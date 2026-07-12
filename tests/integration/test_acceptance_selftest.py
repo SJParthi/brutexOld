@@ -19,7 +19,7 @@ EXPECTED_POISONS = {
     "tf_high_x10",
     "movers_cell",
     "foreign_month_row",
-    "forming_day_stored",
+    "orphan_1day_stored",
     "net_new_gt_bars",
     "counter_invariant",
     "deleted_partition",
@@ -33,6 +33,10 @@ EXPECTED_POISONS = {
     # round-4 B4-3: per-leg unique teeth (census-only + engine-only).
     "census_nonengine_dup",
     "engine_oldmonth_dup",
+    # round-5 F2: per-leg tf.daily-value / sanity.bad_tick / session_window teeth.
+    "tampered_1day_close",
+    "bad_tick_x10_1m",
+    "preopen_bar",
 }
 
 

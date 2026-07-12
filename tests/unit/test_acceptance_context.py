@@ -209,6 +209,31 @@ class TestReadOnlyStore:
         finally:
             ctx.close()
 
+    def test_per_call_read_store_isolates_lock_and_delegates(self, tmp_path: Path) -> None:
+        # Round-5 F1: the app-facing proxy hands each `connection` a PRIVATE
+        # cursor + PRIVATE lock, so an unbalanced describe (a served route's
+        # `.execute(...).description` with no fetch) leaks only that request's
+        # lock and can never deadlock a later request on another worker thread.
+        from brutex.acceptance.context import _PerCallReadStore, open_instrument_store_readonly
+        from brutex.data.instrument_store import InstrumentStore
+
+        path = tmp_path / "instruments.duckdb"
+        InstrumentStore.open(path).close()
+        snapshot = open_instrument_store_readonly(path)
+        proxy = _PerCallReadStore(snapshot)
+        try:
+            v1 = proxy.connection
+            v2 = proxy.connection
+            assert v1 is not v2  # distinct views
+            assert v1._lock is not v2._lock  # PRIVATE per-call locks (isolation)
+            # An UNBALANCED describe on v1 (acquires, no fetch) must NOT block v2.
+            v1.execute("SELECT 1")  # holds v1's private lock (no fetch → leaked)
+            assert v2.execute("SELECT 1").fetchone() == (1,)  # v2 unaffected
+            # Non-connection attributes delegate to the real snapshot.
+            assert proxy.list_index_equity_instruments() == []
+        finally:
+            proxy.close()
+
     def test_client_factory_degrades_to_no_store_on_contention(self, tmp_path: Path) -> None:
         pytest.importorskip("fastapi")
         import duckdb

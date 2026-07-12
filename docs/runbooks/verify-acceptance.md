@@ -83,7 +83,7 @@ FAILs on the clean twin. Any miss ⇒ `TEETH_FAILED`, exit 2, and every
 real-lake verdict is WITHHELD ("nothing below is trustworthy").
 
 ```bash
-brutex verify-acceptance --self-test-only   # the FULL 17-poison battery + table
+brutex verify-acceptance --self-test-only   # the FULL 20-poison battery + table
 brutex verify-acceptance --self-test        # full battery, then the real run
 brutex verify-acceptance --no-self-test     # skip (report carries TEETH_SKIPPED)
 ```
@@ -107,13 +107,31 @@ mutated real wire). `latency` budget-compare and `rate.constants` carry NO
 battery poison BY DESIGN (a latency "poison" would be a wall-clock flake;
 the constants pin is itself the tooth — a drifted constant fails it).
 
+Round-5 (F2) additions — the battery grew 17 → 20 so more real check legs
+are toothed ON-BOX (the operator's trust demo): `tampered_1day_close`
+(tf.daily VALUE-equality — a corrupt derivable 1day close), `bad_tick_x10_1m`
+(`sanity.bad_tick` — a x10-scaled 1-minute close) and `preopen_bar`
+(`sanity.session_window` — an 08:00-IST pre-open bar); poison 5 was renamed
+`orphan_1day_stored` (it tests the tf.daily NOT-derivable path, not the
+forming branch). TWO legs stay honestly UNIT-GATE-KILLED (a robust twin
+poison is impractical, so the killer is the named unit test that drives the
+COMPOSED check against the sabotage): tf.daily's FORMING branch
+(`ist_date >= before`) is clock- AND month-boundary-dependent →
+`test_acceptance_checks_tf.py::TestDailyCompare::test_forming_day_stored_fails`
+(injected clock); `pull.replan_zero`'s planner-vacuity guard is a CODE
+mutation, not data →
+`test_acceptance_checks_pull.py::TestReplan::test_lobotomized_planner_fails_vacuous`
+(+ the positive `test_settled_fixture_replan_zero_and_tail_planned`). The
+per-leg tooth roster lives in `selftest.run_full_battery`'s docstring; every
+real check leg is either battery-toothed or named-unit-gate-killed there.
+
 ## 4. Exit codes (cron-native)
 
 | code | meaning | cron |
 |---|---|---|
 | 0 | clean (teeth proven or explicitly skipped+recorded) | green |
 | 1 | usage error (bad flags, missing lake root) | red |
-| 2 | SUSPECT — verifier internal error / TEETH_FAILED / report-write failure / evidence-tree symlink refusal / a SECOND concurrent run refused by the single-flight lock (B4-1) | red |
+| 2 | SUSPECT — verifier internal error / a check ERROR incl. `<check>.timed_out` (the hard per-check watchdog, F1) / TEETH_FAILED / report-write failure / evidence-tree symlink refusal / a SECOND concurrent run refused by the single-flight lock (B4-1) | red |
 | 3 | ≥1 FAIL finding, verifier healthy | red |
 | 4 | inconclusive — non-structural abstains > `--abstain-budget` (3), an abstain streak ≥3, or time-truncated | amber |
 
@@ -187,7 +205,8 @@ attention, never a silent chain fork).
 --seed 2026-07-10           # reproduce that night's sample exactly
 --date 2026-07-09           # movers/latency coordinate day
 --latency-budget movers_hit=900
---max-runtime-s 900         # unreached checks ABSTAIN(time_budget_exhausted)
+--max-runtime-s 900         # SOFT budget: unreached checks ABSTAIN(time_budget_exhausted)
+--check-timeout-s 120       # HARD per-check deadline (default 120; <=0 disables)
 --repro tf                  # print the exact single-check repro command
 --json                      # machine summary on stdout (files always written)
 --out DIR                   # OFF-CHAIN report copy: LATEST/deltas/streaks untouched
@@ -205,6 +224,17 @@ only — the F&O contract fill is a FIXED seed-rotated 6 contracts/run
 
 ## 8. Triage notes
 
+- `<check>.timed_out` ERROR (exit 2, round-5 F1) = a check exceeded its HARD
+  per-check wall-clock deadline (`--check-timeout-s`, default 120 s) and was
+  abandoned on a daemon thread so the run STILL finishes, writes its report,
+  and releases the single-flight flock — never an unbounded hang that bricks
+  the command. It signals a wedged store / stalled external volume; re-run
+  after the volume recovers. (The `--max-runtime-s` soft budget only stops
+  UNREACHED checks BETWEEN checks; the watchdog is what aborts a check
+  already running.) The shared in-process dashboard store the movers/latency
+  checks use now hands each served request a PRIVATE read cursor + lock, so
+  an unbalanced describe in a served route can no longer leak the shared read
+  lock across worker threads and deadlock a later request (the F1 root fix).
 - `pull.partition_presence` FAIL = the class-3 silent-loss footgun (a
   SUCCESS ledger row whose `bars/` month file is gone) — restore from backup
   or delete the row set via a ledger remediation; a re-pull will NOT notice

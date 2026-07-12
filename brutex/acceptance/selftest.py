@@ -206,6 +206,63 @@ def poison_tf_high_x10(root: Path, *, symbol: str, day: date) -> None:
     frame.with_columns(pl.Series("high", high)).write_parquet(path)
 
 
+def poison_1day_value(root: Path, *, symbol: str, day: date, segment: str = "INDEX") -> None:
+    """B18 — corrupt a DERIVABLE, non-forming stored ``1day`` close.
+
+    Kills the tf.daily VALUE-equality comparator (``stored_vals != got``) — the
+    core of the NEW 1day compare (inventory GAP 1). Finds the stored bar whose
+    IST date is *day* (a midnight-IST bar is 18:30 UTC on the prior day, so it
+    can live in either the day's or the previous UTC-month file) and bumps its
+    close, so the re-derive from the untouched 1m disagrees.
+    """
+    day_dir = root / "bars" / "NSE" / segment / symbol / "1day"
+    target_ist = day
+    for path in sorted(day_dir.rglob("*.parquet")):
+        frame = pl.read_parquet(path, glob=False)
+        stamps = frame.get_column("timestamp").to_list()
+        ist_dates = [(ts + timedelta(hours=5, minutes=30)).date() for ts in stamps]
+        if target_ist not in ist_dates:
+            continue
+        idx = ist_dates.index(target_ist)
+        closes = frame.get_column("close").to_list()
+        closes[idx] = float(closes[idx]) + 100.0
+        frame.with_columns(pl.Series("close", closes)).write_parquet(path)
+        return
+    raise RuntimeError(f"no stored 1day bar for IST date {target_ist} to poison")
+
+
+def poison_1m_bad_tick_x10(root: Path, *, symbol: str, day: date) -> None:
+    """B19 — scale one NON-first in-session 1-minute close x10 (the #1616 class).
+
+    Kills the ``sanity.bad_tick`` predicate (``is_bad_tick`` on the 1-minute
+    close-to-close ratio) — distinct from the tf x10 poison (a 5m HIGH the tf
+    freshness leg catches). x10 of a 2dp value stays 2dp, so it never trips the
+    tick-grid law; the bar is self-consistent so price-sanity passes too.
+    """
+    path = _month_file(root, symbol, "1minute", day)
+    frame = pl.read_parquet(path, glob=False).sort("timestamp")
+    closes = frame.get_column("close").to_list()
+    # The twin always stores _TWIN_BARS_PER_DAY (31) bars per session, so bar 2
+    # and its in-session predecessor bar 1 always exist.
+    closes[2] = float(closes[1]) * 10.0  # bar 2 vs its in-session predecessor
+    frame.with_columns(pl.Series("close", closes)).write_parquet(path)
+
+
+def poison_preopen_bar(root: Path, *, symbol: str, day: date) -> None:
+    """B20 — append a 08:00-IST (pre-open) 1-minute bar on a trading day.
+
+    Kills the ``sanity.session_window`` predicate (a bar whose IST minute is
+    before the session open). A pre-open bar on a REAL trading date isolates
+    the window law without tripping the non-trading-date arm or contiguity.
+    """
+    path = _month_file(root, symbol, "1minute", day)
+    frame = pl.read_parquet(path, glob=False)
+    head = frame.head(1)
+    stamp = head.get_column("timestamp").to_list()[0]
+    preopen = stamp.replace(hour=2, minute=30)  # 08:00 IST = 02:30 UTC same date
+    pl.concat([frame, head.with_columns(pl.Series("timestamp", [preopen]))]).write_parquet(path)
+
+
 def _twin_context(
     root: Path, *, now_utc: datetime, client_factory: Callable[[], Any] | None = None
 ) -> AcceptanceContext:
@@ -373,23 +430,54 @@ def run_full_battery(
     *,
     now_utc: datetime | None = None,
 ) -> SelfTestResult:
-    """The FULL battery (17 poisons) — CI mandatory, ``--self-test`` on demand.
+    """The FULL battery (20 poisons) — CI mandatory, ``--self-test`` on demand.
 
     The battery twin additionally carries ONE non-engine CASH symbol
     (round-4 B4-3) so the census leg and the engine leg each have a tooth of
     their OWN: poison 16 is detectable ONLY by ``unique.census`` (a
     non-engine dup — an always-PASS census sabotage is MISSED) and poison 17
     ONLY by ``unique.engine`` (an out-of-months-bound engine dup — an
-    always-clean engine sabotage is MISSED). Scope honesty: the ``movers``
-    teeth (smoke S3; battery poisons 3 ``movers_cell`` + 15
-    ``prevclose_hole_unstamped``) drive the COMPARATOR SEAM directly, never
-    the composed ``movers_check.run`` wiring — the designated killer for a
-    comparator-discard wiring sabotage is the unit gate
-    (``tests/unit/test_acceptance_checks_movers.py::TestMoversRealWire::
-    test_tamper_tooth_volume_cell`` — it drives the COMPOSED ``movers.run``
-    against a mutated real wire and fails under the sabotage, measured),
-    disclosed here rather than paying an instrument-master +
-    in-process-app twin per battery run.
+    always-clean engine sabotage is MISSED).
+
+    Per-leg tooth roster — round-5 F2 (the on-box battery is the operator's
+    trust demo, so EVERY real check leg is either battery-toothed here or
+    named-unit-gate-killed below; a bare "TEETH_PROVEN" is never overclaimed):
+
+    * ``unique.census`` / ``unique.engine`` — poisons 1/4/16/17.
+    * ``tf.intraday`` — poisons 2 (5m HIGH x10) + 14 (grid, via sanity).
+    * ``tf.daily`` — poison 5 ``orphan_1day_stored`` (NOT-derivable path) +
+      poison 18 ``tampered_1day_close`` (the VALUE-equality comparator).
+    * ``pull.net_new`` / ``pull.counters`` / ``pull.presence`` — poisons 6/7/8.
+    * ``rate.*`` — poisons 9 (over-cap bridge) + 10 (in-window attempt).
+    * ``sanity.price`` — poisons 11/12; ``sanity.tick_grid`` — poison 14;
+      ``sanity.contiguity`` — poison 13; ``sanity.bad_tick`` — poison 19
+      (1-minute x10); ``sanity.session_window`` — poison 20 (pre-open bar).
+
+    HONEST unit-gate-killed legs (NOT battery-toothed — a robust twin poison is
+    genuinely impractical, so the killer is the named unit gate that drives the
+    COMPOSED check against the sabotage and fails, measured):
+
+    * ``tf.daily`` FORMING branch (``ist_date >= before``) — a reliable
+      forming-day twin bar is clock- AND month-boundary-dependent (the cutoff
+      is ``today`` pre-close vs ``today+1`` post-close, and a forming date can
+      fall outside the ``--months`` file window), so it is unit-gate-killed by
+      ``tests/unit/test_acceptance_checks_tf.py::TestDailyCompare::
+      test_forming_day_stored_fails`` (injected clock, deterministic).
+    * ``pull.replan_zero`` (planner-vacuity guard) — a vacuous planner is a
+      CODE mutation, not a data poison, so it is unit-gate-killed by
+      ``tests/unit/test_acceptance_checks_pull.py::TestReplan::
+      test_lobotomized_planner_fails_vacuous`` (a monkeypatched always-empty
+      planner ⇒ FAIL) plus the positive
+      ``test_settled_fixture_replan_zero_and_tail_planned``.
+    * ``movers.*`` — the movers teeth (smoke S3; battery poisons 3
+      ``movers_cell`` + 15 ``prevclose_hole_unstamped``) drive the COMPARATOR
+      SEAM directly, never the composed ``movers_check.run`` wiring — the
+      designated killer for a comparator-discard wiring sabotage is the unit
+      gate ``tests/unit/test_acceptance_checks_movers.py::TestMoversRealWire::
+      test_tamper_tooth_volume_cell`` (it drives the COMPOSED ``movers.run``
+      against a mutated real wire and fails under the sabotage, measured),
+      disclosed here rather than paying an instrument-master +
+      in-process-app twin per battery run.
     """
     import tempfile
 
@@ -485,13 +573,16 @@ def run_full_battery(
 
         scenario("foreign_month_row", "unique must FAIL a foreign-month row", _p4)
 
-        # 5: a stored forming-day 1day bar.
+        # 5: a stored 1day bar with NO 1m backing (the not-derivable path).
         def _p5(root: Path) -> bool:
             from brutex.data.models import CandleBar
             from brutex.data.parquet_writer import ParquetWriter
 
-            today = (now.astimezone(UTC) + timedelta(hours=5, minutes=30)).date()
-            stamp = datetime.combine(today - timedelta(days=1), time(18, 30), tzinfo=UTC)
+            # A PAST (non-forming) IST date with no 1m bars → the compare cannot
+            # re-derive it → tf.daily `divergent` ("stored bar not derivable").
+            # (The FORMING branch itself is unit-gate-killed — see the docstring.)
+            orphan_ist = days[0] - timedelta(days=3)
+            stamp = datetime.combine(orphan_ist - timedelta(days=1), time(18, 30), tzinfo=UTC)
             ParquetWriter(lake_root=root).write(
                 exchange="NSE",
                 segment="INDEX",
@@ -511,7 +602,11 @@ def run_full_battery(
             )
             return _tf_fails(root)
 
-        scenario("forming_day_stored", "tf.daily must FAIL a forming-day 1day bar", _p5)
+        scenario(
+            "orphan_1day_stored",
+            "tf.daily must FAIL a stored 1day bar with no 1m backing (not-derivable)",
+            _p5,
+        )
 
         # 6: settled-row bars_net_new > bars.
         def _p6(root: Path) -> bool:
@@ -675,6 +770,46 @@ def run_full_battery(
             "engine_oldmonth_dup",
             "unique.engine ALONE must FAIL an out-of-months-bound engine dup",
             _p17,
+        )
+
+        # 18: a value-corrupt DERIVABLE stored 1day bar — tf.daily VALUE tooth
+        # (round-5 F2: the 1day value-equality comparator was unit-gate-only).
+        def _p18(root: Path) -> bool:
+            poison_1day_value(root, symbol="NIFTY", day=days[0])
+            check = tf_check.run(_twin_context(root, now_utc=now))
+            daily = next(s for s in check.sub_checks if s.id == "tf.daily")
+            return daily.verdict is Verdict.FAIL
+
+        scenario(
+            "tampered_1day_close",
+            "tf.daily ALONE must FAIL a value-corrupt derivable 1day bar",
+            _p18,
+        )
+
+        # 19: a 1-minute close x10 — sanity.bad_tick tooth (round-5 F2).
+        def _p19(root: Path) -> bool:
+            poison_1m_bad_tick_x10(root, symbol="NIFTY", day=days[1])
+            check = sanity_check.run(_twin_context(root, now_utc=now))
+            sub = next(s for s in check.sub_checks if s.id == "sanity.bad_tick")
+            return sub.verdict is Verdict.FAIL
+
+        scenario(
+            "bad_tick_x10_1m",
+            "sanity.bad_tick ALONE must FAIL a x10-scaled 1-minute close",
+            _p19,
+        )
+
+        # 20: a pre-open bar — sanity.session_window tooth (round-5 F2).
+        def _p20(root: Path) -> bool:
+            poison_preopen_bar(root, symbol="NIFTY", day=days[1])
+            check = sanity_check.run(_twin_context(root, now_utc=now))
+            sub = next(s for s in check.sub_checks if s.id == "sanity.session_window")
+            return sub.verdict is Verdict.FAIL
+
+        scenario(
+            "preopen_bar",
+            "sanity.session_window ALONE must FAIL an 08:00-IST pre-open bar",
+            _p20,
         )
 
     detected = sum(1 for o in outcomes if o.detected)

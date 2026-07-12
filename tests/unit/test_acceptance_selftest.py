@@ -7,7 +7,9 @@ battery itself must flip to TEETH_FAILED.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from brutex.acceptance import selftest
@@ -109,6 +111,64 @@ class TestRenderTable:
         monkeypatch.setattr(movers_check, "compare_spot_cells", lambda *a, **k: [])
         text = selftest.render_battery_table(selftest.run_smoke(now_utc=NOW))
         assert "MISSED" in text
+
+
+class TestPoison1dayValueBranches:
+    """Round-5 F2: the tf.daily VALUE poison helper's multi-file + no-bar arms."""
+
+    def _twin(self, tmp_path: Path) -> Path:
+        root = tmp_path / "twin"
+        selftest.build_twin_lake(root, days=(date(2026, 7, 8), date(2026, 7, 9)))
+        return root
+
+    def test_poison_walks_past_a_non_matching_month_file(self, tmp_path: Path) -> None:
+        # Plant an EXTRA 1day bar in an earlier month so the target day's bar
+        # lives in a LATER-sorted file — forcing the per-file `continue` arm.
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+
+        root = self._twin(tmp_path)
+        early = datetime.combine(date(2026, 3, 1), time(18, 30), tzinfo=selftest.UTC)
+        ParquetWriter(lake_root=root).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[
+                CandleBar(
+                    timestamp=early,
+                    open=Decimal("1.00"),
+                    high=Decimal("2.00"),
+                    low=Decimal("0.50"),
+                    close=Decimal("1.50"),
+                    volume=1,
+                    open_interest=None,
+                )
+            ],
+        )
+        day_dir = root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day"
+        assert len(list(day_dir.rglob("*.parquet"))) >= 2  # multi-file
+        selftest.poison_1day_value(root, symbol="NIFTY", day=date(2026, 7, 9))
+        # the target day-9 bar was corrupted (its file is not the first-sorted).
+        import polars as pl
+
+        found = False
+        for path in day_dir.rglob("*.parquet"):
+            frame = pl.read_parquet(path, glob=False)
+            for ts, close in zip(
+                frame.get_column("timestamp").to_list(),
+                frame.get_column("close").to_list(),
+                strict=True,
+            ):
+                if (ts + timedelta(hours=5, minutes=30)).date() == date(2026, 7, 9):
+                    assert float(close) > 110.0  # bumped
+                    found = True
+        assert found
+
+    def test_poison_raises_when_no_bar_for_day(self, tmp_path: Path) -> None:
+        root = self._twin(tmp_path)
+        with pytest.raises(RuntimeError, match="no stored 1day bar"):
+            selftest.poison_1day_value(root, symbol="NIFTY", day=date(2020, 1, 2))
 
 
 class TestBatteryGuardDateWalk:

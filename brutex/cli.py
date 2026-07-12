@@ -1849,6 +1849,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Soft budget; unreached checks ABSTAIN(time_budget_exhausted)",
     )
     verify_acc.add_argument(
+        "--check-timeout-s",
+        type=float,
+        default=120.0,
+        help="HARD per-check wall-clock deadline; a hung check is abandoned + "
+        "recorded ERROR(check_timed_out) → exit 2, the run still finishes + "
+        "releases the single-flight lock. <=0 disables the watchdog (default 120)",
+    )
+    verify_acc.add_argument(
         "--force-during-pull",
         action="store_true",
         help="Run data checks even while a pull looks active (default: they ABSTAIN)",
@@ -7693,6 +7701,7 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
     latency_rounds: int,
     abstain_budget: int,
     max_runtime_s: float | None,
+    check_timeout_s: float,
     force_during_pull: bool,
     self_test: bool,
     self_test_only: bool,
@@ -7766,6 +7775,8 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
             file=sys.stderr,
         )
     mode = "skipped" if no_self_test else ("full" if self_test else "smoke")
+    # <=0 disables the hard per-check watchdog (operator escape hatch).
+    watchdog_s = check_timeout_s if check_timeout_s > 0 else None
     cfg = RunConfig(
         lake_root=resolved,
         checks=selected,
@@ -7779,6 +7790,7 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
         latency_budget_overrides=budgets,
         abstain_budget=abstain_budget,
         max_runtime_s=max_runtime_s,
+        check_timeout_s=watchdog_s,
         force_during_pull=force_during_pull,
         self_test_mode=mode,
         out_dir=out_dir,
@@ -9819,6 +9831,7 @@ def _dispatch(argv: list[str] | None) -> int:
             latency_rounds=args.latency_rounds,
             abstain_budget=args.abstain_budget,
             max_runtime_s=args.max_runtime_s,
+            check_timeout_s=args.check_timeout_s,
             force_during_pull=args.force_during_pull,
             self_test=args.self_test,
             self_test_only=args.self_test_only,

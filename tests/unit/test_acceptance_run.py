@@ -153,6 +153,57 @@ class TestFencing:
             sub = check["sub_checks"][0]
             assert sub["abstain_reason"] == "time_budget_exhausted"
 
+    def test_hung_check_hard_timeout_exit_2_run_finishes_lock_released(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-5 F1 defense-in-depth: a wedged check is ABANDONED on a daemon
+        thread → ERROR(check_timed_out) → exit 2; the run STILL finishes + the
+        later check runs + the single-flight flock is released so the next run
+        acquires it (never an unbounded hang that bricks the command)."""
+        import time as _t
+
+        from brutex.acceptance.run import acceptance_lock_path
+
+        def _wedge(ctx):
+            _t.sleep(1000)  # never returns
+
+        monkeypatch.setitem(CHECK_REGISTRY, "unique", _wedge)
+        lake = make_twin(tmp_path)
+        started = _t.monotonic()
+        code, report = _run(_cfg(lake, check_timeout_s=1.0))
+        elapsed = _t.monotonic() - started
+        assert elapsed < 30, "the watchdog must abort a hung check well within budget"
+        assert code == 2
+        by_id = {c["check_id"]: c for c in report["checks"]}
+        assert by_id["unique"]["verdict"] == "ERROR"
+        sub = by_id["unique"]["sub_checks"][0]
+        assert sub["id"] == "unique.timed_out"
+        assert sub["evidence"]["reason"] == "check_timed_out"
+        assert by_id["tf"]["verdict"] in {"PASS", "FAIL"}  # the run CONTINUED
+        # the flock is released — the next run acquires it (no SUSPECT refusal).
+        _code2, report2 = _run(_cfg(lake, checks=("tf",), check_timeout_s=5.0))
+        assert "single-flight" not in str(report2.get("error", ""))
+        assert acceptance_lock_path(lake).is_file()  # file persists; lock freed
+
+    def test_watchdog_disabled_runs_inline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``check_timeout_s=None`` runs checks inline (no watchdog thread)."""
+        import threading
+
+        seen: dict[str, int] = {}
+
+        def _record(ctx):
+            seen["thread"] = threading.get_ident()
+            from brutex.acceptance.checks import unique
+
+            return unique.run(ctx)
+
+        monkeypatch.setitem(CHECK_REGISTRY, "unique", _record)
+        lake = make_twin(tmp_path)
+        _run(_cfg(lake, checks=("unique",), check_timeout_s=None))
+        assert seen["thread"] == threading.get_ident()  # ran on the caller thread
+
 
 class TestExitMatrix:
     def test_fail_finding_exit_3(self, tmp_path: Path) -> None:

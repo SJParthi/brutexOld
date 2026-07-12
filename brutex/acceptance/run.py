@@ -134,6 +134,14 @@ class RunConfig:
     latency_budget_overrides: dict[str, float] = field(default_factory=dict)
     abstain_budget: int = 3
     max_runtime_s: float | None = None
+    #: HARD per-check wall-clock deadline (round-5 F1 defense-in-depth). A check
+    #: that has not returned within this many seconds is ABANDONED on a daemon
+    #: worker thread and recorded ``ABSTAIN(check_timed_out)`` so the run always
+    #: finishes + releases the single-flight flock — never an unbounded hang.
+    #: ``None`` disables the watchdog (tests that inject a fake client). The
+    #: default is deliberately generous: every real-lake check is sub-second, so
+    #: a breach is pathological (a wedged store / vendor volume), not slowness.
+    check_timeout_s: float | None = 120.0
     force_during_pull: bool = False
     self_test_mode: str = "smoke"  # "smoke" | "full" | "skipped"
     out_dir: Path | None = None
@@ -167,6 +175,70 @@ def _budget_check(check_id: str, *, seed: str) -> CheckResult:
     )
     coverage = make_coverage(mode="none", population=0, examined=0, seed=seed)
     return make_check(check_id, [sub], coverage=coverage)
+
+
+def _timeout_check(check_id: str, *, timeout_s: float, seed: str) -> CheckResult:
+    """A hung check → ERROR(check_timed_out) → SUSPECT (exit 2), run continues.
+
+    Round-5 F1 defense-in-depth: the check was ABANDONED on a daemon worker
+    thread after *timeout_s* so the run always finishes + releases the
+    single-flight flock — never an unbounded hang that self-bricks the command.
+    ERROR (not ABSTAIN) so the exit is the truthful SUSPECT floor.
+    """
+    sub = make_subcheck(
+        f"{check_id}.timed_out",
+        Verdict.ERROR,
+        units_checked=0,
+        evidence={
+            "reason": "check_timed_out",
+            "timeout_s": timeout_s,
+            "detail": "the check exceeded its hard per-check wall-clock deadline "
+            "and was abandoned on a daemon thread so the run could finish + "
+            "release the single-flight lock (a wedged store / stalled volume)",
+        },
+        repro=f"brutex verify-acceptance --checks {check_id} --seed {seed}",
+    )
+    coverage = make_coverage(mode="none", population=0, examined=0, seed=seed)
+    return make_check(check_id, [sub], coverage=coverage)
+
+
+def _run_one_check(
+    check_id: str,
+    ctx: AcceptanceContext,
+    *,
+    seed: str,
+    timeout_s: float | None,
+) -> CheckResult:
+    """Run one check under the HARD per-check watchdog (round-5 F1).
+
+    Runs the registry runner on a daemon worker thread and joins for at most
+    *timeout_s*. A breach records :func:`_timeout_check` and returns so the
+    outer loop advances (the abandoned thread dies at interpreter exit).
+    ``MemoryError`` re-raises raw (house law N3); any other exception is folded
+    to an ERROR check by the caller. ``timeout_s=None`` runs inline (no thread).
+    """
+    if timeout_s is None:
+        return CHECK_REGISTRY[check_id](ctx)
+    import threading
+
+    box: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            box["result"] = CHECK_REGISTRY[check_id](ctx)
+        except BaseException as exc:  # captured; re-raised on the caller thread
+            box["exc"] = exc
+
+    thread = threading.Thread(target=_worker, name=f"acceptance-check-{check_id}", daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        _LOG.error("acceptance.check_timed_out", check_id=check_id, timeout_s=timeout_s)
+        return _timeout_check(check_id, timeout_s=timeout_s, seed=seed)
+    exc = box.get("exc")
+    if exc is not None:
+        raise exc
+    return box["result"]  # type: ignore[no-any-return]
 
 
 def _box_block(ctx: AcceptanceContext) -> dict[str, Any]:
@@ -382,7 +454,7 @@ def _run_audited(
                 continue
             check_started = time.monotonic()
             try:
-                result = CHECK_REGISTRY[check_id](ctx)
+                result = _run_one_check(check_id, ctx, seed=ctx.seed, timeout_s=cfg.check_timeout_s)
             except MemoryError:
                 raise  # house law (N3): OOM re-raises raw, never an ERROR verdict
             except Exception as exc:

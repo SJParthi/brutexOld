@@ -95,6 +95,57 @@ def open_instrument_store_readonly(path: Path) -> Any:
     return InstrumentStore(conn=mem, path=path)
 
 
+class _PerCallReadStore:
+    """Proxy over a read-only snapshot whose ``connection`` hands out a FRESH
+    per-call DuckDB read cursor + a FRESH per-call read lock.
+
+    F1 (round-5 BLOCKER): the served dashboard routes reach an unbalanced
+    ``store.connection.execute(...).description`` describe (``db_view``'s
+    coverage-windows / window-ledger schema probe reads ``.description`` with NO
+    ``fetch*()``, and when both the counts AND the page are cache HITS on a warm
+    poll no later ``execute`` runs to release it — a production-latent read-lock
+    leak). The shared in-memory :class:`InstrumentStore` snapshot has ONE child
+    read cursor under ONE non-reentrant-across-threads ``RLock``, so a leaked
+    hold on one anyio worker thread wedged a LATER request that landed on a
+    DIFFERENT worker thread — an unbounded deadlock the verifier's rapid
+    same-lake polling reliably triggered (present only when
+    ``instruments.duckdb`` + a full-schema ledger make the DuckDB fast path with
+    caches live, i.e. every real dashboard-served lake). Handing each
+    ``connection`` a private cursor + private lock isolates the leak per request:
+    a leaked hold dies with its own short-lived lock and can never block another
+    request. TestClient serves requests sequentially (its blocking portal), so
+    the private cursors never race; the child cursor shares the in-memory
+    catalog via DuckDB MVCC.
+
+    Everything else (the typed store methods, ``close``) delegates verbatim, so
+    the ``spot_drift.load_stock_drift_map`` → ``InstrumentStore.open`` movers
+    drift-recovery ladder (round-2 fix 6 goal) is untouched — the underlying
+    snapshot still holds NO file handle.
+    """
+
+    def __init__(self, store: Any) -> None:
+        object.__setattr__(self, "_store", store)
+
+    @property
+    def connection(self) -> Any:
+        import threading
+
+        from brutex.data.instrument_store import _LockedReadConn
+
+        store = object.__getattribute__(self, "_store")
+        # A private child read cursor over the SAME in-memory catalog, guarded
+        # by a private RLock — an unbalanced describe on this view leaks only
+        # THIS lock (GC'd with the view), never the shared read lock.
+        cursor = store._read_conn.cursor()
+        return _LockedReadConn(cursor, threading.RLock(), ensure_ready=store._ensure_not_wedged)
+
+    def close(self) -> None:
+        object.__getattribute__(self, "_store").close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_store"), name)
+
+
 def stat_token(path: Path) -> str:
     """``mtime_ns:size`` content token for one file; ``absent`` when unreadable."""
     try:
@@ -247,7 +298,12 @@ class AcceptanceContext:
             self._env_lake_root_set = True
             os.environ["BRUTEX_LAKE_ROOT"] = str(self.lake_root)
         self._store = store
-        app = build_app(DashboardState(), instrument_store=store)
+        # F1 (round-5 BLOCKER): hand the app a per-call-read-lock PROXY so an
+        # unbalanced describe in a served route can never leak the shared read
+        # lock across anyio worker threads and deadlock a later request. The
+        # raw snapshot is kept as `self._store` for `close()`.
+        app_store = None if store is None else _PerCallReadStore(store)
+        app = build_app(DashboardState(), instrument_store=app_store)
         # The dashboard's Host allowlist is loopback-only (R2-DS-F1) — the
         # default "testserver" base would 400 every probe.
         return TestClient(app, base_url="http://localhost")

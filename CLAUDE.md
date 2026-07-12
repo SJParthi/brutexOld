@@ -25,7 +25,7 @@ incremental-pull re-plan idempotence · disk-provable rate evidence · movers pa
 the ONE AST-FENCED independent recompute · stored-data sanity · on-box latency probes) over the
 REAL lake, PASS/FAIL/ABSTAIN(named-reason) with mandatory evidence blocks + required coverage{}
 disclosure, a GATING <10 s teeth smoke (3 planted poisons on a real-writer twin — a verifier that
-cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 17-poison
+cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 20-poison
 full battery, the frozen `brutex-acceptance-report-v1` machine+human report under
 `<lake>/acceptance/<run_id>/` (atomic LATEST pointer + SweepAuditWriter hash chain + run-over-run
 deltas/abstain streaks carried in the report chain), verify-family exits 0/1/2/3/4 (precedence
@@ -2215,7 +2215,7 @@ hostile-review pass._
   Three structural laws: one-verdict-one-evidence-block (empty evidence REFUSED at the model), no-verdict-without-work
   (`units_checked == 0` ⇒ forced ABSTAIN(nothing_to_check) in the constructor — the #935/#1014 dormant-feature trap
   closed), and teeth-before-trust (the always-on smoke plants 3 poisons in a real-writer twin lake and requires the
-  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 17-poison full battery is
+  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 20-poison full battery is
   CI-mandatory per merge with a comparator-INVERSION tooth). Compose-never-reimplement: the census fold, the
   sweep-preflight TF seam + the NEW 1day compare composition, the REAL `plan_windows`/`plan_contract_windows` re-plan
   on a pinned-clock copy (anti-vacuous planner tail tooth included; explicitly NOT `brutex fetch --dry-run`),
@@ -5662,7 +5662,7 @@ hostile-review pass._
 - **Active feature branch:** `claude/verify-acceptance`
   (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 — the operator acceptance verifier
   `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
-  verdicts + evidence blocks, the gating teeth smoke + CI 17-poison battery, the frozen
+  verdicts + evidence blocks, the gating teeth smoke + CI 20-poison battery, the frozen
   `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
   hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
   grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
