@@ -769,6 +769,15 @@ class _LockedReadConn:
     internals — and, by checking before ``acquire``, a post-breach reader never
     even queues on ``read_lock`` behind a pre-breach reader that may already be
     blocked inside the engine.
+
+    SINGLE-THREAD-PER-VIEW contract (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    round 1): one view instance must never be shared across threads — the
+    ``_held`` hold flag is per-view, unsynchronized state, so a second thread's
+    ``execute()`` would ``_release()`` the FIRST thread's live hold (a non-owner
+    ``RLock.release`` RuntimeError, then a leaked read-lock acquisition = every
+    later dashboard read deadlocks). A concurrent consumer (the SWR background
+    revalidators in :mod:`brutex.dashboard.db_view`) calls :meth:`cursor` for
+    its OWN view instead.
     """
 
     def __init__(
@@ -832,6 +841,24 @@ class _LockedReadConn:
             return self._result.fetchall()
         finally:
             self._release()
+
+    def cursor(self) -> _LockedReadConn:
+        """A FRESH view over the same read cursor + read lock — independent hold state.
+
+        DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 round 1 (the SWR
+        revalidator BLOCKER): a background compute running CONCURRENT with the
+        request thread must never share this view's per-view ``_held`` flag
+        (see the class docstring's single-thread-per-view contract).
+        ``cursor()`` mirrors the DuckDB connection API shape
+        ``db_view._compute_cursor`` probes for, but deliberately returns a new
+        ``_LockedReadConn`` over the SAME underlying read connection + the SAME
+        store read lock — never a second engine connection — so every
+        compute's ``execute → fetch`` window stays atomic under the store's
+        documented read-serialization discipline (concurrent reads share the
+        one cursor, DEC-STORE-READ-WRITE-SPLIT-001) with zero new concurrency
+        surface. O(1), no I/O.
+        """
+        return _LockedReadConn(self._conn, self._lock, ensure_ready=self._ensure_ready)
 
     def _release(self) -> None:
         """Release the store lock iff this view holds it (idempotent)."""

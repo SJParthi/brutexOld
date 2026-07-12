@@ -144,13 +144,27 @@ def _run_one(root: Path, *, diffcheck_k: int) -> tuple[str, Path]:
 
 
 def _flip_middle_line(path: Path) -> tuple[bytes, bytes]:
-    """Flip one payload byte in a MIDDLE chain line; return (before, after)."""
+    """Flip one recorded-content byte in a MIDDLE chain line; return (before, after)."""
     original = path.read_bytes()
     lines = original.splitlines(keepends=True)
     assert len(lines) >= 3, "the plant needs a middle line"
     middle = lines[len(lines) // 2]
-    # Corrupt the recorded content (not the framing): 1 <-> 2 in the JSON body.
-    swapped = middle.replace(b"1", b"@", 1)
+    # Corrupt the recorded content (not the framing) DETERMINISTICALLY: flip
+    # the first hex char of the line's stored `entry_hash` to a DIFFERENT hex
+    # char, so the tampered line stays valid JSON + a parseable AuditEntry and
+    # the verifier goes red at the entry_hash recompute-compare
+    # (AuditChainCorruption, "entry_hash does not match recomputed hash").
+    # The prior `middle.replace(b"1", b"@", 1)` flip was PROBABILISTIC:
+    # whenever the run's entry_hash hex happened to contain no "1"
+    # (p ~= (15/16)**64 ~= 1.6% per run — ts_utc makes the hash run-varying),
+    # the first "1" in the line was the NUMERIC `"attempt":1` token at
+    # char 142, so the plant produced malformed JSON and a raw AuditError
+    # escaped `pytest.raises(AuditChainCorruption)` — the 2026-07-12 CI red
+    # (run 29195635571: "Expecting value: line 1 column 143 (char 142)").
+    key = b'"entry_hash":"'
+    at = middle.index(key) + len(key)
+    flipped = b"0" if middle[at : at + 1] != b"0" else b"f"
+    swapped = middle[:at] + flipped + middle[at + 1 :]
     assert swapped != middle
     lines[len(lines) // 2] = swapped
     tampered = b"".join(lines)

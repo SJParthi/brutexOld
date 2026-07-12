@@ -150,6 +150,31 @@ def test_vendor_status_only_numeric_survives() -> None:
     assert auth._vendor_status(RuntimeError("no code attr")) is None
 
 
+def test_vendor_status_nonascii_digit_code_returns_none_never_raises() -> None:
+    """A non-ASCII Unicode digit ``code`` returns ``None`` instead of raising.
+
+    DEC-GROWW-ERRORCODE-ASCII-GUARD-001 regression — ``'²'.isdigit()`` is True but
+    ``int('²')`` raises, so pre-fix ``_vendor_status`` escaped a raw ``ValueError``
+    (production-unreachable in the AWS-only read-only config — the mint path — but
+    the same bug class as the errors.py mapping site). An Nd-category digit string
+    (``'٥٠٣'``) coerced fine pre-fix; the ASCII guard now drops it to ``None`` too
+    (sanctioned narrowing — the status log field stays canonical-ASCII-only).
+    """
+
+    class _SuperscriptCode(RuntimeError):
+        code = "²"  # No-category digit — int() raises
+
+    class _ArabicIndicCode(RuntimeError):
+        code = "٥٠٣"  # Nd-category digits — int() coerces, but non-ASCII is dropped
+
+    class _AsciiDigitCode(RuntimeError):
+        code = "429"  # ASCII digits — parity pin, byte-identical to pre-guard
+
+    assert auth._vendor_status(_SuperscriptCode("x")) is None
+    assert auth._vendor_status(_ArabicIndicCode("x")) is None
+    assert auth._vendor_status(_AsciiDigitCode("x")) == 429
+
+
 def test_sanitize_reason_skips_blank_secret_and_masks_longest_first() -> None:
     """Blank secrets are skipped; an overlapping pair masks the longest first."""
     # a blank secret must not corrupt the text (str.replace("", …) would)
