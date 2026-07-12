@@ -909,9 +909,19 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
+
+    Bad-tick screen (DEC-READ-GUARD-PARITY-001): after the sanity gate the
+    frame is screened by :func:`~brutex.data.bad_tick.screen_frame_bad_ticks`
+    (the engine read boundary's screen, frame form — same 4.0x threshold, same
+    ``BRUTEX_BAD_TICK_SCREEN`` kill switch, one ``feed.bad_tick_skipped`` WARN
+    per session with a ``prebuild:``-prefixed source), so a self-consistent
+    scaled 1m spike is dropped-and-counted before it can poison the derived
+    bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
+    object-identical (zero-copy); clean lakes stay byte-identical.
     """
     import polars as pl
 
+    from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
     from brutex.data.price_sanity import validate_frame_price_sanity
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
@@ -948,11 +958,18 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             extra_columns="ignore",
         ).collect()
         frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
+        context = f"{exchange}/{segment}/{symbol}/1minute"
         # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
         # frame to the resamplers (raises the quarantining ResampleInputError).
-        validate_frame_price_sanity(
-            frame, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
-        )
+        validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)
+        # DEC-READ-GUARD-PARITY-001: drop x10/÷10 scaled 1m spikes (the engine
+        # read boundary's BadTickScreen, frame form) BEFORE any resampler — a
+        # self-consistent scaled bar passes price sanity and otherwise poisons
+        # the derived bucket HIGH/LOW + the 1day anchor. Runs AFTER the sanity
+        # gate (is_bad_tick assumes positivity). Default ON; the ONE
+        # BRUTEX_BAD_TICK_SCREEN kill switch flips both boundaries together.
+        if bad_tick_screen_enabled():
+            frame = screen_frame_bad_ticks(frame, ts_column="ts_utc", source=f"prebuild:{context}")
         return frame
 
     return _read

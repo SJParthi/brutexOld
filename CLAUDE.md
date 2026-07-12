@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
+_Last updated: 2026-07-12 (DEC-READ-GUARD-PARITY-001, MIGRATION.md #1762 —
+the read-boundary guard parity pack: the #1616 bad-tick screen reaches the
+derived-TF prebuild's 1m read seam as the NEW pure frame-form
+`bad_tick.screen_frame_bad_ticks` (two-phase — vectorized candidate trigger,
+the sequential BadTickScreen arm owns skips + WARNs; clean frames returned
+object-identical, clean lakes byte-identical, the SAME
+`BRUTEX_BAD_TICK_SCREEN` kill switch, a `prebuild:`-prefixed source on the
+SAME `feed.bad_tick_skipped` event), the movers raw-1m seam
+(`_read_cut_1m_frame`, POST-cut) gains the mirrored price-sanity gate so an
+inverted stored 1m row is an honest skip+count — never a silently laundered
+resampled bucket, never a CandleBar-ValueError 500 — and five db_view
+stats-manifest claim sites relabel "true O(page) in partition depth" to the
+#1614 honest envelope (O(page-files) Parquet work + an O(D) per-request
+revalidation stat sweep; the window-ledger survivor sentence deliberately
+kept + doc-pinned). READ-side only; clean lakes byte-identical (pinned);
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1762.)
+Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
 #1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
 FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
 — NEW frozen `TradeFolds` + `_fold_trades` (the verbatim per-trade
@@ -2320,7 +2337,47 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
+- **Active branch:** `claude/read-guard-parity` (**DEC-READ-GUARD-PARITY-001, MIGRATION.md #1762** —
+  read-boundary guard parity, READ-side only: (GAP-1) NEW pure
+  `bad_tick.screen_frame_bad_ticks` — the frame twin of the engine read
+  boundary's #1616 `BadTickScreen` (two-phase: ONE vectorized candidate
+  trigger over `close.shift(1).over(IST session)` mirroring `is_bad_tick`
+  exactly; the sequential `BadTickScreen` arm is the single skip/WARN owner —
+  baseline-hold, one `feed.bad_tick_skipped` WARN per session, `finish()`
+  flush; a clean frame returns the INPUT OBJECT zero-copy) — wired gated
+  (`bad_tick_screen_enabled`, the SAME `BRUTEX_BAD_TICK_SCREEN` switch) AFTER
+  the price-sanity gate in `make_lake_read_1m._read` with the
+  boundary-distinct `source="prebuild:…"`, so a self-consistent x10/÷10
+  scaled 1m bar (which passes price sanity) no longer poisons every derived
+  bucket HIGH/LOW + the 1day anchor (spiked-screened ≡ clean-twin derived
+  bytes, ON-vs-OFF clean-lake sha A/B, kill-switch-off legacy arm ALL
+  pinned); (GAP-2) `movers_snapshot._read_cut_1m_frame` (the ONE COMMON
+  raw-1m read+cut BOTH the resample display reader AND the TF-invariant
+  value reader share) gains the mirrored `validate_frame_price_sanity` on
+  the POST-cut frame — validate-what-you-return, the #1719
+  strictly-narrower-degrade law: an inverted/non-positive stored 1m row is
+  an honest skip+count via the EXISTING `movers_read_skip_errors` machinery
+  (`ResampleInputError` already in the set) — never a silently laundered
+  resampled bucket, never a CandleBar bare-ValueError 500 (both modes
+  route-proven fails-before; a corrupt row strictly AFTER the as-of cutoff
+  never blanks an earlier-cut view, pinned); (BUG-4/5) five db_view
+  stats-manifest claim sites relabeled to the #1614 honest envelope
+  (O(page-files) Parquet work + an O(D) per-request revalidation stat sweep,
+  NOT literal O(page); the SHIPPED manifest no longer called "the named
+  future work"; the window-ledger "true O(page) … NOT claimed" survivor kept
+  + counted by the new doc-pin). HONEST: the movers STORED-partition read
+  seam (`read_stored_day_frame` — the TF-1minute whole-day coordinate) and
+  the futures/options `_read_future_session` sibling stay UNGATED (named
+  follow-ups); already-derived poisoned partitions self-heal only on stamp
+  movement / a full rebuild (remediation named, not mechanised). TESTS:
+  19-test frame battery + the hypothesis frame-vs-scalar equivalence
+  property + 3 prebuild + 5 movers integration regressions + the db_view
+  killed-token doc-pin; 10 hand-kill mutants ledgered. `bad_tick.py` 100%
+  line+branch via its stem-matched unit file; every touched gated module
+  100.00% on its ci.yml gate; ruff/ruff-format/`mypy --strict` clean,
+  pyright 0 errors. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
   of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
   `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
   `_fold_trades` (the verbatim per-trade accumulations, moved token-for-token, summation order untouched) + NEW
@@ -5903,7 +5960,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-core-slice0`
+- **Active feature branch:** `claude/read-guard-parity`
+  (DEC-READ-GUARD-PARITY-001, MIGRATION.md #1762 — read-boundary guard
+  parity: the #1616 bad-tick screen reaches the derived-TF prebuild's 1m
+  read seam (NEW pure frame-form `bad_tick.screen_frame_bad_ticks`, gated
+  after the price-sanity gate in `make_lake_read_1m._read`, clean lakes
+  byte-identical — pinned), the movers raw-1m seam `_read_cut_1m_frame`
+  gains the mirrored price-sanity gate (inverted stored row → honest
+  skip+count, never a laundered bucket / CandleBar 500), and five db_view
+  stats-manifest claim sites relabel to the #1614 honest envelope (the
+  window-ledger survivor kept + doc-pinned); READ-side only; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/sweep-core-slice0`
   (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
   sweep-core conversion: the behavior-identical fold/combine decomposition of
   `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
