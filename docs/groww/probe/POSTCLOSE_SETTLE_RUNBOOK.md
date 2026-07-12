@@ -22,10 +22,14 @@ nightly schedule can be grounded in evidence instead of a guess.
   plus one unauthenticated instrument-master CSV download. ZERO lake writes, ZERO
   ledger settles — the script imports no sink/writer/ledger module (structurally
   read-only).
-* **Shared-account safety:** all five slots run at/after **15:35 IST**. The
-  market-hours block is `[08:45, 15:35)` **half-open**
+* **Shared-account safety:** all five slots run at/after **15:35 IST**, and the
+  probe ENFORCES it — it refuses to start (exit 2) inside the NSE trading block
+  on a trading day via the market-hours guard predicate
+  (DEC-GROWW-MARKET-HOURS-GUARD-001; `BRUTEX_MARKET_HOURS_GUARD=0` is the
+  deliberate operator override). The block is `[08:45, 15:35)` **half-open**
   (`brutex/calendars/market_hours.py` — `BLOCK_START`/`BLOCK_END`), so 15:35 itself is
-  ALLOWED: the probe never competes with TickVault's live-feed window.
+  ALLOWED: the probe never competes with TickVault's live-feed window, by code
+  and not just by convention. Weekends/holidays are allowed at any hour.
 * **Credentials:** the doctor-kit read-only build — the api-key/TOTP-secret + the
   SHARED daily access token are read from AWS SSM (DEC-AWS-ONLY-CREDS-001), a token
   **mint is PHYSICALLY blocked** (`mint_blocked_token_factory`/`mint_blocked_totp_minter`),
@@ -46,7 +50,7 @@ nightly schedule can be grounded in evidence instead of a guess.
 
    ```bash
    python docs/groww/probe/postclose_settle_probe.py \
-     | tee docs/groww/probe/postclose-$(date +%F)-$(date +%H%M).txt
+     | tee docs/groww/probe/postclose-$(TZ=Asia/Kolkata date +%F)-$(TZ=Asia/Kolkata date +%H%M).txt
    ```
 
    Each run writes the machine transcript
@@ -55,9 +59,13 @@ nightly schedule can be grounded in evidence instead of a guess.
    Commit both — the Phase-0 transcript flow.
 
 2. The CASH pool is 10 F&O-eligible NSE stocks picked with the FIXED seed
-   `postclose-settle-v1` over the sorted instrument-master pool — the SAME 10 names
-   across all slots and days, so the matrix is a controlled same-symbol comparison.
-   `--seed` / `--symbols` override for breadth (note the trade: a changed pool breaks
+   `postclose-settle-v1` over the sorted instrument-master pool, and the probe
+   PRINTS the 10 chosen symbols at startup. HONEST caveat: the seed fixes the
+   SAMPLING, not the POOL — the instrument master is re-downloaded per run, so a
+   listing/eligibility change naturally drifts the pool and therefore the sample.
+   **After day 1, pin the sample by re-running with `--symbols <the printed
+   list>`** so the 5-day matrix stays a controlled same-symbol comparison.
+   `--seed` overrides breadth (note the trade: a changed pool breaks
    day-over-day comparability).
 
 3. After ≥ 5 probe days, build the settle matrix:
@@ -68,7 +76,13 @@ nightly schedule can be grounded in evidence instead of a guess.
 
 ### Optional scheduling
 
-cron (the `CRON_TZ` form keeps the slots pinned to IST wall-clock):
+Manual runs (the five slots, `tee`'d) are the simplest story and are what the
+reference macOS box should start with; a launchd plist per slot
+(`StartCalendarInterval` at the IST-equivalent local times — the
+`docs/runbooks/backup-templates/` pattern) is the macOS automation. The cron
+form below uses `CRON_TZ`, which is **Linux (cronie/vixie-cron) only** — macOS
+launchd/cron does not honour it, so on a Mac either set the box's TZ to IST or
+use launchd:
 
 ```cron
 CRON_TZ=Asia/Kolkata
@@ -79,9 +93,9 @@ CRON_TZ=Asia/Kolkata
 30 17 * * 1-5  cd /path/to/bruteX && python docs/groww/probe/postclose_settle_probe.py | tee -a docs/groww/probe/postclose-$(date +\%F)-1730.txt
 ```
 
-(A macOS launchd plist per slot works identically — the
-`docs/runbooks/backup-templates/` pattern; one `ProgramArguments` entry per slot with
-`StartCalendarInterval` at the IST-equivalent local times.)
+(Tee filenames in the examples use `date` in the BOX's local TZ — on a non-IST
+box prefix `TZ=Asia/Kolkata date ...` so the `.txt` name matches the JSONL
+transcript's IST-stamped filename.)
 
 ## Interpreting the matrix
 
@@ -110,8 +124,17 @@ defers a still-forming day and re-pulls.
 * **Per-symbol errors** (a 429 burst, a dead symbol) are recorded inline in the JSONL
   (`error` field) and the probe continues; a record with an error counts as FAILING
   every check in the matrix (honest — no evidence is not passing evidence).
-* **CANNOT START (exit 2):** bad args / `growwapi` missing / SSM unreachable / no
-  read-only token — nothing was probed; fix the environment and re-run.
+* **CANNOT START (exit 2):** inside the market-hours block `[08:45, 15:35)` IST
+  on a trading day (the probe's own guard — run at/after 15:35 IST, or
+  `BRUTEX_MARKET_HOURS_GUARD=0` for a deliberate override) / bad args /
+  `growwapi` missing / SSM unreachable / no read-only token — nothing was
+  probed; fix the environment and re-run.
+* **Operational note for the GATE (not the probe):** the #1751 TODAY gate is
+  day-scoped — an evening pull must not be left spanning IST midnight against a
+  still-unsettled day (a post-midnight round no longer covers day D, goes
+  gate-inert for it, and keep-first would freeze a still-forming day D). The
+  probe-measured settle time + margin is exactly what makes the nightly
+  schedule safe.
 
 ## Operator heuristics — reading a day's table
 

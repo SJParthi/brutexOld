@@ -24,9 +24,11 @@ type / coverage gate by design (kept ``py_compile``-clean).
 
 Usage
 -----
-    # On the operator's production box (SSM access = the turnkey path):
+    # On the operator's production box (SSM access = the turnkey path). The
+    # date is TZ-pinned to IST so the .txt name matches the JSONL transcript's
+    # IST-stamped filename on a non-IST box:
     python docs/groww/probe/postclose_settle_probe.py \
-        | tee docs/groww/probe/postclose-$(date +%F)-$(date +%H%M).txt
+        | tee docs/groww/probe/postclose-$(TZ=Asia/Kolkata date +%F)-$(TZ=Asia/Kolkata date +%H%M).txt
 
     # After >= 5 probe days, build the slot-by-check settle matrix:
     python docs/groww/probe/postclose_settle_probe.py --summarize docs/groww/probe/
@@ -134,13 +136,27 @@ def _fno_eligible_cash_pool() -> list[str]:
 def _summarize(directory: Path) -> int:
     """Fold every ``postclose-*.jsonl`` transcript into the slot × check matrix."""
     records: list[dict[str, object]] = []
+    bad_lines = 0
     for path in sorted(directory.glob("postclose-*.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            row = json.loads(line)
+            # Per-line tolerance (round-1 R3-MINOR-2): a truncated tail line (a
+            # killed probe) or a stray non-dict JSON line must never crash the
+            # matrix — skip + count, keep exit 0. Both crash shapes were
+            # refuter-reproduced (JSONDecodeError and a bare `42` line).
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                bad_lines += 1
+                continue
+            if not isinstance(row, dict):
+                bad_lines += 1
+                continue
             if "slot_summary" not in row:
                 records.append(row)
+    if bad_lines:
+        print(f"{bad_lines} unreadable line(s) skipped")
     if not records:
         print(f"no postclose-*.jsonl records under {directory}")
         return 0
@@ -215,12 +231,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         from brutex.adapters.groww.token_cache import CachedToken, current_session
         from brutex.adapters.groww.token_store_aws import build_readonly_token_store_with
         from brutex.adapters.rate_common import RateController
+        from brutex.calendars.market_hours import guard_active_default, pull_allowed_default
         from brutex.calendars.nse import get_session, has_muhurat_session, now_ist
         from brutex.adapters.groww.auth import GrowwCredentials
         from brutex.config.credentials_aws import load_groww_aws_credentials
         from brutex.data.session import IST
     except Exception as exc:  # noqa: BLE001 — a start failure must name itself
         print(f"CANNOT START: brutex import failed: {type(exc).__name__}: {exc}")
+        return 2
+
+    # ---- market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001) ----
+    # The probe is a VENDOR-calling surface like any other: refuse to run inside
+    # the NSE trading block [08:45, 15:35) IST on a trading day, so a
+    # mis-scheduled cron / a manual mid-session run can never compete with
+    # TickVault's live feed on the shared account. The block is HALF-OPEN, so
+    # the first runbook slot (15:35:00 sharp) is ALLOWED; weekends/holidays are
+    # allowed at any hour. The check runs BEFORE any client build / vendor call.
+    if guard_active_default() and not pull_allowed_default():
+        print(
+            "CANNOT START: inside the NSE market-hours block [08:45, 15:35) IST on a "
+            "trading day — the shared Groww account belongs to TickVault's live feed "
+            "in this window (DEC-GROWW-MARKET-HOURS-GUARD-001). Run at/after 15:35 "
+            "IST (the runbook slots), or set BRUTEX_MARKET_HOURS_GUARD=0 to override "
+            "deliberately."
+        )
         return 2
 
     # ---- the read-only doctor-kit client (mint physically blocked, paced) ----
@@ -294,6 +328,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 — degrade to indices+FUT, recorded
             print(f"instrument-master CSV unavailable ({exc}) — probing indices + FUT only")
             cash = []
+    if cash:
+        # Sample-drift honesty (R4-MINOR-1): the seed fixes the SAMPLING, not the
+        # POOL — the instrument master is re-downloaded per run, so a listing /
+        # eligibility change drifts the pool and therefore the sample. Print the
+        # chosen names so the operator can PIN them for the remaining days.
+        print(f"CASH sample ({len(cash)}): {','.join(sorted(cash))}")
+        print("  (after day 1, pin the sample: re-run with --symbols <the list above>)")
     plan.extend((symbol, "CASH", "NSE", "CASH") for symbol in sorted(cash))
     try:
         expiries = [e for e in resolve_expiries(client, exchange="NSE", underlying_symbol="NIFTY") if e >= today]
