@@ -3171,8 +3171,10 @@ jobs:
       # DEC-FEED-RUST-CORE-001: the pure decision core's edge matrix (26
       # cases) + proptest invariants + the source-digest twin parity. The
       # Python-side bit-identity proof (frozen bxsnap2 goldens flag-ON +
-      # the hypothesis dual-arm gate) lives in the unit/property/golden
-      # jobs, which install the wheel via `pip install ./rust/brutex-feed`.
+      # the hypothesis dual-arm gate) lives in the test (unit) + golden
+      # jobs, which install the wheel via `pip install ./rust/brutex-feed`
+      # (type + bench install it too; the PROPERTY job's install was pruned
+      # in review round 1 — no pyarrow there, the parity module skips).
       - name: cargo test
         run: cargo test --release
       # Verify the optional PyO3 binding compiles standalone (the wheel

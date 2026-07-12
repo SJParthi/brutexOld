@@ -159,7 +159,8 @@ by #1623). NO measured hidden-tab win claimed (idle-page hidden was already
 0 req/s, measured); the `pollRunSweep` hidden-guard gap is source-asserted only.
 CLIENT-side only — templates + static JS + tests + docs; ZERO route/payload
 change, byte-stable wire; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
-per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1720.)Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1720.)
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
 the DB/query-latency hardening pack, READ-side only: (1) the `/db`
 window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
 delta-folded ledger scan source (`db_view.query_window_ledger_page` —
@@ -2329,7 +2330,7 @@ hostile-review pass._
   floor gated to `BRUTEX_M4PRO_ABS=1`). FFI probe transcript recorded in `src/python.rs` (pyo3 0.29 crossing of
   `-0.0`/NaN/±inf/`2**63` executed 2026-07-11); pyarrow `cast(pa.int64())` epoch-µs semantics probe-verified on
   the installed 24.0.0 incl. pre-1970 negatives. CI: NEW `rust-brutex-feed` job in ci-ok's needs; the wheel
-  installed in type/test/property/golden/bench; `brutex.feed_rust` static gate at BOTH ci.yml sites; mutation.yml
+  installed in type/test/golden/bench (the property job's install pruned in review round 1 — dead weight, no pyarrow there); `brutex.feed_rust` static gate at BOTH ci.yml sites; mutation.yml
   path trigger + mutmut pair + the single-shard `rust-mutation-brutex-feed` cargo-mutants job fanned into the
   verdict; Makefile/bootstrap third maturin target (best-effort — the kernel is OPTIONAL; run-smoke deliberately
   does NOT install it, proving boot-without-wheel). HONEST: O(n_bars) per LAUNCH — a feed-read latency lever, not
