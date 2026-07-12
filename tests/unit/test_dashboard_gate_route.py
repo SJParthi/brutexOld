@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -335,10 +336,10 @@ class TestL2CacheKeyInjection:
 
         monkeypatch.setattr(app_module, "build_sweep_leaderboard", _spy)
 
-        def _absent() -> dict[str, object]:
+        def _absent() -> dict[str, Any]:
             return client.get("/api/v1/sweep/leaderboard").json()
 
-        def _empty() -> dict[str, object]:
+        def _empty() -> dict[str, Any]:
             return client.get("/api/v1/sweep/leaderboard", params={leg: ""}).json()
 
         first, second = (_empty(), _absent()) if empty_first else (_absent(), _empty())

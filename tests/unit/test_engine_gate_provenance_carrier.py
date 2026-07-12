@@ -236,7 +236,8 @@ class TestAppendBackfill:
         """A provenance-stamped redo upgrades a legacy None row (returns True)."""
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row(1))
-        assert store.append(_row(1, gate_provenance=_TOKEN)) is True
+        backfilled = store.append(_row(1, gate_provenance=_TOKEN))
+        assert backfilled is True
         kept = store.get(f"{1:064x}")
         assert kept is not None and kept.gate_provenance == _TOKEN
 
@@ -244,7 +245,8 @@ class TestAppendBackfill:
         """A less-informed redo never erases a stamp (returns False)."""
         store = ResultsStore(path=tmp_path / "s.parquet")
         store.append(_row(1, gate_provenance=_TOKEN))
-        assert store.append(_row(1)) is False
+        noop = store.append(_row(1))
+        assert noop is False
         kept = store.get(f"{1:064x}")
         assert kept is not None and kept.gate_provenance == _TOKEN
 
