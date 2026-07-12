@@ -1268,10 +1268,8 @@ def publish_progress(
     snapshot
         The progress snapshot to publish.
     wall_time
-        Injected wall clock (tests pin BOTH wall stamps deterministically) —
-        feeds the G4 ``wall_time_utc`` liveness stamp AND the additive
-        :data:`PROGRESS_WALL_TIME_KEY` decay stamp (the #1593-posture
-        ``progress_bridge_stale`` reader).
+        Injected wall clock (tests pin the :data:`PROGRESS_WALL_TIME_KEY`
+        stamp deterministically).
     run_id
         The run identity (D-1) to stamp, or ``None`` (key omitted).
     suspect
@@ -1283,9 +1281,8 @@ def publish_progress(
 
     try:
         payload = snapshot.to_dict()
-        stamp = float(wall_time())
-        payload["wall_time_utc"] = stamp
-        payload[PROGRESS_WALL_TIME_KEY] = stamp
+        payload[PROGRESS_WALL_TIME_KEY] = float(wall_time())
+        payload["wall_time_utc"] = time.time()
         payload["pid"] = os.getpid()
         if run_id is not None:
             payload["run_id"] = run_id
