@@ -33,11 +33,16 @@
 # whole-fn replacement form; the shim bodies themselves are additionally
 # driven by the Python-side wrapper suites through the real wheel). The
 # rework's +104 net enum_kernel growth (100 -> 204 viable-class mutants) is
-# NOT small by the #1597 dial: at 7 shards ceil(803/7) = 115/shard reproduces
-# the SAME ~102-min worst end that took the 6->7 dial, so the matrix took the
-# pre-decided +1-shard dial AGAIN (7 -> 8; ceil(803/8) = 101/shard restores
-# the proven ~100-mutant budget — arithmetic in mutation.yml's run-step
-# comment).
+# NOT small by the #1597 dial: the shard matrix dialed 6 -> 8 vs main's
+# #1597 6-shard fno-math config (fno-math was never 7 shards on main — the
+# 7-shard matrix is the SEPARATE trading-core job's; the first-published
+# 7-shard-baseline narration here was a merge-reconcile artifact from the
+# branch's pre-rework local config, corrected rounds 5-6). At main's
+# 6 shards the 803-mutant re-measure reads ceil(803/6) = 134/shard,
+# ~107 min at +20% on the worst end — a ~13 min margin against the
+# 120-min cap, past the margin condition that took #1597's 5->6 dial —
+# so 8 shards restore the proven ~100-mutant budget: ceil(803/8) = 101
+# per shard (arithmetic in mutation.yml's run-step comment).
 # Reworked-kernel kill evidence (2026-07-11): spot-checked 15/15 CAUGHT
 # (`cargo mutants --in-place --baseline skip -F
 # 'EnumPlanes::count_hits|binomial_table'` — the fused min-hits count core +

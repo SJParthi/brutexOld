@@ -952,6 +952,15 @@ class TestWorkflowWiring:
         pre-rework local 7-shard config. The committed comment AND the
         ledger must narrate the real baseline (Golden Rule #10 — the
         recorded rationale must match the shipped diff).
+
+        Round-6 review MINOR: the round-5 correction was INCOMPLETE — it
+        missed the THIRD narrative site, ``rust/fno-math/.cargo/mutants.toml``
+        (the primary scope-config file), which kept the phantom
+        "ceil(803/7) / 6->7 dial / 7 -> 8" narration verbatim while this pin
+        read only mutation.yml + MIGRATION.md, so CI stayed green with two
+        committed files disagreeing about the same dial. The pin now reads
+        mutants.toml too and refuses the phantom tokens there (spaced AND
+        unspaced forms), so the third site can never re-drift.
         """
         wf = (self._ROOT / ".github/workflows/mutation.yml").read_text(encoding="utf-8")
         # The applied dial itself (unchanged by this correction).
@@ -963,6 +972,14 @@ class TestWorkflowWiring:
         # The phantom 7-shard fno-math waypoints must never return.
         assert "7->8" not in wf
         assert "ceil(803/7)" not in wf
+        # Round 6: the scope-config file's count block must carry the SAME
+        # 6-shard-baseline narrative — never the phantom waypoints.
+        toml = (self._ROOT / "rust/fno-math/.cargo/mutants.toml").read_text(encoding="utf-8")
+        assert "6 -> 8 vs main's" in toml
+        assert "ceil(803/6) = 134" in toml
+        assert "ceil(803/8) = 101" in toml
+        for phantom in ("ceil(803/7)", "6->7", "6 -> 7", "7->8", "7 -> 8"):
+            assert phantom not in toml, f"phantom shard-dial token {phantom!r} in mutants.toml"
         # ...and the ledger entry #1738 must carry the same correction.
         ledger = (self._ROOT / "docs/MIGRATION.md").read_text(encoding="utf-8")
         entry = re.search(r"^1738\. .*$", ledger, flags=re.MULTILINE)
