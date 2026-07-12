@@ -178,8 +178,10 @@ SWEEP_RUST_ENUM_DEFAULT: Final[bool] = False
 
 #: The enum work-cells knob (design §3): the per-call ``max_work_cells``
 #: budget (enumerated × n_bars, the GIL/liveness bound) AND the numerator of
-#: the ``max_enumerated`` range sizing. Default 2^28 ≈ 70 ms at the measured
-#: 0.257 ns/bar·mask prefilter rate (the design's re-scaled cap).
+#: the ``max_enumerated`` range sizing. Default 2^28 ≈ 70 ms at the design
+#: pack's carried 0.257 ns/bar·mask batch-FFI ``count_supermasks`` rate (the
+#: design's re-scaled cap) — this branch's MEASURED fused rate is lower
+#: (0.077–0.125 ns, combo_counts.md §3.2), so the real GIL hold is shorter.
 ENUM_WORK_CELLS_ENV: Final[str] = "BRUTEX_SWEEP_CORE_ENUM_CELLS"
 
 #: Default ``max_work_cells`` per kernel call (design §3 — 2^28).
