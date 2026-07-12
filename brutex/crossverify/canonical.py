@@ -10,8 +10,8 @@ Pinned laws:
 
 * indices — exactly ``{("NSE","NIFTY"), ("NSE","BANKNIFTY"), ("BSE","SENSEX")}``
   (derived from ``V1_INDICES`` minus reference-only, so INDIAVIX can never
-  silently join); segment token ``IDX_I`` is CROSS-exchange (the Dhan-era
-  single Index segment, MIGRATION.md #57/#80);
+  silently join); segment token ``IDX_I`` is CROSS-exchange (the prior-vendor
+  era's single Index segment, MIGRATION.md #57/#80);
 * stocks — the lake ``CASH`` dir name verbatim (``BAJAJ-AUTO``, ``M&M``) —
   never split a groww_symbol on ``-``;
 * futures — ``parse_fno_symbol`` ONLY; canonical token
