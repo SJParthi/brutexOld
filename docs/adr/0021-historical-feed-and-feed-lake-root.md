@@ -139,11 +139,43 @@ contract is pinned at PR-3 against PR-1's real client surface (not guessed now).
 
 ## 4. Consequences
 
-- Groww output + stored bytes + engine identity are byte-identical (a
-  whole-tree SHA golden + the frozen sweep goldens pin it — the cross-cutting
-  parity/reader-invisibility suite is PR-2's next step).
+- Groww output + stored bytes + engine identity are byte-identical. The
+  cross-cutting parity harness (`tests/integration/test_feed_lake_byte_parity.py`)
+  pins it: the default feed written through `build_feed_sink` produces parquet
+  bytes byte-identical to the direct `ParquetBarSink`; adding a `feeds/feedx/`
+  subtree in place leaves every top-root file byte-unchanged; and the frozen
+  engine sweep golden (`_GOLDEN_CONTENT_HASH` / `_GOLDEN_RUN_ID`) reproduces with
+  the feeds package imported — zero engine drift.
 - A second feed can be added with a per-feed root, its own catalog/manifests, and
   a hash-chained ingest log — no shared-file contention, no schema migration.
-- Until `DEC-FEED-TREE-OBSERVABILITY-001`, `feeds/` is invisible to the readers;
-  the enumeration seam (`list_feed_roots`) is defined and tested now so that PR is
-  a wiring change, not a redesign.
+
+### Reader-invisibility verdict (parity-harness evidence)
+
+The feed subtree `feeds/<f>/` is a SIBLING of every anchor dir a reader walks
+(`bars/` / `options/` / `.manifest/` / `sweeps/` / the catalog), and no existing
+reader enumerates the lake root's direct children — so every reader is
+**invisible-already**. The harness proves this empirically with the honest ±
+methodology (ONE lake, snapshot each reader, add the feed subtree IN PLACE,
+snapshot again — the only variable is the feed tree, never two independently
+written lakes whose stat-token readers would legitimately differ by mtime):
+
+| reader | verdict |
+| --- | --- |
+| `db_view.list_candle_datasets` (+ manifest-first) | invisible-already |
+| `db_view.list_fno_candle_datasets` | invisible-already |
+| `db_view.list_option_datasets` | invisible-already |
+| `db_view.summarize_spot_datasets` (completeness) | invisible-already |
+| `movers_snapshot.compute_spot_candidates` | invisible-already |
+| `catalog_reconcile.reconcile_catalog_from_lake` | invisible-already |
+| `lake_invariants.scan_lake_invariants` (census) | invisible-already |
+| `lake_heal.lake_content_token` | invisible-already |
+| `lake_heal.run_startup_sweep` (healer L3) | invisible-already |
+| `lake_manifest` (top-root discovery manifest) | invisible-already |
+| `lake_stats_manifest` (top-root stats manifest) | invisible-already |
+| `lake_revision` (composite cache token) | invisible-already |
+
+**Zero reader source edits were required.** Each reader is a separate pinned
+assertion, so a future reader that starts descending into `feeds/` fails its own
+test by name. Until `DEC-FEED-TREE-OBSERVABILITY-001` teaches heal/census/display
+/backup-verify the subtree (via `list_feed_roots`), that invisibility is SAFE —
+PR-2 registers only the default feed, so zero feed bytes can exist yet.
