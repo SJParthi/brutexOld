@@ -18,7 +18,7 @@ CredentialsError, GrowwFileCredentials`` call site is byte-unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class CredentialsError(Exception):
@@ -48,4 +48,32 @@ class GrowwFileCredentials:
     totp_secret: str
 
 
-__all__ = ["CredentialsError", "GrowwFileCredentials"]
+@dataclass(frozen=True, slots=True)
+class DhanCredentials:
+    """An immutable triple of DhanHQ v2 headless-mint credentials (DEC-DHAN-AUTH-001).
+
+    All three are AWS-SSM-only (``/tickvault/prod/dhan/*``, DEC-DHAN-AUTH-001) — never an env
+    var, a file, or a webpage. Held only to mint the daily access token via the headless
+    PIN+TOTP flow (``POST https://auth.dhan.co/app/generateAccessToken``). The *pin* and
+    *totp_secret* carry ``field(repr=False)`` so ``repr(creds)`` (which the audit log /
+    dashboard could persist) NEVER leaks a secret — only the non-secret *client_id* shows.
+
+    Attributes
+    ----------
+    client_id
+        The numeric Dhan client id (SSM ``/tickvault/prod/dhan/client-id``). NOT a secret in
+        the sense the PIN/TOTP are — it is a public account identifier — but read from SSM
+        alongside them so a single IAM grant covers the whole triple.
+    pin
+        The 6-digit login PIN (SSM ``/tickvault/prod/dhan/pin``); ``repr``-suppressed.
+    totp_secret
+        The Base32 TOTP shared secret (SSM ``/tickvault/prod/dhan/totp-secret``), held only
+        to mint the 6-digit TOTP code; ``repr``-suppressed.
+    """
+
+    client_id: str
+    pin: str = field(repr=False)
+    totp_secret: str = field(repr=False)
+
+
+__all__ = ["CredentialsError", "DhanCredentials", "GrowwFileCredentials"]

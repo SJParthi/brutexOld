@@ -64,9 +64,19 @@ class FakeAwsClient:
     parameters: dict[str, str] = field(default_factory=dict)
     fail_get_parameter: bool = False
     param_not_found: frozenset[str] = field(default_factory=frozenset)
+    #: When ``True``, ``put_parameter`` raises :class:`FakeAwsError` (the write-denied /
+    #: unreachable permutation) — the WRITE half of the seam, used ONLY by the self-minting
+    #: Dhan token store (DEC-DHAN-AUTH-001). Groww suites never touch this.
+    fail_put_parameter: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     get_parameter_calls: int = field(default=0, init=False)
+    put_parameter_calls: int = field(default=0, init=False)
+    #: Records every write (name, value, secure, overwrite) so a test can pin the exact
+    #: ``PutParameter`` args (SecureString + Overwrite=True) without a real boto3 call.
+    put_parameter_args: list[tuple[str, str, bool, bool]] = field(
+        default_factory=list, init=False, repr=False
+    )
 
     def get_parameter(self, *, name: str, with_decryption: bool) -> str | None:
         """Return the seeded value at *name*, raising for a failure / absent name."""
@@ -78,6 +88,23 @@ class FakeAwsClient:
         if name in self.param_not_found:
             raise FakeParameterNotFound(name)
         return self.parameters.get(name)
+
+    def put_parameter(
+        self, *, name: str, value: str, secure: bool = True, overwrite: bool = True
+    ) -> None:
+        """Write *value* at *name* (SecureString), raising on a simulated write failure.
+
+        The WRITE half of the :class:`~brutex.adapters.aws_client.AwsClientWriter` Protocol —
+        satisfied here so the Dhan token store flows through the REAL store code (not a
+        bypass). Records the call + args and mutates the in-memory map so a subsequent
+        ``get_parameter`` reads back what was written.
+        """
+        with self._lock:
+            self.put_parameter_calls += 1
+            self.put_parameter_args.append((name, value, secure, overwrite))
+        if self.fail_put_parameter:
+            raise FakeAwsError(f"access denied writing {name}")
+        self.parameters[name] = value
 
 
 __all__ = ["FakeAwsClient", "FakeAwsError", "FakeParameterNotFound"]

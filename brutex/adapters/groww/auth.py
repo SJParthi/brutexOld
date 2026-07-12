@@ -37,6 +37,7 @@ from brutex.adapters.groww.errors import (
     GrowwTokenIssuanceThrottled,
     from_groww_exception,
 )
+from brutex.adapters.secret_scrub import scrub_secrets
 
 _LOG = structlog.get_logger("brutex.adapters.groww.auth")
 
@@ -90,15 +91,13 @@ def _sanitize_reason(text: str, *secrets: str) -> str:
     """Scrub every *secrets* occurrence in *text* to ``***`` (secret hygiene).
 
     Used to make the vendor's failure reason VISIBLE without leaking the api_key,
-    the TOTP shared secret, or the minted 6-digit TOTP code. A blank/empty secret
-    is skipped (``str.replace("", …)`` would otherwise corrupt the whole string by
-    inserting between every character). The longest secrets are scrubbed first so a
-    secret that contains another as a substring is fully masked.
+    the TOTP shared secret, or the minted 6-digit TOTP code. DELEGATES to the COMMON
+    :func:`brutex.adapters.secret_scrub.scrub_secrets` (DEC-AWS-SSM-SEAM-COMMON-001,
+    MIGRATION.md #1754 — the scrubber moved verbatim so a second vendor shares it);
+    this thin wrapper keeps the ``(text, *secrets)`` varargs signature byte-compatible
+    for every existing call site (the Groww suites are the oracle).
     """
-    sanitized = text
-    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
-        sanitized = sanitized.replace(secret, "***")
-    return sanitized
+    return scrub_secrets(text, secrets)
 
 
 def _vendor_status(exc: Exception) -> int | None:

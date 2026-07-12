@@ -39,22 +39,40 @@ from __future__ import annotations
 
 import structlog
 
-from brutex.adapters.groww.aws_client import (
+from brutex.adapters.aws_client import (
     SSM_PARAMETER_NOT_FOUND,
     AwsClient,
     build_real_aws_client,
+    resolve_token_broker_region,
+    resolve_token_param_path,
 )
 from brutex.adapters.groww.constants import (
     GROWW_TOKEN_PARAM_API_KEY_DEFAULT,
     GROWW_TOKEN_PARAM_API_KEY_ENV,
     GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT,
     GROWW_TOKEN_PARAM_TOTP_SECRET_ENV,
-    resolve_token_broker_region,
-    resolve_token_param_path,
 )
-from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
+from brutex.config.credentials_types import (
+    CredentialsError,
+    DhanCredentials,
+    GrowwFileCredentials,
+)
 
 _LOG = structlog.get_logger("brutex.config.credentials_aws")
+
+# ── Dhan SSM parameter paths (DEC-DHAN-AUTH-001, MIGRATION.md #1755) ─────────
+# The Dhan headless-mint credential triple lives in AWS Parameter Store SecureStrings under
+# ``/tickvault/prod/dhan/*`` (region resolved by the ONE shared resolver). Each honours a
+# ``BRUTEX_TOKEN_PARAM_DHAN_*`` path override (config-only relocation). The access-token path
+# is here too (the ONE SecureString BruteX WRITES — the Dhan token store owns writing it).
+DHAN_TOKEN_PARAM_CLIENT_ID_ENV: str = "BRUTEX_TOKEN_PARAM_DHAN_CLIENT_ID"  # noqa: S105  # env var name, not a secret
+DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT: str = "/tickvault/prod/dhan/client-id"  # noqa: S105  # parameter path, not a secret
+DHAN_TOKEN_PARAM_PIN_ENV: str = "BRUTEX_TOKEN_PARAM_DHAN_PIN"  # noqa: S105  # env var name, not a secret
+DHAN_TOKEN_PARAM_PIN_DEFAULT: str = "/tickvault/prod/dhan/pin"  # noqa: S105  # parameter path, not a secret
+DHAN_TOKEN_PARAM_TOTP_SECRET_ENV: str = "BRUTEX_TOKEN_PARAM_DHAN_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
+DHAN_TOKEN_PARAM_TOTP_SECRET_DEFAULT: str = "/tickvault/prod/dhan/totp-secret"  # noqa: S105  # parameter path, not a secret
+DHAN_TOKEN_PARAM_ACCESS_TOKEN_ENV: str = "BRUTEX_TOKEN_PARAM_DHAN_ACCESS_TOKEN"  # noqa: S105  # env var name, not a secret
+DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT: str = "/tickvault/prod/dhan/access-token"  # noqa: S105  # parameter path, not a secret
 
 #: How to fix an AWS credential-resolution failure, appended to the raised error. Names
 #: the fixed default parameter paths + the deploy pointer; contains NO secret values.
@@ -63,6 +81,16 @@ AWS_CREDS_HOW_TO_FIX: str = (
     "(/tickvault/prod/groww/api-key + /tickvault/prod/groww/totp-secret, SecureStrings "
     "in ap-south-1) — deploy the minter (deploy/aws_token_minter/deploy.sh) first; "
     "BruteX reads credentials ONLY from AWS (no env-var / local-file / webpage fallback)"
+)
+
+#: How to fix a Dhan AWS credential-resolution failure (DEC-DHAN-AUTH-001). Names the fixed
+#: default parameter paths + the runbook; contains NO secret values.
+DHAN_CREDS_HOW_TO_FIX: str = (
+    "seed the Dhan credentials in AWS Parameter Store "
+    "(/tickvault/prod/dhan/client-id + /tickvault/prod/dhan/pin + "
+    "/tickvault/prod/dhan/totp-secret, SecureStrings in ap-south-1) — see "
+    "docs/runbooks/dhan-auth.md; BruteX reads Dhan credentials ONLY from AWS "
+    "(no env-var / local-file / webpage fallback)"
 )
 
 
@@ -94,56 +122,133 @@ def load_groww_aws_credentials(*, client: AwsClient | None = None) -> GrowwFileC
         absent or blank. The message names the parameter paths + the deploy pointer, never a
         secret value.
     """
-    resolved_client = client if client is not None else _build_client_or_raise()
-
-    api_key = _read_param(
-        resolved_client,
-        resolve_token_param_path(GROWW_TOKEN_PARAM_API_KEY_ENV, GROWW_TOKEN_PARAM_API_KEY_DEFAULT),
+    resolved_client = (
+        client
+        if client is not None
+        else _build_client_or_raise(vendor_label="Groww", how_to_fix=AWS_CREDS_HOW_TO_FIX)
     )
-    totp_secret = _read_param(
+    params = _load_vendor_params(
         resolved_client,
-        resolve_token_param_path(
-            GROWW_TOKEN_PARAM_TOTP_SECRET_ENV, GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT
+        (
+            ("api_key", GROWW_TOKEN_PARAM_API_KEY_ENV, GROWW_TOKEN_PARAM_API_KEY_DEFAULT),
+            (
+                "totp_secret",
+                GROWW_TOKEN_PARAM_TOTP_SECRET_ENV,
+                GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT,
+            ),
         ),
+        vendor_label="Groww",
+        how_to_fix=AWS_CREDS_HOW_TO_FIX,
     )
+    return GrowwFileCredentials(api_key=params["api_key"], totp_secret=params["totp_secret"])
+
+
+def load_dhan_aws_credentials(*, client: AwsClient | None = None) -> DhanCredentials:
+    """Load the Dhan credentials from AWS Parameter Store — the SOLE source (DEC-DHAN-AUTH-001).
+
+    Reads ``/tickvault/prod/dhan/client-id`` + ``/tickvault/prod/dhan/pin`` +
+    ``/tickvault/prod/dhan/totp-secret`` (all ``BRUTEX_TOKEN_PARAM_DHAN_*``-overridable) as
+    SecureStrings (``WithDecryption=True``). MANDATORY and FAIL-FAST exactly like the Groww
+    reader: any failure — boto3 missing, ANY parameter absent/blank, or ANY SSM/network/IAM/
+    KMS error — raises :class:`~brutex.config.credentials_types.CredentialsError` naming
+    EVERY missing path + the runbook, never a secret value. It NEVER returns ``None`` and
+    NEVER falls back to env/file/webpage.
+
+    Parameters
+    ----------
+    client
+        Injected :class:`~brutex.adapters.aws_client.AwsClient` for tests (a fake). ``None``
+        builds the real boto3 client lazily (``# pragma: no cover``).
+
+    Returns
+    -------
+    DhanCredentials
+        The resolved credential triple (all three fields non-blank).
+
+    Raises
+    ------
+    CredentialsError
+        When AWS is unreachable / not configured, boto3 is missing, or any of the three
+        parameters is absent or blank. The message names every missing parameter path + the
+        runbook, never a secret value.
+    """
+    resolved_client = (
+        client
+        if client is not None
+        else _build_client_or_raise(vendor_label="Dhan", how_to_fix=DHAN_CREDS_HOW_TO_FIX)
+    )
+    params = _load_vendor_params(
+        resolved_client,
+        (
+            ("client_id", DHAN_TOKEN_PARAM_CLIENT_ID_ENV, DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT),
+            ("pin", DHAN_TOKEN_PARAM_PIN_ENV, DHAN_TOKEN_PARAM_PIN_DEFAULT),
+            (
+                "totp_secret",
+                DHAN_TOKEN_PARAM_TOTP_SECRET_ENV,
+                DHAN_TOKEN_PARAM_TOTP_SECRET_DEFAULT,
+            ),
+        ),
+        vendor_label="Dhan",
+        how_to_fix=DHAN_CREDS_HOW_TO_FIX,
+    )
+    return DhanCredentials(
+        client_id=params["client_id"], pin=params["pin"], totp_secret=params["totp_secret"]
+    )
+
+
+def _load_vendor_params(
+    client: AwsClient,
+    specs: tuple[tuple[str, str, str], ...],
+    *,
+    vendor_label: str,
+    how_to_fix: str,
+) -> dict[str, str]:
+    """Read every ``(field, env_name, default)`` spec, raising an all-or-loud error on a miss.
+
+    The ONE generic vendor-credential reader (CLAUDE.md §11 COMMON) shared by
+    :func:`load_groww_aws_credentials` + :func:`load_dhan_aws_credentials`. Each spec resolves
+    its Parameter-Store path (honouring the env override) and reads it via :func:`_read_param`
+    (a hard SSM/IAM/network error is FAIL-FAST there, never mistaken for "absent"). An
+    absent/blank value collects the path into *missing*; if ANY field is missing the whole
+    read raises :class:`~brutex.config.credentials_types.CredentialsError` naming EVERY missing
+    path + *how_to_fix* — never a partial/half-resolved credential. Returns a
+    ``{field: value}`` map with every field non-blank on success. O(len(specs)).
+    """
+    resolved: dict[str, str] = {}
     missing: list[str] = []
-    if api_key is None:
-        missing.append(
-            resolve_token_param_path(
-                GROWW_TOKEN_PARAM_API_KEY_ENV, GROWW_TOKEN_PARAM_API_KEY_DEFAULT
-            )
-        )
-    if totp_secret is None:
-        missing.append(
-            resolve_token_param_path(
-                GROWW_TOKEN_PARAM_TOTP_SECRET_ENV, GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT
-            )
-        )
-    if api_key is None or totp_secret is None:
+    for field_name, env_name, default in specs:
+        path = resolve_token_param_path(env_name, default)
+        value = _read_param(client, path)
+        if value is None:
+            missing.append(path)
+        else:
+            resolved[field_name] = value
+    if missing:
         raise CredentialsError(
-            f"missing Groww credentials in AWS Parameter Store: {', '.join(missing)}; "
-            f"{AWS_CREDS_HOW_TO_FIX}"
+            f"missing {vendor_label} credentials in AWS Parameter Store: "
+            f"{', '.join(missing)}; {how_to_fix}"
         )
+    return resolved
 
-    return GrowwFileCredentials(api_key=api_key, totp_secret=totp_secret)
 
-
-def _build_client_or_raise() -> AwsClient:  # pragma: no cover — real boto3 client build
+def _build_client_or_raise(
+    *, vendor_label: str, how_to_fix: str
+) -> AwsClient:  # pragma: no cover — real boto3 client build
     """Build the real boto3 :class:`AwsClient`, raising a clear error when it cannot be built.
 
-    A missing boto3 (:class:`~brutex.adapters.groww.aws_client.AwsBackendUnavailable`, an
+    A missing boto3 (:class:`~brutex.adapters.aws_client.AwsBackendUnavailable`, an
     ``ImportError``) OR any boto3-client construction error — a bad region, an absent
     profile (``ProfileNotFound``), a credential-chain failure — is FAIL-FAST: it raises
-    :class:`~brutex.config.credentials_types.CredentialsError` naming the fix, never a silent
-    fallback to env/file (DEC-AWS-ONLY-CREDS-001).
+    :class:`~brutex.config.credentials_types.CredentialsError` naming the *vendor_label* + the
+    fix, never a silent fallback to env/file (DEC-AWS-ONLY-CREDS-001).
     """
     try:
         return build_real_aws_client(resolve_token_broker_region())
     except Exception as exc:  # pylint: disable=broad-exception-caught — any build failure is fail-fast
-        _LOG.error("groww.creds.aws_unavailable", error_type=type(exc).__name__)
+        _LOG.error("creds.aws_unavailable", vendor=vendor_label, error_type=type(exc).__name__)
         raise CredentialsError(
-            f"could not reach AWS Parameter Store for the Groww credentials "
-            f"({type(exc).__name__}); {AWS_CREDS_HOW_TO_FIX}"
+            f"could not reach AWS Parameter Store for the {vendor_label} credentials "
+            f"({type(exc).__name__}); {how_to_fix}"
         ) from exc
 
 
@@ -173,4 +278,17 @@ def _read_param(client: AwsClient, name: str) -> str | None:
     return value
 
 
-__all__ = ["AWS_CREDS_HOW_TO_FIX", "load_groww_aws_credentials"]
+__all__ = [
+    "AWS_CREDS_HOW_TO_FIX",
+    "DHAN_CREDS_HOW_TO_FIX",
+    "DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT",
+    "DHAN_TOKEN_PARAM_ACCESS_TOKEN_ENV",
+    "DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT",
+    "DHAN_TOKEN_PARAM_CLIENT_ID_ENV",
+    "DHAN_TOKEN_PARAM_PIN_DEFAULT",
+    "DHAN_TOKEN_PARAM_PIN_ENV",
+    "DHAN_TOKEN_PARAM_TOTP_SECRET_DEFAULT",
+    "DHAN_TOKEN_PARAM_TOTP_SECRET_ENV",
+    "load_dhan_aws_credentials",
+    "load_groww_aws_credentials",
+]

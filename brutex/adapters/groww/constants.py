@@ -20,6 +20,19 @@ from collections.abc import Mapping
 from datetime import date
 from typing import Final
 
+# DEC-AWS-SSM-SEAM-COMMON-001 (MIGRATION.md #1754): the region + parameter-path resolvers
+# MOVED to the COMMON seam :mod:`brutex.adapters.aws_client` so a second vendor (Dhan) shares
+# them. Re-exported here byte-identically so every existing
+# ``from brutex.adapters.groww.constants import resolve_token_param_path`` call site is
+# unchanged (the Groww suites are the oracle). The GROWW_TOKEN_AWS_REGION_* / AWS_REGION_ENV
+# constants below keep their literal definitions (values identical to the seam's) so a test
+# that monkeypatches ``os.environ[c.GROWW_TOKEN_AWS_REGION_ENV]`` still drives the moved
+# resolver, which reads the SAME env-var name.
+from brutex.adapters.aws_client import (  # re-exported for byte-compat call sites (in __all__)
+    resolve_token_broker_region,
+    resolve_token_param_path,
+)
+
 # ── Instrument master (live-downloaded; this snapshot is point-in-time) ──────
 #: Live instrument-master CSV (docs/groww/api-reference/02-instruments.md).
 GROWW_INSTRUMENT_CSV_URL: Final[str] = "https://growwapi-assets.groww.in/instruments/instrument.csv"
@@ -500,35 +513,6 @@ GROWW_TOKEN_PARAM_API_KEY_DEFAULT: Final[str] = "/tickvault/prod/groww/api-key" 
 #: Full Parameter-Store path of the shared Groww TOTP-secret SecureString. Env-overridable.
 GROWW_TOKEN_PARAM_TOTP_SECRET_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_TOTP_SECRET"  # noqa: S105  # env var name, not a secret
 GROWW_TOKEN_PARAM_TOTP_SECRET_DEFAULT: Final[str] = "/tickvault/prod/groww/totp-secret"  # noqa: S105  # parameter path, not a secret
-
-
-def resolve_token_broker_region() -> str:
-    """Resolve the token-broker SSM region: ``BRUTEX_TOKEN_AWS_REGION`` → ``AWS_REGION`` → default.
-
-    The operator's SecureStrings live in :data:`GROWW_TOKEN_AWS_REGION_DEFAULT`
-    (``ap-south-1``). A non-blank ``BRUTEX_TOKEN_AWS_REGION`` wins; else a non-blank
-    ``AWS_REGION``; else the ap-south-1 default (never ``None`` — BruteX always targets a
-    concrete region so a mis-set profile default cannot silently read the wrong region).
-    O(1).
-    """
-    for env_name in (GROWW_TOKEN_AWS_REGION_ENV, AWS_REGION_ENV):
-        raw = os.environ.get(env_name)
-        if raw is not None and raw.strip():
-            return raw.strip()
-    return GROWW_TOKEN_AWS_REGION_DEFAULT
-
-
-def resolve_token_param_path(env_name: str, default: str) -> str:
-    """Return the Parameter-Store path from *env_name*, or *default* when unset/blank.
-
-    A thin COMMON resolver shared by the three shared-secret paths (access-token /
-    api_key / totp-secret) so each honours its own env override with the operator's
-    fixed ``/tickvault/prod/groww/…`` default. O(1).
-    """
-    raw = os.environ.get(env_name)
-    if raw is not None and raw.strip():
-        return raw.strip()
-    return default
 
 
 #: Environment toggle for the anti-burst smooth pacing
