@@ -739,3 +739,83 @@ class TestCompositesFor:
         aggs = _load_agg_records(_tuple_paths(out_root, grid))
         assert all(isinstance(agg, ComboAggregate) for agg in aggs)
         assert all(agg.parity_ok for agg in aggs)
+
+
+class TestCascadeJoinThreading:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the kwarg threads VERBATIM."""
+
+    def test_build_top100_receives_the_exact_join_object(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine import results_depth_pass
+        from brutex.engine.cascade_join import CascadeJoin
+
+        sentinel = CascadeJoin(
+            sweep_id=grid_identity(_grid()),
+            version=1,
+            n_input=0,
+            n_survived=0,
+            by_candidate={},
+            ambiguous_ids=frozenset(),
+            groups=(),
+            skipped_groups=0,
+            skipped_verdicts=0,
+            nulled_values=0,
+            rank_inconsistencies=0,
+        )
+        seen: dict[str, object] = {}
+        real_build = results_depth_pass.build_top100
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            seen["cascade_join"] = kwargs.get("cascade_join")
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(results_depth_pass, "build_top100", _spy)
+        _run_pass(out_root, cascade_join=sentinel)
+        # The EXACT object — identity, not a copy (the writer's sweep_id gate
+        # judges the very join the adapter built).
+        assert seen["cascade_join"] is sentinel
+
+    def test_default_none_writes_no_report_meta(self, out_root: Path) -> None:
+        _run_pass(out_root)
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.cascade_join == {
+            "state": "no_report",
+            "sweep_id": None,
+            "n_input": None,
+            "n_survived": None,
+        }
+
+    def test_matching_join_stamps_the_written_artifact(self, out_root: Path) -> None:
+        from brutex.engine.cascade_join import CascadeJoin
+
+        run_id = grid_identity(_grid())
+        join = CascadeJoin(
+            sweep_id=run_id,
+            version=1,
+            n_input=3,
+            n_survived=1,
+            by_candidate={},
+            ambiguous_ids=frozenset(),
+            groups=(),
+            skipped_groups=0,
+            skipped_verdicts=0,
+            nulled_values=0,
+            rank_inconsistencies=0,
+        )
+        _run_pass(out_root, cascade_join=join)
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.cascade_join == {
+            "state": "joined",
+            "sweep_id": run_id,
+            "n_input": 3,
+            "n_survived": 1,
+        }
+        # No pooled run_id sits in the (empty) join — honest not_in_cascade_pool.
+        assert all(
+            entry["cascade"] == {"status": "not_validated", "reason": "not_in_cascade_pool"}
+            for entry in loaded.entries
+        )
