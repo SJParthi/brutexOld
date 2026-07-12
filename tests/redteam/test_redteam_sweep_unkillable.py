@@ -171,9 +171,13 @@ def _tamper_entry_hash(line: bytes) -> bytes:
 
     DEC-REDTEAM-TAMPER-DETERMINISTIC-001: the retired construction
     ``line.replace(b"1", b"@", 1)`` flipped the first ``b"1"`` ANYWHERE in the
-    line; the line's bytes are run-specific (hash hex + wall-clock ``ts_utc``),
-    so on some runs that byte sat in a bare JSON number (``seq`` / ``ts_utc``)
-    and yielded MALFORMED JSON → a different exception → a flaky test.
+    line; whenever the run-specific ``entry_hash`` hex ALONE was '1'-free
+    (P ≈ ``(15/16)**64`` ≈ 1.6% per line) that byte sat in the payload's
+    first bare JSON number (``"attempt":1`` on a real flight line /
+    ``"backtested":1`` on the real CLI SWEEP_COMPLETE line — ``payload``
+    sorts between ``entry_hash`` and ``prev_hash``, so ``prev_hash`` is
+    irrelevant on those lines) and yielded MALFORMED JSON → a different
+    exception → a flaky test.
     """
     match = _ENTRY_HASH_RE.search(line)
     assert match is not None, "chain line carries no entry_hash hex value"
