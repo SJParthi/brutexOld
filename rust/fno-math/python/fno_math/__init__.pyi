@@ -21,6 +21,8 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentSweepCore",
+    "ResidentSweepCoreU128",
     "ResidentSweepEnum",
     "ResidentSweepEnumU128",
     "ResidentSweepSim",
@@ -166,6 +168,68 @@ class ResidentSweepEnumU128:
     `IMPLEMENTED_MASK < 2**60`)."""
 
     def __init__(self, bar_bits: list[int]) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
+
+class ResidentSweepCore:
+    """Resident u64-width UNIFIED sweep-core substrate (DEC-SWEEP-CORE-RUST-001).
+
+    The design §1.3 single per-tuple core object: the seven per-bar columns
+    (`open/high/low/close_paisa, is_forced, session_idx` — validation
+    identical to `ResidentSweepSim`) + `bar_bits` held BOTH as the walk's
+    entry stream and as condition-major transposed bitplanes.
+    `enumerate_prefilter` serves the SAME ranged fused enumeration as
+    `ResidentSweepEnum` (one shared width-generic core); the fused per-mask
+    sim→metrics `fold_block` lands with Slice-2 R3. Raises `ValueError`
+    outside the validated envelope and `MemoryError` on reserve failure
+    (the global-stop class — re-raised bare by the wrapper).
+    """
+
+    def __init__(
+        self,
+        open_paisa: list[int],
+        high_paisa: list[int],
+        low_paisa: list[int],
+        close_paisa: list[int],
+        is_forced: list[bool],
+        session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
+
+class ResidentSweepCoreU128:
+    """Resident u128-width unified sweep-core substrate — the wide twin of
+    `ResidentSweepCore` for condition bits / bar values in `[64, 128)`."""
+
+    def __init__(
+        self,
+        open_paisa: list[int],
+        high_paisa: list[int],
+        low_paisa: list[int],
+        close_paisa: list[int],
+        is_forced: list[bool],
+        session_idx: list[int],
+        bar_bits: list[int],
+    ) -> None: ...
     def n_bars(self) -> int: ...
     def enumerate_prefilter(
         self,

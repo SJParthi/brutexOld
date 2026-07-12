@@ -84,6 +84,14 @@ pub mod metrics;
 /// `brutex/engine/rust_enum.py`).
 pub mod enum_kernel;
 
+/// DEC-SWEEP-CORE-RUST-001 (#1739 reserved): the unified 7-column sweep-core
+/// substrate — `ResidentSweepCore(U128)` carrying the MOVED width-generic
+/// enumeration core (the design §1.3 Q1 unification; `enum_kernel`'s
+/// pyclasses delegate here) and, from Slice-2 R3, the fused per-mask
+/// sim→metrics `fold_block`. Default-OFF behind `BRUTEX_SWEEP_RUST_CORE`
+/// (Python wrapper `brutex/engine/sweep_core.py`).
+pub mod sweep_core;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -161,6 +169,12 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<enum_kernel::ResidentSweepEnum>()?;
     m.add_class::<enum_kernel::ResidentSweepEnumU128>()?;
     // ── end DEC-SWEEP-ENUM-RUST-001 block ──
+    // ── DEC-SWEEP-CORE-RUST-001 (#1739) — unified sweep-core surface ──
+    // (fenced additive block: unmerged sibling slices share this surface;
+    // whoever lands second reconciles trivially.)
+    m.add_class::<sweep_core::ResidentSweepCore>()?;
+    m.add_class::<sweep_core::ResidentSweepCoreU128>()?;
+    // ── end DEC-SWEEP-CORE-RUST-001 block ──
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
 }
