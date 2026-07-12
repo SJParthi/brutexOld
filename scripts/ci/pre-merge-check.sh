@@ -59,6 +59,21 @@ IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
 # (never replaced by) the caller's IGNORE_CHECK_NAMES at all three scan
 # sites, so auto-merge.yml's caller-SET IGNORE_CHECK_NAMES ("Auto-merge on
 # green CI") cannot clobber it. The match is by EXACT name.
+#
+# NAMED RESIDUAL (hostile-review round 2, DEC-PREMERGE-M4PRO-NONBLOCK-001):
+# the sibling bench-m4pro.yml job `bless-baseline` ("Bless baseline
+# candidate (bot PR from measured artifact)", needs: m4pro-absolute-
+# throughput) is EQUALLY non-required but deliberately NOT exempted here —
+# the operator authorization covers exactly `m4pro-absolute-throughput`;
+# broadening this set requires a new DEC. It cannot block in the
+# offline-runner scenario: while m4pro sits QUEUED, GitHub does not
+# instantiate the needs-downstream bless check-run at all (live-run-
+# verified, runs 29172994876 + 29189211057), and a completed feature-branch
+# run marks it SKIPPED — a non-blocking conclusion. The ONE reachable
+# re-block shape is an operator MANUALLY CANCELLING a stuck bench run: the
+# cancelled bless check-run can then materialize on the PR head and blocks
+# at the failed scan below. Remediation: push a fresh head SHA (a new
+# commit), or extend this set under a new DEC.
 NONBLOCKING_CHECK_NAMES="m4pro-absolute-throughput"
 
 # OPERATOR_OVERRIDE requires a non-empty reason (Agent 5 MED finding):

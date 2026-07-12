@@ -22,8 +22,11 @@ _Last updated: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1751 �
 the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
 bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
 `scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
-at all three rollup scan sites (count · failed · pending) — so the offline
-self-hosted runner's pending-forever check can never refuse a merge and
+at all three rollup scan sites (count · failed · pending) — so the
+offline-runner pending-forever shape can never refuse a merge (the ONE
+residual — a manually-CANCELLED bench run's `bless-baseline` check — is
+named in #1751, documented not broadened per the operator only-m4pro
+constraint) and
 auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
 while a FAILED m4pro is surfaced as a WARN-only line that never affects the
 exit code and every REQUIRED check still blocks fully (redteam-pinned incl.
@@ -2328,11 +2331,21 @@ hostile-review pass._
   gains a HARDCODED (deliberately NOT env-overridable — broadening the set
   requires a code change + a new DEC) `NONBLOCKING_CHECK_NAMES` constant
   UNIONED with the caller's `IGNORE_CHECK_NAMES` at all three rollup scan
-  sites (count · failed · pending), so the offline M4-Pro runner's
-  pending-forever check can never refuse a merge AND auto-merge.yml's
+  sites (count · failed · pending), so the offline-runner pending-forever
+  shape can never refuse a merge AND auto-merge.yml's
   caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
   the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
-  that never affects the exit code; every REQUIRED check still blocks —
+  that never affects the exit code; the sibling `bench-m4pro.yml`
+  `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
+  RESIDUAL — operator authorization covers exactly
+  `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
+  evidence 29172994876 + 29189211057: it cannot block in the offline-runner
+  scenario — its needs-downstream check-run is never instantiated while
+  m4pro sits QUEUED, and a completed feature-branch run marks it SKIPPED —
+  so the ONE reachable re-block shape is an operator manually CANCELLING a
+  stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
+  full record lives in #1751's HONEST envelope); every REQUIRED check still
+  blocks —
   redteam-pinned (NEW `TestM4proNonblocking`, 8 tests — incl. the round-1
   review fold's source pin that the hardcoded set is EXACTLY
   {m4pro-absolute-throughput} with the env-default override idiom absent —
@@ -5918,6 +5931,9 @@ hostile-review pass._
   `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
   `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
   caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks;
+  the offline-runner pending-forever shape can never refuse a merge (the
+  manual-cancel `bless-baseline` residual is named in #1751 — documented,
+  not broadened, per the operator only-m4pro constraint);
   every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
   safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
   caught post-merge on the self-hosted runner); CI-gate script + redteam
