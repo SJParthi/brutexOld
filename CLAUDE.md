@@ -20,20 +20,25 @@
 
 _Last updated: 2026-07-12 (DEC-MAPPING-INTEGRITY-FORM-KEY-001 +
 DEC-MOVERS-STORED-FRESHNESS-001 + DEC-FNO-UNDERLYING-EMPTY-GUARD-001,
-MIGRATION.md #1751–#1753 — the dashboard underlying-key truth pack: the
-/universe mapping-integrity compare keyed through the COMMON F&O
-underlying-forms resolver via an injected plain-data `key_forms` map
-(hyphenated names' attempted-and-zero silent-vanish alarm live; writer
-byte-untouched; default-None byte-identical), the /movers stored-first
-intraday read gains the DAY-scoped grid-aware freshness guard (stale
-prebuilt TF ⇒ the existing 1m-resample fallback + one capped
-`movers.stored_stale_fallback` WARN; fresh lakes byte-identical, pinned;
+MIGRATION.md #1751–#1753 — the dashboard underlying-key truth pack, REFUTER
+ROUND 1 folded: the /universe mapping-integrity compare keyed through the
+COMMON F&O underlying-forms resolver via an injected plain-data `key_forms`
+map (hyphenated names' attempted-and-zero silent-vanish alarm live; the
+writer's KEYING byte-untouched — the writer file gains only the #1753
+blank-row isolation; default-None byte-identical), the /movers stored-first
+intraday read gains the VERIFY-EQUALITY freshness guard (a stored TF day
+frame is served only when it EQUALS the in-memory resample of the 1-minute
+base — the round-1 day-max predicate was refuted by the executed #1031
+interior-hole re-pull chain; stale ⇒ the existing 1m-resample fallback + one
+capped `movers.stored_stale_fallback` WARN, dedupe key (exchange, symbol,
+interval) per the #1649a precedent; fresh lakes byte-identical, pinned;
 daily arm = named follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and
 `primary_fno_underlying` made total for the blank-symbol degenerate
-(IndexError → inert self-key; kind-map rows blank-skipped + counted).
-READ-side dashboard only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
-per-item record lives in the §1 Active-branch blurb + MIGRATION.md
-#1751–#1753.)
+(IndexError → self-key; blank rows skipped + counted at the kind-map AND
+the metadata grid — the round-1-falsified "inert key" metadata seam closed,
+`_first_nonempty_over_forms` made total). READ-side dashboard only — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1751–#1753.)
 Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
@@ -2339,42 +2344,71 @@ hostile-review pass._
   primary-only); display + whitelist stay the SPOT spelling; the empty-forms degenerate
   degrades to the exact raw key via `or (symbol,)`; the map is built ONCE per cached
   compute in app.py (zero new imports/reads; nav-latency/outage plumbing untouched); the
-  writer is byte-untouched; CSV golden byte-unmodified; route-executed fail-before
-  regressions + the end-to-end REAL-writer belt (the fake-SDK harness → the route reads
-  green). **(#1752, R7)** the /movers spot stored-first intraday read gains the FOURTH
-  member of its decision family — a DAY-scoped GRID-AWARE freshness guard: stored bars
-  are bucket-OPEN stamped, so fresh ⇔ `stored_max_open_min + minutes > base_day_max_min`
-  on the UNCUT day frames (the naive `>=` compare false-stales every fresh TF lake; the
-  CUT-domain compare is REFUTED BY ARITHMETIC — at the :351 pin's aligned 09:19 cutoff
-  the poison reads 555+5=560 > 559 = fresh, only the DAY domain 560 ≤ 564 catches it);
-  interval=1minute is the identity arm (zero extra I/O, read-spy-pinned); base-absent
-  fail-opens to serve-stored; STALE ⇒ the EXISTING `_read_session_bars` fallback (the
-  byte-equality reference path — only provenance flips into `resampled_reads`, no new
-  payload field) + ONE capped `movers.stored_stale_fallback` WARN (a `_StoredStaleWarnState`
-  mirroring the #1539 idiom, cap 20, (symbol, interval) dedupe, separate state). The
-  test_movers_stored_read.py:351 stale-serve pin is FLIPPED deliberately ((1,0)→(0,1),
-  snapshots==reference, one WARN — the bugfix-reversion-check proof); the FULL fresh-lake
-  equality/provenance pin family passes UNMODIFIED. HONEST: +1 month-bounded 1m read per
-  stored-served TF>1minute candidate (2→3; stale 4; candidate-cache-memoised — the
-  "near-zero I/O" shared-frame restructure is the named follow-up
-  DEC-MOVERS-1M-FRAME-SHARE-001); the live-edge partial-last-bucket sliver
-  (≤ minutes−1 min) passes the guard, self-heals via latest-wins + prefer_resample; the
-  DAILY arm + the stale default-DATE (movers_warm) stay OPEN — named follow-up
-  DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the team memory's
-  two-arm scope. **(#1753, BUG-3)** `primary_fno_underlying` made TOTAL for str input
-  (guarantee-audit): the literal `""` returned IndexError — falsifying its own "Never
-  empty" docstring — and ONE blank-symbol EQ row (parser-retained in the universe)
-  poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol` (`""` →
-  itself, an inert key; `fno_underlying_forms("")` deliberately stays `()` so
-  forms-iterating consumers issue ZERO vendor calls; whitespace-only unchanged;
-  non-empty byte-identical, structural + pinned) and `build_underlying_kind_map` skips
-  blank/whitespace rows BEFORE resolving with ONE aggregate
-  `movers.underlying_kind_blank_symbol_skipped` WARN per build (≤5 exch:security_id
-  samples; no broad except — the isolation is the pre-check). ALL THREE: READ-side
-  dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  writer's KEYING is byte-untouched (refuter-round-1 honesty: the writer FILE gains only
+  the #1753 blank-row grid isolation); with-legs dual-spelling rows both resolve against
+  WRITER-keyed coverage (a legacy-RAW-keyed era leaves the primary-spelled arm a neutral
+  non-gating `not_attempted` — the fold is one-directional spot→forms, round-1-executed);
+  CSV golden byte-unmodified; route-executed fail-before regressions + the end-to-end
+  REAL-writer belt (the fake-SDK harness → the route reads green). **(#1752, R7)** the
+  /movers spot stored-first intraday read gains the FOURTH member of its decision
+  family — a VERIFY-EQUALITY freshness guard (REFUTER ROUND 1 folded): a stored TF day
+  frame is served only when it EQUALS — dtype/column-order-exact `.equals` — the
+  in-memory `resample_1m_to_tf` of the UNCUT 1-minute base day frame, the SAME resampler
+  the fallback runs and the prebuild wrote the partition with (one implementation, §11;
+  fresh ⇒ byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 contract, probed + pinned).
+  The round-1 day-max predicate (`stored_max_open_min + minutes > base_day_max_min` —
+  itself the fix of the naive `>=` false-stale and the CUT-domain arithmetic trap) was
+  REFUTED by the executed #1031 interior-hole re-pull chain (holey pull → prebuild →
+  hole re-pull: a TAIL check read 565+5=570 > 569 = fresh and served stale volume
+  1110-vs-2136 / stale LTP ₹20,000-vs-₹20,040 silently) — equality SUBSUMES it and also
+  mechanises the live-edge sliver, the R7-M2 reverse-truncation and the value-poison
+  residuals; interval=1minute is the identity arm (zero extra I/O, read-spy-pinned);
+  base-absent fail-opens to serve-stored (the ONE remaining unverified serve); STALE ⇒
+  the EXISTING `_read_session_bars` fallback (only provenance flips into
+  `resampled_reads`, no new payload field) + ONE capped `movers.stored_stale_fallback`
+  WARN (a `_StoredStaleWarnState` mirroring the #1539 idiom, cap 20, dedupe key
+  (exchange, symbol, interval) — widened from (symbol, interval) per refuter defect 2 +
+  the #1649a dual-listing precedent, so a dual-listed symbol's second stale exchange is
+  named). The test_movers_stored_read.py:351 stale-serve pin is FLIPPED deliberately
+  ((1,0)→(0,1), snapshots==reference, one WARN — the bugfix-reversion-check proof), the
+  round-1 repro ports (interior-hole whole-day + aligned-cutoff + dual-exchange) land as
+  fail-before regressions, and two pre-existing idle-serves-poison dashboard pins are
+  flipped/reworked; the FULL fresh-lake equality/provenance pin family passes
+  UNMODIFIED. HONEST: +1 month-bounded 1m read per stored-served TF>1minute candidate
+  (2→3; stale 4; candidate-cache-memoised) PLUS one in-memory ≤session-size resample +
+  frame compare per guarded read (CPU-only — the "near-zero I/O" shared-frame
+  restructure is the named follow-up DEC-MOVERS-1M-FRAME-SHARE-001); a session-EXEMPT
+  symbol (GIFT ~21h) whose pre-01:15-IST bars misfile a ≥2hour bucket onto the prior IST
+  date (a PRE-EXISTING labeling artifact) now serves the base-derived resample + one
+  WARN instead of the stored slice — the honest direction; NSE/BSE session-filtered spot
+  can never hit it; the DAILY arm + the stale default-DATE (movers_warm) stay OPEN —
+  named follow-up DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the
+  team memory's two-arm scope. **(#1753, BUG-3)** `primary_fno_underlying` made TOTAL
+  for str input (guarantee-audit): the literal `""` returned IndexError — falsifying its
+  own "Never empty" docstring — and ONE blank-symbol EQ row (parser-retained in the
+  universe) poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol`
+  (`""` → itself; `fno_underlying_forms("")` deliberately stays `()`; whitespace-only
+  unchanged at the resolver; non-empty byte-identical, structural + pinned) and
+  `build_underlying_kind_map` skips blank/whitespace rows BEFORE resolving with ONE
+  aggregate `movers.underlying_kind_blank_symbol_skipped` WARN per build (≤5
+  exch:security_id samples; no broad except — the isolation is the pre-check). REFUTER
+  ROUND 1 folded: the "inert (exch, '') key" disclosure was FALSIFIED for metadata_pull
+  by execution — the blank pair's `()` forms made `_first_nonempty_over_forms` index
+  `forms[0]`, an IndexError per YEAR cell captured into N DURABLE `failed` coverage rows
+  keyed `('NSE','')` re-failing every pull and gating the mapping-integrity panel
+  permanently RED with an empty-string symbol; `metadata_pull._resolve_underlying_forms`
+  now SKIPS blank rows (the same isolation idiom, ONE aggregate
+  `metadata.underlying_blank_symbol_skipped` WARN; zero vendor calls, zero grid/coverage
+  rows, panel unpoisoned), `_first_nonempty_over_forms` is TOTAL (kw-only `empty`; `()`
+  forms → the honest no-data result, zero fetches), the sample cap is hoisted to the ONE
+  COMMON `fno_underlying.BLANK_SYMBOL_SAMPLE_CAP`, and the falsified docstring + ledger
+  envelope are corrected (composite_pull's inert-read-key claim was verified TRUE and
+  stands). ALL THREE: READ-side dashboard only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
   no lake/schema/scope/vocab/rate change; healthy/fresh lakes byte-identical (pinned);
-  `mapping_integrity.py` + `fno_underlying.py` + `movers_underlying_class.py` 100%
-  line+branch on their stem-matched suites, `movers_snapshot.py` 100% on the movers
+  `mapping_integrity.py` + `fno_underlying.py` + `movers_underlying_class.py` +
+  `metadata_pull.py` 100% line+branch on their stem-matched suites,
+  `movers_snapshot.py` 100% on the movers
   family (its documented discovery-gate exclusion stands); ruff/ruff-format clean,
   `mypy --strict` clean, pyright errors at the pre-change baseline.)
   Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
@@ -5941,16 +5975,22 @@ hostile-review pass._
 - **Active feature branch:** `claude/dashboard-read-honesty-pack`
   (DEC-MAPPING-INTEGRITY-FORM-KEY-001 + DEC-MOVERS-STORED-FRESHNESS-001 +
   DEC-FNO-UNDERLYING-EMPTY-GUARD-001, MIGRATION.md #1751–#1753 — the dashboard
-  underlying-key truth pack: the /universe mapping-integrity compare keyed
-  through the COMMON F&O underlying-forms resolver via the injected plain-data
-  `key_forms` map (writer byte-untouched; default-None byte-identical; the
-  hyphenated/aliased silent-vanish alarm live), the /movers stored-first
-  intraday read freshness-guarded DAY-scoped + grid-aware (stale prebuilt TF ⇒
-  the existing 1m-resample fallback + one capped
-  `movers.stored_stale_fallback` WARN; the :351 stale-serve pin deliberately
-  FLIPPED; daily arm = named follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and
-  `primary_fno_underlying` made total for the blank-symbol degenerate
-  (IndexError → inert self-key; kind-map blank rows skipped + counted);
+  underlying-key truth pack, REFUTER ROUND 1 folded: the /universe
+  mapping-integrity compare keyed through the COMMON F&O underlying-forms
+  resolver via the injected plain-data `key_forms` map (the writer's KEYING
+  byte-untouched — the writer file gains only the #1753 blank-row isolation;
+  default-None byte-identical; the hyphenated/aliased silent-vanish alarm
+  live), the /movers stored-first intraday read freshness-guarded by
+  VERIFY-EQUALITY (a stored TF day frame serves only when it equals the
+  in-memory resample of the 1-minute base — the round-1 day-max predicate was
+  refuted by the executed #1031 interior-hole re-pull chain; stale prebuilt
+  TF ⇒ the existing 1m-resample fallback + one capped
+  `movers.stored_stale_fallback` WARN, dedupe key (exchange, symbol,
+  interval); the :351 stale-serve pin deliberately FLIPPED; daily arm = named
+  follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying`
+  made total for the blank-symbol degenerate (IndexError → self-key; blank
+  rows skipped + counted at the kind-map AND the metadata grid — the
+  round-1-falsified "inert key" metadata seam closed);
   READ-side dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/results-cascade-verdict-join`
