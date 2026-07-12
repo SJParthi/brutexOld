@@ -381,7 +381,8 @@ def run_full_battery(
     non-engine dup — an always-PASS census sabotage is MISSED) and poison 17
     ONLY by ``unique.engine`` (an out-of-months-bound engine dup — an
     always-clean engine sabotage is MISSED). Scope honesty: the ``movers``
-    teeth (smoke S3, battery 3/15) drive the COMPARATOR SEAM directly, never
+    teeth (smoke S3; battery poisons 3 ``movers_cell`` + 15
+    ``prevclose_hole_unstamped``) drive the COMPARATOR SEAM directly, never
     the composed ``movers_check.run`` wiring — the designated killer for a
     comparator-discard wiring sabotage is the unit gate
     (``tests/unit/test_acceptance_checks_movers.py::TestMoversRealWire::
