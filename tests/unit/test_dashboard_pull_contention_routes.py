@@ -500,3 +500,49 @@ class TestDbTablesServesLastKnown:
             assert r2.status_code == 200
             assert counted["n"] == 2  # uncached per open during the outage
             assert r2.content == r1.content  # the real sweep still serves
+
+    def test_tables_wedged_store_degrades_to_honest_zero_counts(
+        self, store: InstrumentStore
+    ) -> None:
+        """FAILS-BEFORE (round-7 review MAJOR): a WEDGED store
+        (DEC-STORE-WRITE-DEADLINE-001 — an abandoned coverage write mid-pull,
+        the EXACT contention window this DEC targets) made the
+        ``master_revision`` freshness probe raise ``CatalogError`` — a
+        ``DataLakeError``, NOT in ``STORE_FAULT_TYPES=(duckdb.Error, OSError)``
+        — which escaped the probe-fault clause and ERRORED the route (500)
+        where the pre-cache route answered the honest 0-counts 200. Now the
+        wedge takes the SAME degrade: a 200 whose bytes equal today's exact
+        pre-cache path on the wedged store, nothing cached — and once the
+        wedge clears, the route recovers to REAL counts (proving the wedged
+        response never poisoned the cache)."""
+        _load_master(store, "r-wedge")
+        app = build_app(DashboardState(), instrument_store=store)
+        with TestClient(app) as client:
+            # The documented wedge latch (StoreWriteDeadlineGuard): _active
+            # non-None <=> wedged <=> _ensure_not_wedged raises CatalogError
+            # on the read view's execute — a deterministic stand-in for the
+            # abandoned-coverage-write breach, no zombie thread needed.
+            guard = store._write_guard  # pyright: ignore[reportPrivateUsage]
+            guard._active = object()  # pyright: ignore[reportPrivateUsage]
+            try:
+                # Today's exact pre-cache body on the SAME wedged store:
+                # table_summary swallows the per-table CatalogError -> 0-counts.
+                expected = JSONResponse({"tables": db_view.table_summary(store.connection)}).body
+                resp = client.get("/api/v1/db/tables")
+                assert resp.status_code == 200  # never a 500 on the wedge
+                assert resp.content == expected  # byte-for-byte the degrade
+                counts = {r["table"]: r["row_count"] for r in resp.json()["tables"]}
+                assert counts == {
+                    "instruments": 0,
+                    "instrument_runs": 0,
+                    "schema_meta": 0,
+                }
+            finally:
+                guard._active = None  # pyright: ignore[reportPrivateUsage]
+            # Nothing cached during the wedge: the healed store serves the
+            # REAL counts on the very next open (no stale 0-count poison).
+            recovered = client.get("/api/v1/db/tables")
+            assert recovered.status_code == 200
+            healed = {r["table"]: r["row_count"] for r in recovered.json()["tables"]}
+            assert healed["instruments"] == 1
+            assert healed["schema_meta"] >= 1

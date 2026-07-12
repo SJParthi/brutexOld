@@ -286,6 +286,7 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.errors import CatalogError
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
@@ -341,6 +342,20 @@ _LOG = structlog.get_logger("brutex.dashboard")
 #: A structured-query filter is the 3-token form ``column:op:value`` (the
 #: value may itself contain ``:``). Named to avoid a PLR2004 magic number.
 _FILTER_TOKEN_COUNT = 3
+
+#: The ``/api/v1/db/tables`` freshness-probe fault set: the store fault types
+#: (``duckdb.Error``/``OSError`` — a wedged volume / unreachable DuckDB) PLUS
+#: ``CatalogError``, because the DEC-STORE-WRITE-DEADLINE-001 wedge latch
+#: (``InstrumentStore._ensure_not_wedged``, threaded into the read view's
+#: ``execute``) raises CatalogError — a ``DataLakeError``, NOT a
+#: ``duckdb.Error`` — and the wedge fires in the EXACT mid-pull contention
+#: window the tables-route fold exists for (round-7 review MAJOR: the wedge
+#: previously escaped the ``STORE_FAULT_TYPES``-only clause and 500'd where
+#: the pre-cache route answered honest 0-counts).
+_TABLES_PROBE_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    *STORE_FAULT_TYPES,
+    CatalogError,
+)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -8149,9 +8164,11 @@ def build_app(
         counts instantly (logged ``movers_cache.stale_served``) while at most
         ONE tokenless background daemon revalidates — the fresh-compute
         payload is byte-identical to the pre-cache route (pinned). A
-        freshness-probe fault degrades to today's exact pre-cache path: one
-        direct UNCACHED sweep (``table_summary`` maps a faulted connection to
-        honest 0-counts per table — never a 500, nothing cached).
+        freshness-probe fault — a store fault (``STORE_FAULT_TYPES``) OR the
+        DEC-STORE-WRITE-DEADLINE-001 wedge latch's ``CatalogError`` — degrades
+        to today's exact pre-cache path: one direct UNCACHED sweep
+        (``table_summary`` maps a faulted/wedged connection to honest
+        0-counts per table — never a 500, nothing cached).
         """
         store = _require_store()
 
@@ -8173,10 +8190,12 @@ def build_app(
             try:
                 gen = _summary_cache.generation
                 count, latest = master_revision(store)
-            except STORE_FAULT_TYPES:
-                # Probe outage → the exact pre-cache posture, byte-for-byte:
-                # one direct uncached sweep (honest 0-counts on a faulted
-                # conn — table_summary never raises there), nothing cached.
+            except _TABLES_PROBE_FAULT_TYPES:
+                # Probe outage OR a WEDGED store (the CatalogError member —
+                # see _TABLES_PROBE_FAULT_TYPES) → the exact pre-cache
+                # posture, byte-for-byte: one direct uncached sweep (honest
+                # 0-counts on a faulted/wedged conn — table_summary never
+                # raises there), nothing cached.
                 return _compute()
             return _db_tables_cache.get_or_compute(
                 db_tables_key,
