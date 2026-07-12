@@ -412,7 +412,27 @@ def _build_tuple_sidecars(
 
 
 def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
-    """Read the tuple's aggregate records back from its (validated) sidecar."""
+    """Read the tuple's aggregate records back from its (validated) sidecar.
+
+    ``exits_session_gap`` is read PRESENCE-TOLERANTLY (the WindowLedgerRecord
+    ``bars_net_new`` / gap-register Ruling-5 optional-column template — the
+    ``results_store._optional_float`` sibling): a 49-column ``aggs.parquet``
+    written before DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
+    lacks the column, and a bare ``ComboAggregate(**record)`` raised
+    ``TypeError`` — swallowed by the caller's per-tuple fence as a spurious
+    ``tuples_errored`` (double-counted beside ``tuples_skipped_current``) with
+    the stamped-current tuple silently dropped from the pool.
+
+    The default is the HONEST ``0``, NOT an unknown-``None``: the pre-guard
+    walker NEVER emitted a ``session_gap`` exit, so zero is factually the true
+    count of ``session_gap``-LABELED exits in that old artifact. (Its trades
+    were simulated WITHOUT session-gap closes — a different-semantics sim,
+    disclosed in #1743's honest clause (ii) and healed by the post-deploy
+    re-sweep — but this counter counts LABELS, and the old artifact's label
+    count is exactly 0.) ``0`` also keeps the ``__post_init__`` exit-tally sum
+    invariant satisfied: the old record's five tallies already sum to
+    ``n_trades``.
+    """
     try:
         import polars as pl
     except ImportError as exc:
@@ -421,7 +441,11 @@ def _load_agg_records(paths: SidecarPaths) -> list[ComboAggregate]:
         df = pl.read_parquet(paths.aggs)
     except (pl.exceptions.PolarsError, OSError) as exc:
         raise ResultsDepthError(f"unreadable aggs sidecar at {paths.aggs}: {exc}") from exc
-    return [ComboAggregate(**record) for record in df.iter_rows(named=True)]
+    records: list[ComboAggregate] = []
+    for record in df.iter_rows(named=True):
+        record.setdefault("exits_session_gap", 0)
+        records.append(ComboAggregate(**record))
+    return records
 
 
 def _entry_ts_sets(paths: SidecarPaths, run_ids: Sequence[str]) -> dict[str, frozenset[int]]:

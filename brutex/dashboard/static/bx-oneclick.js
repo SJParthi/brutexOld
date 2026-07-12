@@ -232,12 +232,15 @@ function bxInstrumentText(value) {
 
 /**
  * The exit-reason mix line from the writer's ``metrics.exits`` object
- * (``{stop_loss, take_profit, signal, forced_1520, end_of_data}`` —
- * ``top100_artifact._metrics_payload``).
+ * (``{stop_loss, take_profit, signal, forced_1520, end_of_data,
+ * session_gap}`` — ``top100_artifact._metrics_payload``; ``session_gap``
+ * appended last, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — an OLD artifact
+ * missing the key reads the honest "?", never an invented 0).
  *
  * @param {*} exits - the metrics.exits value.
- * @returns {string} "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0" or "—";
- *   a non-numeric count reads "?" (counted-but-unreadable, never invented).
+ * @returns {string} "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap 0" or
+ *   "—"; a non-numeric count reads "?" (counted-but-unreadable, never
+ *   invented).
  */
 function bxExitMixText(exits) {
   if (!exits || typeof exits !== "object" || Array.isArray(exits)) {
@@ -248,7 +251,8 @@ function bxExitMixText(exits) {
     ["TP", exits.take_profit],
     ["signal", exits.signal],
     ["15:20", exits.forced_1520],
-    ["EOD", exits.end_of_data]
+    ["EOD", exits.end_of_data],
+    ["gap", exits.session_gap]
   ];
   var out = [];
   for (var i = 0; i < parts.length; i++) {

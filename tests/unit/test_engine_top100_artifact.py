@@ -399,6 +399,7 @@ class TestBuildTop100:
             "signal": 20,
             "forced_1520": 5,
             "end_of_data": 0,
+            "session_gap": 0,
         }
         regime = entry["regime"]
         assert isinstance(regime, dict)
@@ -414,6 +415,42 @@ class TestBuildTop100:
         assert entry["equity_ref"] == {
             "tuple": "NIFTY/1minute/bull_k1_deadbeefdeadbeef",
             "sidecar": "equity",
+        }
+
+    def test_exit_tallies_map_positionally_never_swapped_or_zeroed(self) -> None:
+        """Each exits key reads its OWN agg tally (refuter round 4, CM3 pattern).
+
+        The fixture DEFAULTS zero both tail tallies, so the shape pin above let
+        an ``end_of_data`` <-> ``session_gap`` SWAP and a literal-``0``
+        ``session_gap`` both survive. Six pairwise-DISTINCT NONZERO tallies
+        (rebalanced so the exits still sum to ``n_trades`` = 40 — the
+        ``ComboAggregate.__post_init__`` invariant) kill the swap mutant in
+        BOTH directions plus the literal-0. Deliberately per-test
+        ``agg_overrides``, never a fixture-default change — the defaults feed
+        the sha256-locked ``test_top100_artifact_golden.py`` bytes.
+        """
+        cand = make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            agg_overrides={
+                "exits_stop_loss": 7,
+                "exits_take_profit": 11,
+                "exits_signal": 13,
+                "exits_forced_1520": 3,
+                "exits_end_of_data": 2,
+                "exits_session_gap": 4,
+            },
+        )
+        artifact = _build([cand])
+        metrics = artifact.entries[0]["metrics"]
+        assert isinstance(metrics, dict)
+        assert metrics["exits"] == {
+            "stop_loss": 7,
+            "take_profit": 11,
+            "signal": 13,
+            "forced_1520": 3,
+            "end_of_data": 2,
+            "session_gap": 4,
         }
 
     def test_unstamped_vix_band_is_honest_none(self) -> None:
@@ -900,7 +937,14 @@ class TestCascadeJoinAtWriter:
         assert "cascade" not in ENTRY_REQUIRED_KEYS
 
     def test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture(self) -> None:
-        """Stripping ONLY the new keys reproduces the frozen pre-change bytes."""
+        """Stripping ONLY the new keys reproduces the frozen pre-change bytes.
+
+        The frozen fixture predates BOTH additive deltas now in the tree: the
+        #1749 ``cascade_join``/``cascade`` keys (this DEC's) AND main's
+        DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743)
+        ``metrics.exits["session_gap"]`` key — the strip normalizes both, so
+        the pin still proves the deltas are additive-only.
+        """
         frozen = json.loads(_PRE_CASCADE_TOP100.read_text(encoding="utf-8"))
         artifact = build_top100(
             _fixture_pair(),
@@ -914,8 +958,18 @@ class TestCascadeJoinAtWriter:
         payload = artifact.to_payload()
         stripped = dict(payload)
         stripped.pop("cascade_join")
+
+        def _strip_entry(entry: dict[str, object]) -> dict[str, object]:
+            out = {k: v for k, v in entry.items() if k != "cascade"}
+            metrics = dict(out["metrics"])  # type: ignore[arg-type]
+            exits = dict(metrics["exits"])  # type: ignore[arg-type]
+            assert exits.pop("session_gap") == 0  # the #1743 zero-count delta
+            metrics["exits"] = exits
+            out["metrics"] = metrics
+            return out
+
         stripped["entries"] = [
-            {k: v for k, v in entry.items() if k != "cascade"}
+            _strip_entry(entry)
             for entry in payload["entries"]  # type: ignore[union-attr]
         ]
         assert stripped == frozen

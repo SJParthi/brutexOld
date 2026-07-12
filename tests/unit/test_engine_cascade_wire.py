@@ -177,6 +177,32 @@ def _fib_anchor_history(
     return bars
 
 
+def _lockbox_intraday_history() -> list[CandleBar]:
+    """Twelve real trading days whose ±500-paisa legs close IN-day.
+
+    Fixture repair for DEC-TRADESIM-OPEN-SESSION-GUARD-001: the original
+    ``_fib_anchor_history()`` shape (flat interiors, each 5-bar day a
+    session-tail hole) closed its SL/TP trades ONLY via cross-session fills
+    against each NEXT day's first bar — the exact overnight-gap fills the
+    open-position session guard now closes at the prior day's last stored
+    bar (every trade 0-pnl → flat complement equity → an undefined train
+    Sharpe). Alternating up/down days with in-day ±6-point ranges give the
+    lockbox split REAL in-day trade variance on BOTH sides of the window.
+    """
+    bars: list[CandleBar] = []
+    for n, day in enumerate(_FIB_TRADING_DAYS):
+        base_px = 10_000 + 25 * n
+        base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+        up_day = n % 2 == 0
+        for i in range(6):
+            o = base_px + i
+            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            bars.append(
+                _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
+            )
+    return bars
+
+
 def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
     return CandleBar(
         timestamp=ts_ist.astimezone(UTC),
@@ -678,10 +704,12 @@ class TestLockboxTrainingSplit:
         from brutex.metrics.cpcv import sharpe_of_returns
         from brutex.metrics.lockbox import resolve_lockbox_window
 
-        bars = _fib_anchor_history()
-        # SL/TP legs so trades CLOSE throughout the 12-day history (with no
-        # legs the single mask-0 position holds to end_of_data and the
-        # complement equity is flat — the fallback case tested separately).
+        bars = _lockbox_intraday_history()
+        # SL/TP legs so trades CLOSE IN-day throughout the 12-day history
+        # (with no legs the single mask-0 position holds to end_of_data and
+        # the complement equity is flat — the fallback case tested
+        # separately; the in-day ranges are the DEC-TRADESIM-OPEN-SESSION-
+        # GUARD-001 fixture repair — see _lockbox_intraday_history).
         cand = self._build(bars, sl_paisa=500, tp_paisa=500)
 
         # Independent recompute of the exact reconstruction chain.

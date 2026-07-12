@@ -39,15 +39,18 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
-#: RE-LOCKED under DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749):
-#: the writer now ALWAYS emits the additive root ``cascade_join`` meta + the
-#: per-entry ``cascade`` object (state/status ``no_report``/``not_validated``
-#: when no report was threaded — this fixture's arm); the diff vs the prior
-#: lock is EXACTLY those additive keys (pinned by
-#: test_engine_top100_artifact.py's additive-only strip pin against the
-#: frozen pre-change fixture) — readers stay presence-tolerant, so every
-#: committed pre-change artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "2b3562a01567c3d2da32b274a2a53c0c437029c9fa88cb5920334469a2f4ebe5"
+#: RE-LOCKED at the 2026-07-12 merge of DEC-RESULTS-CASCADE-VERDICT-JOIN-001
+#: (MIGRATION.md #1749) with main's DEC-TRADESIM-OPEN-SESSION-GUARD-001
+#: (MIGRATION.md #1743): the merged writer emits BOTH additive deltas — the
+#: #1749 root ``cascade_join`` meta + per-entry ``cascade`` object
+#: (state/status ``no_report``/``not_validated`` when no report was threaded —
+#: this fixture's arm; additive-only strip pin in
+#: test_engine_top100_artifact.py against the frozen pre-change fixture) AND
+#: the #1743 ``"session_gap": 0`` key in every entry's ``metrics.exits`` dict
+#: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
+#: closes). Readers stay presence-tolerant, so every committed pre-change
+#: artifact fixture still loads byte-untouched.
+_GOLDEN_TOP100_SHA256 = "c890213a1c1b19cb892fd2a45d7bcd2cb8a3fb8ed8037c7a1d03c429052d138d"
 
 
 def _fixture_artifact() -> Top100Artifact:
