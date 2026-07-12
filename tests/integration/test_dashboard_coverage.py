@@ -786,6 +786,70 @@ class TestWindowStatusApi:
         # The lifetime counts stay complete + unchanged alongside.
         assert body["counts"]["spot"] == {"EMPTY": 2, "SUCCESS": 1, "PLANNED": 1}
 
+    def test_windows_fast_path_releases_store_read_lock_for_other_threads(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The DuckDB fast path leaves NO dangling store read-lock hold behind.
+
+        DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 deadlock regression (the
+        CI unit-gate hang, py-spy-traced): the legacy-shape ``LIMIT 0``
+        description-only probe in ``_build_window_payload_duckdb`` ran on the
+        request's SHARED ``_LockedReadConn`` view with no fetch and no close.
+        After the round-1 per-compute ``cursor()`` isolation moved every LATER
+        statement off the shared view, nothing rebalanced the probe's hold —
+        the request's worker thread finished still OWNING the store read
+        RLock, and the next ``/coverage/windows`` request dispatched to a
+        DIFFERENT AnyIO worker thread blocked forever on ``_lock.acquire()``.
+        Fails before the fix: the fresh reader thread below never completes
+        (the RLock is reentrant, so probing from the SAME thread would mask
+        the leak — the reader MUST be a different thread, exactly like the
+        next request's pool worker).
+        """
+        import threading
+
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.data.window_ledger_store import save_window_ledger
+
+        ledger = WindowLedger()
+        ledger.record(
+            WindowKey(
+                market="groww",
+                security_id="NIFTY",
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 4, 1),
+            ),
+            raw_bars=5,
+            error_type=None,
+            bars_appended=5,
+            now=datetime(2026, 6, 8, 12, 0, tzinfo=UTC),
+        )
+        save_window_ledger(ledger, tmp_path)
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # One request through the REAL route — runs the fast path (incl. the
+        # legacy-shape probe) on an AnyIO worker thread via the shared view.
+        assert client.get("/api/v1/coverage/windows").json()["source"] == "ledger"
+
+        # A DIFFERENT thread must be able to take the store read lock: this is
+        # exactly what the NEXT request's (fresh) pool worker does. Pre-fix it
+        # deadlocks on the leaked hold and the join below times out.
+        done: list[bool] = []
+
+        def _read_from_fresh_thread() -> None:
+            view = store.connection
+            assert view.execute("SELECT 1").fetchone() == (1,)
+            done.append(True)
+
+        reader = threading.Thread(target=_read_from_fresh_thread, name="fresh-reader", daemon=True)
+        reader.start()
+        reader.join(timeout=10.0)
+        assert done == [True], (
+            "store read lock still held after the /coverage/windows fast path — "
+            "a dangling _LockedReadConn hold (the CI deadlock regression)"
+        )
+
     def test_windows_503_when_store_unwired(self) -> None:
         client = TestClient(build_app(DashboardState(), instrument_store=None))
         assert client.get("/api/v1/coverage/windows").status_code == 503

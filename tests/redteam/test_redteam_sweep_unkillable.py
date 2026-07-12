@@ -177,7 +177,8 @@ def _tamper_entry_hash(line: bytes) -> bytes:
     ``"backtested":1`` on the real CLI SWEEP_COMPLETE line — ``payload``
     sorts between ``entry_hash`` and ``prev_hash``, so ``prev_hash`` is
     irrelevant on those lines) and yielded MALFORMED JSON → a different
-    exception → a flaky test.
+    exception → a flaky test (the 2026-07-12 CI red — run 29195635571,
+    ``Expecting value: line 1 column 143 (char 142)`` — landed exactly there).
     """
     match = _ENTRY_HASH_RE.search(line)
     assert match is not None, "chain line carries no entry_hash hex value"
