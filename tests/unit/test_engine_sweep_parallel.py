@@ -691,6 +691,31 @@ class TestRunTupleInWorker:
         # Even on failure the collected pre-failure audit lines are returned.
         assert result.audit_records[0].action == "SWEEP_START"
 
+    def test_corrupt_store_quarantined_in_worker(self, tmp_path: Path) -> None:
+        """G1 (round 2): a corrupt store is quarantined + retried IN-WORKER.
+
+        A pre-corrupt tuple store raises ResultsStoreSchemaError (a
+        ResultsStoreError) from the worker's
+        persist. The worker-side quarantine moves the trio + retries once
+        (byte-identical regeneration), so the worker returns a SUCCESS summary +
+        the quarantine event as data — never a non-SweepComboError propagating
+        out to abort the whole grid.
+        """
+        grid = _grid()
+        root = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=root))
+        tuple_ = next(iter_sweep_tuples(grid))
+        store = tuple_store_path(root, tuple_, grid)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"garbage - not parquet")
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is not None  # retry regenerated the store cleanly
+        assert result.failed_error is None
+        assert len(result.quarantine_events) == 1
+        dest_rel, reason = result.quarantine_events[0]
+        assert dest_rel.startswith(".quarantine/runtime/")
+        assert "ResultsStoreSchemaError" in reason
+
 
 class TestOutcomeAndResultMapping:
     def test_outcome_heap_orders_by_index(self) -> None:
@@ -847,7 +872,15 @@ class TestParallelSkipPaths:
         # 0..total-1 is recorded, so next_index == total.
         assert guards.checkpoint.next_index == count_sweep_tuples(grid)
 
-    def test_cache_skip_short_circuits_a_completed_tuple(self, tmp_path: Path) -> None:
+    def test_cache_skip_short_circuits_a_completed_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the cache TIER mechanics are what this test pins; guard-ON
+        # behaviour is pinned in test_engine_sweep_parallel_store_guard.py.
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         # First run populates the cache + results.
         _run_parallel(tmp_path / "first", grid, workers=3)
@@ -877,7 +910,13 @@ class TestParallelSkipPaths:
         assert summary.skipped_cache == count_sweep_tuples(grid)
         assert summary.tuples_run == 0
 
-    def test_resume_skips_already_checkpointed_tuples(self, tmp_path: Path) -> None:
+    def test_resume_skips_already_checkpointed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: the pre-seeded checkpoint has NO on-disk
+        # artifacts under the probed root (see the cache twin above's
+        # rationale — DEC-SWEEP-RESUME-STORE-GUARD-001).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         total = count_sweep_tuples(grid)
         out = tmp_path / "out"
@@ -2453,11 +2492,15 @@ class TestParallelOnProgress:
     took NO progress hook, so ``cmd_sweep_all``'s parallel arm never published the
     ``/api/v1/sweep-progress`` file bridge — the dashboard's Stop button (keyed on
     the bridge's ``running``) never showed on the flagship multi-day parallel
-    sweep. These tests pin the FULL tick set: start (running, BEFORE any tuple
-    completes) · every apply · the done / cancelled / error terminals.
+    sweep. FOLD RECONCILE (#1445 run-core G3 exact-count law WINS): a CLEAN run
+    ticks EXACTLY once per applied slot — no leading ``start`` tick (the
+    run-core's G4 reset-at-launch writes the ``running=True`` bridge baseline at
+    core enter) and no trailing ``finish`` tick (``cmd_sweep_all`` publishes the
+    ``done`` snapshot after the driver returns). The in-driver ``cancelled`` /
+    ``error`` terminals — the cancel semantics this DEC actually adds — stand.
     """
 
-    def test_streams_start_applies_and_finish(self, tmp_path: Path) -> None:
+    def test_clean_run_ticks_exactly_once_per_applied_slot(self, tmp_path: Path) -> None:
         grid = _grid()  # 1 instrument × 1 tf × 2 dirs × 2 k = 4 tuples
         snaps: list[Any] = []
         with (
@@ -2475,19 +2518,14 @@ class TestParallelOnProgress:
             )
         assert summary.cancelled is False
         total = count_sweep_tuples(grid)
-        # START tick + one apply per tuple + the finish terminal.
-        assert len(snaps) == total + 2
-        first = snaps[0]
-        assert first.state == "running"
-        assert first.running is True
-        assert first.enumerated == total
-        assert first.evaluated == 0  # the start tick lands BEFORE any tuple applies
-        for snap in snaps[1:-1]:
+        # The #1445 G3 exact-count law: one tick per applied slot — never a
+        # leading evaluated=0 start tick, never a duplicated finish terminal.
+        assert len(snaps) == total
+        assert [snap.evaluated for snap in snaps] == list(range(1, total + 1))
+        for snap in snaps:
             assert snap.state == "running"
-        last = snaps[-1]
-        assert last.state == "done"
-        assert last.running is False
-        assert last.evaluated == total
+            assert snap.running is True
+            assert snap.enumerated == total
 
     def test_streams_cancelled_terminal(self, tmp_path: Path) -> None:
         grid = _grid()
@@ -2507,8 +2545,7 @@ class TestParallelOnProgress:
                 on_progress=snaps.append,
             )
         assert summary.cancelled is True
-        assert snaps, "the start tick must publish even on an immediate cancel"
-        assert snaps[0].state == "running"
+        assert snaps, "the cancelled terminal must publish even on an immediate cancel"
         assert snaps[-1].state == "cancelled"
         assert snaps[-1].running is False
 
@@ -2535,11 +2572,13 @@ class TestParallelOnProgress:
             )
         # The bridge receives the honest ERROR terminal — never a frozen
         # last-running tick (the phantom-live class the staleness decay bounds).
-        assert snaps[0].state == "running"
+        assert snaps, "the error terminal must publish even on a pre-dispatch abort"
         assert snaps[-1].state == "error"
         assert snaps[-1].running is False
 
-    def test_cache_skip_prefix_batches_publishes(self, tmp_path: Path) -> None:
+    def test_cache_skip_prefix_batches_publishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A resumed/cached prefix publishes O(1) per drain, NOT once per skipped tuple.
 
         Fix round 4 (fails-before): `_advance` → `_publish_progress` fired one
@@ -2547,11 +2586,20 @@ class TestParallelOnProgress:
         resume/cache-skip storm over a big grid wrote the bridge file once per
         skipped tuple in a tight loop — contradicting the sequential arm's
         explicit single-publish resume batch. A fully-cached second run must now
-        publish start + at most a couple of end-of-drain flushes + finish (with
-        per-tuple publishes this run emits total + 2 = 6 snapshots), and the
-        LAST pre-terminal snapshot still carries the FULL cumulative skip count
-        (no tick is lost — only the write cadence is batched).
+        publish at most a couple of end-of-drain flushes (with per-tuple
+        publishes this run emits total = 4 snapshots; the start/finish ticks
+        were removed by the #1445 G3 exact-count fold reconcile), and the LAST
+        snapshot still carries the FULL cumulative skip count (no tick is
+        lost — only the write cadence is batched).
         """
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the publish-batching cadence over cache SKIPS is what this
+        # test pins; guard-ON behaviour is pinned in
+        # test_engine_sweep_parallel_store_guard.py (merge-fold adaptation, the
+        # test_cache_skip_short_circuits_a_completed_tuple idiom).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()  # 4 tuples
         total = count_sweep_tuples(grid)
         # First run populates the cache + results (no hook needed).
@@ -2586,16 +2634,14 @@ class TestParallelOnProgress:
             )
         assert summary.skipped_cache == total
         # THE TEETH: strictly fewer publishes than one-per-skipped-tuple (the
-        # pre-fix cadence was exactly total + 2), and O(1) per drain — with
+        # pre-batching cadence was exactly total), and O(1) per drain — with
         # workers=3 (pool_size=2, heap_cap=4) today's driver drains the whole
-        # 4-tuple skip prefix in one pass: start + ONE flush + finish.
-        assert len(snaps) < total + 2
-        assert len(snaps) <= 4
-        assert snaps[0].state == "running"
-        assert snaps[0].skipped == 0  # the start tick
+        # 4-tuple skip prefix in one pass: ONE flush.
+        assert snaps, "the batched drain flush must publish the cumulative skips"
+        assert len(snaps) < total
+        assert len(snaps) <= 2
         # Nothing is lost: the batched flush carries the cumulative skip count.
-        assert snaps[-2].skipped == total
-        assert snaps[-1].state == "done"
+        assert snaps[-1].state == "running"
         assert snaps[-1].skipped == total
 
     def test_default_none_publishes_nothing(self, tmp_path: Path) -> None:
