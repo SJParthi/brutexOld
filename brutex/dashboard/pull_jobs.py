@@ -576,7 +576,10 @@ class BackgroundPullJob:
         CLI ``--dry-run`` lock-free posture, kept behaviourally equal across the
         two surfaces). The IN-process single-flight (layer 1) still applies — a
         second click on the same job is refused either way. Default ``True``
-        keeps every existing caller byte-identical.
+        keeps every existing ``JOB_KIND_PULL`` caller byte-identical; for a
+        NON-pull *job_kind* the cross-process pull-writer guards are never taken
+        regardless of this flag (DEC-SWEEP-JOB-LOCK-POSTURE-001 — see *job_kind*
+        below).
 
         Two single-flight layers (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001):
 
@@ -623,8 +626,16 @@ class BackgroundPullJob:
         dry-run included) or :data:`JOB_KIND_SWEEP` (the zero-vendor-call brute-force
         sweep route). Read via :attr:`running_job_kind` by the ``/api/v1/pull/rate``
         probe so a 2-4-day sweep reads an honest "idle", never a site-wide red
-        "stalled" (the #1593 C5 fix). It changes NOTHING else — ``running``, the
-        progress feed and the single-flight are byte-identical for either kind.
+        "stalled" (the #1593 C5 fix). Since DEC-SWEEP-JOB-LOCK-POSTURE-001
+        (MIGRATION.md #1770) it ALSO governs the cross-process lock posture: the
+        pull-WRITER guards (lake EX flock + account lock + cross-host lease) are
+        taken for :data:`JOB_KIND_PULL` starts only — a sweep-kind job is a lake
+        READER whose exclusion is ``cmd_sweep_all``'s own G10 shared read-guard
+        + G6 results-root single-flight; the job wrapper holding the pull EX
+        flock made the sweep's G10 ``LOCK_SH`` acquire fail against its OWN
+        job's EX (``LakeBusyError`` — every real one-click sweep died at
+        launch). Everything else — ``running``, the progress feed, the
+        IN-process single-flight — stays byte-identical for either kind.
 
         *market_hours_exempt* (DEC-GROWW-MARKET-HOURS-GUARD-001) exempts THIS start
         from the market-hours START gate below — set ``True`` by callers that make
@@ -716,7 +727,18 @@ class BackgroundPullJob:
         # A resolver returning None DISABLES the guard (dry-run / test). Done outside
         # ``self._lock`` — it does (fast, non-blocking) filesystem I/O, and the flag is
         # already claimed so no other start can race in.
-        if cross_process_lock:
+        # DEC-SWEEP-JOB-LOCK-POSTURE-001 (MIGRATION.md #1770): the guards below are the
+        # lake PULL-WRITER's exclusion (the lake-root EX flock + the account lock + the
+        # cross-host lease), so they are taken for ``JOB_KIND_PULL`` ONLY. A sweep-kind
+        # job is a lake READER making ZERO vendor calls; holding the pull EX flock for
+        # its whole run made ``cmd_sweep_all``'s own G10 ``lake_read_guard``
+        # (``LOCK_SH | LOCK_NB`` on the SAME lock file, from a second fd) fail against
+        # the job's OWN held EX — every real one-click dashboard sweep died at launch
+        # with ``LakeBusyError`` ("a pull/heal is running against this lake"). The
+        # sweep's correct cross-process exclusion lives INSIDE ``cmd_sweep_all``: the
+        # G10 SH read-guard vs a real pull/heal's EX (held across the bar preload) plus
+        # the G6 results-root sweep single-flight — both untouched here.
+        if cross_process_lock and job_kind == JOB_KIND_PULL:
             if not self._acquire_singleflight():
                 with self._lock:
                     # Roll back the in-process flag we just claimed. No identity gate is needed
@@ -739,13 +761,15 @@ class BackgroundPullJob:
                     self._empty_ambient_beats = prior_empty_ambient_beats
                 return False
         else:
-            # ZERO-WRITE run (see the docstring): neither cross-process lock is
-            # taken, so a concurrent REAL pull on the same lake is unaffected.
-            # Both guard slots are pinned to None so _run's finally release is a
-            # no-op for this run (they are already None between runs; this makes
-            # the skip explicit rather than incidental).
+            # ZERO-WRITE run (``cross_process_lock=False`` — see the docstring) or a
+            # NON-PULL job kind (a lake READER — DEC-SWEEP-JOB-LOCK-POSTURE-001):
+            # no cross-process pull-writer guard is taken, so a concurrent REAL pull
+            # on the same lake is unaffected. The guard slots are pinned to None so
+            # _run's finally release is a no-op for this run (they are already None
+            # between runs; this makes the skip explicit rather than incidental).
             self._singleflight = None
             self._account_singleflight = None
+            self._lease = None
         self._ledger_synced = ledger_synced
         self._pair_progress = False  # per-run reset; a phase opts in via set_phase
         self._progress.start(total=total, detail=detail)
