@@ -2226,9 +2226,10 @@ hostile-review pass._
   frozen-behavior gate) + `render_parquet_defaults_from_ipc` over the factored FFI
   shell + the defaults-mapping / 122,880-split / Dyn≡File (the P2 standing pin,
   judge-probed PASS 7/7) cargo pins. GATES EXECUTED locally (venv312, wheel==pin):
-  the 12-case options corpus (the probe's 7 + all-null-nullables / single-side /
-  exact 122,880+122,881 boundaries / long-string truncation sentinel / NaN+inf
-  heal) 12/12 sha256+raw-bytes MATCH through the REAL seam with the per-profile
+  the 12-case options corpus (6 probe-origin — the probe's seventh, the 130k
+  mid-boundary multi-RG case, superseded by the exact-boundary pair — + 6 new:
+  all-null-nullables / single-side / the exact 122,880+122,881 boundary pair /
+  long-string truncation sentinel / NaN+inf heal) 12/12 sha256+raw-bytes MATCH through the REAL seam with the per-profile
   vacuous-green guard + whole-path write/heal_partition/merge_partition_frame/
   heal_findings ON/OFF twins + statistics pins (a)–(e) — pin (d) records the
   EMPIRICAL correction: the pinned rev truncates binary stats at 64 bytes with

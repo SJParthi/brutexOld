@@ -21,7 +21,8 @@
 #      cases + the review-round all-null-overlay case, through the REAL
 #      ParquetWriter._render_bytes) AND
 #      tests/golden/test_option_lake_rust_render_parity.py (options
-#      defaults — the PR-2 probe's 7 cases + 5 statistics-surface cases,
+#      defaults — 6 probe-origin cases (the probe's 130k mid-boundary case
+#      superseded by the exact-RG-boundary pair) + 6 statistics-surface cases,
 #      through the REAL OptionParquetWriter write/heal entries), Rust vs
 #      Python sha256 + raw bytes equal, plus the whole-path ON/OFF parity
 #      twins — and the crate-free facade/seam unit suites.

@@ -1,11 +1,14 @@
 """Rust-vs-Python OPTIONS-DEFAULTS parquet byte-parity corpus (roadmap PR-2).
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates the PR-2
-probe's corpus (7 cases, FEASIBLE-BY-LOCKSTEP 7/7) EXTENDED to 12 cases with
-the five statistics-surface shapes the probe never drove (all-null nullable
-columns · constant single-side Utf8 · the exact 122,880/122,881 RG
-boundaries · the ≥256-char binary-stats truncation-default sentinel · NaN/+inf
-Float64 stats), every write-path frame produced through the REAL
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates SIX of
+the PR-2 probe's 7 cases (FEASIBLE-BY-LOCKSTEP 7/7 — retained as
+o1-o4/o9/o10; the probe's seventh, the mid-boundary 130k multi-RG case, is
+SUPERSEDED by the sharper exact-boundary pair below, its multi-RG coverage
+kept by o9) EXTENDED to 12 cases with SIX new cases spanning the five
+statistics-surface shape families the probe never drove (all-null nullable
+columns · constant single-side Utf8 · the exact 122,880/122,881 RG boundary
+PAIR o7+o8 · the ≥256-char binary-stats truncation-default sentinel ·
+NaN/+inf Float64 stats), every write-path frame produced through the REAL
 ``OptionParquetWriter.write()`` / ``heal_partition()`` entries on temp lakes
 (provenance law — the ONLY sanctioned hand-builds are the heal suites'
 planting idiom for the hand-planted-only shapes o4/o12, then healed through

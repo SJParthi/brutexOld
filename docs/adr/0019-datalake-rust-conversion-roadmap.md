@@ -391,10 +391,12 @@ pre-refactor bars tests run UNMODIFIED as the frozen-behavior gate) + the
 thin `render_parquet_defaults_from_ipc` pyfunction over the factored FFI
 shell, with the defaults-mapping / 122,880-split / `dyn_sink_equals_
 file_sink_defaults` (the P2 standing pin — judge-probed PASS 7/7 pre-design)
-cargo pins. Gates EXECUTED: the 12-case options corpus (the probe's 7 +
-all-null-nullables / single-side / exact 122,880 + 122,881 boundaries /
-long-string truncation sentinel / NaN+inf heal shape; real-writer
-provenance) — 12/12 sha256 + raw-bytes MATCH through the REAL seam
+cargo pins. Gates EXECUTED: the 12-case options corpus (6 probe-origin
+cases — the probe's seventh, the 130k mid-boundary multi-RG case, is
+superseded by the exact-boundary pair, its multi-RG coverage kept by the
+retained 300k case — + 6 new: all-null-nullables / single-side / the exact
+122,880 + 122,881 boundary pair / long-string truncation sentinel / NaN+inf
+heal shape; real-writer provenance) — 12/12 sha256 + raw-bytes MATCH through the REAL seam
 steady-state, with the per-profile vacuous-green guard + the three
 whole-path ON/OFF layers (write · heal_partition · merge_partition_frame ·
 the end-to-end `heal_findings` batch twin) + statistics diagnostic pins;
