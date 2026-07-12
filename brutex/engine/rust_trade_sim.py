@@ -130,6 +130,7 @@ from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from brutex.data.models import CandleBar
+    from brutex.engine.reference_series import TradeReferenceStamper
 
     # ``ClosedTrade`` is imported lazily at its construction site (see the note in
     # :mod:`brutex.engine.trade_sim`) to keep numpy out of the engine package's
@@ -154,6 +155,63 @@ _MAX_KERNEL_PRICE_PAISA: Final[int] = (2**63 - 1) // 8
 #: Beyond it (or below zero) the value cannot reach EITHER compiled kernel and
 #: the seam routes to the pure-Python oracle.
 _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
+
+#: Cap on ``trade_sim.session_tail_hole`` WARNs per kernel-input derivation
+#: (DEC-TRADESIM-OPEN-SESSION-GUARD-001) — everything past the cap rolls into
+#: ONE ``trade_sim.session_tail_hole_suppressed`` summary (the house
+#: preopen.prev_close_noncontiguous capped-warn precedent). Mask-independent
+#: by construction: the detection runs ONCE per tuple at derivation, never
+#: per mask and never inside the walker's ``_close`` (the
+#: DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
+_TAIL_HOLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
+    """WARN once per session-tail data hole in the window (capped, mask-independent).
+
+    A *session-tail hole* is a maximal run of consecutive bars sharing one
+    session ordinal that (i) is NOT the window's final session and (ii)
+    contains NO bar with ``forced=True`` — exactly the shape on which the
+    walker's (A2) open-position session guard fires a ``session_gap`` close
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the session's stored bars ended
+    before any forced-exit-window bar, so a position opened in it can only
+    close retroactively at its last stored bar. The FINAL session is exempt —
+    an incomplete final session is the ordinary end-of-window shape the
+    ``end_of_data`` close already names honestly.
+
+    Emits at most :data:`_TAIL_HOLE_WARN_CAP` ``trade_sim.session_tail_hole``
+    WARNs (fields: ``session`` — the ISO date from the ordinal — and ``bars``,
+    the session's stored-bar count) plus ONE
+    ``trade_sim.session_tail_hole_suppressed`` summary carrying the total when
+    the cap is exceeded. One O(N_bars) pass, paid at the already-O(N_bars)
+    derivation. The pure-Python re-sim paths (capture / cascade / robustness /
+    CLI) deliberately get no WARN — the ``exits_session_gap`` aggregate
+    counter is their persistent signal; data-hole ALERTING stays owned by the
+    #1031 detectors.
+    """
+    holes: list[tuple[int, int]] = []
+    run_start = 0
+    n = len(session_days)
+    for i in range(1, n + 1):
+        if i < n and session_days[i] == session_days[run_start]:
+            continue
+        # A maximal run [run_start, i) just ended. The FINAL run (i == n) is
+        # exempt; a prior run with no forced bar is a session-tail hole.
+        if i < n and not any(forced[run_start:i]):
+            holes.append((session_days[run_start], i - run_start))
+        run_start = i
+    for ordinal, bar_count in holes[:_TAIL_HOLE_WARN_CAP]:
+        _LOG.warning(
+            "trade_sim.session_tail_hole",
+            session=date.fromordinal(ordinal).isoformat(),
+            bars=bar_count,
+        )
+    if len(holes) > _TAIL_HOLE_WARN_CAP:
+        _LOG.warning(
+            "trade_sim.session_tail_hole_suppressed",
+            total=len(holes),
+            shown=_TAIL_HOLE_WARN_CAP,
+        )
 
 
 def _construction_fallback_reason(
@@ -289,6 +347,19 @@ class ResidentTradeSim:
     tf_minutes
         The bar timeframe in whole minutes (``>= 1``), for the timeframe-aware
         forced-exit detection.
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001). When supplied, EVERY trade this window emits
+        — on the Rust arm AND the Python-oracle fallback arm alike — carries
+        ``vix_at_entry`` / ``vix_at_exit`` (REFERENCE ONLY, never a signal
+        input; a missing VIX bar stamps ``None``, never fabricated). The Rust
+        kernel itself is UNTOUCHED: the stamp happens Python-side in the
+        :meth:`_to_trade_and_exit` converter (an O(1) post-stamp per trade), so the
+        kernel's trade tuples stay engine-blind and both arms stamp through
+        the SAME :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp`.
+        ``None`` (the default) leaves both VIX fields ``None`` — byte-identical
+        to the pre-wiring output.
 
     Raises
     ------
@@ -306,6 +377,7 @@ class ResidentTradeSim:
         "_bar_bits",
         "_bars",
         "_call_fallback_warned",
+        "_reference_stamper",
         "_rust",
         "_rust_is_wide",
         "_rust_wide",
@@ -320,6 +392,7 @@ class ResidentTradeSim:
         bar_bits: Sequence[int],
         *,
         tf_minutes: int,
+        reference_stamper: TradeReferenceStamper | None = None,
     ) -> None:
         if not bars:
             raise ValueError("ResidentTradeSim: bars must be non-empty")
@@ -332,6 +405,7 @@ class ResidentTradeSim:
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._bar_bits: list[int] = list(bar_bits)
         self._tf_minutes = tf_minutes
+        self._reference_stamper = reference_stamper
         # Exit-index certification (DEC-SWEEP-EXIT-INDEX-FASTPATH-001): the
         # window's timestamps strictly increase ⇒ index↔timestamp is a
         # bijection ⇒ a trade's TRUE exit index provably equals the metrics
@@ -436,9 +510,19 @@ class ResidentTradeSim:
         uses — threaded to the kernel so a pending entry armed on a session's
         last stored bar is DROPPED at the next session's open instead of
         filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
-        walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
-        derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
-        no look-ahead).
+        walker's ``_pending_entry_day`` gate bit-for-bit) AND so an open
+        position never survives a session-date change (the ``session_gap``
+        close, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the same ordinals feed
+        the kernel's open-position guard, zero new FFI inputs). Bar ``i``'s
+        session derives from bar ``i``'s own timestamp — knowable at bar ``i``
+        (P-06: no look-ahead).
+
+        Observability (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the derivation
+        ends with ONE mask-independent capped sweep over the derived columns —
+        :func:`_warn_session_tail_holes` — naming every non-final session
+        whose stored bars never reach a forced-exit bar (the exact shape the
+        guard will fire on), so a session-tail data hole is loud once per
+        derivation, never once per mask.
         """
         forced: list[bool] = []
         session_days: list[int] = []
@@ -455,6 +539,7 @@ class ResidentTradeSim:
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
             session_days.append(bar_day.toordinal())
+        _warn_session_tail_holes(forced, session_days)
         open_p = [_price_to_paisa(bar.open) for bar in self._bars]
         high_p = [_price_to_paisa(bar.high) for bar in self._bars]
         low_p = [_price_to_paisa(bar.low) for bar in self._bars]
@@ -504,6 +589,18 @@ class ResidentTradeSim:
     def n_bars(self) -> int:
         """Number of bars in the resident window."""
         return len(self._bars)
+
+    @property
+    def reference_stamper(self) -> TradeReferenceStamper | None:
+        """The India-VIX stamper bound to this window (``None`` = unstamped).
+
+        PUBLIC so the sweep's chunk-failure re-attribution can hand the
+        Python-oracle replay the SAME stamper this window simulates with
+        (DEC-VIX-STAMP-WIRE-001, the STRUCTURAL oracle≡batch guarantee: the
+        oracle and the batch can never diverge on the stamping input because
+        the oracle reads it FROM the sim, never from a second wiring).
+        """
+        return self._reference_stamper
 
     @property
     def rust_active(self) -> bool:
@@ -656,6 +753,9 @@ class ResidentTradeSim:
             # simulate_trades wraps), one mask at a time. The walker's exit
             # indices are TRUE indices and monotonic by construction; they
             # are emitted under the same window certificate as the kernel's.
+            # The window's OWN stamper rides into every walker, so a
+            # fallback-served window stamps identically to the kernel-served
+            # one (never a wheel-state divergence — DEC-VIX-STAMP-WIRE-001).
             out: list[tuple[list[ClosedTrade], list[int] | None]] = []
             for mask in masks:
                 walker = TradeSimWalker(
@@ -664,6 +764,7 @@ class ResidentTradeSim:
                     stop_loss_paisa=stop_loss_paisa,
                     take_profit_paisa=take_profit_paisa,
                     policy=policy,
+                    reference_stamper=self._reference_stamper,
                 )
                 trades, exit_indices = walker.run_with_exit_indices(
                     self._bars, mask_to_entry_signals(self._bar_bits, mask)
@@ -684,12 +785,16 @@ class ResidentTradeSim:
             tp_next_open,
             tp_first,
         )
+        # HOISTED converter input (DEC-VIX-STAMP-WIRE-001): the stamper is read
+        # ONCE per batch call — not once per trade — and threaded into the
+        # per-record converter, which post-stamps each Rust trade Python-side.
+        stamper = self._reference_stamper
         pairs: list[tuple[list[ClosedTrade], list[int] | None]] = []
         for mask_records in raw:
             mask_trades: list[ClosedTrade] = []
             mask_exit_indices: list[int] = []
             for record in mask_records:
-                trade, exit_idx = self._to_trade_and_exit(record, direction)
+                trade, exit_idx = self._to_trade_and_exit(record, direction, stamper)
                 mask_trades.append(trade)
                 mask_exit_indices.append(exit_idx)
             if not self._ts_certified:
@@ -713,7 +818,10 @@ class ResidentTradeSim:
         return pairs
 
     def _to_trade_and_exit(
-        self, record: tuple[int, int, int, int, int, int], direction: Side
+        self,
+        record: tuple[int, int, int, int, int, int],
+        direction: Side,
+        stamper: TradeReferenceStamper | None,
     ) -> tuple[ClosedTrade, int]:
         """Map one Rust trade tuple → ``(ClosedTrade, exit_idx)`` (idx→bar timestamps).
 
@@ -721,18 +829,34 @@ class ResidentTradeSim:
         pre-#1186 mapping discarded — is returned alongside the trade so the
         metrics tail can skip its per-mask ``exit_ts``→index dict build
         (DEC-SWEEP-EXIT-INDEX-FASTPATH-001).
+
+        ALSO the POST-STAMP seam (DEC-VIX-STAMP-WIRE-001): when a *stamper* is
+        bound the trade's ``vix_at_entry`` / ``vix_at_exit`` are resolved HERE,
+        at the Python-side conversion, through the SAME
+        :meth:`~brutex.engine.reference_series.TradeReferenceStamper.stamp` the
+        pure-Python walker uses — so Rust-batch trades and oracle trades stamp
+        bit-identically, the kernel stays engine-blind, and a missing VIX bar
+        stamps ``None`` (never fabricated). O(1) per trade: two dict probes.
         """
         # Lazy import (numpy-load-once guard; see the module/TYPE_CHECKING note).
         from brutex.metrics.types import ClosedTrade
 
         pnl, mfe, mae, holding, entry_idx, exit_idx = record
+        entry_ts = self._bars[entry_idx].timestamp
+        exit_ts = self._bars[exit_idx].timestamp
+        if stamper is not None:
+            vix_at_entry, vix_at_exit = stamper.stamp(entry_ts, exit_ts)
+        else:
+            vix_at_entry, vix_at_exit = None, None
         trade = ClosedTrade(
             pnl_paisa=pnl,
             mfe_paisa=mfe,
             mae_paisa=mae,
             holding_bars=holding,
-            entry_ts=self._bars[entry_idx].timestamp,
-            exit_ts=self._bars[exit_idx].timestamp,
+            entry_ts=entry_ts,
+            exit_ts=exit_ts,
             direction=direction,
+            vix_at_entry=vix_at_entry,
+            vix_at_exit=vix_at_exit,
         )
         return trade, exit_idx

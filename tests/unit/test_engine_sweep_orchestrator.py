@@ -109,6 +109,15 @@ def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
 
 
+#: An ADR-0012 roll schedule spanning the `_trending_bars` fixture (which
+#: starts 2026-01-05 IST): one mid-stream roll boundary + a covering tail
+#: entry, expressed as owning-expiry day-ordinals.
+_FUT_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 8, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
+
+
 def _tuple(**overrides: object) -> SweepTuple:
     base: dict[str, object] = {
         "instrument": "NIFTY",
@@ -196,11 +205,25 @@ class TestSweepGridConfig:
         grid = _grid(instruments=["INDIAVIX"], unsafe_allow_out_of_scope_instruments=True)
         assert list(grid.instruments) == ["INDIAVIX"]
 
-    @pytest.mark.parametrize(
-        "symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"]
-    )
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NSE-NIFTY-FUT"])
     def test_in_scope_instruments_construct_by_default(self, symbol: str) -> None:
+        # The futures track is addressed by the ONE pinned series alias
+        # (DEC-FUTURES-ADDRESSING-PIN-001) — the two pre-launch shapes moved to
+        # the retired-refusal test below.
         assert list(_grid(instruments=[symbol]).instruments) == [symbol]
+
+    @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
+    def test_retired_futures_shapes_refused_naming_the_alias(self, symbol: str) -> None:
+        """The two RETIRED pre-launch addressing shapes are refused at Layer 1.
+
+        DEC-FUTURES-ADDRESSING-PIN-001 supersedes the dual-acceptance envelope:
+        only the series alias is engine-sweepable, and the reworded refusal
+        message names it so the operator learns the correct shape.
+        """
+        with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
+            _grid(instruments=[symbol])
+        assert "NSE-NIFTY-FUT" in str(exc.value)
+        assert "DEC-FUTURES-ADDRESSING-PIN-001" in str(exc.value)
 
     def test_scope_flag_is_identity_safe(self) -> None:
         """Regression pin (DEC-ENGINE-SCOPE-GUARD-001): the new field enters NO identity.
@@ -387,6 +410,24 @@ class TestToRunConfig:
         cfg = _tuple().to_run_config(grid)
         assert cfg.overfit is overfit
 
+    def test_threads_roll_schedule_for_the_futures_alias(self) -> None:
+        # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the per-tuple schedule
+        # is argument-plumbed into the SweepRunConfig, never a grid field.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        t = _tuple(instrument="NSE-NIFTY-FUT")
+        cfg = t.to_run_config(grid, roll_schedule=_FUT_SCHEDULE)
+        assert cfg.roll_schedule == _FUT_SCHEDULE
+
+    def test_default_roll_schedule_is_none_for_spot(self) -> None:
+        cfg = _tuple().to_run_config(_grid())
+        assert cfg.roll_schedule is None
+
+    def test_spot_tuple_with_a_schedule_is_rejected_by_the_run_config_invariant(self) -> None:
+        # The SweepRunConfig instrument⟺schedule invariant fires through the
+        # threading seam too — a misrouted schedule can never mint an identity.
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _tuple().to_run_config(_grid(), roll_schedule=_FUT_SCHEDULE)
+
 
 # ────── count / iter ──────
 
@@ -500,6 +541,105 @@ class TestPaths:
         store = store_for(_tuple())
         assert isinstance(store, ResultsStore)
         assert store.path == tuple_store_path(tmp_path, _tuple(), grid)
+
+
+# ────── _tuple_digest gate + selection identity (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) ──────
+
+
+class TestTupleDigestGateSelectionIdentity:
+    """The store address folds the ACTIVE gate + non-default selection knobs.
+
+    C1 (overfit) / C2 (top_k/min_hits/max_combos) / stage3 re-key the store
+    Parquet + completion-sentinel address, while a DEFAULT (ungated,
+    default-selection) sweep stays BYTE-STABLE — no existing on-disk store
+    re-keys. The pre-fix default digest is the empirically-captured constant.
+    """
+
+    # The pre-fix default digest captured on 0f411437 (16-char _PATH_DIGEST_LEN).
+    _PRE_FIX_DEFAULT_DIGEST = "5b020e892247deac"
+
+    def test_default_digest_byte_stable(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        assert _tuple_digest(_tuple(), _grid()) == self._PRE_FIX_DEFAULT_DIGEST
+
+    def test_default_store_path_filename_unchanged(self, tmp_path: Path) -> None:
+        name = tuple_store_path(tmp_path, _tuple(), _grid()).name
+        assert name == f"BUY_k1_{self._PRE_FIX_DEFAULT_DIGEST}.parquet"
+
+    def test_selection_defaults_elide_byte_stable(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.ranking import MIN_TRADES
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        # Explicitly setting a knob to its canonical default must NOT re-key.
+        assert _tuple_digest(_tuple(), _grid(top_k=None)) == d0
+        assert _tuple_digest(_tuple(), _grid(min_hits=MIN_TRADES)) == d0
+        assert _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS)) == d0
+
+    def test_overfit_rekeys_and_is_value_sensitive(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d90 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.90)))
+        d80 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.80)))
+        assert d90 != d0
+        assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
+
+    def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert _tuple_digest(_tuple(), _grid(stage3_enable=True)) != d0
+        # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
+        assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
+
+    def test_non_default_selection_rekeys_pairwise_distinct(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d_topk = _tuple_digest(_tuple(), _grid(top_k=50))
+        d_mh5 = _tuple_digest(_tuple(), _grid(min_hits=5))
+        d_mh0 = _tuple_digest(_tuple(), _grid(min_hits=0))  # filter disabled
+        d_mc = _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS - 1))
+        digests = {d0, d_topk, d_mh5, d_mh0, d_mc}
+        assert len(digests) == 5  # all pairwise-distinct incl. the default
+
+    def test_selection_identity_fragment_branches(self) -> None:
+        from brutex.engine.sweep_orchestrator import _selection_identity_fragment
+
+        assert _selection_identity_fragment(_grid()) is None
+        assert _selection_identity_fragment(_grid(top_k=50)) == {"top_k": 50}
+        assert _selection_identity_fragment(_grid(min_hits=5)) == {"min_hits": 5}
+        assert _selection_identity_fragment(_grid(max_combos=7)) == {"max_combos": 7}
+        assert _selection_identity_fragment(_grid(top_k=3, min_hits=5, max_combos=7)) == {
+            "top_k": 3,
+            "min_hits": 5,
+            "max_combos": 7,
+        }
+
+    def test_overfit_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """C1: a changed overfit config maps to a DIFFERENT store + sentinel path."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        light = _grid()
+        gated = _grid(overfit=OverfitGateConfig(dsr_min=0.90))
+        p_light = tuple_store_path(tmp_path, t, light)
+        p_gated = tuple_store_path(tmp_path, t, gated)
+        assert p_light != p_gated
+        assert completion_sentinel_path(p_light) != completion_sentinel_path(p_gated)
+
+    def test_selection_redo_targets_a_distinct_store(self, tmp_path: Path) -> None:
+        """C2: a changed top_k / min_hits each map to a fresh store path."""
+        t = _tuple()
+        base = _grid()
+        p_base = tuple_store_path(tmp_path, t, base)
+        p_topk = tuple_store_path(tmp_path, t, _grid(top_k=50))
+        p_mh = tuple_store_path(tmp_path, t, _grid(min_hits=5))
+        assert len({p_base, p_topk, p_mh}) == 3
 
 
 # ────── run_sweep_grid ──────
@@ -648,6 +788,55 @@ class TestRunSweepGridResilientSkip:
         complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
         assert complete.payload["tuples_failed"] == 1
         assert verify_chain(audit_path) > 0
+
+    def test_gate_conflict_at_persist_is_tuple_scoped_not_global_abort(
+        self, tmp_path: Path
+    ) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config conflict at the
+        finalist ``store.append`` is a TUPLE-scoped skip+count, never a grid abort.
+
+        The store raises the typed :class:`ResultsStoreGateConflictError`;
+        ``run_persisted_sweep`` converts it to a ``SweepComboError`` that sails
+        PAST ``run_one_tuple``'s ``except ResultsStoreError`` (store_quarantine
+        None) global-abort re-raise and lands on the driver's tuple-skip ladder —
+        so the grid FINISHES, ``tuples_failed`` counts it, a TUPLE_FAILED audit
+        line names the config cause, and no healthy store is quarantined.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.results_store import ResultsStoreGateConflictError
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        results_root = tmp_path / "results"
+
+        class _GateConflictStore(ResultsStore):
+            def append(self, row: object) -> bool:  # type: ignore[override]
+                raise ResultsStoreGateConflictError(
+                    "the ONLY differing field(s) (deflated_sharpe) — a gate-config change "
+                    "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001)."
+                )
+
+        def _store_for(t: SweepTuple) -> ResultsStore:
+            return _GateConflictStore(path=tuple_store_path(results_root, t, grid))
+
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # Tuple-scoped skip — the grid did NOT abort.
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "gate-config conflict" in failed.payload["error"]
+        # No sentinel written for the failed tuple (redo next run).
+        store_path = tuple_store_path(results_root, next(iter_sweep_tuples(grid)), grid)
+        assert not completion_sentinel_path(store_path).exists()
 
     def test_real_raise_leaves_failed_store_unsentineled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -848,3 +1037,78 @@ class TestRunSweepGridResilientHardening:
 
 def test_default_max_tuples_is_exposed() -> None:
     assert DEFAULT_MAX_TUPLES == 100_000
+
+
+# ────── ADR-0012 roll_schedule threading through the grid ──────
+
+
+class TestRunSweepGridRollSchedule:
+    """`roll_schedule_by_instrument` — argument-plumbed, identity-safe.
+
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001: the launcher resolves the schedule map
+    ONCE and hands it alongside ``bars_for``; a futures tuple's run identity
+    moves ONLY via ``SweepRunConfig.roll_schedule`` → ``canonical_trade_params``
+    — a spot grid is byte-identical with and without the argument present.
+    """
+
+    def test_futures_grid_threads_the_schedule_and_runs(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+                roll_schedule_by_instrument={"NSE-NIFTY-FUT": _FUT_SCHEDULE},
+            )
+        assert summary.tuples_run == 1
+        assert summary.persisted > 0
+
+    def test_futures_grid_without_a_schedule_map_fails_the_invariant(self, tmp_path: Path) -> None:
+        # A futures tuple with NO schedule cannot mint an identity — the
+        # SweepRunConfig invariant propagates (a genuine wiring bug, never a
+        # silent constant-key sweep).
+        bars = _trending_bars(n_days=2)
+        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="roll_schedule is required for"),
+        ):
+            run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+
+    def test_spot_grid_is_byte_identical_with_and_without_the_argument(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+
+        def _run(tag: str, schedule_map: dict[str, tuple[int, ...]] | None) -> bytes:
+            grid = _grid()
+            results = tmp_path / tag
+            with AuditWriter.open(tmp_path / f"{tag}.jsonl") as audit:
+                summary = run_sweep_grid(
+                    grid,
+                    bars_for=lambda _i, _t: bars,
+                    store_for=make_store_for(results, grid),
+                    dedup=_dedup(),
+                    audit=audit,
+                    roll_schedule_by_instrument=schedule_map,
+                )
+            assert summary.tuples_run == 1
+            store_path = tuple_store_path(results, next(iter_sweep_tuples(grid)), grid)
+            return store_path.read_bytes()
+
+        # None, an empty map, and a map naming ONLY the alias (a mixed launch)
+        # all leave a spot tuple's persisted bytes identical.
+        base = _run("none", None)
+        assert _run("empty", {}) == base
+        assert _run("foreign", {"NSE-NIFTY-FUT": _FUT_SCHEDULE}) == base

@@ -1956,3 +1956,72 @@ class TestLedgerDeltaAwareness:
         spot_row = next(r for r in rows if r["phase"] == "spot")
         assert spot_row["done"] == 2  # the delta row is COUNTED mid-pull
         assert spot_row["total"] == 2
+
+
+# ── the legacy window-payload fallback honours offset (DEC-DB-FNO-DISPLAY-TRUTH-001 item 2) ──
+
+
+class TestBuildWindowPayloadLegacyOffset:
+    """The legacy pyarrow / status_log fallback pages with the SAME
+    ``clamp_offset`` law the DuckDB fast path binds — pre-fix its slice was
+    ``selected[:limit]``, so every "Next ›" click on a legacy backing silently
+    re-served page 1."""
+
+    @staticmethod
+    def _seed_ledger(tmp_path: Path, n: int = 5) -> list[str]:
+        # Symbols seeded in sorted order with identical interval/dates so the
+        # legacy stable sort and the DuckDB secondary ORDER BY agree row-for-row.
+        symbols = [f"SYM{i}" for i in range(n)]
+        ledger = WindowLedger()
+        for s in symbols:
+            ledger.record(
+                _window_key(s), raw_bars=5, error_type=None, bars_appended=5, now=_WINDOW_NOW
+            )
+        save_window_ledger(ledger, tmp_path)
+        return symbols
+
+    def test_legacy_offset_returns_the_offset_slice(self, tmp_path: Path) -> None:
+        # FAILS BEFORE THE FIX: offset=2 returned rows 1-2 (page 1 again).
+        symbols = self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=2)  # conn=None → legacy
+        assert [w["symbol"] for w in payload["windows"]] == symbols[2:4]
+        assert payload["matched"] == 5
+        assert payload["returned"] == 2
+
+    def test_legacy_offset_past_the_end_is_an_empty_page(self, tmp_path: Path) -> None:
+        self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=10_000)
+        assert payload["windows"] == []
+        assert payload["returned"] == 0
+        assert payload["matched"] == 5  # matched is the filter total, not the page
+
+    def test_legacy_negative_offset_clamps_to_zero(self, tmp_path: Path) -> None:
+        symbols = self._seed_ledger(tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=-5)
+        assert [w["symbol"] for w in payload["windows"]] == symbols[:2]
+
+    def test_legacy_page_matches_the_duckdb_fast_path_page(self, tmp_path: Path) -> None:
+        # Parity pin: the SAME filter/sort inputs at the SAME offset yield the SAME
+        # rows on both backings (the seeded tier order is deterministic on both).
+        self._seed_ledger(tmp_path)
+        legacy = build_window_payload(tmp_path, limit=2, offset=2)
+        fast = build_window_payload(tmp_path, limit=2, offset=2, conn=duckdb.connect())
+        assert legacy["windows"] == fast["windows"]
+        assert legacy["matched"] == fast["matched"]
+
+    def test_status_log_fallback_honours_offset_too(self, tmp_path: Path) -> None:
+        # The frozen window_status.json backing pages identically.
+        log = WindowStatusLog()
+        for s in ("AAA", "BBB", "CCC"):
+            log.record(
+                _window_key(s),
+                raw_bars=0,
+                error_type="DhanRateLimitError",
+                bars_appended=0,
+                now=_WINDOW_NOW,
+            )
+        save_window_status(log, tmp_path)
+        payload = build_window_payload(tmp_path, limit=2, offset=2)
+        assert payload["source"] == "status_log"
+        assert [w["symbol"] for w in payload["windows"]] == ["CCC"]
+        assert payload["returned"] == 1

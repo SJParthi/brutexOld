@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Final, Self
 
 from brutex.data.errors import CatalogError
 from brutex.data.models import CatalogEntry
@@ -46,6 +46,28 @@ CREATE TABLE IF NOT EXISTS partitions (
     PRIMARY KEY (exchange, segment, symbol, interval, year, month)
 );
 """
+
+#: Additive per-partition STAT-CACHE columns (DEC-SWEEP-RECONCILE-STATCACHE-001).
+#: These persist a partition file's ``(st_mtime_ns, st_size, st_ino)`` freshness
+#: token OUTSIDE the frozen 11-field :class:`~brutex.data.models.CatalogEntry`
+#: model and the shared ``upsert``/``get``/``list_partitions`` 11-column SELECTs,
+#: so the sweep-launch reconcile can skip the full-bytes ``sha256`` + timestamp
+#: re-read of a byte-unchanged partition on an EXACT token match. ``st_ino`` is
+#: mandatory: every lake writer publishes via ``os.replace`` (a fresh inode), so
+#: an inode change defeats a same-size in-place rewrite AND a coarse-mtime
+#: external-SSD collision. A legacy pre-migration row reads ``NULL`` for all
+#: three ⇒ an explicit cache MISS (full reconcile, byte-identical to today, that
+#: backfills the token) — ``NULL`` is NEVER treated as a match (no COALESCE-to-0).
+_STAT_CACHE_COLUMNS: Final[tuple[str, ...]] = ("file_mtime_ns", "file_size", "file_ino")
+
+#: One ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` per column (DuckDB adds a
+#: single column per statement), run in :meth:`Catalog.open` after ``_DDL`` so a
+#: pre-existing ``partitions`` table gains the columns in place; each is
+#: idempotent, so re-opening an already-migrated catalog is a clean no-op.
+_STAT_CACHE_DDL: Final[tuple[str, ...]] = tuple(
+    f"ALTER TABLE partitions ADD COLUMN IF NOT EXISTS {column} BIGINT"
+    for column in _STAT_CACHE_COLUMNS
+)
 
 
 class Catalog:
@@ -117,6 +139,10 @@ class Catalog:
         try:
             conn = duckdb.connect(str(path))
             conn.execute(_DDL)
+            # DEC-SWEEP-RECONCILE-STATCACHE-001: migrate a legacy 11-column
+            # `partitions` table in place (idempotent `ADD COLUMN IF NOT EXISTS`).
+            for stat_cache_ddl in _STAT_CACHE_DDL:
+                conn.execute(stat_cache_ddl)
         except Exception as exc:  # pragma: no cover — defensive
             raise CatalogError(f"failed to open catalog at {path}: {exc}") from exc
         return cls(conn=conn, path=path)
@@ -265,6 +291,116 @@ class Catalog:
                 [exchange, segment, symbol, interval, year, month],
             ).fetchall()
         return len(deleted) > 0
+
+    def get_partition_stat_tokens(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+    ) -> dict[tuple[int, int], tuple[int, int, int] | None]:
+        """Return every ``(year, month) -> stat token`` for one ``(symbol, interval)``.
+
+        The reconcile stat-cache warm path (DEC-SWEEP-RECONCILE-STATCACHE-001)
+        bulk-loads a whole series' tokens in ONE indexed query, so the per-file
+        freshness check is an ``os.stat`` + an O(1) dict lookup with ZERO Parquet
+        reads. A token is the partition file's ``(st_mtime_ns, st_size,
+        st_ino)``; a row whose stat columns are ``NULL`` (a legacy row written
+        before the migration, or one whose token write failed) maps to ``None``
+        — an explicit cache MISS, never a match.
+
+        Parameters
+        ----------
+        exchange, segment, symbol, interval
+            The four series coordinates. All concrete.
+
+        Returns
+        -------
+        dict
+            ``{(year, month): (mtime_ns, size, ino)}``, with a ``None`` value for
+            any row that has not yet been stamped with a full token.
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        with self._lock:
+            rows = self._conn.execute(  # type: ignore[attr-defined]
+                """
+                SELECT year, month, file_mtime_ns, file_size, file_ino
+                FROM partitions
+                WHERE exchange = ? AND segment = ? AND symbol = ? AND interval = ?
+                """,
+                [exchange, segment, symbol, interval],
+            ).fetchall()
+        tokens: dict[tuple[int, int], tuple[int, int, int] | None] = {}
+        for year, month, mtime_ns, size, ino in rows:
+            if mtime_ns is None or size is None or ino is None:
+                tokens[(int(year), int(month))] = None
+            else:
+                tokens[(int(year), int(month))] = (int(mtime_ns), int(size), int(ino))
+        return tokens
+
+    def set_partition_stat(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        year: int,
+        month: int,
+        file_mtime_ns: int,
+        file_size: int,
+        file_ino: int,
+    ) -> None:
+        """Backfill the stat-cache token columns for one already-upserted partition.
+
+        Kept SEPARATE from :meth:`upsert` so the frozen
+        :class:`~brutex.data.models.CatalogEntry` model + its shared 11-column
+        ``INSERT`` stay untouched (DEC-SWEEP-RECONCILE-STATCACHE-001). The
+        reconcile stat-cache calls this immediately after the row's ``upsert``, so
+        the row always exists; a DuckDB fault (e.g. ``ENOSPC``) is wrapped into
+        :class:`~brutex.data.errors.CatalogError` and swallowed best-effort by the
+        caller (a torn stat write never fails the launch — the token stays ``NULL``
+        and the file is simply recomputed next launch).
+
+        Parameters
+        ----------
+        exchange, segment, symbol, interval, year, month
+            The six-coordinate primary key of the row to stamp.
+        file_mtime_ns, file_size, file_ino
+            The partition file's ``os.stat`` freshness token.
+
+        Raises
+        ------
+        CatalogError
+            If the catalog is closed, or the underlying ``UPDATE`` fails.
+        """
+        if self._closed:
+            raise CatalogError("Catalog is closed")
+        with self._lock:
+            try:
+                self._conn.execute(  # type: ignore[attr-defined]
+                    """
+                    UPDATE partitions
+                    SET file_mtime_ns = ?, file_size = ?, file_ino = ?
+                    WHERE exchange = ? AND segment = ? AND symbol = ?
+                      AND interval = ? AND year = ? AND month = ?
+                    """,
+                    [
+                        file_mtime_ns,
+                        file_size,
+                        file_ino,
+                        exchange,
+                        segment,
+                        symbol,
+                        interval,
+                        year,
+                        month,
+                    ],
+                )
+            except Exception as exc:
+                raise CatalogError(f"failed to write partition stat cache: {exc}") from exc
 
     def list_partitions(
         self,

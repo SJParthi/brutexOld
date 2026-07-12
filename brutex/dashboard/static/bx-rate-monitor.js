@@ -38,10 +38,13 @@
  * "expand" affordance) opens a LARGE fixed-position overlay panel — easy to read at a
  * glance — that ALSO shows the RAW EVIDENCE: the actual integer request counts in the
  * trailing 1s / 60s / 600s / 3600s windows, measured by the rate controller from REAL
- * per-second issue counts. The operator can see the arithmetic add up — e.g. req/sec is
- * literally the trailing-1s count, req/min the trailing-60s count, req/10min the
- * trailing-600s count, req/hour the trailing-3600s count — so the numbers are provably
- * real tracking, not fabricated. The overlay is fixed-position + dismissible (an ✕ button
+ * per-second issue counts. The operator can see the arithmetic add up — req/min is
+ * literally the trailing-60s count, req/10min the trailing-600s count, req/hour the
+ * trailing-3600s count — so the numbers are provably real tracking, not fabricated.
+ * req/sec is the ONE row whose main value is NOT its trailing-window count: 'achieved'
+ * is the meter-MEASURED completed rate, and the '1s' count beside it is the controller's
+ * ISSUED (admission) figure — a different population that can legitimately differ under
+ * failures / in-flight calls (DEC-LABEL-TRUTH-001; the #1022 meter_present split). The overlay is fixed-position + dismissible (an ✕ button
  * and a click on the backdrop) and is built ONCE (idempotent), so it leaves every page's
  * normal collapsed view unchanged and never disturbs the existing layout.
  *
@@ -393,12 +396,14 @@
       cls: "bxrm-evidence",
       text:
         "Evidence (real counts from the rate controller's per-second issue ring): " +
-        "the rates above ARE these trailing-window issue counts — req/sec = count in the " +
-        "last 1s, req/min = last 60s, req/10min = last 600s, req/hour = last 3600s. " +
-        "req/sec 'achieved' is the MEASURED completed rate wherever the client pool's meter is " +
-        "registered (spot AND metadata/F&O once the pool is built), an honest 0 only before a " +
-        "meter exists; 'req/min rate' is the admission per-minute average (issued ÷ 60), NOT a " +
-        "completed rate.",
+        "req/min, req/10min and req/hour ARE these trailing-window ISSUE counts " +
+        "(last 60s / 600s / 3600s). req/sec 'achieved' is DIFFERENT — the client pool " +
+        "meter's MEASURED completed rate wherever the meter is registered " +
+        "(spot AND metadata/F&O once the pool is built), an honest 0 only before a meter exists; " +
+        "the '1s' figure beside it is the controller's ISSUED (admission) count, a " +
+        "different population, so the two can legitimately differ under failures / " +
+        "in-flight calls. 'req/min rate' is the admission per-minute average " +
+        "(issued ÷ 60), NOT a completed rate.",
     });
     var card = el("div", { cls: "bxrm-card" }, [ehead, grid, evidence]);
     var o = el("div", { id: OVERLAY_ID }, [card]);
@@ -482,6 +487,23 @@
   }
 
   var lastData = null;
+
+  // Page fan-out (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): a
+  // template that ALSO renders /api/v1/pull/rate data (e.g. the v29 heartbeat
+  // pull slot) subscribes via `(window.__bxPullRateSubs ||= []).push(fn)` —
+  // its inline script may run BEFORE this deferred file, so the arrays are
+  // read at CALL time, never captured — instead of owning a SECOND poller on
+  // the same endpoint. Failure twins ride __bxPullRateFailSubs. A throwing
+  // subscriber is isolated (it can never break this widget's poll chain).
+  // This file stays dependency-free by design, so the tiny fan-out helper is
+  // local (bx-liveproof.js carries the same-shape twin — deliberate, ledgered).
+  function notifyPageSubs(listName, arg) {
+    var subs = window[listName];
+    if (!subs || !subs.length) { return; }
+    for (var i = 0; i < subs.length; i++) {
+      try { subs[i](arg); } catch (e) { /* subscriber isolation */ }
+    }
+  }
 
   // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
   var pollFailures = 0;
@@ -589,7 +611,15 @@
       "bxrmESec",
       fmtNum(data.req_per_sec_achieved) + " → " + fmtNum(data.req_per_sec_allowed)
     );
-    setText("bxrmESecC", fmtCount(data.req_per_sec_count, "1s"));
+    // Caption truth (DEC-LABEL-TRUTH-001): req_per_sec_count is the controller's
+    // trailing-1s ISSUED (admission) count — a DIFFERENT population from the
+    // meter-MEASURED completed rate rendered above it, so it is labelled as the
+    // issued count, never presented as the measured row's evidence.
+    var secIssuedCount = fmtCount(data.req_per_sec_count, "1s");
+    setText(
+      "bxrmESecC",
+      secIssuedCount === "—" ? secIssuedCount : secIssuedCount + " issued (admission)"
+    );
     // req/min rate (DEC-RATE-WIDGET-FNO-HONEST-001): the admission per-minute average as r/s
     // (issued ÷ 60) — an ISSUED-calls figure, openly NOT a measured completed rate.
     setText("bxrmEMinRate", fmtNum(data.req_per_min_rate) + " r/s");
@@ -630,6 +660,11 @@
         if (!data || typeof data !== "object") { throw new Error("malformed payload"); }
         render(data);
         pollFailures = 0;
+        // Fan the ONE /api/v1/pull/rate poll out to page subscribers
+        // (DEC-FRONTEND-LATENCY-HARDENING-001) — never a second poller. After
+        // the pinned render+reset block: the widget's own render always wins
+        // the ordering race with a page subscriber's.
+        notifyPageSubs("__bxPullRateSubs", data);
         lastPollOkMs = nowMs();   // the CLIENT staleness stamp
         lastPollOkWallMs = Date.now();  // wall twin (suspend guard — see renderAge)
         renderAge();              // stale marking clears on the very next success
@@ -640,6 +675,7 @@
         // place FOREVER. Every failure now feeds the staleness clock + backs off 3s->30s.
         if (seq !== pollSeq) { return; }
         pollFailures += 1;
+        notifyPageSubs("__bxPullRateFailSubs", pollFailures);
         renderAge();
         schedulePoll(backoffDelayMs(pollFailures));
       });

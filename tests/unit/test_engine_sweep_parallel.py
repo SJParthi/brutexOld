@@ -630,8 +630,15 @@ class TestWorkerLogVolumeGuardSpawn:
         monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
         _run_parallel(tmp_path, _grid(), workers=2)
         captured = capfd.readouterr()
-        assert "trade_sim." not in captured.err
-        assert "trade_sim." not in captured.out
+        # The guarded class is the PER-TRADE DEBUG storm (entry/exit — the
+        # #1630 disk-fill events); the mask-independent capped WARN
+        # ``trade_sim.session_tail_hole`` (DEC-TRADESIM-OPEN-SESSION-GUARD-001)
+        # legitimately SURVIVES the INFO default — a data-quality warning must
+        # never be silenced by the volume guard, so the pin names the two
+        # per-trade events instead of the whole ``trade_sim.`` namespace.
+        for stream in (captured.err, captured.out):
+            assert "trade_sim.entry" not in stream
+            assert "trade_sim.exit" not in stream
 
     def test_spawn_worker_per_trade_debug_restored_with_debug_env(
         self,
@@ -690,6 +697,31 @@ class TestRunTupleInWorker:
         assert "combo blew up" in result.failed_error
         # Even on failure the collected pre-failure audit lines are returned.
         assert result.audit_records[0].action == "SWEEP_START"
+
+    def test_corrupt_store_quarantined_in_worker(self, tmp_path: Path) -> None:
+        """G1 (round 2): a corrupt store is quarantined + retried IN-WORKER.
+
+        A pre-corrupt tuple store raises ResultsStoreSchemaError (a
+        ResultsStoreError) from the worker's
+        persist. The worker-side quarantine moves the trio + retries once
+        (byte-identical regeneration), so the worker returns a SUCCESS summary +
+        the quarantine event as data — never a non-SweepComboError propagating
+        out to abort the whole grid.
+        """
+        grid = _grid()
+        root = tmp_path / "out"
+        mod._worker_init(mod._WorkerContext(grid=grid, root=root))
+        tuple_ = next(iter_sweep_tuples(grid))
+        store = tuple_store_path(root, tuple_, grid)
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b"garbage - not parquet")
+        result = mod._run_tuple_in_worker(0, tuple_, _BARS)
+        assert result.summary is not None  # retry regenerated the store cleanly
+        assert result.failed_error is None
+        assert len(result.quarantine_events) == 1
+        dest_rel, reason = result.quarantine_events[0]
+        assert dest_rel.startswith(".quarantine/runtime/")
+        assert "ResultsStoreSchemaError" in reason
 
 
 class TestOutcomeAndResultMapping:
@@ -847,7 +879,15 @@ class TestParallelSkipPaths:
         # 0..total-1 is recorded, so next_index == total.
         assert guards.checkpoint.next_index == count_sweep_tuples(grid)
 
-    def test_cache_skip_short_circuits_a_completed_tuple(self, tmp_path: Path) -> None:
+    def test_cache_skip_short_circuits_a_completed_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: run 2 deliberately probes a DIFFERENT (empty)
+        # results root, which the default-ON resume store guard
+        # (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces back through the
+        # workers — the cache TIER mechanics are what this test pins; guard-ON
+        # behaviour is pinned in test_engine_sweep_parallel_store_guard.py.
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         # First run populates the cache + results.
         _run_parallel(tmp_path / "first", grid, workers=3)
@@ -877,7 +917,13 @@ class TestParallelSkipPaths:
         assert summary.skipped_cache == count_sweep_tuples(grid)
         assert summary.tuples_run == 0
 
-    def test_resume_skips_already_checkpointed_tuples(self, tmp_path: Path) -> None:
+    def test_resume_skips_already_checkpointed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Legacy (guard-OFF) arm: the pre-seeded checkpoint has NO on-disk
+        # artifacts under the probed root (see the cache twin above's
+        # rationale — DEC-SWEEP-RESUME-STORE-GUARD-001).
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid()
         total = count_sweep_tuples(grid)
         out = tmp_path / "out"

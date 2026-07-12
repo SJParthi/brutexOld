@@ -50,6 +50,14 @@ conservative choice (DEC-TRADESIM-001):
   entry; spec line 641). Supplied via the optional ``exit_signal`` stream.
 * **End of data** — a position still open when the feed ends closes at the last
   bar's CLOSE (no 15:20 reached, no next open to fill against).
+* **Session boundary** — *locked*: an open position never survives an IST
+  session-date change (DEC-TRADESIM-OPEN-SESSION-GUARD-001). When a session's
+  stored bars end BEFORE any forced-exit-window bar (a session-tail data hole,
+  or a stitched-series roll gap), the first bar of the NEXT session closes the
+  position retroactively at the PRIOR session's last stored bar's CLOSE — the
+  same pricing as end of data — under the ``session_gap`` reason; a pending
+  next-open exit scheduled on the dead session is subsumed, and the boundary
+  bar itself never arms a new entry.
 
 ## No look-ahead (CLAUDE.md §4, Golden Rule #5)
 
@@ -187,12 +195,21 @@ class _ExitReason(Enum):
     FORCED = "forced_1520"
     SIGNAL = "signal"
     END_OF_DATA = "end_of_data"
+    # A session-tail data GAP: the position's session ended in the stored feed
+    # BEFORE any forced-exit-window bar, so the first bar of the NEXT session
+    # closed it retroactively at the prior session's last stored bar
+    # (DEC-TRADESIM-OPEN-SESSION-GUARD-001). Appended LAST — the vocabulary is
+    # append-only (wire-visible via the P3→P4 trade-row contract).
+    SESSION_GAP = "session_gap"
 
 
 #: The public exit-reason string vocabulary, in enum-definition order
 #: (DEC-SWEEP-RESULTS-DEPTH-001): ``("stop_loss", "take_profit", "forced_1520",
-#: "signal", "end_of_data")``. Downstream persistence (``brutex.engine.trade_store``)
-#: validates against THIS tuple — imported, never copied (CLAUDE.md §11 COMMON).
+#: "signal", "end_of_data", "session_gap")``. APPEND-ONLY — every member is
+#: wire-visible (trade rows, per-reason aggregate counters, the top100 exits
+#: dict, the display exit-mix line). Downstream persistence
+#: (``brutex.engine.trade_store``) validates against THIS tuple — imported,
+#: never copied (CLAUDE.md §11 COMMON).
 EXIT_REASONS: Final[tuple[str, ...]] = tuple(reason.value for reason in _ExitReason)
 
 
@@ -239,14 +256,22 @@ class _OpenPosition:
     entry_idx: int
     entry_price_paisa: int
     entry_ts: datetime
+    # The IST session date the position OPENED on — the open-position session
+    # guard closes the position retroactively at the prior session's last
+    # stored bar the moment a pushed bar's IST date differs
+    # (DEC-TRADESIM-OPEN-SESSION-GUARD-001). Stamped from the SAME
+    # ``bar_day_ist`` the (A) fill site already resolved — one session notion.
+    entry_day_ist: date
     sl_level_paisa: int | None
     tp_level_paisa: int | None
     mfe_paisa: int  # running max favourable excursion (>= 0)
     mae_paisa: int  # running max adverse excursion magnitude (>= 0)
-    # Most-recent in-position bar — the end-of-data fallback closes against it.
+    # Most-recent in-position bar — the end-of-data fallback AND the (A2)
+    # session-boundary close both price against it (the finish() idiom).
     # Held as the bar itself (not pre-converted paisa) so the hot per-bar path
     # avoids a Decimal→paisa conversion of every CLOSE; the conversion happens
-    # once, only if the position survives to end of data (DEC-TRADESIM-001).
+    # once, only if the position survives to end of data / a session boundary
+    # (DEC-TRADESIM-001).
     last_idx: int
     last_bar: CandleBar
 
@@ -275,7 +300,14 @@ class TradeSimWalker:
     forced exit (15:20 IST on a regular day, close − 10min on a half-day /
     Muhurat session) additionally drops an entry signal armed on the session's
     last usable bar (its next bar is a forced-exit bar), so no entry can open
-    at or after the forced-exit instant.
+    at or after the forced-exit instant. The OPEN-position twin of the entry
+    gate (DEC-TRADESIM-OPEN-SESSION-GUARD-001): a position never survives an
+    IST session-date change either — when the feed's next bar lands on a later
+    session date (the session's stored tail never reached a forced-exit bar),
+    the position closes retroactively at the prior session's last stored bar's
+    CLOSE (the ``finish()`` pricing) under the ``session_gap`` reason, any
+    pending next-open exit is subsumed, and the boundary bar never arms a new
+    entry (earliest re-arm: the boundary bar's successor).
 
     Parameters
     ----------
@@ -523,44 +555,81 @@ class TradeSimWalker:
         Returns
         -------
         ClosedTrade | None
-            The trade that closed on this bar, or ``None``.
+            The trade that closed on this bar, or ``None``. A ``session_gap``
+            close is EMITTED on this bar (the first bar of a new session) but
+            PRICED at the prior session's last stored bar — the finish() idiom
+            (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
         """
         self._index += 1
         i = self._index
         # The forced-exit check (UTC→IST + tf-aware compare) is only consulted
         # when opening a pending entry or managing an open position, so skip it
-        # entirely on a flat, no-pending bar (keeps the idle path cheap).
-        need_forced = self._position is not None or self._pending_entry
-        if need_forced:
+        # entirely on a flat, no-pending bar (keeps the idle path cheap). The
+        # whole (A)/(A2)/(B) ladder lives INSIDE this arm — each of its guards
+        # requires a position or a pending entry, so a flat, no-pending bar
+        # never reaches it, and the arm's non-Optional ``day_ist`` local is the
+        # (A)/(A2) session key (the Optional ``bar_day_ist`` mirror survives
+        # solely for step (C)'s reuse-or-resolve fallback expression).
+        bar_day_ist: date | None = None
+        closed: ClosedTrade | None = None
+        if self._position is not None or self._pending_entry:
             ts_ist = bar.timestamp.astimezone(IST)
-            bar_day_ist: date | None = ts_ist.date()
+            day_ist = ts_ist.date()
+            bar_day_ist = day_ist
             forced = is_forced_exit_bar(
                 ts_ist.time(),
                 self._tf_minutes,
-                self._forced_exit_seconds(ts_ist.date()),
+                self._forced_exit_seconds(day_ist),
             )
-        else:
-            bar_day_ist = None
-            forced = False
 
-        # (A) Open a pending entry at THIS bar's open — only within the SAME IST
-        # session date the signal armed on (a fill bar on a LATER session date is
-        # an overnight-gap fill and is DROPPED, R2-OC-2) and never on a forced
-        # bar (cannot open at/after the session's forced-exit instant).
-        # ``bar_day_ist`` is always resolved here (``need_forced`` was True).
-        if self._position is None and self._pending_entry:
-            self._pending_entry = False
-            same_session = bar_day_ist == self._pending_entry_day
-            self._pending_entry_day = None
-            if not forced and same_session:
-                self._open_position(bar, i)
+            # (A) Open a pending entry at THIS bar's open — only within the
+            # SAME IST session date the signal armed on (a fill bar on a LATER
+            # session date is an overnight-gap fill and is DROPPED, R2-OC-2)
+            # and never on a forced bar (cannot open at/after the session's
+            # forced-exit instant). (A) and (A2) are mutually exclusive by
+            # state invariant: step (C) arms only while ``_position is None``
+            # and (A) clears the pending flag before opening, so
+            # ``_pending_entry`` is False whenever a position is open — one
+            # push runs (A) xor (A2), never both
+            # (DEC-TRADESIM-OPEN-SESSION-GUARD-001 §2.2).
+            if self._position is None and self._pending_entry:
+                self._pending_entry = False
+                same_session = day_ist == self._pending_entry_day
+                self._pending_entry_day = None
+                if not forced and same_session:
+                    self._open_position(bar, i, entry_day_ist=day_ist)
 
-        # (B) Manage an open position on this bar.
-        closed: ClosedTrade | None = None
-        if self._position is not None:
-            closed = self._manage_position(
-                self._position, bar, i, forced=forced, exit_signal=exit_signal
-            )
+            if self._position is not None:
+                pos = self._position
+                if day_ist != pos.entry_day_ist:
+                    # (A2) Session-boundary guard: an open position never
+                    # survives an IST session-date change (a session-tail data
+                    # hole / stitched-series roll gap —
+                    # DEC-TRADESIM-OPEN-SESSION-GUARD-001). Close retroactively
+                    # at the PRIOR session's last stored bar — the finish()
+                    # idiom (same fill price / ts / idx, no excursion fold from
+                    # THIS bar) — BEFORE this bar is managed, so neither a
+                    # pending next-open exit nor SL/TP/forced can ever fill
+                    # against the overnight/roll gap. A pending exit is
+                    # SUBSUMED (cleared — the flat walker never carries it into
+                    # the new session). A single-position walker holds at most
+                    # one position, and the inequality compare fires exactly
+                    # once even across a multi-session hole. A just-opened
+                    # position (same push, step (A)) carries THIS bar's date,
+                    # so it can never trip the guard.
+                    self._pending_exit = None
+                    closed = self._close(
+                        pos,
+                        exit_price_paisa=_price_to_paisa(pos.last_bar.close),
+                        exit_ts=pos.last_bar.timestamp,
+                        exit_idx=pos.last_idx,
+                        reason=_ExitReason.SESSION_GAP,
+                    )
+                else:
+                    # (B) Manage an open position on this bar — unchanged.
+                    closed = self._manage_position(
+                        pos, bar, i, forced=forced, exit_signal=exit_signal
+                    )
 
         # (C) While flat (and not on a bar a trade just closed), arm the next
         # entry, recording THIS bar's IST session date — the fill gate for (A).
@@ -597,14 +666,21 @@ class TradeSimWalker:
 
     # ── Internals ─────────────────────────────────────────────────────────
 
-    def _open_position(self, bar: CandleBar, idx: int) -> None:
-        """Open a position at ``bar``'s OPEN (the next-bar-open entry fill)."""
+    def _open_position(self, bar: CandleBar, idx: int, *, entry_day_ist: date) -> None:
+        """Open a position at ``bar``'s OPEN (the next-bar-open entry fill).
+
+        ``entry_day_ist`` is the fill bar's IST session date, threaded from the
+        (A) fill site — which already resolved it for the forced check — so the
+        (A2) open-position session guard costs no extra UTC→IST conversion
+        (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
+        """
         entry_price = _price_to_paisa(bar.open)
         sl_level, tp_level = self._levels(entry_price)
         self._position = _OpenPosition(
             entry_idx=idx,
             entry_price_paisa=entry_price,
             entry_ts=bar.timestamp,
+            entry_day_ist=entry_day_ist,
             sl_level_paisa=sl_level,
             tp_level_paisa=tp_level,
             mfe_paisa=0,

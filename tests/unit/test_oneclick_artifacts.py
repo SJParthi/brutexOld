@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -317,6 +320,45 @@ class TestDiscoverRuns:
         assert [info.run_id for info in found] == ["r-good"]
         skipped = [entry for entry in logs if entry["event"] == "oneclick.run_skipped"]
         assert {entry["run"] for entry in skipped} == {"r-badstat", "r-badisdir"}
+
+
+class TestNewestRunName:
+    """Fix round 2 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, refuter-confirmed
+    MINOR): the name-only newest-run listing — the same ``(mtime_ns, name)``
+    selection core ``discover_runs`` rides, with ZERO manifest reads/parses.
+    """
+
+    def test_absent_runs_tree_is_none(self, tmp_path: Path) -> None:
+        assert oc.newest_run_name(tmp_path / "sweeps") is None
+
+    def test_newest_name_matches_discover_runs_selection(self, tmp_path: Path) -> None:
+        runs = tmp_path / "sweep_runs"
+        for name, age in (("r-old", 100), ("r-new", 0)):
+            (runs / name).mkdir(parents=True)
+            stamp = 1_700_000_000 - age
+            os.utime(runs / name, (stamp, stamp))
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-new"
+        # ONE selection law: name-only listing == the RunInfo listing's head.
+        assert oc.newest_run_name(tmp_path / "sweeps") == (
+            oc.discover_runs(tmp_path / "sweeps", limit=1)[0].run_id
+        )
+
+    def test_zero_manifest_reads_even_when_manifest_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_dir = tmp_path / "sweep_runs" / "r-with-manifest"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text('{"suspect": false}', encoding="utf-8")
+        calls: list[str] = []
+        real_load = oc.load_manifest
+
+        def _spy(target: Path) -> Any:
+            calls.append(str(target))
+            return real_load(target)
+
+        monkeypatch.setattr(oc, "load_manifest", _spy)
+        assert oc.newest_run_name(tmp_path / "sweeps") == "r-with-manifest"
+        assert calls == []
 
 
 # ── manifest loader ─────────────────────────────────────────────────────
@@ -945,6 +987,628 @@ class TestChainPeekSentinel:
             oc.raise_chain_not_verified()
 
 
+# ── revision probes + the outage-serve doctrine (DEC-ONECLICK-PERF-CLUB-001) ──
+
+
+class TestArtifactProbe:
+    def test_statted_file_carries_the_revision_token(self, tmp_path: Path) -> None:
+        target = tmp_path / "a.json"
+        target.write_text("xy", encoding="utf-8")
+        st = os.stat(target)
+        probe = oc.artifact_probe(target)
+        assert probe == oc.ArtifactProbe(f"{st.st_mtime_ns}:{st.st_size}", False)
+
+    def test_absent_file_is_absent_not_outage(self, tmp_path: Path) -> None:
+        assert oc.artifact_probe(tmp_path / "missing.json") == oc.ArtifactProbe(None, False)
+
+    def test_file_component_in_path_is_absent_not_outage(self, tmp_path: Path) -> None:
+        """A FILE where a run dir should be (NotADirectoryError) reads absent."""
+        (tmp_path / "r-x").write_text("not a dir", encoding="utf-8")
+        probe = oc.artifact_probe(tmp_path / "r-x" / "manifest.json")
+        assert probe == oc.ArtifactProbe(None, False)
+
+    def test_other_oserror_is_an_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "a.json"
+        target.write_text("x", encoding="utf-8")
+        real_stat = os.stat
+
+        def _fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(path) == str(target):
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(oc.os, "stat", _fake_stat)
+        assert oc.artifact_probe(target) == oc.ArtifactProbe(None, True)
+
+
+class TestRunsRevisionProbe:
+    def test_absent_tree_is_absent_not_outage(self, tmp_path: Path) -> None:
+        assert oc.runs_revision_probe(tmp_path / "sweeps") == oc.ArtifactProbe(None, False)
+
+    def test_healthy_token_equals_runs_revision(self, tmp_path: Path) -> None:
+        """The probe's token IS runs_revision's token (one digest law — §11 COMMON)."""
+        runs = tmp_path / "sweep_runs"
+        (runs / "r-a").mkdir(parents=True)
+        (runs / "r-a" / oc.MANIFEST_FILENAME).write_text("{}", encoding="utf-8")
+        probe = oc.runs_revision_probe(tmp_path / "sweeps")
+        assert probe.outage is False
+        assert probe.token == oc.runs_revision(tmp_path / "sweeps")
+        assert probe.token is not None
+
+    def test_root_stat_outage_reads_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runs = tmp_path / "sweep_runs"
+        runs.mkdir()
+        real_stat = os.stat
+
+        def _fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(path) == str(runs):
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(oc.os, "stat", _fake_stat)
+        assert oc.runs_revision_probe(tmp_path / "sweeps") == oc.ArtifactProbe(None, True)
+
+    def test_scandir_failure_degrades_to_the_bare_dir_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unlistable-but-stattable tree keeps the bare dir token (both paths)."""
+        runs = tmp_path / "sweep_runs"
+        runs.mkdir()
+        st = os.stat(runs)
+
+        def _fake_scandir(path: Any) -> Any:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(oc.os, "scandir", _fake_scandir)
+        expected = f"{st.st_mtime_ns}:{st.st_size}"
+        assert oc.runs_revision(tmp_path / "sweeps") == expected
+        assert oc.runs_revision_probe(tmp_path / "sweeps") == oc.ArtifactProbe(expected, False)
+
+
+class TestCachedPayloadSentinel:
+    def test_raise_no_cached_payload_raises(self) -> None:
+        with pytest.raises(oc.CachedPayloadMissingError):
+            oc.raise_no_cached_payload()
+
+
+class TestOutageGate:
+    def test_capacity_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="capacity"):
+            oc.OutageGate(capacity=0)
+
+    def test_outage_warns_once_then_stays_quiet(self) -> None:
+        gate = oc.OutageGate()
+        gate.healthy("coord", "key-1")
+        with structlog.testing.capture_logs() as logs:
+            assert gate.outage_key("coord") == "key-1"
+            assert gate.outage_key("coord") == "key-1"  # second poll: no re-log
+        outages = [entry for entry in logs if entry["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+        assert outages[0]["coordinate"] == "coord"
+        assert outages[0]["last_known"] is True
+
+    def test_outage_with_no_last_known_still_warns(self) -> None:
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            assert gate.outage_key("never-served") is None
+        outages = [entry for entry in logs if entry["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+        assert outages[0]["last_known"] is False
+
+    def test_recovery_logs_info_and_rearms_the_warn(self) -> None:
+        gate = oc.OutageGate()
+        gate.healthy("coord", "key-1")
+        with structlog.testing.capture_logs() as logs:
+            gate.outage_key("coord")
+            gate.healthy("coord", "key-2")  # probe answered again
+            gate.outage_key("coord")  # a SECOND outage re-warns
+        events = [entry["event"] for entry in logs]
+        assert events.count("oneclick.probe_outage") == 2
+        assert events.count("oneclick.probe_recovered") == 1
+        recovered = next(e for e in logs if e["event"] == "oneclick.probe_recovered")
+        assert recovered["resolution"] == "healthy"  # r1 NIT: the resolution is named
+        # the recovery updated the last-known key
+        assert gate.outage_key("coord") == "key-2"
+
+    def test_healthy_without_prior_outage_logs_nothing(self) -> None:
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            gate.healthy("coord", "key-1")
+        assert logs == []
+
+    def test_absent_forgets_the_last_known_key(self) -> None:
+        """A deleted artifact is never resurrected by a later outage."""
+        gate = oc.OutageGate()
+        gate.healthy("coord", "key-1")
+        gate.absent("coord")
+        with structlog.testing.capture_logs() as logs:
+            assert gate.outage_key("coord") is None
+        assert [entry["event"] for entry in logs] == ["oneclick.probe_outage"]
+
+    def test_absent_ends_an_outage_with_the_recovery_log(self) -> None:
+        """An absence verdict is a definitive probe answer — the outage ends."""
+        gate = oc.OutageGate()
+        gate.healthy("coord", "key-1")
+        gate.outage_key("coord")
+        with structlog.testing.capture_logs() as logs:
+            gate.absent("coord")
+        assert [entry["event"] for entry in logs] == ["oneclick.probe_recovered"]
+        # r1 NIT: the outage RESOLVED TO ABSENCE — named, never implied healthy.
+        assert logs[0]["resolution"] == "absent"
+
+    def test_absent_without_prior_state_logs_nothing(self) -> None:
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            gate.absent("never-seen")
+        assert logs == []
+
+    def test_last_known_map_is_lru_bounded(self) -> None:
+        """The oldest coordinate is evicted past capacity (hostile-poll bound)."""
+        gate = oc.OutageGate(capacity=2)
+        gate.healthy("a", "key-a")
+        gate.healthy("b", "key-b")
+        gate.healthy("c", "key-c")  # evicts "a"
+        assert gate.outage_key("a") is None
+        assert gate.outage_key("b") == "key-b"
+        assert gate.outage_key("c") == "key-c"
+
+    def test_in_outage_map_is_lru_bounded_so_an_evicted_outage_relogs(self) -> None:
+        gate = oc.OutageGate(capacity=1)
+        with structlog.testing.capture_logs() as logs:
+            gate.outage_key("a")
+            gate.outage_key("b")  # evicts "a" from the outage set
+            gate.outage_key("a")  # re-logs (bounded, disclosed)
+        outages = [entry for entry in logs if entry["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 3
+
+    def test_outage_serve_refreshes_lru_recency_so_a_long_outage_survives_churn(self) -> None:
+        """r1 MINOR-3: serving last-known refreshes the coordinate's LRU slot.
+
+        Fill the last-known map PAST capacity with healthy churn WHILE one
+        coordinate is continuously served from last-known — its key must
+        survive (pre-fix, ``outage_key`` never moved it to the LRU end, so
+        the churn evicted the in-outage coordinate and every later outage
+        poll degraded to the uncached fresh recompute).
+        """
+        gate = oc.OutageGate(capacity=2)
+        gate.healthy("out", "k-out")
+        assert gate.outage_key("out") == "k-out"  # outage begins (refreshes recency)
+        gate.healthy("h1", "k-1")  # map: [out, h1]
+        assert gate.outage_key("out") == "k-out"  # serve refreshes → [h1, out]
+        gate.healthy("h2", "k-2")  # evicts h1, NOT the in-outage coordinate
+        assert gate.outage_key("out") == "k-out"  # survived the churn past capacity
+
+    def test_sustained_outage_refreshes_in_outage_recency_never_rewarns(self) -> None:
+        """r2 NIT-2: an actively-polled outage survives ``_in_outage`` churn.
+
+        A wider-than-capacity outage must evict the STALEST outage
+        coordinate, never one still actively polling (pre-fix,
+        ``_in_outage`` was insertion-ordered — the fresh coordinate "c"
+        evicted the still-polling "a", which then re-WARNed mid-outage).
+        """
+        gate = oc.OutageGate(capacity=2)
+        with structlog.testing.capture_logs() as logs:
+            gate.outage_key("a")  # warn — in_outage: [a]
+            gate.outage_key("b")  # warn — in_outage: [a, b]
+            gate.outage_key("a")  # sustained poll refreshes → [b, a]
+            gate.outage_key("c")  # warn — evicts the STALE "b", not "a"
+            gate.outage_key("a")  # still latched: NO re-warn
+        warns_a = [
+            e for e in logs if e["event"] == "oneclick.probe_outage" and e["coordinate"] == "a"
+        ]
+        assert len(warns_a) == 1
+
+
+class _YieldingContains(OrderedDict[str, None]):
+    """Fault-injection map: the membership check YIELDS the GIL mid-window.
+
+    ``in`` on a C-level (Ordered)dict gives CPython NO eval-breaker
+    checkpoint between the gate's ``coordinate not in _in_outage`` check and
+    its ``_in_outage[coordinate] = None`` set, so a lock-removal mutant is
+    untouchable by scheduling pressure alone (empirically 0/200 at
+    switchinterval 1e-9 — the r2 MINOR-1 theater proof, and 0/10 for the
+    barrier-aligned fresh-coordinate hammer too). A Python-level
+    ``__contains__`` with a ``sleep`` inserts a REAL preemption point INSIDE
+    the check-then-set window: under the production lock the window stays
+    mutually excluded (the yield happens while the lock is held, so racing
+    threads block at ``with self._lock``); with the lock removed, racing
+    first-polls interleave through the yield, both read "first", and
+    double-WARN — the mutant dies.
+    """
+
+    def __contains__(self, key: object) -> bool:
+        present = super().__contains__(key)
+        time.sleep(1e-6)  # release + reacquire the GIL — a real switch point
+        return present
+
+
+class TestOutageGateConcurrency:
+    """REAL teeth for the class docstring's "Thread-safe" claim (r2 MINOR-1).
+
+    The r1 hammer (8 threads free-running one SHARED already-latched
+    coordinate) was proven THEATER: its only lock-protected race — the
+    check-then-set on ``_in_outage`` — happened exactly ONCE per run, GIL-
+    serialised, and a lock-removal mutant survived 200/200 hammer runs (the
+    reviewer's reproduction). This rewrite (a) makes EVERY round a
+    barrier-aligned 8-way FIRST-poll race on a FRESH seeded coordinate and
+    (b) injects a genuine preemption point inside the check-then-set window
+    via :class:`_YieldingContains` (whitebox on the ``_in_outage`` seam —
+    the file's declared private-pin discipline) — the mutant double-WARNs
+    (verified in-session: the no-op-lock mutant fails this test every run;
+    the locked gate passes deterministically).
+    """
+
+    def test_first_poll_races_warn_once_per_coordinate(self) -> None:
+        gate = oc.OutageGate()
+        gate._in_outage = _YieldingContains()  # the injected preemption point
+        n_threads = 8
+        rounds = 200  # every round stays under the 512-capacity maps
+        coordinates = [f"race-{i}" for i in range(rounds)]
+        for i, coordinate in enumerate(coordinates):
+            gate.healthy(coordinate, f"k-{i}")
+        barrier = threading.Barrier(n_threads)
+        served: list[tuple[str | None, str | None]] = []  # (expected, got)
+        errors: list[BaseException] = []
+
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            # Worker escapes of ANY tier — ``Exception`` AND ``BaseException``
+            # (e.g. ``threading.BrokenBarrierError``) — land here and fail the
+            # ``assert errors == []`` below: a ``threading.excepthook``
+            # override instead of a literal ``except BaseException:`` handler
+            # in the worker (CodeQL py/catch-base-exception; the
+            # test_dashboard_rate_bridge_cache.py precedent), teeth unchanged.
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        def _hammer() -> None:
+            for i, coordinate in enumerate(coordinates):
+                # ALL threads' first outage poll of this coordinate lands
+                # together — a genuine check-then-set race each round.
+                barrier.wait(timeout=10)
+                served.append((f"k-{i}", gate.outage_key(coordinate)))
+
+        threads = [threading.Thread(target=_hammer) for _ in range(n_threads)]
+        original_excepthook = threading.excepthook
+        threading.excepthook = _capture
+        try:
+            with structlog.testing.capture_logs() as logs:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=60)
+        finally:
+            threading.excepthook = original_excepthook
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        # no lost last_key: EVERY concurrent poll served its seeded key
+        assert len(served) == n_threads * rounds
+        assert all(got == expected for expected, got in served)
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        # THE teeth: warns == distinct coordinates — an unlocked
+        # check-then-set lets two threads both observe "first" and
+        # double-WARN one coordinate (r2 MINOR-1 recipe).
+        assert len(outages) == rounds, (
+            f"expected one WARN per coordinate ({rounds}), got {len(outages)} — "
+            "a duplicate means the first-poll check-then-set raced"
+        )
+        assert {e["coordinate"] for e in outages} == set(coordinates)
+        assert all(e["last_known"] is True for e in outages)
+
+
+class TestSiblingKeyToken:
+    """The sibling arm of the outage doctrine (r1 MINOR-1) — same gate, no copy."""
+
+    def test_healthy_returns_and_remembers_the_token(self) -> None:
+        gate = oc.OutageGate()
+        probe = oc.ArtifactProbe("7:9", False)
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=probe)
+        assert token == "7:9"
+        assert logs == []
+        # the token was remembered for a later outage
+        assert gate.outage_key("c|sib=events") == "7:9"
+
+    def test_outage_holds_the_last_known_token_with_one_warn(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        outage = oc.ArtifactProbe(None, True)
+        with structlog.testing.capture_logs() as logs:
+            first = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=outage)
+            second = oc.sibling_key_token(gate, coordinate="c|sib=events", probe=outage)
+        assert first == second == "7:9"  # the folded key holds steady through the flap
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1  # once per sibling outage, never per poll
+        assert outages[0]["coordinate"] == "c|sib=events"
+
+    def test_cold_outage_reads_none_with_a_warn(self) -> None:
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(
+                gate, coordinate="cold|sib=top100", probe=oc.ArtifactProbe(None, True)
+            )
+        assert token is None
+        outages = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1
+        assert outages[0]["last_known"] is False
+
+    def test_absent_forgets_so_a_deleted_sibling_is_never_resurrected(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        assert (
+            oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, False)
+            )
+            is None
+        )
+        # a LATER outage cannot resurrect the pre-delete token
+        assert (
+            oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, True)
+            )
+            is None
+        )
+
+    def test_recovery_after_a_sibling_outage_logs_and_rekeys(self) -> None:
+        gate = oc.OutageGate()
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("7:9", False))
+        oc.sibling_key_token(gate, coordinate="c|sib=events", probe=oc.ArtifactProbe(None, True))
+        with structlog.testing.capture_logs() as logs:
+            token = oc.sibling_key_token(
+                gate, coordinate="c|sib=events", probe=oc.ArtifactProbe("8:1", False)
+            )
+        assert token == "8:1"
+        assert [e["event"] for e in logs] == ["oneclick.probe_recovered"]
+
+
+class _FakeCache:
+    """A minimal :class:`oc.PayloadCache` — dict store + compute counter."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, dict[str, Any]] = {}
+        self.computes = 0
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Any) -> dict[str, Any]:
+        if key in self.store:
+            return self.store[key]
+        value: dict[str, Any] = compute()  # a raising compute stores nothing
+        self.computes += 1
+        self.store[key] = value
+        return value
+
+
+class TestServeRevisionCached:
+    """The ONE revision-gated serve chokepoint (C-r2-5 outage doctrine)."""
+
+    @staticmethod
+    def _payload(n: int) -> dict[str, Any]:
+        return {"n": n}
+
+    def test_healthy_serves_the_cache_and_remembers_the_key(self) -> None:
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        probe = oc.ArtifactProbe("1:2", False)
+        calls = {"n": 0}
+
+        def _fresh() -> dict[str, Any]:
+            calls["n"] += 1
+            return self._payload(calls["n"])
+
+        first = oc.serve_revision_cached(
+            cache, gate, coordinate="c", probe=probe, key="k|rev=1:2", compute=_fresh
+        )
+        second = oc.serve_revision_cached(
+            cache, gate, coordinate="c", probe=probe, key="k|rev=1:2", compute=_fresh
+        )
+        assert first == second == {"n": 1}
+        assert cache.computes == 1  # the repeat poll is a cache hit
+        assert gate.outage_key("c") == "k|rev=1:2"  # the key was remembered
+
+    def test_outage_serves_the_last_known_payload_with_one_warn(self) -> None:
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        healthy = oc.ArtifactProbe("1:2", False)
+        oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=healthy,
+            key="k|rev=1:2",
+            compute=lambda: self._payload(1),
+        )
+        outage = oc.ArtifactProbe(None, True)
+
+        def _must_not_compute() -> dict[str, Any]:
+            raise AssertionError("an outage with a cached payload must never recompute")
+
+        with structlog.testing.capture_logs() as logs:
+            served = oc.serve_revision_cached(
+                cache,
+                gate,
+                coordinate="c",
+                probe=outage,
+                key=None,
+                compute=_must_not_compute,
+            )
+            again = oc.serve_revision_cached(
+                cache,
+                gate,
+                coordinate="c",
+                probe=outage,
+                key=None,
+                compute=_must_not_compute,
+            )
+        assert served == again == {"n": 1}
+        outages = [entry for entry in logs if entry["event"] == "oneclick.probe_outage"]
+        assert len(outages) == 1  # once per outage, never per poll
+
+    def test_outage_with_evicted_cache_entry_computes_fresh_uncached(self) -> None:
+        """The last-known key can be LRU-evicted from the CACHE — honest fresh."""
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        healthy = oc.ArtifactProbe("1:2", False)
+        oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=healthy,
+            key="k|rev=1:2",
+            compute=lambda: self._payload(1),
+        )
+        cache.store.clear()  # simulate the LRU eviction
+        served = oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe(None, True),
+            key=None,
+            compute=lambda: self._payload(7),
+        )
+        assert served == {"n": 7}
+        assert cache.store == {}  # fresh compute cached NOTHING (no stale key)
+
+    def test_outage_with_no_last_known_computes_fresh(self) -> None:
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        with structlog.testing.capture_logs() as logs:
+            served = oc.serve_revision_cached(
+                cache,
+                gate,
+                coordinate="cold",
+                probe=oc.ArtifactProbe(None, True),
+                key=None,
+                compute=lambda: self._payload(3),
+            )
+        assert served == {"n": 3}
+        assert any(entry["event"] == "oneclick.probe_outage" for entry in logs)
+        assert cache.store == {}
+
+    def test_recovery_resumes_normal_keying(self) -> None:
+        """Post-outage, a fresh healthy probe re-keys + serves the NEW revision."""
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe("1:2", False),
+            key="k|rev=1:2",
+            compute=lambda: self._payload(1),
+        )
+        oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe(None, True),
+            key=None,
+            compute=lambda: self._payload(99),
+        )
+        with structlog.testing.capture_logs() as logs:
+            served = oc.serve_revision_cached(
+                cache,
+                gate,
+                coordinate="c",
+                probe=oc.ArtifactProbe("3:4", False),
+                key="k|rev=3:4",
+                compute=lambda: self._payload(2),
+            )
+        assert served == {"n": 2}  # the new revision computed fresh + cached
+        assert any(entry["event"] == "oneclick.probe_recovered" for entry in logs)
+        assert gate.outage_key("c") == "k|rev=3:4"
+
+    def test_absent_computes_fresh_uncached_and_forgets(self) -> None:
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe("1:2", False),
+            key="k|rev=1:2",
+            compute=lambda: self._payload(1),
+        )
+        served = oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe(None, False),
+            key=None,
+            compute=lambda: self._payload(4),
+        )
+        assert served == {"n": 4}
+        # the artifact was deleted — a LATER outage must not resurrect it
+        assert gate.outage_key("c") is None
+
+    def test_defensive_none_key_with_a_token_reads_absent(self) -> None:
+        """A route bug passing key=None beside a real token degrades, never crashes."""
+        cache = _FakeCache()
+        gate = oc.OutageGate()
+        served = oc.serve_revision_cached(
+            cache,
+            gate,
+            coordinate="c",
+            probe=oc.ArtifactProbe("1:2", False),
+            key=None,
+            compute=lambda: self._payload(5),
+        )
+        assert served == {"n": 5}
+        assert cache.store == {}
+
+
+class TestDiscoverRunsParseBound:
+    """F4 (DEC-ONECLICK-PERF-CLUB-001): manifests parse ONLY for the top-limit runs."""
+
+    def test_churn_case_parses_at_most_limit_manifests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runs = tmp_path / "sweep_runs"
+        for i in range(60):
+            run_dir = runs / f"r-{i:04d}"
+            run_dir.mkdir(parents=True)
+            (run_dir / oc.MANIFEST_FILENAME).write_text(
+                json.dumps({"suspect": False}), encoding="utf-8"
+            )
+            stamp = 1_700_000_000 + i
+            os.utime(run_dir, (stamp, stamp))
+        real_load = oc.load_manifest
+        parses = {"n": 0}
+
+        def _counting_load(run_dir: Path) -> Any:
+            parses["n"] += 1
+            return real_load(run_dir)
+
+        monkeypatch.setattr(oc, "load_manifest", _counting_load)
+        found = oc.discover_runs(tmp_path / "sweeps")
+        assert len(found) == 50
+        assert parses["n"] == 50  # NOT 60 — only the selected dirs parse
+        # newest-first selection: the 10 oldest dirs never parsed
+        assert [info.run_id for info in found][:2] == ["r-0059", "r-0058"]
+        assert all(info.suspect is False for info in found)
+
+    def test_limit_two_parses_two(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        runs = tmp_path / "sweep_runs"
+        for i in range(5):
+            run_dir = runs / f"r-{i}"
+            run_dir.mkdir(parents=True)
+            (run_dir / oc.MANIFEST_FILENAME).write_text("{}", encoding="utf-8")
+            stamp = 1_700_000_000 + i
+            os.utime(run_dir, (stamp, stamp))
+        parses = {"n": 0}
+        real_load = oc.load_manifest
+
+        def _counting_load(run_dir: Path) -> Any:
+            parses["n"] += 1
+            return real_load(run_dir)
+
+        monkeypatch.setattr(oc, "load_manifest", _counting_load)
+        found = oc.discover_runs(tmp_path / "sweeps", limit=2)
+        assert [info.run_id for info in found] == ["r-4", "r-3"]
+        assert parses["n"] == 2
+
+
 # ── fixture root resolution ─────────────────────────────────────────────
 
 
@@ -1419,20 +2083,139 @@ class TestTradeStoreReader:
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2
 
-    def test_unstattable_top100_computes_fresh_uncached(
+    def test_absent_top100_computes_fresh_uncached(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A None revision computes fresh and caches NOTHING (lake_revision law)."""
+        """An ABSENT top100 (probe answered: no file) computes fresh, caches NOTHING.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 narrows the old blanket None-revision
+        doctrine to the absent arm only — a deleted/never-written artifact
+        must never be served from the memo (no stale illusion).
+        """
         results_root = _rebind_run(tmp_path)
         reader = oc.TradeStoreReader(results_root)
-        monkeypatch.setattr(oc, "artifact_revision", lambda _path: None)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, False))
         page = reader.page("r-x", 1, offset=0, limit=5)
-        # revision None on top100 → fresh parse; then the stamp probe also
-        # reads None → the awaiting sidecars arm (nothing fabricated).
+        # absent top100 → fresh parse of the (missing) artifact → awaiting.
         assert page.status == "awaiting"
         assert reader.parse_count == 1
         reader.page("r-x", 1, offset=0, limit=5)
         assert reader.parse_count == 2  # nothing was cached
+
+    def test_top100_probe_outage_serves_last_known_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe OUTAGE serves the memoised top100 (labelled) — no re-parse storm.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (fails-before: the pre-change reader
+        re-parsed the whole artifact on EVERY trades-page request while the
+        stat probe was down).
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        assert reader.parse_count == 1  # memo primed pre-outage
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        for _ in range(3):
+            page = reader.page("r-x", 1, offset=0, limit=5)
+            assert page.status == "ok"
+            assert "top100 revision probe outage — serving last-known" in page.detail
+        assert reader.parse_count == 1  # the memo served every outage page
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        clean = reader.page("r-x", 1, offset=0, limit=5)
+        assert clean.status == "ok"
+        assert "outage" not in clean.detail  # the label clears on recovery
+        assert reader.parse_count == 1  # same revision → the memo still holds
+
+    def test_top100_outage_note_rides_a_served_corrupt_memo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A last-known CORRUPT top100 served under outage carries BOTH notes."""
+        results_root = tmp_path / "sweeps"
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write(run_dir / oc.TOP100_FILENAME, "{not json")
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "corrupt"
+        assert reader.parse_count == 1  # corrupt verdict memoised per revision
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "corrupt"
+        assert "top100 revision probe outage — serving last-known" in page.detail
+        assert ";" in page.detail  # the corrupt detail is kept, the note appended
+        assert reader.parse_count == 1  # served from the memo — no re-parse
+
+    def test_top100_probe_outage_without_memo_parses_fresh_uncached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An outage with NO primed memo falls back to the fresh uncached parse."""
+        results_root = _rebind_run(tmp_path)
+        reader = oc.TradeStoreReader(results_root)
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        page = reader.page("r-x", 1, offset=0, limit=5)
+        assert page.status == "awaiting"
+        assert reader.parse_count == 1
+        reader.page("r-x", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # nothing cached — no memo to serve
+
+    def test_top100_outage_memo_for_a_different_path_is_not_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The memo serves ONLY its own path under outage — never a foreign run's."""
+        results_root = _rebind_run(tmp_path)
+        _rebind_run(tmp_path, run_id="r-y")
+        reader = oc.TradeStoreReader(results_root)
+        reader.page("r-x", 1, offset=0, limit=5)  # memo primed for r-x
+        assert reader.parse_count == 1
+        monkeypatch.setattr(oc, "artifact_probe", lambda _path: oc.ArtifactProbe(None, True))
+        reader.page("r-y", 1, offset=0, limit=5)
+        assert reader.parse_count == 2  # r-y parsed fresh — r-x's memo not served
+
+    def test_top100_outage_warns_once_per_outage_and_logs_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reader's OutageGate WARNs once per outage per path + recovery INFO.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 reconciled onto #1406's ONE
+        ``OutageGate`` mechanism: no route gate covers this reader, so it owns
+        a gate keyed on the top100 path — ``oneclick.probe_outage`` fires on
+        the FIRST outage poll only, ``oneclick.probe_recovered`` on the flip
+        back, never per poll.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.page("r-x", 1, offset=0, limit=5).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(3):
+                reader.page("r-x", 1, offset=0, limit=5)
+        warns = [e for e in logs if e["event"] == "oneclick.probe_outage"]
+        assert len(warns) == 1  # once per outage, never per poll
+        assert warns[0]["coordinate"] == str(run_dir / oc.TOP100_FILENAME)
+        assert warns[0]["last_known"] is True
+        monkeypatch.setattr(oc, "artifact_probe", real_probe)
+        with structlog.testing.capture_logs() as logs:
+            reader.page("r-x", 1, offset=0, limit=5)
+        assert any(e["event"] == "oneclick.probe_recovered" for e in logs)
 
 
 _EQUITY_POINTS = (
@@ -1501,6 +2284,33 @@ class TestEquityPage:
         assert page.total == 3
         clamped = reader.equity_page("r-x", 1, offset=-5, limit=100)
         assert len(clamped.rows) == 3  # negative offset clamps to 0
+
+    def test_equity_page_names_a_top100_probe_outage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The equity page's detail carries the top100 outage note too.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 (club reconcile): the note threads
+        through the SHARED ``_resolve_sidecars`` 3-tuple, so BOTH pages name
+        a last-known top100 serve — never a silent stale resolution.
+        """
+        pytest.importorskip("polars")
+        results_root = _rebind_run(tmp_path)
+        run_dir = oc.runs_root(results_root) / "r-x"
+        _write_sidecars(run_dir, equity=_EQUITY_POINTS)
+        reader = oc.TradeStoreReader(results_root)
+        assert reader.equity_page("r-x", 1, offset=0, limit=100).status == "ok"
+        real_probe = oc.artifact_probe
+
+        def _outage_on_top100(path: Path) -> oc.ArtifactProbe:
+            if path.name == oc.TOP100_FILENAME:
+                return oc.ArtifactProbe(None, True)
+            return real_probe(path)
+
+        monkeypatch.setattr(oc, "artifact_probe", _outage_on_top100)
+        page = reader.equity_page("r-x", 1, offset=0, limit=100)
+        assert page.status == "ok"
+        assert "top100 revision probe outage — serving last-known" in page.detail
 
     def test_limit_beyond_the_equity_cap_is_clamped_and_named(self, tmp_path: Path) -> None:
         results_root = _rebind_run(tmp_path)
@@ -1590,3 +2400,114 @@ class TestEquityPage:
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert reader.equity_page("r-x", 1, offset=0, limit=2).status == "ok"
         assert calls["n"] == 2  # nothing was cached (lake_revision doctrine)
+
+
+from structlog.testing import capture_logs  # noqa: E402
+
+
+def _cascade_obj(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "status": "pass",
+        "rejected_at": None,
+        "detail": "survived all Stage-4 filters",
+        "cascade_composite": 1.5,
+        "provisional": False,
+        "cpcv_pass_rate": 0.75,
+        "survivor_rank": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestBridgeCascade:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the per-row cascade bridge."""
+
+    def test_absent_key_passes_through_untouched(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert "cascade" not in result.rows[0]
+
+    @pytest.mark.parametrize(
+        ("status", "expected_text"),
+        [
+            ("pass", "PASS"),
+            ("provisional_pass", "PASS (provisional)"),
+            ("fail", "FAIL @ cpcv"),
+            ("not_validated", "not validated"),
+        ],
+    )
+    def test_valid_statuses_stamped_with_server_text(
+        self, tmp_path: Path, status: str, expected_text: str
+    ) -> None:
+        obj = _cascade_obj(status=status)
+        if status == "fail":
+            obj["rejected_at"] = "cpcv"
+        if status == "not_validated":
+            obj = {"status": "not_validated", "reason": "no_report"}
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        cascade = result.rows[0]["cascade"]
+        assert cascade["status_text"] == expected_text
+        # The raw fields ride through untouched beside the stamp.
+        assert cascade["status"] == status
+
+    def test_actionable_reasons_carry_their_suffix(self, tmp_path: Path) -> None:
+        rows = [
+            _top100_row(1, cascade={"status": "not_validated", "reason": "sweep_id_mismatch"}),
+            _top100_row(2, cascade={"status": "not_validated", "reason": "duplicate_candidate_id"}),
+        ]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.rows[0]["cascade"]["status_text"] == "not validated · sweep_id_mismatch"
+        assert result.rows[1]["cascade"]["status_text"] == "not validated · duplicate verdict"
+
+    @pytest.mark.parametrize(
+        "obj",
+        [
+            "not-a-dict",
+            {"status": "GREEN"},
+            {"status": 7},
+            {"status": "pass", "detail": 42},
+            {"status": "pass", "provisional": "yes"},
+            {"status": "pass", "cpcv_pass_rate": "high"},
+            {"status": "pass", "cascade_composite": True},
+            {"status": "pass", "survivor_rank": 1.5},
+            {"status": "not_validated", "reason": 9},
+            {"status": "fail", "rejected_at": 3},
+            None,
+        ],
+    )
+    def test_invalid_object_dropped_and_named_partial(self, tmp_path: Path, obj: Any) -> None:
+        _write_top100(tmp_path, [_top100_row(1, cascade=obj)])
+        with capture_logs() as logs:
+            result = oc.load_top100(tmp_path)
+        # Row KEPT, key DROPPED, degrade NAMED — never a fabricated verdict.
+        assert result.status == "partial"
+        assert "invalid cascade object" in result.detail
+        assert "cascade" not in result.rows[0]
+        assert [e for e in logs if e["event"] == "oneclick.cascade_object_dropped"]
+
+    def test_root_cascade_join_passthrough(self, tmp_path: Path) -> None:
+        meta = {"state": "joined", "sweep_id": "s" * 64, "n_input": 4, "n_survived": 2}
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join=meta)
+        result = oc.load_top100(tmp_path)
+        assert result.cascade_join == meta
+
+    def test_non_object_root_meta_reads_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)], cascade_join="junk")
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_pre_change_doc_defaults_none(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        assert oc.load_top100(tmp_path).cascade_join is None
+
+    def test_row_cap_partial_detail_wins_over_cascade_drop(self, tmp_path: Path) -> None:
+        rows = [_top100_row(i + 1, cascade="junk") for i in range(oc.TOP100_ROW_CAP + 1)]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        # The oversized-cap detail wins the slot; the drops still happened.
+        assert "beyond the" in result.detail
+        assert all("cascade" not in row for row in result.rows)

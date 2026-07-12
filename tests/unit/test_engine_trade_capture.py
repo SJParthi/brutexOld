@@ -12,6 +12,7 @@ fresh signal after an exit re-enters, no cooldown, until the 15:20 wall).
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,8 +23,10 @@ from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.minute_path import MinuteIndex, PathStatus
 from brutex.engine.reference_series import TradeReferenceStamper
+from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow
 from brutex.engine.trade_capture import (
+    _FULL_RANGE_EXIT_REASONS,
     CapturedTrade,
     TradeCaptureError,
     _check_detail_alignment,
@@ -232,6 +235,64 @@ class TestCaptureParityPass:
         assert third.vix_exit is None  # no VIX bar at 15:20 — honest NULL
         assert capture.vix_missing_trades == 1
 
+    def test_result_row_trio_cross_checks_depth_capture_stamps(self) -> None:
+        """The merge-train binding cross-check (PR #1274 coordinator note 3).
+
+        DEC-VIX-STAMP-WIRE-001 ∩ DEC-SWEEP-RESULTS-DEPTH-001: for the SAME
+        combo over ONE India-VIX series, the launch side's persisted
+        ``ResultRow`` trio (``aggregate_trade_vix`` over the stamped oracle
+        trades) must agree with the depth pass's captured per-trade stamps —
+        both surfaces consume the ONE :class:`TradeReferenceStamper`, and this
+        pin makes a derivation drift between them impossible to land silently.
+        Uses the partial-miss VIX series so the ``None``-skip law is
+        cross-checked too.
+        """
+        vix_bars = [
+            _bar(9, 16, "15.25", "15.25", "15.25", "15.25"),
+            _bar(9, 17, "15.30", "15.30", "15.30", "15.30"),
+            _bar(9, 19, "15.40", "15.40", "15.40", "15.40"),
+            _bar(9, 20, "15.45", "15.45", "15.45", "15.45"),
+            _bar(15, 18, "15.50", "15.50", "15.50", "15.50"),
+        ]
+        stamper = TradeReferenceStamper.from_vix_bars(vix_bars)
+        # Launch side: the stamped oracle trades → the ResultRow trio fold.
+        signals = [bool(b & _MASK == _MASK) for b in _BAR_BITS]
+        trades = simulate_trades(
+            _BARS,
+            signals,
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=_SL,
+            take_profit_paisa=_TP,
+            reference_stamper=stamper,
+        )
+        trio = aggregate_trade_vix(trades)
+        # Depth side: the SAME combo captured with the SAME stamper.
+        capture = capture_combo(
+            _row(),
+            bars=_BARS,
+            bar_bits=_BAR_BITS,
+            tf_minutes=1,
+            sl_paisa=_SL,
+            tp_paisa=_TP,
+            minute_index=None,
+            stamper=stamper,
+        )
+        assert capture.parity_ok is True
+        # Per-trade stamps agree pairwise (entry AND exit, None included).
+        assert [(t.vix_at_entry, t.vix_at_exit) for t in trades] == [
+            (c.vix_entry, c.vix_exit) for c in capture.trades
+        ]
+        # The persisted trio equals an INDEPENDENT fold over the capture's
+        # stamps (None-skipped, mean clamped into [min, max] like the ONE law).
+        levels = [
+            float(v) for c in capture.trades for v in (c.vix_entry, c.vix_exit) if v is not None
+        ]
+        assert levels, "teeth: the fixture must stamp at least one level"
+        low, high = min(levels), max(levels)
+        mean = min(max(math.fsum(levels) / len(levels), low), high)
+        assert trio == (mean, low, high)
+
     def test_zero_trade_combo_first_class(self) -> None:
         # A mask bit that never fires → zero trades everywhere; parity holds.
         row = _row(total=0, winning=0, losing=0, net=0)
@@ -317,6 +378,132 @@ class TestReentryPinAsFound:
             t.entry_ts.astimezone(IST).date() == t.exit_ts.astimezone(IST).date()
             for t in capture.trades
         )
+
+
+# ── session_gap exit-bar full-range fold (refuter round 3 CM4) ───────────────
+
+_GAP_DAY2 = date(2024, 1, 3)
+
+
+def _gap_ts(hh: int, mm: int, *, day: date = _DAY) -> datetime:
+    return datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST).astimezone(UTC)
+
+
+def _gap_bar(hh: int, mm: int, o: str, h: str, lo: str, c: str, *, day: date = _DAY) -> CandleBar:
+    return CandleBar(
+        timestamp=_gap_ts(hh, mm, day=day),
+        open=Decimal(o),
+        high=Decimal(h),
+        low=Decimal(lo),
+        close=Decimal(c),
+        volume=0,
+        open_interest=None,
+    )
+
+
+#: Session-gap fixture: day-1 (2024-01-02) is tail-holed at 09:17 — its stored
+#: bars never reach a forced-exit bar — so day-2's first bar trips the (A2)
+#: open-position session guard and the trade closes RETROACTIVELY at day-1's
+#: last stored bar (09:17) CLOSE under the ``session_gap`` reason
+#: (DEC-TRADESIM-OPEN-SESSION-GUARD-001). The 09:17 EXIT bar carries a WIDE
+#: range (high 101.00 / low 99.00 around the 100.00 entry fill), so the fold
+#: law has teeth: the walker manages 09:17 as an ORDINARY in-position bar —
+#: folding its FULL high/low into MFE/MAE — before the retroactive close
+#: prices at its close, so the 1m mirror must fold the exit bar IN FULL too
+#: (a ``session_gap`` fill is the CLOSE of a fully-folded bar, mechanically
+#: identical to ``end_of_data`` — the ``_FULL_RANGE_EXIT_REASONS`` law).
+_GAP_BARS = [
+    _gap_bar(9, 15, "100", "100", "100", "100"),  # signal arms
+    _gap_bar(9, 16, "100.00", "100.10", "99.95", "100.05"),  # entry @ open 100.00
+    _gap_bar(9, 17, "100.00", "101.00", "99.00", "100.20"),  # exit bar — WIDE range
+    _gap_bar(9, 15, "100", "100", "100", "100", day=_GAP_DAY2),  # boundary bar
+]
+_GAP_BAR_BITS = [1, 0, 0, 0]
+
+
+def _gap_row() -> ResultRow:
+    # ONE BUY trade: entry fill 10_000 paisa (09:16 open); session_gap close
+    # at day-1 09:17's CLOSE 10_020 paisa → pnl +20; 1 winner, 0 losers.
+    return ResultRow(
+        run_id=_RUN_ID,
+        instrument="NIFTY",
+        tf="1minute",
+        direction="bull",
+        mode="B",
+        mask_bits=_MASK,
+        net_pnl_paisa=20,
+        gross_profit_paisa=20,
+        gross_loss_paisa=0,
+        max_drawdown_paisa=0,
+        expectancy_paisa=0,
+        total_trades=1,
+        winning_trades=1,
+        losing_trades=0,
+        sharpe_ratio=0.0,
+        sortino_ratio=0.0,
+        calmar_ratio=0.0,
+        profit_factor=0.0,
+        win_rate=0.0,
+        max_drawdown_pct=0.0,
+        avg_entry_price=Decimal("100.00"),
+        avg_exit_price=Decimal("100.20"),
+    )
+
+
+class TestSessionGapExitBarFullRangeFold:
+    """The ``session_gap`` member of ``_FULL_RANGE_EXIT_REASONS`` has behavioral teeth.
+
+    Refuter round 3 CM4: dropping ``"session_gap"`` from the frozenset
+    (``trade_capture.py:98``) survived the whole suite — no capture-level test
+    drove a ``session_gap`` trade WITH a minute index whose exit bar's range
+    extends beyond its open. Under that mutant ``trade_excursions_1m`` folds
+    the exit minute OPEN-ONLY, silently UNDERSTATING ``mae_1m``/``mfe_1m``
+    (5/10 here instead of the true 100/100).
+    """
+
+    def test_session_gap_exit_bar_folds_full_1m_range(self) -> None:
+        capture = capture_combo(
+            _gap_row(),
+            bars=_GAP_BARS,
+            bar_bits=_GAP_BAR_BITS,
+            tf_minutes=1,
+            sl_paisa=None,  # Mode B — no SL/TP leg fires on the wide exit bar
+            tp_paisa=None,
+            minute_index=MinuteIndex.from_bars(_GAP_BARS),
+            stamper=None,
+        )
+        assert capture.parity_ok is True
+        (trade,) = capture.trades
+        assert trade.exit_reason == "session_gap"
+        assert trade.exit_ts == _gap_ts(9, 17)  # day-1's LAST stored bar
+        assert trade.pnl_paisa == 20  # close 10_020 − entry 10_000
+        # Hand-derived walker (TF-path) excursions from the entry fill 10_000:
+        #   09:16 (entry bar, full range): fav = 10_010 − 10_000 = 10;
+        #                                  adv = 10_000 − 9_995 = 5.
+        #   09:17 (exit bar, managed as an ordinary bar BEFORE the retroactive
+        #          close): fav = 10_100 − 10_000 = 100;
+        #                  adv = 10_000 − 9_900 = 100.
+        # → walker mae = max(5, 100) = 100, mfe = max(10, 100) = 100.
+        assert trade.mae_paisa == 100
+        assert trade.mfe_paisa == 100
+        # THE MUTANT KILLER: the 1m fold must mirror the walker's fold law —
+        # the session_gap EXIT bar contributes its FULL 1m range, so at tf==1m
+        # the 1m pair equals the walker pair bit-for-bit. Under the CM4 mutant
+        # (session_gap dropped from _FULL_RANGE_EXIT_REASONS) the exit minute
+        # contributes only its OPEN (fav 0 / adv 0) and the pair understates
+        # to mae_1m=5 / mfe_1m=10.
+        assert trade.path_1m_status is PathStatus.OK
+        assert trade.mae_1m_paisa == 100 == trade.mae_paisa
+        assert trade.mfe_1m_paisa == 100 == trade.mfe_paisa
+
+    def test_session_gap_is_a_full_range_exit_reason(self) -> None:
+        # Frozenset contents pin: the walker itself folds the session_gap exit
+        # bar in full (it is managed as an ordinary bar before the retroactive
+        # close prices at its CLOSE — the finish()/end_of_data pricing class),
+        # so the 1m mirror must list it beside end_of_data
+        # (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
+        assert "session_gap" in _FULL_RANGE_EXIT_REASONS
+        assert "end_of_data" in _FULL_RANGE_EXIT_REASONS
 
 
 class TestBelts:

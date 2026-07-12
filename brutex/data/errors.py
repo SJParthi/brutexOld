@@ -95,6 +95,43 @@ class LakeWriteHalt(DataLakeError):
         return (type(self), (self.reason,))
 
 
+class MarketHoursHalt(BruteXError):
+    """A vendor pull was HALTED because it entered the NSE market-hours window.
+
+    DEC-GROWW-MARKET-HOURS-GUARD-001 (MIGRATION.md #1692). The Groww access token is
+    SHARED with TickVault's live feed (§2 Rule 6 — one TOTP token, one 500/min
+    governor). A nightly BruteX pull that runs into the trading session competes for
+    that budget and 429-rejects TickVault's LIVE feed. So when the per-window guard
+    observes that the clock has crossed into ``[08:45, 15:35)`` IST on a trading day,
+    it raises this — a PULL-WIDE stop (a member of BOTH ingest spines'
+    ``_GLOBAL_STOP_ERRORS``): it propagates past the per-symbol / per-contract
+    quarantine and halts the pull GRACEFULLY. The durable window ledger (flushed
+    per-window via ``make_live_ledger_flush``) leaves PLANNED / FAILED windows, so the
+    interrupted pull is RESUMABLE on the next (out-of-hours) run — never a crash, never
+    a half-written partition, never fabricated data (Golden Rule #1). It is recognised
+    by :func:`~brutex.dashboard.pull_jobs.is_pull_halt`, so an escape to the dashboard
+    job layer fires the CRITICAL Telegram pull-halt alert like every other global stop.
+
+    NOT a :class:`DataLakeError` — this is a pull-CONTROL stop, not a lake-write
+    failure — but it subclasses :class:`~brutex.models.BruteXError` so it satisfies the
+    ``tuple[type[BruteXError], ...]`` global-stop membership. ``reason`` is a non-secret
+    machine token, always ``"market_hours"``.
+    """
+
+    def __init__(self, reason: str = "market_hours") -> None:
+        super().__init__(f"pull halted: {reason}")
+        self.reason = reason
+
+    def __reduce__(self) -> tuple[type[MarketHoursHalt], tuple[str]]:
+        """Pickle as constructor args — REQUIRED for a worker/process-pool crossing.
+
+        Mirrors :meth:`LakeWriteHalt.__reduce__`: the default ``BaseException`` reduce
+        re-feeds the FORMATTED ``args`` to ``__init__``, doubling the message; passing
+        the raw ``reason`` keeps a round-tripped copy byte-identical.
+        """
+        return (type(self), (self.reason,))
+
+
 class PartitionLockTimeout(DataLakeError):
     """A cross-process partition write-lock could not be acquired within the deadline.
 

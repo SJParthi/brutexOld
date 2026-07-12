@@ -20,12 +20,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from brutex.data.fno_symbol import parse_fno_symbol
+from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-#: The base intervals the pull fetches directly from the vendor; anything else is a
-#: derived timeframe whose remedy is materialization, not a re-pull.
-_FETCHED_INTERVALS: frozenset[str] = frozenset({"1minute", "1day"})
+#: The base interval the pull fetches directly from the vendor; anything else is a
+#: derived timeframe whose remedy is materialization, not a re-pull. ``1minute``
+#: ONLY — ``1day`` is DERIVED from the stored 1-minute since
+#: DEC-1MINUTE-ONLY-DERIVE-1DAY-001 (#853), written by the pipeline's automatic
+#: FINAL prebuild stage (DEC-PIPELINE-AUTOPREBUILD-001 #1145), so a missing
+#: ``1day`` slice remediates like any other derived TF (the stale
+#: ``{"1minute", "1day"}`` taxonomy corrected by
+#: DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
+_FETCHED_INTERVALS: frozenset[str] = frozenset({"1minute"})
+
+
+def _is_fno_symbol(symbol: str) -> bool:
+    """True iff *symbol* remediates via the F&O pull (a contract or the alias).
+
+    The NIFTY-futures series alias (ADR-0012 /
+    DEC-FUTURES-ADDRESSING-PIN-001) and any parseable F&O contract
+    ``groww_symbol`` pull through the pipeline's F&O phase — telling an
+    operator to "pull the symbol's spot history" for one would be a WRONG
+    remedy (Golden Rule #1).
+    """
+    return symbol == NIFTY_FUTURES_SERIES_SYMBOL or parse_fno_symbol(symbol) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +76,19 @@ class PreflightReport:
         Derived timeframes are missing because the pipeline's automatic
         FINAL prebuild stage never ran over the symbol
         (DEC-PIPELINE-AUTOPREBUILD-001 — derived data is written ONLY by
-        that stage; the remedy is a full-pipeline pull); fetched intervals
-        (``1minute``/``1day``) are missing because the pull never covered
-        them (the remedy is a pull).
+        that stage; the remedy is a full-pipeline pull); the fetched
+        ``1minute`` interval is missing because the pull never covered it
+        (the remedy is a pull — the F&O pull for an F&O contract / the
+        NIFTY-futures series alias, the spot pull for a spot symbol;
+        DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
         """
         derived = sorted({i for _, i in self.missing if i not in _FETCHED_INTERVALS})
-        fetched = sorted({i for _, i in self.missing if i in _FETCHED_INTERVALS})
+        fetched_fno = sorted(
+            {i for s, i in self.missing if i in _FETCHED_INTERVALS and _is_fno_symbol(s)}
+        )
+        fetched_spot = sorted(
+            {i for s, i in self.missing if i in _FETCHED_INTERVALS and not _is_fno_symbol(s)}
+        )
         lines: list[str] = []
         if derived:
             lines.append(
@@ -68,9 +96,15 @@ class PreflightReport:
                 "dashboard's ▶ Pull · full pipeline — its automatic final prebuild "
                 "stage writes every derived timeframe (DEC-PIPELINE-AUTOPREBUILD-001)"
             )
-        if fetched:
+        if fetched_fno:
             lines.append(
-                f"fetched intervals with no bars ({', '.join(fetched)}): pull the "
+                f"fetched intervals with no bars ({', '.join(fetched_fno)}): pull the "
+                "F&O history first (dashboard ▶ Pull · full pipeline — its F&O phase "
+                "pulls every contract; the prebuild then derives its timeframes)"
+            )
+        if fetched_spot:
+            lines.append(
+                f"fetched intervals with no bars ({', '.join(fetched_spot)}): pull the "
                 "symbol's spot history first (dashboard Pull / `brutex fetch`)"
             )
         return "; ".join(lines)
@@ -153,3 +187,35 @@ def preflight_derived_freshness(verdicts: Mapping[tuple[str, str], str]) -> Fres
     """
     stale = tuple(sorted(pair for pair, verdict in verdicts.items() if verdict != "fresh"))
     return FreshnessReport(stale=stale, checked=len(verdicts))
+
+
+def one_day_trade_law_note(intervals: Sequence[str]) -> str | None:
+    """One honest launch note when a requested interval is the ``1day`` grid.
+
+    HONEST limit (Golden Rule #10, review round-8 finding 1): under the
+    intraday-only trade law the ``1day`` grid is structurally TRADE-less —
+    every derived ``1day`` bar is midnight-IST-stamped, so (a) the next-bar
+    entry fill always lands on a LATER IST session date and is dropped by the
+    trade sim's overnight-gap rule, and (b) no ``1day`` bar ever reaches the
+    15:20 forced-exit window — every mask yields zero trades by construction
+    and ``MIN_TRADES`` gates every combo out. The grid still builds real
+    Stage-1A ``bar_bits`` (the D12 ``apply_1day_mask`` consumers — see
+    :func:`brutex.engine.stage1a.apply_1day_mask_for`), so a ``1day`` launch
+    is not refused; it is NAMED so the operator never mistakes an empty
+    ``1day`` leaderboard for a data defect. Real ``1day`` trade semantics
+    are a named follow-up (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008).
+
+    Returns the note when ``"1day"`` is among *intervals*, else ``None``.
+    Pure, O(#intervals).
+    """
+    if "1day" not in intervals:
+        return None
+    return (
+        "NOTE: interval '1day' ranks NOTHING under the intraday-only trade law — "
+        "every 1day bar is midnight-IST-stamped, so the next-bar fill lands on a "
+        "later IST session date (dropped by the overnight-gap rule) and no 1day "
+        "bar reaches the 15:20 forced exit: zero trades by construction, "
+        "MIN_TRADES gates every combo out. The 1day tuples still build bar_bits "
+        "(the D12 mask consumers); real 1day trade semantics are a named "
+        "follow-up (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008)."
+    )

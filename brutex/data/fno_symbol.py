@@ -110,10 +110,12 @@ class FnoSymbolParts:
 def expiry_year_in_window(year: int) -> bool:
     """Return ``True`` iff *year* is a sane F&O expiry calendar year.
 
-    The ONE window predicate (CLAUDE.md §11 COMMON) shared by
-    :func:`parse_expiry_token` and the shape-stricter futures-movers twin
-    (:mod:`brutex.dashboard.movers_futures`), so the two parsers can never again
-    diverge on which resolved years are junk (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
+    The ONE window predicate (CLAUDE.md §11 COMMON) applied by
+    :func:`parse_expiry_token` — since DEC-MOVERS-FUTURES-HYPHEN-PARSE-001
+    (MIGRATION.md #1646) the futures movers' formerly shape-stricter local twin
+    is DELETED and :mod:`brutex.dashboard.movers_futures` delegates to this
+    module's canonical grammar, so there is exactly ONE parser and ONE junk-year
+    window (DEC-FNO-EXPIRY-YEAR-PIVOT-001).
 
     Parameters
     ----------

@@ -138,13 +138,17 @@ _DEFAULT_PRIOR_N: Final[int] = 3
 #: snap rule has one definition (CLAUDE.md §11 COMMON).
 _HLC3_DIVISOR: Final[Decimal] = Decimal(3)
 
-#: Engine-injected contract/session key fed to ``trading_core.VwapState``. B1 (this
-#: PR) wires VWAP + market-structure with a CONSTANT key, so the VWAP state resets
-#: only on the IST-date change (its ``session_day`` argument) — matching the
-#: existing day-rollover rule the rest of this builder applies. The roll-aware,
-#: per-contract ``session_key`` (B2 — reset on a futures roll, not only a date
-#: change) is a SEPARATE follow-up; until then the constant keeps behaviour
-#: identical for the continuous spot-index series the engine sweeps.
+#: Engine-injected contract/session key fed to :class:`VwapState`. The SPOT
+#: path (``roll_schedule=None``) feeds this CONSTANT key, so :class:`VwapState`
+#: resets only on the IST-date change (its ``session_day`` argument) —
+#: byte-identical to the pre-B2 behaviour for the continuous spot-index series.
+#: B2 is CLOSED (DEC-STAGE1A-ROLL-RESET-001): the futures track passes a
+#: ``roll_schedule`` of owning-expiry day-ordinals and the per-bar key becomes
+#: the owning contract's expiry ordinal — a key CHANGE is a roll boundary and
+#: triggers the TOTAL per-contract hard reset (:meth:`_roll_to_new_contract`),
+#: never only the VWAP key (ADR-0012 D11: every session/level indicator
+#: recomputes per-contract). A 2020+ date ordinal (≈ 737,000+) can never
+#: collide with this constant 0 (also the Rust cold-sentinel key).
 _DEFAULT_SESSION_KEY: Final[int] = 0
 
 
@@ -390,6 +394,31 @@ class Stage1AMatrixBuilder:
         (DEFAULT-PRESERVATION — the goldens still pin the same matrix). Only the
         Group-4 Fib levels move with this anchor; the pivot / PDH / day-type
         groups stay prev-day-anchored regardless (R-2).
+    roll_schedule
+        ADR-0012 NIFTY-futures roll schedule (DEC-STAGE1A-ROLL-RESET-001):
+        strictly increasing owning-expiry day-ordinals from
+        :func:`brutex.data.futures_series.resolve_futures_series`. Per bar the
+        session key becomes the first schedule entry ``>=`` the bar's IST day
+        ordinal (the ``resolve_near_month`` ``>=`` law over the vendor
+        schedule); a key CHANGE triggers the TOTAL per-contract hard reset
+        (:meth:`_roll_to_new_contract`); a bar beyond the last entry raises
+        :class:`ValueError` (loader/schedule desync — never a silent
+        constant-key fallback). ``None`` (the default — every spot caller)
+        feeds the constant :data:`_DEFAULT_SESSION_KEY`, byte-identical to the
+        pre-B2 builder.
+    apply_1day_mask
+        D12 honesty flag for a volume-bearing futures ``1day`` grid: when True
+        the FINAL mask is ANDed with
+        :data:`brutex.vocabulary.bits.APPLIES_TO_1DAY_MASK` (clears exactly
+        the time-of-day bits 44-47 + the VWAP-position bits 52-53). Default
+        False — spot is deliberately NOT flipped (its 1day ToD-bit behaviour
+        is unaudited; the spot-side unification is a named follow-up).
+
+    Raises
+    ------
+    ValueError
+        If *roll_schedule* is an empty tuple or not strictly increasing
+        non-negative day ordinals.
 
     Notes
     -----
@@ -405,10 +434,29 @@ class Stage1AMatrixBuilder:
         proximity: ProximityParams | None = None,
         prior_n: int = _DEFAULT_PRIOR_N,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        *,
+        roll_schedule: tuple[int, ...] | None = None,
+        apply_1day_mask: bool = False,
     ) -> None:
         self._proximity = proximity if proximity is not None else ProximityParams()
+        self._prior_n = prior_n  # stored for the roll-reset re-construction (D11)
         self._prior_history = PriorBarHistory(prior_n=prior_n)
         self._fib_anchor = fib_anchor
+        # ADR-0012 roll schedule (DEC-STAGE1A-ROLL-RESET-001): sorted owning-
+        # expiry day-ordinals for the NIFTY-futures track. None (the default —
+        # every spot caller) keeps the constant-key path byte-identical.
+        if roll_schedule is not None:
+            if not roll_schedule:
+                raise ValueError("Stage1AMatrixBuilder: roll_schedule must be non-empty")
+            if list(roll_schedule) != sorted(set(roll_schedule)) or roll_schedule[0] < 0:
+                raise ValueError(
+                    "Stage1AMatrixBuilder: roll_schedule must be strictly increasing "
+                    "non-negative day ordinals"
+                )
+        self._roll_schedule = roll_schedule
+        self._roll_cursor = 0
+        self._current_session_key: int | None = None
+        self._apply_1day_mask = apply_1day_mask
         self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
         self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
         self._day_extremes = DayExtremesState()
@@ -500,6 +548,32 @@ class Stage1AMatrixBuilder:
         low_paisa = _price_to_paisa(bar.low)
         close_paisa = _price_to_paisa(bar.close)
 
+        # Per-bar roll key (DEC-STAGE1A-ROLL-RESET-001) — O(1) amortized: a
+        # monotone cursor over the sorted schedule (bars are chronological per
+        # the stream contract; <= C ≈ 80 total advances). Runs BEFORE the day
+        # rollover so the contract reset composes with `_roll_to_new_day` (a
+        # boundary can only fall on an IST-day change — ownership is
+        # date-granular).
+        if self._roll_schedule is None:
+            session_key = _DEFAULT_SESSION_KEY  # spot: byte-identical constant 0
+        else:
+            day_ordinal = bar_day.toordinal()
+            while (
+                self._roll_cursor < len(self._roll_schedule)
+                and self._roll_schedule[self._roll_cursor] < day_ordinal
+            ):
+                self._roll_cursor += 1  # advance past expired contracts
+            if self._roll_cursor >= len(self._roll_schedule):
+                raise ValueError(
+                    f"Stage1AMatrixBuilder: bar at {bar.timestamp.isoformat()} (IST day "
+                    f"{bar_day}) is beyond the last roll_schedule expiry — loader/schedule "
+                    "desync (a genuine bug, never a silent constant-key fallback)"
+                )
+            session_key = self._roll_schedule[self._roll_cursor]  # owning expiry ORDINAL
+            if self._current_session_key is not None and session_key != self._current_session_key:
+                self._roll_to_new_contract()  # ADR-0012 D11: TOTAL hard reset
+            self._current_session_key = session_key
+
         if self._today_ohlc is None or bar_day != self._current_day:
             today_ohlc = self._roll_to_new_day(
                 bar_day, open_paisa, high_paisa, low_paisa, close_paisa
@@ -541,7 +615,7 @@ class Stage1AMatrixBuilder:
             typical_paisa,
             bar.volume,
             is_pre_open(ts_ist.time()),
-            _DEFAULT_SESSION_KEY,
+            session_key,
             bar_day.toordinal(),
             tod_seconds,
         )
@@ -606,9 +680,45 @@ class Stage1AMatrixBuilder:
             # are — both derive from the same single prior day).
             mask &= _NON_FIB_MASK
 
+        if self._apply_1day_mask:
+            # D12 honesty for a volume-bearing 1day grid (ADR-0012 /
+            # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): each 1day bar is its own
+            # VWAP session, so the intraday-only bits — time-of-day 44-47 +
+            # VWAP-position 52-53 — are HONESTLY cleared via the vocabulary's
+            # own APPLIES_TO_1DAY_MASK (one bit-set source of truth).
+            mask &= B.APPLIES_TO_1DAY_MASK
+
         # Record this bar's flag AFTER evaluation (close == open → bearish).
         self._prior_history.update(close_paisa > open_paisa)
         return mask
+
+    def _roll_to_new_contract(self) -> None:
+        """ADR-0012 D11 hard reset — the roll boundary is a per-contract series restart.
+
+        "Every session/level indicator recomputes per-contract"
+        (``futures_roll.py`` roll policy). VWAP would also reset via its own
+        key-change branch (``vwap.rs``, pinned by the twin-state golden); it is
+        recreated anyway so the invariant "post-roll state == fresh-builder
+        state" is EXACT rather than argued — the roll-segmentation equivalence
+        oracle depends on it. Clearing ``_current_day`` / ``_today_ohlc``
+        forces the EXISTING day-rollover branch to seed a pristine day-1 state
+        on this bar, and the cleared ``_prev_day_ohlc`` / ``_daily_history`` /
+        ``_anchors`` make the first post-roll day carry the EXISTING
+        ``_NON_ANCHOR_MASK`` clear (the honest ADR-0012 §4.5 #6 cold-start
+        semantics, reusing the machinery — a level is never compared across
+        the basis gap, DEC-STAGE1A-ROLL-RESET-001).
+        """
+        self._vwap = trading_core.VwapState()
+        self._structure = trading_core.MarketStructureState()  # no FFI reset() exists
+        self._ema_fast = EMAState.new(_EMA_FAST_PERIOD)
+        self._ema_slow = EMAState.new(_EMA_SLOW_PERIOD)
+        self._prior_history = PriorBarHistory(prior_n=self._prior_n)
+        self._day_extremes = DayExtremesState()
+        self._current_day = None  # forces _roll_to_new_day on this bar
+        self._today_ohlc = None
+        self._prev_day_ohlc = None  # → first-day _NON_ANCHOR_MASK clear fires
+        self._daily_history.clear()  # weekly Fib anchors go cold → _NON_FIB_MASK
+        self._anchors = None
 
     def _roll_to_new_day(
         self,
@@ -800,6 +910,9 @@ def build_bar_bits(
     proximity: ProximityParams | None = None,
     prior_n: int = _DEFAULT_PRIOR_N,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    *,
+    roll_schedule: tuple[int, ...] | None = None,
+    apply_1day_mask: bool = False,
 ) -> list[int]:
     """Build the Stage-1A ``bar_bits`` matrix for one ``(instrument, interval)``.
 
@@ -818,15 +931,58 @@ def build_bar_bits(
         The SWEPT Fibonacci anchor (DEC-NIFTY-FIB-AXIS-001). Defaults to
         :attr:`FibAnchorKind.PREV_DAY` so an unset call is byte-identical to the
         pre-axis prev-day-only build.
+    roll_schedule
+        ADR-0012 futures roll schedule (DEC-STAGE1A-ROLL-RESET-001) — see
+        :class:`Stage1AMatrixBuilder`. ``None`` (the default) is the
+        byte-identical spot path.
+    apply_1day_mask
+        D12 honesty flag for a volume-bearing futures ``1day`` grid — see
+        :class:`Stage1AMatrixBuilder`. Default False (byte-identical).
 
     Returns
     -------
     list[int]
         One u128 condition mask per input bar, in input order (1:1).
     """
-    return Stage1AMatrixBuilder(proximity=proximity, prior_n=prior_n, fib_anchor=fib_anchor).build(
-        bars
-    )
+    return Stage1AMatrixBuilder(
+        proximity=proximity,
+        prior_n=prior_n,
+        fib_anchor=fib_anchor,
+        roll_schedule=roll_schedule,
+        apply_1day_mask=apply_1day_mask,
+    ).build(bars)
+
+
+def apply_1day_mask_for(instrument: str, tf_label: str) -> bool:
+    """The ONE D12 predicate: mask the intraday-only bits on a futures ``1day`` grid?
+
+    A pure function of ``(instrument, tf_label)`` — both already run-identity
+    fields, so the flag needs NO ``canonical_trade_params`` key (no
+    double-carry). True iff *instrument* is the pinned NIFTY-futures series
+    alias (:data:`brutex.universe.NIFTY_FUTURES_SERIES_SYMBOL`) AND *tf_label*
+    is the lake ``"1day"`` interval — futures 1day partitions carry REAL
+    volume, so bits 52/53 would otherwise fire each 1day bar against its own
+    single-bar VWAP session (a live D12 violation). Spot is deliberately NOT
+    flipped (named follow-up — DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001).
+
+    HONEST limit (Golden Rule #10, review round-8 finding 1): the ``1day``
+    grid this mask makes honest is structurally TRADE-less under the
+    intraday-only trade law — every derived ``1day`` bar is
+    midnight-IST-stamped, so the trade sim's next-bar fill always lands on a
+    LATER IST session date (dropped by the overnight-gap rule,
+    ``trade_sim.push``) and no ``1day`` bar ever reaches the 15:20
+    forced-exit window — so every mask on that grid yields zero trades and
+    ``MIN_TRADES`` gates every combo out. The mask therefore matters ONLY
+    for ``bar_bits`` consumers (Stage-1A matrices, suffix-independence
+    oracles, future non-trade analytics), never for ranked results; the
+    sweep mouths print :func:`brutex.engine.sweep_preflight.
+    one_day_trade_law_note` so a ``1day`` launch is loudly labelled. Real
+    ``1day`` trade semantics are a named follow-up
+    (DEC-FUTURES-LAUNCH-REVIEW-FIXES-008).
+    """
+    from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
+
+    return instrument == NIFTY_FUTURES_SERIES_SYMBOL and tf_label == "1day"
 
 
 # ────────────────────────────────────────────────────────────────────────

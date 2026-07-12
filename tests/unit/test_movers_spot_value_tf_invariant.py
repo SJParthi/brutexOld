@@ -367,22 +367,36 @@ class TestValueInvarianceProperty:
     def test_value_constant_across_tfs_at_shared_cutoff(
         self, tmp_path_factory: pytest.TempPathFactory, payload: tuple[list[CandleBar], int]
     ) -> None:
-        from brutex.dashboard.movers_snapshot import compute_spot_candidates
+        # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 narrows the "shared cutoff": an
+        # explicit bucket-anchor `time` now resolves FORWARD to that TF's completed
+        # bucket end (`resolve_asof_cutoff`), so the EFFECTIVE as-of instant is
+        # TF-dependent for anchor picks. DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001's
+        # guarantee is invariance PER shared effective as-of — so the value each TF
+        # reports must equal the raw-1m HLC3 sum through THAT TF's resolved cutoff
+        # (and any two TFs resolving to the same cutoff report the identical value).
+        from brutex.dashboard.movers_snapshot import (
+            compute_spot_candidates,
+            resolve_asof_cutoff,
+        )
 
         bars, cutoff = payload
         lake = tmp_path_factory.mktemp("prop")
         _write_1m(lake, "NIFTY", bars)
         hh, mm = divmod(cutoff, 60)
         as_of = f"{hh:02d}:{mm:02d}"
-        expected = _hand_raw_1m_paisa([b for b in bars if _minute_of(b) <= cutoff])
-        values: set[int] = set()
+        by_cutoff: dict[int | None, int] = {}
         for interval in ("1minute", "5minute", "15minute"):
+            resolved = resolve_asof_cutoff(interval, as_of)
+            eff = resolved if resolved is not None else 24 * 60
+            expected = _hand_raw_1m_paisa([b for b in bars if _minute_of(b) <= eff])
             cands = compute_spot_candidates(
                 lake_root=lake, interval=interval, date=_DAY.isoformat(), time=as_of
             )
             assert len(cands.snapshots) == 1
-            values.add(cands.snapshots[0].value_paisa)
-        assert values == {expected}
+            got = cands.snapshots[0].value_paisa
+            assert got == expected  # value == raw-1m HLC3 sum through the resolved as-of
+            # Two TFs resolving to the SAME effective cutoff must byte-agree.
+            assert by_cutoff.setdefault(resolved, got) == got
 
 
 def _minute_of(bar: CandleBar) -> int:

@@ -102,6 +102,7 @@ def make_agg(run_id: str, *, fingerprint: str, **overrides: Any) -> ComboAggrega
         "exits_signal": 20,
         "exits_forced_1520": 5,
         "exits_end_of_data": 0,
+        "exits_session_gap": 0,
         "max_consecutive_losses": 3,
         "max_consecutive_wins": 6,
         "composite_score": 1.25,

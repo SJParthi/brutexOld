@@ -18,7 +18,375 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-09 (DEC-BADTICK-HILO-SCREEN-001 +
+_Last updated: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
+the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
+the ranking composite JOIN the display surfaces: the top100 artifact gains the
+per-entry `cascade` object + root `cascade_join` meta behind a HARD writer-side
+sweep_id gate (the in-memory report threaded from `cmd_sweep_all` — never a
+stale disk re-read), /results·/screener·/strategy·operator render the verdict
+red-flagged on a FAIL (ranked, never hidden), the shipped-dark `cpcv_pass_pct`
+column fills with the REAL stage-3 rate (captured recording-only in
+`metrics/cascade.py` BEFORE the threshold compare; RAW fraction in artifacts,
+×100 minted only at the display projections), and `/results`' ?preset=composite
+axis activates honestly off the newest run's aggs sidecars (the read-time half
+of HIGH #40 — the persist half stays DEC-CASCADE-ROW-PERSIST-002). ONE join law
+(`engine/cascade_join.py`, structural-fail-closed + per-item-tolerant, dup ids
+excluded EVERY copy) feeds BOTH consumers; a no-report lake's /results payload
+is BYTE-IDENTICAL (pinned); READ-time + artifact-level only — nothing persisted
+on ResultRow (the ResultsStore-not-touched ruling). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch blurb
++ MIGRATION.md #1749.)
+Earlier: 2026-07-11 (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md
+#1743 — the trade-sim OPEN-position session-boundary guard: an open position
+never survives an IST session-date change — the first bar of a new session
+closes it retroactively at the PRIOR session's last stored bar (the finish()
+idiom) under the NEW append-only exit reason `session_gap`; a pending
+next-open exit is subsumed and the boundary bar never arms (earliest re-arm
+i+1, fill i+2); Python walker + Rust kernel (u64+u128 via the MaskWord core,
+ZERO new FFI inputs) move in ONE change, pinned by the UNMODIFIED two-session
+parity suite; the frozen sweep-run goldens are MEASURED unchanged (census:
+1661 golden trades, ZERO cross-session; no `canonical_trade_params` key — run
+identity untouched); the persistent signal is the NEW `exits_session_gap`
+counter (EXIT_REASONS → combo_aggregates → AGG_COLUMNS 49→50 → top100 exits →
+the bxExitMixText "gap" part, honest "?" on OLD artifacts) + ONE capped
+mask-independent `trade_sim.session_tail_hole` WARN per kernel-input
+derivation. HONEST: the `session_gap` fill is a stale-price approximation
+whenever the market truly traded past the last stored bar — a real stored
+price+instant, counted per trade, self-healing once the hole is re-pulled
+(#1031). ENGINE semantics corrected on hole-shaped feeds ONLY — healthy
+contiguous feeds byte-identical; NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); no
+lake/schema/scope/vocab/rate change; `trade_sim.py` + the whole engine 100%
+line+branch on the ci.yml whole-engine gate; the per-fix record lives in the
+§1 Active-branch blurb + MIGRATION.md #1743 — this header carries the
+one-line summary, never the story).
+Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
+ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
+DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1712 / ADR-0019 — the UNKILLABLE sweep run
+core; its single-flight mechanism `engine/sweep_singleflight.py` is the train-WINNING
+variant by coordinator rule), **#1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001** (#1714,
+renumbered #1623 → #1631 → #1632 → #1714 across the folds — the sweep-cache resume Bloom auto-grow gains 25%
+headroom ABOVE the persisted digest count so a within-wall over-capacity resume genuinely
+self-heals instead of advancing one tuple per restart; the 16 GiB wall refusal preserved),
+**#1336 DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001** (#1715, renumbered #1622 → #1632 → #1633 → #1715 — the
+ACTIVE gate config + non-default selection knobs folded into the `_tuple_digest` store
+address via the NEW COMMON `engine/sweep_identity.py` leaf, byte-stable at defaults
+(`5b020e892247deac`); C5 typed `ResultsStoreGateConflictError` tuple-scoped skip), **#1350
+DEC-SWEEP-RESUME-STORE-GUARD-001** (#1716, renumbered #1623 → #1633 → #1634 → #1716 — BOTH sweep skip tiers
+(checkpoint + dedup-cache, sequential AND parallel drivers) gated on intact on-disk tuple
+artifacts so a delete-then-re-run never silently loses finalists; kill switch
+`BRUTEX_SWEEP_RESUME_STORE_GUARD`, MISSING-only by contract), and the **#1351 tests+docs
+rider** (day-over-day incremental-pull-cycle integration harness + independent TF-resampler
+oracle property harness + the runbook partition-delete-behind-SUCCESS-ledger footgun note;
+no DEC by the test-only exemption; coordinator-merge instruction honored). Post-#1228 main
+tip folded (DEC-LAKE-STATS-MANIFEST-001 #1614). HONEST (Golden Rule #10): each member was
+hostile-reviewed on ITS OWN diff — the fold's conflict re-derivations (CLAUDE.md blurbs, the
+cli.py citation row, the #1712/#1714/#1715/#1716 ledger renumbers — shifted once more at the
+2026-07-09 post-#1352 main fold (main took #1631 for
+DEC-ONECLICK-TOP100-OBJECT-ROOT-001), then again at the 2026-07-11 pre-stage
+fold-2 of the origin/main lander wave (the wave took #1594/#1632/#1633/#1634;
+#1713 skipped — reserved for DEC-RUST-FIRST-MANDATE-001)) are train-level seams disclosed
+in the train PR body. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate
+change.
+Review-round history is deliberately not narrated in this header — each member DEC's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.)
+Earlier: 2026-07-08 (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1712 / ADR-0019 —
+the UNKILLABLE sweep run core (Phase 2 of the one-click sweep program): all 15 hunt gaps
+G1–G15 + R28/R38–R43/R45 built around a byte-untouched engine — 16 NEW 100%-line+branch
+modules (flight recorder on the COMMON orchestrator `AuditWriter` SHA-256 chain at
+`runs/<run_id>/flight-recorder.jsonl` · contract-exact run manifest + ONE additive
+`RUN_MANIFEST` action on the EXISTING CLI sweep chain · content-hash stage stamps incl.
+stage-3 CELLS validated before the cascade consumes · live tripwires + set-once SUSPECT
+latch · secret-redacting diagnostic bundle · chain map · run-core CM · single-flight flock
++ lake read-guard · stall policy (default exactly 300.0) · progress-liveness verdict (the
+CONFIRMED heal monotonic-vs-wall defect fixed — a LIVE run is never quarantinable, legacy
+⇒ UNKNOWN ⇒ heal refuses) · quarantine-not-abort for corrupt tuple stores + checkpoints ·
+the R45 independent naive reference simulator (AST-pinned import ban, K=200,
+mismatch ⇒ SUSPECT, NEVER adopt) · exit-status artifact served through `read_progress`
+with zero route edits · `--detach` own-session-leader launch · verdicts + artifact guard
+for the P3 joins), run_id = `grid_identity(grid)` (NO timestamp — resume lands in the
+SAME `runs/<run_id>/`), NEW `sweep-rehearsal` CI job (the full chain in miniature every
+push, measured 350.5 s sandbox) + the fault matrix on chaos-race + the MECHANIZED R/G
+traceability gate. PROVEN ENGINE UNCHANGED: A/B byte-identity (run-core ON vs OFF —
+per-tuple store SHA-256 maps identical) + the frozen golden reproduced with every
+Phase-2 default ON incl. diffcheck. HONEST: dashboard sweeps stay IN-PROCESS until the
+1-line detach adapter lands (CLI is detached-capable today); the 5 hard-gate per-door
+kills are ABSENT manifest keys (P3-owned follow-up); TUPLE_DONE is decimated LOSSLESSLY
+(cumulative counters; reconciliation reads SweepProgress exactly); diffcheck covers
+projection+trade-sim+drawdown, NOT the 60 indicators; D-19 mutation floors are ratchets
+below 85% (74–79% measured, raise = named follow-up); the G10 "peer pull" refusal wording
+is pinned debt — follow-up DEC-SWEEP-LOCK-WORDING-001. HOSTILE-REVIEW ROUND 2
+(MIGRATION #1712): the G12 crash-loop breaker made DURABLE (per-run counter file — the
+`== threshold` CRITICAL-alert edge was structurally dead with a fresh in-memory tracker
+per enter); SUSPECT can no longer launder to COMPLETE on resume (exit-status `suspect`
+written FIRST + a durable flight-recorder-SUSPECT resume fold); `validate_stage3_cells`
+re-hash now `_guarded` (a transient SSD EIO no longer hard-kills a successful sweep); the
+DEFAULT multi-core path regained `on_tuple` (TUPLE_DONE + the R39 NaN tripwire, parent-
+side) + G1 store-quarantine (worker-side — a corrupt store no longer aborts the grid);
+NEW `run_layout.py` single-source run-dir leaf + the Row-15 R40 forensics mirror to
+`~/.brutex/runs/<run_id>/` (internal disk). Named round-2 follow-ups: R45 diffcheck in
+parallel (DEC-SWEEP-DIFFCHECK-PARALLEL-001), the physical `runs/`→`sweep_runs/` relocation
+(merge-integration, P3 not on-branch), Rows 11/12/13/8/16 (cross-phase P1/P3/P6).
+HOSTILE-REVIEW ROUND 3 (MIGRATION #1712): the `sweep-all --detach` argparse-abbreviation
+fork-bomb CLOSED — the detached child is spawned with a `BRUTEX_SWEEP_DETACHED=1` env sentinel
+and `cmd_sweep_all` honours `--detach`/`--det` only when it is absent, so the abbreviated flag
+(prefix-matched by argparse's default `allow_abbrev`) can never re-trigger detach in the child
+(env-sentinel is spelling-immune, not sys.argv-string-filtered); `mark_suspect`'s mid-run
+exit-status write no longer resets `wall_started_utc` (a RUNNING write PRESERVES a prior
+artifact's launch start; only the very first enter stamps `now`) so a SUSPECT run's forensic
+duration reads from launch, not from the suspect-latch instant. RUNCORE-DASHBOARD-COVERAGE
+finding REJECTED as stale (counter-evidence): the dashboard one-click sweep button ALREADY
+routes `run_sweep_from_request` → `cmd_sweep_all` (since #1120, on main too) → the SAME
+`with sweep_run_core(...)` block, so keep_awake + single-flight flock + G12 corrupt-checkpoint
+quarantine + Row-15 forensics mirror + flight recorder ALL cover the button; only `--detach`
+(survival past process death) is CLI-only, which is the disclosed honest envelope (an in-process
+dashboard job cannot outlive the uvicorn worker). HOSTILE-REVIEW ROUND 4 (#1712): two MINOR
+observability defects closed — (1) the G12 durable crash-loop counter now RESETS at a successful
+run boundary (`reset_checkpoint_corruption` in `_finalize` on COMPLETE/SUSPECT_COMPLETE) so two
+corruptions SEPARATED by a fully successful recovery no longer chain `1→2` into a FALSE CRITICAL
+`checkpoint_crash_loop` page (`consecutive` now means "corruptions with no successful run
+between"); (2) the C6 heal guard closes the resume-startup window — a RESUMING run's progress file
+lags with the prior attempt's DEAD pid until the post-preload reset, so `cmd_sweep_heal` now ALSO
+treats the run live when the fresh `exit-status.json` (state=running + LIVE pid, written first at
+enter under the G6 flock, already enriched into `read_progress`) says so via the NEW pure
+`sweep_liveness.exit_status_running` — no concurrent `--execute` heal can quarantine a resuming
+run's stores. Row 19 VERIFIED (dashboard job is keep_awake-covered via the cmd_sweep_all
+delegation); Row 21 HONEST (the `sweep_run_core(log_file=)` plumbing stays UNWIRED at cmd_sweep_all
+— a run-scoped raw log needs file-routed logging at PROCESS START, out of scope; the material
+events are already a run_id-scoped log on the INTERNAL DISK via the mirrored `flight-recorder.jsonl`
+— follow-up DEC-SWEEP-RUN-LOG-FILE-001). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
+the dashboard FRONTEND latency-hardening pack: the v29 operator page's DUPLICATE
+pollers consolidate onto ONE BXPoll-disciplined consumer per endpoint (subscriber
+fan-outs added to bx-oneclick.js / bx-rate-monitor.js / bx-liveproof.js; the
+measured BEFORE on the idle operator page was 336 requests/120 s with
+sweep-progress / pull-rate / liveproof each polled by TWO-THREE summed pollers;
+measured AFTER, same harness: 240 requests/120 s — −96, −28.6%),
+the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows
+· completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared
+`BXPoll.createPoller` core via a custom-fetchJson tick seam (renders
+byte-identical; failed ticks back off 3 s→30 s; DOMContentLoaded start;
+guarded-legacy degrade), the 8 /screener filter inputs + /results Top-N debounce
+200 ms, completeness/spot_coverage adopt the in-place tbody row-patch idiom (ONE
+shared esc()'d row builder, shell built once), and /reports' ~750 chips build
+ONCE with class-toggle selection. SKIPPED honestly: the bx-format/bx-movers-time
+defer (end-of-body includes with genuine parse-time consumers + a standing
+non-defer pin) and the universe.html integrity-interval catch-up (already shipped
+by #1623). NO measured hidden-tab win claimed (idle-page hidden was already
+0 req/s, measured); the `pollRunSweep` hidden-guard gap is source-asserted only.
+CLIENT-side only — templates + static JS + tests + docs; ZERO route/payload
+change, byte-stable wire; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1720.)
+Earlier: 2026-07-11 (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 —
+the DB/query-latency hardening pack, READ-side only: (1) the `/db`
+window-ledger pager rides a DuckDB LIMIT/OFFSET fast path over the #1533
+delta-folded ledger scan source (`db_view.query_window_ledger_page` —
+measured 7,321–8,778 ms cold at 400k rows → 564.8 ms; the O(rows) Python
+record fold per stamp is GONE; the byte-identical legacy parse stays the
+degrade for legacy-shape / NULL-derivable-cell / persistent-duckdb-error /
+no-conn); (2) the pre-open export rows are memoised per (basis, range,
+symbols) at the write generation (repeat click 326–574 ms / 206 DuckDB
+statements → 4.2–18.6 ms / 0 statements, bytes identical) + the IEP (open)
+reads are span-bounded (the CLOSE maps deliberately stay whole-partition —
+the #1649a hole diagnostics need the unbounded view); (3) the `/db` candles
+%CHNG baseline binds the page's own month files instead of the whole glob
+(72 files bound twice per click → 2; the #863 timestamp bounds pruned ROW
+GROUPS, this bounds the Parquet FOOTER opens too — merged-tree mechanism =
+main's #1670 `_bars_file_windows`, this pack's interim arm superseded at the
+merge-reconcile, behavior pins re-run green). HONEST: the
+window-ledger fresh-stamp click stays ONE O(total rows + delta footers)
+columnar scan (never literal O(page) — the repeat click is the O(1)
+handoff); the ONE behavior-visible class is corrupt-lake-only — a corrupt
+file provably OUTSIDE a bounded read's candidates no longer blanks it (a
+strictly-narrower degrade, named in #1719). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+healthy-lake payloads byte-identical (fast-equals-legacy pinned);
+`db_view.py` + `preopen_report.py` 100% line+branch on their ci.yml gates;
+the per-fix record lives in the §1 Active-branch blurb + MIGRATION.md
+#1719 — this header carries the one-line summary, never the story).
+Earlier: 2026-07-08 (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 —
+an explicit `/movers` bucket-anchor TIME pick now resolves to the COMPLETED bucket
+(broker-matching close) instead of a PARTIAL forming bucket. The TIME dropdown on a
+coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the backend
+treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 showed the partial
+15:27 minute close (₹27,932.80) rather than the completed 15:27–15:29 bucket close
+(₹27,940.85 = the broker's = 2min@15:29 = 1min@latest); the stored derived-TF partitions
+were always CORRECT, only the read-time as-of resolution was wrong. FIX: ONE COMMON as-of
+seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all three tabs)
+resolves an anchor pick FORWARD to the bucket's final minute `min(anchor + minutes − 1,
+15:29)`, and the downstream `<= cutoff` `filter_to_ist_minute` caps at the day's latest
+available minute (NO look-ahead). TF=1minute identity, "Latest"/blank whole-day
+byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001), non-anchor picks keep as-of-instant
+semantics, prev-close %CHNG untouched; additive `asof_through` payload echo + note
+provenance. Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001) now holds PER
+shared *resolved* as-of. READ-ONLY dashboard — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+no lake/schema/scope/vocab/rate change; movers_snapshot/movers_futures/movers_options 100%
+line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at the pre-change baseline.
+Review-round history is deliberately not narrated in this header — each DEC's
+per-round record lives ONLY in the §1 Active-branch blurb + its own
+MIGRATION.md entry.
+Earlier: 2026-07-09 (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+#1646 — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the
+ONE canonical grammar: `movers_futures.parse_future_symbol` now DELEGATES to
+`data/fno_symbol.parse_fno_symbol` (FUT-restricted; the local left-anchored
+twin — `_parse_expiry_token` + its constants — DELETED), so a hyphenated
+underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` instead of
+the `parts[1]` truncation `BAJAJ` that made `_underlying_spot_ltp` probe the
+nonexistent `bars/NSE/CASH/BAJAJ/` — spot + premium were SILENTLY dropped for
+every hyphenated F&O underlying (executed real-lake repro: spot 8010.00
+present under the correct key, served row `spot=None`) and the wrong rows were
+persisted as warm-grid cache hits. HONEST disclosed delta (sanctioned, junk
+tokens only): the deleted twin was shape-stricter than the canonical
+`strptime("%d%b%y")`, so a junk lake dir like `NSE-NIFTY-30SEP25-FUT` flips
+reject→accept — exactly what options//db/Greeks already accepted; every
+well-formed vendor `DDMmmYY` symbol byte-identical, non-hyphenated rows
+byte-parity-pinned end-to-end, `&`-names (M&M — no hyphen in the grammar) were
+and remain correct. `movers_options` already delegated; `futures_warm_grid`
+needed zero change. SAME-PR FOLD-IN (W3 spot-drift ladder): the movers
+underlying-spot probe now walks the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001)
+drift-recovery ladder on an exact-key MISS — NEW
+`movers_futures._SpotLtpResolver`, ONE per-candidates-compute instance in
+BOTH the futures and options loops: exact probe byte-unchanged FIRST; the
+COMMON `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder only on
+a miss, fed by a LAZY at-most-once `spot_drift.load_stock_drift_map`
+(master-verified; ambiguity POISONED + capped warns; no-master fail-softs to
+today's honest no-spot; MemoryError re-raises), the recovery OUTCOME memoised
+per (exchange, underlying) with ONE rung-attributed
+`movers.spot_key_recovered` INFO — so a spelling-drifted stock spot dir
+(chain `BAJAJAUTO` vs on-disk `BAJAJ-AUTO`, executed repro) no longer blanks
+futures spot/premium or reads `?` options moneyness; a resolving lake never
+builds the map (spy-pinned byte-identity); NO `%26`→`&` recovery — the #1482
+pledge stands; read-time recovery only, nothing healed on disk. READ-ONLY
+dashboard display fix — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+`movers_futures.py` + `movers_options.py` BOTH 100% line+branch.)
+Earlier: 2026-07-09 (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 —
+renumbered #1633 → #1673 → #1692 (#1633 → #1673 at the 2026-07-10 merge-reconcile —
+main's in-flight renumber cascade holds the reservation band through #1672 — then
+#1673 → #1692 per the coordinator reservation map, #1673 reserved for PR #1369) —
+the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive)
+and 15:35 (exclusive) IST on a trading day; an in-flight nightly pull STOPS
+gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping the SHARED
+Groww account free for TickVault's live feed (the shared TOTP token + 500/min
+governor, §2 Rule 6). NEW pure leaf `brutex/calendars/market_hours.py` —
+`BLOCK_START=08:45`/`BLOCK_END=15:35`, the clockless predicate `pull_allowed_now`,
+`pull_allowed_default` (binding `now_ist()` + the NON-raising `is_trading_day()`;
+an out-of-holiday-coverage WEEKDAY reads as a trading day → BLOCKS = the FAIL-SAFE
+posture protecting the shared account; a weekend → ALLOWED), the fail-LOUD env
+kill switch `BRUTEX_MARKET_HOURS_GUARD` (default ENABLED), `guard_active_default`,
+and a `now`-injectable `MarketHoursGuard`. NEW `MarketHoursHalt(BruteXError)` in
+`data/errors.py` added to BOTH ingest spines' `_GLOBAL_STOP_ERRORS` +
+`pull_jobs.is_pull_halt` (propagates past per-symbol/contract quarantine, fires the
+CRITICAL Telegram `emit_pull_halt_alert`). START GATES: `BackgroundPullJob.start`
+defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE
+vendor-free exemptions are the sweep (`job_kind != PULL`), the dashboard
+Greeks-backfill start and every dashboard dry-run pull start (both pass
+`market_hours_exempt`); `cmd_fetch` defers a LIVE pull at the START gate with a
+clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN (the CRITICAL requirement): a
+`market_closed` predicate threaded to the PER-WINDOW seam of both spines raises
+`MarketHoursHalt` (the durable window ledger leaves PLANNED/FAILED windows
+RESUMABLE — no new checkpoint); `run_until_clean` gains a `market_closed` hook →
+NEW `stop_market_hours` verdict; `pull_all_spot`/`pull_contract_candles` catch it
+mid-round + belt-break later steps + the minute phase (loud
+`pull.step.halted reason="market_hours"`); the METADATA phase
+(`pull_expiries_contracts`) gets a per-cell belt (raises `MarketHoursHalt` before
+each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not
+record-and-resume); `run_full_pipeline` re-checks the belt BEFORE metadata AND
+before historical + wraps `run_metadata` in `try/except MarketHoursHalt`, skipping
+the rest of the vendor chain with `stopped_after="market_hours"`; and the CLI
+`brutex fetch` path is MID-RUN-guarded too — `cmd_fetch` threads `market_closed`
+into the spot spine + the between-rounds `run_until_clean`, catches
+`MarketHoursHalt` (drains + persists the ledger → resumable), and exits EXIT_OK.
+The mid-run env kill switch is resolved ONCE at pull start via
+`resolve_market_closed()` (fail-LOUD on junk at START; the bound predicate reads
+ONLY the live clock per call — so a junk env written MID-pull can never crash a
+long run with a per-window re-parse); the one-shot START gates keep
+`guard_active_default`. Production entrypoints (dashboard routes + the nightly
+headless binding — the MOTIVATING 01:30 case covered) bind `resolve_market_closed()`;
+a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+`_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively by
+the start-gates; conflict-free with PR #1343). HONEST: the CLI + metadata paths
+are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+per-CONTRACT granularity — a contract already started at 08:45 finishes its few
+small remaining windows before the next contract's belt stops the pull (an
+accepted bounded overrun, never a whole extra symbol); a pull interrupted at 08:45
+DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only (no fetch/rate/pool/
+governor change); `market_hours.py` + `data/errors.py` + `universe_phases.py` +
+`metadata_pull.py` + `pipeline_pull.py` + nightly binding 100% line+branch, the
+CLI/dashboard touched lines covered by the whole-package `--cov=brutex` gate;
+ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline; the
+per-round record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1692 —
+this header carries the one-line summary, never the round-by-round story).
+Earlier: 2026-07-08 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+DEC-STAGE1A-ROLL-RESET-001 + the round-1–8 review-fix packs DEC-FUTURES-LAUNCH-REVIEW-FIXES-001…-008,
+MIGRATION.md #1700–#1709 + #1710 — the ADR-0012 NIFTY-futures sweep LAUNCH
+capstone (PR-5): the futures track is addressed by ONE frozen series alias **`NSE-NIFTY-FUT`**
+(symbol_id 4 in the append-only `_SYMBOL_ID_TABLE`; the two pre-launch shapes
+`NIFTY-FUT-YYYY-MM-DD` + `NSE-NIFTY-<DDMmmYY>-FUT` are RETIRED with a did-you-mean refusal —
+supersedes the #1178 dual-acceptance envelope, satisfies ADR-0016 §6 + the #1138 [C16]
+reservation in one PR). NEW `brutex/data/futures_series.py` resolves the alias from the VENDOR
+lake dirs (scan + `parse_fno_symbol`, never `strftime`) into disjoint IST-date ownership windows
+(`(E_{k-1}, E_k]` — expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=`
+law); interior holes REFUSE loudly naming the missing month(s) — INCLUDING a window that STARTS
+inside a hole (the first-selected-segment predecessor gap gate, review-round-1 #1703) — a head
+span stays UNOWNED (WARNed; never a backward ownership extension serving far-month bars), ANY
+positive tail overhang WARNs, the calendar is an OBSERVE-ONLY cross-check (drift WARNed with
+evidence, 2027+ coverage abstains — never load-bearing). NEW `brutex/feed/series_load.py` is the
+ONE alias-aware sweep-slice loader every sweep mouth now uses (spot path = the old inline
+reconcile+ReplayFeed block moved verbatim; the alias is stitched per contract with the exact
+`astimezone(IST).date()` ownership cut stage1a keys on; a zero-bar boundary sliver holding NO
+expectable session instant SKIPS with one WARN — the loud EMPTY refusal stands for spans the
+NSE calendar says should hold bars, review-round-1 #1703). Stage-1A B2 CLOSED
+(DEC-STAGE1A-ROLL-RESET-001): a `roll_schedule` of owning-expiry day-ordinals keys the VWAP
+session per contract and a key change triggers a TOTAL hard reset of EVERY stateful member
+(VWAP, MarketStructureState, EMA20/200, prior-history, day extremes, pivots/daily-history/
+anchors — D11: no level ever crosses the roll basis gap; post-roll state == fresh-builder state,
+proven bit-for-bit); a bar beyond the schedule raises (never a silent constant-key fallback);
+`apply_1day_mask` honestly clears ToD 44-47 + VWAP 52-53 on volume-bearing futures `1day` grids
+(D12; spot deliberately NOT flipped — named follow-up). `roll_schedule` conditionally enters
+`canonical_trade_params` under a hard instrument⟺schedule `__post_init__` invariant (presence ⟺
+the alias, both directions — the #1062 bug class contained; spot run_ids byte-identical, the
+unmodified golden suite is the proof); recount compares recorded-vs-re-derived schedules with
+evidence. ENGINE surface now EXACTLY {NIFTY/BANKNIFTY/SENSEX spot} ∪ {NSE/FNO/NSE-NIFTY-FUT};
+all else REFERENCE_ONLY; no vocab/rate/lake-schema change. Honest: resolution is O(FNO dirs)
+once per launch, NOT O(1); D6 map, D14's DSR effective-N half (only MIN_TRADES=30 gates at
+launch), the #1013 D8-stamping consumption, futures→options translation (PR-6), and the spot
+1day mask audit are NAMED follow-ups. Cascade manifest schedule-carriage is CLOSED by the
+round-1 review-fix pack (#1703): the automatic Stage-4 cascade threads
+`roll_schedule_by_instrument`, the manifest carries `roll_schedules` for the MANUAL replay, and
+a schedule-less futures pool SKIPS loudly — never a schedule-blind re-score).
+Earlier: 2026-07-10 (DEC-ONECLICK-PERF-CLUB-001,
+MIGRATION.md #1711 — coordinator-ASSIGNED from the reservation map
+(next free above the #1264 reservation tail #1710; live-main max #1665
+at assignment — gaps are legal; renumbered from the interim provisional
+#1666) —
+the queued post-#1373 oneclick perf/hygiene club on
+`claude/oneclick-perf-club` (built on PR #1373's head 3c478831; the PR
+opens after #1373 lands): (F1) `/api/v1/oneclick/verify` — the ONE
+oneclick route with no revision cache — joins the stat-token family (key
+folds manifest + events + top100 tokens + the chain verified-state; a
+primed poll is three stats + the chain cache-peek + one hit; NEW B-7
+bench pin,
+measured 0.95× flat vs a 1000× manifest); (C-r2-5) ALL FIVE cached
+oneclick routes ride the NEW `serve_revision_cached` chokepoint — a stat
+OUTAGE (now distinguished from honest ABSENCE by `artifact_probe`) serves
+the LAST-KNOWN payload with ONE `oneclick.probe_outage` WARN per outage
+per COORDINATE (a whole-volume flap warns once per touched coordinate;
+never a silent per-poll O(artifact) re-parse; recovery logs + resumes
+normal keying; `OutageGate` LRU-bounded 512); (F4) `discover_runs`
+stat-stamps + sorts FIRST and parses only the newest-limit manifests
+(identical selection; the F5 uncapped runs_revision stat walk stands);
+(A-r4) the /screener render/filter/sort surfaces are client-side BOUNDED
+via node-goldened BXScreener primitives (Show all itself capped at 1000;
+input cap 5000; every truncation NAMED on the count line) — the backend
+half was #1373's TOP100_ROW_CAP; F2b (serialized-response caches)
+deliberately SKIPPED as optional polish per the severity correction.
+DISPLAY zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX);
+`oneclick_artifacts.py` 100% line+branch on the ci.yml-exact gate; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1711.)
+Earlier: 2026-07-09 (DEC-BADTICK-HILO-SCREEN-001 +
 DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688 — renumbered from
 the interim #1632–#1633, then from #1655–#1656 at PR prep 2026-07-10 (main's PR
 #1354 took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) —
@@ -810,7 +1178,10 @@ completeness hole is always visible; distinct
 actions + ERROR/WARNING logs make the loss LOUD. Fail-loud is chosen over blind
 pool-rebuild on the merits + the memory-budget-division interaction: the
 per-tuple rank budget divides across workers (`memory_budget_bytes` = `total ×
-fraction / workers`), so rebuilding into the next heavy tuple would just
+fraction / workers`) [CORRECTED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+(MIGRATION.md #1671): as originally wired the divisor was never passed
+(`workers` defaulted 1) — the claim was false until #1671 wired it; see that
+entry], so rebuilding into the next heavy tuple would just
 re-OOM. HONEST residual (named follow-up, NOT claimed): a deterministically-
 WEDGED non-OOM tuple still aborts via `SweepStallError` with a frozen
 checkpoint, so an identical resume re-dispatches IT — the stall path has no
@@ -888,6 +1259,23 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
+Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 —
+India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
+every OBSERVABLE production trade + the persisted nullable
+`vix_mean`/`vix_min`/`vix_max` finalist trio (REFERENCE ONLY — never in the
+60-vocab, `_RANKABLE_FIELDS`, or the BLAKE3 run identity; a missing VIX bar
+stamps `None`, never fabricated); the FIVE sanctioned unstamped
+DISCARDED-stream sites are literal `reference_stamper=None`, AST-pinned with
+exact counts (the round-6 review unstamped the cascade candidate
+re-simulation — stamps provably discarded at the CandidateInput scalar
+conversion — and DELETED the two manual-replay `vix_stamper_for_manifest`
+builds that paid a full VIX lake read per replay/click for zero output);
+redo-honest trio (None→value backfill · the typed tuple-skip
+`VixTrioConflictError` · `sweep-verify --recount` stamps like the launcher and
+attributes VIX-only divergences non-corrupt via `results_store.VIX_FIELDS`,
+the ONE public trio-column source, + `dataclasses.fields()`-driven re-pair
+gates). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; touched modules 100%
+line+branch).
 Earlier: 2026-07-08 (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 —
 the weekly deep mutation gate is made GREEN end-to-end: both cargo-mutants
 jobs restructured onto sharded matrices (6 fno-math + 7 trading-core shards;
@@ -2103,7 +2491,489 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/data-edge-guard-fixes` (**DEC-BADTICK-HILO-SCREEN-001 +
+- **Active branch:** `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
+  the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
+  pass rate + the ranking composite reach top100.json, /results, /screener,
+  /strategy and the operator card. (1) `metrics/cascade.py` RECORDS the
+  already-computed stage-3 CPCV rate (captured BEFORE the threshold compare via
+  ONE line + ONE final `dataclasses.replace` stamp — provably recording-only:
+  determinism + field-preservation pins, six hand-applied mutants killed;
+  `None` for never-reached-#3/ValueError, the FAILING rate on a CPCV reject,
+  the stage-3 rate on every later reject + pass); `cascade_wire` serialises it
+  additively at REPORT_VERSION 1 (the pool_pbo precedent) and `write_report`
+  is HARDENED to `atomic_write_simple` (bytes identical — the auto==manual
+  golden re-runs; the /results poller reads the file concurrently now).
+  (2) NEW `engine/cascade_join.py` — the ONE flattener/validator BOTH
+  consumers share (structural fail-closed on root/version-pun/future-version/
+  sweep_id/groups; per-item skip+count; junk numerics NULLED never clamped;
+  unknown FUTURE stage tokens kept verbatim; duplicate candidate_ids exclude
+  EVERY copy into `ambiguous_ids`; survivor-rank inconsistencies counted).
+  (3) `build_top100(cascade_join=)` + the HARD sweep_id gate at the writer
+  (the cascade dir is one-per-root, overwritten per sweep — a stale report
+  reads `sweep_id_mismatch` + ONE WARN, entries stay not_validated); every
+  entry gains the ALWAYS-EMITTED `cascade` object (pass/provisional_pass —
+  a pool-N DSR pass never reads bare PASS — /fail with verbatim stage/
+  not_validated with named reason) + `metrics.cpcv_pass_pct` (rate×100.0
+  EXACT, only-when-measured); `ENTRY_REQUIRED_KEYS` deliberately NOT extended
+  (old artifacts + the fixture corpus stay loadable); the top100 byte golden
+  RE-LOCKED with the diff pinned ADDITIVE-ONLY vs the frozen PRE-change
+  fixture; R13 annotation-never-reranks (a cascade-FAILED rank-1 stays rank-1,
+  red-flagged — integration-proven via a REAL run_stage4_cascade chain).
+  (4) /results: NEW `lake_revision.cascade_report_revision` file-stat token
+  folded into the leaderboard cache key ("outage" holds the served payload);
+  `load_cascade_join_file` (16 MiB cap; absent/unreadable/malformed/oversized
+  named degrades; single-entry memo per token — ONE parse + ONE WARN per
+  revision, bench-pinned) + EMIT-ON-PRESENT row keys/meta/`cascade_flagged`;
+  the `absent` state emits ZERO new keys (no-report payload BYTE-IDENTICAL,
+  json-equality-pinned view + route); the run_id-exact no-sweep-gate ruling
+  stands (run identity folds the whole Rule-4 tuple; pool context disclosed
+  via meta sweep_id). (5) NEW `dashboard/composite_join.py` reads ONLY the
+  (run_id, composite_score) columns of the NEWEST run's aggs sidecars
+  (the ONE oneclick newest-run selection core — since fix round 2 the
+  NAME-only `newest_run_name` over the extracted `_stamped_run_dirs` law
+  `discover_runs` rides; per-file skip+count; null/non-finite dropped)
+  → scored rows gain `composite_score` AND ?preset=composite ORDERS honestly
+  with the DYNAMIC inert-axes disclosure (`composite_score` leaves the set
+  iff the index joined non-empty) — the /results read-time half of HIGH #40;
+  the index caches once per DEDICATED `composite_index_revision` token (fix
+  round 1, refuter-confirmed MAJOR: the aggs land under `sweep_runs/` AFTER
+  the sweep's last sweeps-tree/audit write, so the sweeps generation alone
+  provably froze an empty/partial index until the NEXT sweep — the probe's
+  newest-run + results-depth dir-mtime digest folds into the payload cache
+  key and the index slot's generation; killing route regression + spy pins;
+  fix round 2, refuter-confirmed MINOR: the round-1 probe's
+  `discover_runs(limit=1)` hop hid an undisclosed per-poll manifest.json
+  read+parse the probe never consumed — the selection is now name-only,
+  ZERO manifest I/O per poll, bench-pinned beside the cascade one-stat pin,
+  both disclosures corrected).
+  (6) display: `oneclick_artifacts._bridge_cascade` (invalid object → key
+  dropped + NAMED partial, row kept) + the ONE server-side
+  `oneclick_view.cascade_status_text` builder (no verdict prose in JS —
+  killed-token-pinned); /screener Cascade column; operator `r1_cascade` +
+  `.oc-cascade-fail`; /strategy `stCascade` + Deep-stats line; /results
+  badge/CPCV %/Composite columns + header meta ("?" for null counts, never a
+  fabricated 0) + flagged chip; BX_EXPLAIN lines. HONEST: read-time +
+  artifact-level ONLY — nothing persisted on ResultRow (ResultsStore
+  untouched, its pre-extension golden re-runs; persistence/history retention
+  across the one-report-per-root overwrite = DEC-CASCADE-ROW-PERSIST-002);
+  other filter numerics = DEC-CASCADE-FILTER-NUMERICS-002; mutation.yml's
+  proven-pair loop deliberately NOT extended (hand-kill evidence ledgered
+  instead); composite read is O(aggs files) once per generation, the report
+  parse O(report) once per token — disclosed, never O(1) claims. TWO new
+  ci.yml 100% gates (cascade_join · composite_join); every touched gated
+  module 100.00% line+branch; ruff/ruff-format/`mypy --strict` clean, pyright
+  0 errors; node --check clean. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/tradesim-open-session-guard` (**DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743** —
+  the trade-sim OPEN-position session-boundary guard, the asymmetric twin of the
+  R2-OC-2 pending-entry gate: pre-fix, a position left open because its
+  session's stored bars ended BEFORE any forced-exit-window bar (a session-tail
+  data hole the #1031 machinery legitimately stores, or a stitched
+  `NSE-NIFTY-FUT` roll gap) silently rode the overnight gap and closed against
+  the NEXT session's prices — a pending NEXT_OPEN exit filled at the next
+  session's open, SL/TP triggered against the gap, or the next day's 15:20 bar
+  forced it out (executed repro on a +₹500 gap: +30000/+50000 paisa fabricated
+  per trade; MFE/MAE contaminated mfe=50100). NOW (§0 law): on the first pushed
+  bar whose IST session date differs from the position's entry-session date the
+  walker closes retroactively at the PRIOR session's last stored bar — the
+  exact `finish()` idiom (`pos.last_bar.close` / `.timestamp` / `pos.last_idx`,
+  no excursion fold from the boundary bar) — under the NEW append-only
+  `session_gap` exit reason; a pending next-open exit is SUBSUMED (cleared);
+  the boundary bar never arms a new entry (earliest re-arm i+1, earliest fill
+  i+2 — the uniform step-(C) `closed is None` law). Python `push()` gains step
+  (A2) reading the PRE-update `last_idx/last_bar` state (`_OpenPosition` gains
+  `entry_day_ist`, stamped from the (A) fill site's already-resolved date —
+  zero new UTC→IST conversions; `_close` stays the ONE seam); the Rust twin
+  lives INSIDE `Walker::push` (`OpenPosition` gains
+  `entry_session`/`last_close_paisa`; `push`/`manage_position` thread
+  `close_paisa`; MaskWord-generic so u64 AND u128 kernels move together; ZERO
+  new FFI inputs — the `session_idx` ordinals already crossed), pinned by the
+  UNMODIFIED two-session hypothesis parity suite, a finish()-equivalence pin
+  (bit-equal ClosedTrade + exit index; ONLY the `TradeDetail.exit_reason`
+  differs) and a NEW truncation-equivalence property (verified failing 3/3 on
+  the reverted walker; its two-session generator's day-1 anchor arithmetic bug
+  — 20:40 IST, every day-1 bar forced, the day-1 arm vacuous — repaired to the
+  documented 15:10 IST in the same stroke). The exit_indices law holds with
+  ZERO `exit_index.py` change (`exit_idx = pos.last_idx`,
+  `bars[exit_idx].timestamp == exit_ts` by construction). Serialization chain
+  (~8 hand sites, all loud-lockstep pins): `EXIT_REASONS` append-only,
+  `_FULL_RANGE_EXIT_REASONS` INCLUDES `session_gap` (a close-fill of a
+  fully-folded bar — `end_of_data`'s class), the `exits_session_gap` counter
+  (combo_aggregates fields/sum/record/build → `trade_store.AGG_COLUMNS` 49→50
+  → the top100 exits dict → `bxExitMixText`'s appended "gap" part with the
+  honest "?" on OLD artifacts + the bx-explain clause; trade-row `exit_reason`
+  is UTF8 pass-through — contract KEYS unchanged, VALUE vocabulary extended);
+  observability = that counter + ONE mask-independent capped-20
+  `trade_sim.session_tail_hole` WARN (+ suppressed summary) at
+  `rust_trade_sim._derive_kernel_inputs` — never per-mask, never in `_close`
+  (the #1630 posture). GOLDENS (run, not assumed): `_GOLDEN_CONTENT_HASH` +
+  `_GOLDEN_RUN_ID` UNCHANGED — the executed census found ZERO cross-session
+  trades in all 1661 golden trades / 5 masks and NO `canonical_trade_params`
+  key was added (run identity untouched; the earlier "expect a re-lock"
+  prediction empirically REFUTED); futures-sweep + every multi-day corpus
+  golden UNMODIFIED; exactly THREE schema-additive digest re-locks, each a
+  zero-count new key audited in-file (combo_aggregates canonical+parquet ·
+  top100 · trade_capture AGGS-only); the buggy-behavior pin renamed +
+  re-derived (`test_cross_session_day1_trade_closes_at_day1_last_bar_exact_values`
+  — pnl 1900→150, mfe 2000→250, holding 4→2); `vocab_golden_vectors.json` +
+  the `results_store_pre_*` fixtures byte-untouched. SANCTIONED test
+  reconciles: the sweep-parallel spawn log pin narrowed to the two per-trade
+  DEBUG events (the capped WARN legitimately survives INFO); the cascade
+  lockbox fixture repaired (`_lockbox_intraday_history` — its trades
+  previously closed ONLY via the now-dead cross-session fills); the
+  AGG_COLUMNS count pin 49→50. HONEST: the `session_gap` fill is a
+  stale-price approximation when the market truly traded past the last stored
+  bar (real stored price+instant, counted, self-heals on re-pull — #1031);
+  an OLD-semantics store under new code recounts divergent — the documented
+  post-deploy re-sweep story (`code_commit_sha` re-key), not corruption.
+  ENGINE semantics corrected on hole-shaped feeds ONLY — healthy contiguous
+  feeds byte-identical; NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; no
+  lake/schema/scope/vocab/rate change; whole-engine 100.00% line+branch on the
+  ci.yml gate + per-module gates green; cargo test --release 578 green,
+  fmt/clippy clean; ruff/ruff-format clean; `mypy --strict` clean; pyright at
+  the pre-change baseline; `node --check` clean on both touched JS files.)
+  Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
+  coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001
+  (MIGRATION.md #1712 / ADR-0019; its single-flight mechanism WINS all competing variants) →
+  #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) → #1336
+  DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1715) → #1350 DEC-SWEEP-RESUME-STORE-GUARD-001
+  (#1716) → the #1351 tests+docs rider; ledger renumbers noted in-entry (shifted once more at
+  the 2026-07-09 post-#1352 main fold — main took #1631); post-#1228 main tip
+  folded. See the §1 header blurb for the member one-liners. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX.)
+  Earlier: `claude/sweep-unkillable-core` (**DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1712 /
+  ADR-0019** — the UNKILLABLE sweep run core, Phase 2 of the operator's one-click sweep program: all 15
+  hunt gaps G1–G15 + the run-observability requirements R28/R38/R39/R40/R41/R42/R43/R45 delivered around
+  a byte-untouched engine. SIXTEEN new 100%-line+branch modules —
+  `brutex/observability/{flight_recorder, run_manifest, stage_stamp, diag_bundle, chain_map,
+  run_tripwires}.py` + `brutex/engine/{sweep_run_core, sweep_singleflight, sweep_stall_policy,
+  sweep_liveness, sweep_quarantine, sweep_diffcheck, sweep_exit_status, sweep_detach, run_verdicts,
+  sweep_artifact_guard}.py` — wired at the cli `cmd_sweep_all` seam through ONE `with sweep_run_core(...)`
+  block. Laws: run_id = `grid_identity(grid)` (BLAKE3 selection identity, NO timestamp — resume lands in
+  the SAME `runs/<run_id>/`; `attempt` observability-only); the flight recorder reuses the COMMON
+  orchestrator `AuditWriter` SHA-256 chain (`actor="flight"`, verified by `audit_verify.auto_verify` in
+  the rehearsal chain-break gate; the supervisor BLAKE3 chain untouched); ONE additive `RUN_MANIFEST`
+  action on the EXISTING CLI sweep chain (the per-tuple 3-line golden contract untouched); stage-3 CELL
+  stamps validated (run_id + snapshot hash) before the cascade consumes (invalid ⇒ discard + one
+  idempotent pass re-run); fail-soft law (an observability failure NEVER changes results — recorder
+  degraded latch, ONE WARN); never-adopt (the R45 independent naive reference simulator — AST-pinned
+  import ban on the production sim/metrics modules, int/datetime-only compare, deterministic blake3
+  per-tuple seeding, K=200 `BRUTEX_SWEEP_DIFFCHECK` tristate — marks SUSPECT on mismatch, NEVER replaces
+  the production value); SUSPECT = set-once latch fanning out ONCE (record + ERROR + Telegram + manifest
+  + exit-status + progress). Gap fixes at the seams: G1 corrupt tuple trio → `.quarantine/runtime/` +
+  one retry, grid CONTINUES; G2 stall policy (env wins, scaled floor stays exactly 300.0); G3 parallel
+  writer-actor progress tick; G4 the CONFIRMED heal monotonic-vs-wall defect fixed (additive
+  `wall_time_utc`/`pid` progress keys + pure `progress_verdict`; legacy ⇒ UNKNOWN ⇒ heal REFUSES — a
+  LIVE run is never quarantinable); G5 `exit-status.json` served through enriched `read_progress`, ZERO
+  route edits; G6 results-root flock (audit-chain fork class dead); G7 cascade sidecars atomic +
+  snapshot-hash-stamped, replay refuses a changed lake naming both hashes; G8 stamped
+  `runs/<run_id>/verdicts.json` (P3 join = documented 1-line adapter); G9 keep-awake; G10 LOCK_SH lake
+  read-guard across preload on the EXISTING pull lock; G11 progress-write warn-once; G12 corrupt
+  checkpoint quarantine-start-fresh + crash-loop breaker; G13 alerter-first daemon kernel 100%-tested in
+  `sweep_scheduler.py`; G14 typed old-schema degrade via `guarded_load`; G15 progress beats feed the
+  channel pull_jobs actually consumes. CLI `--detach` = own-session-leader survival (R7). CI: NEW
+  `sweep-rehearsal` job in `ci-ok.needs` (full chain in miniature each push — golden tuple hash +
+  chain verify + stamps + verdicts + bundle + diffcheck at CI_K_SAMPLES=8 + adversarial leg; measured
+  350.5 s sandbox / 21 tests), fault matrix on the REQUIRED chaos-race job, the MECHANIZED R/G
+  traceability gate (`test_r16_traceability_matrix.py`; human table `docs/runbooks/sweep-unkillable.md`).
+  PROVEN ENGINE UNCHANGED: A/B byte-identity (run-core ON vs OFF — per-tuple store SHA-256 maps
+  identical; chains content-equal modulo timestamps + the ONE additive line) + the frozen
+  `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` reproduced with EVERY Phase-2 default ON incl. diffcheck.
+  HONEST envelope (#1712 carries the full list): dashboard-launched sweeps stay IN-PROCESS until the
+  1-line detach adapter lands at merge-integration (the CLI/nightly path is detached-capable TODAY);
+  the 5 hard-gate per-door kill counts are ABSENT manifest keys (absent ≠ zero, contract-pinned;
+  P3-owned follow-up); TUPLE_DONE decimation (`ceil(total/10_000)`) is LOSSLESS — cumulative counters,
+  reconciliation reads SweepProgress EXACTLY, milestone/failure records never decimated (the R41
+  wording honesty note is ledgered); diffcheck verifies projection + trade-sim + drawdown from
+  CERTIFIED bar_bits, NOT the 60 indicator evaluators (K=200 ≈ 0.004% of a 5M-mask grid — assurance,
+  not proof); manifest `estimate` is honest null until P1's estimator wires; the D-19 mutation floors
+  are RATCHETS below the 85% target (74.4–78.9% measured; raise = named follow-up); two
+  WP-6-discovered gaps filed (LMDB cache-skip without sentinel cross-check; old-schema store RAW abort
+  on the sweep→cascade spec-loader path); the G10 "peer pull" refusal wording while a sweep holds
+  LOCK_SH is pinned misleading-but-safe debt — follow-up DEC-SWEEP-LOCK-WORDING-001; tripwires mark
+  SUSPECT + alert, never auto-kill; the watchdog detects, never kills (#999 stance); flock is weaker on
+  NFS. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; ruff/ruff-format clean;
+  `mypy --strict` + pyright at the pre-change baseline. HOSTILE-REVIEW ROUND 3 (#1712): the `sweep-all --detach`
+  argparse-abbreviation fork-bomb CLOSED via a `BRUTEX_SWEEP_DETACHED=1` env sentinel the child honours instead of
+  re-parsing `sys.argv` strings; `mark_suspect`'s mid-run exit-status write preserves `wall_started_utc`; and the
+  stale RUNCORE-DASHBOARD-COVERAGE finding REJECTED — the dashboard button already routes
+  `run_sweep_from_request` → `cmd_sweep_all` → `sweep_run_core`, so keep_awake + single-flight + G12 + forensics
+  cover it; only `--detach` is CLI-only, the disclosed honest envelope). HOSTILE-REVIEW ROUND 4
+  (#1712): the G12 durable crash-loop counter RESETS at a successful run boundary
+  (`reset_checkpoint_corruption` in `_finalize`) so two corruptions separated by a fully successful
+  recovery no longer fire a FALSE CRITICAL `checkpoint_crash_loop`; the C6 heal guard closes the
+  resume-startup window via the NEW pure `sweep_liveness.exit_status_running` (the fresh
+  `exit-status.json` state=running + LIVE pid, written first at enter under the G6 flock, marks a
+  RESUMING run live before the progress file catches up, so a concurrent `--execute` heal cannot
+  quarantine it); Row 19 verified keep_awake-covered on the dashboard job path; Row 21 honest —
+  the `log_file=` plumbing stays unwired at cmd_sweep_all (process-start file-routing needed; the
+  material events are already a run_id log on the internal disk via the mirrored flight recorder;
+  follow-up DEC-SWEEP-RUN-LOG-FILE-001).
+  Earlier: `claude/frontend-latency-hardening-r2` (**DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720** —
+  the dashboard FRONTEND latency-hardening pack, CLIENT-side only (templates + static JS + tests + docs; ZERO
+  route/payload/backend change — byte-stable wire): (Fix 1) the v29 operator page's DUPLICATE pollers consolidate onto
+  ONE BXPoll-disciplined consumer per endpoint — bx-oneclick.js's progressPoller fans out to
+  `window.__bxSweepProgressSubs`/`__bxSweepProgressFailSubs` (call-time-read arrays, throwing subscribers isolated) +
+  exposes `__bxSweepProgressPollNow`; the [data-sweep] panel, heartbeat sweep slot and Run-controls renderer all
+  SUBSCRIBE (the Run click flips `watching` + one shared pollNow — progress-bar cadence 3 s, was 1.2 s, disclosed);
+  bx-rate-monitor.js / bx-liveproof.js gain the same-shape `__bxPullRateSubs`/`__bxLiveproofSubs` fan-outs feeding the
+  heartbeat pull/proof slots (the notify helper stays LOCAL to each dependency-free widget — a ledgered §11 deviation);
+  the killed tokens (`setInterval(pollSweepProgress, 2000)` · `sweepPoll = setInterval(pollRunSweep, 1200)` ·
+  `setInterval(pollPull, 5000)` · `setInterval(pollProof, 10000)` · `setInterval(pollState, 2000)`) are
+  negative-pinned and /api/v1/state rides BXPoll at its unchanged 2 s. MEASURED BEFORE (coordinator harness, headless
+  Chromium, origin/main @ a268bd4c, idle `/`, 120 s visible): 336 requests — sweep-progress 99 / pull-rate 63 /
+  liveproof 36 = the summed duplicates this closes. MEASURED AFTER (same harness, head 31e9022c — validity
+  scoped PER FILE: the five files the page-`/` measurement depends on — v29.html + bx-oneclick.js +
+  bx-rate-monitor.js + bx-liveproof.js + bx-poll.js — are byte-identical to this branch's head, verified
+  empty diff): 240 requests/120 s = 2.000 req/s (−96, −28.6%) — sweep-progress 99→39, pull/rate 63→39, liveproof
+  36→24, state 60→60, universe/pull-progress 39→39, oneclick/runs 39→39; the same six endpoints on both runs.
+  HONEST: hidden-tab was 0 req/s measured on BOTH SHAs — no hidden-tab
+  win claimed; the pollRunSweep no-guard/no-backoff/un-timed-fetch gap is source-asserted (armed only mid-sweep,
+  unmeasured). (Fix 2) the six fixed-interval template pollers (coverage · spot_coverage · fetch_windows ·
+  completeness · expired_options 4 s + launch 2.5 s) migrate onto the ONE shared `BXPoll.createPoller` core through a
+  custom-fetchJson tick seam — every render/degrade byte-identical, failed ticks throw into the counted 3 s→30 s
+  backoff (coverage's 4-fetch composite backs off only at 0/4), cadence tokens unchanged (`pollMs: 4000`/2500),
+  DOMContentLoaded start, a missing bx-poll.js degrades to the legacy guarded interval; fetch_windows' chip/pager
+  clicks ride `poller.pollNow()` and its page-snap-back recursion returns the inner promise. (Fix 3) the 8 /screener
+  filter inputs + /results' Top-N input debounce 200 ms (the v29/movers precedent). (Fix 5) completeness (renderSpot +
+  the ~750-row renderOptions) + spot_coverage (renderSpot) adopt the fetch_windows/db patchGridRows idiom — ONE
+  esc()'d row builder shared by full rebuild AND tbody patch; the 3 new tbody sinks are the sanctioned narrow-target
+  pattern (`_SANCTIONED_EXTRA_SINKS` extended); MEASURED null result, framed honestly: the in-place tbody patch
+  preserves table-node identity across re-renders (no scroll/selection loss, less GC churn — structural probe main
+  false/false → branch true/true) while render WALL-TIME is UNCHANGED at 750 rows (renderSpot 70.1→69.3 ms /
+  renderOptions 52.3→54.0 ms second-render medians, inside main's own ±4-9% run-to-run variance — NO ms improvement
+  claimed). (Fix 6) /reports' chips build ONCE per symbol-SET key;
+  All/Clear/F&O/index-pick are now an O(chips) `.on` class sweep (`applySelection`), XSS build path byte-preserved.
+  SKIPPED honestly: Fix 4 defer (end-of-BODY includes, movers' genuine parse-time consumers, the standing
+  test_dashboard_halfup_format non-defer pin — the skip itself now pinned deliberate) and Fix 7 (already shipped by
+  DEC-DASHBOARD-POLL-HYGIENE-001 #1623). PINS UPDATED intent-preserved: poll_hygiene's five uniform-poller pins →
+  the BXPoll mechanism; js_perf's cadence pin → `pollMs: 4000`; ux_design's v29 fetch-deadline pin → the
+  BXPoll/subscription mechanism. TESTS: NEW tests/unit/test_dashboard_frontend_latency.py (node --check on EVERY
+  static/*.js + killed-token/subscription/debounce/tbody/chips pins + a node-EXECUTED fan-out isolation golden);
+  every touched template's inline scripts parse clean under node. HONEST envelope: source-string pins + node syntax
+  gates, no in-CI browser measurement — BEFORE/AFTER measured out-of-CI by the coordinator harness (AFTER on
+  31e9022c; the five measured-page files byte-identical to this head). HOSTILE-REVIEW FIX ROUND folded
+  (pre-open, FIX-FIRST verdict — the per-item record lives in MIGRATION.md #1720): the fetch_windows/
+  completeness tick fetches are now BOUNDED through the body read via a per-template `fetchTextBounded`
+  honoring the seam's timeoutMs (the MAJOR — a headers-then-stalled-body tick would have wedged BXPoll's
+  one-in-flight chain forever; the ledger's "bare un-timed fetches closed" claim was ahead of the code, now
+  true + pinned); /reports' chip map keys symbol+exchange (the dual-listed stale-highlight MINOR); the
+  touched templates' inline scripts gain an executable node --check pin; completeness.html joins the
+  innerHTML-sink baseline guard at 7. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change.)
+  Earlier: `claude/db-latency-hardening` (**DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719** —
+  the DB/query-latency hardening pack, READ-side only, three evidence-driven fixes off the 2026-07-11
+  profiling run (a 1,178-file real-writer lake, 400k-row ledger + 5 deltas, real routes via
+  `build_app` + `TestClient`): **(1)** the `/db` window-ledger pager — NEW
+  `db_view.query_window_ledger_page`, a DuckDB LIMIT/OFFSET projection over the SAME #1533
+  delta-folded `_ledger_scan_source` the `/coverage/windows` fast paths scan, total from ONE
+  stamp-memoised COUNT(*) (the NEW `wledger-*` key families on the injected window-payload caches);
+  measured 7,321–8,778 ms cold at 400k rows → 564.8 ms (the 7,177 ms O(rows) Python record fold per
+  stamp is GONE); a legacy-shape base / a NULL in a legacy-DERIVABLE cell / a persistent
+  `duckdb.Error` (torn-read retry-once first) / `conn=None` each degrade to the byte-identical
+  legacy cached parse (`window_ledger_rows_cached`, byte-untouched — the fenced #1533 cache
+  families were NOT restructured); **(2)** the pre-open exports — both routes memoise
+  `build_preopen_rows` on the NEW dedicated `_preopen_rows_cache` keyed
+  `(basis, [from, to], symbols-filter)` at `_summary_cache.generation` (repeat click 326–574 ms /
+  206 DuckDB statements binding 616 files → 4.2–18.6 ms / 0 statements, bytes identical; the `.zip`
+  shares the `.xlsx`'s coordinate) + the IEP (open) readers gain an additive `span=` binding only
+  the report span's month files via NEW `_existing_month_files_in_span` (±1-day pad law, domain
+  saturation, non-grammar strays conservatively kept) through `_execute_parquet_resilient`'s NEW
+  bounded `files=` arm — the CLOSE maps deliberately stay whole-partition (the #1649a contiguity
+  guards' `found=nearest_lake_session` diagnostics + the calendar back-walk depth need the
+  unbounded view); the #1649a pre-fix goldens pass UNMODIFIED; **(3)** the `/db` candles %CHNG
+  baseline — `_intraday_last_close_with_predecessor`'s two reads bind explicit file lists, so a
+  page click binds 2 baseline files instead of 72 (warm p50 30.7 → 21.1 ms; the residual is the
+  #1614 manifest revalidation sweep, out of scope). FIX-3 MECHANISM SUPERSEDED at the 2026-07-11
+  merge-reconcile (main 652301b5, PR #1386): main's DEC-DB-BASELINE-MANIFEST-ROUTE-001 (#1670)
+  landed the SAME footer-open fix in-flight with a richer mechanism (`_bars_file_windows` —
+  manifest-exact per-file bounds + month-grammar fallback + predecessor step-back, ALSO covering
+  the moneyness spot join) — the merged tree serves #1670's mechanism, this pack's interim
+  `_predecessor_candidate_files` helper was DELETED at the reconcile, and this pack's
+  behavior-level pins + bench re-ran GREEN over it unchanged; the bounded-`files=` resilient-read
+  arm CONVERGED with #1670/#1668's (main's kwarg + two-stage probe + readable-subset latch
+  adopted); fixes 1 + 2 untouched, `_existing_month_files_in_span` stays (the fix-2 consumer). SANCTIONED (corrupt lakes
+  only): a corrupt file provably OUTSIDE a bounded read's candidates no longer blanks that read —
+  correct-or-absent preserved, blast radius strictly narrower; a corrupt CANDIDATE still blanks
+  (both directions pinned). The D3 route spy tightened 1 → 0 Python parses (byte-parity half
+  unmodified). HONEST: the window-ledger fresh-stamp click is ONE O(total rows + delta footers)
+  columnar scan, never literal O(page); the export render stays O(report rows) per click; candidate
+  enumeration is an O(existing files) listing. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; no new required wire fields; `db_view.py` +
+  `preopen_report.py` 100% line+branch on their ci.yml gates (two new unit files joined the db_view
+  gate); ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline;
+  fast-equals-legacy + bounded-equals-unbounded parity pinned exhaustively; benches
+  `test_db_window_ledger_page_o1.py` + `test_db_candles_baseline_bound_o1.py`.)
+  Earlier: `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
+  MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
+  COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
+  dropdown on a coarse timeframe offers only the 09:15-anchored bucket-ANCHOR grid, but the
+  backend treated a picked anchor as an as-of INSTANT, so 3-minute @ 15:27 cut at 15:27 and
+  showed the partial 15:27 minute close (₹27,932.80) instead of the completed 15:27–15:29
+  bucket close (₹27,940.85 = the broker's = 2min@15:29 = 1min@latest). The stored derived-TF
+  partitions were always CORRECT; only the read-time as-of resolution was wrong. FIX: ONE
+  COMMON as-of seam `movers_snapshot.resolve_asof_cutoff(interval, time)` (consumed by all
+  three tabs — spot/futures/options) resolves an anchor pick FORWARD to the bucket's final
+  minute `min(anchor + minutes − 1, 15:29)`, and the downstream `<= cutoff`
+  `filter_to_ist_minute` caps at the day's latest available minute (NO look-ahead). Laws:
+  TF=1minute identity; "Latest"/blank whole-day byte-identical (DEC-MOVERS-ASOF-LATEST-DEFAULT-001
+  preserved); non-anchor picks keep as-of-instant semantics; prev-close %CHNG untouched. Honest
+  provenance: additive `asof_through` payload echo + " HH:MM bucket · through HH:MM" note
+  (default `None` → byte-identical). Value TF-invariance (DEC-MOVERS-SPOT-VALUE-TF-INVARIANT-001)
+  now holds PER shared *resolved* as-of (a sanctioned narrowing). READ-ONLY dashboard — ENGINE
+  UNCHANGED (NIFTY/BANKNIFTY/SENSEX); no lake/schema/scope/vocab/rate change; the three touched
+  movers modules 100% line+branch; ruff/ruff-format/`mypy --strict` clean, pyright at baseline).
+  Earlier: `claude/movers-futures-hyphen-parse` (**DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md
+  #1646** — the `/movers` Futures contract-symbol parse is RIGHT-anchored via the ONE canonical grammar:
+  `parse_future_symbol` DELEGATES to `data/fno_symbol.parse_fno_symbol` (FUT-restricted; the left-anchored local twin
+  DELETED), so a hyphenated underlying (`NSE-BAJAJ-AUTO-30Sep25-FUT`) parses to `BAJAJ-AUTO` — not the `parts[1]`
+  truncation `BAJAJ` whose nonexistent-spot-key probe silently dropped spot + premium for every hyphenated F&O
+  underlying and let the warm grid cache the wrong rows (executed real-lake repro). Disclosed sanctioned delta:
+  junk lake-dir expiry tokens the shape-stricter twin rejected (`30SEP25` etc.) now accept exactly as
+  options//db/Greeks already did; well-formed vendor symbols + non-hyphenated rows byte-identical (pinned);
+  `&`-names were and remain correct (pinned). SAME-PR FOLD-IN (W3 spot-drift ladder): the movers underlying-spot
+  probe gains the #1482 (DEC-GREEKS-SPOTJOIN-STOCK-001) drift-recovery ladder — NEW `movers_futures._SpotLtpResolver`,
+  ONE per-candidates-compute instance in BOTH the futures loop and the options moneyness loop: the exact-key
+  `_underlying_spot_ltp` probe (byte-unchanged) runs FIRST; only an exact MISS walks the COMMON
+  `lake_keys.spot_recovery_candidates(..., stock_drift=)` ladder over the same two spot segments, fed by a LAZY
+  at-most-once `spot_drift.load_stock_drift_map` (master-verified unique-fold map; ambiguity POISONED + capped
+  warns; no-master / read error fail-softs to today's honest no-spot; MemoryError re-raises), with the recovery
+  OUTCOME memoised per (exchange, underlying) + ONE rung-attributed `movers.spot_key_recovered` INFO per compute —
+  so a spelling-drifted stock spot dir (chain `BAJAJAUTO` vs the master's on-disk `BAJAJ-AUTO`; executed repro on
+  the REAL computes) no longer blanks futures spot/premium or reads a silent `?` options moneyness. A resolving
+  lake never builds the map (spy-pinned byte-identity, index symbols untouched); NO `%26`→`&` recovery (the #1482
+  pledge stands); read-time recovery ONLY — nothing healed on disk. READ-ONLY dashboard — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX;
+  `movers_futures.py` + `movers_options.py` BOTH 100% line+branch; ruff/ruff-format/`mypy --strict`/pyright clean.)
+  Earlier: `claude/groww-market-hours-guard` (**DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692** —
+  renumbered #1633 → #1673 → #1692: #1633 → #1673 at the 2026-07-10 merge-reconcile (main's slot-wave/renumber
+  cascade reserved #1633–#1649 — see the DEC-MOVERS-UNDERLYING-CLASS-001 #1650 renumber history — and the in-flight
+  cascade holds the band through #1672), then #1673 → #1692 per the coordinator reservation map (#1673 is reserved
+  for PR #1369) —
+  the NSE market-hours pull guard: NO Groww VENDOR pulls between 08:45 (inclusive) and 15:35 (exclusive) IST on a
+  trading day; an in-flight nightly pull STOPS gracefully at 08:45 and start/resume is REFUSED until 15:35, keeping
+  the SHARED Groww account free for TickVault's live feed. NEW pure leaf `brutex/calendars/market_hours.py`
+  (`BLOCK_START=08:45`/`BLOCK_END=15:35`; the clockless `pull_allowed_now`; `pull_allowed_default` binding `now_ist()`
+  + the NON-raising `is_trading_day()` — out-of-coverage weekday BLOCKS = fail-safe, weekend ALLOWED; the fail-LOUD
+  env kill switch `BRUTEX_MARKET_HOURS_GUARD` default ENABLED; `guard_active_default`; a `now`-injectable
+  `MarketHoursGuard`) + NEW `MarketHoursHalt(BruteXError)` in `data/errors.py` (in BOTH spines' `_GLOBAL_STOP_ERRORS`
+  + `pull_jobs.is_pull_halt` → fires the CRITICAL Telegram pull-halt alert). START GATES: `BackgroundPullJob.start`
+  defers a `JOB_KIND_PULL` in-window UNLESS `market_hours_exempt=True` — the THREE vendor-free exemptions are the
+  sweep (`job_kind != PULL`), the dashboard Greeks-backfill start + every dashboard dry-run pull start (both pass
+  `market_hours_exempt`; the over-block fix — Greeks-backfill runs under `JOB_KIND_PULL`, so job_kind alone was not
+  enough); `cmd_fetch` defers a LIVE pull at the START gate with a clean EXIT_OK (dry-run/inspect EXEMPT). MID-RUN
+  (the CRITICAL requirement): a `market_closed` predicate threaded to the PER-WINDOW seam of both
+  spines raises `MarketHoursHalt` (durable ledger leaves PLANNED/FAILED windows RESUMABLE); `run_until_clean` gains a
+  `market_closed` hook → `stop_market_hours`; `pull_all_spot`/`pull_contract_candles` catch it mid-round + belt-break
+  later steps + the minute phase; the METADATA phase (`pull_expiries_contracts`) gets a per-cell belt (raises
+  `MarketHoursHalt` before each `get_expiries`/`get_contracts`; `run_two_phase` re-raises it, not record-and-resume);
+  `run_full_pipeline` re-checks the belt BEFORE metadata AND before historical + wraps `run_metadata` in a
+  `try/except MarketHoursHalt`, skipping the rest of the vendor chain with `stopped_after="market_hours"`; and the
+  CLI `brutex fetch` path is MID-RUN-guarded too (`cmd_fetch` threads `market_closed` into the spot spine + the
+  between-rounds `run_until_clean`, catches `MarketHoursHalt`, drains + persists the ledger → resumable, exits
+  EXIT_OK). The mid-run env kill switch is resolved ONCE at pull start via `resolve_market_closed()` (fail-LOUD on
+  junk at START; the bound predicate reads ONLY the live clock per call, so a junk env written MID-pull can never
+  crash a long run with a per-window re-parse); the one-shot START gates keep `guard_active_default`. Production
+  wiring binds `resolve_market_closed()` (dashboard routes + the nightly headless binding — the MOTIVATING
+  01:30 case covered); a dry-run / un-wired caller passes `None` (byte-identical). NOT edited:
+  `_start_auto_resume_on_boot`/`cmd_dashboard` (auto-resume covered transitively; conflict-free with PR #1343).
+  HONEST: the CLI + metadata paths are now mid-run-guarded (not merely start-gated); the Groww F&O guard is
+  per-CONTRACT granularity — a contract already started at 08:45 finishes its few small remaining windows before the
+  next contract's belt stops the pull (an accepted bounded overrun, never a whole extra symbol); a pull interrupted
+  at 08:45 DEFERS to the NEXT nightly, NOT a same-day 15:35 re-arm (named follow-up); out-of-coverage default is
+  BLOCK-in-window (fail-safe). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; pull-CONTROL only, no fetch/rate/pool/
+  governor change; `market_hours.py` + `data/errors.py` + `universe_phases.py` + `metadata_pull.py` +
+  `pipeline_pull.py` + nightly binding 100% line+branch; ruff/ruff-format clean, `mypy --strict`
+  clean, pyright at the pre-change baseline. LAND-PASS FIX ROUND (2026-07-10, same branch, pre-merge): the async
+  `fetch_pipeline._is_pool_isolatable` now treats `MarketHoursHalt` as a POOL-WIDE trip (the #1038 drift-pin's demand — the
+  async twin of the spines' `_GLOBAL_STOP_ERRORS`; dedicated unit pin, module re-verified 100%); suite-wide WALL-CLOCK
+  hermeticity — `tests/conftest.py` runs the suite under the documented kill switch (`BRUTEX_MARKET_HOURS_GUARD=0`,
+  `setdefault`) because the real-clock START gate made every un-injected `BackgroundPullJob.start` test FAIL inside
+  08:45-15:35 IST (reproduced 2026-07-10; the #1380 hermeticity philosophy applied to the clock — the guard's own tests
+  inject env/clock/guards explicitly and stay armed on both arms); two stale `#1624` docstring citations corrected to
+  this entry's number (now #1692 after the coordinator-map renumber); the fold's duplicated #1632 ledger entry deduped).
+  Earlier: `claude/magical-cray-g6agaw` (**DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 +
+  DEC-FUTURES-ADDRESSING-PIN-001 + DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702** — the ADR-0012
+  NIFTY-futures sweep LAUNCH capstone: the ONE pinned series alias `NSE-NIFTY-FUT` (symbol_id 4; retired shapes get a
+  did-you-mean refusal), the vendor-truth roll resolver (`brutex/data/futures_series.py` — interior holes refuse
+  naming months, head/tail clamp+WARN, calendar observe-only), the ONE alias-aware sweep-slice loader
+  (`brutex/feed/series_load.py` — exact IST-date ownership cut, spot path byte-identical), the Stage-1A B2 closure
+  (roll-aware `session_key` + TOTAL per-contract hard reset + the D12 `apply_1day_mask`), and `roll_schedule` in
+  `canonical_trade_params` under the instrument⟺schedule invariant. ENGINE surface = 3 spot indices +
+  NSE/FNO/NSE-NIFTY-FUT; spot byte-identical (unmodified goldens green); mypy `--strict` clean, pyright at the
+  pre-change baseline, ruff/ruff-format clean).
+  Earlier: `claude/oneclick-perf-club` (**DEC-ONECLICK-PERF-CLUB-001,
+  MIGRATION.md #1711** — the entry number is coordinator-ASSIGNED from the
+  reservation map (2026-07-10 — the next free number above the #1264
+  reservation tail #1710; live-main max #1665 at assignment, live-max+1
+  spoken for by in-flight reservations — gaps are legal; renumbered from
+  the interim provisional #1666, the #1664/#1665 reservation-map
+  lesson) — the queued
+  post-#1373 oneclick perf/hygiene club, built on PR #1373's
+  `claude/oneclick-instrument-display` head 3c478831 (the PR opens only after
+  #1373 merges; BUILD+TEST+PUSH-branch-only until then). **F1 (TOP):**
+  `GET /api/v1/oneclick/verify` was the ONE oneclick route with NO revision
+  cache — `load_manifest` + `reconcile_funnel` + the one-row trades probe ran
+  per REQUEST; the whole payload is now stat-token cached like the siblings
+  (key = manifest token [primary probe] + events + top100 tokens + the chain
+  verified-state — a `check=chain` click re-keys exactly once, then plain polls
+  serve the clicked payload; a primed poll is three `os.stat` probes + the
+  raising chain cache-peek + one hit (r2 sweep M1 — the chain state is a
+  cache-peek, never a stat); HONEST: a sidecar rewrite moving none of
+  the three tokens does not move the key — the #1617 pass lands sidecars
+  BEFORE top100.json, so the trades-wired flag refreshes with the top100
+  token; a manifest-less run computes fresh per poll, cheaply). NEW B-7 bench
+  pin (`TestVerifyPollFlatVsManifestSize`, measured 2026-07-10 sandbox:
+  26.5 µs/poll @ 4 doors vs 25.2 µs @ 4000 doors → 0.95× flat vs the 6.89 ms
+  fresh compute the pre-fix route paid per poll; `ratio_ceiling(8.0)` + the
+  `_must_not_run` no-recompute + outage-serve teeth). **C-r2-5 (same root):**
+  the stat-OUTAGE doctrine — `artifact_probe`/`ArtifactProbe` distinguish
+  honest ABSENCE (FileNotFoundError/NotADirectoryError → fresh UNCACHED, cheap,
+  last-known key FORGOTTEN so a deleted artifact is never resurrected) from a
+  probe OUTAGE (any other OSError → serve the LAST-KNOWN payload via the ONE
+  `serve_revision_cached` chokepoint + `OutageGate` [thread-safe, both maps
+  LRU-bounded at OUTAGE_GATE_CAPACITY=512 — the events coordinate folds
+  client-typed page params, so unbounded dicts would be a hostile-poll leak]
+  with ONE `oneclick.probe_outage` WARN per outage per COORDINATE (r2
+  MINOR-2 honesty — a whole-volume flap warns once per distinct coordinate
+  touching the volume, a verify poll probes 3: primary + events + top100
+  siblings; never per poll) and a
+  `oneclick.probe_recovered` INFO on recovery — the pre-fix rev-None arm was
+  an UNCACHED full O(artifact) re-parse per poll with ZERO logs, Breaker-C
+  measured ~450×); ALL FIVE cached oneclick routes (runs · manifest · top100 ·
+  events · verify) rewired through the chokepoint; the peek rides the NEW
+  `CachedPayloadMissingError`/`raise_no_cached_payload` sentinel over the NEW
+  `PayloadCache` Protocol (leaf module never imports the dashboard cache);
+  `runs_revision_probe` is the outage-aware twin of `runs_revision` over ONE
+  extracted `_runs_digest` (§11 COMMON, byte-identical). **F4:**
+  `discover_runs` stat-stamps every dir, selects the newest-limit on
+  `(mtime_ns, name)` (IDENTICAL selection/order to the pre-fix sort), and
+  parses ONLY the selected manifests — the pre-fix shape parsed EVERY run's
+  manifest then truncated (67× under churn); the stat sweep stays O(run dirs)
+  and `runs_revision`'s uncapped stat walk stands (the F5 ruling — this bounds
+  PARSES, not stats); `TestDiscoverRunsParseBound` pins 50-of-60 parses via a
+  counting spy. **A-r4 (client defense-in-depth):** the /screener "Show all"
+  render is BOUNDED (BX_SCREENER_SHOW_ALL_CAP=1000) and applyFilters/sortRows
+  are input-bounded (BX_SCREENER_INPUT_CAP=5000, applied at payload ingestion
+  via `bxInputCapRows`) through node-goldened BXScreener primitives
+  (`bxRenderCount`/`bxCapNote`/`bxInputCapNote` — every truncation NAMED on
+  the count line: "showing first N of M (render cap 1000)"); the backend half
+  was CLOSED by #1373's TOP100_ROW_CAP=100 (>100-row inputs unreachable
+  TODAY) — this guards FUTURE bypass paths against the Playwright-measured
+  10k=4.8 s / 20k=14.1 s tab freeze; the [W2-5] rendered-numerator law stands
+  (route pin repointed onto the shared primitives). **F2b SKIPPED** (optional
+  polish per the Breaker-A severity correction — the row cap was the real
+  fix; do-not-over-invest ruling, ledgered). TESTS/GATES:
+  `oneclick_artifacts.py` 100.00% line+branch on the ci.yml-EXACT standalone
+  gate (probe/gate/chokepoint covered by the unit file alone);
+  `oneclick_view.py` untouched; the oneclick battery + route
+  outage/recovery regressions green; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 errors on touched files; `node --check` clean. DISPLAY
+  zone only — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX); zero new routes; the
+  verify wire shape byte-identical (caching + logging only); the only
+  payload-visible change class is the /screener count-line notes + the
+  bounded Show-all render.)
+  Earlier: `claude/data-edge-guard-fixes` (**DEC-BADTICK-HILO-SCREEN-001 +
   DEC-READ-BOUNDARY-FINITE-001, MIGRATION.md #1687–#1688** (renumbered from the
   interim #1632–#1633, then from #1655–#1656 at PR prep — main's PR #1354
   took #1632, then PR #1343 took #1655; #1687/#1688 coordinator-granted) — the ADDITIONS cycle
@@ -3290,6 +4160,31 @@ hostile-review pass._
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope / 52→60-vocab / rate-cap / lake-schema / stored-bar
   change; `stage1a.py` + `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
   --strict`/pyright clean; the P-06 look-ahead + suffix-independence property suites pass UNMODIFIED.)
+  Earlier: `claude/peaceful-hamilton-kyeu07` (**DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645** — the
+  dormant India-VIX trade stamping WOKEN end-to-end: the lake's `NSE/INDEX/INDIAVIX` series (1-minute ∪ derived 1-day,
+  ONE window-bounded read per launch via NEW `brutex/engine/lake_slice.py::load_lake_slice` +
+  `brutex/engine/reference_wire.py::build_vix_stamper`) stamps `vix_at_entry`/`vix_at_exit` on EVERY OBSERVABLE production trade, and
+  persisted finalist rows gain the derived nullable `vix_mean`/`vix_min`/`vix_max` trio (`aggregate_trade_vix`, the
+  ONE fsum-overflow-safe fold; results_store's PUBLIC `VIX_FIELDS` is the one cross-module column source) — VIX stays
+  REFERENCE ONLY: never in the 60-vocab, never in `_RANKABLE_FIELDS`, never in the BLAKE3 run identity; a missing VIX
+  bar stamps `None`, NEVER fabricated. The stamper seam is threaded/bound across every production trade-sim site
+  (`ResidentTradeSim.reference_stamper` + the hoisted Rust-batch post-stamp converter — kernel byte-untouched; spawn
+  pools carry a picklable stamper, sequential ≡ parallel bytes pinned); the ONLY unstamped trade streams are the FIVE
+  named DISCARDED/unobservable streams (§2 Rule 3), each an explicit literal `reference_stamper=None` enumerated by
+  the exact-count AST pin (`tests/unit/test_vix_stamper_binding_pin.py`) that also REFUSES silently-omitted kwargs +
+  positively pins the entry-point binds AND the once-per-launch builder-call counts. The trio survives redo honestly:
+  None→value backfills, a value-vs-value clash raises the typed tuple-skip `VixTrioConflictError` (the VIX lake moved,
+  NOT non-determinism — grid drivers tuple-skip, stage-3 cell-skips), and `sweep-verify --recount` stamps like the
+  launcher + attributes a VIX-only divergence as the non-corrupt `recount_vix_divergence` (moved/backfill/pre-VIX-
+  schema shapes; the sentinel/sidecar re-pair gates are `dataclasses.fields()`-driven — drift-proof, never a hand
+  list). Round-6 review fixes: the cascade candidate re-simulation's stamps were provably DISCARDED at the
+  CandidateInput scalar conversion (report bytes pinned identical either way), so the cascade chain's dead stamper
+  seam was DELETED along with the two manual-replay `vix_stamper_for_manifest` builds that paid a full window-bounded
+  VIX lake read per `brutex cascade` run / dashboard click for zero observable output (the fifth sanctioned
+  literal-None site now lives inside `build_candidate_input`; revert lever = add a VIX surface to the cascade report
+  FIRST); miss-WARNs are memoised + capped (cap+1 log lines, exact `miss_count` tally). ENGINE semantics UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; touched modules 100% line+branch; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new vs the pre-change baseline).
   Earlier: `claude/jolly-tesla-miygwt` (**DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597** — the weekly deep
   mutation gate made GREEN end-to-end: both cargo-mutants jobs restructured onto sharded matrices (6 fno-math +
   7 trading-core shards; worst shard 65 min vs the 120 min job cap), trading-core WIDENED to evaluator+python+spec
@@ -5004,8 +5899,30 @@ hostile-review pass._
 3. **Scope lock.** Track 1 = Groww + spot indexes + India VIX (NIFTY 50,
    BANKNIFTY, SENSEX, INDIA VIX). **India VIX is REFERENCE ONLY** — it
    is fetched + stored and stamped as `vix_at_entry` / `vix_at_exit` on
-   every trade, but is NEVER part of brute-force pattern combinations
-   or the 52-condition vocabulary. 21 timeframes — **`1m` is the ONLY
+   every **OBSERVABLE** trade (DEC-VIX-STAMP-WIRE-001, MIGRATION.md
+   #1645 — persisted finalist rows additionally carry the derived
+   nullable `vix_mean`/`vix_min`/`vix_max` trio; the ONLY unstamped
+   trade streams are the FIVE named DISCARDED/unobservable streams —
+   the Stage-4 cascade candidate re-simulation (stamps would be dropped
+   at the CandidateInput scalar conversion; report bytes pinned
+   identical — the round-6 review DELETED the cascade chain's dead
+   stamper seam plus the two manual-replay `vix_stamper_for_manifest`
+   builds that paid a full VIX lake read per replay/click for zero
+   output), its Monte-Carlo permutation filter, `run_persisted_sweep`'s
+   K-of-N inner stream, the CLI options-sim replay (stamps would be
+   dropped at the SpotSignal conversion) and `brutex sweep`'s
+   text-report replay (report bytes pinned identical) — each an
+   explicit literal `reference_stamper=None` enumerated by an AST pin
+   whose exact-count laws also REFUSE a silently-omitted kwarg
+   and positively pin the entry-point binds (round-2 panel hardening);
+   the trio survives redo honestly — `None → value` backfills, a
+   value-vs-value clash raises the typed tuple-skip
+   `VixTrioConflictError` (the VIX lake moved, NOT non-determinism) and
+   `sweep-verify --recount` stamps like the launcher + attributes a
+   VIX-only divergence as the non-corrupt `recount_vix_divergence`;
+   a missing VIX bar stamps `None`, never fabricated), but is
+   NEVER part of brute-force pattern combinations or the 52-condition
+   vocabulary (nor `_RANKABLE_FIELDS`, nor the BLAKE3 run identity). 21 timeframes — **`1m` is the ONLY
    granularity fetched** and the 19 derived intraday TFs + `1d` are all
    DERIVED from it (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, MIGRATION.md #853; the
    `1d` daily anchor is resampled to midnight-IST from the stored 1-minute and
@@ -5042,7 +5959,20 @@ hostile-review pass._
    `rust/trading-core/src/indicators/market_structure.rs`, a swing confirmed only
    k bars later, proven P-06-clean by a dedicated `LookAheadBarrier` test) — so
    ALL 60 conditions are now `implemented=true` (`IMPLEMENTED_MASK = (1<<60)-1`)
-   and the data-independent indicator vocabulary is COMPLETE.**
+   and the data-independent indicator vocabulary is COMPLETE.** **PR-5
+   (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 / DEC-FUTURES-ADDRESSING-PIN-001 /
+   DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702) LAUNCHED the futures
+   sweep: the track is addressed by the ONE pinned series alias
+   `NSE-NIFTY-FUT` (DEC-FUTURES-ADDRESSING-PIN-001 — supersedes the
+   pre-launch dual-acceptance envelope; the retired `NIFTY-FUT-YYYY-MM-DD` /
+   `NSE-NIFTY-<DDMmmYY>-FUT` shapes get a did-you-mean refusal), roll-resolved
+   at launch by `brutex/data/futures_series.py` into the per-contract
+   `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` lake partitions (vendor-parsed
+   expiries govern ownership; expiry day belongs to the EXPIRING contract) and
+   stitched by `brutex/feed/series_load.py` with a hard per-contract Stage-1A
+   reset at every roll (D11 — no level ever crosses the basis gap). The
+   engine sweep surface is EXACTLY {the 3 spot index triples} ∪
+   {NSE/FNO/NSE-NIFTY-FUT}.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
@@ -5106,8 +6036,8 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:743` after spec growth moved it from :654
-   (DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:760` after spec growth moved it from :743
+   (earlier :654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
@@ -5279,7 +6209,123 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/data-edge-guard-fixes`
+- **Active feature branch:** `claude/results-cascade-verdict-join`
+  (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
+  cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
+  composite join the display surfaces: the ONE `engine/cascade_join.py` law
+  feeds the top100 writer (in-memory report, HARD sweep_id gate, per-entry
+  `cascade` object + `metrics.cpcv_pass_pct` only-when-measured, root
+  `cascade_join` meta, ENTRY_REQUIRED_KEYS not extended) AND the /results
+  read-time loader (dedicated `cascade_report_revision` stat token, 16 MiB
+  cap, single-entry memo, EMIT-ON-PRESENT row keys + meta — a no-report
+  lake's payload is byte-identical, pinned); a cascade-FAILED strategy is
+  red-flagged on every screen, ranked never hidden; NEW
+  `dashboard/composite_join.py` activates ?preset=composite honestly off
+  the newest run's aggs sidecars (the read-time half of HIGH #40); nothing
+  persisted on ResultRow — DEC-CASCADE-ROW-PERSIST-002 is the named
+  follow-up; READ-side + artifact-level; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/tradesim-open-session-guard`
+  (DEC-TRADESIM-OPEN-SESSION-GUARD-001, MIGRATION.md #1743 — the trade-sim
+  OPEN-position session-boundary guard: an open position never survives an IST
+  session-date change — closed retroactively at the PRIOR session's last
+  stored bar (the finish() idiom) under the NEW append-only `session_gap`
+  exit reason; a pending next-open exit is subsumed and the boundary bar never
+  arms; Python walker + Rust kernel (u64+u128) in ONE change with zero new FFI
+  inputs; the frozen sweep-run goldens MEASURED unchanged (1661 golden trades,
+  zero cross-session — run identity untouched); the `exits_session_gap`
+  counter + the capped `trade_sim.session_tail_hole` WARN are the signals;
+  ENGINE semantics corrected on hole-shaped feeds only — healthy contiguous
+  feeds byte-identical, NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); matches §1's
+  Active branch line — see §1 + MIGRATION.md #1743 for the full blurb)
+  Earlier: `integration/t1-sweep-core`
+  (T1 SWEEP-CORE integration train — folds #1330 DEC-SWEEP-UNKILLABLE-CORE-001 (#1712) +
+  #1332 DEC-SWEEP-BLOOM-AUTOGROW-HEADROOM-001 (#1714) + #1336
+  DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001 (#1715) + #1350
+  DEC-SWEEP-RESUME-STORE-GUARD-001 (#1716) + the #1351 tests+docs rider; see §1 Active
+  branch for the full blurb)
+  Earlier: `claude/dedup-c1-tuple-digest-identity`
+  (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001, MIGRATION.md #1715 (renumbered #1622 → #1632 → #1633 → #1715 across the T1 train folds) — the residual
+  C1/C2 stale-serve fix: fold the ACTIVE gate config + non-default SELECTION
+  knobs (`top_k`/`min_hits`/`max_combos`) into the per-tuple store ADDRESS
+  (`_tuple_digest`) via a NEW COMMON `sweep_identity.py` leaf + a supervisor
+  re-export shim, DEFAULT-ELIDED so an ungated default-selection sweep's digest
+  is byte-stable (`5b020e892247deac`); the #1330 `grid_identity`/`tuple_cache_key`
+  pins + the #1531 golden pair + the 400-case vocab golden pass UNMODIFIED; C5
+  defense-in-depth `ResultsStoreGateConflictError` tuple-scoped skip; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/sweep-unkillable-core`
+  (DEC-SWEEP-UNKILLABLE-CORE-001, MIGRATION.md #1712 — the UNKILLABLE sweep
+  run core, Phase 2 of the one-click sweep program; see §1 Active branch for
+  the full blurb)
+  Earlier: `claude/frontend-latency-hardening-r2`
+  (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the dashboard
+  FRONTEND latency-hardening pack: v29 duplicate pollers consolidated onto ONE
+  BXPoll-disciplined consumer per endpoint (measured BEFORE: 336 req/120 s idle
+  with sweep-progress/pull-rate/liveproof double-polled → measured AFTER 240
+  req/120 s, −28.6%, same harness), six template pollers
+  migrated onto the shared bx-poll.js core (renders byte-identical), /screener +
+  /results inputs debounced 200 ms, in-place tbody row patches on
+  completeness/spot_coverage, /reports chips build-once + class-toggle
+  selection; the bx-format/bx-movers-time defer + the universe catch-up were
+  SKIPPED honestly (parse-time consumers + standing pin; already shipped by
+  #1623); CLIENT-side only — byte-stable wire; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/db-latency-hardening`
+  (DEC-DB-LATENCY-HARDENING-001, MIGRATION.md #1719 — the DB/query-latency
+  hardening pack, READ-side only: the /db window-ledger DuckDB page fast path
+  (7.3–8.8 s cold at 400k rows → 0.56 s, zero Python parses), the pre-open
+  export rows memo (repeat click 206 DuckDB statements → 0, bytes identical)
+  + span-bounded IEP reads, and the /db candles %CHNG baseline file bound
+  (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1719 for the full blurb)
+  Earlier: `claude/movers-bucket-asof-fix`
+  (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
+  bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
+  via the ONE COMMON `movers_snapshot.resolve_asof_cutoff` seam shared by all three
+  tabs; READ-ONLY dashboard, ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/movers-futures-hyphen-parse`
+  (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, MIGRATION.md #1646 — the `/movers`
+  Futures contract-symbol parse right-anchored by DELEGATING to the canonical
+  `data/fno_symbol.parse_fno_symbol`; hyphenated underlyings keep their full
+  name so spot + premium resolve; + the W3 fold-in: the movers spot probe
+  (futures premium + options moneyness) walks the #1482 spot-drift recovery
+  ladder on an exact-key miss via the per-compute
+  `movers_futures._SpotLtpResolver`; READ-ONLY dashboard fix; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/groww-market-hours-guard`
+  (DEC-GROWW-MARKET-HOURS-GUARD-001, MIGRATION.md #1692 — renumbered #1633 → #1673 → #1692 (the reserved-band collision, #1633–#1672 held by main's cascade; then the coordinator reservation map — #1673 reserved for PR #1369); the NSE
+  market-hours pull guard: no Groww VENDOR pulls 08:45–15:35 IST on trading
+  days, keeping the shared account free for TickVault's live feed; matches
+  §1's Active branch line)
+  Earlier: `claude/magical-cray-g6agaw`
+  (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1710 — the ADR-0012
+  NIFTY-futures sweep LAUNCH capstone; see §1 Active branch for the full blurb)
+  Earlier: `claude/oneclick-perf-club`
+  (DEC-ONECLICK-PERF-CLUB-001, MIGRATION.md #1711 — coordinator-assigned from
+  the reservation map (next free above the #1264 reservation tail #1710;
+  live-main max #1665 at assignment — gaps are legal; renumbered from the
+  interim provisional #1666) — the queued post-#1373 oneclick
+  perf/hygiene club, built
+  on PR #1373's head 3c478831 (the PR opens after #1373 lands): F1 the
+  /api/v1/oneclick/verify revision cache (the ONE uncached oneclick route;
+  key folds manifest + events + top100 tokens + the chain verified-state;
+  NEW B-7 bench pin measured 0.95× flat) · C-r2-5 the stat-outage
+  serve-last-known doctrine on ALL FIVE cached oneclick routes
+  (`artifact_probe` absent≠outage + `OutageGate` + the ONE
+  `serve_revision_cached` chokepoint; one WARN per outage per coordinate,
+  recovery INFO,
+  never a silent per-poll re-parse) · F4 `discover_runs` stat-sorts first and
+  parses only the newest-limit manifests (identical selection; 50-of-60
+  parse-spy pin) · A-r4 the /screener client-side bounds (Show all capped at
+  1000, input cap 5000, node-goldened cap/note math — every truncation NAMED)
+  · F2b deliberately SKIPPED as optional polish; DISPLAY zone only; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/data-edge-guard-fixes`
   (DEC-BADTICK-HILO-SCREEN-001 + DEC-READ-BOUNDARY-FINITE-001,
   MIGRATION.md #1687–#1688 (renumbered from the interim #1632–#1633, then
   from #1655–#1656; main's PR #1354 took #1632, PR #1343 took #1655) — the additions cycle: (1) the bad-tick screen's
@@ -5372,8 +6418,7 @@ hostile-review pass._
   see §1 Active branch for the full blurb)
   Earlier: `claude/dazzling-pasteur-jf8s3w`
   (DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #1614 — the write-time
-  PER-FILE lake STATS manifest; see §1 Active branch chain for the
-  full blurb)
+  PER-FILE lake STATS manifest; matches §1's Earlier chain)
   Earlier: `claude/sweep-log-level-guard`
   (DEC-SWEEP-LOG-VOLUME-GUARD-001, MIGRATION.md #1630 — the sweep CLI
   log-volume guard: INFO default + fail-loud `BRUTEX_LOG_LEVEL` override at the
@@ -5414,6 +6459,11 @@ hostile-review pass._
   anchor at the Stage-1A roll seam + (2) a bounded bad-tick screen at the engine
   read boundary (`arrow_table_to_bars`); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
+  Earlier: `claude/peaceful-hamilton-kyeu07`
+  (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 — India-VIX trade stamping wired
+  end-to-end: `vix_at_entry`/`vix_at_exit` on every OBSERVABLE trade + the
+  persisted nullable `vix_mean`/`vix_min`/`vix_max` finalist trio, REFERENCE
+  ONLY; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/jolly-tesla-miygwt`
   (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597 — the weekly deep mutation
   gate made green end-to-end: sharded cargo-mutants matrices + zero-survivor
@@ -5680,14 +6730,15 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4804-4805` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4863-4864` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError, GrowwEmptyResponseError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name; an empty/non-JSON body `json.JSONDecodeError` → **retryable** `GrowwEmptyResponseError`, so a transient throttle is re-pulled instead of a terminal "not on Groww" quarantine — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854) | `groww/errors.py`; `groww/api-reference/05-exceptions.md:9-70` |
-| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:537-554` |
+| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:595-608` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
+| NIFTY-futures ENGINE series alias | **`NSE-NIFTY-FUT`** (symbol_id 4) — the ONE pinned ADR-0012 futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolved at launch by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the engine hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |

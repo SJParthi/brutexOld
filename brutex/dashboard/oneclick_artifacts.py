@@ -61,6 +61,8 @@ import json
 import os
 import re
 import threading
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -96,18 +98,23 @@ __all__ = [
     "TOP100_ROW_REQUIRED_KEYS",
     "TOP100_SCHEMA_VERSION",
     "TRADES_DIRNAME",
+    "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
+    "CachedPayloadMissingError",
     "ChainNotVerifiedError",
     "EventsPage",
     "FixtureTradesReader",
     "ManifestResult",
     "OneclickConfigError",
+    "OutageGate",
+    "PayloadCache",
     "RunInfo",
     "Top100Result",
     "TradeStoreReader",
     "TradesReader",
     "TradesResult",
+    "artifact_probe",
     "artifact_revision",
     "canonical_record_bytes",
     "chain_hash",
@@ -117,11 +124,16 @@ __all__ = [
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
+    "newest_run_name",
     "probe_run_dir",
     "raise_chain_not_verified",
+    "raise_no_cached_payload",
     "resolve_fixture_root",
     "runs_revision",
+    "runs_revision_probe",
     "runs_root",
+    "serve_revision_cached",
+    "sibling_key_token",
     "sidecar_paths_from_ref",
     "tail_events",
     "trades_path",
@@ -206,10 +218,12 @@ TOP100_ROW_REQUIRED_KEYS: Final[tuple[str, ...]] = (
 #: engine metric names; the display vocabulary (bx-screener.js COLUMNS /
 #: bx-oneclick.js / strategy.html) reads the short names. Applied ADDITIVELY
 #: in :func:`load_top100`: the display alias is added ONLY when absent, the
-#: engine key passes through verbatim, every unmapped key is untouched, and
-#: a metric the writer does not emit (``cpcv_pass_pct`` — no CPCV source in
-#: the artifact today) stays ABSENT so the client renders the honest "—",
-#: NEVER a fabricated 0.
+#: engine key passes through verbatim, every unmapped key is untouched.
+#: ``cpcv_pass_pct`` needs no map row: since
+#: DEC-RESULTS-CASCADE-VERDICT-JOIN-001 the writer emits it under the
+#: display name directly (``rate * 100.0``, only when the joined cascade
+#: verdict carries a measured rate) — on an OLD artifact the key is simply
+#: absent, so the client still renders the honest "—", NEVER a fabricated 0.
 TOP100_METRIC_KEY_MAP: Final[tuple[tuple[str, str], ...]] = (
     ("max_drawdown_paisa", "max_dd_paisa"),
     ("sharpe_ratio", "sharpe"),
@@ -267,6 +281,340 @@ def raise_chain_not_verified() -> NoReturn:
     raise ChainNotVerifiedError("chain not verified yet for this events revision")
 
 
+# ── Revision probes + the outage-serve doctrine (DEC-ONECLICK-PERF-CLUB-001) ──
+
+
+class CachedPayloadMissingError(Exception):
+    """Peek sentinel: raised by :func:`raise_no_cached_payload` so an outage
+    serve can PEEK the last-known cached payload without ever computing (a
+    raising ``compute`` stores nothing — the MoversSnapshotCache contract;
+    the :class:`ChainNotVerifiedError` twin).
+    """
+
+
+def raise_no_cached_payload() -> NoReturn:
+    """Raise :class:`CachedPayloadMissingError` — the outage cache-peek sentinel.
+
+    Returns
+    -------
+    NoReturn
+        Always raises; used as the ``compute=`` closure when
+        :func:`serve_revision_cached` wants ONLY the last-known payload
+        during a stat-probe outage, never a fresh compute under a stale key.
+    """
+    raise CachedPayloadMissingError("no cached payload under the last-known key")
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactProbe:
+    """One artifact stat-probe verdict distinguishing ABSENT from OUTAGE.
+
+    ``token`` is the ``"mtime_ns:size"`` revision token (``None`` when
+    unavailable). ``outage`` is ``True`` iff the stat failed for a reason
+    OTHER than absence — the serve-last-known signal (C-r2-5); ``token
+    None`` + ``outage False`` means the file is genuinely ABSENT (the honest
+    AWAITING state — a stable, cheap fresh compute, never a stale serve).
+    """
+
+    token: str | None
+    outage: bool
+
+
+def artifact_probe(path: Path) -> ArtifactProbe:
+    """Stat *path* into an :class:`ArtifactProbe` (absent ≠ outage — C-r2-5).
+
+    Parameters
+    ----------
+    path
+        The artifact file (or directory) to stat.
+
+    Returns
+    -------
+    ArtifactProbe
+        ``(token, False)`` when statted; ``(None, False)`` when the path is
+        genuinely absent (``FileNotFoundError``/``NotADirectoryError``);
+        ``(None, True)`` on any OTHER ``OSError`` — a probe OUTAGE (e.g. a
+        wedged volume / permission flap), where the artifact may well still
+        exist and a per-poll re-parse would be both wasteful and silent.
+    """
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return ArtifactProbe(None, False)
+    except OSError:
+        return ArtifactProbe(None, True)
+    return ArtifactProbe(f"{st.st_mtime_ns}:{st.st_size}", False)
+
+
+#: Bound on the outage gate's per-coordinate bookkeeping (LRU-evicted past
+#: it) — the events route folds client-typed page params into its
+#: coordinate, so an unbounded dict would be a hostile-poll memory leak.
+OUTAGE_GATE_CAPACITY: Final[int] = 512
+
+
+class OutageGate:
+    """Per-coordinate serve-last-known bookkeeping for stat-probe outages.
+
+    C-r2-5 (Breaker C round 2): a stat-probe outage (``artifact_revision``
+    ``None`` while the artifact still exists) previously meant an UNCACHED
+    full O(artifact) re-parse per poll with ZERO logs. This gate remembers,
+    per logical route coordinate, the LAST cache key served healthily so an
+    outage poll can serve the last-known payload instead — and logs the
+    outage once per COORDINATE per outage (``oneclick.probe_outage`` WARN on
+    the coordinate's first outage poll, ``oneclick.probe_recovered`` INFO
+    when the probe answers again; r2 MINOR-2 honesty: a whole-volume flap
+    warns once per distinct coordinate touching the volume — a verify poll
+    probes THREE (primary + events + top100 siblings) — never per poll).
+
+    Thread-safe; every call is O(1) dict/OrderedDict work; both maps are
+    LRU-bounded at *capacity* (an evicted coordinate merely re-logs / falls
+    back to the honest fresh compute — bounded, disclosed). A serve from
+    last-known REFRESHES the coordinate's LRU recency in BOTH maps
+    (``_last_key`` — r1 MINOR-3; ``_in_outage`` — r2 NIT-2), so a long
+    outage under multi-coordinate churn keeps its last-known key instead of
+    degrading to a per-poll fresh recompute mid-outage, and a
+    wider-than-capacity outage evicts the STALEST outage coordinate, never
+    one still actively polling (the bounded re-warn envelope is
+    idle-coordinate churn past capacity only).
+
+    Parameters
+    ----------
+    capacity
+        Maximum coordinates tracked per map (default
+        :data:`OUTAGE_GATE_CAPACITY`). Must be ``>= 1``.
+    """
+
+    def __init__(self, *, capacity: int = OUTAGE_GATE_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._last_key: OrderedDict[str, str] = OrderedDict()
+        self._in_outage: OrderedDict[str, None] = OrderedDict()
+
+    def healthy(self, coordinate: str, key: str) -> None:
+        """Record *key* as *coordinate*'s last served cache key; end any outage.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+        key
+            The full revision-keyed cache key just served.
+        """
+        with self._lock:
+            self._last_key[coordinate] = key
+            self._last_key.move_to_end(coordinate)
+            while len(self._last_key) > self._capacity:
+                self._last_key.popitem(last=False)
+            recovered = coordinate in self._in_outage
+            if recovered:
+                del self._in_outage[coordinate]
+        if recovered:
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate, resolution="healthy")
+
+    def absent(self, coordinate: str) -> None:
+        """The artifact is genuinely GONE — forget the last-known key.
+
+        A deleted artifact must never be resurrected by a LATER outage
+        (Golden Rule #1 — the honest state is awaiting, not the pre-delete
+        payload); an absence verdict is also a definitive probe answer, so
+        it ends any outage.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+        """
+        with self._lock:
+            self._last_key.pop(coordinate, None)
+            recovered = coordinate in self._in_outage
+            if recovered:
+                del self._in_outage[coordinate]
+        if recovered:
+            # "recovered" here means the PROBE answered definitively again —
+            # the artifact itself is gone (r1 NIT: a resolution, not health).
+            _LOG.info("oneclick.probe_recovered", coordinate=coordinate, resolution="absent")
+
+    def outage_key(self, coordinate: str) -> str | None:
+        """Return *coordinate*'s last-known cache key (or ``None``); WARN once.
+
+        The ``oneclick.probe_outage`` WARN fires on *coordinate*'s FIRST
+        outage poll of each outage only (once per coordinate per outage —
+        never per poll, never silent — C-r2-5); it names whether a
+        last-known payload exists to serve.
+
+        Parameters
+        ----------
+        coordinate
+            The logical route coordinate (revision-independent).
+
+        Returns
+        -------
+        str or None
+            The last healthily-served cache key, or ``None`` when the
+            coordinate was never served / was evicted / went absent.
+        """
+        with self._lock:
+            first = coordinate not in self._in_outage
+            if first:
+                self._in_outage[coordinate] = None
+                while len(self._in_outage) > self._capacity:
+                    self._in_outage.popitem(last=False)
+            else:
+                # r2 NIT-2: a sustained outage poll refreshes its OWN
+                # ``_in_outage`` recency (symmetric with the ``_last_key``
+                # refresh below), so a wider-than-capacity outage evicts the
+                # STALEST outage coordinate — never one still actively
+                # polling, which would re-WARN mid-outage.
+                self._in_outage.move_to_end(coordinate)
+            key = self._last_key.get(coordinate)
+            if key is not None:
+                # r1 MINOR-3: a serve-last-known refreshes LRU recency so a
+                # prolonged outage cannot be evicted mid-outage by healthy
+                # coordinate churn (which would degrade every later outage
+                # poll to the uncached fresh recompute C-r2-5 exists to end).
+                self._last_key.move_to_end(coordinate)
+        if first:
+            _LOG.warning(
+                "oneclick.probe_outage",
+                coordinate=coordinate,
+                last_known=key is not None,
+            )
+        return key
+
+
+class PayloadCache(Protocol):
+    """The ``get_or_compute`` surface :func:`serve_revision_cached` needs.
+
+    Structurally satisfied by
+    :class:`brutex.dashboard.movers_cache.MoversSnapshotCache` (the
+    production oneclick route cache) — typed here so this module never
+    imports the dashboard cache (leaf discipline).
+    """
+
+    def get_or_compute(
+        self, key: str, *, generation: int, compute: Callable[[], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Return the cached payload for *key*, computing on a miss."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+def serve_revision_cached(
+    cache: PayloadCache,
+    gate: OutageGate,
+    *,
+    coordinate: str,
+    probe: ArtifactProbe,
+    key: str | None,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """The ONE revision-gated serve chokepoint for the oneclick routes.
+
+    * probe **OUTAGE** → serve the LAST-KNOWN cached payload when one exists
+      (bounded staleness — the payload last served healthily for this
+      coordinate) with ONE ``oneclick.probe_outage`` WARN per outage per
+      coordinate; no
+      last-known (or LRU-evicted) → compute fresh UNCACHED — still logged,
+      never silent, never a raise (C-r2-5).
+    * **ABSENT** (token ``None``, no outage) → compute fresh UNCACHED (the
+      awaiting state is cheap — there is no artifact to parse) and FORGET
+      the coordinate's last-known key: a deleted artifact must never be
+      resurrected by a later outage.
+    * **HEALTHY** → the normal revision-keyed ``get_or_compute``; the served
+      key is remembered per coordinate (+ one ``oneclick.probe_recovered``
+      INFO when an outage ends) — probe recovery resumes normal keying.
+
+    Parameters
+    ----------
+    cache
+        The route payload cache (:class:`PayloadCache`).
+    gate
+        The shared :class:`OutageGate`.
+    coordinate
+        The revision-INDEPENDENT logical coordinate (route + run + page
+        params + fixture flag) keying the gate's bookkeeping.
+    probe
+        The PRIMARY artifact's :class:`ArtifactProbe`. Routes that fold
+        sibling revisions into *key* resolve each sibling through
+        :func:`sibling_key_token` FIRST (r1 MINOR-1), so a sibling stat
+        outage holds the folded key steady (⇒ the cached payload keeps
+        serving) instead of flapping the key and degrading the content.
+    key
+        The full revision-keyed cache key, or ``None`` when the probe found
+        no token (a non-``None`` *key* with a ``None`` token is treated as
+        absent — defensive, never a crash).
+    compute
+        The zero-arg fresh payload builder.
+
+    Returns
+    -------
+    dict
+        The payload (cached, last-known, or fresh).
+    """
+    if probe.outage:
+        last = gate.outage_key(coordinate)
+        if last is not None:
+            try:
+                return cache.get_or_compute(last, generation=0, compute=raise_no_cached_payload)
+            except CachedPayloadMissingError:
+                pass  # LRU-evicted since — fall through to the honest fresh compute
+        return compute()
+    if probe.token is None or key is None:
+        gate.absent(coordinate)
+        return compute()
+    value = cache.get_or_compute(key, generation=0, compute=compute)
+    gate.healthy(coordinate, key)
+    return value
+
+
+def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe) -> str | None:
+    """Resolve a SIBLING artifact's cache-key token under the outage doctrine.
+
+    r1 MINOR-1 (DEC-ONECLICK-PERF-CLUB-001 fold): the verify/manifest keys
+    fold SIBLING revisions (events/top100) beside their primary probe, and
+    the outage-blind ``artifact_revision`` mapped ANY sibling stat error to
+    ``None`` (≡ absent) — a transient events-stat flap during a
+    manifest-healthy poll flapped the key (``ev=None``), recomputed, and
+    momentarily degraded the chain row to "awaiting". This helper is the
+    sibling arm of the SAME doctrine through the SAME :class:`OutageGate`
+    (never a second copy): the gate's per-coordinate map stores the sibling
+    TOKEN instead of a full cache key —
+
+    * probe **OUTAGE** → the last-known token (or ``None`` when never seen /
+      evicted) with the gate's
+      one-``oneclick.probe_outage``-WARN-per-coordinate-per-outage
+      discipline — the folded key holds steady, so the route's healthy
+      primary serve stays a cache HIT on the pre-flap payload;
+    * **ABSENT** → ``None``, the last-known token FORGOTTEN (a deleted
+      sibling is genuine — the key honestly reads the sibling as gone);
+    * **HEALTHY** → the fresh token, remembered (+ the recovery INFO when a
+      sibling outage ends).
+
+    Parameters
+    ----------
+    gate
+        The shared :class:`OutageGate`.
+    coordinate
+        The sibling's OWN revision-independent coordinate (route coordinate
+        + a ``|sib=<artifact>`` discriminator — never the route's own).
+    probe
+        The sibling artifact's :class:`ArtifactProbe`.
+
+    Returns
+    -------
+    str or None
+        The token to fold into the route's cache key.
+    """
+    if probe.outage:
+        return gate.outage_key(coordinate)
+    if probe.token is None:
+        gate.absent(coordinate)
+        return None
+    gate.healthy(coordinate, probe.token)
+    return probe.token
+
+
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
 
 
@@ -315,6 +663,12 @@ class Top100Result:
         The artifact object root's ranking ``preset`` token (the R30 sort
         basis — surfaced so the pages can LABEL the ordering honestly);
         ``None`` when the artifact never parsed that far.
+    cascade_join
+        The artifact root's ADDITIVE ``cascade_join`` meta object
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``{state, sweep_id,
+        n_input, n_survived}``), passed through when the writer emitted a
+        mapping; ``None`` on a pre-change artifact / a non-object value
+        (reader-OPTIONAL — never a reject).
     """
 
     status: ArtifactStatus
@@ -322,6 +676,7 @@ class Top100Result:
     detail: str
     revision: str | None
     preset: str | None = None
+    cascade_join: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,10 +899,21 @@ def runs_revision(results_root: Path) -> str | None:
     syscalls than today's N manifest stats, so the full walk IS the cheaper
     honest option; the O(run dirs) scaling is disclosed here and in the
     ``test_oneclick_o1.py`` B-2 bench docstring instead. Remaining bound
-    (Golden Rule #10): an in-place rewrite of
-    ``top100.json``/``events.jsonl`` still does not move this token — the
-    listing carries only their PRESENCE, which cannot change without the
-    directory mtime moving, so nothing served from the listing goes stale.
+    (Golden Rule #10, r1 MINOR-2 honesty reword): the token folds ONLY the
+    ``sweep_runs/`` dir token + the per-run ``manifest.json`` tokens — a
+    ``top100.json``/``events.jsonl`` LANDING (or in-place rewrite) inside an
+    EXISTING run dir moves the RUN dir's mtime, which is NOT folded, so the
+    listing's ``has_top100``/``has_events`` presence flags CAN lag a cached
+    listing until a manifest token or the ``sweep_runs/`` dir token moves
+    (a manifest rewrite / a new run) — the pre-existing #1631 envelope:
+    cosmetic presence dots on the index only, while the manifest / top100 /
+    verify routes key on their own per-artifact tokens, which DO move.
+
+    r2 sweep N2 (documentation of intent): since the runs route moved onto
+    the outage-aware :func:`runs_revision_probe`, this function has ZERO
+    production callers — it survives DELIBERATELY as the probe's reference
+    twin / test surface over the shared :func:`_runs_digest` body (the
+    healthy-token-equality pin proves the two never drift), not dead code.
 
     Parameters
     ----------
@@ -565,6 +931,16 @@ def runs_revision(results_root: Path) -> str | None:
     base = artifact_revision(root)
     if base is None:
         return None
+    return _runs_digest(root, base)
+
+
+def _runs_digest(root: Path, base: str) -> str:
+    """Fold the per-run manifest stat tokens into *base* (one shared body).
+
+    The digest core shared by :func:`runs_revision` and
+    :func:`runs_revision_probe` — extracted so the outage-aware probe never
+    re-implements the token law (§11 COMMON).
+    """
     try:
         entries = list(os.scandir(root))
     except OSError:
@@ -581,6 +957,33 @@ def runs_revision(results_root: Path) -> str | None:
         token = artifact_revision(root / name / MANIFEST_FILENAME)
         digest.update(f"{name}={token}\n".encode())
     return f"{base}:m{digest.hexdigest()[:16]}"
+
+
+def runs_revision_probe(results_root: Path) -> ArtifactProbe:
+    """The outage-aware twin of :func:`runs_revision` (C-r2-5).
+
+    Probes the ``sweep_runs/`` directory itself with :func:`artifact_probe`
+    (absent ≠ outage), then folds the same per-run manifest digest as
+    :func:`runs_revision` — so the runs route can serve its last-known
+    listing through a probe outage instead of re-walking per poll.
+
+    Parameters
+    ----------
+    results_root
+        The sweep results root.
+
+    Returns
+    -------
+    ArtifactProbe
+        ``(digest token, False)`` when the tree statted; ``(None, False)``
+        when the tree is genuinely absent (the honest awaiting listing);
+        ``(None, True)`` on a stat OUTAGE.
+    """
+    root = runs_root(results_root)
+    probe = artifact_probe(root)
+    if probe.token is None:
+        return probe
+    return ArtifactProbe(_runs_digest(root, probe.token), False)
 
 
 # ── Discovery ───────────────────────────────────────────────────────────
@@ -635,12 +1038,83 @@ def _probe_run_dir_known(run_dir: Path, dir_mtime_ns: int) -> RunInfo:
     )
 
 
+def _stamped_run_dirs(results_root: Path) -> list[tuple[int, str]]:
+    """Stat-stamp every run dir under the Ruling-4 tree, ``(mtime_ns, name)`` DESC.
+
+    The ONE newest-first selection core (§11 COMMON) shared by
+    :func:`discover_runs` (which pays the :class:`RunInfo` manifest probe per
+    SELECTED dir) and :func:`newest_run_name` (which pays NO manifest work at
+    all) — never a second selection law. An unreadable runs root folds into
+    the empty listing; an unreadable entry is SKIPPED with one
+    ``oneclick.run_skipped`` WARN, never a raise (the whole listing survives
+    one poisoned dir).
+    """
+    root = runs_root(results_root)
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    stamped: list[tuple[int, str]] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            mtime_ns = entry.stat().st_mtime_ns
+        except OSError as exc:
+            _LOG.warning(
+                "oneclick.run_skipped",
+                run=entry.name,
+                error_type=type(exc).__name__,
+            )
+            continue
+        stamped.append((mtime_ns, entry.name))
+    stamped.sort(reverse=True)
+    return stamped
+
+
+def newest_run_name(results_root: Path) -> str | None:
+    """Return the NEWEST run dir's NAME on the ONE selection law — no manifest I/O.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 fix round 2 (refuter-confirmed
+    MINOR): the per-poll ``/results`` ``composite_index_revision`` probe needs
+    ONLY the newest run's directory name, yet reached it through
+    :func:`discover_runs`, whose per-selected-dir :class:`RunInfo` probe reads
+    + json-parses that run's ``manifest.json`` — an O(manifest) file read +
+    parse PER POLL whose parsed value (the ``suspect`` flag) the probe never
+    used. This name-only listing rides the SAME
+    :func:`_stamped_run_dirs` ``(mtime_ns, name)``-descending selection core
+    (never a second selection law) and performs ZERO manifest reads/parses
+    (bench-pinned beside the cascade one-stat pin).
+
+    Returns
+    -------
+    str | None
+        The newest run dir name, or ``None`` when no run directory exists /
+        the tree is unreadable — EXACTLY the cases :func:`discover_runs`
+        folds into its empty listing, so a name-only caller and a RunInfo
+        caller can never disagree about absence.
+    """
+    stamped = _stamped_run_dirs(results_root)
+    return stamped[0][1] if stamped else None
+
+
 def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]:
     """Discover run directories under the Ruling-4 ``sweep_runs/`` tree, newest first.
 
-    O(run dirs) — one ``scandir`` plus per-dir stat/manifest probes; an
-    unreadable entry is SKIPPED with one ``oneclick.run_skipped`` WARN, never
-    a raise (the whole listing survives one poisoned dir).
+    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first (the
+    shared :func:`_stamped_run_dirs` core), the newest-``limit`` selection
+    happens on the (mtime_ns, name) stamps, and only the SELECTED dirs pay
+    the manifest PARSE — the pre-fix shape parsed EVERY run's manifest and
+    then truncated, so a churning history paid O(all runs) parses per fresh
+    listing. The stat sweep itself stays honest O(run dirs) (and
+    :func:`runs_revision` deliberately keeps its own UNCAPPED manifest-token
+    stat walk — the F5 ruling stands; this bounds the PARSES, not the
+    stats). Selection is identical to the pre-fix sort
+    (``(dir_mtime_ns, run_id)`` descending): ``mtime_ns`` granularity means
+    same-instant dirs tie-break on ``run_id``, exactly as before.
+
+    An unreadable entry is SKIPPED with one ``oneclick.run_skipped`` WARN,
+    never a raise (the whole listing survives one poisoned dir).
 
     Parameters
     ----------
@@ -655,27 +1129,11 @@ def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]
     tuple of RunInfo
         The discovered runs; empty when the tree is absent/unreadable.
     """
+    stamped = _stamped_run_dirs(results_root)
     root = runs_root(results_root)
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return ()
-    infos: list[RunInfo] = []
-    for entry in entries:
-        try:
-            if not entry.is_dir():
-                continue
-            mtime_ns = entry.stat().st_mtime_ns
-        except OSError as exc:
-            _LOG.warning(
-                "oneclick.run_skipped",
-                run=entry.name,
-                error_type=type(exc).__name__,
-            )
-            continue
-        infos.append(_probe_run_dir_known(root / entry.name, mtime_ns))
-    infos.sort(key=lambda i: (i.dir_mtime_ns, i.run_id), reverse=True)
-    return tuple(infos[: max(0, limit)])
+    return tuple(
+        _probe_run_dir_known(root / name, mtime_ns) for mtime_ns, name in stamped[: max(0, limit)]
+    )
 
 
 # ── Artifact loaders ────────────────────────────────────────────────────
@@ -840,6 +1298,78 @@ def _bridge_top100_arm(row: dict[str, Any]) -> dict[str, Any]:
     return bridged
 
 
+#: The 4-token per-entry ``cascade.status`` wire vocabulary
+#: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — the writer's law table).
+_CASCADE_STATUS_TOKENS: Final[frozenset[str]] = frozenset(
+    {"pass", "provisional_pass", "fail", "not_validated"}
+)
+
+
+def _cascade_object_defect(cascade: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``cascade`` object, or ``None``.
+
+    Per-field validation of the writer's §2.2 shape: an unknown status token
+    or any type violation names itself — the caller then DROPS the key for
+    that row (rendered "—") and counts it; the row itself is KEPT (the #1631
+    named-partial-degrade law, never a whole-artifact reject).
+    """
+    status = cascade.get("status")
+    if not isinstance(status, str) or status not in _CASCADE_STATUS_TOKENS:
+        return f"unknown cascade status {status!r}"
+    for key in ("reason", "rejected_at", "detail"):
+        value = cascade.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"cascade {key} is not a string"
+    provisional = cascade.get("provisional")
+    if provisional is not None and not isinstance(provisional, bool):
+        return "cascade provisional is not a bool"
+    for key in ("cascade_composite", "cpcv_pass_rate"):
+        value = cascade.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+            return f"cascade {key} is not a number"
+    rank = cascade.get("survivor_rank")
+    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int)):
+        return "cascade survivor_rank is not an integer"
+    return None
+
+
+def _bridge_cascade(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Validate + display-stamp one row's optional ``cascade`` object.
+
+    Returns ``(row, dropped)``: a row without the key passes through
+    untouched (a pre-change artifact — absence renders "—"); a VALID object
+    gains the server-built ``status_text`` via the ONE
+    :func:`brutex.dashboard.oneclick_view.cascade_status_text` builder (no
+    status prose is ever composed in JS); an invalid object is DROPPED from
+    the row + flagged ``True`` so the caller can count it into the named
+    partial degrade — never a fabricated verdict (Golden Rule #1).
+    """
+    if "cascade" not in row:
+        return row, False
+    cascade = row.get("cascade")
+    if not isinstance(cascade, dict) or _cascade_object_defect(cascade) is not None:
+        stripped = dict(row)
+        stripped.pop("cascade", None)
+        return stripped, True
+    # Function-local import — oneclick_view imports THIS module at top level
+    # (the builders consume the result types), so the reverse edge must stay
+    # call-time-lazy to avoid a cycle; the builder itself is pure.
+    from brutex.dashboard.oneclick_view import cascade_status_text
+
+    rejected_at = cascade.get("rejected_at")
+    reason = cascade.get("reason")
+    stamped = dict(cascade)
+    stamped["status_text"] = cascade_status_text(
+        str(cascade["status"]),
+        rejected_at=rejected_at if isinstance(rejected_at, str) else None,
+        provisional=cascade.get("provisional") is True,
+        reason=reason if isinstance(reason, str) else None,
+    )
+    bridged = dict(row)
+    bridged["cascade"] = stamped
+    return bridged, False
+
+
 def load_top100(run_dir: Path) -> Top100Result:
     """Load ``top100.json`` — the WRITER's object root, entries validated per row.
 
@@ -864,7 +1394,12 @@ def load_top100(run_dir: Path) -> Top100Result:
     its display string via :func:`_bridge_top100_arm` (the raw dict rides
     along additively as ``arm_raw``) — the display sites ``String()`` the
     field, so an unbridged dict rendered ``"[object Object]"`` on every real
-    sweep card (hostile-round F1).
+    sweep card (hostile-round F1). Each row's OPTIONAL ``cascade`` object
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) is validated + display-stamped via
+    :func:`_bridge_cascade` (``status_text`` server-built; an invalid object
+    is DROPPED for that row + counted into a NAMED partial — the row itself
+    is kept, rendered "—"); the root ``cascade_join`` meta passes through
+    when a mapping (absent on a pre-change artifact → ``None``).
 
     Parameters
     ----------
@@ -949,7 +1484,13 @@ def load_top100(run_dir: Path) -> Top100Result:
             f"≤{TOP100_ROW_CAP} contract; first {TOP100_ROW_CAP} kept, {over_cap} dropped"
         )
         entries_raw = entries_raw[:TOP100_ROW_CAP]
+    # ADDITIVE root passthrough (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): the
+    # writer's cascade_join meta rides through when a mapping; a pre-change
+    # artifact lacks the key → None (reader-OPTIONAL, never a reject).
+    cascade_join_raw = obj.get("cascade_join")
+    cascade_join = cascade_join_raw if isinstance(cascade_join_raw, dict) else None
     rows: list[dict[str, Any]] = []
+    cascade_dropped = 0
     for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
             return Top100Result(
@@ -958,6 +1499,7 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} is not an object — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
         missing = [key for key in TOP100_ROW_REQUIRED_KEYS if key not in row]
         if missing:
@@ -967,6 +1509,7 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} missing contract keys: {', '.join(missing)} — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
         defect = _top100_row_shape_defect(row)
         if defect is not None:
@@ -976,11 +1519,31 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} {defect} — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
-        rows.append(_bridge_top100_arm(_map_top100_metrics(row)))
+        bridged, dropped = _bridge_cascade(_bridge_top100_arm(_map_top100_metrics(row)))
+        if dropped:
+            cascade_dropped += 1
+        rows.append(bridged)
+    if cascade_dropped:
+        _LOG.warning(
+            "oneclick.cascade_object_dropped",
+            path=str(path),
+            dropped=cascade_dropped,
+        )
     if cap_detail:
-        return Top100Result("partial", tuple(rows), cap_detail, revision, preset)
-    return Top100Result("ok", tuple(rows), "", revision, preset)
+        return Top100Result("partial", tuple(rows), cap_detail, revision, preset, cascade_join)
+    if cascade_dropped:
+        return Top100Result(
+            "partial",
+            tuple(rows),
+            f"{cascade_dropped} row(s) carried an invalid cascade object — "
+            "dropped (those rows render the honest '—')",
+            revision,
+            preset,
+            cascade_join,
+        )
+    return Top100Result("ok", tuple(rows), "", revision, preset, cascade_join)
 
 
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:
@@ -1713,6 +2276,11 @@ class TradeStoreReader:
         self._lock = threading.Lock()
         self._top100_memo: tuple[str, str, Top100Result] | None = None
         self._equity_memo: tuple[tuple[str, str, str], tuple[dict[str, Any], ...]] | None = None
+        #: Reader-owned once-per-outage WARN bookkeeping for the top100 stat
+        #: probe (DEC-CACHE-SERVE-LAST-KNOWN-001, reconciled onto the ONE
+        #: repo-wide :class:`OutageGate` mechanism — #1406's C-r2-5 gate;
+        #: coordinate = the top100 path). No route gate covers this reader.
+        self._outages = OutageGate()
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -1738,7 +2306,7 @@ class TradeStoreReader:
         resolved = self._resolve_sidecars(run_id, rank)
         if isinstance(resolved, TradesResult):
             return resolved
-        combo_run_id, paths = resolved
+        combo_run_id, paths, outage_note = resolved
         try:
             page = read_trade_page(paths, run_id=combo_run_id, offset=offset, limit=limit)
         except TradeStoreError as exc:
@@ -1751,15 +2319,17 @@ class TradeStoreReader:
             return TradesResult(
                 "corrupt", (), None, "results_store", f"results-depth read failed: {exc}"
             )
-        detail = ""
+        detail_parts: list[str] = []
         if limit != page.limit:
-            detail = f"limit clamped to {page.limit} (trade_store page law)"
+            detail_parts.append(f"limit clamped to {page.limit} (trade_store page law)")
+        if outage_note:
+            detail_parts.append(outage_note)
         return TradesResult(
             status="ok",
             rows=tuple(dict(row) for row in page.rows),
             total=page.total,
             source="results_store",
-            detail=detail,
+            detail="; ".join(detail_parts),
         )
 
     def equity_page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -1800,7 +2370,7 @@ class TradeStoreReader:
         resolved = self._resolve_sidecars(run_id, rank)
         if isinstance(resolved, TradesResult):
             return resolved
-        combo_run_id, paths = resolved
+        combo_run_id, paths, outage_note = resolved
         try:
             series = self._equity_cached(paths.equity, combo_run_id)
         except TradeStoreError as exc:
@@ -1815,33 +2385,47 @@ class TradeStoreReader:
             )
         page_offset = max(0, offset)
         page_limit = max(1, min(limit, _MAX_EQUITY_LIMIT))
-        detail = ""
+        detail_parts: list[str] = []
         if page_limit != limit:
-            detail = f"limit clamped to {page_limit} (equity page law)"
+            detail_parts.append(f"limit clamped to {page_limit} (equity page law)")
+        if outage_note:
+            detail_parts.append(outage_note)
         return TradesResult(
             status="ok",
             rows=series[page_offset : page_offset + page_limit],
             total=len(series),
             source="results_store",
-            detail=detail,
+            detail="; ".join(detail_parts),
         )
 
-    def _resolve_sidecars(self, run_id: str, rank: int) -> tuple[str, SidecarPaths] | TradesResult:
-        """Resolve (*run_id*, *rank*) → the combo's ``(store run_id, sidecar paths)``.
+    def _resolve_sidecars(
+        self, run_id: str, rank: int
+    ) -> tuple[str, SidecarPaths, str] | TradesResult:
+        """Resolve (*run_id*, *rank*) → ``(store run_id, sidecar paths, outage note)``.
 
         The ONE rank → ``equity_ref.tuple`` resolution chain shared by the
         trades AND equity pages (steps 1-2 of the class docstring). Returns a
         :class:`TradesResult` degrade instead of raising — awaiting for
         absent/pre-#1275 artifacts, NAMED corrupt for a hostile tuple ref.
+        The third element is the top100 probe-outage note
+        (DEC-CACHE-SERVE-LAST-KNOWN-001 — ``""`` on a healthy probe): a page
+        resolved through a last-known top100 memo NAMES that in ``detail``,
+        never a silent stale serve.
         """
         if not is_safe_run_id(run_id) or rank < 1:
             return TradesResult(
                 "awaiting", (), None, "none", "invalid run_id/rank — nothing to read"
             )
         run_dir = runs_root(self._results_root) / run_id
-        top100 = self._top100_cached(run_dir)
+        top100, top100_last_known = self._top100_cached(run_dir)
+        outage_note = (
+            "top100 revision probe outage — serving last-known" if top100_last_known else ""
+        )
         if top100.status in ("awaiting", "corrupt"):
-            return TradesResult(top100.status, (), None, "none", top100.detail)
+            detail = top100.detail
+            if outage_note:
+                detail = f"{detail}; {outage_note}" if detail else outage_note
+            return TradesResult(top100.status, (), None, "none", detail)
         entry = next(
             (row for row in top100.rows if row.get("rank") == rank),
             None,
@@ -1883,7 +2467,7 @@ class TradeStoreReader:
                 "none",
                 f"{AWAITING_DETAIL} — results-depth sidecars absent for {tuple_ref}",
             )
-        return combo_run_id, paths
+        return combo_run_id, paths, outage_note
 
     def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
         """Serve the single-entry ``(path, revision, combo)`` equity memo.
@@ -1909,24 +2493,44 @@ class TradeStoreReader:
             self._equity_memo = (key, series)
         return series
 
-    def _top100_cached(self, run_dir: Path) -> Top100Result:
+    def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
         """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
 
-        A ``None`` revision (absent/unstattable) computes fresh and caches
-        NOTHING (the ``lake_revision`` doctrine — no stale illusion).
+        Returns ``(result, served_last_known)``. A ``None`` revision splits
+        (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
+        fresh and caches NOTHING (the cheap awaiting parse — never a stale
+        serve of a deleted artifact; the gate FORGETS the coordinate), while
+        a probe OUTAGE (a stalled volume — ``oneclick.probe_outage`` WARNed
+        once per outage per path via the reader-owned :class:`OutageGate`,
+        ``oneclick.probe_recovered`` on the flip back) serves the LAST-KNOWN
+        memo for this exact path when one exists (``served_last_known=True``
+        — the caller labels the page detail), falling back to the fresh
+        uncached parse when none does. The pre-change doctrine re-parsed the
+        whole artifact on EVERY trades-page request for the outage's
+        duration.
         """
         path = run_dir / TOP100_FILENAME
-        revision = artifact_revision(path)
-        if revision is None:
-            self.parse_count += 1
-            return load_top100(run_dir)
+        probe = artifact_probe(path)
         key = str(path)
+        if probe.token is None:
+            if probe.outage:
+                self._outages.outage_key(key)  # once-per-outage WARN latch
+                with self._lock:
+                    memo = self._top100_memo
+                if memo is not None and memo[0] == key:
+                    return memo[2], True
+            else:
+                self._outages.absent(key)
+            self.parse_count += 1
+            return load_top100(run_dir), False
+        revision = probe.token
+        self._outages.healthy(key, revision)
         with self._lock:
             memo = self._top100_memo
         if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2]
+            return memo[2], False
         self.parse_count += 1
         parsed = load_top100(run_dir)
         with self._lock:
             self._top100_memo = (key, revision, parsed)
-        return parsed
+        return parsed, False

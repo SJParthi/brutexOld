@@ -129,3 +129,33 @@ def test_universe_wires_mapping_integrity_panel() -> None:
     assert "function loadMappingIntegrity(" in html
     assert "setInterval(loadMappingIntegrity" in html
     assert 'id="mappanel"' in html and 'id="mapverdict"' in html
+
+
+def test_stocks_badge_labels_full_universe_with_fno_split() -> None:
+    """DEC-LABEL-TRUTH-001: the Stocks badge counts the LIST's population.
+
+    The badge now reads ``stock_count_total`` (the full held universe the Stocks
+    tab actually lists) with the F&O subset labelled beside it
+    ("Stocks · M F&O", M = stock_count_total − reference_stock_count), and the
+    load message mirrors the split — never a lost number, never an
+    undifferentiated count presented as if it were the F&O universe.
+
+    HONEST envelope (Golden Rule #10, the #1529/#1530 precedent): these are
+    substring-PRESENCE pins on the served template — no headless JS runner.
+    FAILS BEFORE: the new copy was absent and the old undifferentiated
+    ``summary.stock_count`` badge / ``${body.stock_count} stocks`` message
+    copy was present.
+    """
+    from brutex.dashboard.app import _render_universe_html
+
+    html = _render_universe_html()
+    # New badge copy present: total-preferring count + the F&O sub-label + title.
+    assert "summary.stock_count_total" in html
+    assert 'lbl + " · " + fnoStocks + " F&O"' in html
+    assert "reference-only — the badge counts the full held universe" in html
+    # New load-message copy present: list population + the F&O subset beside it.
+    assert "body.stock_count_total - body.reference_stock_count" in html
+    assert "stocks${msgFno}" in html
+    # Old misleading copy absent (the undifferentiated badge count + message).
+    assert "const counts = {index: summary.index_count, stock: summary.stock_count};" not in html
+    assert "${body.stock_count} stocks)." not in html

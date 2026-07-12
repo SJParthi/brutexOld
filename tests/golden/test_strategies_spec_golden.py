@@ -81,11 +81,15 @@ def test_spec_run_id_frozen() -> None:
 
 
 def test_symbol_id_table_frozen_both_directions() -> None:
+    # Row 4 appended by DEC-FUTURES-ADDRESSING-PIN-001 (the ADR-0012
+    # NIFTY-futures SERIES label — the #1138 [C16] reservation discharged).
     assert dict(SYMBOL_IDS) == {
         "NSE-NIFTY": 1,
         "NSE-BANKNIFTY": 2,
         "BSE-SENSEX": 3,
+        "NSE-NIFTY-FUT": 4,
     }
     assert symbol_label_for(1) == "NSE-NIFTY"
     assert symbol_label_for(2) == "NSE-BANKNIFTY"
     assert symbol_label_for(3) == "BSE-SENSEX"
+    assert symbol_label_for(4) == "NSE-NIFTY-FUT"

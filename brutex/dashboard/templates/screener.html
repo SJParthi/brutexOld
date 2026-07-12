@@ -161,7 +161,7 @@
     </table>
   </div>
   <div class="showall" id="scShowAllWrap" hidden>
-    <button id="scShowAll" type="button">show all rows (render capped — an oversized/corrupt artifact never freezes the tab)</button>
+    <button id="scShowAll" type="button">show all rows (itself render-capped at 1000 — an oversized/corrupt artifact never freezes the tab)</button>
   </div>
 
   <div id="bxTip" hidden></div>
@@ -178,11 +178,17 @@
    paisa→2dp rupees); metrics render full precision, NEVER re-rounded. */
 (function () {
   'use strict';
-  var RENDER_CAP = 200; // 100 rows render directly; the cap guards corrupt/oversized artifacts
+  /* A-r4 (DEC-ONECLICK-PERF-CLUB-001): every cap lives in BXScreener (ONE
+     source of truth, node-goldened) — 100 contract rows render directly;
+     the default view caps at RENDER_CAP, "Show all" itself is BOUNDED at
+     SHOW_ALL_CAP, and the loaded rows are input-capped at INPUT_CAP, so an
+     oversized/corrupt artifact (or a future path bypassing load_top100)
+     can never freeze the tab. Every truncation is NAMED on the count line. */
   var state = {
     runId: null,
     rows: [],
     rowCount: null,
+    inputDropped: 0,
     sort: { field: 'rank', type: 'num', dir: 'asc' },
     showAll: false
   };
@@ -259,7 +265,7 @@
     );
     var tbody = byId('scRows');
     while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
-    var cap = state.showAll ? sorted.length : Math.min(sorted.length, RENDER_CAP);
+    var cap = window.BXScreener.renderCount(sorted.length, state.showAll);
     var cols = window.BXScreener.COLUMNS;
     for (var i = 0; i < cap; i++) {
       var row = sorted[i];
@@ -279,17 +285,20 @@
       tbody.appendChild(tr);
     }
     var wrap = byId('scShowAllWrap');
-    wrap.hidden = state.showAll || sorted.length <= RENDER_CAP;
+    wrap.hidden = state.showAll || sorted.length <= window.BXScreener.RENDER_CAP;
     // Count line: the DENOMINATOR is the payload's row_count — never an
     // assumed 100 (T-M2); the null-VIX exclusion is COUNTED loudly (F-m3);
     // the NUMERATOR is the count actually RENDERED — when the render cap
-    // truncated the table it says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
-    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie).
+    // (default OR the bounded Show-all cap, A-r4) truncated the table the
+    // node-goldened bxCapNote says so ([W2-5] DEC-ONECLICK-TOP100-OBJECT-
+    // ROOT-001: "500 of 500 shown" over a 200-row table was a lie), and an
+    // input-capped out-of-contract payload is named by bxInputCapNote.
     var total = state.rowCount === null ? '?' : String(state.rowCount);
     var line = String(cap) + ' of ' + total + ' shown';
-    if (cap < sorted.length) {
-      line += ' (render cap ' + String(RENDER_CAP) + ' — use Show all)';
-    }
+    line += window.BXScreener.capNote(cap, sorted.length, state.showAll);
+    line += window.BXScreener.inputCapNote(
+      state.inputDropped, state.rows.length + state.inputDropped
+    );
     if (applied.null_vix_excluded > 0) {
       line += ' ' + window.BXScreener.nullVixNote(applied.null_vix_excluded);
     }
@@ -337,7 +346,12 @@
         var fx = byId('ocFixtureBadge');
         if (fx) { fx.hidden = !payload.fixture_root_active; }
         if (payload.status === 'ok' || payload.status === 'partial') {
-          state.rows = payload.rows || [];
+          // A-r4 input bound: rows past INPUT_CAP of an out-of-contract
+          // payload are cut HERE (named on the count line) so filter/sort/
+          // render work is bounded independent of payload trust.
+          var capped = window.BXScreener.inputCapRows(payload.rows || []);
+          state.rows = capped.rows;
+          state.inputDropped = capped.dropped;
           state.rowCount = payload.row_count === undefined ? null : payload.row_count;
           // [11] sort-basis label: name the ACTUAL artifact preset (fallback
           // to the default name when the payload carries none) — label only.
@@ -355,6 +369,7 @@
           render();
         } else {
           state.rows = [];
+          state.inputDropped = 0;
           state.rowCount = null;
           byId('scDetail').textContent = String(payload.detail || 'awaiting real run artifact');
           render();
@@ -385,8 +400,17 @@
         '/strategy?run_id=' + encodeURIComponent(state.runId) +
         '&rank=' + encodeURIComponent(tr.getAttribute('data-rank') || '1');
     });
+    // ~200 ms trailing-edge debounce on the eight filter inputs
+    // (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the
+    // v29.html/movers.html debounce precedent): a typing burst coalesces
+    // into ONE render instead of a full filter+sort+render per keystroke.
+    var renderDebounceTimer = null;
+    function renderDebounced() {
+      clearTimeout(renderDebounceTimer);
+      renderDebounceTimer = setTimeout(render, 200);
+    }
     ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
-      byId(id).addEventListener('input', render);
+      byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {
       state.showAll = true;

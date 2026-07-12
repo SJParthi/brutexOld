@@ -191,7 +191,7 @@ def trade_excursions_1m(
     which contributes only its OPEN (the walker's next-open / forced-open fill
     convention: the position was already closed at that bar's open, so folding
     its later range would fabricate exposure). Map the walker's exit reasons as
-    ``exit_bar_full_range = reason in {stop_loss, take_profit, end_of_data}``
+    ``exit_bar_full_range = reason in {stop_loss, take_profit, end_of_data, session_gap}``
     (the reasons whose exit bar the walker itself folds in full).
 
     Parameters
