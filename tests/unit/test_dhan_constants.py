@@ -84,13 +84,23 @@ def test_no_decision_branch_imports_the_unverified_sentinels() -> None:
 
     The sentinels are HONESTY MARKERS ONLY — the pull must never gate on a fabricated
     "verified" flag (the Groww ``_UNVERIFIED`` pattern). This scans every ``.py`` file
-    in the dhan package (excluding ``constants.py`` where they are defined) for any
-    reference to a sentinel name.
+    in the dhan package (excluding ``constants.py`` where they are defined) PLUS the
+    Dhan surfaces that live OUTSIDE the package — the dashboard pull glue, the feed
+    binding, and the read-only credentials reader — so the "no decision branch reads a
+    sentinel" guarantee matches the honesty claim across every Dhan consumer.
     """
+    import brutex.config.credentials_dhan_aws as _creds_mod
+    import brutex.dashboard.dhan_pull as _pull_mod
+    import brutex.feeds.dhan_binding as _binding_mod
+
     dhan_pkg = Path(constants.__file__).parent
-    for source_file in sorted(dhan_pkg.glob("*.py")):
-        if source_file.name == "constants.py":
-            continue
+    source_files = [f for f in sorted(dhan_pkg.glob("*.py")) if f.name != "constants.py"]
+    source_files += [
+        Path(_pull_mod.__file__),
+        Path(_binding_mod.__file__),
+        Path(_creds_mod.__file__),
+    ]
+    for source_file in source_files:
         tree = ast.parse(source_file.read_text(encoding="utf-8"), filename=str(source_file))
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}

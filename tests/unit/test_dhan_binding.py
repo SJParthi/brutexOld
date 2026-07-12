@@ -9,6 +9,8 @@ byte-identity (Groww UNCHANGED).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from brutex.adapters.dhan.adapter import DhanMarketAdapter
@@ -20,11 +22,25 @@ from brutex.adapters.dhan.client import (
 )
 from brutex.adapters.dhan.errors import DhanError, is_rate_limit, is_retryable
 from brutex.adapters.protocol import MarketAdapter
+from brutex.dashboard.db_view import list_candle_datasets
 from brutex.data.feed_audit import FeedAuditSink
+from brutex.data.models import CandleBar
 from brutex.feeds.binding import FeedBinding, build_feed_sink
 from brutex.feeds.dhan_binding import build_dhan_binding
 from brutex.feeds.groww_binding import build_groww_binding
 from brutex.feeds.registry import resolve_feed_binding
+
+
+def _spot_bar() -> CandleBar:
+    return CandleBar(
+        timestamp=datetime(2022, 6, 2, 3, 45, tzinfo=UTC),
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100.5"),
+        volume=0,
+        open_interest=None,
+    )
 
 
 def test_returns_feed_binding() -> None:
@@ -100,3 +116,33 @@ def test_groww_binding_byte_identity_unchanged() -> None:
     assert g.feed_id == "groww"
     top = Path("/lake")
     assert g.lake_root_for(top) is top
+
+
+def test_groww_bars_scan_ignores_feeds_dhan_subtree(tmp_path: Path) -> None:
+    """A Groww-side ``bars/``-rooted scan is byte-identical with/without ``feeds/dhan/``.
+
+    R4 M2 — the Dhan feed nests as a SIBLING of ``bars/`` (``feeds/dhan/bars/…``),
+    never a child, so a Groww-side scanner (``db_view.list_candle_datasets``, which
+    walks the top ``bars/`` tree) must NEVER descend into it: the datasets it returns
+    are byte-identical before and after a Dhan pull adds its subtree in place.
+    """
+    # 1. Write a Groww spot bar to the TOP root (default feed → identity root).
+    groww_sink = build_feed_sink(lake_root=tmp_path, binding=build_groww_binding())
+    groww_sink.append(
+        exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=[_spot_bar()]
+    )
+    before = list_candle_datasets(tmp_path)
+    assert before, "expected the Groww top-root scan to find the NIFTY dataset"
+
+    # 2. Add the real Dhan feed subtree IN PLACE (feeds/dhan/bars/…) — the only variable.
+    dhan_sink = build_feed_sink(lake_root=tmp_path, binding=build_dhan_binding())
+    dhan_sink.append(
+        exchange="BSE", segment="INDEX", symbol="SENSEX", interval="1minute", bars=[_spot_bar()]
+    )
+    # Non-vacuity: the Dhan bars physically exist under the sibling feeds/dhan tree.
+    assert list((tmp_path / "feeds" / "dhan" / "bars").rglob("*.parquet"))
+
+    # 3. The Groww-side scan is byte-identical — it never saw feeds/dhan.
+    after = list_candle_datasets(tmp_path)
+    assert after == before
+    assert not any("dhan" in str(ds).lower() or "SENSEX" in str(ds) for ds in after)

@@ -28,10 +28,11 @@ GROWW's movers, which would be dishonest, so a Dhan pull warms nothing).
 
 **Testability.** The pull + prebuild cores are fully fake-driven (an injected fetch
 adapter + a temp lake root + an injected ``materialize`` seam), so this module is
-100% line+branch with no boto3 / dhanhq / network. The real credential + SDK build
-(:func:`build_dhan_spot_adapter`) and the production seam (:func:`default_dhan_spot_pull`)
-are ``# pragma: no cover`` — they need AWS SSM + the ``dhanhq`` SDK; the injectable
-core drives every decision branch.
+100% line+branch with no boto3 / dhanhq / network. The production seam
+(:func:`default_dhan_spot_pull`) takes an injectable ``adapter_factory`` + ``materialize``
+seam so its resolve → pull → prebuild-gate orchestration (both gate branches) is
+fake-driven too; the ONLY ``# pragma: no cover`` is the real credential + SDK adapter
+build (:func:`build_dhan_spot_adapter`), which needs AWS SSM + the ``dhanhq`` SDK.
 """
 
 from __future__ import annotations
@@ -371,18 +372,38 @@ def default_dhan_spot_pull(
     request: DhanPullRequest,
     *,
     pace: Callable[[], None] = _noop_pace,
-) -> DhanPullReport:  # pragma: no cover — production wiring: real SSM + dhanhq
+    adapter_factory: Callable[..., FetchOhlcv] = build_dhan_spot_adapter,
+    materialize: Callable[..., MaterializeResult] = materialize_lake_timeframes,
+) -> DhanPullReport:
     """The production Dhan SPOT pull seam: resolve ids → build adapter → pull → prebuild.
 
     Resolves the index securityIds from the hardcoded verified-pending map (honest
-    omission for an unknown symbol), builds the real Dhan fetch adapter (SSM creds →
-    ``dhanhq``), runs the spot ingest into ``feeds/dhan/``, and — only on a clean spot
-    phase — runs the derived-timeframe prebuild bound to ``dhan_root``. ``# pragma: no
-    cover`` — it needs real AWS + the SDK; the injectable cores
-    (:func:`run_dhan_spot_pull` / :func:`run_dhan_prebuild`) drive every branch offline.
+    omission for an unknown symbol), builds the Dhan fetch adapter via *adapter_factory*
+    (the production default :func:`build_dhan_spot_adapter` — the SOLE ``# pragma: no
+    cover``, needing real AWS SSM + the ``dhanhq`` SDK), runs the spot ingest into
+    ``feeds/dhan/``, and — only on a CLEAN spot phase (``failed_windows == 0``) — runs
+    the derived-timeframe prebuild bound to ``dhan_root``.
+
+    The resolve → pull → prebuild-GATE → prebuild orchestration itself is fully
+    fake-driven: a test injects *adapter_factory* (a fetch fake) + *materialize* (a
+    derive-seam fake) over a temp lake root, so both gate branches are covered offline;
+    only the real adapter build stays uncovered.
+
+    Parameters
+    ----------
+    request
+        The persistable pull request (lake root + half-open ``[start, end)`` + dry-run).
+    pace
+        The controller pace hook threaded into the spot spine.
+    adapter_factory
+        Builds the Dhan :class:`~brutex.adapters.dhan.ingest.FetchOhlcv` adapter from the
+        resolved ``{symbol → securityId}`` map (default the real SSM/``dhanhq`` build).
+    materialize
+        The derived-timeframe materialise seam threaded into the prebuild (default the
+        SHARED :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`).
     """
     resolution = resolve_dhan_spot_security_ids()
-    adapter = build_dhan_spot_adapter(security_ids=resolution.security_ids)
+    adapter = adapter_factory(security_ids=resolution.security_ids)
     spot = run_dhan_spot_pull(
         lake_root=request.lake_root,
         adapter=adapter,
@@ -397,6 +418,7 @@ def default_dhan_spot_pull(
         prebuild = run_dhan_prebuild(
             dhan_root=dhan_root,
             targets=dhan_prebuild_targets(resolution.security_ids),
+            materialize=materialize,
         )
     return DhanPullReport(spot=spot, prebuild=prebuild, dry_run=request.dry_run)
 

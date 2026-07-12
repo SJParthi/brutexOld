@@ -12,14 +12,17 @@ from brutex.adapters.dhan.ingest import (
     STATUS_FAILED,
     STATUS_SKIPPED_UNRESOLVED,
     STATUS_SUCCESS,
+    DhanIngestReport,
     DhanWorkItem,
     dhan_index_exchange,
     plan_dhan_work,
     run_dhan_spot_ingest_with_retry,
+    scan_resolved_all_empty,
 )
 from brutex.data.models import CandleBar
 from brutex.data.sink import SinkAppendResult
 from brutex.models import Exchange
+from structlog.testing import capture_logs
 
 _EPOCH = datetime(2022, 6, 1, 3, 45, tzinfo=UTC)
 
@@ -234,3 +237,83 @@ def test_default_pace_and_session_filter_paths() -> None:
     )
     # The 2022-06-01 03:45 UTC (09:15 IST) bar is in-session → kept.
     assert report.total_bars == 1
+
+
+def test_resolved_all_empty_symbol_flagged_and_warned() -> None:
+    # A RESOLVED index whose only window returns ZERO bars (all clean-empty) is
+    # suspicious (wrong secId / unverified servability) — flagged + one WARN.
+    adapter = _FakeAdapter({"NIFTY": [[]]})  # one window, empty bars
+    sink = _RecordingSink()
+    with capture_logs() as logs:
+        report = run_dhan_spot_ingest_with_retry(
+            symbols=["NIFTY"],
+            adapter=adapter,
+            sink=sink,
+            security_ids={"NIFTY": 13},
+            start=date(2022, 6, 1),
+            end=date(2022, 6, 20),
+            session_filter=_no_filter,
+        )
+    assert report.total_bars == 0
+    assert report.failed_windows == 0
+    assert report.resolved_symbols == ("NIFTY",)
+    assert scan_resolved_all_empty(report) == ("NIFTY",)
+    warns = [e for e in logs if e.get("event") == "dhan.symbol_all_empty"]
+    assert len(warns) == 1
+    assert warns[0]["symbol"] == "NIFTY"
+    assert warns[0]["log_level"] == "warning"
+
+
+def test_scan_all_empty_excludes_failed_unresolved_and_nonempty() -> None:
+    # NIFTY: clean-empty → flagged. BANKNIFTY: has a bar → NOT flagged.
+    # SENSEX: a terminal failure (a FAILED window) → NOT flagged (failure is the
+    # story, already surfaced per-window). MYSTERY: unresolved → NOT flagged.
+    adapter = _FakeAdapter(
+        {
+            "NIFTY": [[]],
+            "BANKNIFTY": [[_bar()]],
+            "SENSEX": [DhanSubscriptionError("no sub")],
+        }
+    )
+    sink = _RecordingSink()
+    with capture_logs() as logs:
+        report = run_dhan_spot_ingest_with_retry(
+            symbols=["NIFTY", "BANKNIFTY", "SENSEX", "MYSTERY"],
+            adapter=adapter,
+            sink=sink,
+            security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
+            start=date(2022, 6, 1),
+            end=date(2022, 6, 20),
+            session_filter=_no_filter,
+        )
+    assert scan_resolved_all_empty(report) == ("NIFTY",)
+    warned = {e["symbol"] for e in logs if e.get("event") == "dhan.symbol_all_empty"}
+    assert warned == {"NIFTY"}
+
+
+def test_scan_all_empty_empty_report_is_empty() -> None:
+    # No resolved symbols / no outcomes → nothing flagged (guards the empty path).
+    adapter = _FakeAdapter({})
+    sink = _RecordingSink()
+    report = run_dhan_spot_ingest_with_retry(
+        symbols=["MYSTERY"],
+        adapter=adapter,
+        sink=sink,
+        security_ids={},
+        start=date(2022, 6, 1),
+        end=date(2022, 6, 20),
+        session_filter=_no_filter,
+    )
+    assert scan_resolved_all_empty(report) == ()
+
+
+def test_scan_all_empty_resolved_without_outcomes_is_skipped() -> None:
+    # Defensive: a report claiming a resolved symbol that has NO matching outcome
+    # (never produced by the run path — every resolved symbol is processed) is
+    # skipped, not flagged. Covers the `if not windows` guard.
+    report = DhanIngestReport(
+        outcomes=(),
+        resolved_symbols=("GHOST",),
+        unresolved_symbols=(),
+    )
+    assert scan_resolved_all_empty(report) == ()

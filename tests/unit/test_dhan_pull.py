@@ -3,8 +3,9 @@
 Fully fake-driven — an injected fetch adapter + a temp lake root + an injected
 ``materialize`` seam + a fake AWS client — so :mod:`brutex.dashboard.dhan_pull` is
 100% line+branch with no boto3 / dhanhq / network. The production credential + SDK
-build (``build_dhan_spot_adapter``) and the production seam (``default_dhan_spot_pull``)
-are ``# pragma: no cover`` (they need real AWS + the SDK).
+build (``build_dhan_spot_adapter``) is the ONLY ``# pragma: no cover`` (it needs real
+AWS + the SDK); the production seam (``default_dhan_spot_pull``) is driven here via its
+injectable ``adapter_factory`` + ``materialize`` seams (both prebuild-gate branches).
 """
 
 from __future__ import annotations
@@ -19,12 +20,14 @@ from brutex.adapters.dhan.constants import (
     DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT,
 )
-from brutex.adapters.dhan.errors import DhanThrottleError
+from brutex.adapters.dhan.errors import DhanSubscriptionError, DhanThrottleError
+from brutex.adapters.dhan.ingest import FetchOhlcv
 from brutex.dashboard.dhan_pull import (
     DhanPrebuildOutcome,
     DhanPrebuildTarget,
     DhanPullReport,
     DhanPullRequest,
+    default_dhan_spot_pull,
     dhan_credentials_error,
     dhan_prebuild_targets,
     resolve_dhan_spot_security_ids,
@@ -255,3 +258,67 @@ def test_dhan_pull_request_record() -> None:
     )
     assert req.lake_root == Path("/lake")
     assert req.dry_run is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# default_dhan_spot_pull — the injectable production seam (both gate branches)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _all_indices_script(response: object) -> dict[str, list[object]]:
+    """One scripted *response* window per resolved index (the full spot index set)."""
+    return {sym: [response] for sym in resolve_dhan_spot_security_ids().security_ids}
+
+
+def _fake_materialize(**kwargs: object) -> MaterializeResult:
+    _ = kwargs
+    return MaterializeResult(written={"5minute": 3, "1day": 1}, skipped=())
+
+
+def test_default_dhan_spot_pull_clean_runs_prebuild(tmp_path: Path) -> None:
+    # TRUE gate branch: a clean spot phase (failed_windows == 0) → prebuild runs.
+    adapter = _FakeAdapter(_all_indices_script([_bar()]))
+
+    def _factory(**kwargs: object) -> FetchOhlcv:
+        _ = kwargs  # security_ids=...
+        return adapter
+
+    request = DhanPullRequest(
+        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=False
+    )
+    report = default_dhan_spot_pull(
+        request, adapter_factory=_factory, materialize=_fake_materialize
+    )
+    assert report.spot_phase_ok is True
+    assert report.prebuild is not None
+    assert report.prebuild.ok is True
+    # every resolved index materialised its derived TFs (3 + 1)
+    assert set(report.prebuild.materialized) == set(resolve_dhan_spot_security_ids().security_ids)
+    assert all(v == 4 for v in report.prebuild.materialized.values())
+    assert report.dry_run is False
+
+
+def test_default_dhan_spot_pull_failed_phase_skips_prebuild(tmp_path: Path) -> None:
+    # FALSE gate branch: a FAILED window (terminal) leaves prebuild None (gated).
+    script = _all_indices_script([_bar()])
+    script["NIFTY"] = [DhanSubscriptionError("no sub")]  # terminal → FAILED window
+    adapter = _FakeAdapter(script)
+
+    materialize_calls: list[object] = []
+
+    def _factory(**kwargs: object) -> FetchOhlcv:
+        _ = kwargs
+        return adapter
+
+    def _spy_materialize(**kwargs: object) -> MaterializeResult:
+        materialize_calls.append(kwargs)
+        return MaterializeResult(written={}, skipped=())
+
+    request = DhanPullRequest(
+        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=True
+    )
+    report = default_dhan_spot_pull(request, adapter_factory=_factory, materialize=_spy_materialize)
+    assert report.spot_phase_ok is False
+    assert report.prebuild is None
+    assert materialize_calls == []  # prebuild never ran
+    assert report.dry_run is True

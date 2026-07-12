@@ -117,14 +117,18 @@ class DhanMarketAdapter:
         start: date,
         end: date,
     ) -> list[CandleBar]:
-        """Fetch 1-minute OHLCV bars for *symbol* over ``[start, end]``.
+        """Fetch 1-minute OHLCV bars for *symbol* over the half-open ``[start, end)``.
 
         Resolves the securityId from :attr:`security_ids` (an unresolved symbol raises
         :class:`~brutex.models.OutOfScopeError` — defensive; the driver loud-skips
-        unresolved symbols up-front), tiles the range into ≤ 90-day windows, fetches
-        each via the client, and concatenates the parsed bars. Index volume is dropped
-        (no traded volume). Raises ``ValueError`` for an unsupported interval
-        (fail-loud, Golden Rule #1).
+        unresolved symbols up-front), tiles the range into ≤ 90-day windows via the
+        vendor-neutral half-open planner, fetches each via the client, and concatenates
+        the parsed bars. Index volume is dropped (no traded volume). Raises
+        ``ValueError`` for an unsupported interval (fail-loud, Golden Rule #1).
+
+        The range is treated as HALF-OPEN ``[start, end)`` (the ``plan_candle_windows``
+        tiling convention; a caller with an inclusive operator range passes
+        ``end + 1 day``).
         """
         _ = exchange  # index spot rides the shared IDX_I segment; exchange is inert here
         security_id = self.security_ids.get(symbol)
@@ -137,6 +141,12 @@ class DhanMarketAdapter:
         )
         bars: list[CandleBar] = []
         for window in windows:
+            # NOTE: whether Dhan's intraday `to_date` is INCLUSIVE is UNVERIFIED (a
+            # probe-gate item — all *.dhan.co hosts are egress-blocked in-sandbox). The
+            # windows are half-open `[start, end)`, so if `to_date` is inclusive a bar on
+            # the exclusive `end` day could be double-fetched across adjacent windows —
+            # harmless (the keep-first sink dedups on timestamp), but a −1-day `to_date`
+            # adjustment may be warranted once a probe transcript confirms the semantics.
             payload = self.client.intraday_candles(
                 security_id=security_id,
                 from_date=window.start[:10],  # ISO "YYYY-MM-DDTHH:MM:SS" → Dhan "YYYY-MM-DD"

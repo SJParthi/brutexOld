@@ -22,8 +22,11 @@ states are structurally distinct:
 **Honest envelope (Golden Rule #10).** This is the LEAN, single-threaded spot spine
 (the "honest, simpler envelope" the Groww spine documents for its own auth latch): it
 proves the Dhan feed end-to-end (resolve → plan → fetch → session-filter → sink →
-bounded retry) with per-window outcomes. The FULL Groww-parity spine — the durable
-:class:`~brutex.data.window_ledger.WindowLedger` as the sole skip authority, the
+bounded retry) with per-window outcomes. It uses **NO
+:class:`~brutex.data.window_ledger.WindowLedger`** — the in-memory per-window
+:class:`DhanWindowOutcome`\\ s ARE the record, and re-pull is a whole-range operator
+re-run (bounded in-run retry re-processes a RETRYABLE-failed window only). The FULL
+Groww-parity spine — a durable ``WindowLedger`` as the sole skip authority, the
 parallel fan-out, and the ``run_until_clean`` integration — is the merge-integration
 surface work (DEC-FEED-SPINE-GENERALIZE-001, option b: drive the binding fields from
 this spot spine), deferred with the dashboard route / CLI ``--feed dhan``.
@@ -226,6 +229,59 @@ def _warn_unresolved(symbol: str) -> DhanWindowOutcome:
     )
 
 
+def scan_resolved_all_empty(report: DhanIngestReport) -> tuple[str, ...]:
+    """Return RESOLVED symbols whose windows all succeeded but summed ZERO bars.
+
+    Mirrors Groww's ``scan_underlying_all_empty`` intent (DEC-DHAN-HONEST-DEGRADE-001):
+    a resolved index that returned zero bars across the ENTIRE requested range —
+    every window a clean SUCCESS, none FAILED — is suspicious (a wrong securityId or
+    an UNVERIFIED servability), never a fabricated bar. Deliberately EXCLUDED: an
+    unresolved symbol (already loud-skipped by :func:`_warn_unresolved`) and any
+    symbol with a FAILED window (its per-window ``dhan.window_failed`` warnings are
+    the story, not silent emptiness). A single clean-empty window is NOT flagged —
+    only the whole-range zero.
+
+    Parameters
+    ----------
+    report
+        The :class:`DhanIngestReport` to scan.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The resolved symbols that returned zero bars across every (SUCCESS) window.
+    """
+    by_symbol: dict[str, list[DhanWindowOutcome]] = {}
+    for outcome in report.outcomes:
+        if outcome.status == STATUS_SKIPPED_UNRESOLVED:
+            continue
+        by_symbol.setdefault(outcome.symbol, []).append(outcome)
+    suspicious: list[str] = []
+    for symbol in report.resolved_symbols:
+        windows = by_symbol.get(symbol, [])
+        if not windows:
+            continue
+        if any(o.status == STATUS_FAILED for o in windows):
+            continue
+        if sum(o.bars_appended for o in windows) == 0:
+            suspicious.append(symbol)
+    return tuple(suspicious)
+
+
+def _warn_resolved_all_empty(report: DhanIngestReport) -> None:
+    """Emit exactly ONE WARN per RESOLVED symbol that returned zero bars all-range."""
+    for symbol in scan_resolved_all_empty(report):
+        _LOG.warning(
+            "dhan.symbol_all_empty",
+            symbol=symbol,
+            reason="resolved_but_zero_bars_across_range",
+            remedy=(
+                "verify the securityId is correct + intraday servability is confirmed "
+                "(run the read-only probe kit), then re-pull"
+            ),
+        )
+
+
 def _process_item(
     item: DhanWorkItem,
     *,
@@ -356,11 +412,13 @@ def run_dhan_spot_ingest_with_retry(
         if pending and round_index < rounds - 1:
             backoff(round_index)
     outcomes.extend(latest.values())
-    return DhanIngestReport(
+    report = DhanIngestReport(
         outcomes=tuple(outcomes),
         resolved_symbols=resolved,
         unresolved_symbols=tuple(unresolved),
     )
+    _warn_resolved_all_empty(report)
+    return report
 
 
 __all__ = [
@@ -373,4 +431,5 @@ __all__ = [
     "dhan_index_exchange",
     "plan_dhan_work",
     "run_dhan_spot_ingest_with_retry",
+    "scan_resolved_all_empty",
 ]
