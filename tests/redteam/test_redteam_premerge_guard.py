@@ -557,31 +557,87 @@ class TestM4proNonblocking:
 
         Broadening NONBLOCKING_CHECK_NAMES weakens the merge gate for every
         added check name, so it must stay a conscious code change under a
-        NEW DEC — any future addition fails this suite. The pin also asserts
-        the constant is genuinely HARDCODED: the script must not read it
-        from the environment via the env-default idiom
-        (`"${NONBLOCKING_CHECK_NAMES:-…}"`), which would let a caller env
-        tweak broaden the set — the exact clobber trap IGNORE_CHECK_NAMES
-        carries by design.
+        NEW DEC. Shapes this pin catches (round-3 hostile-review hardening —
+        the round-1 pin missed the append + duplicate-assignment vectors):
+
+        * LITERAL BROADENING — the one assignment's value must parse (with
+          the script's own comma-split/strip/drop-empties idiom) to exactly
+          ``{"m4pro-absolute-throughput"}``;
+        * DUPLICATE / LINE-START (RE)ASSIGNMENT — the line-start assignment
+          census (plain or ``+=``, indented or not) must be exactly the one
+          expected literal, so a second ``NONBLOCKING_CHECK_NAMES="${...}"``
+          assignment after it fails;
+        * APPEND — ``NONBLOCKING_CHECK_NAMES+=`` must not appear anywhere
+          in the source;
+        * ENV-DEFAULT — the ``"${NONBLOCKING_CHECK_NAMES:-...}"`` idiom
+          (which would let a caller env tweak broaden the set — the exact
+          clobber trap IGNORE_CHECK_NAMES carries by design) must be absent;
+        * ANY OTHER QUOTED USE — every non-literal occurrence must be the
+          exact safe inline passthrough feeding a scan site's python3
+          environment, never a second value-bearing assignment.
+
+        HONEST envelope: a source-shape pin, not a proof — a sufficiently
+        creative bypass (e.g. rebuilding the set inside the embedded
+        python) still has to survive review AND the functional teeth in
+        the rest of this class.
         """
         source = GUARD.read_text(encoding="utf-8")
-        assignments = re.findall(
-            r'^NONBLOCKING_CHECK_NAMES="([^"$]*)"$', source, flags=re.MULTILINE
+        passthrough = 'NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES"'
+
+        # (a) Line-start assignment census (plain or append, indentation
+        # allowed): exactly ONE, and it is a plain double-quoted literal
+        # (no `$` expansion, no `+=`). Kills the second-assignment mutant
+        # `NONBLOCKING_CHECK_NAMES="${EVIL:-a,b}"` and any line-start append.
+        line_start_assignments = [
+            line.strip()
+            for line in source.splitlines()
+            if re.match(r"\s*NONBLOCKING_CHECK_NAMES\+?=", line)
+        ]
+        assert len(line_start_assignments) == 1, (
+            "expected exactly ONE line-start NONBLOCKING_CHECK_NAMES "
+            f"assignment in {GUARD}; found {len(line_start_assignments)}: "
+            f"{line_start_assignments!r}"
         )
-        assert len(assignments) == 1, (
-            'expected exactly ONE literal NONBLOCKING_CHECK_NAMES="..." '
-            f"assignment in {GUARD}; found {len(assignments)}: {assignments!r}"
+        assignment = line_start_assignments[0]
+        literal = re.fullmatch(r'NONBLOCKING_CHECK_NAMES="([^"$]*)"', assignment)
+        assert literal is not None, (
+            "the one line-start assignment must be a plain double-quoted "
+            f"literal (no expansion, no append); got: {assignment!r}"
         )
         # The script's own comma-split/strip/drop-empties parsing idiom.
-        names = {n.strip() for n in assignments[0].split(",") if n.strip()}
+        names = {n.strip() for n in literal.group(1).split(",") if n.strip()}
         assert names == {"m4pro-absolute-throughput"}, (
             "the hardcoded non-blocking set must be EXACTLY "
             "{'m4pro-absolute-throughput'} — broadening it requires a code "
             f"change + a new DEC (DEC-PREMERGE-M4PRO-NONBLOCK-001); got {names!r}"
         )
+
+        # (b) No append idiom ANYWHERE (even mid-line): `+=` grows the set.
+        assert "NONBLOCKING_CHECK_NAMES+=" not in source, (
+            "NONBLOCKING_CHECK_NAMES must never be appended to — broadening "
+            "the non-blocking set requires a code change + a new DEC"
+        )
+
+        # (c) No env-default read: the constant stays genuinely HARDCODED.
         assert '"${NONBLOCKING_CHECK_NAMES' not in source, (
             "NONBLOCKING_CHECK_NAMES must stay HARDCODED — the env-default "
             "idiom would let a caller env override the non-blocking set"
+        )
+
+        # (d) Complete quoted-use census: besides the one literal, every
+        # other occurrence must be the exact safe inline passthrough
+        # (`NONBLOCKING_CHECK_NAMES="$NONBLOCKING_CHECK_NAMES"` before a
+        # scan site's python3 call) — and at least one must exist, pinning
+        # that the union wiring is present at all.
+        quoted_uses = re.findall(r'NONBLOCKING_CHECK_NAMES\+?="[^"]*"', source)
+        assert quoted_uses.count(assignment) == 1, (
+            "the literal assignment must appear exactly once among quoted "
+            f"uses; got {quoted_uses!r}"
+        )
+        others = [use for use in quoted_uses if use != assignment]
+        assert others and all(use == passthrough for use in others), (
+            "every non-literal quoted use must be the exact passthrough "
+            f"{passthrough!r}; got: {sorted(set(others))!r}"
         )
 
 

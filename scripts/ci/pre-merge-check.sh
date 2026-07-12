@@ -74,6 +74,20 @@ IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
 # cancelled bless check-run can then materialize on the PR head and blocks
 # at the failed scan below. Remediation: push a fresh head SHA (a new
 # commit), or extend this set under a new DEC.
+#
+# SCOPE (hostile-review round 3, DEC-PREMERGE-M4PRO-NONBLOCK-001): the
+# warn-only tolerance below for a FAILED/CANCELLED/TIMED_OUT m4pro
+# conclusion is THIS SCRIPT's verdict only. On the auto-merge path the
+# workflow's EARLIER ci-check step (.github/workflows/auto-merge.yml —
+# the `failing` awk scan at lines 282-289, which matches conclusions
+# failure|cancelled|timed_out|action_required|stale and exempts ONLY
+# "Auto-merge on green CI") still refuses those conclusions before this
+# script ever runs — pre-existing behavior, deliberately untouched by
+# this DEC (that workflow is outside this change's file-set). The
+# PENDING shape — the motivating offline-runner incident — IS
+# non-blocking end-to-end: a QUEUED check carries no conclusion (the
+# ci-check jq maps it to "pending", which the failing regex never
+# matches), and this script's pending scan exempts it here.
 NONBLOCKING_CHECK_NAMES="m4pro-absolute-throughput"
 
 # OPERATOR_OVERRIDE requires a non-empty reason (Agent 5 MED finding):

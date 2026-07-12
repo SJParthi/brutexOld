@@ -29,7 +29,9 @@ named in #1751, documented not broadened per the operator only-m4pro
 constraint) and
 auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
 while a FAILED m4pro is surfaced as a WARN-only line that never affects the
-exit code and every REQUIRED check still blocks fully (redteam-pinned incl.
+exit code AT THIS GATE (auto-merge's own untouched ci-check still refuses a
+FAILED/CANCELLED m4pro — pre-existing; the PENDING shape is non-blocking
+end-to-end) and every REQUIRED check still blocks fully (redteam-pinned incl.
 the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
 fails-before-proven against the baseline script). The check is genuinely
 NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
@@ -2335,7 +2337,13 @@ hostile-review pass._
   shape can never refuse a merge AND auto-merge.yml's
   caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
   the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
-  that never affects the exit code; the sibling `bench-m4pro.yml`
+  that never affects the exit code — the round-3 claim-scoping: that
+  tolerance is THIS gate's verdict only, since on the auto-merge path the
+  workflow's own EARLIER ci-check `failing` scan (deliberately untouched —
+  outside this change's file-set) still refuses a FAILED/CANCELLED/
+  TIMED_OUT m4pro, while the PENDING shape (the motivating incident) is
+  non-blocking end-to-end because a queued check carries no conclusion for
+  that scan to match; the sibling `bench-m4pro.yml`
   `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
   RESIDUAL — operator authorization covers exactly
   `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
@@ -2348,7 +2356,11 @@ hostile-review pass._
   blocks —
   redteam-pinned (NEW `TestM4proNonblocking`, 8 tests — incl. the round-1
   review fold's source pin that the hardcoded set is EXACTLY
-  {m4pro-absolute-throughput} with the env-default override idiom absent —
+  {m4pro-absolute-throughput} with the env-default override idiom absent,
+  round-3-HARDENED with the line-start assignment census + the append
+  refusal + the exact-passthrough census (both evasion mutants — an append
+  after the literal; a second line-start env-defaulted assignment —
+  verified passing the round-1 pin and failing the hardened one) —
   fails-before-proven 5/7 on the 7 behavior tests against the baseline
   script incl. THE pending-m4pro case; the
   pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
@@ -5930,7 +5942,10 @@ hostile-review pass._
   NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
   `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
   `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
-  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks;
+  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks
+  at this gate (auto-merge's own untouched ci-check still refuses a
+  FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
+  end-to-end);
   the offline-runner pending-forever shape can never refuse a merge (the
   manual-cancel `bless-baseline` residual is named in #1751 — documented,
   not broadened, per the operator only-m4pro constraint);
