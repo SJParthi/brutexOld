@@ -34,7 +34,8 @@ digest-path-only seam — Apriori WINS + the legacy no-digest arm stays
 Python; the untouched loop serves every fallback; the seam buckets
 enumerated/pruned/evaluated/minhits-dropped EXACTLY as the Python arm).
 MEASURED (shared x86 sandbox over SYNTHETIC bars, NOT the §8 M4 Pro): the
-C(60,5) segment 2.66 µs → 56.8 ns/mask (46.9×); 8/8 sub-grid twin cells
+C(60,5) segment 2.66 µs → 56.8 ns/mask (46.9×; the n_bars=0 FFI floor —
+≈1.3–1.5× higher effective at deep windows); 8/8 sub-grid twin cells
 (2 TFs × k∈{2,5} × top∈{20,1000}) store-hash BYTE-IDENTICAL at 0.90–1.07×
 end-to-end — SEGMENT-level only, NO whole-sweep claim; the REAL-lake
 twin-run (`scripts/ci/rust_enum_twin_run.sh` / the M4-Pro dispatch job) is
@@ -2338,7 +2339,9 @@ hostile-review pass._
   byte-UNMODIFIED flag-OFF. PROPERTIES: kept-list equality INCLUDING min_hits; ranged-vs-monolithic +
   split-at-any-rank; dual-knob ≥5 shapes; strict-`>=` ≡ `count_supermasks` BOTH widths. MEASURED
   (2026-07-11, SHARED x86 SANDBOX over SYNTHETIC bars — NOT the §8 M4 Pro): the C(60,5) segment 2.66 µs →
-  56.8 ns/mask (46.9×) steady-state; fused-count coefficient 0.077 ns/(mask·bar) @k=3 / 0.125 @k=5; the
+  56.8 ns/mask (46.9×) steady-state at the n_bars=0 FFI floor (≈1.3–1.5× higher effective at deep windows
+  via min-hits-blind range shrinkage — the round-5 fold; combo_counts.md §3.2 rows 2/2a); fused-count
+  coefficient 0.077 ns/(mask·bar) @k=3 / 0.125 @k=5; the
   8-cell sub-grid twin (2 TFs incl. a 93,750-bar 1-minute-shaped tuple × k∈{2,5} × top∈{20, 1000}) ALL
   store-hash BYTE-IDENTICAL at 0.90–1.07× end-to-end (the honest claim is byte-identity + no regression —
   the 46.9× is the segment's); `docs/design/sweep_core/combo_counts.md` on-branch with §1/§2 verbatim +
@@ -2371,7 +2374,14 @@ hostile-review pass._
   defect is purely the message's function name); published messages are unamendable (§3), so the durable
   correction lives in MIGRATION.md #1738's round-4 clause, pinned by NEW
   `tests/unit/test_migration_1738_commit_attribution_pin.py` (correction-present + mislabel-stays-phantom
-  + the-call-lives-in-combo_digest source-truth anchor). MUTATION: enum_kernel 782 raw →
+  + the-call-lives-in-combo_digest source-truth anchor). REVIEW ROUND 5 fold (THREE MINORs): the twin-run
+  workflow's three action tags SHA-pinned to the repo standard (the self-hosted REAL-lake job — an
+  every-`uses:`-pinned test is the teeth, no zizmor gate exists); the flagship 56.8 ns segment figure
+  qualified as the n_bars=0 FFI floor + the deep-window remeasure landed (`_segment_ab` now measures BOTH
+  substrate depths; combo_counts.md §3.2 row 2a — same-run 72.8 ns/51.0× @ 0 bars vs 109.2 ns/34.0× @
+  555k zero-bars, ≈1.3–1.5× via min-hits-blind range shrinkage; §4 caveat 2 no longer confines n_bars
+  sensitivity to the count term; 4 doc pins); the fno-math shard-dial narrative corrected to the real
+  6 → 8 (below); per-fix record in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the shard
   matrix dialed 6 → 8 vs main's #1597 6-shard config (ceil(803/8)=101/shard restores the ~100-mutant
