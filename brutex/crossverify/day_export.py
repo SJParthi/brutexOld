@@ -275,7 +275,11 @@ def export_symbol(
                 f"row-count belt: {len(rows)} rows != verdict.distinct_minutes="
                 f"{verdict.distinct_minutes}"
             )
-        if identity.instrument_class == "index_spot" and len(rows) != verdict.expected_minutes:
+        if (
+            identity.instrument_class == "index_spot"
+            and verdict.expected_minutes is not None
+            and len(rows) != verdict.expected_minutes
+        ):
             raise ExportContractError(
                 f"index row-count belt: {len(rows)} rows != verdict.expected_minutes="
                 f"{verdict.expected_minutes}"
