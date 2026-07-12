@@ -38,7 +38,7 @@ them as directional; each one DISCLOSES a cost, never a speedup.
 | GIL during the engaged render | RELEASED (`Python::detach` — the review-round fold; the wheel's own `write_parquet` releases it too), so an engaged render no longer serializes sibling writer/dashboard threads. Pre-fold builds of the crate held it for the full ~12.5 ms render | MEASURED semantics (code), no timing claim |
 | Thread-pool footprint | the crate is a SEPARATE polars build with its OWN global rayon pool beside the wheel's — an engaged process carries up to 2× polars threads on N cores (both pools read `POLARS_MAX_THREADS` independently; the env var bounds each, it does not de-duplicate them) — a further reason the engaged default stays OFF | MODELED (structural) |
 | Burn-in (first 16 engaged renders/process PER PROFILE + once per NEW profile-prefixed schema shape) | 2× render cost, bounded, amortised-nil — AND, because the caller holds the partition's cross-process flock around the render, those renders hold that flock ~2-3× longer (a concurrent CLI-fetch process waiting on the SAME partition waits with them; bounded to the burn-in window). PR-2: the option writer's heal path can mint novel stored-schema shapes; the seen-set is capped (64) — past the cap novel shapes compare on EVERY render (more oracle compares, never fewer) | MODELED |
-| DEFAULTS profile (PR-2, option month files ≈ 0.5 MB / ~16.5k rows) | the same engaged-slowdown class at smaller absolute deltas (the option render is heal-/option-pull-driven O(month-file) glue, not a hot path); statistics ON means MORE upstream code feeds the bytes — expect the options corpus to trip on version bumps the bars corpus survives (that is the apparatus working, §2 step 6) | MODELED (PR-2 probe) |
+| DEFAULTS profile (PR-2, option month files ≈ 0.5 MB / ~16.5k rows) | the same engaged-slowdown class at smaller absolute deltas (the option render is heal-/option-pull-driven O(month-file) glue, not a hot path); statistics ON means MORE upstream code feeds the bytes — expect the options corpus to trip on version bumps the bars corpus survives (that is the apparatus working, §2 step 7) | MODELED (PR-2 probe) |
 | Payoff | **≈ 0 — uniformity, not speed** (the engaged path is a small measured SLOWDOWN; the crate links the same encoder the wheel runs) | MEASURED/MODELED per the roadmap ADR §0/§4 |
 
 ## 1. The ATOMIC pin — three legs that move together
@@ -64,7 +64,7 @@ them as directional; each one DISCLOSES a cost, never a speedup.
 
 ## 2. The bump ritual (wheel bump ⇒ crate bump ⇒ re-prove ⇒ re-engage)
 
-Run ALL steps for ANY polars wheel bump. Nothing re-engages until step 7.
+Run ALL steps for ANY polars wheel bump. Nothing re-engages until step 8.
 
 1. **Pin the wheel deliberately.** Decide the target `polars==X.Y.Z`.
    Resolve the git tag `py-X.Y.Z` to its COMMIT upstream
@@ -101,7 +101,7 @@ Run ALL steps for ANY polars wheel bump. Nothing re-engages until step 7.
    via `POLARS_IDEAL_SINK_MORSEL_SIZE_ROWS/_BYTES`). Update
    `defaults_writer_options()` + `DEFAULTS_ROW_GROUP_SPLIT` + their cargo
    pins if anything moved. The MECHANICAL detector for a missed move is the
-   options corpus FAILING in step 6 — and because statistics widen the
+   options corpus FAILING in step 7 — and because statistics widen the
    byte blast radius, expect the options corpus to trip on bumps the bars
    corpus survives (the apparatus working, not flaking).
 5. **cargo gates.** `cargo fmt --check && cargo clippy --all-targets
