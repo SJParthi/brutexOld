@@ -99,11 +99,13 @@ this module for the same reason.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Final
 
 import structlog
@@ -157,11 +159,14 @@ MAX_OVERLAY_DAYS_PER_YEAR: Final[int] = 8
 #: Minimum clean-``SUCCESS`` 1-minute ledger windows covering the day, PER engine
 #: index (see the module docstring for why ≥2 is unsatisfiable).
 MIN_CLEAN_SUCCESS_WINDOWS: Final[int] = 1
-#: Bounded sidecar read (review round 4 — the DEC-LAKE-STATS-MANIFEST-001 #1614
-#: bounded-shard-read precedent): the overlay contract is TINY (at most
-#: :data:`MAX_OVERLAY_DAYS_PER_YEAR` entries per calendar year), so 1 MiB is
-#: ~1000× any honest sidecar. An oversized file is junk — fail closed to the
-#: empty overlay, never read whole (a multi-GB plant must not be slurped into
+#: Bounded sidecar read (review rounds 4 + 5 — the DEC-LAKE-STATS-MANIFEST-001
+#: #1614 bounded-shard-read precedent): the overlay contract is TINY — the
+#: honest FULL-COVERAGE maximum is :data:`MAX_OVERLAY_DAYS_PER_YEAR` (8)
+#: entries × 7 covered calendar years (2020-2026) = 56 entries ≈ ~22 KB via
+#: this module's own serializer, so 1 MiB is ~47× that maximum (review
+#: round 5 corrected the prior "~1000×" arithmetic overstatement; the bound
+#: itself is unchanged). An oversized file is junk — fail closed to the empty
+#: overlay, never read whole (a multi-GB plant must not be slurped into
 #: memory by a dashboard page / pull / sweep launch).
 MAX_OVERLAY_BYTES: Final[int] = 1 << 20
 
@@ -297,15 +302,42 @@ def _valid_entry_day(entry: Any) -> date | None:
 
 
 def _bounded_sidecar_read(path: Path) -> bytes:
-    """Read at most :data:`MAX_OVERLAY_BYTES` + 1 bytes of the sidecar.
+    """Read at most :data:`MAX_OVERLAY_BYTES` + 1 bytes of the sidecar (REGULAR files only).
 
-    The one-byte over-cap probe (the #1614 shape) lets the caller distinguish
-    "exactly at cap" (parse it) from "over cap" (reject it) without ever
-    reading an out-of-band multi-GB plant whole. ``OSError`` propagates to the
-    caller's belt.
+    The FULL #1614 shape (DEC-LAKE-STATS-MANIFEST-001, its rounds 4 + 6): the
+    one-byte over-cap probe lets the caller distinguish "exactly at cap"
+    (parse it) from "over cap" (reject it) without ever reading an
+    out-of-band multi-GB plant whole, AND the open is ``O_NONBLOCK`` +
+    ``S_ISREG``-checked on the OPEN descriptor — POSIX ``open(2)`` with
+    ``O_RDONLY`` on a writer-less FIFO blocks FOREVER, BEFORE any caller
+    belt could fire, so a FIFO planted at the overlay path wedged every
+    consumer (dashboard page / pull / sweep launch) with no deadline
+    (review round 5; round 4 had adopted only the bounded-read half of the
+    precedent it cited). A non-regular inode (FIFO / device / socket /
+    directory — ``os.open`` on a directory SUCCEEDS on POSIX, unlike
+    ``Path.open``) raises ``OSError``, which — like any other ``OSError``
+    here — propagates to the caller's belt (loader: WARN + empty overlay;
+    merge reader: ``[]``). A regular file ignores ``O_NONBLOCK``, so the
+    bounded read is unchanged.
     """
-    with path.open("rb") as handle:
-        return handle.read(MAX_OVERLAY_BYTES + 1)
+    # O_NONBLOCK: the FIFO-hang guard (see the docstring above).
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    # fd ownership handoff (the #1614 fd close discipline): ``owned`` is True
+    # exactly while THIS frame must close the descriptor; ``os.fdopen``
+    # transfers ownership to the BufferedReader, which closes it internally —
+    # no leak on the not-regular raise, no double-close on the served path.
+    owned = True
+    try:
+        if not S_ISREG(os.fstat(fd).st_mode):
+            # ``fstat`` on the OPEN descriptor — no check-to-read race.
+            raise OSError("non-regular sidecar inode (FIFO/device/socket/dir) rejected")
+        with os.fdopen(fd, "rb") as handle:
+            # The file object now owns (and closes) the descriptor.
+            owned = False
+            return handle.read(MAX_OVERLAY_BYTES + 1)
+    finally:
+        if owned:
+            os.close(fd)
 
 
 def load_observed_holidays(lake_root: Path) -> frozenset[date]:
@@ -320,7 +352,11 @@ def load_observed_holidays(lake_root: Path) -> frozenset[date]:
     is BOUNDED at :data:`MAX_OVERLAY_BYTES` and the parse arm also folds a
     nesting-bomb ``RecursionError`` + an invalid-UTF-8 ``UnicodeDecodeError``
     into the same WARN + empty-overlay degrade (both previously ESCAPED,
-    falsifying this docstring's never-raises claim).
+    falsifying this docstring's never-raises claim). Review round 5: a
+    NON-REGULAR inode (FIFO/device/socket) planted at the overlay path fails
+    closed through the SAME ``OSError`` belt instead of blocking ``open(2)``
+    forever (see :func:`_bounded_sidecar_read` — an indefinite hang is worse
+    than a raise and equally falsified the never-breaks claim).
     """
     path = overlay_path(lake_root)
     try:
@@ -533,9 +569,10 @@ def _gather_evidence(
 def _read_sidecar_entries(path: Path) -> list[dict[str, Any]]:
     """Read the sidecar's raw entry dicts for the merge (tolerant; invalid -> []).
 
-    Rides the SAME bounded read + widened parse belt as the loader (review
-    round 4) — a nesting-bomb / invalid-UTF-8 / oversized sidecar reads as the
-    empty entry list, never a crash of the manual detect run.
+    Rides the SAME bounded, regular-file-only read + widened parse belt as the
+    loader (review rounds 4 + 5) — a nesting-bomb / invalid-UTF-8 / oversized /
+    non-regular-inode sidecar reads as the empty entry list, never a crash (or
+    a FIFO-open hang) of the manual detect run.
     """
     try:
         raw = _bounded_sidecar_read(path)
