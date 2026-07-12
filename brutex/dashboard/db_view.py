@@ -32,6 +32,7 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
@@ -73,7 +74,7 @@ from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.errors import CatalogError, LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
@@ -631,19 +632,51 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def table_summary(conn: Any) -> list[dict[str, Any]]:
+#: The :func:`table_summary` strict-mode (``raise_on_fault=True``) re-raise
+#: set: the store fault types (``duckdb.Error`` / ``OSError`` — the
+#: ``universe_cache.STORE_FAULT_TYPES`` members, a wedged volume / unreachable
+#: DuckDB / a dropped table on a foreign DB) PLUS
+#: :class:`~brutex.data.errors.CatalogError`, because the
+#: DEC-STORE-WRITE-DEADLINE-001 wedge latch (``_ensure_not_wedged`` on the
+#: store read view's ``execute``) raises CatalogError — a ``DataLakeError``,
+#: NOT a ``duckdb.Error``. MUST stay member-equal to the ``/api/v1/db/tables``
+#: route's ``_TABLES_PROBE_FAULT_TYPES`` (set-equality pinned in
+#: ``test_dashboard_pull_contention_routes.py``) so a strict-mode raise is
+#: ALWAYS caught by that route's uncached degrade arm — never a 500
+#: (round-8 review MINOR: the probe→compute TOCTOU).
+TABLE_SUMMARY_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    CatalogError,
+    duckdb.Error,
+    OSError,
+)
+
+
+def table_summary(conn: Any, *, raise_on_fault: bool = False) -> list[dict[str, Any]]:
     """Return ``[{"table", "row_count"}]`` for every known table.
 
-    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. A
-    table that is missing (a partially-initialised or foreign DB) is
-    tolerated and reported with ``row_count == 0`` rather than raising,
-    so a fresh/empty store renders cleanly.
+    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. By
+    default a table that is missing (a partially-initialised or foreign
+    DB) — or any other per-table read fault — is tolerated and reported
+    with ``row_count == 0`` rather than raising, so a fresh/empty store
+    renders cleanly.
 
     Parameters
     ----------
     conn
         A DuckDB connection — typically
         :attr:`brutex.data.instrument_store.InstrumentStore.connection`.
+    raise_on_fault
+        ``True`` re-raises a :data:`TABLE_SUMMARY_FAULT_TYPES` member (a
+        store fault OR the DEC-STORE-WRITE-DEADLINE-001 wedge latch's
+        ``CatalogError``) instead of folding it into a 0-count — the
+        strict form the ``/api/v1/db/tables`` CACHED compute uses, so a
+        store that wedges AFTER a healthy freshness probe (the round-8
+        probe→compute TOCTOU) raises out of ``get_or_compute`` and a
+        wedge-degraded all-zero summary is NEVER stored under the
+        healthy pre-wedge token. Any exception OUTSIDE that fault set
+        still folds to 0 in BOTH modes (the never-a-500 posture is
+        unchanged for unexpected defect classes). Default ``False`` —
+        every existing caller byte-identical.
 
     Returns
     -------
@@ -656,6 +689,10 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
         # name is a hardcoded allowlist literal, never caller input.
         try:
             row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608  # nosec B608 - name is a hardcoded KNOWN_TABLES literal, never caller input
+        except TABLE_SUMMARY_FAULT_TYPES:
+            if raise_on_fault:
+                raise
+            count = 0
         except Exception:
             count = 0
         else:
@@ -5520,6 +5557,96 @@ def _ledger_stamp_moved() -> bool:
     return True
 
 
+def _compute_cursor(conn: Any) -> Any:
+    """A statement-isolated DuckDB cursor for a cached window compute — never a raise.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the flagged
+    (``stale_while_revalidate``) window caches may run a compute on a
+    BACKGROUND daemon revalidator, CONCURRENT with the request thread's own
+    statements on the SAME shared connection — and DuckDB's execute→fetch is
+    per-connection pending-result state, so interleaved statements corrupt
+    each other's results (reproduced in-suite: a background counts fold
+    fetched the request's 16-column page rows and died on the 3-tuple
+    unpack). ``conn.cursor()`` yields an isolated statement holder for BOTH
+    production shapes (round-1 BLOCKER fix — the original fallback rationale
+    was FALSE for the store conn, which had no ``cursor()`` and silently
+    shared one single-thread-per-view instance across the revalidator
+    daemons): a raw DuckDB connection returns an independent engine
+    connection (its own pending-result state), and the store's
+    ``_LockedReadConn`` returns a FRESH locked view over the same read
+    cursor + read lock (independent per-view hold state; each compute's
+    execute→fetch stays atomic under the store read lock — never a shared
+    ``_held`` flag, whose cross-thread corruption leaked the read lock and
+    froze every later dashboard read). The inline single-flight computes ride
+    the same cursor, which also closes the pre-existing (rare) cross-request
+    interleave on these families. A conn without ``cursor()`` (test fakes /
+    exotic injections — genuinely single-threaded drivers) — or a raising
+    ``cursor()`` — falls back to *conn* itself (isolation is best-effort,
+    never a 500). Callers pair every isolated cursor with
+    :func:`_close_cursor` so a compute can never strand a held view.
+    """
+    factory = getattr(conn, "cursor", None)
+    if factory is None:
+        return conn
+    try:
+        return factory()
+    except Exception:  # pylint: disable=broad-except — isolation is best-effort
+        return conn
+
+
+def _close_cursor(cursor: Any, conn: Any) -> None:
+    """Best-effort close of a per-compute isolated cursor — NEVER the shared *conn*.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 round 1: an isolated cursor
+    can end its compute still HOLDING state — the legacy-shape probe
+    (`_ensure_full_schema`) raises ``ValueError`` after a description-only
+    read, which on a ``_LockedReadConn`` view leaves the store read lock
+    acquired (an abandoned hold = every later dashboard read deadlocks; the
+    request-shared view was previously rebalanced by the NEXT execute, a
+    per-compute view never is) — and a raw DuckDB cursor is an engine
+    connection worth freeing eagerly rather than at GC. The fallback arm
+    (``cursor is conn`` — the caller's own shared connection) is never
+    closed; a missing/raising ``close`` is swallowed (cleanup can never mask
+    the compute's own outcome or 500 a poll).
+    """
+    if cursor is conn:
+        return
+    close = getattr(cursor, "close", None)
+    if close is None:
+        return
+    with contextlib.suppress(Exception):  # cleanup is best-effort
+        close()
+
+
+def _isolated_counts_total(
+    conn: Any, source: _LedgerScanSource
+) -> tuple[dict[str, dict[str, int]], int]:
+    """:func:`_window_counts_total` on a per-compute isolated cursor (closed after).
+
+    The ONE compute body the flagged counts caches run — possibly on a
+    background SWR revalidator daemon concurrent with the request thread —
+    so it must never touch the caller's shared *conn* directly
+    (`_compute_cursor`) and must release its view even on a raise
+    (`_close_cursor`).
+    """
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_total(cursor, source)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+def _isolated_counts_since(
+    conn: Any, source: _LedgerScanSource, since_iso: str
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The per-run twin of :func:`_isolated_counts_total` — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_since(cursor, source, since_iso)
+    finally:
+        _close_cursor(cursor, conn)
+
+
 #: Resident-key bound for the shared ledger read cache: 2 key families
 #: (records / spot-rollup — the ``ledger-rows`` family was RETIRED by
 #: DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the /db grid rows are now an
@@ -5606,7 +5733,9 @@ def _ledger_payload_size_hint(payload: object) -> int | None:
 
 
 def _make_ledger_read_cache(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
@@ -5616,8 +5745,9 @@ def _make_ledger_read_cache(
     third hand-rolled cache — CLAUDE.md §11 COMMON), plus the M1
     ledger-aware ``size_of`` sizing hint so a cold 841k-row parse never pays
     the measured 5.28 s deep-size walk (see :func:`_ledger_payload_size_hint`).
-    *clock* is injectable so the floor tests are deterministic (production
-    keeps the monotonic default).
+    *clock* / *swr_runner* are injectable so the floor +
+    stale-while-revalidate tests are deterministic (production keeps the
+    monotonic default and the daemon-thread runner).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
@@ -5629,6 +5759,16 @@ def _make_ledger_read_cache(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4 widened — the
+        # operator's live repro: /db window-ledger rows stuck behind an inline
+        # O(rows) re-parse past the floor mid-pull): PAST-floor stamp churn
+        # serves the PRIOR stamp's records instantly and re-parses in ONE
+        # tokenless background revalidator — bounded staleness (≤ floor + one
+        # parse behind the live ledger), every serve logged, converged by the
+        # next idle read (the constant-True probe keeps the arm armed exactly
+        # while the stamp churns).
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
 
@@ -5676,7 +5816,9 @@ def _reset_ledger_read_cache() -> None:
 
 
 def make_window_payload_caches(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[MoversSnapshotCache, MoversSnapshotCache]:
     """Construct the ``(counts_cache, page_cache)`` pair for ``/coverage/windows``.
 
@@ -5699,11 +5841,30 @@ def make_window_payload_caches(
     and page-key churn can never evict the counts entries (round-2 MEDIUM
     fold — see the capacity constant's envelope). *clock* is injectable so the
     floor tests are deterministic (production keeps the monotonic default).
+    Both instances ALSO opt into ``stale_while_revalidate``
+    (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 — see the construction
+    comment below for the sanctioned-staleness envelope).
     """
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4): BOTH instances opt
+    # into stale-while-revalidate — a pull-progress / /coverage/windows poll
+    # landing PAST the 120 s-capped floor serves the PRIOR stamp's counts /
+    # page instantly and revalidates the O(rows + delta-footers) fold in ONE
+    # tokenless background daemon; concurrent pollers never block on the
+    # single-flight (the operator's live repro: the windows page stuck at
+    # "loading…" mid-pull, and the /universe feed dropping ~154 s recurring).
+    # The fold still RUNS (≤1 concurrent, ≤ floor cadence) — this bounds poll
+    # LATENCY, it does not eliminate the fold (Golden Rule #10). Because the
+    # probe is the constant-True `_ledger_stamp_moved`, the SWR arm also
+    # covers CROSS-PROCESS CLI-pull stamp churn: an idle-after-CLI-write read
+    # past the floor converges via one background fold instead of one inline
+    # fold (≤ seconds delayed freshness, log-labelled — the disclosed
+    # sanctioned delta for the counts family).
     counts_cache = MoversSnapshotCache(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     page_cache = MoversSnapshotCache(
@@ -5711,6 +5872,8 @@ def make_window_payload_caches(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     return counts_cache, page_cache
@@ -6538,7 +6701,7 @@ def query_window_ledger_page(
         ledger_glob = path.as_posix()
         probed = False
 
-        def _ensure_full_schema() -> None:
+        def _ensure_full_schema(c: Any) -> None:
             """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
             ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
             the /db grid projects ALL 16 columns, so ANY absent optional column
@@ -6548,14 +6711,21 @@ def query_window_ledger_page(
             list, whose NULL-fill would mask a legacy base's missing columns.
             Base-ABSENT (a first pull's delta-only checkpoint) skips it: every
             delta is written by `append_ledger_delta` with the full current
-            schema (writer-pinned). Run at most once per fresh attempt."""
+            schema (writer-pinned). Run at most once per fresh attempt; *c* is
+            the calling compute's statement-isolated cursor (`_compute_cursor`
+            — the flagged caches may run a compute on a background revalidator,
+            concurrent with the request thread's statements; a production
+            store conn isolates via `_LockedReadConn.cursor()`), closed by the
+            compute's `finally` (`_close_cursor`) so the legacy-shape raise
+            below — thrown AFTER a description-only read — can never strand a
+            held read-lock view (round-1 BLOCKER hygiene)."""
             nonlocal probed
             if probed or not path.is_file():
                 return
             available = {
                 str(col[0])
                 for col in (
-                    conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                    c.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
                     or []
                 )
             }
@@ -6568,26 +6738,37 @@ def query_window_ledger_page(
         order_sql = ", ".join(f'"{name}"' for name in _WINDOW_KEY_COLUMNS)
 
         def _total() -> int:
-            _ensure_full_schema()
-            # COUNT(*) over the fold = the number of DISTINCT window keys (the
-            # QUALIFY keeps exactly one row per key; a steady-state base holds
-            # unique keys by construction — save writes the folded to_rows()).
-            row = conn.execute(
-                f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
-                list(source.params),
-            ).fetchone()
-            return int(row[0]) if row else 0
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # COUNT(*) over the fold = the number of DISTINCT window keys (the
+                # QUALIFY keeps exactly one row per key; a steady-state base holds
+                # unique keys by construction — save writes the folded to_rows()).
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+                    list(source.params),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                # The legacy-shape probe raises AFTER a description-only read —
+                # on a `_LockedReadConn` view that hold must be released here or
+                # the store read lock leaks forever (round-1 BLOCKER hygiene).
+                _close_cursor(c, conn)
 
         def _page() -> tuple[tuple[Any, ...], ...]:
-            _ensure_full_schema()
-            # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
-            # source params bind FIRST (the subquery precedes them in the text).
-            cursor = conn.execute(
-                f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
-                f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
-                [*source.params, limit, offset],
-            )
-            return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
+                # source params bind FIRST (the subquery precedes them in the text).
+                cursor = c.execute(
+                    f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
+                    f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                    [*source.params, limit, offset],
+                )
+                return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            finally:
+                _close_cursor(c, conn)
 
         if count_cache is None:
             total = _total()
@@ -6856,10 +7037,17 @@ def phase_progress_payload(
             # #920 adaptive floor throttle mid-pull recomputes. The SAME key
             # `_build_window_payload_duckdb` uses, so the two routes share one
             # warm entry.
+            # The compute runs on a statement-isolated cursor, closed after
+            # (`_isolated_counts_total`): the flagged cache may execute it on a
+            # background revalidator, concurrent with this thread's own
+            # statements — and a production store conn's isolation rides
+            # `_LockedReadConn.cursor()` (a fresh per-compute view; the shared
+            # single-thread view corrupted its hold flag cross-thread and
+            # leaked the store read lock — round-1 BLOCKER).
             counts, _total = count_cache.get_or_compute(
                 f"window-counts|{ledger_file.as_posix()}",
                 generation=revision_generation(source.stamp_token),
-                compute=lambda: _window_counts_total(conn, source),
+                compute=lambda: _isolated_counts_total(conn, source),
             )
         return counts
 
@@ -7041,13 +7229,35 @@ def _build_window_payload_duckdb(
         # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
         # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
         # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
-        available = {
-            str(col[0])
-            for col in (
-                conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
-                or []
-            )
-        }
+        # ISOLATED cursor + close (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+        # deadlock fix): this description-only probe was the LAST remaining
+        # statement on the request's SHARED ``_LockedReadConn`` view — with no
+        # fetch and no close it left the store read RLock HELD by the request's
+        # worker thread at request end (pre-round-1 the later counts/page
+        # statements on the SAME shared view rebalanced it via ``execute``'s
+        # leading ``_release()``; the round-1 per-compute ``cursor()`` isolation
+        # moved them off the shared view, so nothing rebalanced), and the NEXT
+        # request dispatched to a DIFFERENT worker thread deadlocked forever on
+        # ``_lock.acquire()`` (reproduced: the CI unit-gate hang at
+        # test_windows_ledger_fast_path_through_real_connection; py-spy-traced
+        # to the instrument_store ``_LockedReadConn.execute`` acquire). The
+        # probe now follows the same ``_compute_cursor``/``_close_cursor``
+        # discipline as every other statement in this function — its view
+        # releases the lock in the ``finally`` even on the legacy-shape raise
+        # below.
+        probe = _compute_cursor(conn)
+        try:
+            available = {
+                str(col[0])
+                for col in (
+                    probe.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]
+                    ).description
+                    or []
+                )
+            }
+        finally:
+            _close_cursor(probe, conn)
         if not {"empty_streak", "in_pull_fetches"}.issubset(available):
             raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
@@ -7081,10 +7291,15 @@ def _build_window_payload_duckdb(
         if since is not None:
             counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
+        # Computes run on a statement-isolated cursor, closed after
+        # (`_isolated_counts_total`): the flagged caches may execute them on a
+        # background revalidator daemon, concurrent with this thread's own
+        # statements — a production store conn isolates via
+        # `_LockedReadConn.cursor()` (fresh per-compute view, round-1 BLOCKER).
         counts, total = count_cache.get_or_compute(
             f"window-counts|{ledger_glob}",
             generation=stamp_generation,
-            compute=lambda: _window_counts_total(conn, source),
+            compute=lambda: _isolated_counts_total(conn, source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
@@ -7095,7 +7310,7 @@ def _build_window_payload_duckdb(
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
                 generation=stamp_generation,
-                compute=lambda: _window_counts_since(conn, source, since),
+                compute=lambda: _isolated_counts_since(conn, source, since),
             )
 
     valid_buckets = ("spot", "options", "futures")
@@ -7161,14 +7376,24 @@ def _build_window_payload_duckdb(
             # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
             # a superseded row version can never resurrect through a filter); the
             # source params bind FIRST (the subquery precedes them in the SQL text).
+            # Statement-isolated cursor, closed after: this compute may run on the
+            # flagged page cache's background revalidator, concurrent with the
+            # request thread's own statements — a production store conn isolates
+            # via `_LockedReadConn.cursor()` (fresh per-compute view; the shared
+            # single-thread view leaked the store read lock — round-1 BLOCKER).
             params: list[Any] = [*source.params, *where_params, limit, offset]
-            cursor = conn.execute(
-                f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
-                params,
-            )
-            out_columns = [str(col[0]) for col in (cursor.description or [])]
+            isolated = _compute_cursor(conn)
+            try:
+                cursor = isolated.execute(
+                    f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
+                    params,
+                )
+                out_columns = [str(col[0]) for col in (cursor.description or [])]
+                raw_rows = cursor.fetchall()
+            finally:
+                _close_cursor(isolated, conn)
             page: list[dict[str, Any]] = []
-            for raw in cursor.fetchall():
+            for raw in raw_rows:
                 # DuckDB returns native Python values (str for the string columns, int for the
                 # int64 ones, None for a null) — pass them straight to the shared `_window_row`
                 # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
@@ -7784,6 +8009,7 @@ __all__ = [
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
     "SPOT_VERDICT_INTERVALS",
+    "TABLE_SUMMARY_FAULT_TYPES",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",

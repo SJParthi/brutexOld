@@ -58,6 +58,31 @@ stale. A CLI pull in a SEPARATE process has no in-process job signal, so the
 probe reads ``False`` there and the floor simply never applies (stated, not
 hidden — Golden Rule #10).
 
+## Opt-in stale-while-revalidate (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001)
+
+The adaptive floor above bounds how OFTEN a mid-pull discovery walk re-runs,
+but PAST the floor a stale-entry reader still recomputed INLINE — and a reader
+arriving while a foreign compute was in flight blocked on the single-flight
+``wait_event.wait()``, pinning a 32-token lake-limiter worker for the whole
+walk (the 8-tab poll-herd defect this flag closes). An instance constructed
+with ``stale_while_revalidate=True`` adds ONE arm between the floor arm and
+the single-flight loop: while a pull is active (or a revalidator for the key
+is already in flight — the pull-end boundary), a PAST-floor stale entry is
+served IMMEDIATELY and at most ONE tokenless background daemon revalidates the
+key (the :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache`
+non-blocking single-flight posture, #1522). The revalidator's store is guarded
+NEWEST-WINS: it lands only when the slot is empty or still holds the
+generation observed at spawn — any OTHER stamped generation means a LATER
+store (the pull-end ``warm_discovery_memos`` reseed / an inline recompute)
+already landed, and store ORDER, not numeric order, is the freshness signal
+(generations are counters OR digests), so the fresher entry is never
+regressed. Staleness stays log-labelled (``movers_cache.stale_served`` gains a
+``revalidate`` field) and escalation-visible: serving past the instance's
+``adaptive_floor_cap_s`` WARNs ``movers_cache.stale_extended`` once per
+episode + every :data:`_SWR_STALE_EXTENDED_REWARN_S`. The DEFAULT
+(``False``) keeps every existing consumer byte-identical — the blocking
+single-flight wait included (regression-pinned).
+
 ## Serve-last-known on a revision-probe OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001)
 
 Callers that key freshness on a lake CONTENT token (``lake_revision`` /
@@ -196,6 +221,19 @@ MAX_ADAPTIVE_FLOOR_CAP_S: Final[float] = 600.0
 #: generation mismatch recomputes; the seed is never served as CLEAN.
 OUTAGE_GENERATION: Final[int] = -1
 
+#: Re-WARN cadence for the ``movers_cache.stale_extended`` escalation rail
+#: (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): a key serving stale PAST the
+#: instance's ``adaptive_floor_cap_s`` WARNs once per episode, then at most
+#: once per this many seconds while the episode persists (a wedged revalidate
+#: is loud, never silent-forever); the episode ends when a store lands.
+_SWR_STALE_EXTENDED_REWARN_S: Final[float] = 300.0
+
+#: Re-log throttle for ``movers_cache.swr_revalidate_failed``: a repeatedly
+#: failing background revalidate WARNs at most once per this many seconds per
+#: key (failures stay COUNTED between logs); the episode resets on a
+#: successful store.
+_SWR_FAILURE_RELOG_S: Final[float] = 60.0
+
 #: The candidate-key field separator. ``|`` cannot appear in any of the keyed
 #: coordinates (an interval label, an ISO date, an ``HH:MM`` time, a lower-cased
 #: ``near``/``next``/``far`` tier or ``all``/``monthly``/``weekly`` track, an
@@ -211,6 +249,21 @@ def _monotonic() -> float:
     import time
 
     return time.monotonic()
+
+
+def _default_swr_runner(job: Callable[[], None]) -> None:
+    """Default SWR revalidate runner — one UNPOOLED daemon thread per spawn.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: deliberately a RAW daemon
+    thread (the #1360 census-daemon shape) so a background revalidate consumes
+    ZERO lake-limiter / AnyIO tokens, and deliberately NO ``run_with_deadline``
+    — a legitimate multi-minute cold discovery walk must not be killed (the
+    #999 no-kill stance; a wedged revalidator is at most ONE zombie daemon per
+    key, escalation-WARNed via ``movers_cache.stale_extended``). Tests inject a
+    run-inline / capturing ``swr_runner`` instead — deterministic coverage, no
+    real threads.
+    """
+    threading.Thread(target=job, daemon=True, name="bx-cache-revalidate").start()
 
 
 def candidate_key(
@@ -474,6 +527,26 @@ class MoversSnapshotCache:
         :data:`DEFAULT_ADAPTIVE_BASE_FLOOR_S` / :data:`MAX_ADAPTIVE_FLOOR_CAP_S`);
         effective floor = ``min(max(base, entry.compute_duration), cap)`` — the
         ported #920 pattern.
+    stale_while_revalidate
+        Opt-in flag (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 — see the
+        module docstring's SWR section): ``True`` adds the serve-stale +
+        non-blocking-background-revalidate arm BETWEEN the adaptive-floor arm
+        and the single-flight loop, engaged for a PAST-floor stale entry
+        while a pull is active (or a revalidator for the key is already in
+        flight). ``False`` (the default) is byte-identical to the pre-flag
+        behaviour — a past-floor stale reader still recomputes inline /
+        blocks on the single-flight wait (regression-pinned).
+    swr_runner
+        Injectable revalidate runner (tests pass a run-inline or capturing
+        callable — deterministic coverage, no real threads); ``None`` (the
+        default) spawns one unpooled daemon thread per revalidate
+        (:func:`_default_swr_runner`). A runner that RAISES (e.g.
+        ``Thread.start()`` under thread exhaustion) is caught by the serving
+        reader: the in-flight marker is released, ONE
+        ``movers_cache.swr_spawn_failed`` WARN fires per key episode, and the
+        stale entry is still served — never a 500, never a wedge (the #1522
+        hostile-review MAJOR fold; ``KeyboardInterrupt``/``SystemExit``
+        propagate with the marker released).
     clock
         Zero-arg time source (defaults to :func:`time.monotonic`). Injected so
         the floor tests are deterministic.
@@ -509,6 +582,8 @@ class MoversSnapshotCache:
         adaptive_floor: bool = False,
         adaptive_base_floor_s: float = DEFAULT_ADAPTIVE_BASE_FLOOR_S,
         adaptive_floor_cap_s: float = MAX_ADAPTIVE_FLOOR_CAP_S,
+        stale_while_revalidate: bool = False,
+        swr_runner: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], float] = _monotonic,
     ) -> None:
         if capacity < 1:
@@ -528,8 +603,27 @@ class MoversSnapshotCache:
         self._adaptive_floor = adaptive_floor
         self._adaptive_base_floor_s = adaptive_base_floor_s
         self._adaptive_floor_cap_s = adaptive_floor_cap_s
+        self._swr = stale_while_revalidate
+        self._swr_runner = swr_runner if swr_runner is not None else _default_swr_runner
         self._clock = clock
         self._lock = threading.Lock()
+        #: Keys with a background revalidator in flight (DEC-DASHBOARD-PULL-
+        #: CONTENTION-RESILIENCE-001) — guarded by ``_lock``; bounded by the
+        #: in-flight count (≤ one revalidator per key, removed in a finally).
+        self._revalidating: set[str] = set()
+        #: Per-key ``stale_extended`` escalation stamps (last WARN clock) —
+        #: cleared when a store lands for the key (episode end); bounded like
+        #: ``_outage_latched`` (LRU, ``capacity``).
+        self._swr_stale_warned_at: OrderedDict[str, float] = OrderedDict()
+        #: Per-key revalidate-failure state ``(count, last_logged_at)`` —
+        #: throttles ``swr_revalidate_failed`` to once per
+        #: :data:`_SWR_FAILURE_RELOG_S` while counting EVERY failure; reset on
+        #: a successful store. Bounded (LRU, ``capacity``).
+        self._swr_fail_state: OrderedDict[str, tuple[int, float]] = OrderedDict()
+        #: Keys whose spawn-failure WARN already fired this episode (ONE
+        #: ``swr_spawn_failed`` per key episode — the #1522 fold); reset on a
+        #: successful store. Bounded (LRU, ``capacity``).
+        self._swr_spawn_warned: OrderedDict[str, None] = OrderedDict()
         self._entries: OrderedDict[str, _Entry] = OrderedDict()
         #: Per-key in-flight guard (DEC-SCAN-SINGLE-FLIGHT-001): ``key →
         #: (event, owner thread ident)``. Concurrent cold misses of one key
@@ -596,6 +690,272 @@ class MoversSnapshotCache:
             if hinted is not None:
                 return max(0, hinted)
         return deep_size_bytes(value)
+
+    def _store_entry_locked(
+        self,
+        key: str,
+        value: object,
+        generation: int,
+        *,
+        computed_at: float,
+        compute_duration: float,
+        entry_bytes: int,
+    ) -> tuple[int, bool, int]:
+        """Insert/replace *key* under the HELD lock — the ONE store block.
+
+        DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: extracted VERBATIM from
+        :meth:`get_or_compute`'s tail (byte-equal — the tail now delegates
+        here) so the SWR revalidator's guarded store shares the exact same
+        bookkeeping: prior-bytes retirement, insert, MRU, capacity eviction,
+        and the byte-watermark eviction + single-entry-over episode
+        (DEC-MEMORY-FOOTPRINT-HARDENING-001 — the watermark accounting is
+        threaded through EVERY insert path). Also ends the key's SWR episodes
+        (stale-extended escalation / failure throttle / spawn-warn latch) — a
+        landed store means the next staleness is a NEW episode. Returns
+        ``(evicted_for_bytes, single_over, total_after)`` for the caller's
+        out-of-lock logging. MUST be called with ``self._lock`` held.
+        """
+        evicted_for_bytes = 0
+        single_over = False
+        prior = self._entries.get(key)
+        if prior is not None:
+            # Replacing a stale entry: retire its bytes before re-adding.
+            self._total_bytes -= prior.size_bytes
+        self._entries[key] = _Entry(
+            value=value,
+            generation=generation,
+            computed_at=computed_at,
+            compute_duration=compute_duration,
+            size_bytes=entry_bytes,
+        )
+        self._total_bytes += entry_bytes
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._capacity:
+            _, removed = self._entries.popitem(last=False)  # evict the LRU entry.
+            self._total_bytes -= removed.size_bytes
+        if self._max_bytes is not None:
+            # Byte-watermark eviction: LRU-first until the tracked total
+            # fits — but NEVER the just-inserted entry (it is MRU, and the
+            # loop stops at one resident entry), so a single over-budget
+            # payload is kept alone (warned once per breach episode by the
+            # caller).
+            while self._total_bytes > self._max_bytes and len(self._entries) > 1:
+                _, removed = self._entries.popitem(last=False)
+                self._total_bytes -= removed.size_bytes
+                evicted_for_bytes += 1
+            if self._total_bytes > self._max_bytes:
+                if not self._single_over_warned:
+                    self._single_over_warned = True
+                    single_over = True
+            else:
+                self._single_over_warned = False
+        # A landed store ends the key's SWR episodes — O(1) pops, no-ops for
+        # non-SWR caches (the dicts stay empty there).
+        self._swr_stale_warned_at.pop(key, None)
+        self._swr_fail_state.pop(key, None)
+        self._swr_spawn_warned.pop(key, None)
+        return evicted_for_bytes, single_over, self._total_bytes
+
+    def _ensure_revalidator(
+        self,
+        key: str,
+        generation: int,
+        compute: Callable[[], object],
+        *,
+        spawn_if_absent: bool,
+    ) -> str | None:
+        """Ensure at most ONE background revalidator for *key* — the SWR core.
+
+        Returns the serve label for ``movers_cache.stale_served``'s
+        ``revalidate`` field — ``"in_flight"`` (a revalidator is already
+        running), ``"spawned"`` (this call started one), ``"spawn_failed"``
+        (the runner raised — marker released, stale still served, the #1522
+        fold) — or ``None`` when no revalidator is in flight AND
+        *spawn_if_absent* is ``False`` (pull idle ⇒ the caller falls through
+        to the inline single-flight). ``KeyboardInterrupt``/``SystemExit``
+        from the runner propagate with the marker released.
+        """
+        with self._lock:
+            if key in self._revalidating:
+                return "in_flight"
+            if not spawn_if_absent:
+                return None
+            observed = self._entries.get(key)
+            observed_generation = observed.generation if observed is not None else None
+            self._revalidating.add(key)
+
+        def _revalidate() -> None:
+            """Compute + guarded-store OUT of the request path (daemon thread)."""
+            try:
+                started_at = self._clock()
+                try:
+                    value = compute()
+                except Exception as exc:  # pylint: disable=broad-except — logged; stale keeps serving
+                    self._note_revalidate_failure(key, exc)
+                    return
+                self._store_revalidated(
+                    key,
+                    value,
+                    generation,
+                    observed_generation=observed_generation,
+                    started_at=started_at,
+                )
+            finally:
+                with self._lock:
+                    self._revalidating.discard(key)
+
+        try:
+            self._swr_runner(_revalidate)
+        except (KeyboardInterrupt, SystemExit):
+            with self._lock:
+                self._revalidating.discard(key)
+            raise
+        except Exception:  # pylint: disable=broad-except — spawn failure must never break a read
+            with self._lock:
+                self._revalidating.discard(key)
+            self._warn_spawn_failed(key)
+            return "spawn_failed"
+        # NOTE: with a run-INLINE test runner the revalidate has already
+        # completed here, so this "started" line can follow its "stored" line
+        # — production (daemon-thread) ordering is started-then-stored.
+        _LOG.info("movers_cache.swr_revalidate_started", key=key, generation=generation)
+        return "spawned"
+
+    def _store_revalidated(
+        self,
+        key: str,
+        value: object,
+        generation: int,
+        *,
+        observed_generation: int | None,
+        started_at: float,
+    ) -> None:
+        """Store a completed background revalidate — guarded NEWEST-WINS.
+
+        The judge-found regression window (DEC-DASHBOARD-PULL-CONTENTION-
+        RESILIENCE-001 §0.6): a SLOW revalidator finishing AFTER the pull-end
+        ``warm_discovery_memos`` reseed must never clobber the warm's fresh
+        entry with its older result. Generations here are counters OR digests
+        (``revision_generation`` sha256 tokens), so "newer" cannot be a
+        numeric ``>`` — the guard keys on STORE ORDER instead: the store lands
+        only when the slot is EMPTY or still holds the generation observed at
+        spawn; ANY other stamped generation means a LATER store already landed
+        (the warm reseed / an inline recompute) and this result is skipped
+        with one ``movers_cache.swr_revalidate_superseded`` INFO (the next
+        past-floor read re-spawns — convergent, never a regression).
+        """
+        entry_bytes = self._size_payload(value)
+        finished_at = self._clock()
+        superseded_by: int | None = None
+        evicted_for_bytes = 0
+        single_over = False
+        total_after = 0
+        with self._lock:
+            current = self._entries.get(key)
+            if current is not None and current.generation != observed_generation:
+                superseded_by = current.generation
+            else:
+                evicted_for_bytes, single_over, total_after = self._store_entry_locked(
+                    key,
+                    value,
+                    generation,
+                    computed_at=finished_at,
+                    compute_duration=finished_at - started_at,
+                    entry_bytes=entry_bytes,
+                )
+        if superseded_by is not None:
+            _LOG.info(
+                "movers_cache.swr_revalidate_superseded",
+                key=key,
+                spawn_generation=generation,
+                observed_generation=observed_generation,
+                stored_generation=superseded_by,
+            )
+            return
+        _LOG.info("movers_cache.swr_revalidate_stored", key=key, generation=generation)
+        # The same out-of-lock watermark logging discipline as get_or_compute.
+        if evicted_for_bytes:
+            _LOG.info(
+                "movers_cache.byte_watermark_evicted",
+                evicted=evicted_for_bytes,
+                total_bytes=total_after,
+                max_bytes=self._max_bytes,
+                key=key,
+            )
+        if single_over:
+            _LOG.warning(
+                "movers_cache.byte_watermark_single_entry_over",
+                key=key,
+                entry_bytes=entry_bytes,
+                max_bytes=self._max_bytes,
+            )
+
+    def _note_revalidate_failure(self, key: str, exc: Exception) -> None:
+        """Count + throttled-WARN a failed background revalidate (60 s/key relog)."""
+        now = self._clock()
+        should_log = False
+        failures = 1
+        with self._lock:
+            prior = self._swr_fail_state.get(key)
+            if prior is None:
+                should_log = True
+                self._swr_fail_state[key] = (1, now)
+            else:
+                count, last_logged = prior
+                failures = count + 1
+                if now - last_logged >= _SWR_FAILURE_RELOG_S:
+                    should_log = True
+                    self._swr_fail_state[key] = (failures, now)
+                else:
+                    self._swr_fail_state[key] = (failures, last_logged)
+            self._swr_fail_state.move_to_end(key)
+            while len(self._swr_fail_state) > self._capacity:
+                self._swr_fail_state.popitem(last=False)
+        if should_log:
+            _LOG.warning(
+                "movers_cache.swr_revalidate_failed",
+                key=key,
+                error=repr(exc),
+                failures=failures,
+            )
+
+    def _warn_spawn_failed(self, key: str) -> None:
+        """ONE ``swr_spawn_failed`` WARN per key episode (reset on a landed store)."""
+        with self._lock:
+            warn = key not in self._swr_spawn_warned
+            self._swr_spawn_warned[key] = None
+            self._swr_spawn_warned.move_to_end(key)
+            while len(self._swr_spawn_warned) > self._capacity:
+                self._swr_spawn_warned.popitem(last=False)
+        if warn:
+            _LOG.warning("movers_cache.swr_spawn_failed", key=key)
+
+    def _maybe_warn_stale_extended(self, key: str, age: float) -> None:
+        """Escalation rail: WARN when a key serves stale PAST the floor cap.
+
+        Once per episode + re-WARN every :data:`_SWR_STALE_EXTENDED_REWARN_S`
+        while the episode persists (a wedged revalidator / dead volume is
+        LOUD, never silent-forever); the episode ends when a store lands for
+        the key (:meth:`_store_entry_locked` clears the stamp). Strict ``>``
+        — serving exactly AT the cap is the floor family's own boundary law.
+        """
+        if age <= self._adaptive_floor_cap_s:
+            return
+        now = self._clock()
+        with self._lock:
+            last = self._swr_stale_warned_at.get(key)
+            if last is not None and now - last < _SWR_STALE_EXTENDED_REWARN_S:
+                return
+            self._swr_stale_warned_at[key] = now
+            self._swr_stale_warned_at.move_to_end(key)
+            while len(self._swr_stale_warned_at) > self._capacity:
+                self._swr_stale_warned_at.popitem(last=False)
+        _LOG.warning(
+            "movers_cache.stale_extended",
+            key=key,
+            age_s=round(age, 3),
+            cap_s=self._adaptive_floor_cap_s,
+        )
 
     def _note_result_locked(self, key: str, mru_prefix: str | None) -> bool:
         """Record *key* as *mru_prefix*'s last-known pointer + clear its outage latch.
@@ -692,6 +1052,22 @@ class MoversSnapshotCache:
           pull is never starved by back-to-back discovery walks, and the
           staleness is bounded + pull-scoped (the probe reads ``False`` the
           moment the pull ends).
+        * **Stale-while-revalidate** (opt-in only —
+          DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): PAST the floor (or
+          with no floor armed), the flagged instance serves the stale entry
+          IMMEDIATELY while a pull is active OR a revalidator for the key is
+          already in flight, ensuring at most ONE tokenless background
+          revalidator (``movers_cache.stale_served`` gains a ``revalidate``
+          field; serving past ``adaptive_floor_cap_s`` escalates via
+          ``movers_cache.stale_extended``). Never engaged on a MISS (no entry
+          to serve) — the cold first read stays the blocking single-flight.
+          BOTH stale-serving arms re-check the slot under the serve lock: a
+          CLEAN entry that raced in since the fast-path miss (a foreign
+          thread's store / a landed revalidator / the warm reseed) is served
+          as a plain hit — never a one-store-older snapshot, never a
+          ``stale_served`` log for a stale serve that did not happen
+          (round-3 review; the SWR arm's re-check runs BEFORE the spawn, the
+          post-spawn window is a disclosed residual).
         * **Miss / stale** — no entry, or the entry's generation is stale (a
           write landed) past the floor / with no floor: run ``compute``
           (outside the lock), store the result stamped with *generation*, evict
@@ -759,6 +1135,77 @@ class MoversSnapshotCache:
                 cap_s=self._adaptive_floor_cap_s,
             )
             if age < effective_floor:
+                raced_clean = False
+                with self._lock:
+                    # Round-3 review: re-read under the serve lock — a racing
+                    # store (a foreign thread's compute / an SWR revalidator /
+                    # the warm reseed) may have landed a CLEAN entry for THIS
+                    # generation between the fast-path miss and this serve.
+                    # Serve the fresh value as a plain hit instead of a
+                    # one-store-older snapshot — and never log a stale serve
+                    # that did not happen (the stale_served law).
+                    latest = self._entries.get(key)
+                    if latest is not None and latest.generation == generation:
+                        entry, raced_clean = latest, True
+                    if key in self._entries:
+                        self._entries.move_to_end(key)  # keep the served key MRU.
+                    recovered = self._note_result_locked(key, mru_prefix)
+                if not raced_clean:
+                    _LOG.info(
+                        "movers_cache.stale_served",
+                        stale=True,
+                        key=key,
+                        age_s=round(age, 3),
+                        floor_s=round(effective_floor, 3),
+                        entry_generation=entry.generation,
+                        generation=generation,
+                    )
+                if recovered:
+                    self._log_probe_recovered(key, mru_prefix)
+                return entry.value  # type: ignore[return-value]
+        # Stale-while-revalidate arm (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001)
+        # — reached only when the floor arm did NOT serve (age >= the effective
+        # floor, or the floor is not armed): while a pull is active (or a
+        # revalidator for this key is ALREADY in flight — the pull-end boundary,
+        # so a reader never blocks behind an in-flight revalidate), serve the
+        # stale entry IMMEDIATELY and ensure AT MOST ONE tokenless background
+        # revalidator. The blocked-waiter defect (`wait_event.wait()` below
+        # pinning a lake-limiter worker per waiter) is structurally unreachable
+        # for a flagged cache holding an entry. Idle with no revalidator in
+        # flight falls through to the untouched inline single-flight (an idle
+        # stamp is stable ⇒ the recompute is the cheap manifest-first read).
+        if entry is not None and self._swr and not force_fresh:
+            recovered = False
+            raced_clean = False
+            with self._lock:
+                # Round-3 review: the same racing-store re-check BEFORE the
+                # revalidator spawn — a CLEAN entry that landed for THIS
+                # generation since the fast-path miss is served as a plain hit
+                # (no spawn, no stale_served log for a stale serve that did
+                # not happen). The residual window between the spawn below and
+                # the serve tail is disclosed, not closed: re-reading there
+                # would swallow an inline test runner's own store and invert
+                # the deterministic serve-stale seam the suite pins — the
+                # revalidator's store converges the NEXT read either way.
+                latest = self._entries.get(key)
+                if latest is not None and latest.generation == generation:
+                    entry, raced_clean = latest, True
+                    self._entries.move_to_end(key)  # a plain hit — mark MRU.
+                    recovered = self._note_result_locked(key, mru_prefix)
+            if raced_clean:
+                if recovered:
+                    self._log_probe_recovered(key, mru_prefix)
+                return entry.value  # type: ignore[return-value]
+            revalidate_state = self._ensure_revalidator(
+                key, generation, compute, spawn_if_absent=self._pull_active()
+            )
+            if revalidate_state is not None:
+                age = self._clock() - entry.computed_at
+                effective_floor = effective_adaptive_floor(
+                    entry.compute_duration,
+                    base_s=self._adaptive_base_floor_s,
+                    cap_s=self._adaptive_floor_cap_s,
+                )
                 _LOG.info(
                     "movers_cache.stale_served",
                     stale=True,
@@ -767,7 +1214,9 @@ class MoversSnapshotCache:
                     floor_s=round(effective_floor, 3),
                     entry_generation=entry.generation,
                     generation=generation,
+                    revalidate=revalidate_state,
                 )
+                self._maybe_warn_stale_extended(key, age)
                 with self._lock:
                     if key in self._entries:
                         self._entries.move_to_end(key)  # keep the served key MRU.
@@ -839,48 +1288,23 @@ class MoversSnapshotCache:
         # compute half). Lock-wait is still excluded — the lock below is
         # taken only after this capture.
         finished_at = self._clock()
-        evicted_for_bytes = 0
-        single_over = False
-        total_after = 0
         with self._lock:
-            prior = self._entries.get(key)
-            if prior is not None:
-                # Replacing a stale entry: retire its bytes before re-adding.
-                self._total_bytes -= prior.size_bytes
-            self._entries[key] = _Entry(
-                value=value,
-                generation=generation,
+            # The ONE extracted store block (`_store_entry_locked` — shared
+            # with the SWR revalidator's guarded store, byte-equal tail
+            # refactor); `compute_duration` — the #920 adaptive floor's input
+            # — covers compute PLUS sizing whenever the deep walk runs
+            # (hostile-review M1: the floor must throttle for the WHOLE cold
+            # cycle it protects against, not just its compute half); a
+            # non-monotonic clock's negative delta is neutralized by the
+            # floor's max(base, …) — no clamp needed (mirrors #920).
+            evicted_for_bytes, single_over, total_after = self._store_entry_locked(
+                key,
+                value,
+                generation,
                 computed_at=finished_at,
-                # The measured walk cost — compute PLUS sizing (hostile-review
-                # M1: the floor must throttle for the WHOLE cold cycle it
-                # protects against, not just its compute half) — drives the
-                # (opt-in) floor for the next read; a non-monotonic clock's
-                # negative delta is neutralized by the floor's max(base, …) —
-                # no clamp needed (mirrors #920).
                 compute_duration=finished_at - started_at,
-                size_bytes=entry_bytes,
+                entry_bytes=entry_bytes,
             )
-            self._total_bytes += entry_bytes
-            self._entries.move_to_end(key)
-            while len(self._entries) > self._capacity:
-                _, removed = self._entries.popitem(last=False)  # evict the LRU entry.
-                self._total_bytes -= removed.size_bytes
-            if self._max_bytes is not None:
-                # Byte-watermark eviction: LRU-first until the tracked total
-                # fits — but NEVER the just-inserted entry (it is MRU, and the
-                # loop stops at one resident entry), so a single over-budget
-                # payload is kept alone (warned once per breach episode below).
-                while self._total_bytes > self._max_bytes and len(self._entries) > 1:
-                    _, removed = self._entries.popitem(last=False)
-                    self._total_bytes -= removed.size_bytes
-                    evicted_for_bytes += 1
-                if self._total_bytes > self._max_bytes:
-                    if not self._single_over_warned:
-                        self._single_over_warned = True
-                        single_over = True
-                else:
-                    self._single_over_warned = False
-            total_after = self._total_bytes
             recovered = self._note_result_locked(key, mru_prefix)
             # Store BEFORE waking waiters (same lock block) so a woken waiter
             # always finds the fresh entry — never a duplicate scan.

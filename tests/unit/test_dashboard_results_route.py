@@ -313,3 +313,206 @@ def test_leaderboard_no_lake_root_degrades(store: InstrumentStore) -> None:
         resp = c.get("/api/v1/sweep/leaderboard")
         assert resp.status_code == 200
         assert resp.json()["available"] is False
+
+
+# ── DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the cascade join on the wire ──
+
+
+def _seed_wire_report(lake_root: Path, *, sweep_id: str = "s" * 64) -> Path:
+    from brutex.engine.cascade_wire import CascadeWireReport, write_report
+    from brutex.metrics.cascade import CandidateVerdict, CascadeReport, FilterStage
+
+    inner = CascadeReport(
+        verdicts=(
+            CandidateVerdict(
+                candidate_id=f"{1:064x}",
+                passed=True,
+                rejected_at=None,
+                detail="survived all Stage-4 filters",
+                composite_score=2.0,
+                cpcv_pass_rate=0.9,
+            ),
+            CandidateVerdict(
+                candidate_id=f"{2:064x}",
+                passed=False,
+                rejected_at=FilterStage.PBO,
+                detail="pool PBO 0.7500 > 0.5",
+                cpcv_pass_rate=0.65,
+            ),
+        ),
+        survivor_ids=(f"{1:064x}",),
+        n_input=2,
+        n_survived=1,
+        stage_survivors={},
+    )
+    report = CascadeWireReport(sweep_id=sweep_id, groups=(("NIFTY", "5m", inner),))
+    return write_report(lake_root / "sweeps", report)
+
+
+class TestLeaderboardCascadeJoin:
+    def test_no_report_payload_carries_no_new_keys(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert "cascade_join" not in payload
+        assert "cascade_flagged" not in payload
+        assert not any(k.startswith("cascade") for k in payload["rows"][0])
+
+    def test_report_annotates_rows_and_meta_on_the_wire(
+        self, client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1, sharpe=2.5), _row(2, sharpe=0.5)])
+        _seed_wire_report(lake_root)
+        summary_cache.mark_dirty()
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert payload["cascade_join"]["state"] == "joined"
+        assert payload["cascade_join"]["sweep_id"] == "s" * 64
+        assert payload["cascade_flagged"] == 1
+        rows = {r["run_id"]: r for r in payload["rows"]}
+        assert rows[f"{1:064x}"]["cascade_status"] == "pass"
+        assert rows[f"{1:064x}"]["cpcv_pass_pct"] == 90.0
+        assert rows[f"{2:064x}"]["cascade_status"] == "fail"
+        assert rows[f"{2:064x}"]["cascade_status_text"] == "FAIL @ pbo"
+        # The FAILED row stays RANKED (rank 2 by sharpe) — flagged, never hidden.
+        assert rows[f"{2:064x}"]["rank"] == 2
+
+    def test_malformed_report_never_500s(
+        self, client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        report = lake_root / "sweeps" / "cascade" / "cascade-report.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_bytes(b"{torn half-write")
+        summary_cache.mark_dirty()
+        resp = client.get("/api/v1/sweep/leaderboard")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["cascade_join"]["state"] == "malformed"
+        assert not any(k.startswith("cascade_status") for k in payload["rows"][0])
+
+    def test_report_rewrite_moves_the_cache_key(
+        self, client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+    ) -> None:
+        import os
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        path = _seed_wire_report(lake_root)
+        first = client.get("/api/v1/sweep/leaderboard").json()
+        assert first["cascade_join"]["sweep_id"] == "s" * 64
+        # An IN-PLACE rewrite (a new sweep overwrote the one-per-root report)
+        # moves NO directory mtime the sweeps digest sees and bumps NO
+        # generation: the dedicated casc stat token ALONE must re-key the
+        # decorated payload (the sweep_id flips on the wire).
+        _seed_wire_report(lake_root, sweep_id="t" * 64)
+        os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+        second = client.get("/api/v1/sweep/leaderboard").json()
+        assert second["cascade_join"]["sweep_id"] == "t" * 64
+
+    def test_composite_join_meta_from_aggs(
+        self, client: TestClient, store: InstrumentStore, summary_cache: SummaryCache
+    ) -> None:
+        import polars as pl
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        depth = lake_root / "sweep_runs" / ("grid" + "0" * 60) / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "run_id": [f"{1:064x}"],
+                "composite_score": pl.Series([1.75], dtype=pl.Float64),
+            }
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        summary_cache.mark_dirty()
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert payload["composite_join"]["state"] == "joined"
+        assert payload["composite_join"]["scored_rows"] == 1
+        assert payload["rows"][0]["composite_score"] == 1.75
+        # The ?preset=composite axis is now honestly ACTIVE.
+        preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
+        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+
+    def test_aggs_landing_after_a_poll_surfaces_without_a_sweeps_write(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """Fix round 1 (refuter-confirmed MAJOR killing regression): the depth
+        pass writes the aggs sidecars AFTER the sweep's last store flush /
+        audit append, into the ``sweep_runs/`` sibling tree that
+        ``sweep_results_revision`` never stats — so a poll landing mid-pass
+        cached an EMPTY composite index that the aggs writes could never
+        invalidate (the pre-fix "can never hide behind a stale index" comment
+        was false; the stale index persisted until the NEXT sweep). The
+        dedicated ``composite_index_revision`` token must surface the aggs on
+        the very next poll with NO sweeps-tree write, NO audit append and NO
+        ``mark_dirty`` following them (``cmd_sweep_all``'s real ordering).
+        """
+        import polars as pl
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        run_dir = lake_root / "sweep_runs" / ("grid" + "0" * 60)
+        run_dir.mkdir(parents=True)
+        # Prime every cache MID-depth-pass: the run dir exists, no aggs yet.
+        first = client.get("/api/v1/sweep/leaderboard").json()
+        assert first["composite_join"]["state"] == "joined"
+        assert first["composite_join"]["scored_rows"] == 0
+        assert "composite_score" not in first["rows"][0]
+        # The depth pass then lands the aggs — nothing else moves.
+        depth = run_dir / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "run_id": [f"{1:064x}"],
+                "composite_score": pl.Series([1.75], dtype=pl.Float64),
+            }
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        second = client.get("/api/v1/sweep/leaderboard").json()
+        assert second["composite_join"]["scored_rows"] == 1
+        assert second["rows"][0]["composite_score"] == 1.75
+        # The activation reaches the preset axis too — still no sweeps write.
+        preset = client.get("/api/v1/sweep/leaderboard?preset=composite").json()
+        assert preset["preset_inert_axes"] == ["max_consecutive_losses"]
+
+    def test_composite_index_reads_once_per_token(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fix round 1 memo law: repeat polls at an UNCHANGED aggs tree pay ONE
+        ``load_composite_index`` (the token-keyed slot), and an aggs write pays
+        exactly one more — never a per-poll O(aggs files) re-read.
+        """
+        import polars as pl
+        from brutex.dashboard import app as app_module
+
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        depth = lake_root / "sweep_runs" / ("grid" + "0" * 60) / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {"run_id": [f"{1:064x}"], "composite_score": pl.Series([1.75], dtype=pl.Float64)}
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+        calls = {"n": 0}
+        real = app_module.load_composite_index
+
+        def _spy(root: Path) -> object:
+            calls["n"] += 1
+            return real(root)
+
+        monkeypatch.setattr(app_module, "load_composite_index", _spy)
+        for _ in range(3):
+            assert (
+                client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 1
+            )
+        assert calls["n"] == 1
+        # A second sidecar lands in a NEW tf dir → the token moves → ONE more read.
+        sibling = depth.parent / "15m"
+        sibling.mkdir()
+        pl.DataFrame(
+            {"run_id": [f"{2:064x}"], "composite_score": pl.Series([2.0], dtype=pl.Float64)}
+        ).write_parquet(sibling / "bull_k1_bbbbbbbbbbbbbbbb.aggs.parquet")
+        assert client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 2
+        assert calls["n"] == 2

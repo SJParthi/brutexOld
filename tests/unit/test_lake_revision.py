@@ -685,3 +685,49 @@ class TestGreeksBackfillComponent:
 
         assert probe_mod._GREEKS_BACKFILL_DIRNAME == CHECKPOINT_DIR_NAME
         assert probe_mod._GREEKS_REVISION_FILENAME == REVISION_MARKER_FILE_NAME
+
+
+class TestCascadeReportRevision:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the dedicated report stat token."""
+
+    def test_absent_reads_the_stable_sentinel(self, tmp_path: Path) -> None:
+        from brutex.dashboard.lake_revision import ABSENT_TOKEN, cascade_report_revision
+
+        assert cascade_report_revision(tmp_path) == ABSENT_TOKEN
+
+    def test_token_moves_on_an_in_place_rewrite(self, tmp_path: Path) -> None:
+        from brutex.dashboard.lake_revision import cascade_report_revision
+
+        report = tmp_path / "sweeps" / "cascade" / "cascade-report.json"
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b'{"version":1}')
+        first = cascade_report_revision(tmp_path)
+        assert first is not None and ":" in first
+        # An atomic in-place rewrite moves NO directory mtime the sweeps
+        # digest sees — the FILE stat token must move on its own.
+        os.utime(report, ns=(1, 1))
+        second = cascade_report_revision(tmp_path)
+        assert second is not None
+        assert second != first
+
+    def test_probe_outage_reads_none_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import lake_revision as probe_mod
+
+        def _boom(path: object) -> object:
+            raise PermissionError("wedged")
+
+        monkeypatch.setattr(probe_mod.os, "stat", _boom)
+        with capture_logs() as logs:
+            assert probe_mod.cascade_report_revision(tmp_path) is None
+        assert [e for e in logs if e["event"] == "lake_revision.cascade_report_stat_failed"]
+
+    def test_relpath_pinned_to_the_wire_path_law(self, tmp_path: Path) -> None:
+        """The mirrored relpath literal tracks cascade_wire.report_path —
+        pinned by test, never imported (lake_revision stays stdlib-lean)."""
+        from brutex.dashboard import lake_revision as probe_mod
+        from brutex.engine.cascade_wire import report_path
+
+        pinned = tmp_path.joinpath("sweeps", *probe_mod._CASCADE_REPORT_RELPATH)
+        assert pinned == report_path(tmp_path / "sweeps")
