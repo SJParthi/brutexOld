@@ -1095,6 +1095,14 @@ jobs:
           else
             echo "(brutex.orchestrator.events test file not present yet — gate inactive)"
           fi
+          # audit_seam_log.py — the slice-9 audit-chain Rust-port seam
+          # (DEC-ORCH-CALENDAR-RUST-CONVERT-001, MIGRATION.md #1727);
+          # static gate added post-refuter per workspace-health disclosure.
+          if compgen -G "tests/unit/test_orchestrator_audit_seam_log.py" > /dev/null; then
+            pytest --cov=brutex.orchestrator.audit_seam_log --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_audit_seam_log.py
+          else
+            echo "(brutex.orchestrator.audit_seam_log test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_orchestrator_rate_limiter.py" > /dev/null; then
             pytest --cov=brutex.orchestrator.rate_limiter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_orchestrator_rate_limiter.py
           else
