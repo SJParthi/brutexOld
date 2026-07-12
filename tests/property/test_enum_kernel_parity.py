@@ -55,11 +55,9 @@ from brutex.engine.rust_enum import (
     reset_enum_self_check_for_tests,
     reset_observability_memo_for_tests,
 )
-from brutex.vocabulary import CONFLICT_PAIRS, has_conflict
+from brutex.vocabulary import has_conflict
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
-_PAIRS_SORTED = sorted(CONFLICT_PAIRS)
 
 #: A generous per-call budget — whole-range monolithic calls in one shot.
 _NO_CAP = (1 << 63) - 1
