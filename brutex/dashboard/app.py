@@ -39,7 +39,7 @@ import math
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -292,6 +292,8 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.errors import CatalogError
+from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -325,6 +327,7 @@ from brutex.engine.results_store import ResultsStoreError
 from brutex.models import Exchange, Instrument, InstrumentType
 from brutex.notifications.sweep_alerts import emit_greeks_backfill_complete_alert
 from brutex.observability.correlation import request_id_scope
+from brutex.observability.loop_watchdog import LoopWatchdog
 from brutex.observability.power_keepawake import keep_awake
 from brutex.orchestrator.pipeline import (
     PipelineEvent,
@@ -345,6 +348,20 @@ _LOG = structlog.get_logger("brutex.dashboard")
 #: A structured-query filter is the 3-token form ``column:op:value`` (the
 #: value may itself contain ``:``). Named to avoid a PLR2004 magic number.
 _FILTER_TOKEN_COUNT = 3
+
+#: The ``/api/v1/db/tables`` freshness-probe fault set: the store fault types
+#: (``duckdb.Error``/``OSError`` — a wedged volume / unreachable DuckDB) PLUS
+#: ``CatalogError``, because the DEC-STORE-WRITE-DEADLINE-001 wedge latch
+#: (``InstrumentStore._ensure_not_wedged``, threaded into the read view's
+#: ``execute``) raises CatalogError — a ``DataLakeError``, NOT a
+#: ``duckdb.Error`` — and the wedge fires in the EXACT mid-pull contention
+#: window the tables-route fold exists for (round-7 review MAJOR: the wedge
+#: previously escaped the ``STORE_FAULT_TYPES``-only clause and 500'd where
+#: the pre-cache route answered honest 0-counts).
+_TABLES_PROBE_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    *STORE_FAULT_TYPES,
+    CatalogError,
+)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1196,6 +1213,7 @@ def build_app(
     session_rate: SessionRateController | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
+    loop_watchdog: LoopWatchdog | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1360,6 +1378,18 @@ def build_app(
         assert the dry-run / job-end eviction through the REAL routes); ``None``
         (the default) builds a fresh production holder — byte-identical to the
         pre-seam construction (mirrors the ``summary_cache`` injection pattern).
+    loop_watchdog
+        Optional :class:`~brutex.observability.loop_watchdog.LoopWatchdog`
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): when given, the app
+        rides a minimal LIFESPAN (``FastAPI(lifespan=...)`` — Starlette 1.x
+        removed the ``add_event_handler``/``on_event`` seam, so the lifespan
+        kwarg is the ONE lifecycle hook) that starts the 1 s event-loop
+        heartbeat task + monitor daemon on serve and stops them cleanly on
+        shutdown. ``None`` (the default) builds the app with NO lifespan —
+        zero threads, tasks or lifecycle hooks (census-pinned), so every
+        existing ``build_app()`` caller is byte-identical. Production binds
+        one in ``cli.cmd_dashboard`` behind the fail-loud
+        ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
 
     Returns
     -------
@@ -1420,7 +1450,34 @@ def build_app(
     # dashboard now authenticates via Groww TOTP, so the vestigial keepalive
     # lifespan wiring was removed. The retired-vendor adapter package has since been
     # deleted; the dashboard simply no longer drives any keepalive.
-    app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
+    #
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): OPT-IN — `None` (the default, every test construction) builds the app
+    # with NO lifespan at all, spawning ZERO threads/tasks (byte-identical app;
+    # census-pinned). A wired watchdog rides a minimal LIFESPAN (the modern
+    # Starlette seam — `add_event_handler`/on_event were REMOVED in Starlette
+    # 1.x, so the lifespan kwarg is the one lifecycle hook): startup starts the
+    # 1 s heartbeat task on THIS app's running loop + the monitor daemon;
+    # shutdown cancels the task + joins the monitor BOUNDED. Production binds
+    # one in `cli.cmd_dashboard` behind the fail-loud BRUTEX_LOOP_WATCHDOG kill
+    # switch (default ON).
+    if loop_watchdog is not None:
+        from contextlib import asynccontextmanager
+
+        watchdog = loop_watchdog  # narrow for the closure (mypy: not None)
+
+        @asynccontextmanager
+        async def _watchdog_lifespan(_app: Any) -> AsyncGenerator[None]:
+            """Start/stop the loop watchdog around the app's serving lifetime."""
+            await watchdog.start_from_running_loop()
+            try:
+                yield
+            finally:
+                watchdog.stop()
+
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan)
+    else:
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
     # Serve the shared dashboard static assets (the date-picker component, etc.)
     # from ``/static`` — ONE source of truth loaded by every page via <link>/<script>
@@ -1758,7 +1815,18 @@ def build_app(
     # the flat thousand-row dropdown. Now the COMMON `MoversSnapshotCache` (keyed
     # FNO_CASCADE_KEY) so it shares the pull-time floor + the discovery warm; the
     # bespoke single-slot `FnoCascadeCache` class is superseded at this wiring site.
-    _fno_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the THREE discovery-walk memos
+    # additionally opt into stale-while-revalidate — PAST the adaptive floor a
+    # mid-pull poll serves the last-known index IMMEDIATELY and at most ONE
+    # tokenless background daemon revalidates, instead of an inline O(datasets)
+    # walk (or a blocking single-flight wait pinning a 32-token lake worker per
+    # waiter — the 8-tab herd defect). Staleness stays bounded (≤ one walk/fold
+    # behind live), log-labelled (`movers_cache.stale_served` + the
+    # `stale_extended` escalation), and hard-converged by the pull-end
+    # `warm_discovery_memos` force_fresh reseed (which bypasses floor AND SWR).
+    _fno_cascade_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
     # The /db candle-datasets discovery cache (DEC-DB-TAB-SWITCH-O1-001): the
     # `/api/v1/db/candles/datasets` endpoint walks the WHOLE `bars/` tree THREE times
     # (spot + F&O + options, each an O(files) `rglob("*.parquet")`) — and it fires on
@@ -1766,13 +1834,45 @@ def build_app(
     # between lake writes, so they are memoised behind the SAME generation signal as the
     # caches above (a pull bumps it → rediscover; otherwise a tab switch is an O(1) handoff
     # of the cached lists). REUSES the COMMON `MoversSnapshotCache` (one dataset key).
-    _db_datasets_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _db_datasets_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
     # The /db SPOT cascade cache (DEC-DB-SPOT-CASCADE-001): the symbol→interval index is
     # an O(datasets) build over the non-F&O lake partitions; memoised behind the SAME
     # write-generation as the caches above (the spot twin of `_fno_cascade_cache`), so a
     # pull rebuilds it but every symbol-picker open is an O(1) handoff — the small
     # symbols-with-intervals payload, never the flat ~750-row spot dropdown.
-    _spot_cascade_cache = MoversSnapshotCache(pull_active_probe=_pull_live, adaptive_floor=True)
+    _spot_cascade_cache = MoversSnapshotCache(
+        pull_active_probe=_pull_live, adaptive_floor=True, stale_while_revalidate=True
+    )
+    # The /db TABLES summary cache (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
+    # the coordinator-directed tables-route fold): `GET /api/v1/db/tables` ran the
+    # `table_summary` COUNT(*) sweep UNCACHED on the store's read connection on
+    # EVERY open, so mid-pull it convoyed behind whatever multi-second read held
+    # the store read lock (the operator's live "request timed out after 12000ms"
+    # on the tables list, twice; the in-repo forensic precedent latency_ms≈32796).
+    # The 3-row payload is a pure function of the store tables (instruments /
+    # instrument_runs / schema_meta), so it is memoised on ONE STABLE key whose
+    # GENERATION digests the write generation AND the instrument-master content
+    # revision (`master_revision` — a keyless load-instruments moves the
+    # instruments/instrument_runs counts WITHOUT bumping the generation; the
+    # `_nav_latency_coords` digest-bridge form, so the floor + SWR arms stay
+    # reachable on the one stable key), with the SAME serve-last-known posture
+    # as the discovery memos above: past-floor mid-pull the last-known counts
+    # serve instantly and AT MOST ONE tokenless background daemon revalidates.
+    # SMALL dedicated instance (one live key — the WINDOW_PAGE_CACHE
+    # small-instance precedent); the compute reads a FRESH `store.connection`
+    # view per run, so the background revalidator never shares a
+    # `_LockedReadConn` with a request thread.
+    _db_tables_cache = MoversSnapshotCache(
+        capacity=8,
+        pull_active_probe=_pull_live,
+        adaptive_floor=True,
+        stale_while_revalidate=True,
+    )
+    # The tables cache's ONE stable key (the freshness token lives in the
+    # GENERATION digest, never the key — the floor-rekey law).
+    db_tables_key = "db-tables-summary"
     # The DEFAULT-poll latest-movers-date cache (GAP #4): the `/api/v1/movers` route with
     # NO explicit date resolves the latest available spot 1day via `latest_movers_date`,
     # an O(datasets) DuckDB MAX over the spot 1day globs — re-run on EVERY default poll.
@@ -7961,9 +8061,73 @@ def build_app(
 
         Thin wrapper over :func:`brutex.dashboard.db_view.table_summary`.
         Tolerates a missing table (count 0) so a fresh/empty store works.
+        Memoised in the SWR-flagged ``_db_tables_cache``
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, the tables-route fold):
+        the COUNT(*) sweep previously ran UNCACHED on the store read connection
+        per open and convoyed >12 s behind mid-pull reads holding the store
+        read lock (the operator's live tables-list timeout). Now a repeat open
+        within one freshness token is an O(1) hit, a token move (a pull
+        generation bump OR a keyless ``load-instruments`` master move)
+        recomputes, and a past-floor mid-pull open serves the LAST-KNOWN
+        counts instantly (logged ``movers_cache.stale_served``) while at most
+        ONE tokenless background daemon revalidates — the fresh-compute
+        payload is byte-identical to the pre-cache route (pinned). The
+        CACHED compute runs ``table_summary(..., raise_on_fault=True)``, so
+        a fault is NEVER stored: a probe fault (``_TABLES_PROBE_FAULT_TYPES``
+        — the store fault types + the DEC-STORE-WRITE-DEADLINE-001 wedge
+        latch's ``CatalogError``) OR the SAME fault striking AFTER a healthy
+        probe (the round-8 probe→compute TOCTOU — the strict compute raises
+        out of ``get_or_compute``, which caches nothing on a raise) degrades
+        to today's exact pre-cache path: one direct UNCACHED default-form
+        sweep (honest 0-counts on a faulted/wedged connection — never a 500,
+        nothing cached on EITHER degrade arm).
         """
         store = _require_store()
-        tables = await _run_lake(lambda: table_summary(store.connection))
+
+        def _tables() -> list[dict[str, Any]]:
+            """Resolve the cached table summary off the event loop (worker thread).
+
+            The freshness probe (one O(1) generation read + the cheap
+            ``master_revision`` COUNT+MAX) runs INSIDE the offloaded callable
+            — never on the event loop (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002).
+            The compute reads a FRESH ``store.connection`` view per run, so
+            the background SWR revalidator never shares a ``_LockedReadConn``
+            with a request thread (each view serialises its own
+            ``execute → fetch`` under the store read lock).
+            """
+
+            def _compute() -> list[dict[str, Any]]:
+                # STRICT sweep (round-8 review MINOR — the probe→compute
+                # TOCTOU): a store fault / the wedge latch's CatalogError
+                # striking AFTER the healthy probe RAISES here instead of
+                # folding to all-zero counts, so `get_or_compute` can never
+                # store a wedge-degraded summary under the healthy pre-wedge
+                # token (a raising compute caches NOTHING and releases the
+                # single-flight — the pinned movers_cache law,
+                # test_movers_cache.py::TestComputeRaises
+                # ::test_exception_propagates_and_nothing_cached).
+                return table_summary(store.connection, raise_on_fault=True)
+
+            try:
+                gen = _summary_cache.generation
+                count, latest = master_revision(store)
+                return _db_tables_cache.get_or_compute(
+                    db_tables_key,
+                    generation=revision_generation(f"gen={gen}|m={count}:{latest}"),
+                    compute=_compute,
+                )
+            except _TABLES_PROBE_FAULT_TYPES:
+                # Probe outage OR a WEDGED/faulted store — surfacing at the
+                # probe OR mid-compute (the round-8 TOCTOU window; the strict
+                # compute's raise set TABLE_SUMMARY_FAULT_TYPES is
+                # member-equal to this clause, drift-pinned) → the exact
+                # pre-cache posture, byte-for-byte: one direct uncached
+                # DEFAULT-form sweep (honest 0-counts on a faulted/wedged
+                # conn — the fold-to-zero arm never raises there), nothing
+                # cached.
+                return table_summary(store.connection)
+
+        tables = await _run_lake(_tables)
         return JSONResponse({"tables": tables})
 
     @app.get("/api/v1/db/table/{name}")
@@ -8283,8 +8447,33 @@ def build_app(
         lake = lake_root.parent
 
         def _build() -> SpotCascadeIndex:
-            """Build the spot symbol→interval cascade from the non-F&O lake datasets."""
-            return build_spot_cascade(filter_spot_datasets(list_candle_datasets(lake)))
+            """Build the spot symbol→interval cascade from the non-F&O lake datasets.
+
+            DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G2): the walk PRUNES the
+            F&O contract tree AT DESCENT (``exclude_segments`` — the
+            DEC-COMPLETENESS-FNO-SKIP-001 mechanism db_view already implements at
+            the segment-dir level), so a cold spot-cascade build never pays the
+            ~10⁵-10⁶ per-contract partition dirs of a materialised options lake
+            (measured 42× on the synthetic repro's WALK, 420.0 ms → 10.0 ms —
+            the full unfiltered ``_build`` measured 490.9 ms; the production
+            unfiltered walk's own docstring figure is 29.7 min at 2.36M
+            files — OUT-OF-CI measurements; the structural walk-flatness the
+            figures follow from is pinned deterministically by the committed
+            op-count bench ``tests/bench/test_db_spot_cascade_fno_flat_o1.py``
+            — round-5 review). ``filter_spot_datasets``
+            stays as the provable-no-op belt (the ONE spot-vs-F&O split, §11
+            COMMON). A FILTERED walk deliberately NEVER rebuilds the dataset
+            manifest (db_view's :func:`list_candle_datasets` guard) — rebuild duty
+            stays with the unfiltered datasets route + ``warm_discovery_memos`` +
+            the write-side ``record_dataset`` convergence (spy-pinned).
+            """
+            return build_spot_cascade(
+                filter_spot_datasets(
+                    list_candle_datasets(
+                        lake, exclude_segments=frozenset({FNO_CANDLE_LAKE_SEGMENT})
+                    )
+                )
+            )
 
         # DEC-DASHBOARD-EVENTLOOP-OFFLOAD-002: the generation probe (ledger stat +
         # sweeps-tree digest) is read INSIDE the offloaded lambda, never the event loop.
