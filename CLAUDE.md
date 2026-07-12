@@ -18,7 +18,33 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
+_Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
+MIGRATION.md #1753–#1755 — the daily TickVault cross-verification PRODUCER:
+one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
+futures, NO options) → completeness gate (FAIL-CLOSED on the sibling #1751
+module) → day-scoped never-stamping prebuild → the pinned per-symbol CSV
+byte contract → idempotent journal-keyed S3 publish to
+`tv-prod-cold/crossverify/*` (PutObject-ONLY — BruteX's FIRST sanctioned AWS
+WRITE surface; the SSM read-only pledge UNCHANGED; boto3 via the NEW
+optional `crossverify` extra, never installed in CI) — surfaced as `brutex
+crossverify {run,install,uninstall,status}` (launchd label
+`com.brutex.crossverify`, `--at` REQUIRED probe-decided; trading-day-aware
+journal deadman) + the /universe dashboard button riding the SAME runner
+(cross_process_lock=False — the runner's own lock trio; market-hours law
+runner-owned at step E). Correct-or-absent: a short/settling file is
+WITHHELD + CRITICAL-alerted, never wrong bytes; Muhurat days skip entirely
+(no files, both sides no-op); INDEX `no_today_bars` = BLOCKED exit 2. HONEST
+envelope: vendor same-day availability UNVERIFIED (the operator's 5-day
+settle probe decides `--at`); BSE_EQ/BSE_FNO structural-only; GREEKS N/A
+(the options-only stage on an options-excluding pull); movers warm =
+revision propagation only; named follow-ups
+DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (BSE-FNO probe-gated) +
+DEC-CROSSVERIFY-PREEMPT-002 (true preemption — job-cancel dependency).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; the per-item record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1753 — this header carries the pointer, never the story.)
+Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
 #1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
 FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
 — NEW frozen `TradeFolds` + `_fold_trades` (the verbatim per-trade
@@ -2320,7 +2346,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
+- **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+  DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1753–#1755** — the daily
+  TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
+  renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
+  run step-machine · launchd schedule, each 100% line+branch on its own ci.yml stanza) executing ONE zero-touch
+  post-close chain: priority pull (ALL spot with EXPLICIT `to_date=day` + scoped metadata + `expiry>=day`
+  NIFTY/BANKNIFTY futures — options EXCLUDED per the tonight-scope addendum; ONE SessionRateController spans the
+  legs) → the sibling #1751 completeness gate behind a narrow FAIL-CLOSED Protocol (module absent ⇒ refused exit 1,
+  never publish-ungated; the per-class branch-on-REASON table — INDEX `no_today_bars` = BLOCKED exit 2, settling
+  FUT / short index = bounded settle-retry then withheld-final) → the day-scoped never-stamping derive (#1755:
+  month-bounded 19 TFs + ±1d-padded 1day on the heal-recall template; the partial-derive-never-stamps invariant BY
+  CONSTRUCTION; double-derive-on-nightly disclosed, no new nightly cost) → the pinned CSV byte contract (UTF-8
+  no-BOM · LF+trailing newline · no-quote-ever · 2dp ROUND_HALF_UP via `round_money` · `oi` empty-for-spot /
+  int-for-fut with the NULL-OI-fut render REFUSAL · out-of-session/dup-minute/csv_safe-mutable REFUSE · raw-`&` S3
+  keys `M&M.csv`) → staging + per-day journal (atomic, crash-convergent) → LOCKS RELEASED → idempotent publish
+  (journal-keyed skip; bounded 1 s/4 s retry; AccessDenied aborts the WHOLE publish naming the IAM runbook;
+  recovery scan re-publishes prior pending staged bytes) → exactly ONE Telegram summary
+  (`SweepAlerter.crossverify_summary`/`crossverify_refused` + the blanket-try emit helpers the producer's
+  `_default_alerter` binds by NAME — landing them woke the alerts with zero producer edits, pinned end-to-end).
+  SURFACES: `brutex crossverify {run,install,uninstall,status}` (thin shims; exit law 0/1/2 cron-red; `--at`
+  REQUIRED probe-decided, NO default fire time; launchd `com.brutex.crossverify` DELEGATES to the nightly
+  install law via the ADDITIVE defaulted `log_stem`/`next_step` params — nightly plist bytes UNCHANGED, pinned;
+  the TRADING-DAY-AWARE journal-mtime deadman never false-MISSes a Monday or the day after Diwali) + the
+  /universe dashboard button (tonight-scope item 2): `POST /api/v1/crossverify/run` + O(1) progress route on a
+  DEDICATED third `BackgroundPullJob` sharing the app's SessionRateController — `cross_process_lock=False` (the
+  runner's `default_seams` lock seam owns the account→lake→lease trio, bounded 45-min wait-retry + honest
+  refusal; a job-level second flock acquire would self-conflict) + `market_hours_exempt=True` (the RUNNER owns
+  the market-hours law at its step E — honest `deferred_market_hours` exit 0); the panel rides the shared
+  `gbFetchJson` hung-fetch-bounded helper, textContent-only. BSE_EQ/BSE_FNO stay STRUCTURAL-only (mapper+pins,
+  never emitted); Muhurat = whole-run skip, NO files; GREEKS N/A — the Greeks stage is options-only and this
+  pull excludes options, nothing to enrich. HONEST: vendor same-day 1-minute availability UNVERIFIED — the
+  operator's 5-day settle probe decides `--at` (a too-early run WITHHOLDS, correct-or-absent, never wrong
+  bytes); movers warm = revision propagation only; CASH files legitimately <375 rows (INDEX strict 375);
+  withheld days = manual `--day` re-run (publish-PARTIAL recovery automatic); NO preemption (a foreign lock
+  holder past the budget defers the day — CRITICAL refused; TRUE preemption = named follow-up
+  DEC-CROSSVERIFY-PREEMPT-002 on the job-cancel mechanism); SENSEX-futures ingest = named follow-up
+  DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 gated on a Groww BSE-FNO availability probe; the FIRST-AWS-WRITE posture
+  (#1754) is PutObject-only on `tv-prod-cold/crossverify/*` — the SSM read-only pledge UNCHANGED, boto3 via the
+  NEW optional `crossverify` extra CI never installs, no real S3 put in CI (operator acceptance step). Integration
+  proof: a real-ParquetBarSink lake through the FULL `run_crossverify` over `default_seams` (real locks/reader/
+  export/journal/prebuild; FakeS3 + recording alerter injected) — published bytes byte-verified vs the committed
+  goldens, idempotent re-run 0 puts, truncated-index withheld exit 2, crash-mid-publish next-run convergence, the
+  derive leg proven by the independent `lake_derived_freshness_verdicts` oracle. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean,
+  pyright 0 new; `node --check` clean on the touched template's inline scripts.)
+  Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
   of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
   `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
   `_fold_trades` (the verbatim per-trade accumulations, moved token-for-token, summation order untouched) + NEW
@@ -5903,13 +5974,30 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/sweep-core-slice0`
+- **Active feature branch:** `claude/crossverify-producer`
+  (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
+  DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1753–#1755 — the daily
+  TickVault cross-verification producer: NEW `brutex/crossverify/` package
+  running the zero-touch post-close chain (priority pull [ALL spot +
+  NIFTY/BANKNIFTY futures, NO options] → fail-closed completeness gate →
+  day-scoped never-stamping derive → the pinned per-symbol CSV byte
+  contract → idempotent journal-keyed S3 publish, PutObject-ONLY on
+  `tv-prod-cold/crossverify/*` — BruteX's FIRST sanctioned AWS write
+  surface, SSM read-only pledge unchanged), surfaced as `brutex crossverify
+  {run,install,uninstall,status}` (launchd `com.brutex.crossverify`, `--at`
+  REQUIRED probe-decided, trading-day-aware journal deadman) + the /universe
+  dashboard button on a dedicated BackgroundPullJob riding the SAME runner;
+  correct-or-absent (withheld + CRITICAL, never wrong bytes; Muhurat days
+  skip entirely; INDEX `no_today_bars` = BLOCKED); GREEKS N/A (options-only
+  stage, options-excluding pull); BSE_EQ/BSE_FNO structural-only;
+  SENSEX-futures ingest + true preemption = named follow-up DECs; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/sweep-core-slice0`
   (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
   sweep-core conversion: the behavior-identical fold/combine decomposition of
   `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
   `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
-  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
-  branch line)
+  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
@@ -6409,7 +6497,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4863-4864` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4975-4976` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
