@@ -7406,8 +7406,11 @@ def build_app(
     # The ONE integration-adapter surface over the sweep-oneclick artifact
     # CONTRACTS (manifest.json / top100.json / events.jsonl / trades pages) —
     # thin closures over the 100%-unit-tested `oneclick_artifacts` +
-    # `oneclick_view` modules, offloaded via `run_in_threadpool` (the app.py
-    # doctrine). Unknown run dirs are HONEST 200 `status:"awaiting"` payloads
+    # `oneclick_view` modules, offloaded via the app's 32-token `_run_lake`
+    # lake limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — every artifact
+    # read lives under the lake root, so a wedged lake volume pins lake
+    # tokens, never the default pool). Unknown run dirs are HONEST 200
+    # `status:"awaiting"` payloads
     # (polls must never error-loop); ONLY a genuinely bad request — missing/
     # unsafe run_id, a junk BRUTEX_ONECLICK_FIXTURE_ROOT — is a 400.
 
@@ -7812,7 +7815,7 @@ def build_app(
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -8696,7 +8699,11 @@ def build_app(
     # INTERIM Run-Sweep launch page (DEC-SWEEP-LAUNCH-BUTTON-INTERIM-001):
     # strictly additive registration — /launch + /api/v1/launch/* live in
     # brutex/dashboard/launch_button.py (single-flight detached CLI launch).
-    register_launch_routes(app, lake_root_resolver=store_lake_root_resolver(instrument_store))
+    register_launch_routes(
+        app,
+        lake_root_resolver=store_lake_root_resolver(instrument_store),
+        run_lake=_run_lake,
+    )
 
     return app
 

@@ -121,7 +121,7 @@ from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 _LOG = structlog.get_logger(__name__)
 
@@ -1264,16 +1264,35 @@ def register_launch_routes(
     lake_root_resolver: Callable[[], Path | None],
     spawner: Callable[[list[str], Path], int] | None = None,
     min_free_bytes: int = DEFAULT_MIN_DISK_FREE_BYTES,
+    run_lake: Callable[..., Awaitable[Any]] | None = None,
 ) -> None:
     """Register the INTERIM launch page + API routes on *app* (additive only).
 
     FastAPI is imported lazily (the app.py doctrine — unit tests can import
     this module without the ``[ui]`` extra). *spawner* is the injectable
     detached-process seam so tests NEVER launch a real sweep.
+
+    *run_lake* is the app's lake-I/O limiter (``LakeOffload.__call__``-shaped —
+    the ``run_in_threadpool``-identical contract; DEC-DASHBOARD-LAKE-IO-LIMITER-002):
+    every /api/v1/launch/* closure stats/reads/writes under the lake root, so
+    ``build_app`` passes its own 32-token ``_run_lake``. ``None`` degrades to the
+    lazily-imported default-pool ``run_in_threadpool`` so direct callers without
+    an app limiter keep today's behavior byte-identically.
     """
     from fastapi import HTTPException, Query
     from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import HTMLResponse, JSONResponse
+
+    # The lake-I/O dispatch (DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the #1642
+    # named follow-up): every /api/v1/launch/* closure stats/reads/writes
+    # under the lake root (21 partition dir stats + shutil.disk_usage +
+    # <lake>/sweeps/.launch/ pidfile + the launch.log tail; the POST adds the
+    # flock + atomic pidfile writes + the log open), so it must ride the
+    # app's 32-token lake limiter, never the DEFAULT 40-token pool a wedged
+    # volume would starve.
+    _offload: Callable[..., Awaitable[Any]] = (
+        run_lake if run_lake is not None else run_in_threadpool
+    )
 
     # Hoist ``JSONResponse`` into module globals (the app.py `_make_ws_handler`
     # hoist idiom — DEC-OPENAPI-ANNOTATIONS-RESOLVE-001): the two API closures'
@@ -1295,9 +1314,7 @@ def register_launch_routes(
     async def api_launch_state() -> JSONResponse:
         """GET /api/v1/launch/state — preconditions + cards + active-run poll."""
         lake_root = lake_root_resolver()
-        payload = await run_in_threadpool(
-            build_launch_state, lake_root, min_free_bytes=min_free_bytes
-        )
+        payload = await _offload(build_launch_state, lake_root, min_free_bytes=min_free_bytes)
         return JSONResponse(payload)
 
     async def api_launch_sweep(
@@ -1335,16 +1352,14 @@ def register_launch_routes(
             futures = probe_futures_alias()
             if not futures.available:
                 raise HTTPException(status_code=400, detail=futures.reason)
-        checks = await run_in_threadpool(
-            run_preconditions, lake_root, min_free_bytes=min_free_bytes
-        )
+        checks = await _offload(run_preconditions, lake_root, min_free_bytes=min_free_bytes)
         failing = [c.name for c in checks if not c.ok and c.name in _POST_GATE_CHECKS]
         if failing:
             raise HTTPException(
                 status_code=412,
                 detail=f"launch preconditions failed: {', '.join(failing)} — nothing launched",
             )
-        outcome = await run_in_threadpool(
+        outcome = await _offload(
             launch_sweep,
             card,
             lake_root=lake_root,
