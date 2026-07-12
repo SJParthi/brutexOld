@@ -206,7 +206,7 @@ def publish_staged(
     recorded ``sha256`` + ``size`` BEFORE the PUT (round-2 hostile review
     M2 — on the cross-day recovery path a bit-rotted/tampered staged file
     must never reach production S3): a mismatch counts failed + WARNs and
-    stays pending (the ``staged_bytes_missing`` law — a same-day re-render
+    stays pending (the ``staged_bytes_corrupt`` law — a same-day re-render
     re-stages the correct bytes and heals). A nonretryable error aborts the
     WHOLE publish immediately with the remaining pending keys counted
     failed. O(pending keys).
