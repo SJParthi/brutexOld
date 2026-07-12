@@ -638,6 +638,28 @@
     <span id="gbstatus" style="margin-left:10px;color:var(--muted);"></span>
   </div>
 
+  <!-- Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001): the daily TickVault
+       cross-verification run — post-close priority pull (all spot + NIFTY/BANKNIFTY
+       futures, NO options), completeness gate, day-scoped prebuild, pinned CSV
+       export, idempotent S3 publish. Same runner as `brutex crossverify run`; the
+       run takes the pull locks itself with a bounded wait, so a concurrent pull
+       defers it honestly. GREEKS N/A: the Greeks stage is options-only and this
+       pull excludes options — nothing to enrich. Status is written via textContent
+       ONLY (CodeQL XSS guard). -->
+  <div id="crossverifyPanel" role="status" aria-live="polite"
+       style="margin:12px 0;padding:10px 14px;border-radius:10px;
+              border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
+    <b>Cross-verify → TickVault (daily CSV → S3)</b>
+    <button id="crossverifyBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
+            title="Pull today's spot + NIFTY/BANKNIFTY futures (options excluded), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
+      ▶ Run cross-verify
+    </button>
+    <label style="margin-left:8px;color:var(--muted);">
+      <input type="checkbox" id="cvDry"> dry-run (render in memory — no locks, pulls, writes, or S3)
+    </label>
+    <span id="cvstatus" style="margin-left:10px;color:var(--muted);"></span>
+  </div>
+
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
        (DEC-MAPPING-INTEGRITY-RECONCILE-001 / DEC-MAPPING-INTEGRITY-ATTEMPTED-001). VERIFIED =
        every ATTEMPTED options-eligible spot pulled its option history; RED = a spot was
@@ -2498,6 +2520,126 @@ if (verdictRetryBtn) verdictRetryBtn.addEventListener('click', () =>
   // Wire to the EXISTING manual retry engine (DEC-INGEST-AUTO-RETRY-001 / PR #483) —
   // re-pull ONLY the still-failed windows over the full admitted spot universe.
   startAndPoll('/api/v1/universe/retry-failed', 'retry failed windows'));
+
+/* ── Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001) ──
+   POST to start the daily TickVault cross-verify run, then poll its OWN O(1)
+   progress route until a TERMINAL state is actually OBSERVED — riding the
+   SAME gbFetchJson hung-fetch-bounded helper (CLAUDE.md §11 COMMON — no
+   third copy of the abort-controller boilerplate) and the SAME discipline as
+   the Greeks-backfill watcher above: hidden-tab zero fetches + a
+   visibilitychange catch-up, a generation guard so a stale response never
+   repaints, quick retries then the capped 3s→30s backoff, NEVER gives up
+   while the run may still be going. A shared job-watch factory folding this
+   and the gb watcher into one closure is the named follow-up
+   (DEC-CROSSVERIFY-DASHBOARD-001). textContent ONLY — never innerHTML. */
+const CV_MS = 1000;
+let cvTimer = null;
+let cvFailures = 0;
+let cvActive = false;
+let cvGen = 0;
+function cvStatus(text) {
+  const el = document.getElementById('cvstatus');
+  if (el) el.textContent = text;
+}
+function cvDelayMs() {
+  if (cvFailures <= GB_MAX_FEED_RETRIES) return CV_MS;
+  const exp = Math.min(cvFailures - GB_MAX_FEED_RETRIES - 1, 4);
+  return Math.min(GB_BACKOFF_MAX_MS, GB_BACKOFF_BASE_MS * Math.pow(2, exp));
+}
+function cvFinish() {
+  cvActive = false;
+  cvFailures = 0;
+  cvGen += 1;   // invalidate any in-flight poll straggler
+  if (cvTimer) { clearTimeout(cvTimer); cvTimer = null; }
+  const btn = document.getElementById('crossverifyBtn');
+  if (btn) btn.disabled = false;
+}
+function cvBeginWatch() {
+  cvActive = true;
+  cvFailures = 0;
+  const btn = document.getElementById('crossverifyBtn');
+  if (btn) btn.disabled = true;   // re-enabled ONLY once a terminal state is observed
+  pollCrossverify();
+}
+async function pollCrossverify() {
+  const gen = ++cvGen;   // re-entrancy guard: a superseded chain's late response never repaints
+  if (cvTimer) { clearTimeout(cvTimer); cvTimer = null; }
+  if (!cvActive) return;
+  if (document.hidden) {
+    cvTimer = setTimeout(pollCrossverify, GB_HIDDEN_MS);   // zero fetches while hidden
+    return;
+  }
+  try {
+    const res = await gbFetchJson('/api/v1/crossverify/progress');
+    if (gen !== cvGen) return;                        // superseded — drop the stale response
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = res.body;
+    if (!s || typeof s.state !== 'string') throw new Error('malformed progress payload');
+    cvFailures = 0;
+    if (s.state === 'running') {
+      cvStatus('running · ' + (s.current || s.detail || '…'));
+      cvTimer = setTimeout(pollCrossverify, CV_MS);
+      return;
+    }
+    // TERMINAL state observed (done / error / idle): the honest terminal
+    // line (detail carries the runner's verdict headline).
+    cvStatus((s.state === 'error' ? '✕ ' : '✓ ') + (s.detail || s.state));
+    cvFinish();
+  } catch (e) {
+    if (gen !== cvGen) return;   // superseded — a stale failure never reschedules
+    cvFailures += 1;
+    cvStatus('… live progress feed unreachable (the run may still be going) — retrying');
+    cvTimer = setTimeout(pollCrossverify, cvDelayMs());
+  }
+}
+async function cvAttachIfRunning() {
+  try {
+    const res = await gbFetchJson('/api/v1/crossverify/progress');
+    if (!res.ok) return false;
+    const s = res.body;
+    if (!s || s.state !== 'running') return false;
+    cvStatus('running · attaching to the live progress feed…');
+    cvBeginWatch();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+async function startCrossverify() {
+  const btn = document.getElementById('crossverifyBtn');
+  const dry = !!(document.getElementById('cvDry') && document.getElementById('cvDry').checked);
+  if (btn) btn.disabled = true;
+  cvStatus('Starting cross-verify…');
+  try {
+    const res = await gbFetchJson('/api/v1/crossverify/run' + (dry ? '?dry_run=true' : ''),
+                                  {method: 'POST'});
+    const body = res.body;
+    if (!res.ok) throw new Error((body && body.detail) || ('HTTP ' + res.status));
+    if (!body || !body.started) {
+      // Refused (in-process single-flight): attach to the live feed instead
+      // of a dead-end message.
+      const attached = await cvAttachIfRunning();
+      if (!attached) {
+        cvStatus('a cross-verify run is already in flight — retry once it finishes');
+        if (btn) btn.disabled = false;
+      }
+      return;
+    }
+    cvStatus((dry ? 'DRY RUN · ' : '') + 'running — pull → gate → derive → export → publish…');
+    cvBeginWatch();
+  } catch (e) {
+    cvStatus('✕ failed to start: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && cvActive) pollCrossverify();
+});
+const crossverifyBtn = document.getElementById('crossverifyBtn');
+if (crossverifyBtn) {
+  crossverifyBtn.addEventListener('click', startCrossverify);
+  cvAttachIfRunning();   // a re-opened page re-attaches to a running producer
+}
 
 /* Render the live stat row (units done/total · failed · no-data gaps · bars). A
    no-data gap is a benign Groww DH-905 boundary (e.g. NIFTY NEXT 50's pre-2021
