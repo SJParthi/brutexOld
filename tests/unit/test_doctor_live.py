@@ -1798,6 +1798,45 @@ class TestRateProbePullExclusion:
         with pull_singleflight_lock(ctx.lake_root):  # released after return
             pass
 
+    def test_pull_start_during_probe_refused_naming_doctor_at_account_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """The REVERSE direction at the lock production pulls hit FIRST.
+
+        Round-3 refuter (the R5 reverse-attribution fix): every creds-bearing
+        production pull start (dashboard ``BackgroundPullJob.start``, CLI
+        ``cmd_fetch``, nightly) contends on the ACCOUNT flock first — so the
+        doctor's holder note must live in THAT lock file too, not only the
+        lake-root one. A production-ORDER contender (account lock first)
+        refused DURING probe traffic must read
+        ``(holder: doctor:rate-probe:<run_id>)`` — pre-fix the account lock
+        had no holder-note channel and the refusal was the generic
+        "a pull is already running…" with NO doctor attribution.
+        """
+        deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        ctx.options.rate_probe_seconds = 1.0
+        lock_dir = dl._account_lock_dir(deps.home)
+        refusals: list[str] = []
+
+        def handler(kwargs: dict[str, object]) -> Mapping[str, object]:
+            # The production pull order: the ACCOUNT-keyed lock FIRST.
+            try:
+                with account_pull_singleflight_lock("key", lock_dir=lock_dir):
+                    refusals.append("ACQUIRED")  # would be the pre-fix silent overlap
+            except PullAlreadyRunningError as exc:
+                refusals.append(f"REFUSED:{exc}")
+            return default_handler(kwargs)
+
+        box["handler"] = handler
+        outcome = dl.stage_rate(deps, ctx)
+        assert outcome.status == dl.STATUS_PASS
+        assert refusals
+        assert all(entry.startswith("REFUSED:") for entry in refusals)
+        # The attribution law: the ACCOUNT-arm refusal names the doctor.
+        assert f"(holder: doctor:rate-probe:{ctx.run_id})" in refusals[0]
+        with account_pull_singleflight_lock("key", lock_dir=lock_dir):
+            pass  # released after return
+
     def test_lock_order_account_before_lake(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

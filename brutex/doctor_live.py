@@ -2350,9 +2350,13 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     Runs ONLY under the account+lake pull single-flight locks
     (DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001) — account flock FIRST then
     lake-root flock (the fixed order law), HELD through the whole probe
-    traffic window; a concurrent pull refuses the probe (WARN, zero vendor
-    calls) and, reverse, the probe's <=60 s hold refuses a pull start naming
-    ``doctor:rate-probe:<run_id>``. HONEST: same-host serialisation only —
+    traffic window, with the ``doctor:rate-probe:<run_id>`` holder note
+    written into BOTH lock files (round-3 refuter: production pulls contend
+    on the ACCOUNT lock first, so an account-arm note is what a refused pull
+    actually reads); a concurrent pull refuses the probe (WARN, zero vendor
+    calls) and, reverse, a pull/nightly start during the <=60 s probe is
+    refused naming ``doctor:rate-probe:<run_id>`` at WHICHEVER lock it
+    contends on first. HONEST: same-host serialisation only —
     the cross-host lease is deliberately NOT entered for a <=60 s diagnostic;
     TickVault takes no BruteX lock (accepted envelope); the other stages'
     <=40-call diagnostic traffic remains unlocked (bounded, out of scope).
@@ -2365,7 +2369,9 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     try:
         with (
             account_pull_singleflight_lock(
-                ctx.creds.api_key, lock_dir=_account_lock_dir(deps.home)
+                ctx.creds.api_key,
+                lock_dir=_account_lock_dir(deps.home),
+                holder_note=holder,
             ),
             pull_singleflight_lock(ctx.lake_root, holder_note=holder),
         ):

@@ -382,6 +382,16 @@ class AdaptiveTokenBucket:
                     try:
                         self.sleep(more_wait)
                     finally:
+                        # Main-thread-SIGINT window (round-3 refuter NIT,
+                        # documented not guarded): a KeyboardInterrupt landing
+                        # while THIS re-acquire blocks propagates with the
+                        # lock unheld, so the enclosing `with` __exit__ can
+                        # raise RuntimeError('release unlocked lock') during
+                        # Ctrl-C teardown — byte-identical to stdlib
+                        # threading.Condition.wait's finally/_acquire_restore
+                        # idiom (the accepted equivalence); worker threads
+                        # (the production-dominant path) never see SIGINT.
+                        # No state corruption: tokens untouched, lock free.
                         self._lock.acquire()
                     self._refill_locked()
                     wait_seconds += more_wait
@@ -524,7 +534,14 @@ class AdaptiveTokenBucket:
             return len(self._recent_429s)
 
     def acquire_fail_open_count(self) -> int:
-        """Dashboard stat — cumulative :meth:`acquire` fail-OPEN force-grants.
+        """Observe-only accessor — cumulative :meth:`acquire` fail-OPEN force-grants.
+
+        Dashboard wiring is a NAMED follow-up, not claimed: no production
+        reader polls this yet (round-3 refuter NIT) — folding it into
+        ``RateController.snapshot()`` would touch rate_common production
+        lines (new weekly mutmut surface + a wire-shape change) for an
+        observe-only stat, so the accessor is the deliberate exposure
+        surface today.
 
         Each count is ONE "phantom" token granted WITHOUT a matching refill:
         the retry loop lost its refilled token to peers ``_ACQUIRE_LOOP_CAP``

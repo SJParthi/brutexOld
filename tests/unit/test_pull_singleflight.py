@@ -212,6 +212,50 @@ def test_account_lock_contended_refused_and_released_on_exit(tmp_path: Path) -> 
         pass
 
 
+def test_account_lock_holder_note_names_holder_in_refusal(tmp_path: Path) -> None:
+    """A ``holder_note`` on the ACCOUNT lock reaches a contender's refusal message.
+
+    DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001 (the round-3 reverse-attribution fix):
+    production pulls contend on the account lock FIRST, so the note must live here
+    for a refused pull to name the true holder.
+    """
+    with account_pull_singleflight_lock(
+        "key-A", lock_dir=tmp_path, holder_note="doctor:rate-probe:RUN123"
+    ):
+        with (
+            pytest.raises(PullAlreadyRunningError) as excinfo,
+            account_pull_singleflight_lock("key-A", lock_dir=tmp_path),
+        ):
+            pass  # pragma: no cover — the acquire raises first
+        assert "(holder: doctor:rate-probe:RUN123)" in str(excinfo.value)
+
+
+def test_account_lock_default_no_note_message_byte_identical(tmp_path: Path) -> None:
+    """``holder_note=None`` (every pre-existing caller) is BYTE-IDENTICAL.
+
+    The default acquire truncates any STALE note and writes none, so a
+    contender's refusal message carries no ``(holder: …)`` suffix — the exact
+    pre-``holder_note``-parameter contract.
+    """
+    lock_path = account_singleflight_lock_path("key-A", lock_dir=tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("stale:prior-holder")  # a dead holder's leftover note
+    with account_pull_singleflight_lock("key-A", lock_dir=tmp_path):
+        assert lock_path.read_bytes() == b""  # stale note truncated, none written
+        with (
+            pytest.raises(PullAlreadyRunningError) as excinfo,
+            account_pull_singleflight_lock("key-A", lock_dir=tmp_path),
+        ):
+            pass  # pragma: no cover — the acquire raises first
+        assert "(holder:" not in str(excinfo.value)
+        assert str(excinfo.value) == (
+            "a pull is already running for this lake "
+            f"(account-wide single-flight lock held at {lock_path}); "
+            "refusing to start a second concurrent pull, which would double the "
+            "Groww account request rate"
+        )
+
+
 def test_account_lock_distinct_keys_never_contend(tmp_path: Path) -> None:
     with (
         account_pull_singleflight_lock("key-A", lock_dir=tmp_path),

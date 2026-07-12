@@ -462,7 +462,7 @@ def account_singleflight_lock_path(api_key: str, *, lock_dir: Path | None = None
 
 @contextmanager
 def account_pull_singleflight_lock(
-    api_key: str, *, lock_dir: Path | None = None
+    api_key: str, *, lock_dir: Path | None = None, holder_note: str | None = None
 ) -> Generator[None, None, None]:
     """Hold the ACCOUNT-keyed single-flight lock for the ``with`` block.
 
@@ -485,6 +485,15 @@ resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CRED
         log.
     lock_dir
         Override of the lock directory (tests — never write the real ``$HOME`` in CI).
+    holder_note
+        Optional advisory note best-effort-written into the ACCOUNT lock file on a
+        successful acquire (e.g. ``doctor:rate-probe:<run_id>`` —
+        DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001), so a contended peer's
+        :class:`PullAlreadyRunningError` names the true holder — production pulls
+        contend on THIS lock first (the fixed account→lake order law), so a
+        lake-lock-only note never reaches them. ``None`` (every pre-existing caller)
+        ⇒ behavior byte-identical: the acquire still truncates any stale note and
+        writes nothing (pinned).
 
     Raises
     ------
@@ -495,7 +504,10 @@ resolve_groww_aws_credentials` — the SOLE credential source, DEC-AWS-ONLY-CRED
         If creating the lock dir / file hits ENOSPC / OOM (the same
         :func:`~brutex.data.atomic_io.lake_write_guard` contract as the lake-root lock).
     """
-    with _flock_singleflight(account_singleflight_lock_path(api_key, lock_dir=lock_dir)):
+    with _flock_singleflight(
+        account_singleflight_lock_path(api_key, lock_dir=lock_dir),
+        holder_note=holder_note,
+    ):
         yield
 
 

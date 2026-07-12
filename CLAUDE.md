@@ -2373,9 +2373,14 @@ hostile-review pass._
   its ci.yml standalone gate + the weekly zero-survivor mutmut pair. (2) [R5] — `brutex doctor
   --live --rate-probe` (stage 13's ≤480-call/≤60 s probe at the FULL production 8 r/s /
   500-per-min controller) now acquires `account_pull_singleflight_lock` FIRST then
-  `pull_singleflight_lock` with holder_note `doctor:rate-probe:<run_id>` — the fixed order
+  `pull_singleflight_lock`, BOTH carrying holder_note `doctor:rate-probe:<run_id>` (the
+  round-3 fold — production pulls contend on the ACCOUNT lock first, so the account lock
+  gained its own additive `holder_note` kwarg, default-None byte-identical for every
+  existing caller, and a refused pull now reads the doctor's name at WHICHEVER lock it hits
+  first) — the fixed order
   law — HELD through the entire probe traffic (never probe-and-release); contention = the NEW
-  `rate.pull_lock_held` NAMED WARN refusal (zero vendor calls, holder-note echoed,
+  `rate.pull_lock_held` NAMED WARN refusal (zero vendor calls; the holder's note echoed WHEN
+  the holder wrote one — a plain pull writes none, a nightly/doctor does,
   golden-catalog-pinned; `LakeWriteHalt` at lock creation = the NEW `rate.lock_halt` stage
   FAIL), closing the ~960 req/min ≫ 500/min account-cap breach a probe beside a pull could
   compose (governors never share state across controllers); the autorun budget-split precedent
@@ -2399,8 +2404,11 @@ hostile-review pass._
   the rolling-60 s law holds on every admission) and bounded/terminating under the pathological
   frozen-clock + no-op-sleep shape; governor code + every VALUE byte-untouched. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema change; touched
-  modules 100% line+branch on their gates; ruff/ruff-format/`mypy --strict` clean, pyright at
-  the pre-change baseline.)
+  modules 100% line+branch on their gates; ruff/ruff-format/`mypy --strict` clean, pyright
+  0 errors at the pre-change baseline, +7 test-file `reportPrivateUsage` warnings (5
+  test_doctor_live + 2 test_orchestrator_rate_limiter — the new tests'
+  `_account_lock_dir`/`_lock` probes, the house private-import test pattern, the #1649a
+  disclosure precedent.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry

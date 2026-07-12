@@ -76,6 +76,45 @@ def test_bogus_dec_id_is_blocked(tmp_path: Path) -> None:
     assert _scan("Per DEC-NONEXISTENT-999 this should block.", tmp_path) == 1
 
 
+def test_plus_joined_multi_dec_header_member_resolves(tmp_path: Path) -> None:
+    """A NON-FIRST member of a plus-joined multi-DEC entry header resolves.
+
+    MIGRATION.md #1759 is the one-line/multi-DEC umbrella shape ("NNN. **DEC-A
+    + DEC-B + DEC-C — …", the #300/#1297/#1529 precedent): the entry IS each
+    member's ledger record, so citing the second/third member must pass — the
+    pre-fix header regex admitted only the FIRST ID of the chain.
+    """
+    body = (
+        "Per DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001 and "
+        "DEC-SWEEP-BLOOM-EXACT-BOUNDARY-001 the locks/boundary behavior is ledgered."
+    )
+    assert _scan(body, tmp_path) == 0
+
+
+def test_plus_joined_chain_stays_conservative(tmp_path: Path) -> None:
+    """The plus-chain extension admits ONLY the leading chain, never body text.
+
+    A synthetic ledger proves both directions against the REAL script: chain
+    members resolve; an ID merely MENTIONED after the title separator (or
+    plus-joined to a bogus continuation) still fails closed.
+    """
+    ledger = tmp_path / "MIGRATION.md"
+    ledger.write_text(
+        "1. **DEC-ALPHA-001 + DEC-BETA-001 — a pack that supersedes "
+        "DEC-GAMMA-001 in passing.** Body mentioning DEC-DELTA-001.\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(_SCRIPT.parent))
+    try:
+        import importlib
+
+        mod = importlib.import_module("validate_dec_ids")
+        known = mod.load_known_dec_ids(ledger.read_text(encoding="utf-8"))
+    finally:
+        sys.path.remove(str(_SCRIPT.parent))
+    assert known == {"DEC-ALPHA-001", "DEC-BETA-001"}  # gamma/delta NOT admitted
+
+
 def test_inline_code_dec_id_is_ignored(tmp_path: Path) -> None:
     """An example ID inside inline backticks is documentation, not a citation."""
     assert _scan("The validator rejects e.g. `DEC-NONEXISTENT-999`.", tmp_path) == 0

@@ -146,9 +146,21 @@ def load_known_dec_ids(migration_text: str) -> set[str]:
     """Extract every DEC-ID that appears as a ledger entry header in MIGRATION.md."""
     # An entry header looks like: "NNN. **DEC-FOO-001 — description**" or the
     # suffix-disambiguated "NNNa. **DEC-FOO-001 ..." (DEC-LEDGER-RENUMBER-001).
-    # We accept any DEC-ID that appears bolded right after an entry-number.
-    header_pattern = re.compile(r"^\d+[a-z]?\.\s*\*\*(DEC-[A-Z][A-Z0-9_-]*-\d{3,})", re.MULTILINE)
-    return set(header_pattern.findall(migration_text))
+    # We accept any DEC-ID that appears bolded right after an entry-number —
+    # INCLUDING every member of a plus-joined multi-DEC header ("NNN. **DEC-A +
+    # DEC-B + DEC-C — …", the #300/#1297/#1529/#1759 one-line/multi-DEC entry
+    # shape), since such an entry IS each member's ledger record. Conservative:
+    # only the LEADING plus-chain is admitted — a DEC-ID merely mentioned later
+    # in a title ("… supersedes DEC-X-001 —") or in the body does not resolve.
+    header_pattern = re.compile(
+        r"^\d+[a-z]?\.\s*\*\*"
+        r"(DEC-[A-Z][A-Z0-9_-]*-\d{3,}(?:\s*\+\s*DEC-[A-Z][A-Z0-9_-]*-\d{3,})*)",
+        re.MULTILINE,
+    )
+    known: set[str] = set()
+    for chain in header_pattern.findall(migration_text):
+        known.update(DEC_ID_PATTERN.findall(chain))
+    return known
 
 
 def read_pr_body(args: list[str]) -> str:
