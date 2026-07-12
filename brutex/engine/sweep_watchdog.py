@@ -41,6 +41,12 @@ from brutex.observability.watchdog import Watchdog, WorkerEvent, WorkerState
 #: Default hung-combo timeout. A single spot combo over the full 2020→today 1m
 #: history is sub-second; 300 s is a generous ceiling that only trips on a true
 #: wedge, not a slow-but-progressing combo. Tune per hardware envelope.
+#: G2 (DEC-SWEEP-UNKILLABLE-CORE-001): the PRODUCTION launch resolves its
+#: timeout through :func:`brutex.engine.sweep_stall_policy.resolve_stall_policy`
+#: (env ``BRUTEX_SWEEP_STALL_SECONDS`` / raise-only estimate scaling over this
+#: SAME base — the policy module imports this constant, ONE source of truth)
+#: and injects it via ``timeout_seconds=``; this default stays the exact 300 s
+#: identity for every other caller.
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 300.0
 
 #: Optional per-event callback (HEALTHY→HUNG or HUNG→HEALTHY).

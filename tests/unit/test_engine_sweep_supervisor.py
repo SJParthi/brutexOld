@@ -225,6 +225,57 @@ class TestIdentity:
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
         assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
 
+    def test_gate_config_change_rekeys_identity_and_cache_key(self) -> None:
+        """Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit + Stage-3 gate config
+        is part of BOTH the run identity AND the tuple cache key.
+
+        A gated institutional re-run over a light-research results tree must NOT
+        resume the same checkpoint (``grid_identity``) NOR cache-skip the ungated
+        tuples (``tuple_cache_key``) — otherwise it serves ungated rows as gated
+        winners. Only the gate knobs differ here.
+        """
+        from brutex.ranking import OverfitGateConfig
+
+        light = _grid()  # overfit=None, stage3 default-off — the light-research grid
+        gated_overfit = _grid(overfit=OverfitGateConfig(dsr_min=0.95))
+        gated_stage3 = _grid(stage3_enable=True)
+
+        # grid_identity (checkpoint resume) re-keys on either gate.
+        assert grid_identity(gated_overfit) != grid_identity(light)
+        assert grid_identity(gated_stage3) != grid_identity(light)
+        assert grid_identity(gated_overfit) != grid_identity(gated_stage3)
+
+        # tuple_cache_key (the cache-SKIP fast path — no preload safety net) too.
+        t_light = next(iter_sweep_tuples(light))
+        t_overfit = next(iter_sweep_tuples(gated_overfit))
+        t_stage3 = next(iter_sweep_tuples(gated_stage3))
+        assert tuple_cache_key(t_overfit, gated_overfit) != tuple_cache_key(t_light, light)
+        assert tuple_cache_key(t_stage3, gated_stage3) != tuple_cache_key(t_light, light)
+
+        # A distinct overfit KNOB value re-keys again (not just presence).
+        gated_overfit2 = _grid(overfit=OverfitGateConfig(dsr_min=0.90))
+        assert grid_identity(gated_overfit2) != grid_identity(gated_overfit)
+
+    def test_gate_config_default_is_identity_byte_stable(self) -> None:
+        """Ruling 3: an UNCHANGED (ungated, no-Stage-3) grid keeps identity byte-stable.
+
+        The gate-config axis contributes NOTHING at defaults, so a light grid
+        hashes exactly as it did before this axis existed (the frozen goldens
+        above are unmoved) — the "gate-config change never cache-skips, unchanged
+        config never re-keys" contract. A disabled Stage-3 pass leaves its knobs
+        INERT, so changing ``stage3_top_k`` on a ``stage3_enable=False`` grid must
+        NOT move the identity (no false full-recompute).
+        """
+        light = _grid()
+        assert grid_identity(_grid()) == grid_identity(light)
+        # Stage-3 knobs are inert while disabled → identity unmoved.
+        assert grid_identity(_grid(stage3_top_k=999)) == grid_identity(light)
+        assert grid_identity(_grid(stage3_max_fevals=17)) == grid_identity(light)
+        t_light = next(iter_sweep_tuples(light))
+        assert tuple_cache_key(
+            next(iter_sweep_tuples(_grid(stage3_top_k=999))), _grid(stage3_top_k=999)
+        ) == tuple_cache_key(t_light, light)
+
     @given(
         top_k_a=st.integers(min_value=1, max_value=5),
         top_k_b=st.integers(min_value=1, max_value=5),
@@ -441,8 +492,18 @@ class TestRunSupervisedGrid:
                 skip_empty=False,
             )
 
-    def test_cache_hit_skips_the_tuple(self, tmp_path: Path) -> None:
-        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path."""
+    def test_cache_hit_skips_the_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path.
+
+        Pins the cache TIER mechanics under the legacy (guard-OFF) arm: the
+        fabricated cache mark has NO on-disk artifacts, which the default-ON
+        resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces
+        back through run_one_tuple — guard-ON behaviour is pinned in
+        ``test_engine_sweep_supervisor_store_guard.py``.
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -464,8 +525,15 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_CACHE" in actions
 
-    def test_resume_skips_completed_tuples(self, tmp_path: Path) -> None:
-        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path."""
+    def test_resume_skips_completed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path.
+
+        Legacy (guard-OFF) arm — the fabricated checkpoint has no on-disk
+        artifacts (see ``test_cache_hit_skips_the_tuple``'s rationale).
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -485,7 +553,9 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_RESUME" in actions
 
-    def test_resume_batches_prefix_into_one_audit_line(self, tmp_path: Path) -> None:
+    def test_resume_batches_prefix_into_one_audit_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A resume over N>1 completed tuples emits ONE summarising audit line.
 
         O(1) resume emission (DEC-SWEEP-SCALE-OPERABILITY-001): on a 4-tuple grid
@@ -493,8 +563,12 @@ class TestRunSupervisedGrid:
         ``TUPLE_SKIPPED_RESUME`` line (the prior per-tuple emission wrote 3)
         carrying ``resumed_count`` + the resume boundary, fires ONE progress
         publish for the whole prefix, and the hash chain — with the summary as
-        an ordinary entry — still verifies end-to-end.
+        an ordinary entry — still verifies end-to-end. Legacy (guard-OFF) arm —
+        the fabricated checkpoint prefix has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON intact
+        batched emission is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (resume prefix needs 4
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -546,13 +620,20 @@ class TestRunSupervisedGrid:
         assert snaps[0].evaluated == 3
         assert snaps[0].skipped == 3
 
-    def test_fully_resumed_rerun_emits_single_summary_line(self, tmp_path: Path) -> None:
+    def test_fully_resumed_rerun_emits_single_summary_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An idempotent re-run over an N-tuple complete grid is O(1) in audit lines.
 
         The resume_count == total edge: the second run's ENTIRE grid is the
         resumed prefix — one summary line, zero per-tuple emission, and the
-        shared audit file still verifies across both runs.
+        shared audit file still verifies across both runs. Legacy (guard-OFF)
+        arm — an all-no-bars grid checkpoints ZERO artifacts, which the
+        default-ON guard deliberately re-probes each resume (the disclosed
+        no-bars shift, DEC-SWEEP-RESUME-STORE-GUARD-001; guard-ON arm pinned
+        in the store-guard suite).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (full-resume edge needs 3
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -878,8 +959,11 @@ class TestRunSupervisedGrid:
         the no-bars paths: a later cache-HIT or no-bars tuple must NOT advance the
         checkpoint past the earlier failed tuple (else that failed tuple would be
         resume-skipped — the BLOCKER). 3 tuples: index 0 FAILS, index 1 is a
-        pre-cached cache-hit, index 2 has no bars.
+        pre-cached cache-hit, index 2 has no bars. Legacy (guard-OFF) arm — the
+        fabricated cache mark has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 
@@ -977,8 +1061,12 @@ class TestRunSupervisedGrid:
 
         A mixed 5-tuple grid touching EVERY disposition: index 0 resume-skipped
         (pre-checkpointed), index 1 cache-skipped (pre-cached), index 2 RUNS,
-        index 3 NO BARS, index 4 FAILS.
+        index 3 NO BARS, index 4 FAILS. Legacy (guard-OFF) arm — the fabricated
+        checkpoint/cache marks have no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON
+        reconciliation invariant is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 

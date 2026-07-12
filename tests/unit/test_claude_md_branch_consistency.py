@@ -79,10 +79,18 @@ class TestActiveBranchConsistency:
         )
 
     def test_active_branch_is_a_claude_branch(self) -> None:
-        """The shared name follows the repo's `claude/<slug>` convention."""
+        """The shared name follows a sanctioned branch-naming convention.
+
+        Convention (going forward): coordinator-driven integration-train /
+        vehicle branches use ``integration/<slug>``; everything else uses
+        ``claude/<slug>``. The T1 sweep-core train (PR #1357) is the first
+        ``integration/*`` vehicle — its CLAUDE.md honestly names the train
+        branch itself as active, per Golden Rule #10, rather than faking a
+        ``claude/`` name. Any other form is a merge artifact.
+        """
         text = _CLAUDE_MD.read_text(encoding="utf-8")
         s1 = _single_branch(_S1_PATTERN, text, "§1 '**Active branch:**'")
-        assert s1.startswith("claude/"), f"unexpected active-branch form: {s1!r}"
+        assert s1.startswith(("claude/", "integration/")), f"unexpected active-branch form: {s1!r}"
 
 
 def _normalized_region(text: str, start_marker: str, end_marker: str) -> str:
