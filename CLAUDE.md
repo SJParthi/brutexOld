@@ -40,6 +40,20 @@ liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; healthy-lake payloads
 byte-identical; the per-item record lives in the §1 Active-branch blurb +
 MIGRATION.md #1751 — this header carries the one-line summary, never the
 story.)
+Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
+#1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
+FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
+— NEW frozen `TradeFolds` + `_fold_trades` (the verbatim per-trade
+accumulations, token-for-token) + public `combine_metrics_from_folds` (the
+verbatim scalar tail), the exact shape the Rust core will mirror
+term-for-term; BYTE-IDENTITY golden-proven (a 52-test old-vs-new bit-parity
+suite against the frozen pre-Slice-0 oracle + the C23 order-sensitivity
+hypothesis differential gate; anti-vacuous perturbation teeth measured; the
+#1531 frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` reproduce
+byte-for-byte). ZERO Rust lands in this slice; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `compute.py` 100%
+line+branch. Any per-round record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1685 — this header carries the pointer, never the story.)
 Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
@@ -2382,6 +2396,28 @@ hostile-review pass._
   READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
   on the discovery gate's stem suite; app.py rides the whole-package floor.)
+  Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
+  of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
+  `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
+  `_fold_trades` (the verbatim per-trade accumulations, moved token-for-token, summation order untouched) + NEW
+  public `combine_metrics_from_folds` (the verbatim scalar tail — every libm / None-boundary / floor-div / clamp
+  expression in today's literal tokens; fail-loud typed `ValueError` on `n_trades < 1`, the zero-trade arm staying
+  at the composition root `_compute_metrics_impl` via `_empty_metrics`) — the exact shape the future Rust core
+  mirrors term-for-term. BYTE-IDENTITY golden-proven: a 52-test golden suite bit-compares old-vs-new through BOTH
+  public entries against the VERBATIM pre-Slice-0 oracle (frozen inline; `struct.pack("<d", …)` per float field —
+  signed zeros + every ULP distinguished) over a hostile corpus, PLUS the C23 order-sensitivity hypothesis
+  DIFFERENTIAL gate (4 properties: adversarial orderings / splits 0..n / single-element folds /
+  negative-zero-denormal classes); anti-vacuous teeth MEASURED (one fold operator flipped → golden 33/52 FAIL; the
+  sorted-returns C23 mutant → golden 14/52 + differential 3/4 FAIL); the #1531 frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` sweep-run goldens reproduce byte-for-byte (run identity bit-identical).
+  HONEST LIMITS: "zero observable change" is scoped to the documented contract — the exception SHAPE under
+  contract-VIOLATING inputs (a direct private call with `start_equity_paisa=0`) may differ (same ZeroDivisionError
+  TYPE, different message/raise site), unreachable from BOTH public entries (`compute_metrics_from_scalars` raises
+  a typed ValueError first; details in MIGRATION.md #1685); the `TradeFolds` field-name spellings vs design §1.3
+  are a recorded deviation whose pairing obligation binds Slice 2 (#1685 item (3)). ZERO Rust lands in this slice;
+  no flag, no performance claim. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema
+  change; `compute.py` 100% line+branch (288 stmts / 54 branches, 0 missed); ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new.)
   Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
@@ -5955,6 +5991,13 @@ hostile-review pass._
   drift pin over brutex/dashboard/'s five sanctioned bare sites; READ-ONLY
   dashboard liveness; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
   Active branch line)
+  Earlier: `claude/sweep-core-slice0`
+  (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
+  sweep-core conversion: the behavior-identical fold/combine decomposition of
+  `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
+  `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
+  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line)
   Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
