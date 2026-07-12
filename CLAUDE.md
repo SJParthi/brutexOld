@@ -2416,7 +2416,20 @@ hostile-review pass._
   `MAX_WINDOW_DAYS=3660` config bound, the S3b `nothing_to_do`-writes-its-journal deadman honesty correction
   (schedule.py/runbook/#1753 + an in-test pin), the S3d eager market-hours-env 400 on the dashboard route (CLI
   parity; dry-run exempt), and the S4 `covers_today` defense-in-depth belt (`gate_contract_violation` withheld,
-  never a publish on a lying "complete"). ENGINE
+  never a publish on a lying "complete"). ROUND-3 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the
+  per-finding record lives in MIGRATION.md #1753): the refuter-confirmed X1 MAJOR killed — step M RE-LOADS
+  today's journal UNDER the day flock (the step-D law applied to today), so a K_A,K_B,M_A,M_B same-day
+  interleave CONVERGES (zero puts, the peer's published entries counted skipped_already;
+  `crossverify.publish_converged`) instead of the stale in-memory journal reading the peer-cleaned staging as
+  a FALSE publish_failed exit 2 + CRITICAL while S3 is complete — the interleave now forced DETERMINISTICALLY
+  in-test (the peer's whole step M injected at run B's step-L clock hook; fails pre-fix) beside the kept
+  two-thread belt; plus the journal parse guard widened (`OverflowError`/`RecursionError` + the 16 MiB
+  `MAX_JOURNAL_BYTES` size cap — the SweepCheckpointStore precedent; load + recovery-scan arms
+  fail-before-verified), the gate binding folding `AttributeError` into the fail-closed refusal NAMING the
+  missing attribute + the per-symbol `gate_signature_drift` withhold on a classify `TypeError` (never a
+  mid-run crash), the sha256-operand killing test (same-length different-bytes tamper; the operand-drop
+  mutant applied + verified killed by exactly the new test), and the PR-body/#1753 stale-count + deadman-claim
+  honesty refresh (whole-crossverify 1253 stmts / 320 branches / 0 missed; 410 package tests). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
   Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
