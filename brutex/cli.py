@@ -9496,6 +9496,25 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command is None or args.command == "version":
         return cmd_version()
+    if args.command in {"sweep", "sweep-all", "sweep-daemon", "verify-acceptance"}:
+        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
+        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
+        # module's first logger use — an unconfigured sweep process streamed
+        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
+        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
+        # call site covering all three sweep entries (sweep-daemon reuses
+        # cmd_sweep_all; the dashboard sweep job is already configured by
+        # cmd_dashboard at startup and the guard defers to it).
+        # verify-acceptance joined at round 3 of DEC-OPERATOR-ACCEPTANCE-
+        # VERIFY-001 (#1756): unconfigured structlog's default PrintLogger
+        # writes to STDOUT, so the acceptance checks' scan events buried the
+        # human table and made `--json` unparseable (`json.loads(stdout)`
+        # failed on the log prefix). The seam routes every log line to
+        # STDERR, keeping stdout = exactly the table / JSON summary. The
+        # guard sits ABOVE apply_polars_thread_bound() so even the polars
+        # bound's own once-per-process INFO event lands on stderr, never
+        # ahead of the table/JSON on stdout.
+        _configure_sweep_logging()
     # DEC-THREAD-BUDGET-BOUNDS-001 — bound the polars global thread pool ONCE
     # per process, at the ONE entrypoint every BruteX process (CLI fetch AND
     # the in-process uvicorn dashboard) enters, BEFORE the first lazy `import
@@ -9617,22 +9636,6 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
-    if args.command in {"sweep", "sweep-all", "sweep-daemon", "verify-acceptance"}:
-        # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
-        # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
-        # module's first logger use — an unconfigured sweep process streamed
-        # per-trade DEBUG events to stderr (measured 870 MB on a ~200-session
-        # fixture; a disk-fill run-killer on the 2-4 day grid run). ONE COMMON
-        # call site covering all three sweep entries (sweep-daemon reuses
-        # cmd_sweep_all; the dashboard sweep job is already configured by
-        # cmd_dashboard at startup and the guard defers to it).
-        # verify-acceptance joined at round 3 of DEC-OPERATOR-ACCEPTANCE-
-        # VERIFY-001 (#1756): unconfigured structlog's default PrintLogger
-        # writes to STDOUT, so the acceptance checks' scan events buried the
-        # human table and made `--json` unparseable (`json.loads(stdout)`
-        # failed on the log prefix). The seam routes every log line to
-        # STDERR, keeping stdout = exactly the table / JSON summary.
-        _configure_sweep_logging()
     if args.command == "backup":
         return cmd_backup(args)
     if args.command == "sweep":
