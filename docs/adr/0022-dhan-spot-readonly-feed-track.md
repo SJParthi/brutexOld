@@ -1,6 +1,6 @@
 # ADR-0022 — Dhan read-only SPOT feed track (standalone, `feeds/dhan/`)
 
-**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1756, umbrella),
+**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1763, umbrella),
 `DEC-DHAN-READONLY-AUTH-001`, `DEC-DHAN-SPOT-PULL-001`,
 `DEC-DHAN-PULL-SURFACE-001`, `DEC-DHAN-FEED-BINDING-001`,
 `DEC-DHAN-GUARD-RETIRE-002`, `DEC-DHAN-HONEST-DEGRADE-001`
