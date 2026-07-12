@@ -472,6 +472,7 @@ def _metrics_payload(row: ResultRow, agg: ComboAggregate) -> dict[str, object]:
             "signal": agg.exits_signal,
             "forced_1520": agg.exits_forced_1520,
             "end_of_data": agg.exits_end_of_data,
+            "session_gap": agg.exits_session_gap,
         },
         "fingerprint": agg.fingerprint,
     }
