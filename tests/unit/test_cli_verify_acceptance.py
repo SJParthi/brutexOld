@@ -8,12 +8,32 @@ drive it through ``main()`` (the CLI-harness discipline) so the parser wiring
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from unittest import mock
 
 import pytest
-from brutex.cli import EXIT_OK, EXIT_USER_ERROR, build_parser, main
+import structlog
+from brutex import cli
+from brutex.cli import EXIT_INTERNAL_ERROR, EXIT_OK, EXIT_USER_ERROR, build_parser, main
+from brutex.observability.logging import LOG_LEVEL_ENV, reset_configuration
 
 from tests.fakes.acceptance_twin import make_twin
+
+
+@pytest.fixture(autouse=True)
+def _clean_logging_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Isolate global structlog config + the env override per test.
+
+    Round 3 (C-F2): the verify-acceptance dispatch now runs the #1630
+    logging guard (process-global), so every ``main()`` drive here starts
+    genuinely UNCONFIGURED — the fails-before state of the stdout-purity
+    regressions — and leaks nothing to later tests.
+    """
+    monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
+    reset_configuration()
+    yield
+    reset_configuration()
 
 
 class TestParserRegistration:
@@ -138,6 +158,7 @@ class TestEndToEndViaMain:
         import json
 
         lake = make_twin(tmp_path)
+        capsys.readouterr()  # drain the twin-build setup logs (pre-CLI, in-process)
         code = main(
             [
                 "verify-acceptance",
@@ -151,9 +172,11 @@ class TestEndToEndViaMain:
         )
         assert code == EXIT_OK
         out = capsys.readouterr().out
-        # structlog INFO lines may precede the JSON summary on stdout in an
-        # unconfigured test process — parse from the object start.
-        payload = json.loads(out[out.index("{\n") :])
+        # Round-3 fix (C-F2): the FULL stdout must be the JSON summary —
+        # the dispatch logging guard routes every log line to stderr, so
+        # `brutex verify-acceptance --json | jq .` works. (The shipped
+        # round-2 test papered over the defect by slicing from '{'.)
+        payload = json.loads(out)
         assert payload["schema"] == "brutex-acceptance-report-v1"
         assert payload["self_test"]["verdict"] == "TEETH_SKIPPED"
 
@@ -176,3 +199,75 @@ class TestEndToEndViaMain:
         captured = capsys.readouterr()
         assert "--full lifts sampling" in captured.err
         assert "BruteX acceptance" in captured.out
+
+    def test_human_table_is_first_thing_on_stdout(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Round-3 fix (C-F2): on an UNCONFIGURED process the human table was
+        # buried under ~60 raw PrintLogger lines on stdout.
+        lake = make_twin(tmp_path)
+        capsys.readouterr()  # drain the twin-build setup logs (pre-CLI, in-process)
+        code = main(
+            ["verify-acceptance", "--lake-root", str(lake), "--checks", "unique", "--no-self-test"]
+        )
+        assert code == EXIT_OK
+        out = capsys.readouterr().out
+        assert out.startswith("BruteX acceptance")
+
+
+class TestLoggingGuard:
+    """Round-3 fix (C-F2): verify-acceptance rides the #1630 logging seam."""
+
+    def test_guard_configures_before_the_handler(self) -> None:
+        assert not structlog.is_configured()
+        with mock.patch.object(cli, "cmd_verify_acceptance", return_value=0) as handler:
+            rc = main(["verify-acceptance", "--repro", "unique"])
+        assert rc == 0
+        handler.assert_called_once()
+        assert structlog.is_configured()
+
+    def test_junk_log_level_fails_loud_before_the_handler(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setenv(LOG_LEVEL_ENV, "DEBG")
+        with mock.patch.object(cli, "cmd_verify_acceptance", return_value=0) as handler:
+            rc = main(["verify-acceptance", "--repro", "unique"])
+        assert rc == EXIT_USER_ERROR
+        handler.assert_not_called()
+        assert "BRUTEX_LOG_LEVEL" in capsys.readouterr().err
+
+
+class TestReportWriteFailureAndSampleGuard:
+    def test_negative_sample_exit_1(self, tmp_path: Path) -> None:
+        # Round-3 NIT (C-F5): a negative N is a Python slice, not a sample.
+        lake = make_twin(tmp_path)
+        code = main(["verify-acceptance", "--lake-root", str(lake), "--sample", "-1"])
+        assert code == EXIT_USER_ERROR
+
+    def test_report_write_failure_is_loud_and_truthful(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Round-3 fix (C-F4): read-only/unwritable report destination →
+        # exit 2, one loud stderr SUSPECT line, and the printed table's exit
+        # line reads 2 — never a table claiming exit 0 on a 2-exit process.
+        lake = make_twin(tmp_path)
+        capsys.readouterr()  # drain the twin-build setup logs (pre-CLI, in-process)
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file, not a dir", encoding="utf-8")
+        code = main(
+            [
+                "verify-acceptance",
+                "--lake-root",
+                str(lake),
+                "--checks",
+                "unique",
+                "--no-self-test",
+                "--out",
+                str(blocker / "sub"),
+            ]
+        )
+        assert code == EXIT_INTERNAL_ERROR
+        captured = capsys.readouterr()
+        assert "report write failed" in captured.err
+        assert "→ exit 2" in captured.out
+        assert "→ exit 0" not in captured.out

@@ -29,6 +29,7 @@ from brutex.acceptance.model import (
     make_subcheck,
 )
 from brutex.acceptance.sampling import (
+    engine_futures_contracts,
     read_bars_frame_bounded,
     recent_months,
     sample_datasets,
@@ -207,8 +208,12 @@ def run(ctx: AcceptanceContext) -> CheckResult:
     )
     contracts = ctx.fno_contracts()
     if not ctx.full:
-        # Seed-ROTATED fill (round 2 fix 8) — mirrors unique's contract law.
-        contracts = sample_fno_contracts(contracts, seed=ctx.seed, sample_n=FNO_SAMPLE_N)
+        # Seed-ROTATED fill (round 2 fix 8) — mirrors unique's contract law —
+        # UNIONED with the ADR-0012 engine-track NSE-NIFTY-*-FUT contract
+        # dirs, which are ALWAYS in the tf selection (round 3 fix C-F1;
+        # never left to the rotation).
+        picked = sample_fno_contracts(contracts, seed=ctx.seed, sample_n=FNO_SAMPLE_N)
+        contracts = sorted(set(picked) | set(engine_futures_contracts(contracts)))
     if not plan.selected and not contracts:
         return _abstain_check(ctx, AbstainReason.NO_DATASETS)
 

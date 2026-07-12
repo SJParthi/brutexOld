@@ -28,6 +28,7 @@ from brutex.acceptance.model import (
     SCHEMA_VERSION,
     AbstainReason,
     CheckResult,
+    OverallVerdict,
     TeethVerdict,
     Verdict,
     make_check,
@@ -131,6 +132,10 @@ def run_acceptance(
         # list can never read as a clean exit-0 run — usage error in the CORE,
         # not just the CLI guard.
         return 1, {"error": "no checks requested — refusing a zero-work PASS run"}
+    if cfg.sample_n < 0:
+        # Round-3 NIT (C-F5) at the core too: a negative N is a Python slice
+        # ([:-1] = population−1 datasets) — refused for in-process callers.
+        return 1, {"error": "sample_n must be >= 0 — a negative sample is a slice surprise"}
     ctx = AcceptanceContext(
         lake_root=cfg.lake_root,
         seed=cfg.seed or "",
@@ -177,6 +182,20 @@ def _run_with_ctx(
     selftest_runner: Callable[..., selftest.SelfTestResult] | None,
 ) -> tuple[int, dict[str, Any]]:
     run_id = report_mod.mint_run_id(clock())
+
+    # ONE evidence-tree symlink refusal covering EVERY write (round-3 fix
+    # B-NEW-1): the round-2 guard sat at report-write time, so the audit
+    # chain (and the coverage ledger's warn-only refusal) had already been
+    # reached with <lake>/acceptance a symlink — the audit JSONL was written
+    # THROUGH the link into the target dir. Hoisted here, BEFORE any write
+    # (house .quarantine precedent — refuse the whole run loudly, SUSPECT).
+    base = report_mod.acceptance_dir(cfg.lake_root)
+    if base.is_symlink():
+        _LOG.error("acceptance.evidence_tree_symlink_refused", path=str(base))
+        return 2, {
+            "error": f"{base} is a symlink — refusing to write the evidence tree through it",
+            "run_id": run_id,
+        }
 
     audit: report_mod.AcceptanceAudit | None
     try:
@@ -368,6 +387,16 @@ def _run_audited(
     except (report_mod.ReportWriteError, OSError) as exc:
         _LOG.error("acceptance.report_write_failed", error=str(exc))
         audit.close()
+        # Round-3 fix (C-F4): the in-memory report still carried the
+        # data-verdict exit code, so the printed table ended "→ exit 0"
+        # while the PROCESS exited 2 — restamp overall to the truthful
+        # SUSPECT and carry the failure for the CLI's loud stderr line.
+        report["report_write_error"] = str(exc)
+        report["overall"] = {
+            **report["overall"],
+            "verdict": str(OverallVerdict.SUSPECT),
+            "exit_code": 2,
+        }
         return 2, report
     exit_code = overall.exit_code
     _LOG.info(

@@ -275,6 +275,24 @@ def render_human(report: Mapping[str, Any]) -> str:
         for sub in check["sub_checks"]:
             if sub["verdict"] in {"FAIL", "ERROR"}:
                 lines.append(f"  ! {sub['id']}: {sub['verdict']}")
+            evidence = sub.get("evidence") or {}
+            # Round-3 NIT (A-2): a check-level PASS with abstain-ROUTED series
+            # was invisible in report.txt — surface the count on its own line.
+            routed = evidence.get("non_default_shape_series")
+            if isinstance(routed, int) and routed > 0:
+                lines.append(
+                    f"  ~ {sub['id']}: {routed} series routed "
+                    "non_default_window_shape (verified for default-law series only)"
+                )
+            # Round-3 NIT (A-4): the Muhurat-unverified disclosure was
+            # JSON/evidence-only — the operator must see it here.
+            muhurat_total = evidence.get("muhurat_days_unverified_total")
+            if isinstance(muhurat_total, int) and muhurat_total > 0:
+                dates = ", ".join(str(d) for d in evidence.get("muhurat_days_unverified", [])[:5])
+                lines.append(
+                    f"  ~ {sub['id']}: {muhurat_total} Muhurat date(s) NOT verified"
+                    + (f": {dates}" if dates else "")
+                )
     totals = report["totals"]
     lines.append("")
     lines.append(
@@ -287,6 +305,19 @@ def render_human(report: Mapping[str, Any]) -> str:
     if isinstance(deltas, dict):
         for t in deltas.get("verdict_transitions", []):
             lines.append(f"changed: {t['sub_check']} {t['from']}→{t['to']}")
+    # Round-3 NIT (A-4, the ABSTAIN-prominence law extended): every limits
+    # line is rendered — the honest envelope must be readable WITHOUT
+    # opening report.json. Limits are verifier-authored static strings
+    # (never vendor-influenceable), so they render raw.
+    limit_lines: list[str] = []
+    for check in report["checks"]:
+        limit_lines.extend(f"  {check['check_id']}: {lim}" for lim in check.get("limits", []))
+        for sub in check["sub_checks"]:
+            limit_lines.extend(f"  {sub['id']}: {lim}" for lim in sub.get("limits", []))
+    if limit_lines:
+        lines.append("")
+        lines.append("LIMITS (honest envelope)")
+        lines.extend(limit_lines)
     return "\n".join(lines) + "\n"
 
 
@@ -370,6 +401,14 @@ def write_report_files(
     Returns ``(report_json_path, sha256_of_report_bytes)``. Raises
     :class:`ReportWriteError` on schema violation (the run must go SUSPECT —
     a malformed report never ships).
+
+    ``--out`` semantics (round-3 fix C-F3): a redirected report is
+    OFF-CHAIN — ``<lake>/acceptance/LATEST`` is NOT touched, so the
+    deltas/streak chain keeps pointing at the last DEFAULT-location report
+    (previously LATEST was restamped to a run id whose report dir did not
+    exist under the lake: the next default run's ``load_previous`` hit an
+    OSError and silently reset every streak/delta, and an operator following
+    LATEST found nothing).
     """
     errors = validate_report_dict(report)
     if errors:
@@ -398,12 +437,15 @@ def write_report_files(
             tmp.write_text(payload, encoding="utf-8")
 
         atomic_write_simple(evidence_dir / f"{check['check_id']}.json", _write_spill)
-    base = acceptance_dir(lake_root)
-    base.mkdir(parents=True, exist_ok=True)
-    atomic_write_simple(
-        base / "LATEST",
-        lambda tmp: tmp.write_text(str(report["run_id"]) + "\n", encoding="utf-8"),
-    )
+    if out_dir is None:
+        # LATEST tracks the DEFAULT <lake>/acceptance chain ONLY — an --out
+        # report never dangles the pointer / resets streaks (C-F3).
+        base = acceptance_dir(lake_root)
+        base.mkdir(parents=True, exist_ok=True)
+        atomic_write_simple(
+            base / "LATEST",
+            lambda tmp: tmp.write_text(str(report["run_id"]) + "\n", encoding="utf-8"),
+        )
     sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     _LOG.info("acceptance.report_written", path=str(report_path), sha256=sha)
     return report_path, sha

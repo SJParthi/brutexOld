@@ -133,4 +133,17 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         seed=ctx.seed,
         selection=[p[0] for p in PROBES],
     )
-    return make_check(CHECK_ID, subs, coverage=coverage, repro=_repro(ctx))
+    return make_check(
+        CHECK_ID,
+        subs,
+        coverage=coverage,
+        repro=_repro(ctx),
+        limits=[
+            # Round-3 disclosure (B-NEW-2): the latency probes drive the same
+            # in-process serving path the movers check does.
+            "the in-process serving path may refresh <lake>/.manifest/ "
+            "discovery caches exactly as the production dashboard does (a "
+            "benign self-healing rebuild, results-safe — a disclosed "
+            "residual beside the registry.duckdb open)",
+        ],
+    )

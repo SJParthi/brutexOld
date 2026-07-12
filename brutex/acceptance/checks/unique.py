@@ -28,6 +28,8 @@ from brutex.acceptance.model import (
     make_subcheck,
 )
 from brutex.acceptance.sampling import (
+    ENGINE_COORDS,
+    engine_futures_contracts,
     month_bounded_files,
     recent_months,
     sample_datasets,
@@ -72,8 +74,6 @@ def _symbol_dir_files(symbol_dir: Path, months: set[tuple[int, int]] | None) -> 
 
 def run(ctx: AcceptanceContext) -> CheckResult:
     """Run the uniqueness census over the engine set + the sampled bounded rest."""
-    from brutex.data.lake_invariants import ENGINE_INDEX_COORDS
-
     if not (ctx.lake_root / "bars").is_dir():
         return _abstain_check(ctx, AbstainReason.NO_LAKE)
     if ctx.pull_active() and not ctx.force_during_pull:
@@ -88,6 +88,10 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         if ctx.full
         else sample_fno_contracts(contracts_all, seed=ctx.seed, sample_n=FNO_SAMPLE_N)
     )
+    # The ADR-0012 ENGINE surface (round 3 fix C-F1): the NSE-NIFTY-*-FUT
+    # contract dirs are FORCE-included in the full-history engine sub —
+    # never left to the rotating fill.
+    engine_contracts = engine_futures_contracts(contracts_all)
     months = None if ctx.full else set(recent_months(ctx.run_date(), ctx.months))
 
     def _paths() -> list[Path]:
@@ -95,10 +99,16 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         if ctx.full:
             paths.extend((ctx.lake_root / "bars").rglob("*.parquet"))
         else:
-            for exchange, segment, symbol in ENGINE_INDEX_COORDS:
-                # Engine coords are scanned FULL-history — fingerprint them so.
+            for exchange, segment, symbol in ENGINE_COORDS:
+                # Engine coords (3 indexes + INDIAVIX) are scanned
+                # FULL-history — fingerprint them so.
                 paths.extend(
                     _symbol_dir_files(ctx.lake_root / "bars" / exchange / segment / symbol, None)
+                )
+            for contract in engine_contracts:
+                # Engine futures contract dirs: full-history too (C-F1).
+                paths.extend(
+                    _symbol_dir_files(ctx.lake_root / "bars" / "NSE" / "FNO" / contract, None)
                 )
             for exchange, segment, symbol in plan.selected:
                 paths.extend(
@@ -118,7 +128,13 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         check_id=CHECK_ID,
         sub_id="unique.census",
         paths_fn=_paths,
-        body=lambda: _run_body(ctx, plan=plan, contracts=contracts, months=months),
+        body=lambda: _run_body(
+            ctx,
+            plan=plan,
+            contracts=contracts,
+            engine_contracts=engine_contracts,
+            months=months,
+        ),
     )
 
 
@@ -127,10 +143,10 @@ def _run_body(
     *,
     plan: Any,
     contracts: list[str],
+    engine_contracts: list[str],
     months: set[tuple[int, int]] | None,
 ) -> CheckResult:
     from brutex.data.lake_invariants import (
-        ENGINE_INDEX_COORDS,
         build_lake_census,
         census_to_dict,
         scan_lake_invariants,
@@ -205,6 +221,10 @@ def _run_body(
 
     # The operator's headline row: FULL-history engine scans regardless of the
     # month bound (the engine set is never left to the sampling window).
+    # Round-3 fix (C-F1): the engine surface here is the FULL ADR-0012 set —
+    # the 3 indexes + INDIAVIX (ENGINE_COORDS) + every NSE-NIFTY-*-FUT
+    # contract dir — each scanned full stored history (a contract dir is
+    # bounded at ~60 days of 1m + its derived TFs).
     engine_evidence: dict[str, Any] = {}
     engine_units = 0
     engine_clean = True
@@ -215,7 +235,11 @@ def _run_body(
         engine_units = census.files_scanned
     else:
         details: dict[str, str] = {}
-        for exchange, segment, symbol in ENGINE_INDEX_COORDS:
+        engine_cells: list[tuple[str, str, str, str]] = [
+            (exchange, segment, symbol, symbol) for exchange, segment, symbol in ENGINE_COORDS
+        ]
+        engine_cells.extend(("NSE", "FNO", contract, contract) for contract in engine_contracts)
+        for exchange, segment, symbol, label in engine_cells:
             sub_report = scan_lake_invariants(
                 ctx.lake_root,
                 exchange=exchange,
@@ -227,26 +251,30 @@ def _run_body(
             engine_units += sub_report.files_scanned
             clean = sub_census.findings_total == 0 and sub_report.files_skipped == 0
             engine_clean = engine_clean and clean
-            details[symbol] = "CLEAN" if clean else "POISONED-or-UNREADABLE"
+            details[label] = "CLEAN" if clean else "POISONED-or-UNREADABLE"
         engine_evidence["engine_detail"] = details
     engine_sub = make_subcheck(
         "unique.engine",
         Verdict.PASS if engine_clean else Verdict.FAIL,
         units_checked=engine_units,
         evidence=engine_evidence,
-        limits=["full stored history — never month-bounded"],
+        limits=[
+            "full stored history — never month-bounded (3 indexes + INDIAVIX "
+            "+ the NSE-NIFTY-*-FUT engine-track contract dirs)"
+        ],
         repro=_repro(ctx),
     )
 
+    examined_contracts = sorted(set(contracts) | set(engine_contracts))
     coverage = make_coverage(
         mode="full" if ctx.full else "bounded",
         population=plan.population + len(ctx.fno_contracts()),
-        examined=len(plan.selected) + len(contracts),
+        examined=len(plan.selected) + len(examined_contracts),
         seed=ctx.seed,
         selection=(
             ["whole-lake"]
             if ctx.full
-            else [*plan.selection_keys, *(f"NSE/FNO/{c}" for c in contracts)]
+            else [*plan.selection_keys, *(f"NSE/FNO/{c}" for c in examined_contracts)]
         ),
     )
     return make_check(

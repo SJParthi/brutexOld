@@ -381,7 +381,14 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         repro=_repro(ctx),
         limits=[
             "independent-leg reads are not fingerprint-guarded — a concurrent "
-            "writer surfaces as a loud mismatch FAIL, never a silent PASS"
+            "writer surfaces as a loud mismatch FAIL, never a silent PASS",
+            # Round-3 disclosure (B-NEW-2): the second serving-path residual
+            # beside the registry open — named, never suppressed (a seam edit
+            # into the production discovery cache is out of this DEC's scope).
+            "the in-process serving path may refresh <lake>/.manifest/ "
+            "discovery caches exactly as the production dashboard does (a "
+            "benign self-healing rebuild, results-safe — the second disclosed "
+            "residual beside the registry.duckdb open)",
         ],
     )
 

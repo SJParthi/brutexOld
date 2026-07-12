@@ -467,9 +467,14 @@ def _run_body(ctx: AcceptanceContext, *, rss: tuple[int | None, int | None]) -> 
         },
         limits=[
             "plan-level convergence only — not vendor-side determinism",
-            "re-plan runs per MERGED covered span: a deleted ledger row that "
-            "splits a span is invisible here (partition presence + census own "
-            "file-level loss)",
+            "re-plan runs per MERGED covered span: a deleted ledger row OR a "
+            "never-planned window that splits a span is invisible here "
+            "(partition presence + census own file-level loss; the sanity "
+            "interior-hole detector owns the missing DATA)",
+            "open_by_design folds unsettled rows + out-of-coverage replanned "
+            "keys, INCLUDING a hypothetical future-dated key past the ledger "
+            "max end — the hard double-fetch FAIL bites past-dated phantom "
+            "keys only",
             "the hard replan==0 law binds DEFAULT-law series only: explicit-"
             "dates F&O rows / overlapping-anchor ranges / re-tiling mismatches "
             "fully inside covered spans read non_default_window_shape (planner "

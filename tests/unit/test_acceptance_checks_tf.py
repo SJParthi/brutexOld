@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
 from brutex.acceptance.checks import tf
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, _twin_bars, poison_tf_high_x10
@@ -375,3 +376,23 @@ class TestTfEdges:
         check = tf.run(make_ctx(lake, full=True))
         assert check.coverage.mode == "full"
         assert check.verdict is Verdict.PASS
+
+    def test_engine_future_forced_into_selection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Round-3 fix (C-F1): the ADR-0012 NSE-NIFTY-*-FUT engine-track
+        # contract dirs are ALWAYS in the tf selection — never left to the
+        # rotating 6-contract fill (rotation stubbed to pick NOTHING).
+        from brutex.data.parquet_writer import ParquetWriter
+
+        lake = make_twin(tmp_path)
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-NIFTY-31Jul26-FUT",
+            interval="1minute",
+            bars=_twin_bars(DAY2, base=200.0),
+        )
+        monkeypatch.setattr(tf, "sample_fno_contracts", lambda contracts, *, seed, sample_n: [])
+        check = tf.run(make_ctx(lake))
+        assert "NSE/FNO/NSE-NIFTY-31Jul26-FUT" in check.coverage.selection

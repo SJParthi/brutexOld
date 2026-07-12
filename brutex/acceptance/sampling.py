@@ -159,6 +159,32 @@ def _rotation_rank(seed: str, key: str) -> str:
     return hashlib.sha256(f"{seed}\x1f{key}".encode()).hexdigest()
 
 
+def engine_futures_contracts(contracts: Sequence[str]) -> list[str]:
+    """The ADR-0012 ENGINE-track NIFTY futures contract dirs — ALWAYS in scope.
+
+    Round-3 fix (C-F1): the docs claimed the engine set includes the
+    NIFTY-FUT contract dirs while the code left them to the rotating
+    6-contract fill. A contract dir is engine-track iff it parses under the
+    ONE canonical grammar (:func:`brutex.data.fno_symbol.parse_fno_symbol`)
+    as an NSE NIFTY ``FUT`` (``NSE-NIFTY-<DDMmmYY>-FUT`` — the
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 sweep surface). Each such dir holds
+    at most ~60 days of 1m (+ its derived TFs) — bounded per contract.
+    """
+    from brutex.data.fno_symbol import parse_fno_symbol
+
+    out: list[str] = []
+    for name in contracts:
+        parsed = parse_fno_symbol(name)
+        if (
+            parsed is not None
+            and parsed.instrument_type == "FUT"
+            and parsed.exchange == "NSE"
+            and parsed.underlying == "NIFTY"
+        ):
+            out.append(name)
+    return sorted(out)
+
+
 def sample_fno_contracts(contracts: Sequence[str], *, seed: str, sample_n: int) -> list[str]:
     """The seed-ROTATED F&O contract fill (round 2 fix 8).
 

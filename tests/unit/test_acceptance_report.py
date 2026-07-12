@@ -187,6 +187,16 @@ class TestWriteFiles:
         out = tmp_path / "elsewhere"
         path, _sha = write_report_files(_report_dict(), lake_root=tmp_path, out_dir=out)
         assert path.parent == out.resolve()
+        # Round-3 fix (C-F3): an --out report is OFF-CHAIN — LATEST is never
+        # stamped with a run id that has no report under <lake>/acceptance.
+        assert not (tmp_path / "acceptance" / "LATEST").exists()
+
+    def test_out_dir_override_leaves_existing_latest_untouched(self, tmp_path: Path) -> None:
+        first = _report_dict()
+        write_report_files(first, lake_root=tmp_path)
+        before = (tmp_path / "acceptance" / "LATEST").read_text(encoding="utf-8")
+        write_report_files(_report_dict(), lake_root=tmp_path, out_dir=tmp_path / "elsewhere")
+        assert (tmp_path / "acceptance" / "LATEST").read_text(encoding="utf-8") == before
 
 
 class TestPreviousChain:
@@ -304,6 +314,50 @@ class TestHumanRender:
             "verdict_transitions": [{"sub_check": "a.b", "from": "PASS", "to": "FAIL"}]
         }
         assert "changed: a.b PASS→FAIL" in render_human(report)
+
+    def test_render_limits_section(self) -> None:
+        # Round-3 NIT (A-4): the honest envelope must be readable in
+        # report.txt — check-level AND sub-check-level limits render.
+        check = make_check(
+            "tf",
+            [
+                make_subcheck(
+                    "tf.daily",
+                    Verdict.PASS,
+                    units_checked=3,
+                    evidence={"equal": 3},
+                    limits=["forming sessions excluded from BOTH sides"],
+                )
+            ],
+            coverage=make_coverage(mode="full", population=3, examined=3, seed="s"),
+            limits=["a check-level envelope line"],
+        )
+        text = render_human(_report_dict([check]))
+        assert "LIMITS (honest envelope)" in text
+        assert "  tf: a check-level envelope line" in text
+        assert "  tf.daily: forming sessions excluded from BOTH sides" in text
+
+    def test_render_routed_series_count_visible(self) -> None:
+        # Round-3 NIT (A-2): a PASS check with abstain-ROUTED series must
+        # show the count on the table, not only in JSON evidence.
+        check = _check("pull", non_default_shape_series=2)
+        text = render_human(_report_dict([check]))
+        assert "~ pull.census: 2 series routed non_default_window_shape" in text
+
+    def test_render_muhurat_unverified_visible(self) -> None:
+        check = _check(
+            "tf",
+            muhurat_days_unverified_total=2,
+            muhurat_days_unverified=["2022-10-24", "2024-11-01"],
+        )
+        text = render_human(_report_dict([check]))
+        assert "~ tf.census: 2 Muhurat date(s) NOT verified: 2022-10-24, 2024-11-01" in text
+
+    def test_render_zero_counts_stay_silent(self) -> None:
+        check = _check("pull", non_default_shape_series=0, muhurat_days_unverified_total=0)
+        text = render_human(_report_dict([check]))
+        assert "routed non_default_window_shape" not in text
+        assert "Muhurat date(s) NOT verified" not in text
 
 
 class TestAuditChain:

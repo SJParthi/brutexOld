@@ -116,8 +116,13 @@ class AcceptanceContext:
     Parameters
     ----------
     lake_root
-        The REAL lake under verification (read-only; writes land only under
-        ``<lake_root>/acceptance/``).
+        The REAL lake under verification. The verifier's OWN writes land only
+        under ``<lake_root>/acceptance/``; the in-process SERVING path adds
+        two disclosed residuals (round 3, B-NEW-2): a schema-matched
+        ``registry.duckdb`` open (no-net-bytes re-stamp) and a possible
+        ``<lake_root>/.manifest/`` discovery-cache refresh — both exactly
+        what the production dashboard does (benign, results-safe; named in
+        the movers/latency limits + the runbook headline).
     seed
         Sampling seed (the IST report date by default — daily rotation).
     now_utc

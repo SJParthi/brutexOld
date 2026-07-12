@@ -218,6 +218,28 @@ class TestFnoContractRotation:
         assert sampling.sample_fno_contracts(contracts, seed="s", sample_n=6) == ["A", "B"]
 
 
+class TestEngineFuturesContracts:
+    """Round-3 fix (C-F1): the ADR-0012 engine surface is code-selectable."""
+
+    def test_filters_nse_nifty_fut_only(self) -> None:
+        contracts = [
+            "NSE-NIFTY-31Jul26-FUT",
+            "NSE-NIFTY-27Aug26-FUT",
+            "NSE-BANKNIFTY-31Jul26-FUT",  # not the engine futures track
+            "NSE-NIFTY-31Jul26-24000-CE",  # option leg, never engine
+            "NSE-RELIANCE-31Jul26-FUT",  # stock future, REFERENCE_ONLY
+            "BSE-NIFTY-31Jul26-FUT",  # wrong exchange (no such vendor symbol)
+            "junk-dir-name",  # unparseable → skipped
+        ]
+        assert sampling.engine_futures_contracts(contracts) == [
+            "NSE-NIFTY-27Aug26-FUT",
+            "NSE-NIFTY-31Jul26-FUT",
+        ]
+
+    def test_empty_population(self) -> None:
+        assert sampling.engine_futures_contracts([]) == []
+
+
 class TestRecentMonths:
     def test_year_boundary(self) -> None:
         from datetime import date

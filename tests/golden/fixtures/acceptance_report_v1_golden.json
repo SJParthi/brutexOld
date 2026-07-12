@@ -61,14 +61,15 @@
      "evidence": {
       "engine_detail": {
        "BANKNIFTY": "CLEAN",
+       "INDIAVIX": "CLEAN",
        "NIFTY": "CLEAN",
        "SENSEX": "CLEAN"
       },
-      "units_checked": 6
+      "units_checked": 9
      },
      "id": "unique.engine",
      "limits": [
-      "full stored history \u2014 never month-bounded"
+      "full stored history \u2014 never month-bounded (3 indexes + INDIAVIX + the NSE-NIFTY-*-FUT engine-track contract dirs)"
      ],
      "repro": "brutex verify-acceptance --checks unique --seed 2026-07-10",
      "structural": false,

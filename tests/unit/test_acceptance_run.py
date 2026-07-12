@@ -240,12 +240,75 @@ class TestChainAcrossRuns:
         )
         assert oi["abstain_streak"] == 2
 
-    def test_out_dir_override(self, tmp_path: Path) -> None:
+    def test_out_dir_override_is_off_chain(self, tmp_path: Path) -> None:
+        # Round-3 fix (C-F3): an --out run must NOT dangle LATEST — the
+        # pointer previously named a run id absent under <lake>/acceptance,
+        # so the next default run's load_previous silently reset every
+        # streak/delta and an operator following LATEST found nothing.
         lake = make_twin(tmp_path)
         out = tmp_path / "elsewhere"
         _code, report = _run(_cfg(lake, out_dir=out))
         assert (out / "report.json").is_file()
-        assert report["run_id"] in (lake / "acceptance" / "LATEST").read_text(encoding="utf-8")
+        assert not (lake / "acceptance" / "LATEST").exists()
+        assert not (lake / "acceptance" / str(report["run_id"])).exists()
+
+    def test_out_dir_override_keeps_existing_chain(self, tmp_path: Path) -> None:
+        # An --out run after a default run leaves the chain byte-untouched.
+        lake = make_twin(tmp_path)
+        _code, first = _run(_cfg(lake))
+        latest = lake / "acceptance" / "LATEST"
+        before = latest.read_text(encoding="utf-8")
+        assert str(first["run_id"]) in before
+        _code2, second = _run(_cfg(lake, out_dir=tmp_path / "elsewhere"))
+        assert latest.read_text(encoding="utf-8") == before
+        # The off-chain run still CONSUMED the chain (deltas vs the default
+        # run) — it just never advanced it.
+        assert (second.get("previous") or {}).get("run_id") == first["run_id"]
+
+
+class TestEvidenceTreeSymlinkRefusal:
+    """Round-3 fix (B-NEW-1): ONE refusal BEFORE any write — audit included.
+
+    The round-2 guard sat at report-write time, so the hash-chained audit
+    JSONL had already been written THROUGH a symlinked ``<lake>/acceptance``
+    into the attacker's target dir.
+    """
+
+    def test_symlinked_acceptance_refuses_whole_run_before_audit(self, tmp_path: Path) -> None:
+        lake = make_twin(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (lake / "acceptance").symlink_to(target)
+        code, report = _run(_cfg(lake))
+        assert code == 2
+        assert "symlink" in report["error"]
+        # NOTHING written through the link — no audit/, no report, no ledger.
+        assert list(target.iterdir()) == []
+
+
+class TestReportWriteFailureLoud:
+    """Round-3 fix (C-F4): a failed report write restamps overall to SUSPECT."""
+
+    def test_write_failure_restamps_overall_exit_2(self, tmp_path: Path) -> None:
+        lake = make_twin(tmp_path)
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file, not a dir", encoding="utf-8")
+        code, report = _run(_cfg(lake, out_dir=blocker / "sub"))
+        assert code == 2
+        assert report["overall"]["exit_code"] == 2  # the table can never say exit 0
+        assert report["overall"]["verdict"] == "SUSPECT"
+        assert "report_write_error" in report
+
+
+class TestNegativeSampleRefused:
+    def test_negative_sample_is_a_core_usage_error(self, tmp_path: Path) -> None:
+        # Round-3 NIT (C-F5): sample_n=-1 is a Python slice ([:-1] selects
+        # population−1 datasets) — refused in the CORE, not just the CLI.
+        code, report = run_acceptance(
+            RunConfig(lake_root=tmp_path, checks=("unique",), sample_n=-1)
+        )
+        assert code == 1
+        assert "sample_n" in report["error"]
 
 
 class TestRegistryAndRepro:

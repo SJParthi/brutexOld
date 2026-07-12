@@ -110,6 +110,13 @@ class CliUserError(Exception):
 def _configure_sweep_logging() -> None:
     """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
 
+    ALSO the ``verify-acceptance`` stdout-purity guard (round 3 of
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756): an unconfigured
+    process's structlog PrintLogger defaults to STDOUT, which buried the
+    acceptance human table under scan events and broke the ``--json``
+    machine contract (``json.loads(stdout)`` failed) — the seam below routes
+    every log line to STDERR, so stdout carries EXACTLY the table / JSON.
+
     A bare ``brutex sweep`` / ``sweep-all`` / ``sweep-daemon`` process
     previously ran with structlog UNCONFIGURED, whose default wrapper class
     filters at NOTSET — so the engine's per-trade DEBUG events
@@ -1858,7 +1865,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Machine summary on stdout (files always written)"
     )
     verify_acc.add_argument(
-        "--out", type=Path, default=None, help="Report dir override (default <lake>/acceptance/<run_id>/)"
+        "--out",
+        type=Path,
+        default=None,
+        help=(
+            "Report dir override (default <lake>/acceptance/<run_id>/). "
+            "An --out report is OFF-CHAIN: <lake>/acceptance/LATEST and the "
+            "deltas/streak chain are NOT updated"
+        ),
     )
     verify_acc.add_argument(
         "--repro",
@@ -7698,7 +7712,9 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
 
     if repro is not None:
         if repro not in ALL_CHECK_IDS:
-            raise CliUserError(f"unknown check id for --repro: {repro!r} (choose from {', '.join(ALL_CHECK_IDS)})")
+            raise CliUserError(
+                f"unknown check id for --repro: {repro!r} (choose from {', '.join(ALL_CHECK_IDS)})"
+            )
         print(repro_command(repro, seed=seed))
         return EXIT_OK
     if self_test_only:
@@ -7727,6 +7743,10 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
             raise CliUserError(f"bad --latency-budget entry: {token!r} (expected KEY=MS)") from None
     if top_n > 100:  # noqa: PLR2004 — the documented movers cross-check depth cap
         raise CliUserError("--top-n is capped at 100")
+    if sample < 0:
+        # Round-3 NIT (C-F5): a negative N is a Python slice ([:-1] selects
+        # population−1 datasets) — a silent cost surprise, never a sample.
+        raise CliUserError("--sample must be >= 0")
     if no_self_test and (self_test or self_test_only):
         raise CliUserError("--no-self-test conflicts with --self-test/--self-test-only")
     if full:
@@ -7758,6 +7778,15 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
     if "error" in report:
         print(f"[brutex] verify-acceptance SUSPECT: {report['error']}", file=sys.stderr)
         return exit_code
+    if "report_write_error" in report:
+        # Round-3 fix (C-F4): a report-write failure was near-silent
+        # interactively — one loud stderr line; the table/JSON below already
+        # carry the truthful SUSPECT exit 2 (run.py restamped overall).
+        print(
+            "[brutex] verify-acceptance SUSPECT: report write failed: "
+            f"{report['report_write_error']}",
+            file=sys.stderr,
+        )
     if json_out:
         print(json.dumps(report, indent=1, sort_keys=True))
     else:
@@ -9588,7 +9617,7 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_notify_test()
     if args.command == "wipe":
         return cmd_wipe(execute=args.execute, assume_yes=args.yes)
-    if args.command in {"sweep", "sweep-all", "sweep-daemon"}:
+    if args.command in {"sweep", "sweep-all", "sweep-daemon", "verify-acceptance"}:
         # DEC-SWEEP-LOG-VOLUME-GUARD-001: bound the engine's structlog output
         # at INFO (fail-loud $BRUTEX_LOG_LEVEL override) BEFORE any engine
         # module's first logger use — an unconfigured sweep process streamed
@@ -9597,6 +9626,12 @@ def _dispatch(argv: list[str] | None) -> int:
         # call site covering all three sweep entries (sweep-daemon reuses
         # cmd_sweep_all; the dashboard sweep job is already configured by
         # cmd_dashboard at startup and the guard defers to it).
+        # verify-acceptance joined at round 3 of DEC-OPERATOR-ACCEPTANCE-
+        # VERIFY-001 (#1756): unconfigured structlog's default PrintLogger
+        # writes to STDOUT, so the acceptance checks' scan events buried the
+        # human table and made `--json` unparseable (`json.loads(stdout)`
+        # failed on the log prefix). The seam routes every log line to
+        # STDERR, keeping stdout = exactly the table / JSON summary.
         _configure_sweep_logging()
     if args.command == "backup":
         return cmd_backup(args)

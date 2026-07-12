@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
 from brutex.acceptance.checks import unique
 from brutex.acceptance.model import AbstainReason, Verdict
 from brutex.acceptance.selftest import _month_file, poison_duplicate_row
@@ -228,3 +229,67 @@ class TestToctouLaw:
         assert any("NSE-NIFTY-30Jul26-FUT" in key for key in check.coverage.selection)
         # both trees contributed fingerprinted inputs → clean stamp
         assert check.input_fingerprint == {"moved": False, "retried": False}
+
+
+def _write_engine_future(lake: Path, *, symbol: str = "NSE-NIFTY-31Jul26-FUT") -> Path:
+    """One REAL-writer NIFTY-FUT engine-track contract dir; returns its 1m file."""
+    from brutex.acceptance.selftest import _twin_bars
+    from brutex.data.parquet_writer import ParquetWriter
+
+    ParquetWriter(lake_root=lake).write(
+        exchange="NSE",
+        segment="FNO",
+        symbol=symbol,
+        interval="1minute",
+        bars=_twin_bars(DAY2, base=200.0),
+    )
+    return lake / "bars" / "NSE" / "FNO" / symbol / "1minute" / "2026" / "07.parquet"
+
+
+def _no_rotation(contracts: object, *, seed: str, sample_n: int) -> list[str]:
+    """A rotation stub that NEVER picks the engine contract (force-include proof)."""
+    return []
+
+
+class TestEngineSurface:
+    """Round-3 fix (C-F1): the ADR-0012 engine surface is FORCE-included.
+
+    The docs claimed the engine set (3 indexes + INDIAVIX + the NIFTY-FUT
+    contract dirs) is ALWAYS in scope full-history while the code rotated a
+    6-contract sample and month-bounded INDIAVIX — these pins make code and
+    docs match EXACTLY.
+    """
+
+    def test_engine_future_in_engine_block_even_when_rotation_skips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        lake = make_twin(tmp_path)
+        _write_engine_future(lake)
+        monkeypatch.setattr(unique, "sample_fno_contracts", _no_rotation)
+        check = unique.run(make_ctx(lake))
+        engine = next(s for s in check.sub_checks if s.id == "unique.engine")
+        assert engine.evidence["engine_detail"]["NSE-NIFTY-31Jul26-FUT"] == "CLEAN"
+        assert "NSE/FNO/NSE-NIFTY-31Jul26-FUT" in check.coverage.selection
+
+    def test_indiavix_in_engine_detail_full_history(self, tmp_path: Path) -> None:
+        lake = make_twin(tmp_path)
+        check = unique.run(make_ctx(lake))
+        engine = next(s for s in check.sub_checks if s.id == "unique.engine")
+        assert engine.evidence["engine_detail"]["INDIAVIX"] == "CLEAN"
+
+    def test_poisoned_engine_future_fails_even_outside_rotation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import polars as pl
+
+        lake = make_twin(tmp_path)
+        month_file = _write_engine_future(lake)
+        frame = pl.read_parquet(month_file, glob=False)
+        pl.concat([frame, frame.head(1)]).write_parquet(month_file)  # dup poison
+        monkeypatch.setattr(unique, "sample_fno_contracts", _no_rotation)
+        check = unique.run(make_ctx(lake))
+        engine = next(s for s in check.sub_checks if s.id == "unique.engine")
+        assert engine.verdict is Verdict.FAIL
+        assert engine.evidence["engine_detail"]["NSE-NIFTY-31Jul26-FUT"] == (
+            "POISONED-or-UNREADABLE"
+        )
