@@ -190,8 +190,16 @@ DEFAULT_ENUM_WORK_CELLS: Final[int] = 1 << 28
 #: Env-override clamps (design §3, rounds 2–3): an override above 2^30
 #: (~0.28 s GIL hold) clamps DOWN, one below 2^16 clamps UP — each with one
 #: loud ``work_cap_clamped`` warn naming the direction, so a typo'd ``2**44``
-#: can never hold the GIL for minutes and a degenerate ``=1`` can never
-#: produce a pathological one-mask-per-call stream.
+#: can never hold the GIL for minutes. HONEST scope of the lower clamp
+#: (review round 3, #1738): the kernel's work-cap charging rule is
+#: min-hits-blind (``n_bars`` cells per mask, checked AFTER each mask), so
+#: the clamped floor rules out the one-mask-per-call stream ONLY for windows
+#: up to ~2^16 bars — a DEEPER window (a production 1-minute window is
+#: ~350k–560k bars) at the minimum knob still enumerates exactly one mask
+#: per range. That degenerate stream is correctness-INVARIANT (kept lists
+#: are cap-invariant — the ranged==monolithic property + the
+#: ``TestLowerClampDeepWindowEnvelope`` pin) and costs extra FFI round-trips
+#: only, never a wrong or truncated result.
 ENUM_WORK_CELLS_UPPER_CLAMP: Final[int] = 1 << 30
 ENUM_WORK_CELLS_LOWER_CLAMP: Final[int] = 1 << 16
 
@@ -410,7 +418,10 @@ def _resolve_enum_work_cells() -> int:
     invalid-numeric-knob precedent (loud, never a mid-grid crash). A valid
     value is clamped into ``[2^16, 2^30]`` with one loud ``work_cap_clamped``
     warn per direction (design §3 rounds 2–3: the upper clamp bounds a typo'd
-    GIL hold, the lower clamp bounds a degenerate one-mask-per-call stream).
+    GIL hold; the lower clamp bounds the one-mask-per-call stream only for
+    windows up to ~2^16 bars — a deeper window at the minimum knob still
+    streams one mask per range, correctness-invariant, extra FFI round-trips
+    only; see :data:`ENUM_WORK_CELLS_LOWER_CLAMP`).
     """
     raw = os.environ.get(ENUM_WORK_CELLS_ENV, "").strip()
     if not raw:

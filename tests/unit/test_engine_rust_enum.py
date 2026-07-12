@@ -153,7 +153,9 @@ def test_enum_cells_clamps_both_directions_with_one_warn_each(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The design §3 override clamps: a typo'd 2**44 can never hold the GIL
-    for minutes; a degenerate 1 can never make a one-mask-per-call stream."""
+    for minutes; a degenerate 1 clamps UP to 2^16 — which bounds the
+    one-mask-per-call stream only for windows up to ~2^16 bars (the honest
+    deep-window residual is pinned by TestLowerClampDeepWindowEnvelope)."""
     monkeypatch.setenv(rust_enum.ENUM_WORK_CELLS_ENV, str(2**44))
     with capture_logs() as logs:
         assert rust_enum._resolve_enum_work_cells() == rust_enum.ENUM_WORK_CELLS_UPPER_CLAMP
@@ -171,6 +173,53 @@ def test_enum_cells_valid_value_passes_through(monkeypatch: pytest.MonkeyPatch) 
     with capture_logs() as logs:
         assert rust_enum._resolve_enum_work_cells() == 1 << 20
     assert not logs
+
+
+class TestLowerClampDeepWindowEnvelope:
+    """Review-round-3 honesty pin (DEC-SWEEP-ENUM-RUST-001, #1738): the lower
+    work-cells clamp does NOT rule out the one-mask-per-call stream for a
+    window DEEPER than the clamp (the min-hits-blind charging rule bills
+    n_bars cells per mask and is checked AFTER each mask), so the written
+    disclosure must be scoped — and the degenerate stream itself must stay
+    correctness-invariant (extra FFI round-trips only, never a wrong list).
+    """
+
+    def test_disclosure_is_scoped_never_an_absolute_guarantee(self) -> None:
+        """Doc-pin: the false absolute 'can never produce a one-mask-per-call
+        stream' claim stays gone; the honest scoped wording stays present."""
+        source = Path(rust_enum.__file__).read_text(encoding="utf-8")
+        flat = " ".join(source.split())
+        assert re.search(r"can never[^.]*one-mask-per-call", flat) is None
+        assert "only for windows up to ~2^16 bars" in flat
+        assert "one mask per range" in flat
+
+    def test_deep_window_min_knob_streams_one_mask_per_call_cap_invariant(self) -> None:
+        """A window deeper than the clamp at the minimum knob enumerates
+        exactly ONE mask per kernel call — and walking that degenerate stream
+        to exhaustion yields the SAME kept list, SET AND ORDER, as one
+        default-cap call (the disclosure's correctness-invariance claim)."""
+        clamp = rust_enum.ENUM_WORK_CELLS_LOWER_CLAMP
+        deep_bars = [0b1111] * (clamp + 4096)
+        core = _REAL_U64(deep_bars)
+        bits = list(range(7))
+        first = core.enumerate_prefilter(bits, 2, [], 0, 0, 4096, clamp)
+        assert first[0] == 1  # the disclosed one-mask-per-call shape
+        assert first[3] is False
+        kept: list[int] = []
+        rank = 0
+        for _ in range(64):
+            enumerated, _pruned, rank, exhausted, _hits, batch = core.enumerate_prefilter(
+                bits, 2, [], 0, rank, 4096, clamp
+            )
+            assert enumerated <= 1
+            kept.extend(batch)
+            if exhausted:
+                break
+        else:  # pragma: no cover - loud failure shape only
+            pytest.fail("min-knob stream never exhausted")
+        full = core.enumerate_prefilter(bits, 2, [], 0, 0, 4096, rust_enum.DEFAULT_ENUM_WORK_CELLS)
+        assert full[3] is True
+        assert kept == list(full[5])
 
 
 # ────── shadow window + latch state ──────
