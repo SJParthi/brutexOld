@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -73,6 +74,56 @@ def _static_js(name: str) -> str:
     text = (_STATIC / name).read_text(encoding="utf-8")
     assert text, f"expected a non-empty static module at {name}"
     return text
+
+
+class _MarkupHandlerScanner(HTMLParser):
+    """Collect every raw inline ``on*=`` handler attribute in real MARKUP.
+
+    CodeQL hardening (js/bad-tag-filter, code-scanning alert 1010): the
+    prior regex pair — strip ``<script…>…</script>`` blocks with
+    ``</script>`` spelled EXACTLY, then grep the remainder for handler
+    attributes — missed end-tag spelling variants (``</script >``,
+    ``</SCRIPT\\t>``, ``</script foo>``), so a variant-spelled end tag made
+    the non-greedy stripper run on to the NEXT real ``</script>`` and
+    over-strip genuine markup out of the scan. The stdlib
+    ``html.parser.HTMLParser`` does the tag grammar natively (the
+    frontend-latency suite precedent — its NIT-1 extractor carries the same
+    rationale): ``<script>`` bodies arrive via ``handle_data`` (script
+    CDATA content mode) and never surface as start tags, so JS comparisons
+    like ``a < b`` — and handler-shaped STRINGS inside a script body —
+    still cannot false-positive, while every end-tag spelling a browser
+    honours terminates the element (variant matrix pinned by
+    ``test_inline_handler_scan_catches_end_tag_spelling_variants``).
+    This is a TEST-side reader of our own trusted templates, never a
+    sanitizer. ``startswith("on")`` is deliberately BROADER than the
+    retired ``\\son[a-z]+\\s*=`` regex (valueless ``<img onerror>`` and
+    exotic handler spellings now flag too) — strictly stronger, corpus
+    re-verified zero-hit.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.handler_attrs: list[str] = []
+
+    def _scan_tag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, _value in attrs:
+            # HTMLParser lowercases attribute names, so ONCLICK= is covered.
+            if name.startswith("on") and len(name) > 2:
+                self.handler_attrs.append(f"<{tag} … {name}=…>")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._scan_tag(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._scan_tag(tag, attrs)
+
+
+def _inline_handler_attrs(html: str) -> list[str]:
+    """Every raw inline ``on*=`` handler attribute in ``html``'s markup."""
+    parser = _MarkupHandlerScanner()
+    parser.feed(html)
+    parser.close()
+    return parser.handler_attrs
 
 
 def _client_no_lake() -> TestClient:
@@ -744,19 +795,21 @@ class TestRoutesEndToEnd:
             r"|setAttribute\(\s*[\"'](srcdoc|src)[\"']"
         )
         # Fix round 2 (seccov LOW-1): raw inline HTML `on*=` handler
-        # attributes are banned in the scanned templates' MARKUP (the
-        # <script> blocks are stripped first — JS comparisons like `a < b`
-        # must never false-positive; the JS-side `setAttribute('on…')` arm
-        # above covers dynamic handler injection). The one pre-existing
-        # benign specimen (v29's modal 'Got it' onclick) was converted to a
-        # proper addEventListener binding in the same change, so the corpus
-        # is genuinely zero-hit.
-        inline_handler = re.compile(r"<[^>]{0,300}?\son[a-z]+\s*=", re.IGNORECASE)
-        script_block = re.compile(r"<script\b.*?</script>", re.DOTALL | re.IGNORECASE)
+        # attributes are banned in the scanned templates' MARKUP (script
+        # bodies are excluded by the parser's CDATA content mode — JS
+        # comparisons like `a < b` must never false-positive; the JS-side
+        # `setAttribute('on…')` arm above covers dynamic handler
+        # injection). The one pre-existing benign specimen (v29's modal
+        # 'Got it' onclick) was converted to a proper addEventListener
+        # binding in the same change, so the corpus is genuinely zero-hit.
+        # CodeQL hardening (js/bad-tag-filter, alert 1010): the former
+        # regex `<script\b.*?</script>` stripper missed `</script >`-style
+        # end-tag variants — replaced by the HTMLParser-based
+        # _MarkupHandlerScanner (rationale on the class).
         for name in ("screener.html", "strategy.html", "v29.html"):
             html = _template(name)
             assert sink.search(html) is None, name
-            assert inline_handler.search(script_block.sub("", html)) is None, name
+            assert _inline_handler_attrs(html) == [], name
         for js_name in (
             "bx-oneclick.js",
             "bx-poll.js",
@@ -769,6 +822,73 @@ class TestRoutesEndToEnd:
             "bx-operator-portal.js",
         ):
             assert sink.search((_STATIC / js_name).read_text(encoding="utf-8")) is None, js_name
+
+    @pytest.mark.parametrize(
+        "end_tag",
+        [
+            "</script>",
+            "</script >",
+            "</script\t\n>",
+            "</SCRIPT>",
+            "</Script >",
+        ],
+    )
+    def test_inline_handler_scan_catches_end_tag_spelling_variants(self, end_tag: str) -> None:
+        """CodeQL js/bad-tag-filter teeth (alert 1010): the retired regex
+        stripper spelled the end tag EXACTLY `</script>`, so a handler
+        hidden between a variant-spelled end tag and the NEXT real script
+        block was over-stripped out of the old scan (evasion, reproduced on
+        the pre-fix pattern for every whitespace-bearing spelling below;
+        the case-only variants were already covered by its IGNORECASE).
+        The parser-based scan must flag it for every one of these
+        stdlib-version-stable end-tag spellings."""
+        specimen = (
+            f"<script>var a = 1 < 2;{end_tag}"
+            '<img src=x onerror="alert(1)">'
+            "<script>var b = 2;</script>"
+        )
+        assert _inline_handler_attrs(specimen) == ["<img … onerror=…>"], end_tag
+
+    @pytest.mark.parametrize("end_tag", ["</script foo>", "</script/>"])
+    def test_inline_handler_scan_recovers_past_divergent_end_tag_spellings(
+        self, end_tag: str
+    ) -> None:
+        """HONEST residual (Golden Rule #10): attribute/slash-bearing end
+        tags (`</script foo>`, `</script/>`) DO terminate the script
+        element in a browser, but ``html.parser`` only honours them on
+        stdlib patch levels carrying the CDATA end-tag conformance
+        backport (present on e.g. 3.11.15; absent on 3.12.3) — on older
+        patch levels the in-between handler rides as script data,
+        unflagged. Tolerant arm: either outcome is accepted, but the scan
+        must NEVER go blind past the specimen — the next GENUINE
+        ``</script>`` always re-opens markup scanning, so a real handler
+        after it is flagged on EVERY stdlib (the invariant that matters
+        for scanning our own trusted templates, whose real scripts all end
+        ``</script>``)."""
+        specimen = (
+            f"<script>var a = 1 < 2;{end_tag}"
+            '<img src=x onerror="alert(1)">'
+            "<script>var b = 2;</script>"
+            '<div onclick="x">t</div>'
+        )
+        hits = _inline_handler_attrs(specimen)
+        assert hits in (
+            ["<div … onclick=…>"],  # pre-backport: divergent tag rode as data
+            ["<img … onerror=…>", "<div … onclick=…>"],  # conformant stdlib
+        ), (end_tag, hits)
+
+    def test_inline_handler_scan_never_false_positives_on_script_bodies(self) -> None:
+        """The CDATA false-positive guard survives the regex→parser move:
+        JS comparisons AND handler-shaped STRINGS inside a script body never
+        flag; a real markup handler outside one still does."""
+        clean = (
+            '<script>if (a < b && c > d) { s = "<div onclick=x>"; }</script><div class="k">t</div>'
+        )
+        assert _inline_handler_attrs(clean) == []
+        assert _inline_handler_attrs('<DIV ONCLICK="x">t</DIV>') == ["<div … onclick=…>"]
+        # Valueless handler attributes flag too (broader than the old regex,
+        # which required `=` — strictly stronger, stated on the scanner).
+        assert _inline_handler_attrs("<img src=x onerror>") == ["<img … onerror=…>"]
 
     def test_screener_and_strategy_serve_with_corpus_lake(self, tmp_path: Path) -> None:
         client = _client_with_corpus(tmp_path)
