@@ -22,7 +22,9 @@ _Last updated: 2026-07-12 (DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1
 the pre-settle TODAY minute-completeness gate: a post-close pull's covers-today
 window WITHHOLDS today's still-settling bars from the keep-first lake (the #837
 forming shape would freeze forever) and defers streak-EXEMPT re-pullable FAILED
-(`TODAY_INCOMPLETE` — never bumps toward SKIPPED; heals at the next nightly)
+(`TODAY_INCOMPLETE` — never bumps toward SKIPPED; heals at the next nightly
+PROVIDED the vendor has settled by then — the probe-measured settle time +
+margin grounds that schedule)
 until the per-class criteria pass (INDEX count+close-edge · CASH/FUT/CE-PE
 shape checks; FUT count observe-only; legit vendor-empty NEVER demotes —
 pinned); armed at ALL FOUR production pulls incl. the bulk `pull_all_spot`
@@ -2339,8 +2341,11 @@ hostile-review pass._
   SKIPPED settle is structurally unreachable + belt-guarded, both membership
   mutants hand-killed; the tombstone protection inherited free; the next pull
   whose window no longer covers today is inert and the settled bars LAND —
-  convergence + zero-conflict lifecycle integration-pinned against a real lake
-  with the gate-off keep-first-freeze counterfactual). (2) Criteria table:
+  PROVIDED the vendor has settled by that first non-covers-today re-pull, which
+  is exactly why the nightly must schedule after the probe-measured settle
+  time + margin (the #1752 runbook); convergence + zero-conflict lifecycle
+  integration-pinned against a real lake with the gate-off keep-first-freeze
+  counterfactual). (2) Criteria table:
   INDEX_SPOT = distinct-minute count == `session.duration_minutes` (375
   regular/Budget-weekend, 60 Muhurat) AND `session_last_bar_complete`;
   CASH_SPOT = all-zero-volume shape only (no count demand — the #1031 illiquid
