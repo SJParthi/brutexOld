@@ -2333,12 +2333,18 @@ hostile-review pass._
   caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
   the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
   that never affects the exit code; every REQUIRED check still blocks —
-  redteam-pinned (NEW `TestM4proNonblocking`, 7 tests, fails-before-proven
-  5/7 against the baseline script incl. THE pending-m4pro case; the
+  redteam-pinned (NEW `TestM4proNonblocking`, 8 tests — incl. the round-1
+  review fold's source pin that the hardcoded set is EXACTLY
+  {m4pro-absolute-throughput} with the env-default override idiom absent —
+  fails-before-proven 5/7 on the 7 behavior tests against the baseline
+  script incl. THE pending-m4pro case; the
   pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
   pins guard the unchanged fail-closed posture; the excluded entry never
   inflates the EXPECTED_MIN_CHECKS floor). SAFE because the check is
-  genuinely NON-required (not in ci.yml's `ci-ok` needs; MIGRATION.md #382
+  genuinely NON-required (not in ci.yml's `ci-ok` needs AND absent from
+  branch-protection-drift.yml's 22-member required-contexts set — the
+  round-1 review corrected the overstated "aggregate gate only" wording in
+  the script comment + ledger to this two-way evidence; MIGRATION.md #382
   DEC-M4PRO-PR-TRIGGER-001 + #1534 DEC-BENCH-ABS-BASELINE-001 — a bench
   regression is caught POST-merge on the self-hosted runner, never a merge
   blocker, unchanged here). CI-gate script + redteam tests + docs only;

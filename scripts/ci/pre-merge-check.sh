@@ -44,8 +44,10 @@ IGNORE_CHECK_NAMES="${IGNORE_CHECK_NAMES:-}"
 # the self-hosted M4-Pro runner; when that runner is offline the check sits
 # QUEUED/pending forever and this gate's fail-closed pending scan refused
 # every touching PR indefinitely. It is genuinely NON-required: it is NOT
-# in ci.yml's `ci-ok` aggregate-gate `needs:` list and the branch-protection
-# required context is "CI OK (aggregate gate)" only (MIGRATION.md #382,
+# in ci.yml's `ci-ok` aggregate-gate `needs:` list AND it is NOT among branch
+# protection's required contexts (absent from the 22-member
+# expected_required_checks set asserted by
+# .github/workflows/branch-protection-drift.yml) (MIGRATION.md #382,
 # DEC-M4PRO-PR-TRIGGER-001: "m4pro-* is NOT in the required CI OK (aggregate
 # gate) set"; MIGRATION.md #1534, DEC-BENCH-ABS-BASELINE-001: "bench-m4pro
 # stays a NON-required, non-PR check … a regression is caught post-merge …

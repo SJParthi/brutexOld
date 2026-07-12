@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -549,6 +550,38 @@ class TestM4proNonblocking:
         assert result.returncode == 7, (
             "with the non-blocking check excluded, only 19 real checks remain "
             f"(< 20 floor) so the rollup is incomplete and must block; got {result.returncode}"
+        )
+
+    def test_nonblocking_constant_is_exactly_m4pro(self) -> None:
+        """Source pin: the hardcoded non-blocking set is EXACTLY m4pro.
+
+        Broadening NONBLOCKING_CHECK_NAMES weakens the merge gate for every
+        added check name, so it must stay a conscious code change under a
+        NEW DEC — any future addition fails this suite. The pin also asserts
+        the constant is genuinely HARDCODED: the script must not read it
+        from the environment via the env-default idiom
+        (`"${NONBLOCKING_CHECK_NAMES:-…}"`), which would let a caller env
+        tweak broaden the set — the exact clobber trap IGNORE_CHECK_NAMES
+        carries by design.
+        """
+        source = GUARD.read_text(encoding="utf-8")
+        assignments = re.findall(
+            r'^NONBLOCKING_CHECK_NAMES="([^"$]*)"$', source, flags=re.MULTILINE
+        )
+        assert len(assignments) == 1, (
+            'expected exactly ONE literal NONBLOCKING_CHECK_NAMES="..." '
+            f"assignment in {GUARD}; found {len(assignments)}: {assignments!r}"
+        )
+        # The script's own comma-split/strip/drop-empties parsing idiom.
+        names = {n.strip() for n in assignments[0].split(",") if n.strip()}
+        assert names == {"m4pro-absolute-throughput"}, (
+            "the hardcoded non-blocking set must be EXACTLY "
+            "{'m4pro-absolute-throughput'} — broadening it requires a code "
+            f"change + a new DEC (DEC-PREMERGE-M4PRO-NONBLOCK-001); got {names!r}"
+        )
+        assert '"${NONBLOCKING_CHECK_NAMES' not in source, (
+            "NONBLOCKING_CHECK_NAMES must stay HARDCODED — the env-default "
+            "idiom would let a caller env override the non-blocking set"
         )
 
 
