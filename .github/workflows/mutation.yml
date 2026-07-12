@@ -452,6 +452,7 @@ jobs:
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
+            "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
@@ -775,11 +776,13 @@ jobs:
         run: |
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE + FEATURES live in rust/trading-core/.cargo/mutants.toml:
-          #   evaluator.rs + spec.rs + python.rs = 627 mutants measured 2026-07-08
-          #   (`cargo mutants --list | wc -l` on the post-merge HEAD — the race-6
-          #   merge folded main's python.rs swing getters, python.rs 368->376, the
-          #   exact +8, each killed by the merge-added in-file tests; the
-          #   pre-merge 2026-07-07 measurement was 619); features python,serde
+          #   evaluator.rs + spec.rs + python.rs + stage1a_batch.rs = 693 mutants
+          #   measured 2026-07-11 (`cargo mutants --list | wc -l` on the
+          #   DEC-STAGE1A-RUST-BATCH-001 tree — the batch slice adds
+          #   stage1a_batch.rs 54 + the python.rs wrapper 12, the wrapper's pdc
+          #   read made operator-free in the round-5 refuter fix so its former
+          #   arithmetic-mutant class is structurally absent; the prior
+          #   2026-07-08 measurement was 627); features python,serde
           #   (python.rs is feature-gated at lib.rs:66 — all 376 of its mutants —
           #   and spec.rs's mask_hex module is serde-gated — 3 of its 13; without
           #   the features those 376 + 3 = 379 mutants build a byte-identical
@@ -796,10 +799,10 @@ jobs:
           #   main's build.rs include!s ../source_digest_core.rs — both outside the
           #   crate dir, so copy-mode baselines break (#1258, measured).
           # - --in-place precludes --jobs (hard CLI error, measured) => the 120-min
-          #   budget is met by SHARDING: ceil(627/7)=90 mutants x 39-48 s/mutant
+          #   budget is met by SHARDING: ceil(693/7)=99 mutants x 39-48 s/mutant
           #   (measured serial: CI 34 s default features, +15% python feature,
-          #   ±20%) ~= 59-72 min + ~6 min baseline/setup ~= 65-78 min nominal,
-          #   ~92 at +20% -> >= 28 min margin per shard.
+          #   ±20%) ~= 64-79 min + ~6 min baseline/setup ~= 70-85 min nominal,
+          #   ~102 at +20% -> >= 18 min margin per shard.
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/7 \
