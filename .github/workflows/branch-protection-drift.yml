@@ -98,9 +98,9 @@ jobs:
           # ITSELF required
           # below, and ci-ok fails if ANY of its needs is red, so every ci-ok need
           # is transitively enforced through that one aggregate context even when it
-          # is not its own direct required context. The 12 ci-ok needs deliberately
+          # is not its own direct required context. The 11 ci-ok needs deliberately
           # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are:
-          #   actionlint, rust-trading-core, ledger-numbering, no-dhan-guard,
+          #   actionlint, rust-trading-core, ledger-numbering,
           #   zplus-pr-guard, definition-of-ready, dec-id-validator,
           #   bugfix-regression-scan, no-hallucination-scan, conv-commits,
           #   chaos-race, browser.

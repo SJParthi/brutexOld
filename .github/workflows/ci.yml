@@ -3349,24 +3349,6 @@ jobs:
         run: python3 scripts/ci/validate_ledger_numbering.py
 
   # ─────────────────────────────────────────────────────────────────
-  # NO-DHAN GUARD — zero-dhan enforcement on the live surface.
-  # The live vendor is Groww; the Dhan adapter was fully removed in the
-  # J4 PR series. This guard fails the build if the retired "dhan" vendor
-  # word reappears in brutex/, scripts/, CLAUDE.md, README.md, or
-  # docs/runbooks/. The immutable DEC-DHAN-* decision IDs + the historical
-  # docs (MIGRATION.md / adr/ / TRACK1_*.md) are exempt (see the script
-  # header for the full LEDGER rationale).
-  # ─────────────────────────────────────────────────────────────────
-  no-dhan-guard:
-    name: No-dhan guard (zero-dhan enforcement)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Run no-dhan guard
-        run: bash scripts/ci/no-dhan-guard.sh
-
-  # ─────────────────────────────────────────────────────────────────
   # CONVENTIONAL COMMITS — commit format check (only on PRs)
   # ─────────────────────────────────────────────────────────────────
   conv-commits:
@@ -4313,13 +4295,6 @@ jobs:
       # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
-      # DEC-CI-OK-NODHAN-GATE-001 (R2-CI-1): the zero-dhan enforcement guard.
-      # It has NO event `if:` (runs on push / pull_request / dispatch alike),
-      # so it never legitimately skips — a RED no-dhan-guard is a HARD fail
-      # here (never skipped==pass). It is enforced via this required `CI OK`
-      # aggregate, NOT as a direct branch-protection required context, so the
-      # branch-protection-drift.yml expected snapshot is untouched.
-      - no-dhan-guard
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
       # de-conflated from the banned-pattern scan into its own job. It is
       # NOT a branch-protection required context (so the drift detector is
@@ -4393,7 +4368,7 @@ jobs:
       # REAL lake + the resume/adversarial legs + the I-1 byte-identity
       # proof, every push. Enforced via this required CI OK aggregate, NOT
       # as a direct branch-protection required context, so the drift
-      # snapshot is untouched (the no-dhan-guard precedent).
+      # snapshot is untouched (the ledger-numbering precedent).
       - sweep-rehearsal
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
@@ -4419,7 +4394,6 @@ jobs:
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
-          echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
           echo "  ledger-numbering:${{ needs.ledger-numbering.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -4456,7 +4430,6 @@ jobs:
             "${{ needs.rust-trading-core.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
-            "${{ needs.no-dhan-guard.result }}" \
             "${{ needs.ledger-numbering.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \
