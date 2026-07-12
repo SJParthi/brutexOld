@@ -2388,9 +2388,20 @@ hostile-review pass._
   proof: a real-ParquetBarSink lake through the FULL `run_crossverify` over `default_seams` (real locks/reader/
   export/journal/prebuild; FakeS3 + recording alerter injected) — published bytes byte-verified vs the committed
   goldens, idempotent re-run 0 puts, truncated-index withheld exit 2, crash-mid-publish next-run convergence, the
-  derive leg proven by the independent `lake_derived_freshness_verdicts` oracle. ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean,
-  pyright 0 new; `node --check` clean on the touched template's inline scripts.)
+  derive leg proven by the independent `lake_derived_freshness_verdicts` oracle. ROUND-1 HOSTILE-REVIEW FIX PACK
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1753): the F1 BLOCKER (the futures
+  candle leg passed ISO STRINGS to `pull_contract_candles`, whose real signature types `date | None` — every real
+  futures pull would have TypeError'd; both legs now pass strings to the spot chain / `date` objects to the candle
+  chain, typed-stub contract tests + an `inspect.signature` drift pin on BOTH real chains), the corrupt-stored-row
+  isolation widening (`InvalidOperation`/`TypeError` → withheld `read_error`, never a whole-run crash), the
+  positive symbol allowlist `symbol_key_safe` (uppercase+digits+`&-.`, control chars/lowercase/dot-tokens refused;
+  mirrored control-char refusal in the renderer's cell guard), the validated `staging_path_for_key` (a tampered
+  journal key can never traverse outside the staging tree), the recovery scan moved BEFORE the session gate (a
+  weekend run still republishes prior pending keys; recovered staging cleaned, failed-again staging kept +
+  `publish_failed` exit 2), repr()'d vendor-derived log fields (#907), the step-boundary-deadline / box-IST /
+  IAM-guardrail / legacy-bar runbook honesty notes, and the intentional double-CRITICAL-on-halt comment. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
   Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
   of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
   `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +

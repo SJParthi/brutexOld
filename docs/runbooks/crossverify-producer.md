@@ -88,17 +88,22 @@
 
 ## 1. The daily run (zero-touch)
 
-`brutex crossverify run` executes: kill-switch/session gate (non-trading +
-**Muhurat days skip entirely — no files, both sides no-op**) → fail-closed
-completeness-gate presence → prior-day pending-publish recovery scan →
-bounded pull-lock wait (45 min default; a peer pull holding the locks past
-the budget DEFERS the day with a CRITICAL `crossverify_refused` — no
-preemption in v1) → priority pull (spot whole-universe to TODAY, scoped
-metadata, `expiry>=day` NIFTY/BANKNIFTY futures) → per-symbol completeness
-gate + export decisions (INDEX missing its day = BLOCKED exit 2; a settling
-future / short index gets ONE bounded settle-retry) → day-scoped derive
-(#1755; never blocks the export) → stage + journal → **locks released** →
-publish frozen staged bytes → exactly ONE Telegram summary.
+`brutex crossverify run` executes: kill switch → prior-day pending-publish
+recovery scan (BEFORE the session gate, deliberately: a weekend/holiday run
+still republishes a prior trading day's pending staged keys — recovery is
+lock-free and vendor-free; a fully-recovered day's staging dir is cleaned,
+a still-failing day's is kept and the skip verdict upgrades honestly to
+`publish_failed` exit 2) → session gate (non-trading + **Muhurat days skip
+entirely — no files, both sides no-op**) → fail-closed completeness-gate
+presence → bounded pull-lock wait (45 min default; a peer pull holding the
+locks past the budget DEFERS the day with a CRITICAL `crossverify_refused`
+— no preemption in v1) → priority pull (spot whole-universe to TODAY,
+scoped metadata, `expiry>=day` NIFTY/BANKNIFTY futures) → per-symbol
+completeness gate + export decisions (INDEX missing its day = BLOCKED exit
+2; a settling future / short index gets ONE bounded settle-retry) →
+day-scoped derive (#1755; never blocks the export) → stage + journal →
+**locks released** → publish frozen staged bytes → exactly ONE Telegram
+summary.
 
 Exit codes (cron-red discipline): `0` published / staged-only / honest
 skips / disabled / market-hours deferral · `1` junk config / lock refusal /
@@ -135,5 +140,27 @@ pull excludes options; nothing to enrich.
   (the #1596 posture); a `nothing_to_do` day writes no journal and reads
   MISSED — check the Telegram summary.
 - Locks: the producer holds the pull account→lake→lease trio ONLY through
-  staging; the S3 publish runs lock-free, so the 01:30 nightly can never
-  meet a producer-held flock.
+  staging; the S3 publish (and the recovery scan) run lock-free, so the
+  01:30 nightly can never meet a producer-held flock during publish.
+
+## 4. Honest limits
+
+- **The 4 h hard deadline is checked at STEP BOUNDARIES only** — a
+  pathologically long pull leg can hold the flocks past the wall until its
+  own step completes (in practice bounded by the 08:45 market-hours halt,
+  which stops vendor pulls mid-run; a nightly that then fires at 01:30
+  against still-held locks refuses LOUDLY after its own wait budget — never
+  silently, never corrupting).
+- **Box-local time is assumed IST** (the nightly/launchd precedent — NSE
+  market hours, the deadman clock and the `--at` fire time all read the
+  box clock; a non-IST box needs its system timezone set to Asia/Kolkata).
+- **IAM — not the code — is the write-scope guardrail:** the
+  `BRUTEX_CROSSVERIFY_S3_BUCKET`/`_S3_PREFIX` env vars are bring-up
+  configuration, not a security boundary; the PutObject-only grant on
+  `arn:aws:s3:::tv-prod-cold/crossverify/*` is what actually bounds where
+  the producer can write.
+- **A legacy out-of-session bar in an un-healed month partition withholds
+  that symbol's file** (`render_refused:` — the renderer refuses any row
+  outside the session window; correct-or-absent, never a dropped row).
+  Remediation: run the lake heal / re-pull the affected month, then re-run
+  `--day YYYY-MM-DD`.
