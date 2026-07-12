@@ -26,12 +26,11 @@ pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
 from brutex.adapters.dhan.rolling_option_adapter import RollingOptionAdapter
-from brutex.adapters.dhan.rolling_option_plan import enumerate_rolling_option_keys
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.dhan_pull import DhanPullRequest
 from brutex.dashboard.dhan_rolling_pull import (
     DhanRollingOptionPullReport,
-    run_dhan_rolling_option_pull,
+    default_dhan_rolling_option_pull,
 )
 from brutex.data.instrument_store import InstrumentStore
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
@@ -49,8 +48,14 @@ _PAYLOAD: dict[str, list[object]] = {
 
 
 class _FakeRollingClient:
+    """A rolling-option client that COUNTS calls — proves a dry-run issues zero."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
     def rolling_option_data(self, *, body: Mapping[str, object]) -> Mapping[str, object]:
         _ = body
+        self.calls += 1
         return _PAYLOAD
 
 
@@ -86,24 +91,36 @@ def store(tmp_path: Path) -> Iterator[InstrumentStore]:
 
 
 class _FakeRollingPull:
-    """An injected ``dhan_rolling_option_pull`` seam writing synthetic rolling bars."""
+    """An injected ``dhan_rolling_option_pull`` seam that DELEGATES to the REAL
+    production ``default_dhan_rolling_option_pull`` with a SPY ``adapter_factory``.
+
+    So the route → production → dry-run short-circuit chain runs end-to-end OFFLINE:
+    on ``dry_run`` the real seam plans the pure cartesian and returns a zero-outcome
+    report WITHOUT building an adapter (``adapter_built`` stays ``False``), issuing a
+    vendor call (``client.calls`` stays 0), or writing. No AWS is ever touched — the
+    spy ``adapter_factory`` stands in for the real SSM/``dhanhq`` build, which is never
+    invoked on the dry-run path.
+    """
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.request: DhanPullRequest | None = None
+        self.adapter_built = False
+        self.client = _FakeRollingClient()
+
+    def _spy_factory(self) -> RollingOptionAdapter:
+        self.adapter_built = True
+        return RollingOptionAdapter(client=self.client)
 
     def __call__(self, request: DhanPullRequest) -> DhanRollingOptionPullReport:
         self.request = request
-        keys = enumerate_rolling_option_keys(band=0)  # 48 keys — fast
-        ingest = run_dhan_rolling_option_pull(
-            lake_root=request.lake_root,
-            adapter=RollingOptionAdapter(client=_FakeRollingClient()),
-            keys=keys,
-            start=request.start,
-            end=request.end,
-        )
-        self.done.set()
-        return DhanRollingOptionPullReport(ingest=ingest, dry_run=request.dry_run)
+        try:
+            # band=0 → 48 keys (fast if ever WET); the dry-run branch never fetches.
+            return default_dhan_rolling_option_pull(
+                request, adapter_factory=self._spy_factory, band=0
+            )
+        finally:
+            self.done.set()
 
 
 @pytest.fixture
@@ -120,9 +137,20 @@ def client(store: InstrumentStore, fake_pull: _FakeRollingPull) -> Iterator[Test
 
 
 class TestDhanRollingPullRoute:
-    def test_dry_run_pulls_into_rolling_options(
+    def test_dry_run_is_offline_and_writes_nothing(
         self, client: TestClient, fake_pull: _FakeRollingPull, tmp_path: Path
     ) -> None:
+        """HONEST dry-run: plan-only — NO adapter build, NO vendor call, NO write, NO AWS.
+
+        Drives the REAL ``default_dhan_rolling_option_pull`` seam (via the injected
+        fake's SPY ``adapter_factory``), so the route → production → dry-run
+        short-circuit runs end-to-end OFFLINE. The credential gate short-circuits on
+        ``dry_run`` and the rolling job start skips the cross-process guards
+        (``cross_process_lock=False``), so the dry-run never resolves an SSM/AWS
+        credential and never fires a vendor call — it returns the honest planned-keys
+        report and writes nothing (Golden Rule #1). This SUPERSEDES the stale
+        "dry-run pulls into rolling_options" assertion (a dry-run must never write).
+        """
         resp = client.post("/api/v1/universe/pull-rolling-options-dhan", params={"dry_run": True})
         assert resp.status_code == 200
         body = resp.json()
@@ -133,12 +161,13 @@ class TestDhanRollingPullRoute:
         assert fake_pull.done.wait(timeout=10.0)
         assert fake_pull.request is not None
         assert fake_pull.request.lake_root == tmp_path
-        # Bars land under feeds/dhan/rolling_options/ — Groww top lake untouched.
-        rolling_root = tmp_path / "feeds" / "dhan" / "rolling_options"
-        assert rolling_root.is_dir()
+        assert fake_pull.request.dry_run is True
+        # The real seam short-circuited: NO adapter build, NO vendor call.
+        assert fake_pull.adapter_built is False
+        assert fake_pull.client.calls == 0
+        # A dry-run writes NOTHING — neither the Dhan feed tree nor the Groww top lake.
+        assert not (tmp_path / "feeds").exists()
         assert not (tmp_path / "bars").exists()
-        # An ATM±N selector path — NO date, NO absolute strike segment.
-        assert (rolling_root / "NSE" / "NIFTY" / "WEEK" / "EC0" / "ATM" / "CALL").is_dir()
 
     def test_market_hours_exempt(
         self,
