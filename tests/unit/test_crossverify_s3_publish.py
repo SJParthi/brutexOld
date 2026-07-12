@@ -59,13 +59,12 @@ class TestBuildRealClient:
     def test_missing_boto3_raises_backend_unavailable(self) -> None:
         # boto3 is deliberately NOT installed (the optional `crossverify`
         # extra, never in CI); the factory must name it loudly.
-        try:
-            import boto3  # noqa: F401
-        except ImportError:
-            with pytest.raises(S3BackendUnavailable, match="crossverify"):
-                build_real_s3_client("ap-south-1")
-        else:  # pragma: no cover — boto3 present only in an operator env
+        import importlib.util
+
+        if importlib.util.find_spec("boto3") is not None:  # pragma: no cover
             pytest.skip("boto3 installed — the missing-extra arm is not testable here")
+        with pytest.raises(S3BackendUnavailable, match="crossverify"):
+            build_real_s3_client("ap-south-1")
 
 
 class TestPublishStaged:
@@ -74,9 +73,7 @@ class TestPublishStaged:
         _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"a\n")
         _stage(tmp_path, journal, "p/NSE_EQ/M&M.csv", b"b\n")
         client = FakeS3Client()
-        outcome = publish_staged(
-            client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert (outcome.attempted, outcome.published, outcome.failed_count) == (2, 2, 0)
         assert outcome.skipped_already == 0
         assert outcome.aborted_nonretryable is False
@@ -99,9 +96,7 @@ class TestPublishStaged:
         _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"a\n")
         client = FakeS3Client()
         publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
-        rerun = publish_staged(
-            client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        rerun = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert (rerun.attempted, rerun.published) == (0, 0)
         assert rerun.skipped_already == 1
         assert len(client.puts) == 1  # ZERO extra puts
@@ -146,9 +141,7 @@ class TestPublishStaged:
         for name in ("a", "b", "c"):
             _stage(tmp_path, journal, f"p/IDX_I/{name}.csv", b"x\n")
         client = FakeS3Client(nonretryable=frozenset({"p/IDX_I/a.csv"}))
-        outcome = publish_staged(
-            client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert outcome.aborted_nonretryable is True
         # The aborting key + every not-yet-attempted pending key count failed.
         assert outcome.failed_count == 3
@@ -161,9 +154,7 @@ class TestPublishStaged:
         for key in keys:
             _stage(tmp_path, journal, key, b"x\n")
         client = FakeS3Client(nonretryable=frozenset({keys[0]}))
-        outcome = publish_staged(
-            client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert outcome.failed_count == len(keys)
         assert len(outcome.failed_keys) == FAILED_KEYS_CAP
 
@@ -172,9 +163,7 @@ class TestPublishStaged:
         journal.mark_staged("p/IDX_I/GONE.csv", "sha", 2)  # never staged on disk
         _stage(tmp_path, journal, "p/IDX_I/NIFTY.csv", b"a\n")
         client = FakeS3Client()
-        outcome = publish_staged(
-            client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        outcome = publish_staged(client=client, bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert outcome.published == 1
         assert outcome.failed_count == 1
         assert outcome.failed_keys == ("p/IDX_I/GONE.csv",)
@@ -191,9 +180,7 @@ class TestPublishStaged:
             original_save(self, lake_root)
 
         journal.save = _spy_save.__get__(journal)  # type: ignore[method-assign]
-        publish_staged(
-            client=FakeS3Client(), bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        publish_staged(client=FakeS3Client(), bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert saves == [JOURNAL_SAVE_EVERY, JOURNAL_SAVE_EVERY + 1]
 
     def test_publish_then_journal_ordering_crash_converges(self, tmp_path: Path) -> None:
@@ -244,7 +231,5 @@ class TestPublishStaged:
     def test_journal_file_not_rewritten_when_nothing_published(self, tmp_path: Path) -> None:
         journal = _journal()
         journal.mark_staged("p/IDX_I/GONE.csv", "sha", 2)  # missing staged file only
-        publish_staged(
-            client=FakeS3Client(), bucket=_BUCKET, journal=journal, lake_root=tmp_path
-        )
+        publish_staged(client=FakeS3Client(), bucket=_BUCKET, journal=journal, lake_root=tmp_path)
         assert not journal_path(tmp_path, _DAY).exists()  # no dirty save

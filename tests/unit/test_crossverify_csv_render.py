@@ -127,7 +127,9 @@ class TestRenderDayCsv:
             rows=[_row(9, 15, price="24300.00", volume=5, oi=0)],
             session=_DAY_SESSION,
         )
-        assert body.endswith(b"NIFTY-2026-07-30-FUT,2026-07-10 09:15:00,24300.00,24300.00,24300.00,24300.00,5,0\n")
+        assert body.endswith(
+            b"NIFTY-2026-07-30-FUT,2026-07-10 09:15:00,24300.00,24300.00,24300.00,24300.00,5,0\n"
+        )
 
     def test_no_quote_ever(self) -> None:
         body = render_day_csv(
@@ -156,7 +158,7 @@ class TestRefusals:
 
     def test_naive_timestamp(self) -> None:
         row = ExportRow(
-            ts_utc=datetime(2026, 7, 10, 3, 45),  # noqa: DTZ001 — the refusal under test
+            ts_utc=datetime(2026, 7, 10, 3, 45),
             open=Decimal("1"),
             high=Decimal("1"),
             low=Decimal("1"),
@@ -170,15 +172,11 @@ class TestRefusals:
     @pytest.mark.parametrize("bad", ["0.00", "-1.00", "NaN", "Infinity"])
     def test_bad_price(self, bad: str) -> None:
         with pytest.raises(ExportContractError, match="finite positive price"):
-            render_day_csv(
-                identity=_identity(), rows=[_row(price=bad)], session=_DAY_SESSION
-            )
+            render_day_csv(identity=_identity(), rows=[_row(price=bad)], session=_DAY_SESSION)
 
     def test_negative_volume(self) -> None:
         with pytest.raises(ExportContractError, match="negative volume"):
-            render_day_csv(
-                identity=_identity(), rows=[_row(volume=-1)], session=_DAY_SESSION
-            )
+            render_day_csv(identity=_identity(), rows=[_row(volume=-1)], session=_DAY_SESSION)
 
     def test_spot_with_oi_refused(self) -> None:
         with pytest.raises(ExportContractError, match="spot row carries oi"):

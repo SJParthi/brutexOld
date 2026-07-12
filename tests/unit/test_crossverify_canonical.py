@@ -25,8 +25,9 @@ from brutex.universe import V1_INDICES
 class TestIndexMapping:
     def test_allowlist_is_exactly_the_three_indices(self) -> None:
         # Mirror-pinned against V1_INDICES minus reference-only (design §1.3).
-        assert EXPORT_INDEX_COORDS == frozenset(
-            {("NSE", "NIFTY"), ("NSE", "BANKNIFTY"), ("BSE", "SENSEX")}
+        assert (
+            frozenset({("NSE", "NIFTY"), ("NSE", "BANKNIFTY"), ("BSE", "SENSEX")})
+            == EXPORT_INDEX_COORDS
         )
 
     def test_v1_indices_cross_check(self) -> None:
@@ -35,7 +36,7 @@ class TestIndexMapping:
             for spec in V1_INDICES
             if not spec.reference_only
         }
-        assert EXPORT_INDEX_COORDS == frozenset(derived)
+        assert frozenset(derived) == EXPORT_INDEX_COORDS
 
     def test_nifty(self) -> None:
         identity = canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="NIFTY")
@@ -149,23 +150,19 @@ class TestFuturesMapping:
 
     def test_exchange_dir_mismatch_excluded(self) -> None:
         assert (
-            canonical_identity(
-                exchange="BSE", segment="FNO", lake_symbol="NSE-NIFTY-30Jul26-FUT"
-            )
+            canonical_identity(exchange="BSE", segment="FNO", lake_symbol="NSE-NIFTY-30Jul26-FUT")
             is None
         )
 
     def test_unmapped_fno_exchange_excluded(self) -> None:
         # parse succeeds (any leading token), but only NSE/BSE mint a token.
         assert (
-            canonical_identity(
-                exchange="MCX", segment="FNO", lake_symbol="MCX-NIFTY-30Jul26-FUT"
-            )
+            canonical_identity(exchange="MCX", segment="FNO", lake_symbol="MCX-NIFTY-30Jul26-FUT")
             is None
         )
 
     def test_futures_allowlist(self) -> None:
-        assert EXPORT_FUTURES_UNDERLYINGS == frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
+        assert frozenset({"NIFTY", "BANKNIFTY", "SENSEX"}) == EXPORT_FUTURES_UNDERLYINGS
 
     def test_canonical_token_is_no_lake_namespace_collision(self) -> None:
         # The pinned collision check: the canonical token is NOT parseable as

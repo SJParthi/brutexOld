@@ -167,9 +167,7 @@ class TestLiveFutRows:
         assert all(r.side == "FUT" and r.expiry_date >= _DAY for r in rows)
 
     def test_expiry_day_contract_still_lives(self) -> None:
-        registry = _FakeRegistry(
-            rows=[_contract("NSE-NIFTY-10Jul26-FUT", side="FUT", expiry=_DAY)]
-        )
+        registry = _FakeRegistry(rows=[_contract("NSE-NIFTY-10Jul26-FUT", side="FUT", expiry=_DAY)])
         assert len(live_fut_rows(registry, day=_DAY)) == 1  # type: ignore[arg-type]
 
     def test_scope_is_nifty_banknifty(self) -> None:
@@ -238,7 +236,9 @@ class TestRunPullLeg:
         assert len(report.fut_contracts) == 2
 
     def test_market_hours_halt_in_spot_leg(self, tmp_path: Path) -> None:
-        report, spot, metadata, candles = _run(spot=_Spy(raise_market_hours=True), tmp_path=tmp_path)
+        report, _spot, metadata, candles = _run(
+            spot=_Spy(raise_market_hours=True), tmp_path=tmp_path
+        )
         assert report.halted is True
         assert report.halt_reason == "market_hours"
         assert report.spot_ok is False
@@ -296,9 +296,7 @@ class TestResolvePullers:
 class TestRunSettleRetry:
     def _affected(self) -> list[Any]:
         index = canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="NIFTY")
-        fut = canonical_identity(
-            exchange="NSE", segment="FNO", lake_symbol="NSE-NIFTY-30Jul26-FUT"
-        )
+        fut = canonical_identity(exchange="NSE", segment="FNO", lake_symbol="NSE-NIFTY-30Jul26-FUT")
         assert index is not None and fut is not None
         return [index, fut]
 
@@ -318,9 +316,7 @@ class TestRunSettleRetry:
         )
         assert [t.symbol_name for t in spot.calls[0]["args"][0]] == ["NIFTY"]
         assert spot.calls[0]["kwargs"]["to_date"] == "2026-07-10"
-        assert [r.contract_symbol for r in candles.calls[0]["args"][0]] == [
-            "NSE-NIFTY-30Jul26-FUT"
-        ]
+        assert [r.contract_symbol for r in candles.calls[0]["args"][0]] == ["NSE-NIFTY-30Jul26-FUT"]
         assert report.halted is False
         assert [r.contract_symbol for r in report.fut_contracts] == ["NSE-NIFTY-30Jul26-FUT"]
 

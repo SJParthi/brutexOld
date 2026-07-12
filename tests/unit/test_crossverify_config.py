@@ -96,9 +96,7 @@ class TestOverrides:
         assert cfg.catchup_days == 9
 
     def test_kill_switch_off(self) -> None:
-        cfg = resolve_crossverify_config(
-            lake_root=_LAKE, env={ENV_KILL_SWITCH: "OFF"}, day=_DAY
-        )
+        cfg = resolve_crossverify_config(lake_root=_LAKE, env={ENV_KILL_SWITCH: "OFF"}, day=_DAY)
         assert cfg.enabled is False
 
     def test_publish_env_off(self) -> None:

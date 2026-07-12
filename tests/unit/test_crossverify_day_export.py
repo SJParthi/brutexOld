@@ -39,7 +39,9 @@ _SESSION = TradingSession(
 )
 
 
-def _identity(segment: str = "INDEX", symbol: str = "NIFTY", exch: str = "NSE") -> CanonicalIdentity:
+def _identity(
+    segment: str = "INDEX", symbol: str = "NIFTY", exch: str = "NSE"
+) -> CanonicalIdentity:
     identity = canonical_identity(exchange=exch, segment=segment, lake_symbol=symbol)
     assert identity is not None
     return identity
@@ -172,7 +174,7 @@ class TestReadDayBars:
     def test_naive_stored_timestamp_is_retagged_utc(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.data.lake_day_glob as lake_day_glob
+        from brutex.data import lake_day_glob
 
         naive_frame = pl.DataFrame(
             {
@@ -233,8 +235,8 @@ class TestDecide:
         )
 
     def test_settle_retry_reason_sets(self) -> None:
-        assert SETTLE_RETRY_REASONS_INDEX == frozenset({"count_short", "last_bar_incomplete"})
-        assert SETTLE_RETRY_REASONS_FUT == frozenset({"oi_null_settling"})
+        assert frozenset({"count_short", "last_bar_incomplete"}) == SETTLE_RETRY_REASONS_INDEX
+        assert frozenset({"oi_null_settling"}) == SETTLE_RETRY_REASONS_FUT
 
 
 def _static_reader(bars: list[CandleBar]) -> DayFrameReader:
@@ -311,7 +313,9 @@ class TestExportSymbol:
         assert export.csv_bytes is None
 
     def test_genuine_code_bug_propagates(self) -> None:
-        def _buggy_reader(*, exchange: str, segment: str, symbol: str, day: date) -> list[CandleBar]:
+        def _buggy_reader(
+            *, exchange: str, segment: str, symbol: str, day: date
+        ) -> list[CandleBar]:
             raise KeyError("a code bug, not a data problem")
 
         with pytest.raises(KeyError):

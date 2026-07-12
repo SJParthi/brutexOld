@@ -175,8 +175,8 @@ class TestFailureIsolation:
             now_ist=_NOW_IST,
             materialize=_materialize,
             derive_daily=lambda **kw: None,
-            read_window_factory=lambda **kw: (lambda: None),
-            write_daily_factory=lambda **kw: (lambda bars: 0),
+            read_window_factory=lambda **kw: lambda: None,
+            write_daily_factory=lambda **kw: lambda bars: 0,
         )
         assert outcome.failed == len(coords)
         assert len(outcome.failed_names) == FAILED_NAMES_CAP
@@ -193,8 +193,8 @@ class TestFailureIsolation:
                 now_ist=_NOW_IST,
                 materialize=_materialize,
                 derive_daily=lambda **kw: None,
-                read_window_factory=lambda **kw: (lambda: None),
-                write_daily_factory=lambda **kw: (lambda bars: 0),
+                read_window_factory=lambda **kw: lambda: None,
+                write_daily_factory=lambda **kw: lambda bars: 0,
             )
 
 
@@ -243,9 +243,7 @@ class TestRealComposition:
         assert outcome == DeriveOutcome(derived=2, failed=0, failed_names=())
         # Derived intraday TFs landed month-bounded…
         assert (tmp_path / "bars/NSE/INDEX/NIFTY/2minute/2026/07.parquet").exists()
-        assert (
-            tmp_path / "bars/NSE/FNO/NSE-NIFTY-30Jul26-FUT/2minute/2026/07.parquet"
-        ).exists()
+        assert (tmp_path / "bars/NSE/FNO/NSE-NIFTY-30Jul26-FUT/2minute/2026/07.parquet").exists()
         # …the derived 1day landed (the completed session is before the
         # post-close cutoff)…
         assert (tmp_path / "bars/NSE/INDEX/NIFTY/1day/2026/07.parquet").exists()

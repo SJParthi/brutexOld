@@ -457,19 +457,24 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
 
         # ── K: stage + journal ─────────────────────────────────────────────
         if not config.dry_run:
+            # The comprehension's non-None narrowing is structural: the
+            # never-partial law (`csv_bytes is not None ⇔ publish`) is pinned
+            # at export_symbol — the filter narrows types, it drops nothing.
             publishable = sorted(
-                (e for e in exports.values() if e.disposition == "publish"),
-                key=lambda e: (e.identity.segment_token, e.identity.canonical_symbol),
+                (
+                    (e.identity, e.csv_bytes, e.sha256)
+                    for e in exports.values()
+                    if e.disposition == "publish"
+                    and e.csv_bytes is not None
+                    and e.sha256 is not None
+                ),
+                key=lambda item: (item[0].segment_token, item[0].canonical_symbol),
             )
             from brutex.data.atomic_io import atomic_write_via
 
             try:
-                for staged, export in enumerate(publishable, start=1):
-                    body = export.csv_bytes
-                    sha = export.sha256
-                    if body is None or sha is None:  # structurally impossible — belt
-                        raise AssertionError("publish disposition without bytes")
-                    dest = staging_path(config.lake_root, config.day, export.identity)
+                for staged, (identity, body, sha) in enumerate(publishable, start=1):
+                    dest = staging_path(config.lake_root, config.day, identity)
                     dest.parent.mkdir(parents=True, exist_ok=True)
 
                     def _write(tmp: Path, data: bytes = body) -> None:
@@ -477,7 +482,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
 
                     atomic_write_via(dest, _write)
                     journal.mark_staged(
-                        s3_key(prefix=config.key_prefix, day=config.day, identity=export.identity),
+                        s3_key(prefix=config.key_prefix, day=config.day, identity=identity),
                         sha,
                         len(body),
                     )
@@ -704,16 +709,22 @@ def default_seams(
 
         identities: list[CanonicalIdentity] = []
         excluded = 0
-        for spec in V1_INDICES:
-            if spec.reference_only:
-                continue
-            index_identity = canonical_identity(
-                exchange=spec.exchange.value, segment="INDEX", lake_symbol=spec.underlying_symbol
+        # The mapper mirrors V1_INDICES minus reference-only by construction
+        # (EXPORT_INDEX_COORDS derives from it), so every non-reference spec
+        # maps — the comprehension filter is the structural narrowing.
+        identities.extend(
+            identity
+            for spec in V1_INDICES
+            if not spec.reference_only
+            and (
+                identity := canonical_identity(
+                    exchange=spec.exchange.value,
+                    segment="INDEX",
+                    lake_symbol=spec.underlying_symbol,
+                )
             )
-            if index_identity is None:  # structurally impossible — mapper mirror
-                excluded += 1
-                continue
-            identities.append(index_identity)
+            is not None
+        )
         store = opener(db_path)
         try:
             stock_symbols = sorted(
