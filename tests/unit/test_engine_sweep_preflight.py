@@ -302,11 +302,15 @@ class TestSessionDensityNote:
 
     def _two_flag_note(self) -> SessionDensityNote:
         # Two symbols, each with the same interior hole -> exactly 2 flags
-        # in symbol-major order (AAA before BBB).
+        # in symbol-major order (AAA before BBB). Review round-6 (the #1594
+        # R4-2 anti-order precedent): BBB is deliberately inserted FIRST so
+        # the symbol-major contract is proven by `sorted(slices)`, never by
+        # dict insertion-order luck — the sorted-removal mutant renders the
+        # BBB line first and fails the AAA-first pin below.
         return preflight_session_density(
             {
-                ("AAA", "1minute"): self._holey_slice(),
                 ("BBB", "1minute"): self._holey_slice(),
+                ("AAA", "1minute"): self._holey_slice(),
             },
             today_ist=date(2026, 12, 31),
         )
@@ -364,10 +368,13 @@ class TestSessionDensityNote:
 
         monkeypatch.setattr(sweep_preflight_mod, "classify_session_density", _selective)
         slices = {
-            # sorted first -> the RAISING slice; continuation is proven by
-            # the later healthy slice still being censused + flagged.
-            ("AAA", "1minute"): self._minute_bars(date(2024, 1, 2), count=1),
+            # AAA sorts first -> the RAISING slice; continuation is proven by
+            # the later healthy slice still being censused + flagged. Review
+            # round-6 anti-order (the #1594 R4-2 precedent): NIFTY is
+            # deliberately inserted BEFORE AAA so the sorted-order claim never
+            # rides dict insertion-order luck.
             ("NIFTY", "1minute"): self._holey_slice(),
+            ("AAA", "1minute"): self._minute_bars(date(2024, 1, 2), count=1),
         }
         with capture_logs() as logs:
             note = preflight_session_density(slices, today_ist=date(2026, 12, 31))
