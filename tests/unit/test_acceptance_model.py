@@ -55,6 +55,11 @@ class TestSchemaTokens:
                     AbstainReason.NO_PER_CALL_PERSISTENCE,
                     AbstainReason.NO_PER_CALL_LOG,
                     AbstainReason.NO_OI_COMPARE_SEAM,
+                    # Round-8 (MIGRATION.md #1756): an ABSENT rotating-log sink
+                    # (headless / dashboard never run) is a standing by-design
+                    # gap, budget/streak-EXEMPT so it never turns a healthy
+                    # headless lake permanently amber.
+                    AbstainReason.NO_RATE_LOG_CONFIGURED,
                 }
             )
             == STRUCTURAL_ABSTAINS
@@ -72,6 +77,7 @@ class TestSchemaTokens:
             "no_fno_data",
             "no_ledger",
             "no_bridge_file",
+            "no_rate_log_configured",
             "no_rate_log_lines",
             "no_per_call_log",
             "no_dataset",
@@ -322,6 +328,40 @@ class TestOverallRollup:
         checks = [make_check("latency", [sub, _sub("ok", Verdict.PASS)], coverage=_cov())]
         overall = rollup_overall(checks, teeth=TeethVerdict.TEETH_PROVEN, abstain_budget=3)
         assert overall.exit_code == 4
+
+    def test_headless_absent_rate_log_streak_never_amber(self) -> None:
+        # Round-8: 3 sequential HEADLESS nights (no rotating-log sink) carry a
+        # NO_RATE_LOG_CONFIGURED abstain with an ever-growing streak. Because it
+        # is STRUCTURAL it must NEVER escalate a healthy lake to exit 4.
+        for streak in range(1, ABSTAIN_STREAK_LIMIT + 3):
+            sub = with_streak(
+                _sub(
+                    "rate.log_window",
+                    Verdict.ABSTAIN,
+                    units=0,
+                    reason=AbstainReason.NO_RATE_LOG_CONFIGURED,
+                ),
+                streak,
+            )
+            checks = [make_check("rate", [sub, _sub("ok", Verdict.PASS)], coverage=_cov())]
+            overall = rollup_overall(checks, teeth=TeethVerdict.TEETH_PROVEN, abstain_budget=0)
+            assert overall.exit_code == 0, f"headless streak {streak} must stay non-amber"
+            assert overall.abstain_subchecks_nonstructural == 0
+
+    def test_present_but_silent_rate_log_still_streak_amber(self) -> None:
+        # Round-8: the present-but-empty sink (NO_RATE_LOG_LINES) is a possible
+        # real problem — it stays NON-structural and DOES escalate at the streak
+        # limit, exactly like before the split.
+        sub = with_streak(
+            _sub(
+                "rate.log_window", Verdict.ABSTAIN, units=0, reason=AbstainReason.NO_RATE_LOG_LINES
+            ),
+            ABSTAIN_STREAK_LIMIT,
+        )
+        checks = [make_check("rate", [sub, _sub("ok", Verdict.PASS)], coverage=_cov())]
+        overall = rollup_overall(checks, teeth=TeethVerdict.TEETH_PROVEN, abstain_budget=3)
+        assert overall.exit_code == 4
+        assert overall.abstain_subchecks_nonstructural == 1
 
     def test_time_truncated_exit_4(self) -> None:
         checks = [make_check("unique", [_sub("s", Verdict.PASS)], coverage=_cov())]

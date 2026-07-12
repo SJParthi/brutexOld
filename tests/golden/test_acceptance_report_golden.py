@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from brutex.acceptance.run import RunConfig, run_acceptance
 
 from tests.fakes.acceptance_twin import NOW, make_twin
@@ -23,7 +25,8 @@ from tests.fakes.acceptance_twin import NOW, make_twin
 FIXTURE = Path(__file__).parent / "fixtures" / "acceptance_report_v1_golden.json"
 
 #: Evidence keys whose VALUES are wall-clock/box-volatile (names still pinned).
-_VOLATILE_EVIDENCE_KEYS = frozenset({"ledger_rss_kib_before", "ledger_rss_kib_after"})
+#: ``searched`` echoes the box-specific rotating-log sink path (round 8).
+_VOLATILE_EVIDENCE_KEYS = frozenset({"ledger_rss_kib_before", "ledger_rss_kib_after", "searched"})
 
 
 def _normalise(obj: Any) -> Any:
@@ -60,7 +63,14 @@ def _build_report(tmp_path: Path) -> dict[str, Any]:
 
 
 class TestReportGolden:
-    def test_normalised_report_matches_frozen_fixture(self, tmp_path: Path) -> None:
+    def test_normalised_report_matches_frozen_fixture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Pin the HEADLESS shape hermetically: no rotating structlog sink (a
+        # nightly-cron box never ran the dashboard) → rate.log_window abstains
+        # the structural ``no_rate_log_configured`` (round-8, MIGRATION #1756).
+        monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
+        monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path / "no-such-logs"))
         got = _normalise(_build_report(tmp_path))
         if os.environ.get("BRUTEX_REGEN_ACCEPTANCE_GOLDEN") == "1":  # pragma: no cover
             FIXTURE.parent.mkdir(parents=True, exist_ok=True)

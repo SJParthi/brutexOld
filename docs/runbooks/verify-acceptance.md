@@ -136,8 +136,18 @@ real check leg is either battery-toothed or named-unit-gate-killed there.
 | 4 | inconclusive — non-structural abstains > `--abstain-budget` (3), an abstain streak ≥3, or time-truncated | amber |
 
 Precedence 2 > 3 > 4 > 0. Structural abstains
-(`no_per_call_persistence`, `no_per_call_log`, `no_oi_compare_seam`) are
-budget/streak-exempt — the standing by-design gaps never go permanently amber.
+(`no_per_call_persistence`, `no_per_call_log`, `no_oi_compare_seam`,
+`no_rate_log_configured`) are budget/streak-exempt — the standing by-design
+gaps never go permanently amber.
+
+`rate.log_window` reads the rotating structlog sink that ONLY the dashboard
+enables. Two cases (round 8): the sink ABSENT ENTIRELY — a headless
+nightly-cron / CLI-fetch box (the motivating 01:30 case) where the dashboard
+never ran — is the STRUCTURAL `no_rate_log_configured` (exempt, so a healthy
+headless lake never goes permanently amber over it); a sink that EXISTS but
+holds no `rate.*` lines is a possible present-but-silent problem and stays the
+NON-structural, streak-TRACKED `no_rate_log_lines`. Run the dashboard to
+enable the file sink and gain a real `rate.log_window` verdict.
 
 ## 5. The report
 

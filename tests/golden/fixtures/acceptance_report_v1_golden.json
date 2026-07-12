@@ -290,18 +290,21 @@
      "verdict": "ABSTAIN"
     },
     {
-     "abstain_reason": "no_rate_log_lines",
+     "abstain_reason": "no_rate_log_configured",
      "abstain_streak": 1,
      "evidence": {
-      "reason": "no rate.* lines in the rotating log window",
+      "law": "only cmd_dashboard enables the structlog file sink; a nightly run / CLI fetch writes no rate.* sink \u2014 an absent sink is a by-design standing gap, not a nightly regression",
+      "reason": "no rotating log sink exists \u2014 headless / dashboard never run",
+      "searched": "<volatile>",
       "units_checked": 0
      },
      "id": "rate.log_window",
      "limits": [
-      "CLI fetch never writes this sink \u2014 dashboard pulls only"
+      "absent-by-design standing gap \u2014 structural, budget/streak-EXEMPT",
+      "run the dashboard to enable the file sink and gain a real verdict"
      ],
      "repro": "brutex verify-acceptance --checks rate --seed 2026-07-10",
-     "structural": false,
+     "structural": true,
      "verdict": "ABSTAIN"
     },
     {
@@ -375,8 +378,8 @@
   "seed_mode": "fixed"
  },
  "overall": {
-  "abstain_subchecks_nonstructural": 4,
-  "abstain_subchecks_structural": 3,
+  "abstain_subchecks_nonstructural": 3,
+  "abstain_subchecks_structural": 4,
   "error_checks": [],
   "exit_code": 0,
   "fail_checks": [],

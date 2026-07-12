@@ -9,6 +9,15 @@ PASS". ``rate.per_call_history`` is a PERMANENT structural ABSTAIN
 under operator ruling (it sits adjacent to the Python-locked fetch path).
 Live sampling is cross-referenced (``brutex doctor --live --stage 13``),
 never imported — the package carries the structural zero-vendor-call pin.
+
+``rate.log_window`` reads the rotating structlog JSON sink that ONLY
+``cmd_dashboard`` enables. It distinguishes two cases (round 8): the sink is
+ABSENT ENTIRELY (headless nightly-cron / CLI-fetch box — the dashboard never
+ran) is a STANDING STRUCTURAL gap ``no_rate_log_configured`` (budget/streak-
+EXEMPT, so a healthy headless lake never goes permanently amber over it);
+whereas a sink that EXISTS but holds no ``rate.*`` lines is a possible present-
+but-silent problem and stays the NON-structural, streak-TRACKED
+``no_rate_log_lines`` abstain.
 """
 
 from __future__ import annotations
@@ -190,22 +199,53 @@ def _bridge_sub(ctx: AcceptanceContext) -> Any:
     )
 
 
-def rate_log_paths() -> list[Path]:
-    """The rotating structlog JSON sink paths (env-overridable, house law)."""
+def rate_log_base() -> Path:
+    """The rotating structlog JSON sink BASE path (env-overridable, house law)."""
     explicit = os.environ.get("BRUTEX_LOG_FILE")
     if explicit:
-        base = Path(explicit)
-    else:
-        log_dir = Path(os.environ.get("BRUTEX_LOG_DIR", str(Path.home() / ".brutex" / "logs")))
-        base = log_dir / "brutex.log"
+        return Path(explicit)
+    log_dir = Path(os.environ.get("BRUTEX_LOG_DIR", str(Path.home() / ".brutex" / "logs")))
+    return log_dir / "brutex.log"
+
+
+def rate_log_paths() -> list[Path]:
+    """The rotating structlog JSON sink paths (env-overridable, house law)."""
+    base = rate_log_base()
     return sorted(base.parent.glob(base.name + "*")) if base.parent.is_dir() else []
 
 
 def _log_window_sub(ctx: AcceptanceContext) -> Any:
+    paths = rate_log_paths()
+    if not paths:
+        # CASE (1): the rotating structlog sink is ABSENT ENTIRELY. Only
+        # ``cmd_dashboard`` enables the file sink; a headless nightly-cron /
+        # CLI-fetch box (the MOTIVATING 01:30 case) writes no rate.* sink by
+        # design. This is a STANDING STRUCTURAL gap identical in kind to
+        # ``rate.per_call_history`` — budget/streak-EXEMPT — so an absent-by-
+        # design sink can never turn a healthy headless lake permanently amber
+        # (round-8 refuter observation). NOT the present-but-empty case below.
+        return make_subcheck(
+            "rate.log_window",
+            Verdict.ABSTAIN,
+            units_checked=0,
+            evidence={
+                "reason": "no rotating log sink exists — headless / dashboard never run",
+                "searched": str(rate_log_base()),
+                "law": "only cmd_dashboard enables the structlog file sink; a nightly "
+                "run / CLI fetch writes no rate.* sink — an absent sink is a "
+                "by-design standing gap, not a nightly regression",
+            },
+            abstain_reason=AbstainReason.NO_RATE_LOG_CONFIGURED,
+            limits=[
+                "absent-by-design standing gap — structural, budget/streak-EXEMPT",
+                "run the dashboard to enable the file sink and gain a real verdict",
+            ],
+            repro=_repro(ctx),
+        )
     rate_lines = 0
     over: list[str] = []
     histogram: dict[str, int] = {}
-    for path in rate_log_paths():
+    for path in paths:
         try:
             lines, _read, _size = tail_lines(path)
         except OSError:
@@ -227,13 +267,19 @@ def _log_window_sub(ctx: AcceptanceContext) -> Any:
             ):
                 over.append(line[:200])
     if rate_lines == 0:
+        # CASE (2): the sink file(s) EXIST but hold no parseable rate.* lines in
+        # the window. This could indicate a real problem (a present-but-silent
+        # log), so it stays the NON-structural, streak-TRACKED abstain.
         return make_subcheck(
             "rate.log_window",
             Verdict.ABSTAIN,
             units_checked=0,
-            evidence={"reason": "no rate.* lines in the rotating log window"},
+            evidence={
+                "reason": "no rate.* lines in the rotating log window",
+                "sink_files": [str(p) for p in paths[:ROW_CAP]],
+            },
             abstain_reason=AbstainReason.NO_RATE_LOG_LINES,
-            limits=["CLI fetch never writes this sink — dashboard pulls only"],
+            limits=["sink present but silent — TRACKED (streak-counted), not a standing gap"],
             repro=_repro(ctx),
         )
     return make_subcheck(

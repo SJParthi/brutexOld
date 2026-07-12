@@ -164,7 +164,26 @@ class TestBridge:
 
 
 class TestLogWindow:
+    def test_headless_no_sink_structural_abstain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CASE (1): the rotating structlog sink is ABSENT ENTIRELY (headless /
+        # nightly-cron box — the dashboard never ran). A perfectly healthy lake
+        # must NOT go permanently amber over this: the abstain is STRUCTURAL,
+        # budget/streak-EXEMPT (round-8, MIGRATION #1756).
+        monkeypatch.delenv("BRUTEX_LOG_FILE", raising=False)
+        monkeypatch.setenv("BRUTEX_LOG_DIR", str(tmp_path / "no-such-logs"))
+        lake = make_twin(tmp_path)
+        sub = _sub(rate.run(make_ctx(lake)), "rate.log_window")
+        assert sub.verdict is Verdict.ABSTAIN
+        assert sub.abstain_reason is AbstainReason.NO_RATE_LOG_CONFIGURED
+        assert sub.structural is True
+        assert sub.evidence["searched"].endswith("brutex.log")
+
     def test_no_rate_lines_abstains(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # CASE (2): the sink FILE exists but holds no parseable rate.* lines —
+        # a possible present-but-silent problem, so it stays NON-structural
+        # (streak-TRACKED), unchanged from before the split.
         log = tmp_path / "logs" / "brutex.log"
         log.parent.mkdir(parents=True)
         log.write_text('{"event": "other.event"}\nnot-json\n', encoding="utf-8")
@@ -172,6 +191,8 @@ class TestLogWindow:
         lake = make_twin(tmp_path)
         sub = _sub(rate.run(make_ctx(lake)), "rate.log_window")
         assert sub.abstain_reason is AbstainReason.NO_RATE_LOG_LINES
+        assert sub.structural is False
+        assert sub.evidence["sink_files"] == [str(log)]
 
     def test_within_cap_lines_pass_with_histogram(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

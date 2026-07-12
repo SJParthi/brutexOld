@@ -81,6 +81,7 @@ class AbstainReason(StrEnum):
     NO_FNO_DATA = "no_fno_data"
     NO_LEDGER = "no_ledger"
     NO_BRIDGE_FILE = "no_bridge_file"
+    NO_RATE_LOG_CONFIGURED = "no_rate_log_configured"
     NO_RATE_LOG_LINES = "no_rate_log_lines"
     NO_PER_CALL_LOG = "no_per_call_log"
     NO_DATASET = "no_dataset"
@@ -96,13 +97,18 @@ class AbstainReason(StrEnum):
 
 #: Abstain reasons EXEMPT from the ``--abstain-budget`` + streak laws: standing
 #: BY-DESIGN gaps (a per-call rate log does not exist — follow-up F3 under
-#: operator ruling; derived-F&O OI is not value-compared in v1 — follow-up F2).
+#: operator ruling; derived-F&O OI is not value-compared in v1 — follow-up F2;
+#: the rotating structlog file sink exists ONLY when ``cmd_dashboard`` ran, so a
+#: headless nightly-cron / CLI-fetch box has NO sink by design — an absent sink
+#: is a standing gap identical in kind to per_call_history, NOT a nightly
+#: regression, so it can never turn a healthy headless lake permanently amber).
 #: Frozen — extending this set is a ledgered decision, never a convenience.
 STRUCTURAL_ABSTAINS: Final[frozenset[AbstainReason]] = frozenset(
     {
         AbstainReason.NO_PER_CALL_PERSISTENCE,
         AbstainReason.NO_PER_CALL_LOG,
         AbstainReason.NO_OI_COMPARE_SEAM,
+        AbstainReason.NO_RATE_LOG_CONFIGURED,
     }
 )
 

@@ -29,7 +29,9 @@ cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-
 full battery, the frozen `brutex-acceptance-report-v1` machine+human report under
 `<lake>/acceptance/<run_id>/` (atomic LATEST pointer + SweepAuditWriter hash chain + run-over-run
 deltas/abstain streaks carried in the report chain), verify-family exits 0/1/2/3/4 (precedence
-2>3>4>0; structural abstains {no_per_call_persistence, no_per_call_log, no_oi_compare_seam} are
+2>3>4>0; structural abstains {no_per_call_persistence, no_per_call_log, no_oi_compare_seam,
+no_rate_log_configured — the last splits an ABSENT rotating-log sink (headless / dashboard never
+run) from a present-but-silent one so a healthy headless lake never goes permanently amber} are
 budget/streak-EXEMPT so the standing by-design gaps never turn the nightly permanently amber).
 ADDITIVE ONLY — NEW `brutex/acceptance/` package + thin CLI shim + ci.yml/mutation.yml gates;
 ZERO edits to serving paths/engine/pull/movers/db_view/ledger/doctor; compose-never-reimplement
