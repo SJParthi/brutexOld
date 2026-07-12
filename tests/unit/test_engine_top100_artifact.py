@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from brutex import ranking
@@ -961,8 +961,8 @@ class TestCascadeJoinAtWriter:
 
         def _strip_entry(entry: dict[str, object]) -> dict[str, object]:
             out = {k: v for k, v in entry.items() if k != "cascade"}
-            metrics = dict(out["metrics"])  # type: ignore[arg-type]
-            exits = dict(metrics["exits"])  # type: ignore[arg-type]
+            metrics = dict(cast("dict[str, object]", out["metrics"]))
+            exits = dict(cast("dict[str, object]", metrics["exits"]))
             assert exits.pop("session_gap") == 0  # the #1743 zero-count delta
             metrics["exits"] = exits
             out["metrics"] = metrics
