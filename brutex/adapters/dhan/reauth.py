@@ -44,7 +44,7 @@ import contextlib
 import fcntl
 import os
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -332,7 +332,7 @@ class DhanTokenManager:
         caller) is the one renewed.
         """
         current = self._current
-        assert current is not None  # noqa: S101  # guaranteed by the caller's `self._current is not None`
+        assert current is not None  # noqa: S101  # nosec B101 — guaranteed by the caller's `self._current is not None`
         try:
             minted = run_with_deadline(
                 lambda: renew_access_token(
@@ -430,7 +430,7 @@ class DhanTokenManager:
 
     def _require_lockdown(self) -> DhanAuthLockdown:
         """Return the latched lockdown (set by :meth:`_latch_lockdown`); asserts it is present."""
-        assert self._lockdown is not None  # noqa: S101  # set immediately before this call
+        assert self._lockdown is not None  # noqa: S101  # nosec B101 — set immediately before this call
         return self._lockdown
 
     def _latch_lockdown(self, reason: str, detail: str) -> None:
@@ -451,7 +451,7 @@ class DhanTokenManager:
             self._audit.record(action, subject=subject, **payload)
 
     @contextlib.contextmanager
-    def _advisory_lock(self) -> Iterator[None]:
+    def _advisory_lock(self) -> Generator[None, None, None]:
         """Hold the cross-process advisory ``flock`` around the mint decision (kernel-released).
 
         A blocking exclusive ``flock`` on the sidecar so two BruteX processes sharing the lake

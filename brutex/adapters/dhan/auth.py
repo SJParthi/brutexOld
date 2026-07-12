@@ -131,7 +131,7 @@ class _UrllibTransport:  # pragma: no cover — real network
         import urllib.request
 
         req = urllib.request.Request(url, headers=dict(headers), method=method)  # noqa: S310  # https only (constant hosts)
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310 — https only, constant Dhan hosts
             body = resp.read().decode("utf-8")
         return _parse_json_object(body)
 
