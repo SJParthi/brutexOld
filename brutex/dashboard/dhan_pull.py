@@ -384,6 +384,18 @@ def default_dhan_spot_pull(
     ``feeds/dhan/``, and — only on a CLEAN spot phase (``failed_windows == 0``) — runs
     the derived-timeframe prebuild bound to ``dhan_root``.
 
+    **Dry-run is HONEST (Golden Rule #1).** When ``request.dry_run`` is set the seam
+    short-circuits AFTER resolving the securityId map: it does **NOT** build the real
+    adapter (no AWS SSM / ``dhanhq`` SDK), issues **NO** vendor call, and writes
+    **NOTHING** (neither spot bars nor derived timeframes), so the
+    :class:`DhanPullRequest` ``dry_run`` docstring's "no vendor call — honestly writes
+    nothing real" is literally true. The returned :class:`DhanPullReport` carries a
+    zero-outcome spot report (``total_bars=0``, ``failed_windows=0``) with the
+    resolved / unresolved symbols the run WOULD pull, and ``prebuild=None`` (nothing
+    derived), so the route payload reads "would pull the resolved indices over
+    ``[start, end)``; no vendor call, nothing written". *adapter_factory* and
+    *materialize* are never invoked on this path.
+
     The resolve → pull → prebuild-GATE → prebuild orchestration itself is fully
     fake-driven: a test injects *adapter_factory* (a fetch fake) + *materialize* (a
     derive-seam fake) over a temp lake root, so both gate branches are covered offline;
@@ -398,11 +410,32 @@ def default_dhan_spot_pull(
     adapter_factory
         Builds the Dhan :class:`~brutex.adapters.dhan.ingest.FetchOhlcv` adapter from the
         resolved ``{symbol → securityId}`` map (default the real SSM/``dhanhq`` build).
+        Never called on the ``dry_run`` path.
     materialize
         The derived-timeframe materialise seam threaded into the prebuild (default the
         SHARED :func:`~brutex.data.timeframe_materialize.materialize_lake_timeframes`).
+        Never called on the ``dry_run`` path.
     """
     resolution = resolve_dhan_spot_security_ids()
+    if request.dry_run:
+        # HONEST offline pass: resolve the ids ONLY — no adapter build, no vendor call,
+        # no write, no prebuild (Golden Rule #1). Zero outcomes ⇒ total_bars=0,
+        # failed_windows=0; the resolved / unresolved symbols carry the "would pull"
+        # plan. adapter_factory + materialize are never invoked on this path.
+        dry_spot = DhanIngestReport(
+            outcomes=(),
+            resolved_symbols=tuple(resolution.security_ids),
+            unresolved_symbols=resolution.unresolved,
+        )
+        _LOG.info(
+            "dhan.spot.pull_dry_run",
+            resolved=len(resolution.security_ids),
+            unresolved=len(resolution.unresolved),
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=True,
+        )
+        return DhanPullReport(spot=dry_spot, prebuild=None, dry_run=True)
     adapter = adapter_factory(security_ids=resolution.security_ids)
     spot = run_dhan_spot_pull(
         lake_root=request.lake_root,

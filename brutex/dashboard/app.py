@@ -4844,6 +4844,14 @@ def build_app(
         ``market_hours_exempt`` because Dhan uses its OWN account (the 08:45-15:35 NSE
         guard exists only to free the SHARED Groww account for TickVault → the Dhan
         pull passes ``market_closed=None``).
+
+        A ``dry_run`` start is fully OFFLINE (Golden Rule #1): the production seam
+        (:func:`~brutex.dashboard.dhan_pull.default_dhan_spot_pull`) short-circuits
+        after resolving the securityId map — it builds NO adapter, loads NO AWS
+        credentials, issues NO vendor call, and writes nothing — so the start skips the
+        cross-process guards (``cross_process_lock=False``, the ``_greeks_backfill_job``
+        dry-run precedent), meaning a dry-run never resolves the account-lock key from
+        AWS. The WET run keeps the cross-process lock.
         """
         refusal = gate_pull_credentials(
             dry_run_requested=dry_run, credentials_error=dhan_credentials_error
@@ -4887,6 +4895,12 @@ def build_app(
             _work,
             total=len(DHAN_SPOT_INDEX_SYMBOLS),
             detail=detail,
+            # A DRY-RUN is fully OFFLINE: the real seam short-circuits after resolving
+            # the securityId map (no adapter build, no vendor call, no write), so it
+            # needs NO cross-process guards — skipping them means the dry-run never
+            # resolves the account-lock key from AWS (the `_greeks_backfill_job`
+            # dry-run precedent). The WET run keeps the cross-process lock.
+            cross_process_lock=not dry_run,
             market_hours_exempt=True,
         )
         return {

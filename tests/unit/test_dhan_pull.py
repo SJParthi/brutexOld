@@ -314,11 +314,61 @@ def test_default_dhan_spot_pull_failed_phase_skips_prebuild(tmp_path: Path) -> N
         materialize_calls.append(kwargs)
         return MaterializeResult(written={}, skipped=())
 
+    # A REAL (wet) pull — a dry_run would short-circuit before fetching, so this gate
+    # branch is exercised with dry_run=False.
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=True
+        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=False
     )
     report = default_dhan_spot_pull(request, adapter_factory=_factory, materialize=_spy_materialize)
     assert report.spot_phase_ok is False
     assert report.prebuild is None
     assert materialize_calls == []  # prebuild never ran
+    assert report.dry_run is False
+
+
+def test_default_dhan_spot_pull_dry_run_builds_no_adapter_and_calls_no_vendor(
+    tmp_path: Path,
+) -> None:
+    """HONEST dry-run: no adapter build, no vendor call, no prebuild, no write — Golden Rule #1."""
+    built: list[FetchOhlcv] = []
+    adapter = _FakeAdapter(_all_indices_script([_bar()]))
+    materialize_calls: list[object] = []
+
+    def _spy_factory(**kwargs: object) -> FetchOhlcv:
+        _ = kwargs  # security_ids=...
+        built.append(adapter)
+        return adapter
+
+    def _spy_materialize(**kwargs: object) -> MaterializeResult:
+        materialize_calls.append(kwargs)
+        return MaterializeResult(written={}, skipped=())
+
+    request = DhanPullRequest(
+        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=True
+    )
+    report = default_dhan_spot_pull(
+        request, adapter_factory=_spy_factory, materialize=_spy_materialize
+    )
+    # The adapter_factory + materialize seams were NEVER invoked, and NO vendor call
+    # was issued (the fake adapter's per-symbol call log stays empty).
+    assert built == []
+    assert adapter.calls == []
+    assert materialize_calls == []
+    # An HONEST report: dry_run true, zero bars/failures, prebuild gated off (None).
     assert report.dry_run is True
+    assert report.spot.total_bars == 0
+    assert report.spot.failed_windows == 0
+    assert report.spot.outcomes == ()
+    assert report.prebuild is None
+    # The resolved / unresolved symbols carry the honest "would pull" plan.
+    resolution = resolve_dhan_spot_security_ids()
+    assert set(report.spot.resolved_symbols) == set(resolution.security_ids)
+    assert report.spot.unresolved_symbols == resolution.unresolved
+    # Nothing written to the lake (no feeds/ tree, no top bars/).
+    assert not (tmp_path / "feeds").exists()
+    assert not (tmp_path / "bars").exists()
+    # The route payload is honest too.
+    payload = report.to_dict()
+    assert payload["dry_run"] is True
+    assert payload["spot"]["total_bars"] == 0  # type: ignore[index]
+    assert payload["prebuild"] is None

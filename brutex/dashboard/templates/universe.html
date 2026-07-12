@@ -1597,8 +1597,8 @@ if (PIPELINE_BTN) {
 /* ── DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001): posts the standalone Dhan
    route (feeds/dhan/), reusing the from/to picker. It does NOT drive the shared
    Groww progress panel (that polls the Groww _pull_job) — the Dhan job carries its
-   own progress; wiring it into the shared panel is the named follow-up
-   DEC-DHAN-PULL-PROGRESS-001. So this shows a one-line textContent status instead.
+   own progress; wiring it into the shared panel is a named follow-up (not yet
+   ledgered). So this shows a one-line textContent status instead.
    textContent-only (no innerHTML of any response value) — XSS-safe. ── */
 const DHAN_BTN = document.getElementById("pullDhanBtn");
 if (DHAN_BTN) {

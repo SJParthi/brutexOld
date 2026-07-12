@@ -33,13 +33,13 @@ from brutex.dashboard.app import (
     build_app,
 )
 from brutex.dashboard.dhan_pull import (
-    DhanPrebuildOutcome,
     DhanPullReport,
     DhanPullRequest,
-    run_dhan_spot_pull,
+    default_dhan_spot_pull,
 )
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.models import CandleBar
+from brutex.data.timeframe_materialize import MaterializeResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
 
@@ -90,10 +90,16 @@ def _bar() -> CandleBar:
 
 
 class _FakeAdapter:
+    """A fetch adapter that COUNTS calls — proves a dry-run issues zero vendor calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
     def fetch_ohlcv(
         self, *, symbol: str, exchange: Any, interval: str, start: date, end: date
     ) -> list[CandleBar]:
         _ = (symbol, exchange, interval, start, end)
+        self.calls += 1
         return [_bar()]
 
 
@@ -102,30 +108,44 @@ def _no_filter(bars: list[CandleBar]) -> SimpleNamespace:
 
 
 class _FakeDhanPull:
-    """An injected ``dhan_spot_pull`` seam that writes a synthetic bar into feeds/dhan/."""
+    """An injected ``dhan_spot_pull`` seam that DELEGATES to the REAL production
+    ``default_dhan_spot_pull`` with a SPY ``adapter_factory`` + a SPY ``materialize``.
+
+    So the route → production → dry-run short-circuit chain runs end-to-end OFFLINE:
+    on ``dry_run`` the real seam resolves the securityId map and returns a zero-outcome
+    report WITHOUT building an adapter (``adapter_built`` stays ``False``), issuing a
+    vendor call (``client.calls`` stays 0), materialising, or writing. No AWS is ever
+    touched — the spy ``adapter_factory`` stands in for the real SSM/``dhanhq`` build,
+    which is never invoked on the dry-run path.
+    """
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.request: DhanPullRequest | None = None
+        self.adapter_built = False
+        self.materialize_calls = 0
+        self.client = _FakeAdapter()
+
+    def _spy_factory(self, **kwargs: Any) -> _FakeAdapter:
+        _ = kwargs  # security_ids=...
+        self.adapter_built = True
+        return self.client
+
+    def _spy_materialize(self, **kwargs: Any) -> MaterializeResult:
+        _ = kwargs
+        self.materialize_calls += 1
+        return MaterializeResult(written={}, skipped=())
 
     def __call__(self, request: DhanPullRequest) -> DhanPullReport:
         self.request = request
-        spot = run_dhan_spot_pull(
-            lake_root=request.lake_root,
-            adapter=_FakeAdapter(),
-            security_ids={"NIFTY": 13},
-            start=request.start,
-            end=request.end,
-            symbols=["NIFTY"],
-            session_filter=_no_filter,
-        )
-        report = DhanPullReport(
-            spot=spot,
-            prebuild=DhanPrebuildOutcome(materialized={"NIFTY": 20}, failed={}),
-            dry_run=request.dry_run,
-        )
-        self.done.set()
-        return report
+        try:
+            return default_dhan_spot_pull(
+                request,
+                adapter_factory=self._spy_factory,
+                materialize=self._spy_materialize,
+            )
+        finally:
+            self.done.set()
 
 
 @pytest.fixture
@@ -142,22 +162,37 @@ def client(store: InstrumentStore, fake_pull: _FakeDhanPull) -> Iterator[TestCli
 
 
 class TestDhanPullRoute:
-    def test_dry_run_pulls_into_feeds_dhan(
+    def test_dry_run_is_offline_and_writes_nothing(
         self, client: TestClient, fake_pull: _FakeDhanPull, tmp_path: Path
     ) -> None:
+        """HONEST dry-run: plan-only — NO adapter build, NO vendor call, NO write, NO AWS.
+
+        Drives the REAL ``default_dhan_spot_pull`` seam (via the injected fake's SPY
+        ``adapter_factory``), so the route → production → dry-run short-circuit runs
+        end-to-end OFFLINE. The credential gate short-circuits on ``dry_run`` and the
+        spot job start skips the cross-process guards (``cross_process_lock=False``), so
+        the dry-run never resolves an SSM/AWS credential and never fires a vendor call —
+        it returns the honest zero-outcome report and writes nothing (Golden Rule #1).
+        This SUPERSEDES the stale "dry-run pulls into feeds/dhan/" assertion (a dry-run
+        must never write).
+        """
         resp = client.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": True})
         assert resp.status_code == 200
         body = resp.json()
         assert body["feed"] == "dhan"
         assert body["dry_run"] is True
         assert body["started"] is True
-        # The background job ran the injected fake pull.
+        # The background job ran the injected fake, which delegated to the real seam.
         assert fake_pull.done.wait(timeout=10.0)
         assert fake_pull.request is not None
         assert fake_pull.request.dry_run is True
         assert fake_pull.request.lake_root == tmp_path
-        # Bars landed under the NESTED feeds/dhan/ tree — Groww's top lake untouched.
-        assert (tmp_path / "feeds" / "dhan" / "bars" / "NSE" / "INDEX" / "NIFTY").exists()
+        # The real seam short-circuited: NO adapter build, NO vendor call, NO materialise.
+        assert fake_pull.adapter_built is False
+        assert fake_pull.client.calls == 0
+        assert fake_pull.materialize_calls == 0
+        # A dry-run writes NOTHING — neither the Dhan feed tree nor the Groww top lake.
+        assert not (tmp_path / "feeds").exists()
         assert not (tmp_path / "bars").exists()
 
     def test_market_hours_exempt(
@@ -172,7 +207,11 @@ class TestDhanPullRoute:
 
         def _spy(self: Any, work: Any, **kwargs: Any) -> bool:
             starts.append(
-                {"detail": kwargs.get("detail"), "exempt": kwargs.get("market_hours_exempt")}
+                {
+                    "detail": kwargs.get("detail"),
+                    "exempt": kwargs.get("market_hours_exempt"),
+                    "lock": kwargs.get("cross_process_lock"),
+                }
             )
             return bool(orig_start(self, work, **kwargs))
 
@@ -186,6 +225,8 @@ class TestDhanPullRoute:
         assert dhan_starts, f"no dhan job start captured: {starts}"
         # Dhan uses its own account → market_closed=None → the start gate is exempt.
         assert dhan_starts[0]["exempt"] is True
+        # A dry-run start skips the cross-process guards (offline: no AWS lock resolved).
+        assert dhan_starts[0]["lock"] is False
 
     def test_bad_date_range_is_400(self, client: TestClient) -> None:
         resp = client.post(
