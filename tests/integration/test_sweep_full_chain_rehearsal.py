@@ -119,7 +119,11 @@ _CI_K_SAMPLES = 8
 #: PBO, SPA/reality-check, Romano-Wolf, lockbox AND the 1000-permutation
 #: Monte-Carlo filter (which kills it: ``stage_survivors.deflated_sharpe ==
 #: 1``, ``monte_carlo == 0``) — the most faithful "full chain in miniature"
-#: (R38) of the three, at ~20× margin to the 300 s budget. The MC leg is
+#: (R38) of the three. Margin to the 300 s budget, both measured on the same
+#: 4-vCPU sandbox (Golden Rule #10): ~20× WITHOUT coverage (14.87 s — the
+#: figure quoted in #1773's pin matrix) and ~6× UNDER ``--cov=brutex
+#: --cov-branch`` (50.53 s — ≈ the WITH-COVERAGE unit job's context, the arm
+#: whose pre-fix failures the ledger records). The MC leg is
 #: BOUNDED here because the pinned seed's candidate is signal-LIGHT and the
 #: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered — the
 #: unlucky pre-pin seeds drew signal-DENSE candidates (~663 entries per
@@ -379,8 +383,36 @@ def test_r38_stage3_cells_genuinely_written(rehearsal: _Rehearsal) -> None:
 
 
 def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
+    """The cascade report exists AND carries the pinned seed's FULL-cascade shape.
+
+    CASCADE-SHAPE DRIFT PIN (DEC-R38-REHEARSAL-DETERMINISM-001 #1773): the
+    "full chain in miniature" claim rests on the PINNED seed drawing ONE
+    candidate through the DSR gate so every statistical cascade leg —
+    walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox and the
+    1000-permutation Monte-Carlo filter (which kills it) — genuinely EXECUTES.
+    That coverage is a property of the seed choice, not of the code, so a
+    future ``indicator_version`` / wheel / engine change that re-keys the
+    pinned seed could silently revert the rehearsal to a DSR-KILLED fast path
+    (legs never run) while the runtime gate stays green. This assertion makes
+    that rot fail LOUD and forces a conscious re-pin (re-measure candidate
+    constants per the #1773 matrix; never a silent coverage drop).
+    """
     report = json.loads((rehearsal.results_root / "cascade" / "cascade-report.json").read_text())
     assert report["sweep_id"] == rehearsal.run_id
+    # ONE (instrument, tf) group in the rehearsal grid — its per-group report
+    # carries the stage_survivors funnel (cascade_wire.wire_report_to_dict).
+    assert len(report["groups"]) == 1
+    assert report["groups"][0]["report"]["stage_survivors"] == {
+        "hard_gates": 5,
+        "deflated_sharpe": 1,
+        "cpcv": 1,
+        "reality_check_spa": 1,
+        "pbo": 1,
+        "romano_wolf": 1,
+        "walk_forward": 1,
+        "lockbox": 1,
+        "monte_carlo": 0,
+    }, "the pinned seed's full-cascade shape drifted — re-pin consciously (#1773)"
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
 
@@ -531,13 +563,20 @@ def test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds(
     per-mask delay injected into ``TradeSimWalker.run`` — the per-mask
     trade-sim step every sweep/cascade/results-depth evaluation walks
     (class-method patch, so every import style of ``simulate_trades`` is
-    covered) — and the measured wall time must contain the injected delay at
-    least 1:1. Therefore a REAL chain regression of budget magnitude on the
-    pinned workload still blows the ``< 300.0`` assert: the full-scale
-    demonstration (one wedged-chain-step sleep sized past the budget →
-    ``test_r38_rehearsal_runtime_is_ci_feasible`` FAILED at 30x s on the
-    pinned sha) was executed and recorded in the #1773 ledger entry; this
-    companion is the fast permanent form of that proof.
+    covered). HONEST framing of what each half proves (Golden Rule #10): the
+    PERMANENT load-bearing teeth here is ``calls > 0`` — SEAM LIVENESS, so a
+    refactor that moves per-mask trade-sim off ``TradeSimWalker.run`` (e.g.
+    onto a Rust kernel) fails LOUD instead of leaving this proof vacuous —
+    plus the time-RESPONSE check that the measured wall time contains the
+    injected delay ≥ 1:1 (near-mechanical for serial in-process sleeps inside
+    the timed window; it is a structural proxy, not a magnitude proof). The
+    actual BUDGET-MAGNITUDE bite — that a budget-scale chain regression blows
+    the unchanged ``< 300.0`` assert — is proven by the ONE-TIME executed
+    wedge recorded in the #1773 ledger entry (one wedged-chain-step 301 s
+    sleep → ``test_r38_rehearsal_runtime_is_ci_feasible`` FAILED at 315.8 s
+    on the pinned sha); this companion alone does not prove it — it keeps that
+    recorded proof's premises (seam fires; wall time responds) permanently
+    pinned at CI speed.
     """
     from brutex.engine.trade_sim import TradeSimWalker
 
