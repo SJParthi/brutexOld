@@ -2316,7 +2316,7 @@ hostile-review pass._
   TypeError/InvalidOperation escapes stay escapes); `bad_tick.py` gains `emit_bad_tick_warn`, the ONE
   `feed.bad_tick_skipped` seam `_flush` delegates to (delegation-equivalence pinned). PROOF: 26-case cargo edge
   matrix + proptest invariants + the cargo-fuzz harness (never-panics over raw-bit f64s; joined to
-  rust-fuzz-smoke.yml); `test_feed_rust.py` 100.00% standalone (59 tests — flag matrix, every validate arm,
+  rust-fuzz-smoke.yml); `test_feed_rust.py` 100.00% standalone (61 tests — flag matrix, every validate arm,
   sys.modules-poisoned wheel degrades, ints-only FFI walk); the seam integration suite (bomb-kernel default-OFF
   pin, the full degrade matrix with exception TYPE+message parity for null/naive/int-price/`timestamp[ms]`/
   missing-column tables, kill-switch interplay `ts_us=[]` spy, the three ordering laws under `capture_logs`
@@ -2338,7 +2338,7 @@ hostile-review pass._
   `DEC-FEED-RUST-FLIP-001`, the doctor wheel-freshness stage `DEC-FEED-RUST-DOCTOR-STAGE-001`. ENGINE results
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; `feed_rust.py` 100.00% standalone,
   `replay.py` 100.00% under its `test_feed_replay*` discovery set, `bad_tick.py` 100.00%; ruff/ruff-format clean,
-  `mypy --strict` clean (416 files), pyright 0 errors at the pre-change baseline; cargo fmt/clippy `-D warnings`/
+  `mypy --strict` clean (435 files on the merged tree), pyright 0 errors at the pre-change baseline; cargo fmt/clippy `-D warnings`/
   test green.)
   Earlier: `integration/t1-sweep-core` (**T1 SWEEP-CORE integration train** — the
   coordinator-confirmed fold, in binding order, of #1330 DEC-SWEEP-UNKILLABLE-CORE-001

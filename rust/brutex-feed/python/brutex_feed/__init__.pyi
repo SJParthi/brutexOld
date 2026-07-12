@@ -13,7 +13,6 @@ __version__: str
 __build_crate_version__: str
 __source_digest__: str
 
-def version() -> str: ...
 def scan_bars(
     ts_us: list[int],
     opens: list[float],

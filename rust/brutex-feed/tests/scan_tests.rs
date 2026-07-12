@@ -4,7 +4,7 @@
 //! (`brutex/feed/replay.py` + `brutex/data/bad_tick.py`); the Python-side
 //! hypothesis parity gate proves the two ends agree on generated inputs.
 
-use brutex_feed::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, scan_bars};
+use brutex_feed::{DAY_US, IST_OFFSET_US, MAX_SAFE_TS_US, ScanOutcome, WarnEvent, scan_bars};
 
 /// 2024-01-02T03:45:00Z (09:15 IST) in epoch microseconds — the same anchor
 /// the Python fixtures use.
@@ -27,7 +27,7 @@ fn empty_input_scans_clean() {
         .unwrap()
         .unwrap();
     assert_eq!(out.kept_rows, Vec::<usize>::new());
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
     assert_eq!(out.positivity_stop, None);
 }
 
@@ -35,7 +35,7 @@ fn empty_input_scans_clean() {
 fn single_bar_kept() {
     let out = scan_uniform(&[SESSION_1], &[27_940.0]);
     assert_eq!(out.kept_rows, vec![0]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
     assert_eq!(out.positivity_stop, None);
 }
 
@@ -86,7 +86,7 @@ fn reopen_gap_across_sessions_never_trips() {
     let ts = [SESSION_1, SESSION_1 + DAY_US];
     let out = scan_uniform(&ts, &[27_940.0, 2_000.0]);
     assert_eq!(out.kept_rows, vec![0, 1]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn session_flip_flop_backwards_dates_resets_each_time() {
     let out = scan_uniform(&ts, &[100.0, 5_000.0, 100.0]);
     // Every bar is the first of "its" session after a flip — all kept.
     assert_eq!(out.kept_rows, vec![0, 1, 2]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
 }
 
 #[test]
@@ -169,8 +169,8 @@ fn positivity_stop_field_order_open_high_low_close() {
             .unwrap()
             .unwrap();
         assert_eq!(out.positivity_stop, Some((0, field)), "field {field}");
-        assert_eq!(out.kept_rows, vec![]);
-        assert_eq!(out.warn_events, vec![]);
+        assert_eq!(out.kept_rows, Vec::<usize>::new());
+        assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
     }
     // A bar corrupt in EVERY field names the FIRST (open).
     let out = scan_bars(&ts, &[-1.0], &[-1.0], &[-1.0], &[-1.0], true, 4.0)
@@ -213,7 +213,7 @@ fn stop_suppresses_same_row_boundary_flush_and_finish() {
         .unwrap();
     assert_eq!(out.positivity_stop, Some((2, 0)));
     assert_eq!(out.kept_rows, vec![0]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn stop_mid_session_suppresses_finish_only() {
         .unwrap();
     assert_eq!(out.positivity_stop, Some((2, 0)));
     assert_eq!(out.kept_rows, vec![0]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn nan_close_kept_and_poisons_baseline() {
         .unwrap()
         .unwrap();
     assert_eq!(out.kept_rows, vec![0, 1, 2]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
     assert_eq!(out.positivity_stop, None);
 }
 
@@ -350,7 +350,7 @@ fn screen_disabled_ignores_ts_entirely() {
         .unwrap()
         .unwrap();
     assert_eq!(out.kept_rows, vec![0, 1]);
-    assert_eq!(out.warn_events, vec![]);
+    assert_eq!(out.warn_events, Vec::<WarnEvent>::new());
     let out = scan_bars(
         &[],
         &[1.0, -1.0],
