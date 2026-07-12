@@ -38,6 +38,10 @@ _PK_TRADE_HI_S = 0.40
 _PK_TRADE_BARS = 93_750
 _TOP = 1_000  # the production --top
 _WORKERS = 8  # the grid-wall amortisation divisor the table states
+_HEADLINE_NS = 56.8  # §3.2 row 2 — the separate-run n_bars=0 FFI-floor headline
+_FLOOR_NS = 72.8  # §3.2 row 2a — the remeasure pair's OWN same-run n_bars=0 floor
+_DEEP_NS = 109.2  # §3.2 row 2a — the measured deep-window rate @555k zero-bars
+_ENUM_B_K5 = 754.1e6  # §2 scenario B, Σk≤5 enumerated masks (126 tuples)
 
 
 def _term2_seconds(n_bars: int, coeff_ns: float) -> float:
@@ -158,3 +162,51 @@ class TestEnumSegmentProvenancePin:
         norm = " ".join(doc_text.split())
         assert "The enumerate+prune term's EFFECTIVE FFI-amortized rate is n_bars-sensitive" in norm
         assert "min-hits-blind cells charging shrinks each range" in norm
+
+
+class TestDeepWindowFactorAttributionPin:
+    """Round-6 review MINOR: the ×1.3–1.5 deep-window band is the WITHIN-
+    same-run inflation of the 2026-07-12 remeasure pair (109.2/72.8 = 1.50)
+    — NOT a multiplier on row 2's SEPARATE-run 56.8 ns headline. Applied to
+    56.8 it reads 73.8–85.2 ns, understating the doc's OWN measured
+    deep-window rate (109.2 ns) by ~22–32%; the honest cross-run figure
+    against the headline is ≈1.9× (109.2/56.8 = 1.92 — a ratio additionally
+    bundling ~1.28× run-to-run sandbox variance, 72.8 vs 56.8 at the same
+    n_bars=0 config). The doc must (a) never instruct applying the same-run
+    band to the headline, (b) label the band against its own same-run
+    floor, and (c) budget deep grids with the MEASURED rate. Golden
+    Rule #10.
+    """
+
+    def test_the_same_run_band_is_never_applied_to_the_headline(self, doc_text: str) -> None:
+        norm = " ".join(doc_text.split())
+        # The round-5 misapplication instruction (fails-before token).
+        assert "so read the kernel column ×1.3–1.5" not in norm, (
+            "the ×1.3–1.5 same-run band must never be instructed against the "
+            "separate-run 56.8 headline — the round-6 defect returning"
+        )
+        # Row 2a's old mislabel (the band presented as ×row 2's headline).
+        assert "≈1.3–1.5× row 2" not in norm
+
+    def test_row2a_labels_the_band_same_run_and_states_the_cross_run_figure(
+        self, doc_text: str
+    ) -> None:
+        row = _table_row(doc_text, "| 2a | `c` — ranged kernel at a DEEP window")
+        assert "same-run n_bars=0 floor" in row
+        assert "≈1.9×" in row
+        # The stated cross-run figure must bracket the doc's own numbers...
+        assert 1.85 <= _DEEP_NS / _HEADLINE_NS <= 1.95
+        # ...and the within-run band genuinely differs from it because the
+        # two runs' floors differ (the variance the row must disclose).
+        assert _FLOOR_NS / _HEADLINE_NS > 1.25
+
+    def test_term1_note_budgets_with_the_measured_deep_rate(self, doc_text: str) -> None:
+        norm = " ".join(doc_text.split())
+        assert "×≈1.9" in norm
+        # The worked example must equal the recomputation from the doc's own
+        # constants: 754.1M enumerated (B k≤5) × 109.2 ns ÷ 8 workers.
+        b_k5_deep_s = _ENUM_B_K5 * _DEEP_NS * 1e-9 / _WORKERS
+        assert f"≈ {b_k5_deep_s:.1f} s" in norm  # ≈ 10.3 s
+        # The arithmetic fact the correction rests on: even the band's TOP
+        # end applied to the headline understates the measured deep rate.
+        assert _HEADLINE_NS * 1.5 < _DEEP_NS
