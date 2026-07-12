@@ -62,6 +62,12 @@
 # (6 → 8 in .github/workflows/mutation.yml — its own comment says the same;
 # the 7-shard matrix there is trading-core's); ranking.rs mutants are cheap
 # (sub-second in-file tests, no proptest-heavy kill path).
+# Re-measured 2026-07-12 at the origin/main merge-reconcile — main's #1743
+# (DEC-TRADESIM-OPEN-SESSION-GUARD-001) trade-sim session-boundary guard grew
+# trade_sim.rs 167 → 168: `cargo mutants --list | wc -l` from this dir = 921
+# (metrics 358 + trade_sim 168 + python 65 + lib 9 + ranking 321). +1 is well
+# inside the mutation.yml shard-budget bands (ceil(921/8) = 116/shard) — no
+# shard-dial change.
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",

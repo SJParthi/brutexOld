@@ -742,13 +742,15 @@ jobs:
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 920
-          #   mutants measured 2026-07-11 (`cargo mutants --list | wc -l`; the
-          #   slice-4 ranking.rs conversion added 321 over the 2026-07-08
-          #   post-merge 599 — history: 556 pre-merge 2026-07-07, 599 after the
-          #   race-6 u128 trade_sim fold, 897 then 915 on interim ranking.rs
-          #   shapes; the round-4 review fix moved the wrapper-inline guards
-          #   into pure killable cores, 915 -> 920).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 921
+          #   mutants measured 2026-07-12 on the merged tree (`cargo mutants
+          #   --list | wc -l`; the slice-4 ranking.rs conversion added 321 over
+          #   the 2026-07-08 post-merge 599 — history: 556 pre-merge 2026-07-07,
+          #   599 after the race-6 u128 trade_sim fold, 897 then 915 on interim
+          #   ranking.rs shapes; the round-4 review fix moved the wrapper-inline
+          #   guards into pure killable cores, 915 -> 920; the 2026-07-12
+          #   merge-reconcile of main's #1743 trade-sim session-boundary guard
+          #   grew trade_sim.rs 167 -> 168, 920 -> 921).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
@@ -758,7 +760,7 @@ jobs:
           #   shard dial taken TWICE for the slice-4 ranking.rs re-measure: the
           #   920-mutant scope on 6 shards puts the +20%-band worst end at
           #   ~130 min — OVER the 120-min job cap):
-          #   ceil(920/8)=115 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   ceil(921/8)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
           #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
           #   ~= 61-82 min nominal, ~98 at +20% on the worst end -> >= 22 min
           #   margin per shard.
