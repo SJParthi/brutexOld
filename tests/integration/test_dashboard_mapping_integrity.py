@@ -283,3 +283,76 @@ def test_hyphenated_writer_roundtrip_reads_green(
     assert body["is_green"] is True
     assert body["fully_covered"] == 1
     assert body["under_pulled"] == []
+
+
+def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
+    """REFUTER ROUND 1 port of ``attack1_metadata_blank.py`` — the panel stays honest.
+
+    Pre-fix, a blank-symbol EQ row surviving store admission + ONE real metadata pull
+    wrote durable ``failed`` coverage rows keyed ``('NSE','')`` (per-YEAR-cell
+    ``forms[0]`` IndexErrors captured by the pool), which the mapping-integrity panel
+    matched as an attempted-and-ZERO gating failure: ``is_green=False`` with an
+    unnameable empty-string symbol, ``Status,RED`` on the CSV, and ``expiry_failures``
+    re-failing every pull — falsifying the #1753 "inert key" disclosure. Post-fix the
+    metadata grid SKIPS the blank row (one aggregate WARN): no coverage rows keyed
+    ``''``, zero failures, and the panel verdict rides ONLY the real rows.
+    """
+    import structlog.testing
+    from brutex.dashboard.metadata_pull import (
+        METADATA_BLANK_SYMBOL_SKIPPED_EVENT,
+        pull_expiries_contracts,
+    )
+    from brutex.data.registry_store import RegistryStore
+
+    from tests.unit.test_metadata_pull import _factory, _FakeSDK, _sync_run_parallel
+
+    years = _coverage_years()
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    try:
+        store.upsert_many(
+            [_eq("RELIANCE"), _eq("")],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-blank",
+            csv_source_sha256="0" * 64,
+        )
+        sdk = _FakeSDK(
+            expiries={("NSE", "RELIANCE", y): [f"{y}-06-25"] for y in years},
+            contracts={
+                ("NSE", "RELIANCE", f"{y}-06-25"): [f"NSE-RELIANCE-25Jun{y % 100:02d}-FUT"]
+                for y in years
+            },
+        )
+        registry = RegistryStore.open(tmp_path / "registry.duckdb")
+        try:
+            with structlog.testing.capture_logs() as logs:
+                report = pull_expiries_contracts(
+                    [_eq("RELIANCE"), _eq("")],
+                    registry=registry,
+                    coverage_store=store,
+                    years=years,
+                    dry_run=False,
+                    run_parallel=_sync_run_parallel,
+                    client_factory=_factory(sdk),
+                    now=datetime.now(UTC),
+                    today=date(years[-1], 1, 2),
+                    run_id="rt-blank",
+                )
+        finally:
+            registry.close()
+        # The writer never minted a blank cell: zero failures, zero '' rows, one WARN.
+        assert report.expiry_failures == 0
+        assert [r for r in store.list_coverage() if r.underlying_symbol == ""] == []
+        assert len([e for e in logs if e["event"] == METADATA_BLANK_SYMBOL_SKIPPED_EVENT]) == 1
+
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get("/api/v1/universe/mapping-integrity").json()
+        # The blank eligible row degrades to the NEUTRAL not_attempted (the R2
+        # `or (symbol,)` exact-key probe matches nothing) — never a gating "none".
+        assert body["is_green"] is True
+        assert body["gating_failures"] == 0
+        blank_rows = [u for u in body["under_pulled"] if u["symbol"].strip() == ""]
+        assert all(u["reason"] == "not_attempted" for u in blank_rows)
+        csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
+        assert "GREEN" in csv_text.split("VERDICT", 1)[1].splitlines()[1]
+    finally:
+        store.close()
