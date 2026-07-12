@@ -532,7 +532,7 @@ jobs:
           else
             echo "(brutex.audit_verify test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1751): the feed-root
+          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1753): the feed-root
           # nesting-law leaf ships at 100% line+branch — the identity-default
           # law + grammar/reserved refusal + path-structural attribution.
           if compgen -G "tests/unit/test_data_feed_root.py" > /dev/null; then
