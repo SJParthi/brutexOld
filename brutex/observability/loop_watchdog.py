@@ -169,7 +169,7 @@ class AlerterLike(Protocol):
 
     def loop_stalled(self, *, stalled_s: float, threshold_s: float) -> bool:
         """Fire the CRITICAL loop-stall alert (best-effort)."""
-        ...  # pragma: no cover — Protocol body
+        raise NotImplementedError  # pragma: no cover — Protocol body, never executed
 
 
 @dataclass(frozen=True, slots=True)
