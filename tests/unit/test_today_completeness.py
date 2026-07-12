@@ -525,7 +525,7 @@ class TestObserveWrapper:
         split, verdict = result
         assert verdict.incomplete is True
         assert split.prior == prior
-        warn = next(f for lvl, e, f in log.events if e == tc.TODAY_INCOMPLETE_EVENT)
+        warn = next(f for _lvl, e, f in log.events if e == tc.TODAY_INCOMPLETE_EVENT)
         assert warn["withheld_bars"] == 374
         assert warn["reason"] == tc.REASON_COUNT_SHORT
         assert warn["session_date"] == "2021-03-05"
@@ -553,7 +553,7 @@ class TestObserveWrapper:
         result = self._observe(log, bars, instrument_class=InstrumentClass.FUT)
         assert result is not None
         assert result[1].incomplete is False  # never demotes
-        info = next(f for lvl, e, f in log.events if e == tc.TODAY_COUNT_SHORT_EVENT)
+        info = next(f for _lvl, e, f in log.events if e == tc.TODAY_COUNT_SHORT_EVENT)
         assert info["demoted"] is False
         assert info["distinct_minutes"] == 200
         assert info["expected_minutes"] == 375

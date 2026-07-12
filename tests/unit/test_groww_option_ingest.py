@@ -4912,7 +4912,7 @@ class TestRetryCounterSplitOption:
 from brutex.data.today_completeness import TODAY_INCOMPLETE  # noqa: E402
 
 
-def _fut(symbol: str = "NSE-NIFTY-25Jan24-FUT") -> DerivativeContract:
+def _gate_fut(symbol: str = "NSE-NIFTY-25Jan24-FUT") -> DerivativeContract:
     return DerivativeContract(
         underlying_symbol="NIFTY",
         expiry=date(2024, 1, 25),
@@ -4988,7 +4988,7 @@ class TestOptionIngestTodayGate:
         return ingest_option_contract(
             _client(sdk),
             sink,  # type: ignore[arg-type]
-            contract=contract if contract is not None else _fut(),
+            contract=contract if contract is not None else _gate_fut(),
             interval="1minute",
             start=start,
             end=end,
@@ -5205,7 +5205,7 @@ class TestOptionIngestTodayGate:
                 ingest_option_contract(
                     _client(_FakeSDK(payload=payload)),
                     sink,
-                    contract=_fut(),
+                    contract=_gate_fut(),
                     interval="1minute",
                     start=date(2024, 1, 1),
                     end=date(2024, 1, 3),
