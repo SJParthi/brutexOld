@@ -18,14 +18,14 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1752 —
+_Last updated: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 —
 the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
 bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
 `scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
 at all three rollup scan sites (count · failed · pending) — so the
 offline-runner pending-forever shape can never refuse a merge (the ONE
 residual — a manually-CANCELLED bench run's `bless-baseline` check — is
-named in #1752, documented not broadened per the operator only-m4pro
+named in #1753, documented not broadened per the operator only-m4pro
 constraint) and
 auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
 while a FAILED m4pro is surfaced as a WARN-only line that never affects the
@@ -38,7 +38,7 @@ NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
 bench regression is caught POST-merge on the self-hosted runner, never a
 merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
-blurb + MIGRATION.md #1752.)
+blurb + MIGRATION.md #1753.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -2355,7 +2355,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1752** —
+- **Active branch:** `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753** —
   the pre-merge gate treats the non-required self-hosted
   `m4pro-absolute-throughput` check as NON-BLOCKING: `scripts/ci/pre-merge-check.sh`
   gains a HARDCODED (deliberately NOT env-overridable — broadening the set
@@ -2380,7 +2380,7 @@ hostile-review pass._
   m4pro sits QUEUED, and a completed feature-branch run marks it SKIPPED —
   so the ONE reachable re-block shape is an operator manually CANCELLING a
   stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
-  full record lives in #1752's HONEST envelope); every REQUIRED check still
+  full record lives in #1753's HONEST envelope); every REQUIRED check still
   blocks —
   redteam-pinned (NEW `TestM4proNonblocking`, 9 tests — incl. the round-4
   TIMED_OUT warn-path pin `test_timed_out_m4pro_warns_but_does_not_block`
@@ -6024,7 +6024,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/premerge-m4pro-nonblock`
-  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1752 — the pre-merge gate
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 — the pre-merge gate
   treats the non-required self-hosted `m4pro-absolute-throughput` check as
   NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
   `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
@@ -6034,7 +6034,7 @@ hostile-review pass._
   FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
   end-to-end);
   the offline-runner pending-forever shape can never refuse a merge (the
-  manual-cancel `bless-baseline` residual is named in #1752 — documented,
+  manual-cancel `bless-baseline` residual is named in #1753 — documented,
   not broadened, per the operator only-m4pro constraint);
   every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
   safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
