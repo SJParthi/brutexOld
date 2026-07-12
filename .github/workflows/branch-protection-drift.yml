@@ -98,12 +98,14 @@ jobs:
           # ITSELF required
           # below, and ci-ok fails if ANY of its needs is red, so every ci-ok need
           # is transitively enforced through that one aggregate context even when it
-          # is not its own direct required context. The 11 ci-ok needs deliberately
-          # enforced VIA ci-ok (and therefore intentionally ABSENT from this set) are:
+          # is not its own direct required context. Representative ci-ok needs
+          # deliberately enforced VIA ci-ok (and therefore intentionally ABSENT from
+          # this set) — a NON-EXHAUSTIVE list — include:
           #   actionlint, rust-trading-core, ledger-numbering,
           #   zplus-pr-guard, definition-of-ready, dec-id-validator,
           #   bugfix-regression-scan, no-hallucination-scan, conv-commits,
-          #   chaos-race, browser.
+          #   chaos-race, browser (and others such as bugfix-reversion-check,
+          #   citation-accuracy-scan, sweep-rehearsal).
           # Do NOT add those to expected_required_checks: they are never registered
           # as DIRECT required contexts, so they never appear in `live_checks`, so the
           # UNEXPECTED-context drift check below never false-flags them — and adding

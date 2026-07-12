@@ -9,6 +9,7 @@ FAIL-FAST exactly like the Groww reader. All values are FAKE (never a real secre
 from __future__ import annotations
 
 import pytest
+import structlog
 from brutex.config.credentials_aws import load_dhan_aws_credentials
 from brutex.config.credentials_types import CredentialsError, DhanCredentials
 
@@ -75,6 +76,37 @@ def test_hard_read_failure_fails_fast() -> None:
     fake = FakeAwsClient(fail_get_parameter=True)
     with pytest.raises(CredentialsError):
         load_dhan_aws_credentials(client=fake)
+
+
+def test_hard_read_failure_names_dhan_not_groww() -> None:
+    """A hard SSM/IAM/KMS read failure on a Dhan parameter names Dhan + the Dhan runbook.
+
+    Pins the fix for the shared-``_read_param`` vendor mislabel: the operator-facing message
+    must NOT point at Groww / the Groww paths (the wrong remediation), and the emitted
+    structlog event must be vendor-namespaced ``dhan.creds.aws_read_failed`` (never
+    ``groww.creds.*``). The secret value is never captured — only the path + class name.
+    """
+    fake = FakeAwsClient(fail_get_parameter=True, parameters=_seeded().parameters)
+    with structlog.testing.capture_logs() as logs, pytest.raises(CredentialsError) as ei:
+        load_dhan_aws_credentials(client=fake)
+    message = str(ei.value)
+    assert "Dhan" in message
+    assert "docs/runbooks/dhan-auth.md" in message
+    assert "Groww" not in message
+    assert "/tickvault/prod/groww" not in message
+    events = [entry.get("event") for entry in logs]
+    assert "dhan.creds.aws_read_failed" in events
+    assert "groww.creds.aws_read_failed" not in events
+
+
+def test_absent_param_emits_dhan_namespaced_event() -> None:
+    """An absent Dhan parameter logs the vendor-namespaced ``dhan.creds.aws_param_absent``."""
+    fake = FakeAwsClient(param_not_found=frozenset({_PIN}), parameters=_seeded().parameters)
+    with structlog.testing.capture_logs() as logs, pytest.raises(CredentialsError):
+        load_dhan_aws_credentials(client=fake)
+    events = [entry.get("event") for entry in logs]
+    assert "dhan.creds.aws_param_absent" in events
+    assert "groww.creds.aws_param_absent" not in events
 
 
 def test_repr_never_leaks_secrets() -> None:

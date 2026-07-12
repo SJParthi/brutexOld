@@ -213,3 +213,20 @@ class TestHelpers:
         http = FakeDhanAuthHttp([{"accessToken": "FAKE-JWT"}])
         token = mint_access_token(_CREDS, transport=http, totp_minter=_totp)
         assert token.minted_at_utc.tzinfo is UTC
+
+
+class TestParseJsonObject:
+    """The extracted JSON-object guard (lifted out of the network pragma) is unit-tested."""
+
+    def test_valid_object_returned(self) -> None:
+        assert auth_mod._parse_json_object('{"accessToken": "FAKE-JWT"}') == {
+            "accessToken": "FAKE-JWT"
+        }
+
+    def test_json_array_raises_dhan_auth_error(self) -> None:
+        with pytest.raises(DhanAuthError):
+            auth_mod._parse_json_object("[1, 2, 3]")
+
+    def test_json_scalar_raises_dhan_auth_error(self) -> None:
+        with pytest.raises(DhanAuthError):
+            auth_mod._parse_json_object("42")

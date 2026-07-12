@@ -551,6 +551,7 @@ jobs:
               --cov=brutex.adapters.dhan.token_lifecycle \
               --cov=brutex.adapters.dhan.auth_audit \
               --cov=brutex.adapters.dhan.reauth \
+              --cov=brutex.config.credentials_aws \
               --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_dhan_constants.py \
               tests/unit/test_dhan_errors.py \
@@ -559,7 +560,8 @@ jobs:
               tests/unit/test_dhan_token_lifecycle.py \
               tests/unit/test_dhan_auth_audit.py \
               tests/unit/test_dhan_reauth.py \
-              tests/unit/test_dhan_credentials_aws.py
+              tests/unit/test_dhan_credentials_aws.py \
+              tests/unit/test_credentials_aws.py
           else
             echo "(brutex.adapters.dhan test files not present yet — gate inactive)"
           fi

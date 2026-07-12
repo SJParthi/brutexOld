@@ -218,7 +218,7 @@ def _load_vendor_params(
     missing: list[str] = []
     for field_name, env_name, default in specs:
         path = resolve_token_param_path(env_name, default)
-        value = _read_param(client, path)
+        value = _read_param(client, path, vendor_label=vendor_label, how_to_fix=how_to_fix)
         if value is None:
             missing.append(path)
         else:
@@ -245,14 +245,17 @@ def _build_client_or_raise(
     try:
         return build_real_aws_client(resolve_token_broker_region())
     except Exception as exc:  # pylint: disable=broad-exception-caught — any build failure is fail-fast
-        _LOG.error("creds.aws_unavailable", vendor=vendor_label, error_type=type(exc).__name__)
+        # Vendor-NAMESPACED event name (Groww byte-identity: ``groww.creds.aws_unavailable``
+        # matches origin/main; a Dhan failure emits ``dhan.creds.aws_unavailable``) so
+        # log-keyed alerting never mismatches after this move-with-shim (finding fix).
+        _LOG.error(f"{vendor_label.lower()}.creds.aws_unavailable", error_type=type(exc).__name__)
         raise CredentialsError(
             f"could not reach AWS Parameter Store for the {vendor_label} credentials "
             f"({type(exc).__name__}); {how_to_fix}"
         ) from exc
 
 
-def _read_param(client: AwsClient, name: str) -> str | None:
+def _read_param(client: AwsClient, name: str, *, vendor_label: str, how_to_fix: str) -> str | None:
     """Read one SecureString parameter, returning its non-blank value or ``None``.
 
     A ``ParameterNotFound`` (matched by exception class name — no botocore import) or an
@@ -260,18 +263,25 @@ def _read_param(client: AwsClient, name: str) -> str | None:
     OTHER SSM/network/IAM/KMS error is FAIL-FAST — it raises
     :class:`~brutex.config.credentials_types.CredentialsError` (a redacting log, never the
     value), since a transient/denied AWS read must not be mistaken for "credential absent".
+
+    The *vendor_label* + *how_to_fix* (resolved once by the caller) are threaded through so a
+    Dhan hard-read failure names Dhan + the Dhan runbook, not Groww (finding fix); the log
+    events are vendor-NAMESPACED (``groww.creds.*`` stays byte-identical to origin/main;
+    ``dhan.creds.*`` for the Dhan reader). The parameter value is NEVER captured — only the
+    path *name* + the exception class name are surfaced.
     """
     try:
         value = client.get_parameter(name=name, with_decryption=True)
     except Exception as exc:  # pylint: disable=broad-exception-caught — classify absent vs hard failure
         reason = type(exc).__name__
+        event_vendor = vendor_label.lower()
         if reason == SSM_PARAMETER_NOT_FOUND:
-            _LOG.debug("groww.creds.aws_param_absent", name=name)
+            _LOG.debug(f"{event_vendor}.creds.aws_param_absent", name=name)
             return None
-        _LOG.error("groww.creds.aws_read_failed", error_type=reason)
+        _LOG.error(f"{event_vendor}.creds.aws_read_failed", error_type=reason)
         raise CredentialsError(
-            f"failed to read the Groww credential parameter {name} from AWS "
-            f"({reason}); {AWS_CREDS_HOW_TO_FIX}"
+            f"failed to read the {vendor_label} credential parameter {name} from AWS "
+            f"({reason}); {how_to_fix}"
         ) from exc
     if value is None or not value.strip():
         return None

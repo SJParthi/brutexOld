@@ -255,6 +255,49 @@ class TestReauthLadder:
             mgr.reauth(mgr.current_generation())
 
 
+class TestFreezeGuardSsm:
+    """The SSM read + write run under the freeze guard (a hung boto3 call never holds the lock)."""
+
+    def test_load_timeout_falls_through_to_mint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # SSM holds a usable sibling token, but the READ hangs → freeze guard → fall to mint.
+        seed = {_PARAM: encode_envelope(_env("FAKE-SIBLING", _ANCHOR))}
+        http = FakeDhanAuthHttp([{"accessToken": "FAKE-MINTED"}])
+        from brutex.config.deadline import run_with_deadline as real
+
+        def _fake(fn, secs, *, what="", thread_name=""):  # type: ignore[no-untyped-def]
+            if what == "Dhan SSM read":
+                raise TimeoutError("hung SSM read")
+            return real(fn, secs, what=what, thread_name=thread_name)
+
+        monkeypatch.setattr("brutex.adapters.dhan.reauth.run_with_deadline", _fake)
+        mgr, _ = _make(tmp_path, transport=http, seed=seed)
+        # The hung read degraded to None (never adopted the sibling) → a fresh mint ran.
+        assert mgr.current_token() == "FAKE-MINTED"
+        assert http.call_count == 1
+
+    def test_store_timeout_still_adopts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        http = FakeDhanAuthHttp([{"accessToken": "FAKE-MINTED"}])
+        audit = _FakeAudit()
+        from brutex.config.deadline import run_with_deadline as real
+
+        def _fake(fn, secs, *, what="", thread_name=""):  # type: ignore[no-untyped-def]
+            if what == "Dhan SSM write":
+                raise TimeoutError("hung SSM write")
+            return real(fn, secs, what=what, thread_name=thread_name)
+
+        monkeypatch.setattr("brutex.adapters.dhan.reauth.run_with_deadline", _fake)
+        mgr, _ = _make(tmp_path, transport=http, audit=audit)
+        # A hung store never un-adopts: the minted token is live + audited store-failed.
+        assert mgr.current_token() == "FAKE-MINTED"
+        store_records = [p for a, p in audit.records if a == "DHAN_TOKEN_STORE"]
+        assert store_records and store_records[0]["outcome"] == "failed"
+        assert store_records[0]["reason_class"] == "TimeoutError"
+
+
 class TestLockdown:
     def _lock_down_via_repeated_terminal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

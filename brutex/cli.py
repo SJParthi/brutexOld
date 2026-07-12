@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from brutex.adapters.dhan.reauth import DhanTokenManager
+    from brutex.adapters.dhan.token_store_aws import DhanParameterStoreTokenStore
     from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 from brutex import __version__
@@ -2713,21 +2714,32 @@ def _build_dhan_manager() -> DhanTokenManager:  # pragma: no cover — real AWS 
     )
 
 
-def cmd_dhan_token_status() -> int:  # pragma: no cover — real AWS read
+def _default_dhan_store() -> DhanParameterStoreTokenStore:  # pragma: no cover — real AWS read
+    """Build the production Dhan token store (real boto3 write-capable SSM client)."""
+    from brutex.adapters.dhan.token_store_aws import build_dhan_token_store
+
+    return build_dhan_token_store()
+
+
+def cmd_dhan_token_status(store: DhanParameterStoreTokenStore | None = None) -> int:
     """Print the stored Dhan token's age / remaining life / fingerprint (never the token).
 
     Exit :data:`EXIT_OK` when a usable (fresh) token is present, else
-    :data:`EXIT_USER_ERROR` (stale / absent / corrupt). The token bytes are NEVER printed —
-    only the ``sha256(token)[:8]`` fingerprint.
+    :data:`EXIT_USER_ERROR` (stale / absent / corrupt) — the documented exit-code contract.
+    The token bytes are NEVER printed — only the ``sha256(token)[:8]`` fingerprint.
+
+    *store* is injectable (a fake in tests): only the real-AWS store CONSTRUCTION
+    (:func:`_default_dhan_store`) stays ``# pragma: no cover``; the None-guard + exit-code
+    mapping below are pure, testable logic and are NOT pragma-suppressed.
     """
     from datetime import UTC, datetime
 
     from brutex.adapters.dhan.constants import DHAN_TOKEN_LIFETIME_S
     from brutex.adapters.dhan.token_lifecycle import token_age_s, token_usable
-    from brutex.adapters.dhan.token_store_aws import build_dhan_token_store, token_fingerprint
+    from brutex.adapters.dhan.token_store_aws import token_fingerprint
 
-    store = build_dhan_token_store()
-    envelope = store.load()
+    resolved_store = store if store is not None else _default_dhan_store()
+    envelope = resolved_store.load()
     if envelope is None:
         print("[brutex] dhan token: absent or unreadable (mint required)", file=sys.stderr)
         return EXIT_USER_ERROR

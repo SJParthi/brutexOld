@@ -281,7 +281,7 @@ class DhanTokenManager:
         """Reread → renew → mint under the advisory flock, then store-first-then-adopt."""
         now = self._clock()
         with self._advisory_lock():
-            existing = self._store.load()
+            existing = self._load_guarded()
             if (
                 existing is not None
                 and token_usable(existing, now)
@@ -296,6 +296,29 @@ class DhanTokenManager:
             if new_env is None:
                 new_env = self._mint(creds)
             self._store_then_adopt(new_env)
+
+    def _load_guarded(self) -> DhanTokenEnvelope | None:
+        """Read the stored envelope under the freeze guard; a hung SSM read degrades to ``None``.
+
+        :meth:`~brutex.adapters.dhan.token_store_aws.DhanParameterStoreTokenStore.load` never
+        raises (it degrades every miss to ``None``), but the underlying boto3 ``GetParameter``
+        carries only botocore's default multi-minute connect/read timeout × retries — and this
+        runs while the process-wide :attr:`_lock` AND the cross-process advisory ``flock`` are
+        held. The freeze guard bounds it by :data:`DHAN_AUTH_HTTP_TIMEOUT_S` (like the mint /
+        renew network calls) so a stalled SSM endpoint can never hold the auth lock — and block
+        every other thread's :meth:`current_token` / :meth:`reauth` — for minutes; a timeout
+        degrades to ``None`` (fall through to renew / mint), never a raise. O(1).
+        """
+        try:
+            return run_with_deadline(
+                self._store.load,
+                DHAN_AUTH_HTTP_TIMEOUT_S,
+                what="Dhan SSM read",
+                thread_name="dhan-ssm-read",
+            )
+        except TimeoutError as exc:
+            _LOG.warning("dhan.token.load_timed_out", error_type=type(exc).__name__)
+            return None
 
     def _is_new_token(self, envelope: DhanTokenEnvelope) -> bool:
         """True iff *envelope* holds a DIFFERENT token than the one currently in memory."""
@@ -354,7 +377,16 @@ class DhanTokenManager:
         """Store the fresh token FIRST, then adopt REGARDLESS (a store failure never un-adopts)."""
         fingerprint = token_fingerprint(envelope.token)
         try:
-            self._store.store(envelope)
+            # Freeze-guard the boto3 ``PutParameter`` (like the mint / renew / read network
+            # calls): a stalled SSM write can never hold the auth lock + advisory flock for
+            # botocore's multi-minute default. A timeout maps to the SAME graceful
+            # store-failed path as a raised store error (never un-adopts).
+            run_with_deadline(
+                lambda: self._store.store(envelope),
+                DHAN_AUTH_HTTP_TIMEOUT_S,
+                what="Dhan SSM write",
+                thread_name="dhan-ssm-write",
+            )
             self._audit_safe(
                 ACTION_STORE,
                 subject=fingerprint,
@@ -362,7 +394,7 @@ class DhanTokenManager:
                 fingerprint=fingerprint,
                 source=envelope.source,
             )
-        except DhanAuthError as exc:
+        except (DhanAuthError, TimeoutError) as exc:
             _LOG.warning(
                 "dhan.token.store_failed", error_type=type(exc).__name__, fingerprint=fingerprint
             )

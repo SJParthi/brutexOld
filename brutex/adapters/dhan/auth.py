@@ -104,22 +104,36 @@ def _real_totp(secret: str) -> str:  # pragma: no cover — needs pyotp + a real
     return str(pyotp.TOTP(secret).now())
 
 
+def _parse_json_object(body: str) -> Mapping[str, Any]:
+    """Parse *body* as JSON, requiring a JSON OBJECT (a scalar/array is an anomalous response).
+
+    Extracted from the urllib shim so the defensive non-object guard is UNIT-TESTED (it is
+    the real safety net for a Dhan endpoint returning a JSON array/scalar — without it a
+    non-``Mapping`` would reach :func:`_extract_token` as a ``.get``-less value and raise an
+    uncaught ``AttributeError`` OUTSIDE the transport try/except). A malformed body raises
+    ``json.JSONDecodeError`` (a ``ValueError``), caught by the auth boundary's broad handler
+    and re-raised scrubbed. O(len(body)).
+    """
+    import json
+
+    parsed = json.loads(body)
+    if not isinstance(parsed, Mapping):
+        raise DhanAuthError("Dhan auth response was not a JSON object")
+    return parsed
+
+
 class _UrllibTransport:  # pragma: no cover — real network
     """The production :class:`HttpTransport` backed by ``urllib.request`` (JSON over HTTPS)."""
 
     def request_json(
         self, method: str, url: str, *, headers: Mapping[str, str], timeout_s: float
     ) -> Mapping[str, Any]:
-        import json
         import urllib.request
 
         req = urllib.request.Request(url, headers=dict(headers), method=method)  # noqa: S310  # https only (constant hosts)
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
             body = resp.read().decode("utf-8")
-        parsed = json.loads(body)
-        if not isinstance(parsed, Mapping):
-            raise DhanAuthError("Dhan auth response was not a JSON object")
-        return parsed
+        return _parse_json_object(body)
 
 
 def _real_transport() -> HttpTransport:  # pragma: no cover — real network
