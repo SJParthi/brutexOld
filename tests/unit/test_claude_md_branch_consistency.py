@@ -192,7 +192,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1750 = DEC-RANKING-MUTATION-ZERO-SURVIVOR-001 (2026-07-11): the pass-1
     # runner-list rationale comment (tests/unit/test_ranking_gate_reasons.py
     # MUST stay in the runner) cites THAT decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1750}),
+    # 1751 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
+    # data/today_completeness.py pair's rationale comment cites THAT
+    # decision's entry, not this one.
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1750, 1751}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

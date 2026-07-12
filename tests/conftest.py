@@ -10,7 +10,10 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
-from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+from brutex.data.today_completeness import (
+    TODAY_COMPLETENESS_GATE_ENV,
+    reset_today_gate_log_state,
+)
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -75,6 +78,22 @@ os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
 # gate tests in test_groww_ingest.py / test_groww_option_ingest.py) — so this
 # default disables ONLY the ambient real-environ read, never the tested law.
 os.environ.setdefault(TODAY_COMPLETENESS_GATE_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_today_gate_log_state() -> None:
+    """Reset the TODAY-gate's per-pull capped-event counters before EVERY test.
+
+    DEC-PULL-TODAY-COMPLETENESS-GATE-001 round-1 R2-M1: the module keeps
+    thread-safe per-``pull_id`` counters for its capped WARN/INFO events (the
+    per-pull design — production never resets them). Tests that drive the gate
+    without a bound pull scope share the ``""`` key, so without a reset a
+    later-added test could inherit a prior test's counts and flake on its
+    event-count asserts (measured headroom was 11/20 at review time). The reset
+    is the module's OWN test seam (``reset_today_gate_log_state``) — never a
+    production-code reset; 5 dict clears per test, negligible.
+    """
+    reset_today_gate_log_state()
 
 
 @pytest.fixture

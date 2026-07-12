@@ -101,7 +101,7 @@ import os
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Final
 
@@ -156,7 +156,14 @@ TODAY_INCOMPLETE_EVENT: Final[str] = "ingest.window.today_incomplete"
 
 #: The exactly-once-per-pull suppressed-summary WARNING flushed on the next
 #: observation past the cap (monotone-approximate — it carries the counts AT
-#: FLUSH time, observation #cap+1; later demotions stay counted but unlogged).
+#: FLUSH time, observation #cap+1, so ``suppressed_count``/``total_incomplete``
+#: are a FLOOR, not the pull's final total: a 3000-demotion FNO evening logs
+#: "suppressed 1 of 21"; later demotions stay counted internally but unlogged.
+#: The TRUE per-pull total is the durable record — the window ledger's
+#: ``FAILED`` rows carrying :data:`TODAY_INCOMPLETE` (one per demoted window).
+#: A true-total pull-END flush would need a post-drain seam at all four arm
+#: sites — deliberately not built (this event is a heads-up, the ledger is the
+#: count; disclosed in MIGRATION.md #1751 item (8), round-1 R3-MINOR-1).
 TODAY_INCOMPLETE_SUPPRESSED_EVENT: Final[str] = "ingest.window.today_incomplete_suppressed"
 
 #: FUT observe-only count shortfall INFO (never a demotion — ``demoted=False``).
@@ -352,6 +359,7 @@ def classify_today_completeness(
     oi_null_count = sum(1 for b in bars_today if b.open_interest is None)
     zero_volume_count = sum(1 for b in bars_today if b.volume == 0)
     last_bar_ist: str | None = None
+    last_dt: datetime | None = None  # hoisted ONCE — round-1 R4-NIT-3 (was computed twice)
     if bars_today:
         last_dt = max(b.timestamp for b in bars_today).astimezone(IST)
         last_bar_ist = last_dt.strftime("%H:%M")
@@ -369,12 +377,12 @@ def classify_today_completeness(
             # but if it ever fires something is deeply wrong and settling would
             # be a lie: fail with its own reason.
             reason, incomplete = REASON_COUNT_EXCESS, True
-        else:
+        elif last_dt is not None and not session_last_bar_complete(session, last_dt):
             # distinct == expected >= 1 (every NSE session has >= 60 minutes),
-            # so bars_today is non-empty here by construction.
-            last_dt = max(b.timestamp for b in bars_today).astimezone(IST)
-            if not session_last_bar_complete(session, last_dt):
-                reason, incomplete = REASON_LAST_BAR_INCOMPLETE, True
+            # so bars_today is non-empty ⇒ last_dt is not None here by
+            # construction — the None guard is the type-narrower only (a
+            # compound-`and` sub-condition, coverage-arc-safe).
+            reason, incomplete = REASON_LAST_BAR_INCOMPLETE, True
     elif not bars_today:
         # CASH/FUT/OPTION with zero today bars: ABSTAIN / vacuous pass — a dead
         # strike, a dormant far-month contract or a vendor-empty cash day
@@ -471,6 +479,12 @@ def observe_today_completeness(
     append the ORIGINAL bars (byte-identical — the complete-day pin);
     ``incomplete=True`` ⇒ append ``split.prior`` only + demote with
     :data:`TODAY_INCOMPLETE`.
+
+    Suppressed-summary honesty: the :data:`TODAY_INCOMPLETE_SUPPRESSED_EVENT`
+    flush carries flush-time counts (observation #cap+1) — a FLOOR on the
+    pull's final demotion total, never the total itself. The true per-pull
+    count lives in the window ledger's ``FAILED`` + :data:`TODAY_INCOMPLETE`
+    rows (see the event's own doc-comment; MIGRATION.md #1751 item (8)).
 
     *raw_count* is the window's UN-filtered vendor bar count (``len(raw_bars)``)
     — needed to route the raw-EMPTY shape to the EMPTY machinery instead of a

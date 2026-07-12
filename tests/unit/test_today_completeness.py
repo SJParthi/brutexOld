@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -198,7 +199,6 @@ class TestIndexCriteria:
         # the documented reason precedence is count FIRST (a short day cannot
         # prove its close edge; a full-count day with a bad last bar is
         # impossible by distinctness over the [open, close) grid).
-        bars = [_minute(_TODAY, i) for i in range(374)]  # 09:15..14:28... 374 minutes
         bars = [_minute(_TODAY, i) for i in range(343)]  # ends 14:57 IST
         verdict = _classify(bars, instrument_class=InstrumentClass.INDEX_SPOT)
         assert verdict.incomplete is True
@@ -543,9 +543,17 @@ class TestObserveWrapper:
         assert names.count(tc.TODAY_INCOMPLETE_EVENT) == 20
         assert names.count(tc.TODAY_INCOMPLETE_SUPPRESSED_EVENT) == 1
         summary = next(f for _lvl, e, f in log.events if e == tc.TODAY_INCOMPLETE_SUPPRESSED_EVENT)
-        # Flushed on observation #21 — monotone-approximate by contract.
+        # Flushed on observation #21 — the counts are FLUSH-time counts, a
+        # FLOOR on the pull's final total by contract (round-1 R3-MINOR-1
+        # disclosure): after 25 demotions the summary still reads 1-of-21,
+        # NOT 5-of-25 — the TRUE per-pull total is the window ledger's
+        # FAILED + TODAY_INCOMPLETE rows, one per demoted window.
         assert summary["suppressed_count"] == 1
         assert summary["total_incomplete"] == 21
+        # The internal per-pull counter keeps counting past the flush (the
+        # "later demotions stay counted internally but unlogged" clause) —
+        # only the LOG surface is a floor, never the count itself.
+        assert tc._INCOMPLETE_COUNTS["pull-1"] == 25
 
     def test_fut_count_short_observe_only_info(self) -> None:
         log = _Log()
@@ -649,3 +657,31 @@ class TestModuleConstants:
 
         assert TODAY_INCOMPLETE in STREAK_EXEMPT_DEGRADED_REASONS
         assert TODAY_INCOMPLETE in DEMOTED_SETTLE_REASONS
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    Round-1 review (R2-M3, MIGRATION.md #1751): the classifier is a pure
+    criteria table whose membership/boundary mutants (the covers-today
+    equality, the per-class any-vs-all folds, the streak-exempt reason
+    token) are exactly the class the hand-applied ledger mutants proved
+    killable — so the module:suite pair sits in the workflow's per-module
+    ``mutmut`` loop, and this deterministic pin (the
+    ``test_lake_stats_manifest.py`` / ``TestBenchWorkflowWiring`` precedent)
+    fails if the pair is ever dropped. HONEST: it pins the WIRING only —
+    the weekly run executes on its own schedule/push triggers.
+
+    Pair format: the loop parses 3-field ``module:testfile:timeout`` pairs
+    (DEC-MUTATION-RUNTIME-003, MIGRATION.md #1597) — the trailing ``:``
+    (empty timeout) selects the exact historical runner; a 2-field form
+    would mis-parse the TEST PATH as the timeout.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert (
+            '"brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:"' in text
+        ), "today_completeness.py is not wired into mutation.yml's per-module mutmut loop"

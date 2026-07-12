@@ -335,6 +335,20 @@ jobs:
           #    subset argument as the rest of the loop) and
           #    TestMutationWorkflowWiring fails the unit suite if this pair
           #    is ever dropped.
+          #    data/today_completeness.py (the pre-settle TODAY
+          #    minute-completeness gate — a silent mutant here either freezes
+          #    still-settling vendor rows into the keep-first lake FOREVER or
+          #    demote-loops healthy post-close pulls) joined per
+          #    DEC-PULL-TODAY-COMPLETENESS-GATE-001 round-1 review (R2-M3,
+          #    MIGRATION.md #1751): the classifier is a pure criteria table
+          #    whose membership/boundary mutants (covers-today equality, the
+          #    per-class any-vs-all folds, the streak-exempt reason token) are
+          #    exactly the class the ledger's hand-applied mutant kills
+          #    demonstrated killable; its dedicated 100%-line+branch unit file
+          #    runs in seconds and TestMutationWorkflowWiring in that file
+          #    fails the unit suite if this pair is ever dropped. Rides the
+          #    historical runner (empty third field — no spin constructs; the
+          #    module's only loops are bounded bar folds).
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
           # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) with a
@@ -451,6 +465,7 @@ jobs:
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
+            "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
