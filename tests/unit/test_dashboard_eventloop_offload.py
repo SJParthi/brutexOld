@@ -428,7 +428,7 @@ def test_oneclick_routes_run_off_the_event_loop(
     assert payload["fixture_root_active"] is False
 
 
-# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — pool-choice dispatch pins (#1752) ──
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — pool-choice dispatch pins (#1757) ──
 
 
 class _CountingLakeOffload(LakeOffload):
@@ -446,7 +446,7 @@ class _CountingLakeOffload(LakeOffload):
 
 
 class TestLakeLimiterRouteDispatch:
-    """Pool-choice pins via the ``build_app(lake_offload=)`` seam (#1752).
+    """Pool-choice pins via the ``build_app(lake_offload=)`` seam (#1757).
 
     The wedged-lake realserver regression proves the LIMITER binds; these
     pins prove WHICH pool each route's dispatch rides — the class the equity

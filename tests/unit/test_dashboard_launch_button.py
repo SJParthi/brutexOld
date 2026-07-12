@@ -385,7 +385,7 @@ class TestRealPidLifecycle:
         assert second_pid != pid or not os.path.exists(f"/proc/{pid}")
 
 
-# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the run_lake= injection seam (#1752) ──
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the run_lake= injection seam (#1757) ──
 
 
 def _recording_run_lake(calls: list[str]) -> Callable[..., Awaitable[Any]]:

@@ -1,4 +1,4 @@
-"""Bare-``run_in_threadpool`` drift pin over ``brutex/dashboard/`` (#1752).
+"""Bare-``run_in_threadpool`` drift pin over ``brutex/dashboard/`` (#1757).
 
 DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 context: every LAKE-touching dashboard
 offload rides the app's OWN 32-token ``LakeOffload`` limiter — ``_run_lake``
@@ -16,7 +16,7 @@ THE RULE: a bare ``run_in_threadpool`` CALL in ``brutex/dashboard/*.py`` is
 sanctioned ONLY on the enumerated default-pool set below — the five are
 enumerated CENTRALLY at app.py's ``_run_lake`` doctrine comment AND each
 carries an at-site "Deliberately on the DEFAULT AnyIO pool" naming, with the
-ledger record in #1642's deliberate-keep list + #1752. Counter
+ledger record in #1642's deliberate-keep list + #1757. Counter
 EQUALITY over ``(file, enclosing-def)`` — the #1492-G3 drift-pin pattern
 crossed with the exact-count enumeration of the VIX stamper binding pin — so:
 
@@ -57,7 +57,7 @@ _DASHBOARD = Path(brutex.__file__).resolve().parent / "dashboard"
 
 #: DEC-DASHBOARD-LAKE-IO-LIMITER-001 deliberate default-pool set — enumerated
 #: centrally at app.py's `_run_lake` doctrine comment AND named deliberate
-#: in-code at each site (#1642's deliberate-keep list + #1752); a NEW entry
+#: in-code at each site (#1642's deliberate-keep list + #1757); a NEW entry
 #: requires a ledgered DEC + an at-site "deliberately on the DEFAULT AnyIO
 #: pool" comment (the #1642 doctrine).
 _SANCTIONED: Counter[tuple[str, str]] = Counter(

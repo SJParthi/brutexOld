@@ -2246,7 +2246,7 @@ def build_app(
             # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — the
             # deadline-guarded RateBridgeCache memo (#1522) caps the worker hold per
             # outage, and this liveness poll must stay startable through a lake
-            # outage; sanctioned in the threadpool pin allowlist (#1752).
+            # outage; sanctioned in the threadpool pin allowlist (#1757).
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
@@ -6969,7 +6969,7 @@ def build_app(
         # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
         # CPU render of rows already fetched via _run_lake above, no lake I/O at
-        # render time; sanctioned in the threadpool pin allowlist (#1752).
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         return Response(
             content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -7047,7 +7047,7 @@ def build_app(
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
         # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
         # CPU render of rows already fetched via _run_lake above, no lake I/O at
-        # render time; sanctioned in the threadpool pin allowlist (#1752).
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         blob = await run_in_threadpool(
             render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
         )
@@ -8066,7 +8066,7 @@ def build_app(
         # AnyIO pool (not the lake limiter) — resolve_log_file() tails the LOCAL
         # rotating log under ~/.brutex/logs, not lake I/O, and riding _run_lake
         # would let a lake outage starve the log route; sanctioned in the
-        # threadpool pin allowlist (#1752).
+        # threadpool pin allowlist (#1757).
         records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
