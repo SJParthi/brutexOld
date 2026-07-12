@@ -2364,7 +2364,14 @@ hostile-review pass._
   (kept lists cap-invariant), extra FFI round-trips only — reworded at all three sites + pinned by NEW
   `TestLowerClampDeepWindowEnvelope` (fails-before doc-pin + a real-kernel deep-window set-AND-order walk);
   plus the PR-body draft's stale ci-gate count reconciled to the measured 88 at both sites; per-fix record
-  in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
+  in MIGRATION.md #1738. REVIEW ROUND 4 fold (ONE NIT — commit-message attribution): the merge-reconcile
+  hook-env commit 57859da's message mislabeled its `sweep_cache.py` blake3-wrap site as the NONEXISTENT
+  `sweep_cache._params_digest` — the actually-wrapped function is `combo_digest` (the file's sole blake3
+  site; the `sweep_supervisor` half of the message is accurate; the CODE verified semantics-free — the
+  defect is purely the message's function name); published messages are unamendable (§3), so the durable
+  correction lives in MIGRATION.md #1738's round-4 clause, pinned by NEW
+  `tests/unit/test_migration_1738_commit_attribution_pin.py` (correction-present + mislabel-stays-phantom
+  + the-call-lives-in-combo_digest source-truth anchor). MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the #1597
   dial taken AGAIN (7 → 8 shards, ceil(803/8)=101). HONEST: SEGMENT-level lever, NO whole-sweep claim; no
