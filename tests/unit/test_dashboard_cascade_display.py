@@ -18,6 +18,11 @@ from pathlib import Path
 
 import pytest
 
+# The ONE house inline-<script> extractor (stdlib HTMLParser — CodeQL
+# py/bad-tag-filter hardening, alert 1011; §11 COMMON: imported from the
+# frontend-latency suite that owns it, never a second copy).
+from tests.unit.test_dashboard_frontend_latency import _inline_script_bodies
+
 _DASH = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
 _STATIC = _DASH / "static"
 _TEMPLATES = _DASH / "templates"
@@ -126,7 +131,7 @@ class TestNodeSyntax:
         if node is None:
             pytest.skip("node not installed locally (CI installs it)")
         body = (_TEMPLATES / name).read_text(encoding="utf-8")
-        blocks = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", body, re.DOTALL)
+        blocks = _inline_script_bodies(body)
         assert blocks, f"{name} carries no inline scripts?"
         for index, block in enumerate(blocks):
             target = tmp_path / f"{name}.{index}.js"
@@ -135,3 +140,62 @@ class TestNodeSyntax:
                 [node, "--check", str(target)], capture_output=True, text=True, check=False
             )
             assert proc.returncode == 0, f"{name} inline script {index}: {proc.stderr}"
+
+
+class TestInlineScriptExtractorTeeth:
+    """CodeQL py/bad-tag-filter hardening (code-scanning alert 1011).
+
+    The retired extractor regex
+    ``<script(?![^>]*\\bsrc=)[^>]*>(.*?)</script>`` spelled BOTH tags
+    lowercase-exact, so (a) an upper/mixed-case ``<SCRIPT>`` block was
+    silently MISSED — its inline script escaped the ``node --check`` gate
+    entirely — and (b) a variant-spelled end tag (``</script >``,
+    ``</SCRIPT\\t>``) made the non-greedy capture run on to the NEXT real
+    ``</script>``, swallowing intervening MARKUP into the "script body"
+    (the db940c42 / alert-1010 evasion class one suite over). The scan now
+    rides the ONE house extractor — ``_inline_script_bodies`` over the
+    stdlib ``html.parser.HTMLParser`` (the frontend-latency suite's
+    NIT-1 precedent; ``tests.unit.test_dashboard_frontend_latency``, §11
+    COMMON — imported, never a second copy): real tag grammar incl. the
+    script-element CDATA content mode, every browser-honoured tag
+    spelling. TEST-side reader of our own trusted templates, never a
+    sanitizer. The variant matrix below pins exactly the spellings CodeQL
+    names (case + end-tag whitespace) on the stdlib-version-STABLE set
+    (the divergent ``</script foo>`` / ``</script/>`` arms are pinned
+    with a tolerant law in the db940c42 suite, not re-pinned here)."""
+
+    @pytest.mark.parametrize(
+        "specimen",
+        [
+            "<script>var a = 1;</script>",
+            "<SCRIPT>var a = 1;</SCRIPT>",
+            "<ScRiPt>var a = 1;</sCrIpT>",
+            "<script>var a = 1;</script >",
+            "<script>var a = 1;</script\t\n>",
+            "<SCRIPT type='text/javascript'>var a = 1;</Script >",
+        ],
+    )
+    def test_case_and_end_tag_variants_are_extracted(self, specimen: str) -> None:
+        # The retired lowercase-exact regex returned [] for every non-
+        # lowercase spelling here — the block escaped the node gate.
+        assert _inline_script_bodies(specimen) == ["var a = 1;"], specimen
+
+    @pytest.mark.parametrize(
+        "specimen",
+        [
+            '<script src="/static/x.js"></script>',
+            '<SCRIPT SRC="/static/x.js"></SCRIPT>',
+            "<script\tSrc='/static/x.js'></script >",
+        ],
+    )
+    def test_src_carrying_scripts_are_excluded_any_case(self, specimen: str) -> None:
+        # HTMLParser lowercases attribute names, so SRC=/Src= are excluded
+        # too (the retired regex's case-sensitive lookahead admitted them).
+        assert _inline_script_bodies(specimen) == [], specimen
+
+    def test_variant_end_tag_never_swallows_following_markup(self) -> None:
+        # The alert-1010 evasion shape: with the retired regex, the
+        # variant-spelled end tag made `(.*?)</script>` capture straight
+        # through the <div> markup into the NEXT block's end tag.
+        specimen = '<script>var a = 1;</script ><div id="k">markup</div><script>var b = 2;</script>'
+        assert _inline_script_bodies(specimen) == ["var a = 1;", "var b = 2;"]
