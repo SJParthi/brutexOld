@@ -882,3 +882,14 @@ class TestStoredStaleWarner:
         with structlog.testing.capture_logs() as logs2:
             _warn("SYM0")
         assert [e for e in logs2 if e["event"] == "movers.stored_stale_fallback"] != []
+
+    def test_stored_stale_warn_cap_literal_pinned(self) -> None:
+        """The cap LITERAL is the contract — a 20→21 mutant must die HERE.
+
+        The behavioral cap test above asserts RELATIVE to the constant, so it is
+        blind to a changed literal; this pin is the independent teeth (the
+        `FALLBACK_REL_LOG_CAP == 20` / `_NONCONTIGUOUS_WARN_CAP == 20` idiom).
+        """
+        from brutex.dashboard.movers_snapshot import _STORED_STALE_WARN_CAP
+
+        assert _STORED_STALE_WARN_CAP == 20
