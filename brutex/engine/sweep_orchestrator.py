@@ -988,8 +988,19 @@ class TupleDiffCheck(Protocol):
         bar_bits: Sequence[int],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
+        mask_population: Sequence[int] | None = None,
     ) -> None:
-        """Spot-check one persisted tuple (results-inert by contract)."""
+        """Spot-check one persisted tuple (results-inert by contract).
+
+        ``mask_population`` (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+        round 3) is the tuple's EXECUTED mask population — the Apriori
+        candidate list captured from
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` — passed ONLY
+        on the apriori arm so the spot-check samples what actually ran
+        instead of re-walking the raw C(n, k) enumeration; the legacy arm
+        keeps the pre-round-3 call shape (the kwarg is never passed —
+        defaulted for the implementations).
+        """
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -1070,6 +1081,13 @@ def run_one_tuple(
         certified ``bar_bits``. Skipped (honestly, by design) when
         ``kernel_cache`` is ``None`` — the production drivers always run with
         a resident kernel. ``None`` (default) is byte-identical to before.
+        On the APRIORI arm (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+        round 3) the call additionally carries ``mask_population=`` — the
+        tuple's EXECUTED Apriori candidate list captured from
+        :func:`~brutex.engine.sweep_run.run_persisted_sweep` (never
+        recomputed) — so the spot-check samples the executed population
+        instead of re-walking raw C(n, k); the legacy arm keeps the
+        pre-round-3 call shape verbatim.
     store_quarantine
         Optional :class:`StoreQuarantine` (G1): a
         :class:`~brutex.engine.results_store.ResultsStoreError` from the store
@@ -1146,6 +1164,17 @@ def run_one_tuple(
         else None
     )
 
+    # R45 executed-population capture (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+    # round 3): when the diffcheck WILL run (bound closure + resident kernel),
+    # ask run_persisted_sweep to hand back the tuple's Apriori candidate list —
+    # fired ONLY on the apriori arm, so an empty capture is the tri-state
+    # "legacy mode" signal (an apriori EXTINCT tuple captures an EMPTY list,
+    # which is a real population → the diffcheck's honest counted skip).
+    population_capture: list[Sequence[int]] = []
+    capture_population = (
+        population_capture.append if (diffcheck is not None and kernel is not None) else None
+    )
+
     def _attempt() -> SweepRunSummary:
         return run_persisted_sweep(
             bars,
@@ -1159,6 +1188,7 @@ def run_one_tuple(
             trial_stats_digest=_tuple_digest(tuple_, grid),
             reference_stamper=reference_stamper,
             hit_count_memo=hit_count_memo,
+            on_mask_population=capture_population,
         )
 
     try:
@@ -1188,7 +1218,20 @@ def run_one_tuple(
             ) from retry_exc
     if diffcheck is not None and kernel is not None:
         # R45 — strictly post-persist, read-only; the closure is fail-soft.
-        diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
+        if population_capture:
+            # APRIORI arm (round 3): sample the EXECUTED candidate population
+            # — a quarantine retry re-captures, so the LAST capture (the run
+            # that actually persisted) wins.
+            diffcheck(
+                bars=bars,
+                bar_bits=kernel.bar_bits,
+                tuple_=tuple_,
+                grid=grid,
+                mask_population=population_capture[-1],
+            )
+        else:
+            # LEGACY arm — the pre-round-3 call shape, byte-identical.
+            diffcheck(bars=bars, bar_bits=kernel.bar_bits, tuple_=tuple_, grid=grid)
     return summary
 
 

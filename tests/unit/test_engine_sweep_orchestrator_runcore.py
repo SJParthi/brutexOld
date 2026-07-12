@@ -186,7 +186,10 @@ def test_r45_diffcheck_invoked_post_persist_with_kernel_bits(tmp_path: Path) -> 
     out = tmp_path / "out"
     seen: list[dict[str, Any]] = []
 
-    def _diffcheck(*, bars: Any, bar_bits: Any, tuple_: Any, grid: Any) -> None:
+    def _diffcheck(
+        *, bars: Any, bar_bits: Any, tuple_: Any, grid: Any, mask_population: Any = None
+    ) -> None:
+        assert mask_population is None  # legacy arm — the kwarg is never passed
         seen.append({"n_bars": len(bars), "n_bits": len(bar_bits), "tuple": tuple_.instrument})
 
     summary = _run(out, tmp_path / "a.jsonl", diffcheck=_diffcheck)

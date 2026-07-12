@@ -922,12 +922,22 @@ class RunCoreHandles:
             bar_bits: Sequence[int],
             tuple_: Any,
             grid: Any,
+            mask_population: Sequence[int] | None = None,
         ) -> None:
+            # ``mask_population`` (DEC-SWEEP-APRIORI-DEFAULT-001 review fix
+            # round 3): the apriori arm's EXECUTED candidate list, forwarded
+            # verbatim so the hook samples what actually ran; ``None`` (every
+            # legacy call site) keeps the raw-enumeration path byte-identical.
             give = min(per_tuple, budget["left"])
             if give <= 0:
                 return
             report = hook.run_for_tuple(
-                bars=bars, bar_bits=bar_bits, tuple_=tuple_, grid=grid, budget_left=give
+                bars=bars,
+                bar_bits=bar_bits,
+                tuple_=tuple_,
+                grid=grid,
+                budget_left=give,
+                mask_population=mask_population,
             )
             budget["left"] -= report.checked
             if report.checked:

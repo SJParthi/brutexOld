@@ -1334,6 +1334,7 @@ def run_persisted_sweep(
     trial_stats_digest: str | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
     hit_count_memo: MutableMapping[int, int] | None = None,
+    on_mask_population: Callable[[Sequence[int]], None] | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -1460,6 +1461,21 @@ def run_persisted_sweep(
         ``None`` (default — every legacy call site) is byte-identical to the
         pre-memo path. The grid drivers pass a memo ONLY when the Apriori
         exploration mode is enabled.
+    on_mask_population
+        Optional observability capture (DEC-SWEEP-APRIORI-DEFAULT-001,
+        review fix round 3): fired EXACTLY once on the APRIORI arm — after
+        the candidate generation, before the enumeration loop — with the
+        tuple's already-materialised candidate list, so the R45 diffcheck
+        can sample the EXECUTED mask population instead of re-walking the
+        raw C(n, k) enumeration (which the extinction-mode auto-raise
+        unbounds). NEVER fired on the legacy arm (its ``mask_source`` is a
+        lazy generator; materialising it for a capture would re-create the
+        very cost this closes — the diffcheck's own raw walk stays the
+        legacy population). Fail-soft: a raising capture is WARNed
+        (``sweep_run.mask_population_capture_failed``) and the sweep
+        continues — an observability seam never kills a tuple (the R45
+        I-3 law). ``None`` (default — every legacy call site) is
+        byte-identical.
 
     Returns
     -------
@@ -1771,6 +1787,19 @@ def run_persisted_sweep(
                     "count_ms": None,
                 }
             )
+        if on_mask_population is not None:
+            # R45 executed-population handoff (review fix round 3): the
+            # candidate list is ALREADY materialised in memory — hand the
+            # reference to the caller (the diffcheck's sample population);
+            # nothing is recomputed. Fail-soft per the I-3 law.
+            try:
+                on_mask_population(apriori_candidates)
+            except Exception as exc:  # an observability capture never kills the tuple
+                _LOG.warning(
+                    "sweep_run.mask_population_capture_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
         mask_source = apriori_candidates
     else:
         mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)

@@ -1743,8 +1743,10 @@ def test_r45_run_one_tuple_invokes_diffcheck_post_persist(tmp_path: Path) -> Non
         bar_bits: Sequence[int],
         tuple_: SweepTuple,
         grid: SweepGridConfig,
+        mask_population: Sequence[int] | None = None,
     ) -> None:
         assert len(bar_bits) == len(bars)
+        assert mask_population is None  # legacy arm — the kwarg is never passed
         calls.append(len(bar_bits))
 
     grid = _grid()
