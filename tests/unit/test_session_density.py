@@ -672,6 +672,7 @@ class TestObserveSessionDensity:
         assert fields["shape"] == SHAPE_INTRADAY_HOLE
         assert (fields["gap_start"], fields["gap_end"]) == ("10:00", "10:45")
         assert "re-pull this window" in fields["remediation"]
+        assert ("warning", SESSION_DENSITY_LOW_EVENT, fields) in log.records
         assert log.events(SESSION_DENSITY_SUPPRESSED_EVENT) == []
 
     def test_sparse_flag_carries_the_inspect_remediation(self) -> None:

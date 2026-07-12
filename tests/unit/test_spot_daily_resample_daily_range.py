@@ -198,6 +198,7 @@ class TestEmitExtremeDailyRanges:
         with capture_logs() as logs:
             emit_extreme_daily_ranges(days, symbol="NIFTY")
         (warn,) = [e for e in logs if e["event"] == DAILY_RANGE_EVENT]
+        assert warn["log_level"] == "warning"
         assert "CIRCUIT_HALT_SESSIONS" in warn["remediation"]
         assert "citation" in warn["remediation"]
         assert [e for e in logs if e["event"] == DAILY_RANGE_SUPPRESSED_EVENT] == []
