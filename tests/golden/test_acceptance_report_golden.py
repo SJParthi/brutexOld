@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from brutex.acceptance.run import RunConfig, run_acceptance
 
 from tests.fakes.acceptance_twin import NOW, make_twin
