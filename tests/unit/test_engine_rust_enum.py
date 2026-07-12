@@ -944,6 +944,27 @@ class TestWorkflowWiring:
         assert "TWIN_START: ${{ inputs.twin_start }}" in wf
         assert "TWIN_END: ${{ inputs.twin_end }}" in wf
 
+    def test_twin_run_actions_are_sha_pinned(self) -> None:
+        """Round-5 review MINOR: every ``uses:`` in the twin-run workflow must
+        be SHA-pinned (the repo convention — 63/33/19 pinned sibling refs).
+
+        This job runs on the self-hosted M4 Pro with the REAL production lake
+        mounted; a mutable tag (``@v7``) re-point — or a compromised
+        first-party tag — would execute attacker-controlled action code on
+        the most sensitive runner in the repo, exactly the exposure the
+        SHA-pin convention exists to close. No zizmor/actionlint SHA-pin
+        gate exists, so this pin is the teeth.
+        """
+        wf = (self._ROOT / ".github/workflows/rust-enum-twin-run.yml").read_text(encoding="utf-8")
+        refs = re.findall(r"^\s*(?:-\s*)?uses:\s*(\S+)", wf, flags=re.MULTILINE)
+        assert refs, "no `uses:` refs found — the workflow shape moved, repin"
+        for ref in refs:
+            assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", ref), (
+                f"action ref {ref!r} is not SHA-pinned (40-hex) — the twin-run "
+                "job runs self-hosted with the real lake mounted; pin it like "
+                "the sibling workflows (`@<sha> # vN`)"
+            )
+
     def test_coverage_gate_comment_carries_no_stale_size_figure(self) -> None:
         """Round-1 review NIT: the pre-rework '151 stmts, 66 branches' figure
         must never return — the gate enforces ``--cov-fail-under=100``; a
