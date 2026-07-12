@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1751 —
+_Last updated: 2026-07-12 (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1752 —
 the /oneclick/equity + /api/v1/launch/* lake-limiter fix: the equity route (the
 #1665 merge-seam straggler — the ONLY oneclick route left on the bare pool) and
 ALL THREE launch offloads (the #1642 HONEST-LIMITS named follow-up, CLOSED) now
@@ -38,7 +38,7 @@ deadline — a wedged worker stays wedged until the volume recovers; the fix
 bounds the pile at 32 isolated tokens, it does not end it. READ-ONLY dashboard
 liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; healthy-lake payloads
 byte-identical; the per-item record lives in the §1 Active-branch blurb +
-MIGRATION.md #1751 — this header carries the one-line summary, never the
+MIGRATION.md #1752 — this header carries the one-line summary, never the
 story.)
 Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
 #1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
@@ -2342,7 +2342,9 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1751** —
+- **Active branch:** `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1752** —
+  renumbered #1751 → #1752 at the 2026-07-12 merge-reconcile (main took #1751
+  for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, PR #1488) —
   the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
   app.py:7815, now :7828 — the #1665 merge-seam straggler, the ONLY oneclick
   route still on the bare default pool) joins its six siblings on
@@ -5980,7 +5982,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/lake-limiter-equity-launch`
-  (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1751 — the lake-limiter
+  (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1752 — renumbered
+  #1751 → #1752 at the 2026-07-12 merge-reconcile, main took #1751 for
+  DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (PR #1488) — the lake-limiter
   completion for the two straggler route families: GET /api/v1/oneclick/equity
   joins its six siblings on `await _run_lake(_resolve)` and the THREE
   /api/v1/launch/* offloads ride the NEW kw-only `run_lake=` injection seam on
