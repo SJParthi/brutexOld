@@ -568,6 +568,76 @@ jobs:
           else
             echo "(brutex.feeds.groww_binding test file not present yet — gate inactive)"
           fi
+          # DEC-DHAN-SPOT-FEED-001 (ADR-0022): the standalone Dhan read-only SPOT
+          # feed track — the real second consumer of the feed interface. Each new
+          # module 100% line+branch, fake-driven (no boto3/dhanhq/network).
+          if compgen -G "tests/unit/test_dhan_constants.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.constants --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_constants.py
+          else
+            echo "(brutex.adapters.dhan.constants test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_errors.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_errors.py
+          else
+            echo "(brutex.adapters.dhan.errors test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_scrip_master.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.scrip_master --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_scrip_master.py
+          else
+            echo "(brutex.adapters.dhan.scrip_master test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_token_store.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store.py
+          else
+            echo "(brutex.adapters.dhan.token_store_aws test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_reauth.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.reauth --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_reauth.py
+          else
+            echo "(brutex.adapters.dhan.reauth test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_parser.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_parser.py
+          else
+            echo "(brutex.adapters.dhan.parser test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_chunks.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.chunks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_chunks.py
+          else
+            echo "(brutex.adapters.dhan.chunks test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_client.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.client --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_client.py
+          else
+            echo "(brutex.adapters.dhan.client test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_adapter.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.adapter --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_adapter.py
+          else
+            echo "(brutex.adapters.dhan.adapter test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_live_controller.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.live_controller --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_live_controller.py
+          else
+            echo "(brutex.adapters.dhan.live_controller test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_ingest.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.ingest --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_ingest.py
+          else
+            echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_dhan_credentials_aws.py" > /dev/null; then
+            pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_credentials_aws.py
+          else
+            echo "(brutex.config.credentials_dhan_aws test file not present yet — gate inactive)"
+          fi
+          # DEC-DHAN-FEED-BINDING-001 (ADR-0022): the Dhan feed binding — the real
+          # second consumer's identity-pinned FeedBinding shim.
+          if compgen -G "tests/unit/test_dhan_binding.py" > /dev/null; then
+            pytest --cov=brutex.feeds.dhan_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_binding.py
+          else
+            echo "(brutex.feeds.dhan_binding test file not present yet — gate inactive)"
+          fi
           # DEC-CONSTITUENTS-CACHE-001 (MIGRATION.md #457): the new
           # constituent disk-cache module ships at 100% line+branch from
           # the start (its live-network surface lives in nse_constituents,
@@ -3394,23 +3464,12 @@ jobs:
         run: python3 scripts/ci/validate_ledger_numbering.py
 
   # ─────────────────────────────────────────────────────────────────
-  # NO-DHAN GUARD — zero-dhan enforcement on the live surface.
-  # The live vendor is Groww; the Dhan adapter was fully removed in the
-  # J4 PR series. This guard fails the build if the retired "dhan" vendor
-  # word reappears in brutex/, scripts/, CLAUDE.md, README.md, or
-  # docs/runbooks/. The immutable DEC-DHAN-* decision IDs + the historical
-  # docs (MIGRATION.md / adr/ / TRACK1_*.md) are exempt (see the script
-  # header for the full LEDGER rationale).
-  # ─────────────────────────────────────────────────────────────────
-  no-dhan-guard:
-    name: No-dhan guard (zero-dhan enforcement)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - name: Run no-dhan guard
-        run: bash scripts/ci/no-dhan-guard.sh
-
+  # (no-dhan-guard RETIRED — DEC-DHAN-GUARD-RETIRE-002, ADR-0022. The
+  # zero-dhan enforcement guard + its job are gone: Dhan is RE-ADMITTED as
+  # a standalone read-only SPOT feed track (DEC-DHAN-SPOT-FEED-001), so the
+  # "dhan" vendor word is once again LIVE on the code surface — the guard
+  # would now fail every push. `scripts/ci/no-dhan-guard.sh` is deleted and
+  # its `ci-ok` needs entry + result echo/aggregate refs below are removed.)
   # ─────────────────────────────────────────────────────────────────
   # CONVENTIONAL COMMITS — commit format check (only on PRs)
   # ─────────────────────────────────────────────────────────────────
@@ -4358,13 +4417,9 @@ jobs:
       # trading_core + #480 numpy crashes) can never recur silently.
       - run-smoke
       - banned
-      # DEC-CI-OK-NODHAN-GATE-001 (R2-CI-1): the zero-dhan enforcement guard.
-      # It has NO event `if:` (runs on push / pull_request / dispatch alike),
-      # so it never legitimately skips — a RED no-dhan-guard is a HARD fail
-      # here (never skipped==pass). It is enforced via this required `CI OK`
-      # aggregate, NOT as a direct branch-protection required context, so the
-      # branch-protection-drift.yml expected snapshot is untouched.
-      - no-dhan-guard
+      # (no-dhan-guard need RETIRED — DEC-DHAN-GUARD-RETIRE-002, ADR-0022:
+      # Dhan is re-admitted as a standalone read-only SPOT feed, so the
+      # zero-dhan enforcement guard + its job are deleted.)
       # DEC-CICD-GATE-HONESTY-001: the ledger-numbering validator,
       # de-conflated from the banned-pattern scan into its own job. It is
       # NOT a branch-protection required context (so the drift detector is
@@ -4438,7 +4493,7 @@ jobs:
       # REAL lake + the resume/adversarial legs + the I-1 byte-identity
       # proof, every push. Enforced via this required CI OK aggregate, NOT
       # as a direct branch-protection required context, so the drift
-      # snapshot is untouched (the no-dhan-guard precedent).
+      # snapshot is untouched (the enforced-via-ci-ok precedent).
       - sweep-rehearsal
       # Still advisory-only (continue-on-error): typos, complexity,
       # fno-math-drift — these are informational scans, not enforcement
@@ -4464,7 +4519,6 @@ jobs:
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
-          echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
           echo "  ledger-numbering:${{ needs.ledger-numbering.result }}"
           echo "  secrets:       ${{ needs.secrets.result }}"
           echo "  codeql:        ${{ needs.codeql.result }}"
@@ -4501,7 +4555,6 @@ jobs:
             "${{ needs.rust-trading-core.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
-            "${{ needs.no-dhan-guard.result }}" \
             "${{ needs.ledger-numbering.result }}" \
             "${{ needs.secrets.result }}" \
             "${{ needs.codeql.result }}" \
