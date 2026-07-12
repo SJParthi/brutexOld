@@ -473,6 +473,43 @@ class TestExportSymbol:
         assert export.disposition == "withheld"
         assert export.reason == "gate_signature_drift"
 
+    def test_enum_value_drifted_module_withholds_gate_signature_drift(self) -> None:
+        # Round-4 polish P2, the end-to-end shape: bind over a module whose
+        # enum VALUES renamed ("index_spot" gone) — pre-fix the seam's
+        # InstrumentClass("index_spot") raised a raw ValueError PAST this
+        # loop's TypeError drift net (an escaping mid-run crash); the seam
+        # now folds it to TypeError, so the symbol is withheld as
+        # gate_signature_drift. day_export's except is deliberately NOT
+        # widened to bare ValueError — a gate-internal bug must propagate.
+        import enum
+        import types
+
+        from brutex.crossverify.gate_seam import bind_production_classifier
+
+        class _Renamed(enum.Enum):
+            INDEX_SPOT = "idx_spot"  # the VALUE drifted away from "index_spot"
+            CASH_SPOT = "cash_spot"
+            FUT = "fut"
+
+        module = types.ModuleType("value_drifted_gate")
+
+        def classify_today_completeness(**kwargs: object) -> object:
+            raise AssertionError("unreachable — the enum conversion raises first")
+
+        module.classify_today_completeness = classify_today_completeness  # type: ignore[attr-defined]
+        module.InstrumentClass = _Renamed  # type: ignore[attr-defined]
+        classifier = bind_production_classifier(lambda _name: module)
+        export = export_symbol(
+            identity=_identity(),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15)]),
+            classifier=classifier,
+        )
+        assert export.disposition == "withheld"
+        assert export.reason == "gate_signature_drift"
+        assert export.csv_bytes is None
+
     def test_genuine_code_bug_propagates(self) -> None:
         def _buggy_reader(
             *, exchange: str, segment: str, symbol: str, day: date

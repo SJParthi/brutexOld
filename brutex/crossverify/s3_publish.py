@@ -66,6 +66,11 @@ NONRETRYABLE_S3_ERROR_NAMES: Final[frozenset[str]] = frozenset(
         "InvalidAccessKeyId",
         "SignatureDoesNotMatch",
         "ExpiredToken",
+        # Round-4 polish P3 (bring-up hardening): botocore raises
+        # NoCredentialsError when NO credential source resolves — a
+        # creds-absent box must abort the WHOLE publish immediately (the
+        # AccessDenied posture), never retry-storm ~750 keys × 3 attempts.
+        "NoCredentialsError",
     }
 )
 

@@ -45,6 +45,9 @@ class TestClassification:
     def test_nonretryable_names(self) -> None:
         assert "AccessDenied" in NONRETRYABLE_S3_ERROR_NAMES
         assert "NoSuchBucket" in NONRETRYABLE_S3_ERROR_NAMES
+        # Round-4 polish P3: a creds-absent box (botocore NoCredentialsError)
+        # is a broken-grant shape — whole-publish abort, never a retry storm.
+        assert "NoCredentialsError" in NONRETRYABLE_S3_ERROR_NAMES
         assert is_nonretryable_s3_error(FakeS3AccessDenied("x")) is True
         assert is_nonretryable_s3_error(FakeS3SlowDown("x")) is False
         assert is_nonretryable_s3_error(TimeoutError("x")) is False
@@ -147,6 +150,50 @@ class TestPublishStaged:
         assert outcome.failed_count == 3
         assert outcome.published == 0
         assert len(client.puts) == 1  # never a per-key storm against a broken grant
+
+    def test_no_credentials_aborts_whole_publish_zero_retries(self, tmp_path: Path) -> None:
+        # Round-4 polish P3 (bring-up hardening): botocore raises
+        # NoCredentialsError when NO credential source resolves — a
+        # creds-absent box must abort the WHOLE publish on the FIRST
+        # attempt (the AccessDenied posture), never retry-storm
+        # ~750 keys × 3 attempts against a box that can never succeed.
+        class _NoCreds(Exception):
+            pass
+
+        # Retryability is classified by class NAME; align exactly.
+        _NoCreds.__name__ = "NoCredentialsError"
+        _NoCreds.__qualname__ = "NoCredentialsError"
+        assert is_nonretryable_s3_error(_NoCreds("Unable to locate credentials")) is True
+
+        class _NoCredsClient:
+            def __init__(self) -> None:
+                self.attempts = 0
+
+            def put_object(
+                self, *, bucket: str, key: str, body: bytes, content_type: str = CSV_CONTENT_TYPE
+            ) -> None:
+                _ = (bucket, key, body, content_type)
+                self.attempts += 1
+                raise _NoCreds("Unable to locate credentials")
+
+        journal = _journal()
+        for name in ("A", "B", "C"):
+            _stage(tmp_path, journal, f"p/IDX_I/{name}.csv", b"x\n")
+        sleeps: list[float] = []
+        client = _NoCredsClient()
+        outcome = publish_staged(
+            client=client,
+            bucket=_BUCKET,
+            journal=journal,
+            lake_root=tmp_path,
+            sleeper=sleeps.append,
+        )
+        assert outcome.aborted_nonretryable is True
+        assert outcome.published == 0
+        assert outcome.failed_count == 3
+        assert client.attempts == 1  # ONE attempt total — zero retries, no later keys tried
+        assert sleeps == []  # the retry ladder never slept
+        assert len(journal.pending_keys()) == 3  # everything stays pending for recovery
 
     def test_failed_keys_capped(self, tmp_path: Path) -> None:
         journal = _journal()

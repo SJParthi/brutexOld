@@ -135,6 +135,44 @@ class TestBindProductionClassifier:
         with pytest.raises(CompletenessGateUnavailable, match=missing):
             bind_production_classifier(lambda _name: gate)
 
+    def test_enum_value_drift_folds_to_type_error_healthy_unchanged(self) -> None:
+        # Round-4 polish P2 (future-only belt): a sibling enum-VALUE rename
+        # ("index_spot" no longer a member value) makes the seam's
+        # InstrumentClass(token) conversion raise a raw ValueError — which
+        # day_export's drift net deliberately does NOT catch (a bare
+        # ValueError there would mask gate-internal bugs). The seam folds
+        # it into TypeError so the export loop's EXISTING except withholds
+        # the symbol as `gate_signature_drift` instead of crashing mid-run.
+        calls: list[dict[str, Any]] = []
+        gate = _fake_gate_module(calls)
+
+        class _Renamed(enum.Enum):
+            INDEX_SPOT = "idx_spot"  # the VALUE drifted away from "index_spot"
+            CASH_SPOT = "cash_spot"
+            FUT = "fut"
+
+        gate.InstrumentClass = _Renamed  # type: ignore[attr-defined]
+        classifier = bind_production_classifier(lambda _name: gate)
+        with pytest.raises(TypeError, match="gate enum drift") as excinfo:
+            classifier(
+                bars_today=[],
+                clamp_today=date(2026, 7, 10),
+                window_end=date(2026, 7, 10),
+                instrument_class="index_spot",
+            )
+        assert isinstance(excinfo.value.__cause__, ValueError)  # chained, never swallowed
+        assert calls == []  # the drifted token never reached classify
+        # Healthy path UNCHANGED on the SAME classifier: an un-drifted
+        # token still maps by value and classifies normally.
+        verdict = classifier(
+            bars_today=[],
+            clamp_today=date(2026, 7, 10),
+            window_end=date(2026, 7, 10),
+            instrument_class="cash_spot",
+        )
+        assert verdict.reason == "complete"
+        assert calls[-1]["instrument_class"] is _Renamed.CASH_SPOT
+
     def test_default_importer_state_matches_tree(self) -> None:
         # Honest either way: with the sibling module absent this is the
         # fail-closed arm through the REAL importlib; once #1751 merges the

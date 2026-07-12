@@ -1203,6 +1203,43 @@ class TestDayJournalLockSerialization:
         # Staged bytes left in place — the orphan-staging remediation path.
         assert staging_path(tmp_path, _DAY, _NIFTY).exists()
 
+    def test_step_m_reload_stamps_finishing_runs_provenance(self, tmp_path: Path) -> None:
+        # Round-4 polish P4 (mutation teeth): the step-M reload's
+        # `current.run_id = run_id` provenance assignment had no killing
+        # test (the near-equivalent survivor). A PARTIAL peer publishes ONE
+        # key between our steps K and M and stamps ITS run_id on the durable
+        # journal; our step M re-loads under the day flock, finds 2 pending
+        # keys, publishes them — and the durable journal must read the
+        # FINISHING run's run_id. Dropping the assignment leaves the peer's
+        # "cv-peer" provenance behind, killing exactly the mutant.
+        nifty_key = s3_key(prefix="crossverify/groww", day=_DAY, identity=_NIFTY)
+        peer_acted: list[int] = []
+        base = _Clock()
+
+        def _peer_partial_publish_at_our_step_l() -> datetime:
+            if not peer_acted and journal_path(tmp_path, _DAY).exists():
+                peer = load_journal(tmp_path, _DAY)
+                assert peer is not None
+                assert len(peer.pending_keys()) == 3
+                peer.run_id = "cv-peer"
+                peer.mark_published(nifty_key)  # partial — 2 keys stay pending
+                peer.save(tmp_path)
+                peer_acted.append(1)
+            return base()
+
+        h = _harness(tmp_path, clock=_peer_partial_publish_at_our_step_l)  # type: ignore[arg-type]
+        report = h.run()
+        assert peer_acted == [1]  # the partial-peer interleave genuinely happened
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.published == 2  # the still-pending keys, from the RE-LOADED journal
+        assert report.skipped_already == 1  # the peer's key honestly skipped
+        journal = load_journal(tmp_path, _DAY)
+        assert journal is not None
+        assert journal.pending_keys() == ()
+        # The provenance law: the finishing run owns the durable journal.
+        assert journal.run_id == report.run_id
+        assert journal.run_id != "cv-peer"
+
     def test_concurrent_same_day_runs_serialize_and_converge(self, tmp_path: Path) -> None:
         # Two full same-day runs racing on ONE lake: both complete green,
         # neither reads a spurious publish_failed off the other's cleanup,

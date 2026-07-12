@@ -118,11 +118,26 @@ def bind_production_classifier(
         window_end: date,
         instrument_class: str,
     ) -> VerdictLike:
+        try:
+            enum_member = instrument_class_enum(instrument_class)
+        except ValueError as exc:
+            # Round-4 polish P2 (defensive belt, future-only): a sibling
+            # enum-VALUE rename ("index_spot" no longer a member value)
+            # raises a raw ValueError here — OUTSIDE day_export's
+            # per-symbol TypeError drift net (which deliberately does NOT
+            # catch bare ValueError; widening it would mask gate-internal
+            # bugs). Fold the drift at THIS seam into the SAME typed path:
+            # re-raise as TypeError so the export loop withholds the symbol
+            # as `gate_signature_drift`, never an escaping mid-run crash.
+            raise TypeError(
+                f"gate enum drift: {instrument_class!r} is not a value of the "
+                f"sibling InstrumentClass enum ({GATE_MODULE}): {exc}"
+            ) from exc
         verdict: VerdictLike = classify(
             bars_today=bars_today,
             clamp_today=clamp_today,
             window_end=window_end,
-            instrument_class=instrument_class_enum(instrument_class),
+            instrument_class=enum_member,
         )
         return verdict
 
