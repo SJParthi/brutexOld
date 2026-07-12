@@ -51,8 +51,9 @@ Hard guarantees (see the module-level HARD REQUIREMENTS map at the bottom):
   the access token MUST be provided (SSM-read; TickVault owns the lifecycle).
 * Rate-safe: token-bucket pacing at <= 5 r/s (Dhan) / <= 3 r/s (Kite) and a
   bounded total call budget. 401/403/429 are reported, not spam-retried.
-* Zero pip installs -- Python standard library only. TOTP is hand-rolled
-  (RFC 6238, HMAC-SHA1, 6 digits, 30 s step). Nothing is imported from the
+* Zero pip installs -- Python standard library only. The probe NEVER mints a
+  token (no TOTP, no ``generateAccessToken``): the access token MUST be provided
+  (SSM-read; TickVault owns the lifecycle). Nothing is imported from the
   ``brutex`` package.
 * Each vendor is independently skippable. A missing-creds vendor is marked
   SKIPPED and never crashes the run.
@@ -329,8 +330,8 @@ def http_json(
     headers:
         Request headers.
     body:
-        Optional request body bytes (JSON for Dhan charts; ``b""`` for the
-        POST mint).
+        Optional request body bytes (JSON for the Dhan charts intraday /
+        rollingoption POST reads; empty on GET).
     timeout:
         Socket timeout in seconds.
     redactor:
@@ -1098,7 +1099,7 @@ def run_dhan(
     run_rollingoption: bool = True,
     run_scrip_confirm: bool = True,
 ) -> tuple[list[ProbeRecord], dict[str, Any]]:
-    """Run all Dhan probes: resolve ids, ID-confirm, (optionally) mint, march, options.
+    """Run all Dhan probes: resolve ids, ID-confirm, march, options.
 
     Parameters
     ----------

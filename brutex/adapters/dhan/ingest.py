@@ -6,8 +6,9 @@ each index series, fetch each via the COMMON
 the bars, and append to a :class:`~brutex.data.sink.BarSink`. Only **3 vendor
 couplings** — :func:`~brutex.adapters.dhan.chunks.window_days_for_interval` (the flat
 90-day tile), the :mod:`~brutex.adapters.dhan.errors` classifiers, and the
-module ledger namespace ``_MARKET="dhan"`` (own namespace → no Groww collision);
-everything else is vendor-neutral (the window planner, the session filter, the sink).
+per-symbol outcome/attribution namespace ``_MARKET="dhan"`` (own namespace → no
+Groww collision); everything else is vendor-neutral (the window planner, the
+session filter, the sink).
 
 **Honest degradation (Golden Rule #1, DEC-DHAN-HONEST-DEGRADE-001).** Two honest
 states are structurally distinct:
@@ -78,8 +79,11 @@ class FetchOhlcv(Protocol):
         ...
 
 
-#: The window-ledger market namespace for Dhan windows (the ONE vendor coupling to the
-#: ledger — own namespace so a Dhan window never collides with a Groww window).
+#: The per-symbol outcome/attribution namespace for Dhan windows — used in the
+#: structlog events and the all-empty scan, NOT a durable ledger namespace (this lean
+#: spine uses no WindowLedger; the durable ledger is deferred to
+#: DEC-FEED-SPINE-GENERALIZE-001). Own namespace so a Dhan outcome never collides with
+#: a Groww window.
 _MARKET: Final[str] = DHAN_COVERAGE_MARKET
 
 #: The lake partition segment for a Dhan index series (the neutral INDEX segment; the
@@ -149,7 +153,8 @@ class DhanIngestReport:
     resolved_symbols, unresolved_symbols
         The symbols that DID / did NOT resolve to a securityId.
     market
-        The ledger market namespace (``"dhan"``).
+        The per-symbol outcome/attribution namespace (``"dhan"``); not a durable
+        ledger namespace (this lean spine uses no WindowLedger).
     """
 
     outcomes: tuple[DhanWindowOutcome, ...]
