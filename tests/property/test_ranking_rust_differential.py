@@ -85,12 +85,6 @@ _finite = st.one_of(
     st.sampled_from([0.0, -0.0, 1.0, -1.0]),
 )
 _maybe_finite = st.one_of(st.none(), _finite)
-#: int64 paisa spanning BOTH sides of the 2**53 fast-path envelope.
-_paisa = st.one_of(
-    st.integers(min_value=0, max_value=1 << 20),
-    st.integers(min_value=(1 << 53) - 4, max_value=(1 << 53) + 4),
-    st.integers(min_value=0, max_value=(1 << 62)),
-)
 
 
 @st.composite
