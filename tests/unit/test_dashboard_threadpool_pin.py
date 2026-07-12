@@ -170,7 +170,7 @@ def test_scan_is_not_vacuous() -> None:
     names = {path.name for path in sources}
     assert "app.py" in names and "launch_button.py" in names
     app_source = (_DASHBOARD / "app.py").read_text(encoding="utf-8")
-    # 57 sites at authoring — a rename of `_run_lake` must consciously update
+    # 58 sites at authoring — a rename of `_run_lake` must consciously update
     # this pin (and the allowlist rule text) rather than silently hollowing
     # the "rides the lake limiter" claim.
     assert app_source.count("await _run_lake(") >= 50, (
