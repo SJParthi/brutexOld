@@ -167,8 +167,27 @@ def test_template_ships_honest_error_state(name: str) -> None:
 
 @pytest.mark.parametrize("name", ADOPTING)
 def test_template_wires_fetch_with_timeout(name: str) -> None:
-    """Every adopting template routes polls through BXUI.fetchWithTimeout."""
-    assert "fetchWithTimeout" in _template(name), f"{name}: fetchWithTimeout is not wired"
+    """Every adopting template's polls are deadline-bounded (a hung endpoint
+    always resolves).
+
+    v29.html carries the bound through the shared BXPoll core since
+    DEC-FRONTEND-LATENCY-HARDENING-001 (MIGRATION.md #1720): its state poller
+    rides ``BXPoll.createPoller`` (10 s abort armed through the BODY read) and
+    its heartbeat slots SUBSCRIBE to the bx-oneclick / bx-rate-monitor /
+    bx-liveproof pollers, each of which owns its own abort bound — the page's
+    former inline ``BXUI.fetchWithTimeout`` polls are gone WITH their pollers.
+    Every other adopting template still routes through fetchWithTimeout.
+    """
+    html = _template(name)
+    if name == "v29.html":
+        assert "window.BXPoll.createPoller({" in html, (
+            "v29.html: the BXPoll-bounded state poller is missing"
+        )
+        assert "window.__bxPullRateSubs" in html and "window.__bxLiveproofSubs" in html, (
+            "v29.html: the heartbeat slots must subscribe to the bounded widget polls"
+        )
+    else:
+        assert "fetchWithTimeout" in html, f"{name}: fetchWithTimeout is not wired"
 
 
 # ---------------------------------------------------------------------------

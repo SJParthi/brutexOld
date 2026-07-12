@@ -103,7 +103,7 @@ from brutex.engine.combo_mask import (
     mask_to_entry_signals,
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
-from brutex.engine.results_store import ResultRow, ResultsStore
+from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
 from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
@@ -528,9 +528,17 @@ class SweepRunConfig:
         ranking term, DEC-RANKING-OVERFIT-001) inside :func:`brutex.ranking.rank_combos`.
         ``None`` (the default) keeps the legacy five-gate / seven-term ranking. The
         leaderboard's trial count ``N`` is this tuple's backtested-combo count —
-        the authoritative per-(instrument, TF) ``N`` — so the persisted store is, by
-        construction, the overfit-gated output (see the ``overfit`` module's honest
-        envelope: no statistically-valid post-store re-gate exists).
+        the authoritative per-(instrument, TF) ``N`` (see the ``overfit`` module's
+        honest envelope: no statistically-valid post-store re-gate exists). The
+        gate identity is now encoded in the store ADDRESS itself: the
+        active-only gate config folds into
+        :func:`~brutex.engine.sweep_orchestrator._tuple_digest`
+        (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so a gated vs an ungated run
+        over ONE results root map to DIFFERENT Parquet + completion-sentinel
+        addresses — an ungated store can never be served as a gated one via the
+        sentinel short-circuit, and a same-address collision differing only in
+        the nullable DSR metric is a tuple-scoped skip (C5), never a silent
+        overwrite.
 
     Raises
     ------
@@ -1833,7 +1841,20 @@ def run_persisted_sweep(
             # lands here.
             reference_stamper=reference_stamper,
         )
-        store.append(row)
+        try:
+            store.append(row)
+        except ResultsStoreGateConflictError as exc:
+            # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config re-run
+            # into the same store address surfaces here as an all-nullable-metric
+            # conflict. Convert AT THE SOURCE to a SweepComboError — a SIBLING of
+            # ResultsStoreError — so it sails PAST run_one_tuple's
+            # ``except ResultsStoreError`` (which, with store_quarantine=None,
+            # re-raises as a GLOBAL grid abort) and lands on the driver's
+            # ``except SweepComboError`` tuple-skip + TUPLE_FAILED-count ladder.
+            raise SweepComboError(
+                f"gate-config conflict persisting {cfg.instrument}/{cfg.tf}/"
+                f"{direction_label} k={cfg.k}: {exc}"
+            ) from exc
         persisted += 1
 
     flush = store.flush()
