@@ -157,6 +157,63 @@ _MAX_KERNEL_PRICE_PAISA: Final[int] = (2**63 - 1) // 8
 #: the seam routes to the pure-Python oracle.
 _U128_MASK: Final[int] = (1 << MAX_VOCAB_BITS) - 1
 
+#: Cap on ``trade_sim.session_tail_hole`` WARNs per kernel-input derivation
+#: (DEC-TRADESIM-OPEN-SESSION-GUARD-001) — everything past the cap rolls into
+#: ONE ``trade_sim.session_tail_hole_suppressed`` summary (the house
+#: preopen.prev_close_noncontiguous capped-warn precedent). Mask-independent
+#: by construction: the detection runs ONCE per tuple at derivation, never
+#: per mask and never inside the walker's ``_close`` (the
+#: DEC-SWEEP-LOG-VOLUME-GUARD-001 #1630 posture).
+_TAIL_HOLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_session_tail_holes(forced: Sequence[bool], session_days: Sequence[int]) -> None:
+    """WARN once per session-tail data hole in the window (capped, mask-independent).
+
+    A *session-tail hole* is a maximal run of consecutive bars sharing one
+    session ordinal that (i) is NOT the window's final session and (ii)
+    contains NO bar with ``forced=True`` — exactly the shape on which the
+    walker's (A2) open-position session guard fires a ``session_gap`` close
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the session's stored bars ended
+    before any forced-exit-window bar, so a position opened in it can only
+    close retroactively at its last stored bar. The FINAL session is exempt —
+    an incomplete final session is the ordinary end-of-window shape the
+    ``end_of_data`` close already names honestly.
+
+    Emits at most :data:`_TAIL_HOLE_WARN_CAP` ``trade_sim.session_tail_hole``
+    WARNs (fields: ``session`` — the ISO date from the ordinal — and ``bars``,
+    the session's stored-bar count) plus ONE
+    ``trade_sim.session_tail_hole_suppressed`` summary carrying the total when
+    the cap is exceeded. One O(N_bars) pass, paid at the already-O(N_bars)
+    derivation. The pure-Python re-sim paths (capture / cascade / robustness /
+    CLI) deliberately get no WARN — the ``exits_session_gap`` aggregate
+    counter is their persistent signal; data-hole ALERTING stays owned by the
+    #1031 detectors.
+    """
+    holes: list[tuple[int, int]] = []
+    run_start = 0
+    n = len(session_days)
+    for i in range(1, n + 1):
+        if i < n and session_days[i] == session_days[run_start]:
+            continue
+        # A maximal run [run_start, i) just ended. The FINAL run (i == n) is
+        # exempt; a prior run with no forced bar is a session-tail hole.
+        if i < n and not any(forced[run_start:i]):
+            holes.append((session_days[run_start], i - run_start))
+        run_start = i
+    for ordinal, bar_count in holes[:_TAIL_HOLE_WARN_CAP]:
+        _LOG.warning(
+            "trade_sim.session_tail_hole",
+            session=date.fromordinal(ordinal).isoformat(),
+            bars=bar_count,
+        )
+    if len(holes) > _TAIL_HOLE_WARN_CAP:
+        _LOG.warning(
+            "trade_sim.session_tail_hole_suppressed",
+            total=len(holes),
+            shown=_TAIL_HOLE_WARN_CAP,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PriceColumns:
@@ -585,9 +642,24 @@ class ResidentTradeSim:
         uses — threaded to the kernel so a pending entry armed on a session's
         last stored bar is DROPPED at the next session's open instead of
         filling ~18h stale across the overnight gap (R2-OC-2; mirrors the
-        walker's ``_pending_entry_day`` gate bit-for-bit). Bar ``i``'s session
-        derives from bar ``i``'s own timestamp — knowable at bar ``i`` (P-06:
-        no look-ahead).
+        walker's ``_pending_entry_day`` gate bit-for-bit) AND so an open
+        position never survives a session-date change (the ``session_gap``
+        close, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the same ordinals feed
+        the kernel's open-position guard, zero new FFI inputs). Bar ``i``'s
+        session derives from bar ``i``'s own timestamp — knowable at bar ``i``
+        (P-06: no look-ahead).
+
+        Observability (DEC-TRADESIM-OPEN-SESSION-GUARD-001): the forced/
+        session loop ends with ONE mask-independent capped sweep over its
+        derived columns — :func:`_warn_session_tail_holes` — naming every
+        non-final session whose stored bars never reach a forced-exit bar
+        (the exact shape the guard will fire on), so a session-tail data
+        hole is loud once per derivation, never once per mask. Under the
+        memo (below) a memo HIT RE-EMITS the sweep from the memoised
+        ``forced``/``session_days`` columns — a pure function of them, so
+        the warn frequency and payloads match the non-memo derivation's
+        per-call emission 1:1 (main-parity: the u128 promotion's second
+        call warns exactly as its second full derivation used to).
 
         Since DEC-STAGE1A-RUST-BATCH-001 (the W2 rider): the tf-independent
         columns come from the injected ``precomputed_columns`` when a kernel
@@ -599,16 +671,25 @@ class ResidentTradeSim:
         column in the memo is an immutable ``tuple`` — the price columns are
         SHARED across every sim built from one kernel, so no consumer can
         corrupt a sibling in place (review LOW-2 hardening). The forced/
-        session loop runs BEFORE the local price-column derivation — the
-        pre-rider statement order — so a multi-pathology window (an
-        out-of-coverage weekday PLUS an over-precision price, both
+        session loop (with the tail-hole sweep at its end, per the
+        session-guard order above) runs BEFORE the local price-column
+        derivation — the pre-rider statement order — so a multi-pathology
+        window (an out-of-coverage weekday PLUS an over-precision price, both
         constructible from validated ``CandleBar``\\s) still raises the class
         contract's ``HolidayDataUnavailableError``, never
-        ``decimal.InvalidOperation`` (refuter RF2 C-1; regression-pinned).
+        ``decimal.InvalidOperation`` (refuter RF2 C-1; regression-pinned) —
+        and the tail-hole WARNs land before a price-derivation raise, exactly
+        as the non-memo derivation ordered them.
         """
         if self._kernel_inputs is not None:
+            # Memo HIT: re-emit the session-tail-hole sweep from the memoised
+            # forced/session_days columns (docstring — main-parity warn
+            # frequency: every call warns, exactly as every non-memo
+            # derivation did).
+            _warn_session_tail_holes(self._kernel_inputs[4], self._kernel_inputs[5])
             return self._kernel_inputs
         forced: list[bool] = []
+        session_days: list[int] = []
         cache_date: date | None = None
         cache_seconds: int | None = None
         for bar in self._bars:
@@ -621,6 +702,8 @@ class ResidentTradeSim:
                     None if session is None else forced_exit_seconds_for_session(session)
                 )
             forced.append(is_forced_exit_bar(ts_ist.time(), self._tf_minutes, cache_seconds))
+            session_days.append(bar_day.toordinal())
+        _warn_session_tail_holes(forced, session_days)
         columns = self._precomputed_columns
         if columns is None:
             columns = derive_price_columns(self._bars)
@@ -640,10 +723,12 @@ class ResidentTradeSim:
         DEC-TRADE-SIM-U128-KERNEL-001: a mask in ``(U64_MASK, _U128_MASK]``
         over a u64-resident window promotes the WHOLE batch to
         ``fno_math.ResidentSweepSimU128`` — built lazily HERE from the same
-        :meth:`_derive_kernel_inputs` columns (an O(1) memo handoff since the
+        :meth:`_derive_kernel_inputs` columns (a memo handoff since the
         DEC-STAGE1A-RUST-BATCH-001 G-4 memo — the historical second
-        ``O(N_bars)`` Decimal derivation is gone — plus the FFI copy, paid
-        once per instance, announced with ONE
+        ``O(N_bars)`` DECIMAL derivation is gone; the hit still pays the
+        ``O(N_bars)`` session-tail-hole RE-EMIT sweep for main-parity warn
+        frequency, DEC-TRADESIM-OPEN-SESSION-GUARD-001 — plus the FFI copy,
+        paid once per instance, announced with ONE
         ``rust_trade_sim.wide_kernel_promoted`` INFO) and memoised, so the
         chunked sweep's subsequent wide batches are pure kernel calls. Returns
         ``None`` when the installed wheel predates the class (memoised via
