@@ -51,6 +51,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Final
 
 from brutex.engine.combo_mask import ResidentBarBuffer
+from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
 from brutex.engine.stage1a import build_bar_bits
 from brutex.strategies.types import FibAnchorKind
 
@@ -120,6 +121,7 @@ class ResidentSweepKernel:
         "_bar_bits",
         "_bars",
         "_fib_anchor",
+        "_kernel_columns",
         "_resident",
         "_roll_schedule",
     )
@@ -149,6 +151,9 @@ class ResidentSweepKernel:
             apply_1day_mask=apply_1day_mask,
         )
         self._resident: ResidentBarBuffer = ResidentBarBuffer(self._bar_bits)
+        # Lazily-derived tf-independent trade-sim columns (the W2 rider of
+        # DEC-STAGE1A-RUST-BATCH-001) — see :attr:`kernel_columns`.
+        self._kernel_columns: PriceColumns | None = None
 
     @property
     def bars(self) -> tuple[CandleBar, ...]:
@@ -174,6 +179,22 @@ class ResidentSweepKernel:
     def bar_bits(self) -> list[int]:
         """The pre-built Stage-1A per-bar u128 truth-vectors (reused, never rebuilt)."""
         return self._bar_bits
+
+    @property
+    def kernel_columns(self) -> PriceColumns:
+        """The tf-independent trade-sim input columns for this bar window.
+
+        Derived LAZILY via ONE
+        :func:`~brutex.engine.rust_trade_sim.derive_price_columns` call per
+        kernel lifetime (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) and
+        memoised, so every ``(direction, K, sl, tp)`` tuple reusing this
+        kernel hands its :class:`~brutex.engine.rust_trade_sim.ResidentTradeSim`
+        pre-derived columns instead of re-paying the 4×-Decimal-snap pass —
+        byte-identical by construction (the SAME seam derives both).
+        """
+        if self._kernel_columns is None:
+            self._kernel_columns = derive_price_columns(self._bars)
+        return self._kernel_columns
 
     @property
     def n_bars(self) -> int:

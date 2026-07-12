@@ -104,7 +104,7 @@ from brutex.engine.combo_mask import (
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
-from brutex.engine.rust_trade_sim import ResidentTradeSim
+from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
 from brutex.engine.sweep_driver import (
@@ -1028,6 +1028,7 @@ def _build_trade_sim(
     direction_label: str,
     *,
     reference_stamper: TradeReferenceStamper | None,
+    kernel_columns: PriceColumns | None = None,
 ) -> ResidentTradeSim:
     """Build the tuple's resident trade-sim; map a failure to the #904 tuple-skip contract.
 
@@ -1055,10 +1056,21 @@ def _build_trade_sim(
     ``reference_stamper`` is REQUIRED (no default) so every caller makes an
     EXPLICIT stamping decision for the trades this sim will emit — the
     one-kwarg revert lever the coordinator ruling demands.
+
+    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) threads a
+    :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`'s once-per-window
+    :class:`~brutex.engine.rust_trade_sim.PriceColumns` into the sim so a
+    kernel-reusing tuple skips the per-tuple 4×-Decimal-snap derivation;
+    ``None`` (the default — every kernel-less caller) derives locally,
+    byte-identical.
     """
     try:
         sim = ResidentTradeSim(
-            bars, bar_bits, tf_minutes=cfg.tf_minutes, reference_stamper=reference_stamper
+            bars,
+            bar_bits,
+            tf_minutes=cfg.tf_minutes,
+            reference_stamper=reference_stamper,
+            precomputed_columns=kernel_columns,
         )
     except MemoryError:
         # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a tuple skip.
@@ -1762,7 +1774,17 @@ def run_persisted_sweep(
         # projector's OWN re-simulation, never this stream — and
         # trade_sim_path logs vix_stamped=False so the unstamped stream is a
         # stated fact).
-        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label, reference_stamper=None)
+        sim = _build_trade_sim(
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            reference_stamper=None,
+            # The W2 rider (DEC-STAGE1A-RUST-BATCH-001): a kernel-reusing
+            # tuple hands its once-per-window columns; the kernel=None arm
+            # derives locally (byte-identical).
+            kernel_columns=kernel.kernel_columns if kernel is not None else None,
+        )
         for mask, metrics in _iter_mask_metrics(
             sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
         ):

@@ -520,3 +520,50 @@ class TestKernelPathMuhuratWeeklyAnchor:
         assert cache.builds == 1 and cache.hits == 1
         warns = [e for e in logs if e.get("event") == _MUHURAT_WEEKLY_ANCHOR_EVENT]
         assert len(warns) == 1  # one WARN per Muhurat session, not per lookup
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestKernelColumns:
+    def test_kernel_columns_derived_once_and_memoised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ONE derive_price_columns call per kernel lifetime (spy) — repeat
+        # property reads are the memo handoff.
+        from brutex.engine import sweep_kernel as sk_module
+        from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
+
+        calls = [0]
+        real = derive_price_columns
+
+        def _counting(bars: object) -> PriceColumns:
+            calls[0] += 1
+            return real(bars)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sk_module, "derive_price_columns", _counting)
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        assert calls[0] == 0  # lazy: construction derives nothing
+        first = kernel.kernel_columns
+        second = kernel.kernel_columns
+        assert calls[0] == 1
+        assert first is second
+        # The columns equal a fresh module-level derivation (same seam).
+        assert first == real(bars)
+
+    def test_kernel_columns_feed_the_trade_sim_byte_identically(self) -> None:
+        from brutex.engine.rust_trade_sim import ResidentTradeSim
+
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        injected = ResidentTradeSim(
+            bars, kernel.bar_bits, tf_minutes=1, precomputed_columns=kernel.kernel_columns
+        )
+        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1)
+        assert (
+            injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )
