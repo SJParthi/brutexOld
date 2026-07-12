@@ -69,7 +69,22 @@ def _node_call(expr: str, *argv: str) -> Any:
 class TestExitMixText:
     """bxExitMixText — the writer's metrics.exits object → one honest line."""
 
-    def test_writer_exits_object_renders_all_five_reasons(self) -> None:
+    def test_writer_exits_object_renders_all_six_reasons(self) -> None:
+        exits = {
+            "stop_loss": 12,
+            "take_profit": 30,
+            "signal": 5,
+            "forced_1520": 3,
+            "end_of_data": 0,
+            "session_gap": 2,
+        }
+        out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps(exits))
+        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap 2"
+
+    def test_old_artifact_missing_session_gap_reads_question_mark(self) -> None:
+        # Deploy-skew honesty (DEC-TRADESIM-OPEN-SESSION-GUARD-001): an OLD
+        # top100.json predating the session_gap counter renders the new slot
+        # as the honest "?" — counted-but-unreadable, never an invented 0.
         exits = {
             "stop_loss": 12,
             "take_profit": 30,
@@ -78,7 +93,7 @@ class TestExitMixText:
             "end_of_data": 0,
         }
         out = _node_call("O.bxExitMixText(ARGS[0])", json.dumps(exits))
-        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0"
+        assert out == "SL 12 · TP 30 · signal 5 · 15:20 3 · EOD 0 · gap ?"
 
     @pytest.mark.parametrize("bad", ["null", "undefined", "[]", '"x"', "7"])
     def test_absent_or_malformed_reads_the_honest_dash(self, bad: str) -> None:

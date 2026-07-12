@@ -39,7 +39,12 @@ _RUN = "a1" * 32
 
 #: Locked digest (sha256 hex of the rendered top100.json bytes).
 #: Regeneration is a deliberate, ledgered act — see the module docstring.
-_GOLDEN_TOP100_SHA256 = "db2cfaffcf4786988a059595a46a3c720897f9021b9a9588e42d29bc152e4764"
+#: Re-locked 2026-07-11 for DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md
+#: #1743) — SCHEMA-ADDITIVE ONLY: every entry's ``metrics.exits`` dict gained
+#: the ``"session_gap": 0`` key (zero-count on this fixture — the wp5 fixture
+#: aggs carry no session-gap closes; every other byte of the rendered
+#: artifact is unchanged vs the prior lock).
+_GOLDEN_TOP100_SHA256 = "62894be93580b878b146bf5ee2e1e6cb89c7a4083125e2de1aa8508cef114e05"
 
 
 def _fixture_artifact() -> Top100Artifact:

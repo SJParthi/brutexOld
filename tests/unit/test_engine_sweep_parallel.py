@@ -630,8 +630,15 @@ class TestWorkerLogVolumeGuardSpawn:
         monkeypatch.delenv(LOG_LEVEL_ENV, raising=False)
         _run_parallel(tmp_path, _grid(), workers=2)
         captured = capfd.readouterr()
-        assert "trade_sim." not in captured.err
-        assert "trade_sim." not in captured.out
+        # The guarded class is the PER-TRADE DEBUG storm (entry/exit — the
+        # #1630 disk-fill events); the mask-independent capped WARN
+        # ``trade_sim.session_tail_hole`` (DEC-TRADESIM-OPEN-SESSION-GUARD-001)
+        # legitimately SURVIVES the INFO default — a data-quality warning must
+        # never be silenced by the volume guard, so the pin names the two
+        # per-trade events instead of the whole ``trade_sim.`` namespace.
+        for stream in (captured.err, captured.out):
+            assert "trade_sim.entry" not in stream
+            assert "trade_sim.exit" not in stream
 
     def test_spawn_worker_per_trade_debug_restored_with_debug_env(
         self,
