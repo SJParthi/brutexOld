@@ -28,6 +28,14 @@ CHECK_ID = "latency"
 #: HTTP success status the probes require before timing warm rounds.
 HTTP_OK = 200
 
+#: A 503 from a store-backed probe means the acceptance client has no readable
+#: master (it opens ``instruments.duckdb`` READ-ONLY and degrades to no-store
+#: when it is locked/absent, review round 1 M1) — the route then 503s. ANY
+#: OTHER non-200 (a 400/404/500) is a genuine route/data error and MUST NOT be
+#: relabelled "no dataset" (Golden Rule #10, round-7 F1 — the same class as the
+#: round-6 F2 movers-non-200 mislabel, fixed for movers but missed here).
+MASTER_ABSENT_STATUS = 503
+
 #: key → (route path, params, warm budget ms, envelope citation).
 PROBES: Final[tuple[tuple[str, str, dict[str, Any], float, str], ...]] = (
     (
@@ -60,7 +68,7 @@ PROBES: Final[tuple[tuple[str, str, dict[str, Any], float, str], ...]] = (
     ),
     (
         "universe_summary",
-        "/api/v1/universe",
+        "/api/v1/universe/summary",
         {},
         250.0,
         "content-token cache #866",
@@ -83,13 +91,34 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         response = client.get(path, params=params)
         first_call_ms = (timer() - t0) * 1000.0
         if response.status_code != HTTP_OK:
+            # HONEST split (Golden Rule #10, round-7 F1): a 503 is the
+            # degraded no-master shape (an honest standing gap on a
+            # master-absent lake); ANY OTHER non-200 (404/400/500) is a genuine
+            # route/data error — NEVER a fabricated "no dataset". A
+            # master-PRESENT healthy lake 200s every probe, so this branch never
+            # fires there and can never drive a false permanent amber.
+            status = response.status_code
+            if status == MASTER_ABSENT_STATUS:
+                reason = (
+                    f"{CHECK_ID}.{key} route 503 — instrument master absent or "
+                    "held read-write by another process"
+                )
+                abstain_reason = AbstainReason.NO_INSTRUMENT_STORE
+            else:
+                reason = f"{CHECK_ID}.{key} route error (HTTP {status})"
+                abstain_reason = AbstainReason.ROUTE_ERROR
             subs.append(
                 make_subcheck(
                     f"{CHECK_ID}.{key}",
                     Verdict.ABSTAIN,
                     units_checked=0,
-                    evidence={"status_code": response.status_code, "route": path},
-                    abstain_reason=AbstainReason.NO_DATASET,
+                    evidence={
+                        "status_code": status,
+                        "route": path,
+                        "reason": reason,
+                        "detail": str(response.text)[:200],
+                    },
+                    abstain_reason=abstain_reason,
                     repro=_repro(ctx),
                 )
             )
