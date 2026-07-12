@@ -183,7 +183,7 @@ def test_universe_visibilitychange_fires_the_catch_up_pollers() -> None:
     # marked by the DEC-DASHBOARD-POLL-HYGIENE-001 comment) + the independent
     # greeks-backfill gb-poller listener that landed on main via
     # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9) + the cross-verify cv-poller
-    # listener (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753 — an
+    # listener (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1757 — an
     # intent-preserved pin update: each independent job WATCHER owns exactly
     # one listener; the poll-hygiene CATCH-UPS still add none of their own).
     assert js.count("addEventListener('visibilitychange'") == 3, (

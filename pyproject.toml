@@ -103,7 +103,7 @@ groww = [
 token-broker = [
     "boto3>=1.34,<2.0",
 ]
-# DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (MIGRATION.md #1754): the cross-verify
+# DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (MIGRATION.md #1758): the cross-verify
 # producer's S3 publisher needs boto3 for PutObject — BruteX's FIRST sanctioned
 # AWS WRITE surface (s3:PutObject on arn:aws:s3:::tv-prod-cold/crossverify/*
 # ONLY; the SSM read-only pledge of DEC-AWS-ONLY-CREDS-001 is UNCHANGED). Kept

@@ -1,4 +1,4 @@
-"""Fakes for the today-completeness gate seam (sibling MIGRATION.md #1751).
+"""Fakes for the today-completeness gate seam (sibling MIGRATION.md #1755).
 
 The gate module (``brutex/data/today_completeness.py``) is NOT yet merged, so
 the producer tests drive :mod:`brutex.crossverify` through these doubles:

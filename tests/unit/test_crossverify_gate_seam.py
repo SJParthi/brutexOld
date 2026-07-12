@@ -175,7 +175,7 @@ class TestBindProductionClassifier:
 
     def test_default_importer_state_matches_tree(self) -> None:
         # Honest either way: with the sibling module absent this is the
-        # fail-closed arm through the REAL importlib; once #1751 merges the
+        # fail-closed arm through the REAL importlib; once #1755 merges the
         # bind succeeds — both outcomes satisfy the seam's contract.
         try:
             classifier = bind_production_classifier()

@@ -3,7 +3,7 @@
 DEC-CROSSVERIFY-PRODUCER-001 §3.4. The producer codes against a structural
 Protocol matching the sibling gate module
 (``brutex/data/today_completeness.py``, DEC-PULL-TODAY-COMPLETENESS-GATE-001
-MIGRATION.md #1751) and binds it LAZILY: no gate module ⇒
+MIGRATION.md #1755) and binds it LAZILY: no gate module ⇒
 :class:`CompletenessGateUnavailable` ⇒ the run is FAIL-CLOSED (no gate, no
 publish — exit 1 + CRITICAL). If the sibling's hostile review changes
 signatures, ONLY this adapter moves — the producer NEVER re-implements gate
@@ -97,7 +97,7 @@ def bind_production_classifier(
         instrument_class_enum = module.InstrumentClass
     except ImportError as exc:
         raise CompletenessGateUnavailable(
-            f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1751) "
+            f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1755) "
             "is not importable — refusing to publish without the gate (fail-closed)"
         ) from exc
     except AttributeError as exc:
@@ -106,7 +106,7 @@ def bind_production_classifier(
         # raised a raw AttributeError past the fail-closed exit-1+CRITICAL
         # law. Fold it into the same refusal, NAMING the missing attribute.
         raise CompletenessGateUnavailable(
-            f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1751) "
+            f"the today-completeness gate module ({GATE_MODULE}, MIGRATION.md #1755) "
             f"is present but missing a required attribute — refusing to publish "
             f"without the gate (fail-closed): {exc}"
         ) from exc

@@ -155,7 +155,7 @@ def render_launchd_plist(
     and NEVER Telegram secrets (``bootstrap_env`` loads ``~/.brutex/.env`` in
     the process itself).
 
-    *log_stem* (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753 — ADDITIVE,
+    *log_stem* (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1757 — ADDITIVE,
     defaulted so the nightly plist bytes are UNCHANGED, golden-pinned) names
     the ``<stem>.out.log`` / ``<stem>.err.log`` pair, so a SECOND LaunchAgent
     (the cross-verify producer, label ``com.brutex.crossverify``) renders

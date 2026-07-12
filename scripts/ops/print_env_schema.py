@@ -33,7 +33,7 @@ _SOURCE_ROOT = _REPO_ROOT / "brutex"
 _PATTERNS = (
     # [A-Z0-9_] (was [A-Z_]): digit-bearing names like
     # BRUTEX_CROSSVERIFY_S3_BUCKET were invisible to the registry
-    # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753).
+    # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1757).
     re.compile(r'ENV_[A-Z0-9_]+\s*:\s*Final\[str\]\s*=\s*"(BRUTEX_[A-Z0-9_]+)"'),
     re.compile(r'os\.environ\.get\(\s*"(BRUTEX_[A-Z0-9_]+)"'),
 )

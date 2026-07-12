@@ -285,7 +285,7 @@ def export_symbol(
         )
     except TypeError as exc:
         # Round-3 X3 (refuter R2-2): a signature-drifted sibling gate module
-        # (a renamed/added classify kwarg the #1751 hostile review may land)
+        # (a renamed/added classify kwarg the #1755 hostile review may land)
         # raises TypeError from the classify call — fail-closed PER SYMBOL:
         # withheld under a NAMED reason, never an escaping crash that kills
         # the whole ~750-symbol run mid-flight.

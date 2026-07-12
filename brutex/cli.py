@@ -2010,7 +2010,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
 
-    # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753) ──
+    # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1757) ──
     # The daily TickVault cross-verification producer: post-close priority
     # pull → completeness gate → day-scoped prebuild → CSV export → idempotent
     # S3 publish, all through the 100%-tested brutex.crossverify runner.

@@ -9,7 +9,7 @@ BOTH the generator script and the golden test so neither copies the build
 
 The gate binding uses the contract-faithful fake twin
 (:func:`tests.fakes.fake_completeness_gate.faithful_classify`) until the
-sibling gate module (MIGRATION.md #1751) merges — the golden pins RENDER
+sibling gate module (MIGRATION.md #1755) merges — the golden pins RENDER
 bytes; the per-class gate laws are the sibling's own suite's job.
 """
 
