@@ -439,6 +439,82 @@ class TestLoadObservedHolidays:
         assert len(events) == 1
         assert "non-regular" in str(events[0].get("error"))
 
+    def test_bounded_read_fd_close_discipline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fd ownership handoff is a REAL contract, pinned via an
+        ``os.close`` spy (review round 9 — the #1614
+        ``test_loader_fd_close_discipline`` shape verbatim-adapted; kills
+        every mutant of the ``owned`` handoff flag in
+        ``_bounded_sidecar_read``: a stuck-False sentinel LEAKS the fd of
+        every rejected non-regular read unobserved, a clobbered handoff
+        double-closes a descriptor the ``BufferedReader`` already owns —
+        the classic reused-fd corruption bug):
+
+        * ABSENT sidecar — ``os.open`` raised, nothing was opened, the
+          ``finally`` must close NOTHING;
+        * SERVED sidecar — ``os.fdopen`` took ownership, the ``finally``
+          must close NOTHING (the reader closes its own fd internally at
+          the C level, so the spy stays silent) and the read still returns
+          the bytes (parsed into the overlay set);
+        * NOT-REGULAR sidecar (directory AND FIFO plants) — opened but
+          never handed off, the ``finally`` must close EXACTLY the fd
+          ``os.open`` returned, once.
+        """
+        closed: list[int] = []
+        opened: list[int] = []
+        real_open, real_close = os.open, os.close
+
+        def _open_spy(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            fd = real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+            opened.append(fd)
+            return fd
+
+        def _close_spy(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+
+        monkeypatch.setattr(os, "open", _open_spy)
+        monkeypatch.setattr(os, "close", _close_spy)
+
+        # Absent: no fd exists, so no close may happen.
+        assert load_observed_holidays(tmp_path) == frozenset()
+        assert opened == [] and closed == []
+
+        # Served: ownership moved to the BufferedReader — the frame's own
+        # finally must not (double-)close it, and the bytes are served
+        # (proven by the parsed overlay set). Reset both ledgers so only
+        # the LOADER's behaviour is measured.
+        path = self._write(
+            tmp_path,
+            {"version": OBSERVED_OVERLAY_VERSION, "entries": [self._entry("2026-05-12")]},
+        )
+        opened.clear()
+        closed.clear()
+        assert load_observed_holidays(tmp_path) == frozenset({_DRIFT_DAY})
+        assert len(opened) == 1 and closed == []
+
+        # Not-regular (directory): opened (POSIX ``os.open`` on a directory
+        # SUCCEEDS, unlike ``Path.open``), never handed off — closed exactly
+        # once. This is the arm the surviving ``owned = True -> False``
+        # mutant leaks on: under it ``closed`` stays empty.
+        path.unlink()
+        path.mkdir()
+        opened.clear()
+        closed.clear()
+        with _hang_watchdog():
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(opened) == 1 and closed == opened
+
+        # Not-regular (FIFO): same law through the O_NONBLOCK open.
+        path.rmdir()
+        os.mkfifo(path)
+        opened.clear()
+        closed.clear()
+        with _hang_watchdog():
+            assert load_observed_holidays(tmp_path) == frozenset()
+        assert len(opened) == 1 and closed == opened
+
 
 class TestWindowCovers:
     def test_end_exclusive(self) -> None:
