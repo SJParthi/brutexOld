@@ -574,8 +574,13 @@ def _run_locked(
                 error=str(exc),
             )
             return LinkResult(status=LinkStatus.REFUSED, detail=f"pull_in_flight: {exc}")
-        logger.info("nightly.sweep_lock_downgraded", nightly_id=nightly_id, mode="EX->SH")
         with leg_read_guard:
+            # Logged INSIDE the guard's with-block (review-round NIT 1): between
+            # the acquire above and this block a raising log call would have
+            # left the SH released only by GC finalization — the log is
+            # observability, never allowed to widen the guard's exception
+            # envelope.
+            logger.info("nightly.sweep_lock_downgraded", nightly_id=nightly_id, mode="EX->SH")
             run_sweep = _resolve_run_sweep(seams)
             since = seams.now()
             # The counts live in the SUPERVISOR audit chain (SweepGuards.audit →

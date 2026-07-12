@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import structlog.testing
 
 pytest.importorskip("polars")
 pytest.importorskip("duckdb")
@@ -303,10 +304,11 @@ def test_pull_ex_refused_for_the_whole_sweep_leg_and_reader_sh_composes(
             )
         return 0
 
-    report = run_nightly(
-        _plan(lake, results, tmp_path),
-        seams=_seams(monkeypatch, alerter, run_sweep=probing_run_sweep),
-    )
+    with structlog.testing.capture_logs() as logs:
+        report = run_nightly(
+            _plan(lake, results, tmp_path),
+            seams=_seams(monkeypatch, alerter, run_sweep=probing_run_sweep),
+        )
     sweep = _link(report, "sweep")
     assert sweep.status is LinkStatus.OK, f"sweep leg not green: {sweep.detail!r}"
     # LAW: the pull writer stays excluded for the whole leg…
@@ -315,6 +317,14 @@ def test_pull_ex_refused_for_the_whole_sweep_leg_and_reader_sh_composes(
     assert "(holder: nightly:" in probe["pull_ex"]
     # MECHANISM: the reader guard (cmd_sweep_all's G10 shape) composes freely.
     assert probe["reader_sh"] == "acquired"
+    # OBSERVABILITY (review-round NIT 2): the transition emits exactly one
+    # INFO with the mode token, and the lost-race WARN never fires on the
+    # happy path.
+    downgraded = [e for e in logs if e["event"] == "nightly.sweep_lock_downgraded"]
+    assert len(downgraded) == 1
+    assert downgraded[0]["mode"] == "EX->SH"
+    assert downgraded[0]["log_level"] == "info"
+    assert not any(e["event"] == "nightly.sweep_lock_downgrade_lost_race" for e in logs)
 
 
 def test_lost_reacquire_race_refuses_the_sweep_leg_loudly(
@@ -345,12 +355,21 @@ def test_lost_reacquire_race_refuses_the_sweep_leg_loudly(
         calls.append("ran")
         return 0
 
-    report = run_nightly(
-        _plan(lake, results, tmp_path),
-        seams=_seams(monkeypatch, alerter, run_sweep=never_runs),
-    )
+    with structlog.testing.capture_logs() as logs:
+        report = run_nightly(
+            _plan(lake, results, tmp_path),
+            seams=_seams(monkeypatch, alerter, run_sweep=never_runs),
+        )
     sweep = _link(report, "sweep")
     assert calls == []
     assert sweep.status is LinkStatus.REFUSED
     assert "pull_in_flight" in sweep.detail
     assert report.exit_code != 0
+    # OBSERVABILITY (review-round NIT 2): the lost race WARNs by name — a
+    # regression dropping the WARN while keeping REFUSED must fail here —
+    # and the happy-path INFO never fires on a refused transition.
+    lost = [e for e in logs if e["event"] == "nightly.sweep_lock_downgrade_lost_race"]
+    assert len(lost) == 1
+    assert lost[0]["log_level"] == "warning"
+    assert "pull single-flight lock" in lost[0]["error"]
+    assert not any(e["event"] == "nightly.sweep_lock_downgraded" for e in logs)

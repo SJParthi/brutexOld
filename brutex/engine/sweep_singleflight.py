@@ -213,7 +213,10 @@ def lake_read_guard(lake_root: Path) -> Generator[None, None, None]:
 
     Hold this across the sweep's bar PRELOAD ONLY (bounded hold): once the
     bars are in memory the sweep is immune to lake writes, and a long hold
-    would needlessly refuse legitimate pulls.
+    would needlessly refuse legitimate pulls. ONE sanctioned exception: the
+    NIGHTLY chain holds this guard for its WHOLE sweep leg — the deliberate
+    whole-leg sweep-vs-pull exclusion of DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001
+    (MIGRATION.md #1772), where refusing pulls for the leg IS the point.
 
     Parameters
     ----------
