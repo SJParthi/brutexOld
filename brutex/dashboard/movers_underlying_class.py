@@ -58,6 +58,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Final, Protocol
 
+import structlog
+
 from brutex.dashboard.fno_underlying import primary_fno_underlying
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
@@ -79,6 +81,8 @@ __all__ = [
     "normalize_underlying_class",
     "spot_kind_from_segment",
 ]
+
+_LOG = structlog.get_logger(__name__)
 
 #: The three canonical underlying-class selector tokens (lower-case wire form).
 CLASS_ALL: Final[str] = "all"
@@ -103,6 +107,12 @@ _CASH_SEGMENT: Final[str] = SPOT_PROBE_SEGMENTS[1]  # "CASH"
 
 #: The set of selector tokens that are a real class filter (i.e. not the default).
 _KNOWN_CLASSES: Final[frozenset[str]] = frozenset({CLASS_ALL, CLASS_INDICES, CLASS_STOCKS})
+
+#: Max ``exch:security_id`` sample refs carried on the ONE aggregate blank-symbol
+#: skip WARNING per :func:`build_underlying_kind_map` build (the symbol itself is
+#: blank, so the security id is the only nameable handle) —
+#: DEC-FNO-UNDERLYING-EMPTY-GUARD-001.
+_BLANK_SYMBOL_SAMPLE_CAP: Final[int] = 5
 
 
 def normalize_underlying_class(raw: str | None) -> str:
@@ -175,6 +185,15 @@ def build_underlying_kind_map(instruments: Iterable[Instrument]) -> dict[str, st
     First-wins on a key collision (two spot spellings sharing one F&O primary),
     mirroring the pull-side de-dup.
 
+    A blank / whitespace-only ``symbol_name`` row (retained in the universe by the
+    instrument parser, which excludes it only from the PAIR maps —
+    ``adapters/groww/instruments.py``) is SKIPPED + counted here with ONE aggregate
+    ``movers.underlying_kind_blank_symbol_skipped`` WARNING per build — one junk
+    vendor row never poisons the whole map (guarantee-audit BUG-3,
+    DEC-FNO-UNDERLYING-EMPTY-GUARD-001); before this guard
+    ``primary_fno_underlying("")`` raised ``IndexError`` and the entire compute
+    died.
+
     Parameters
     ----------
     instruments
@@ -188,10 +207,23 @@ def build_underlying_kind_map(instruments: Iterable[Instrument]) -> dict[str, st
     """
     aliases = resolve_fno_index_aliases()
     kinds: dict[str, str] = {}
+    skipped = 0
+    samples: list[str] = []
     for inst in instruments:
+        if not inst.symbol_name.strip():
+            skipped += 1
+            if len(samples) < _BLANK_SYMBOL_SAMPLE_CAP:
+                samples.append(f"{inst.exch_id.value}:{inst.security_id}")
+            continue
         key = primary_fno_underlying(inst.symbol_name, aliases=aliases)
         if key not in kinds:
             kinds[key] = KIND_INDEX if inst.is_index else KIND_STOCK
+    if skipped:
+        _LOG.warning(
+            "movers.underlying_kind_blank_symbol_skipped",
+            skipped=skipped,
+            samples=samples,  # security-id refs — the symbol is blank, name what we can
+        )
     return kinds
 
 

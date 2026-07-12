@@ -91,8 +91,11 @@ def fno_underlying_forms(spot_symbol: str, *, aliases: Mapping[str, str]) -> tup
     Returns
     -------
     tuple[str, ...]
-        At least one form (the original spelling is always a candidate); 1–3 forms,
-        de-duplicated, in try order. Never empty.
+        1–3 forms, de-duplicated, in try order — never empty for a NON-empty
+        *spot_symbol* (the original spelling is always a candidate). The degenerate
+        EMPTY string yields ``()`` (no vendor form can be derived from nothing;
+        consumers iterating the forms then issue ZERO SDK calls —
+        DEC-FNO-UNDERLYING-EMPTY-GUARD-001).
     """
     forms: list[str] = []
 
@@ -116,9 +119,14 @@ def primary_fno_underlying(spot_symbol: str, *, aliases: Mapping[str, str]) -> s
     registry KEY (the persisted ``underlying``), independent of which form ends up
     answering the vendor. The remaining forms are still TRIED in turn at fetch time
     (see :mod:`brutex.dashboard.metadata_pull`); this returns only the key. Never
-    empty (the original spelling is always a fallback candidate).
+    raises: for a NON-empty *spot_symbol* the original spelling is always a
+    candidate, so ``forms[0]`` exists; the degenerate EMPTY string (forms ``()``)
+    returns the symbol itself verbatim — an inert key no coverage / registry / kind
+    row ever matches, never a fabricated form (guarantee-audit BUG-3,
+    DEC-FNO-UNDERLYING-EMPTY-GUARD-001).
     """
-    return fno_underlying_forms(spot_symbol, aliases=aliases)[0]
+    forms = fno_underlying_forms(spot_symbol, aliases=aliases)
+    return forms[0] if forms else spot_symbol
 
 
 def resolve_fno_underlying_forms(spot_symbol: str) -> tuple[str, ...]:
