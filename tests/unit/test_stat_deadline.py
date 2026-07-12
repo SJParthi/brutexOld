@@ -71,12 +71,15 @@ class _BreachGuard:
 class TestResolver:
     def test_default_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(STAT_DEADLINE_ENV, raising=False)
-        assert resolve_stat_deadline_seconds() == STAT_DEADLINE_S
+        # The audited default pinned as a LITERAL (a default edit must fail
+        # here, never a self-referential comparison a mutant would satisfy).
+        assert STAT_DEADLINE_S == 5.0
+        assert resolve_stat_deadline_seconds() == 5.0
 
     @pytest.mark.parametrize("junk", ["", "  ", "abc", "nan", "inf", "-1", "0"])
     def test_junk_fails_safe_to_default(self, junk: str) -> None:
         """A bad value can NEVER disable the bound (fail-safe, Golden Rule #1)."""
-        assert resolve_stat_deadline_seconds(junk) == STAT_DEADLINE_S
+        assert resolve_stat_deadline_seconds(junk) == 5.0
 
     def test_valid_env_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(STAT_DEADLINE_ENV, "0.25")
@@ -244,39 +247,61 @@ class TestBreachAndLatch:
     def test_concurrently_breached_second_flight_does_not_re_warn_or_re_own(self) -> None:
         """``setdefault`` makes the FIRST breached flight the owner; the second is silent.
 
-        Two flights breach back-to-back before either zombie returns: the
-        second breach neither re-WARNs nor replaces the owner, and the
-        SECOND zombie's late return does NOT clear the first's latch.
+        The genuine photo-finish race, fully event-orchestrated: TWO flights
+        pass the latch check before EITHER breaches (both are in-guard), then
+        breach in a controlled order. The second breach must neither re-WARN
+        nor replace the owner (a ``setdefault``→assignment mutant would let
+        the second flight steal ownership, so the FIRST zombie's return could
+        never clear the latch), and the FIRST zombie's return — the true
+        owner's — clears it with ONE recovered INFO.
         """
-        guard = _BreachGuard()
-        gate = StatSweepGate(what="test gate", guard=guard)
+        captured: list[Callable[[], Any]] = []
+        release = [threading.Event(), threading.Event()]
+        in_guard = [threading.Event(), threading.Event()]
 
-        # First flight breaches normally (owner).
-        with pytest.raises(StatSweepTimeout):
-            gate.run("k", lambda: None, op="probe", deadline_s=0.05)
-        # Force a second breach on the SAME key by clearing the latch check
-        # path artificially: run() would fail fast while latched, so drive
-        # the second flight's breach through the internal seam the way a
-        # true photo-finish race would — two callers passing the latch check
-        # before either breaches. Simulate: temporarily un-latch, run, and
-        # re-check ownership survives.
-        first_owner = gate._wedged["k"]
-        del gate._wedged["k"]
-        with capture_logs() as logs, pytest.raises(StatSweepTimeout):
-            gate.run("k", lambda: None, op="probe", deadline_s=0.05)
-        # The second breach flipped the (cleared) latch again — one WARN.
-        assert len(_events(logs, STAT_GATE_DEADLINE_EVENT)) == 1
-        second_owner = gate._wedged["k"]
-        assert second_owner is not first_owner
-        # The FIRST zombie's late return must NOT clear the second's latch
-        # (token identity): only its own entry may be popped.
+        def _orchestrated(fn: Callable[[], Any], seconds: float, **_kw: Any) -> Any:
+            index = len(captured)
+            captured.append(fn)
+            in_guard[index].set()
+            assert release[index].wait(5.0), "test orchestration failure"
+            raise DeadlineExceeded(f"orchestrated breach {index}")
+
+        gate = StatSweepGate(what="test gate", guard=_orchestrated)
+        errors: list[BaseException] = []
+
+        def _flight() -> None:
+            try:
+                gate.run("k", lambda: None, op="probe", deadline_s=0.05)
+            except StatSweepTimeout as exc:
+                errors.append(exc)
+
         with capture_logs() as logs:
-            guard.captured[0]()
+            flight_a = threading.Thread(target=_flight, daemon=True)
+            flight_a.start()
+            assert in_guard[0].wait(5.0)  # A passed the latch check, in-guard
+            flight_b = threading.Thread(target=_flight, daemon=True)
+            flight_b.start()
+            assert in_guard[1].wait(5.0)  # B ALSO passed it (nothing armed yet)
+            release[0].set()  # A breaches FIRST — the owner
+            flight_a.join(5.0)
+            assert not flight_a.is_alive()
+            release[1].set()  # B breaches second — silent, never re-owns
+            flight_b.join(5.0)
+            assert not flight_b.is_alive()
+        assert len(errors) == 2
+        assert all(not e.latched for e in errors if isinstance(e, StatSweepTimeout))
+        # Exactly ONE WARN — the latch FLIP; the concurrent second breach is silent.
+        assert len(_events(logs, STAT_GATE_DEADLINE_EVENT)) == 1
+        assert gate.wedged("k")
+        # The SECOND (non-owner) zombie's late return must NOT clear the latch
+        # (token identity): only the owner's entry may be popped.
+        with capture_logs() as logs:
+            captured[1]()
         assert _events(logs, STAT_GATE_RECOVERED_EVENT) == []
         assert gate.wedged("k")
-        # The CURRENT owner's zombie clears it.
+        # The FIRST (owner) zombie clears it — ONE recovered INFO.
         with capture_logs() as logs:
-            guard.captured[1]()
+            captured[0]()
         assert len(_events(logs, STAT_GATE_RECOVERED_EVENT)) == 1
         assert not gate.wedged("k")
 

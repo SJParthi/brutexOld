@@ -1169,9 +1169,12 @@ def test_cold_wait_budget_total_across_owner_handoffs() -> None:
     w = threading.Thread(target=waiter, daemon=True)
     w.start()
     assert entered_wait.wait(5.0)  # the waiter is inside its FIRST (bounded) wait
-    # The owner "hands off": clock jumps past the deadline, a FRESH owner
-    # registers, and the old event wakes the waiter (a genuine wake).
-    clock.advance(11.0)
+    # The owner "hands off": the clock reaches EXACTLY the total deadline (the
+    # boundary law — ``remaining <= 0.0`` must raise WITHOUT waiting; a ``<``
+    # mutant would pay one extra ``wait(0.0)`` on owner 2's event, killed by
+    # the ``event2.wait_calls == 0`` spy below), a FRESH owner registers, and
+    # the old event wakes the waiter (a genuine wake).
+    clock.advance(10.0)
     with cache._lock:
         cache._refreshing[SPOT] = (event2, foreign_ident)
     signalling.set()
@@ -1358,9 +1361,12 @@ def test_cold_wait_budget_resolver_and_ctor_precedence(monkeypatch: pytest.Monke
     )
 
     monkeypatch.delenv("BRUTEX_SUMMARY_COLD_WAIT_S", raising=False)
-    assert resolve_cold_wait_budget_s() == COLD_WAIT_BUDGET_S
+    # The audited default pinned as a LITERAL (a default edit must fail here,
+    # never a self-referential comparison a constant mutant would satisfy).
+    assert COLD_WAIT_BUDGET_S == 60.0
+    assert resolve_cold_wait_budget_s() == 60.0
     for junk in ("", "  ", "abc", "nan", "inf", "-3", "0"):
-        assert resolve_cold_wait_budget_s(junk) == COLD_WAIT_BUDGET_S
+        assert resolve_cold_wait_budget_s(junk) == 60.0
     assert resolve_cold_wait_budget_s("12.5") == 12.5
     monkeypatch.setenv("BRUTEX_SUMMARY_COLD_WAIT_S", "7.5")
     assert SummaryCache()._cold_wait_budget_s == 7.5  # env drives the default
