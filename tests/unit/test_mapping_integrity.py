@@ -29,7 +29,14 @@ _NOW = datetime(2026, 6, 21, tzinfo=UTC)
 _EXPECTED = (2020, 2021, 2022)
 
 
-def _reconcile(eligible, covered, *, expected=_EXPECTED, attempted=None, whitelist=()):
+def _reconcile(
+    eligible, covered, *, expected=_EXPECTED, attempted=None, whitelist=(), key_forms=None
+):
+    # ``key_forms`` is threaded ONLY when given, so every pre-existing call exercises
+    # the OMITTED-kwarg default path (the DEC-MAPPING-INTEGRITY-FORM-KEY-001
+    # default-flip mutant killer); the explicit-``None`` arm is pinned separately in
+    # ``test_key_forms_none_is_byte_identical``.
+    extra = {} if key_forms is None else {"key_forms": key_forms}
     return reconcile_mapping_integrity(
         eligible_spots=eligible,
         covered_years=covered,
@@ -37,6 +44,7 @@ def _reconcile(eligible, covered, *, expected=_EXPECTED, attempted=None, whiteli
         attempted=attempted,
         whitelist=whitelist,
         now=_NOW,
+        **extra,
     )
 
 
@@ -307,3 +315,162 @@ def test_report_to_dict_carries_not_attempted() -> None:
     assert payload["not_attempted"] == 1
     assert payload["is_green"] is True
     assert payload["gating_failures"] == 0
+
+
+# ── DEC-MAPPING-INTEGRITY-FORM-KEY-001: the key_forms keyspace crossing ───────
+
+
+def test_key_forms_none_is_byte_identical() -> None:
+    """``key_forms=None`` (the default) is byte-identical to the exact-key compare.
+
+    The default IS the mutant killer for a flipped default: the same fixture with and
+    without an explicit ``key_forms=None`` serialises identically (and the 20 prior
+    tests above pass unmodified).
+    """
+    eligible = [("NSE", "M&M"), ("NSE", "BAJAJ-AUTO"), ("NSE", "RELIANCE")]
+    covered = {("NSE", "BAJAJ-AUTO"): [2022], ("NSE", "RELIANCE"): [2020, 2021, 2022]}
+    attempted = {("NSE", "M&M"), ("NSE", "BAJAJ-AUTO"), ("NSE", "RELIANCE")}
+    without = _reconcile(eligible, covered, attempted=attempted)
+    with_none = reconcile_mapping_integrity(
+        eligible_spots=eligible,
+        covered_years=covered,
+        expected_years=_EXPECTED,
+        attempted=attempted,
+        whitelist=(),
+        now=_NOW,
+        key_forms=None,
+    )
+    assert report_to_dict(without) == report_to_dict(with_none)
+
+
+def test_key_forms_union_across_forms() -> None:
+    """Covered years UNION across the forms superset — never primary-only, never last-wins.
+
+    Legacy raw-era 2021 (``BAJAJ-AUTO``) + primary-era 2020+2022 (``BAJAJAUTO``) rows
+    union into ONE fully-covered verdict (the DEC-PULL-FORENSIC-WAVE2-001
+    legacy-key-era law; kills the union→last-wins and forms``[:1]`` mutants).
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {("NSE", "BAJAJ-AUTO"): [2021], ("NSE", "BAJAJAUTO"): [2020, 2022]},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.fully_covered == 1
+    assert report.under_pulled == ()
+    # And a split leaving a hole reads ONE partial row with the UNION of years.
+    partial = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {("NSE", "BAJAJ-AUTO"): [2021], ("NSE", "BAJAJAUTO"): [2022]},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    [u] = partial.under_pulled
+    assert u.reason == REASON_PARTIAL
+    assert u.covered_years == (2021, 2022)  # the cross-era union
+    assert u.missing_years == (2020,)
+
+
+def test_key_forms_attempted_any_form() -> None:
+    """Attempted means ANY form has a coverage row — the silent-vanish alarm can fire.
+
+    The attempted set holds only the PRIMARY form (the writer's keyspace); the
+    eligible SPOT spelling must still read attempted-and-zero → the gating ``none``,
+    never ``not_attempted`` (kills the primary-only membership and ``any``→``all``
+    mutants — with ``all``, the raw-spelling miss would flip it back).
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {},
+        attempted={("NSE", "BAJAJAUTO")},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.symbol == "BAJAJ-AUTO"  # display stays the SPOT spelling
+    assert u.reason == REASON_NONE
+    assert report.not_attempted == 0
+
+
+def test_key_forms_symbol_absent_degrades_to_exact_key() -> None:
+    """A symbol missing from the map degrades to today's exact-key compare."""
+    report = _reconcile(
+        [("NSE", "RELIANCE")],
+        {("NSE", "RELIANCE"): [2020, 2021, 2022]},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.fully_covered == 1
+    assert report.under_pulled == ()
+
+
+def test_key_forms_empty_forms_degrades_to_exact_key() -> None:
+    """The BUG-3 interaction pin: an EMPTY forms tuple degrades to the exact raw key.
+
+    ``fno_underlying_forms("") == ()`` (DEC-FNO-UNDERLYING-EMPTY-GUARD-001), so the
+    builder map may hold ``{"": ()}`` — the ``or (symbol,)`` degrade probes the exact
+    ``("NSE", "")`` key, matches nothing, and reads the honest ``not_attempted``;
+    never a raise (kills the ``or (symbol,)`` removal mutant — without it the years
+    generator yields nothing AND ``any`` over no forms reads never-attempted even
+    when the raw key was attempted).
+    """
+    report = _reconcile(
+        [("NSE", "")],
+        {},
+        attempted=set(),
+        key_forms={"": ()},
+    )
+    [u] = report.under_pulled
+    assert u.symbol == "" and u.reason == REASON_NOT_ATTEMPTED
+    # The exact-raw-key degrade has TEETH: an attempted raw key still reads through.
+    attempted_raw = _reconcile(
+        [("NSE", "")],
+        {},
+        attempted={("NSE", "")},
+        key_forms={"": ()},
+    )
+    [u2] = attempted_raw.under_pulled
+    assert u2.reason == REASON_NONE
+
+
+def test_key_forms_alias_form_resolves() -> None:
+    """The dormant index-alias class is covered for free: NIFTYJR reads NIFTYNXT50 coverage."""
+    report = _reconcile(
+        [("NSE", "NIFTYJR")],
+        {("NSE", "NIFTYNXT50"): [2020, 2021, 2022]},
+        key_forms={"NIFTYJR": ("NIFTYNXT50", "NIFTYJR")},
+    )
+    assert report.fully_covered == 1
+    assert report.under_pulled == ()
+
+
+def test_with_legs_dual_spelling_no_dedup() -> None:
+    """The no-dedup choice pinned: dual spellings BOTH resolve, ``total_eligible`` counts 2.
+
+    On a full-with-legs store the arm(a) ``BAJAJAUTO`` + arm(b) ``BAJAJ-AUTO``
+    eligible rows both resolve to the SAME coverage (count semantics unchanged; a
+    vanish would flag BOTH rows red — louder, never quieter).
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJAUTO"), ("NSE", "BAJAJ-AUTO")],
+        {("NSE", "BAJAJAUTO"): [2020, 2021, 2022]},
+        key_forms={
+            "BAJAJAUTO": ("BAJAJAUTO",),
+            "BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO"),
+        },
+    )
+    assert report.total_eligible == 2
+    assert report.fully_covered == 2
+    assert report.under_pulled == ()
+
+
+def test_whitelist_matches_display_spelling() -> None:
+    """The whitelist matches the SPOT spelling — it never needs the F&O form."""
+    report = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {},
+        attempted={("NSE", "BAJAJAUTO")},
+        whitelist=["BAJAJ-AUTO"],
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    [u] = report.under_pulled
+    assert u.reason == REASON_NONE and u.whitelisted is True
+    assert report.gating_failures == ()
+    assert report.is_green is True

@@ -21,7 +21,10 @@ legs — the lean store discards them, DEC-INSTRUMENT-UNIVERSE-FAST-001):
 
 A spot that was ATTEMPTED yet pulled ZERO expiries is the hard, GATING ``none`` failure
 (e.g. M&M, the special-character options-fetch bug); a spot covering only PART of the
-expected 2020→today span is ``partial``/amber (e.g. BAJAJ-AUTO's 2024-only). A spot that
+expected 2020→today span is ``partial``/amber (a late listing whose early years never
+traded — note the coverage ledger keys such a hyphenated name under its PRIMARY F&O
+form, ``BAJAJ-AUTO`` → ``BAJAJAUTO``, which is why the compare crosses keyspaces via
+*key_forms* below — DEC-MAPPING-INTEGRITY-FORM-KEY-001). A spot that
 was NEVER attempted (NO coverage row at all — the common case on a SELECTIVE pull that
 targeted only a few underlyings) is the neutral ``not_attempted`` state: it is reported
 SEPARATELY and NEVER gates, because "not pulled yet" is not a "pulled and got nothing"
@@ -32,8 +35,14 @@ completeness verdict, NOT a fabricated year total — Golden Rule #10).
 
 This is the never-attempted↔attempted-and-zero distinction the gate was missing: a
 never-attempted spot has NO coverage row; an attempted-and-empty spot DOES (Phase-1
-expiry discovery writes a ``pending`` ``expiries_pulled=0`` cell — ``metadata_pull.
-_on_expiry_cell``), so the two are on-disk distinguishable. The real M&M silent-vanish
+expiry discovery writes a ``pending`` ``expiries_pulled=0`` cell), so the two are
+on-disk distinguishable. The coverage WRITER keys every cell on the PRIMARY F&O
+underlying form (``metadata_pull._resolve_underlying_forms`` →
+``primary_fno_underlying`` — ``BAJAJ-AUTO`` rows land under ``BAJAJAUTO``), while the
+eligible set is SPOT-spelled; the dashboard builder therefore injects the *key_forms*
+map (DEC-MAPPING-INTEGRITY-FORM-KEY-001) so the compare crosses the two keyspaces —
+without it a hyphenated/aliased name read ``not_attempted`` forever and its
+attempted-and-zero alarm could never fire. The real M&M silent-vanish
 stays catchable (it is in the attempted set, zero years → ``none`` → red) while a clean
 selective pull reads green (the un-pulled names are ``not_attempted``, never red).
 
@@ -216,6 +225,7 @@ def reconcile_mapping_integrity(
     attempted: Iterable[tuple[str, str]] | None = None,
     whitelist: Iterable[str] = (),
     now: datetime,
+    key_forms: Mapping[str, tuple[str, ...]] | None = None,  # DEC-MAPPING-INTEGRITY-FORM-KEY-001
 ) -> MappingIntegrityReport:
     """Reconcile options-eligible spots against pulled coverage → a green/red report.
 
@@ -227,6 +237,18 @@ def reconcile_mapping_integrity(
     with NO coverage row → :data:`REASON_NOT_ATTEMPTED` (neutral — never pulled, never gates,
     so a clean SELECTIVE pull reads green). Whitelisted symbols are still reported but excluded
     from the gating verdict. One O(eligible) pass, O(1) per spot — no nested scan.
+
+    **The *key_forms* law (DEC-MAPPING-INTEGRITY-FORM-KEY-001):** the coverage WRITER
+    keys its cells on the PRIMARY F&O underlying form
+    (``metadata_pull._resolve_underlying_forms`` — ``BAJAJ-AUTO`` rows land under
+    ``BAJAJAUTO``), while the eligible set is SPOT-spelled. When *key_forms* maps an
+    eligible SYMBOL to its ordered forms superset, the covered years are the UNION
+    over every ``(exchange, form)`` key (never primary-only — legacy raw-key coverage
+    eras stay visible, DEC-PULL-FORENSIC-WAVE2-001) and "attempted" means ANY form has
+    a coverage row. Display + whitelist stay on the SPOT spelling. A ``None`` map, a
+    symbol absent from it, and an EMPTY forms tuple (the blank-symbol degenerate,
+    DEC-FNO-UNDERLYING-EMPTY-GUARD-001) each degrade to today's exact raw-key compare
+    — never a guess, and the default is byte-identical.
 
     Parameters
     ----------
@@ -248,6 +270,14 @@ def reconcile_mapping_integrity(
         Documented genuine late-listing symbols, excluded from the gating verdict.
     now
         The report timestamp (injected for determinism).
+    key_forms
+        Optional map of a spot SYMBOL (the eligible spelling, ``"BAJAJ-AUTO"``) to its
+        ordered F&O underlying forms superset (``("BAJAJAUTO", "BAJAJ-AUTO")`` — the
+        COMMON :func:`~brutex.dashboard.fno_underlying.fno_underlying_forms` output,
+        injected as PLAIN DATA so this data-layer leaf never imports the dashboard —
+        the DEC-GREEKS-SPOTJOIN-STOCK-001 injection template). Keyed by bare symbol
+        (the resolver is exchange-agnostic; the loop holds ``exchange`` to build each
+        probe pair). ``None`` (the default) = exact-key compare, byte-identical.
 
     Returns
     -------
@@ -268,9 +298,18 @@ def reconcile_mapping_integrity(
     fully_covered = 0
     not_attempted = 0
     for exchange, symbol in pairs:
-        years = frozenset(covered_years.get((exchange, symbol), ()))
+        # DEC-MAPPING-INTEGRITY-FORM-KEY-001: probe every underlying form the coverage
+        # writer may have keyed this symbol under. The single `or (symbol,)` covers ALL
+        # THREE degrades in one expression — `key_forms is None`, symbol absent from
+        # the map, and an EMPTY forms tuple (the blank-symbol degenerate,
+        # DEC-FNO-UNDERLYING-EMPTY-GUARD-001) — each falling back to today's exact raw
+        # key, never a guess.
+        forms = (key_forms or {}).get(symbol) or (symbol,)
+        years = frozenset(y for form in forms for y in covered_years.get((exchange, form), ()))
         if not years:
-            was_attempted = attempted is None or (exchange, symbol) in attempted_set
+            was_attempted = attempted is None or any(
+                (exchange, form) in attempted_set for form in forms
+            )
             reason = REASON_NONE if was_attempted else REASON_NOT_ATTEMPTED
             if not was_attempted:
                 not_attempted += 1

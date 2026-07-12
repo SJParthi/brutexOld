@@ -5640,6 +5640,16 @@ def build_app(
         eligible set is scoped to TRADABLE F&O underlyings (``tradable_only=True``), so the
         ~539 NIFTY-Total-Market REFERENCE_ONLY constituents (no option chain) never inflate
         the gate (DEC-MAPPING-INTEGRITY-ATTEMPTED-001).
+
+        DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the PRIMARY
+        F&O underlying form (``metadata_pull._resolve_underlying_forms`` —
+        ``BAJAJ-AUTO`` rows land under ``BAJAJAUTO``), while the eligible set is
+        SPOT-spelled — so the builder injects the ordered forms superset per eligible
+        symbol (``key_forms``, built through the ONE COMMON ``fno_underlying_forms``)
+        and the reconciler unions coverage / matches attempts across the forms. The
+        fold lives INSIDE the cached compute (one reconcile per
+        (generation, master-revision) token; aliases resolved ONCE per compute, never
+        per row; zero new store reads).
         """
         store = _require_store()
         eligible = [
@@ -5647,6 +5657,18 @@ def build_app(
             for exch, sym in store.fno_eligible_underlyings(tradable_only=True)
         ]
         coverage = store.list_coverage()
+        # DEC-MAPPING-INTEGRITY-FORM-KEY-001: the coverage ledger is keyed on the
+        # PRIMARY F&O form (metadata_pull._resolve_underlying_forms — "BAJAJAUTO");
+        # the eligible set is SPOT-spelled ("BAJAJ-AUTO"). Inject the ordered forms
+        # superset per eligible symbol (alias / normalized / raw — the app.py
+        # _resolve_historical_contracts idiom, DEC-PULL-FORENSIC-WAVE2-001) so the
+        # reconciler's compare crosses the keyspace: hyphenated/aliased names read
+        # their real coverage and the attempted-and-zero alarm can fire. Aliases
+        # resolved ONCE per cached compute (never per row).
+        aliases = resolve_fno_index_aliases()
+        key_forms = {
+            spot.symbol: fno_underlying_forms(spot.symbol, aliases=aliases) for spot in eligible
+        }
         return reconcile_mapping_integrity(
             eligible_spots=eligible,
             covered_years=coverage_years_from_records(coverage),
@@ -5654,6 +5676,7 @@ def build_app(
             attempted=attempted_pairs_from_records(coverage),
             whitelist=(),
             now=datetime.now(UTC),
+            key_forms=key_forms,
         )
 
     def _build_mapping_integrity_report_cached() -> tuple[MappingIntegrityReport, bool, bool]:
@@ -5698,7 +5721,11 @@ def build_app(
         (``store.fno_eligible_underlyings``) against the coverage ledger
         (``store.list_coverage``) and returns the honest integrity verdict: each eligible spot
         that pulled ZERO expiries (gating RED — e.g. M&M, the special-character options-fetch
-        bug F2 fixes) or only PART of the 2020→today span (amber — e.g. BAJAJ-AUTO's 2024-only).
+        bug F2 fixes) or only PART of the 2020→today span (amber — a genuine late listing).
+        The compare crosses the eligible set's SPOT spellings into the coverage writer's
+        PRIMARY-F&O-form keyspace via the injected ``key_forms`` map
+        (DEC-MAPPING-INTEGRITY-FORM-KEY-001 — ``BAJAJ-AUTO`` reads its real ``BAJAJAUTO``
+        coverage instead of ``not_attempted`` forever).
         This is the real-time, self-checking guarantee that the core spot↔options mapping is
         precise, surfaced as ``is_green`` + a drill-down. Pure delegation to
         :mod:`brutex.data.mapping_integrity` (its grouping + reconciliation are at 100%
