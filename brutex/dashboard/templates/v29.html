@@ -2392,7 +2392,7 @@
   <div class="picker">
     <span class="rank-pill" data-oc="r1_rank" data-explain="rank">—</span>
     <span class="strategy-name" data-oc="r1_name">— awaiting real run artifact —</span>
-    <span class="meta"><span data-oc="sel_symbols">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
+    <span class="meta"><span data-oc="r1_instrument" data-explain="instrument">—</span> · <span data-oc="r1_tf">—</span> · <span data-oc="r1_direction">—</span> · selection <span data-oc="sel_symbols">—</span> · <span data-oc="tested_rank_line">rank line awaits the top-100 artifact</span></span>
   </div>
   <div class="date-range">📅 <span data-oc="date_range">—</span></div>
   <nav class="tabs">
@@ -2413,8 +2413,9 @@
     </div>
     <div class="verdict-text">
       <span class="tldr">In plain English</span>
-      Best stored winner: <strong data-oc="r1_name">—</strong>. Net P&amp;L
-      <strong class="pos" data-oc="r1_net" data-explain="net_pnl_paisa">—</strong>
+      Best stored winner: <strong data-oc="r1_name">—</strong>. Gross signal P&amp;L
+      <strong class="pos" data-oc="r1_net" data-explain="gross_signal_pnl">—</strong>
+      <span class="dim">(signal-only — costs modeled in the options-translation track)</span>
       over <span data-oc="r1_trades" data-explain="trades">—</span> trades ·
       <span data-oc="r1_vix_band" data-explain="vix_band">no VIX band</span>.
       Every number on this card comes from the stored run artifact — nothing is invented (R27).
@@ -2427,11 +2428,11 @@
 
   <section class="hero">
     <div class="hero-cards">
-      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = net trade P&L from the stored run artifact (R27: Σ trade P&L − full costs).">
+      <div class="card green anim-card" style="animation-delay: 0.25s" data-tooltip="EDGE = gross signal P&L from the stored run artifact (R27: Σ trade P&L; signal-only — costs modeled in the options-translation track).">
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4 12l8 10 8-10L12 2z"/></svg>EDGE</div>
-        <div class="big" data-oc="r1_net" data-explain="net_pnl_paisa">—</div>
-        <div class="sub">net P&amp;L · buy-&amp;-hold baseline lands with P3</div>
+        <div class="big" data-oc="r1_net" data-explain="gross_signal_pnl">—</div>
+        <div class="sub">gross signal P&amp;L (signal-only — costs modeled in the options-translation track) · buy-&amp;-hold baseline render is a named follow-up (baseline data ships on the run artifact)</div>
       </div>
       <div class="card green anim-card" style="animation-delay: 0.35s" data-tooltip="RISK = worst drop in equity from a peak.">
         <div class="dot"></div>
@@ -2479,7 +2480,7 @@
            bx-oneclick.js fills the live preset — neither sort is changed. -->
       <div class="oc-sub" data-oc="top100_sort_basis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending)</div>
       <div class="kpi-strip">
-        <div class="kpi-cell"><div class="k">Net P&amp;L</div><div class="v" data-oc="r1_net" data-explain="net_pnl_paisa">—</div></div>
+        <div class="kpi-cell"><div class="k">Gross signal P&amp;L</div><div class="v" data-oc="r1_net" data-explain="gross_signal_pnl">—</div></div>
         <div class="kpi-cell"><div class="k">Max DD</div><div class="v" data-oc="r1_max_dd" data-explain="max_dd_paisa">—</div></div>
         <div class="kpi-cell"><div class="k">Trades</div><div class="v" data-oc="r1_trades" data-explain="trades">—</div></div>
         <div class="kpi-cell"><div class="k">% Win</div><div class="v" data-oc="r1_win_rate" data-explain="win_rate">—</div></div>
@@ -2492,10 +2493,11 @@
         <div class="panel">
           <h3>Returns</h3>
           <table>
-            <tr><td>Net P&amp;L</td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Gross signal P&amp;L <span class="dim">(signal-only)</span></td><td data-oc="r1_net">—</td></tr>
+            <tr><td>Instrument</td><td data-oc="r1_instrument" data-explain="instrument">—</td></tr>
             <tr><td>Trades</td><td data-oc="r1_trades">—</td></tr>
             <tr><td>SL/TP arm</td><td data-oc="r1_arm">—</td></tr>
-            <tr><td>Buy &amp; hold baseline</td><td>— (lands with P3 — O-n)</td></tr>
+            <tr><td>Buy &amp; hold baseline</td><td>— (render is a named follow-up — baseline data ships on the run artifact)</td></tr>
           </table>
         </div>
         <div class="panel">
@@ -2506,6 +2508,13 @@
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
             <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
             <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
+            <!-- Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
+                 breakdown + worst-5-days the card previously omitted —
+                 one_regime_wonder/by_trend from entry.regime; worst5_days
+                 is a METRICS key (writer truth, top100_artifact.py). -->
+            <tr><td>P&amp;L by trend regime</td><td data-oc="r1_trend_split" data-explain="by_trend">—</td></tr>
+            <tr><td>Regime concentration</td><td data-oc="r1_regime_wonder" data-explain="one_regime_wonder">—</td></tr>
+            <tr><td>Worst 5 days</td><td data-oc="r1_worst5" data-explain="worst5_days">—</td></tr>
           </table>
         </div>
       </div>
@@ -2786,7 +2795,11 @@
     <div class="filter-bar">
       <label>Filter:</label>
       <label style="margin-left:0">Instrument</label>
-      <select id="fInst"><option value="">All</option><option>NIFTY 50</option><option>BANKNIFTY</option><option>SENSEX</option></select>
+      <!-- Options carry the ENGINE instrument tokens the Inst cell now
+           renders from the artifact's per-entry `instrument` key
+           (DEC-ONECLICK-INSTRUMENT-DISPLAY-001) — the old v29-preview
+           display names ("NIFTY 50") could never match a real cell. -->
+      <select id="fInst"><option value="">All</option><option>NSE-NIFTY</option><option>NSE-BANKNIFTY</option><option>BSE-SENSEX</option></select>
       <label>TF</label>
       <select id="fTF"><option value="">All</option><option>5m</option><option>15m</option><option>30m</option><option>1h</option><option>1d</option></select>
       <label>Direction</label>
@@ -3290,38 +3303,32 @@
     // only; backend payloads are frozen (no generation field added).
     let lastFunnelPayload = '';
 
-    async function pollState() {
-      // Hidden-tab pause (DEC-DASHBOARD-UX-ANIMATE-001): a background tab
-      // holds no socket open for this poll; visibilitychange below fires an
-      // immediate refresh tick on return. Pure scheduling — the skip-render
-      // memo + bound-field semantics are unchanged.
-      if (document.hidden) return;
-      try {
-        const res = await fetch('/api/v1/state');
-        if (!res.ok) return;  // server hiccup; next tick retries
-        const snap = await res.json();
-        // Sweep funnel may be null when no sweep has started yet —
-        // the honest em-dash placeholders stay in that case (the manifest
-        // fill in bx-oneclick.js covers the completed-run view — C-M2).
-        const funnel = snap.sweep_funnel;
-        if (!funnel) return;
-        const payload = JSON.stringify(funnel);
-        if (payload === lastFunnelPayload) return;  // unchanged → skip render
-        lastFunnelPayload = payload;
-        stateBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-bind');
-          if (funnel[key] !== undefined && funnel[key] !== null) {
-            el.textContent = formatNumber(funnel[key]);
-          }
-        });
-        // C-M2 funnel write precedence: the LIVE writer stamps its
-        // provenance beside the funnel (bx-oneclick's manifest fill labels
-        // the completed-run side) — two sources never interleave silently.
-        const prov = document.getElementById('ocFunnelProvenance');
-        if (prov && window.BXOneclick) {
-          prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+    // Render one /api/v1/state snapshot (the fetch/scheduling moved onto the
+    // shared BXPoll core below — DEC-FRONTEND-LATENCY-HARDENING-001,
+    // MIGRATION.md #1720; the skip-render memo + bound-field semantics are
+    // byte-identical to the old pollState body).
+    function renderStateSnap(snap) {
+      // Sweep funnel may be null when no sweep has started yet —
+      // the honest em-dash placeholders stay in that case (the manifest
+      // fill in bx-oneclick.js covers the completed-run view — C-M2).
+      const funnel = snap.sweep_funnel;
+      if (!funnel) return;
+      const payload = JSON.stringify(funnel);
+      if (payload === lastFunnelPayload) return;  // unchanged → skip render
+      lastFunnelPayload = payload;
+      stateBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-bind');
+        if (funnel[key] !== undefined && funnel[key] !== null) {
+          el.textContent = formatNumber(funnel[key]);
         }
-      } catch (e) { /* network blip; next tick retries */ }
+      });
+      // C-M2 funnel write precedence: the LIVE writer stamps its
+      // provenance beside the funnel (bx-oneclick's manifest fill labels
+      // the completed-run side) — two sources never interleave silently.
+      const prov = document.getElementById('ocFunnelProvenance');
+      if (prov && window.BXOneclick) {
+        prov.textContent = 'funnel source: ' + window.BXOneclick.funnelProvenance('live', funnel.sweep_id || '');
+      }
     }
 
     // Cadence per §6.0: 2s while running (caller can adjust by reading
@@ -3330,18 +3337,52 @@
     // Skip when offline / file:// — the mockup is served standalone
     // from the docs folder for design review; the poller only matters
     // when the file is served by the FastAPI app on 127.0.0.1:9080.
+    // Scheduling rides the ONE shared BXPoll discipline core (bx-poll.js —
+    // hidden-tab guard, one-in-flight chain, 10 s fetch abort, capped
+    // 3 s→30 s failure backoff, visibilitychange catch-up); the poller
+    // starts at DOMContentLoaded, by which every deferred script has
+    // executed. bx-poll.js failing to load degrades to the legacy guarded
+    // interval — the funnel never goes pollerless.
     if (window.location.protocol !== 'file:') {
-      pollState();  // first call immediate so the page is fresh on load
-      setInterval(pollState, 2000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollState(); });
+      const startStatePolling = () => {
+        if (window.BXPoll) {
+          window.BXPoll.createPoller({
+            url: '/api/v1/state',
+            pollMs: 2000,
+            onData: renderStateSnap
+          }).start();
+        } else {
+          const legacyTick = async () => {
+            if (document.hidden) return;
+            try {
+              const res = await fetch('/api/v1/state');
+              if (!res.ok) return;  // server hiccup; next tick retries
+              renderStateSnap(await res.json());
+            } catch (e) { /* network blip; next tick retries */ }
+          };
+          legacyTick();
+          setInterval(legacyTick, 2000);
+          document.addEventListener('visibilitychange', () => { if (!document.hidden) legacyTick(); });
+        }
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startStatePolling);
+      } else {
+        startStatePolling();
+      }
     }
   })();
 
-  // Live sweep-progress poller (DEC-SWEEP-WIRE-GA-001) — fetches the dedicated
-  // /api/v1/sweep-progress route every 2s and fills every [data-sweep="<field>"]
-  // element. Idle until the supervisor's first snapshot; the panel un-hides once
-  // a sweep is running or done. HONEST envelope: rate/percent are at the grid
-  // TUPLE grain (the supervised unit), not per-mask.
+  // Live sweep-progress renderer (DEC-SWEEP-WIRE-GA-001) — fills every
+  // [data-sweep="<field>"] element. Idle until the supervisor's first
+  // snapshot; the panel un-hides once a sweep is running or done. HONEST
+  // envelope: rate/percent are at the grid TUPLE grain (the supervised
+  // unit), not per-mask. Since DEC-FRONTEND-LATENCY-HARDENING-001
+  // (MIGRATION.md #1720) this block owns NO timer: it SUBSCRIBES to the ONE
+  // /api/v1/sweep-progress poller (bx-oneclick.js progressPoller, the
+  // BXPoll-disciplined 3 s consumer) — the former second 2 s setInterval on
+  // the same endpoint is gone (measured BEFORE: 99 sweep-progress requests
+  // per idle 120 s = the two pollers summed).
   (function () {
     function fmtEta(secs) {
       if (secs === null || secs === undefined) return '—';
@@ -3361,47 +3402,38 @@
     // tick). CLIENT-side compare only; backend payloads are frozen.
     const sweepBoundEls = document.querySelectorAll('[data-sweep]');
     let lastSweepPayload = '';
-    async function pollSweepProgress() {
-      // Hidden-tab pause — see pollState; visibilitychange refreshes on return.
-      if (document.hidden) return;
-      try {
-        const res = await fetch('/api/v1/sweep-progress');
-        if (!res.ok) {
-          // Heartbeat hook (DEC-DASHBOARD-UX-ANIMATE-001): surface the honest
-          // "unreachable — retrying" state; the panel itself keeps its
-          // silent-retry contract.
-          if (window.__bxHbSweepErr) window.__bxHbSweepErr(res.status);
-          return;  // server hiccup; next tick retries
-        }
-        const sp = await res.json();
-        // Heartbeat hook: the hero's sweep slot rides THIS fetch — zero extra
-        // sockets. Fires before the idle-return so "idle" renders honestly.
-        if (window.__bxHbSweep) window.__bxHbSweep(sp);
-        if (!sp || sp.state === 'idle') return;  // nothing running yet
-        const panel = document.getElementById('sweepProgressPanel');
-        // Un-hide BEFORE the skip gate so the first running snapshot always
-        // reveals the panel (re-assigning hidden=false is a no-op after that).
-        if (panel) panel.hidden = false;
-        const payload = JSON.stringify(sp);
-        if (payload === lastSweepPayload) return;  // unchanged → skip render
-        lastSweepPayload = payload;
-        sweepBoundEls.forEach(function (el) {
-          const key = el.getAttribute('data-sweep');
-          let v = sp[key];
-          if (key === 'eta_seconds') v = fmtEta(v);
-          else if (key === 'combos_per_sec') v = fmtRate(v);
-          else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
-          el.textContent = (v === null || v === undefined) ? '' : String(v);
-        });
-      } catch (e) {
-        if (window.__bxHbSweepErr) window.__bxHbSweepErr(e);
-        /* network blip; next tick retries */
-      }
+    function renderSweepProgress(sp) {
+      // Heartbeat hook: the hero's sweep slot rides the SAME shared poll —
+      // zero extra sockets. Fires before the idle-return so "idle" renders
+      // honestly.
+      if (window.__bxHbSweep) window.__bxHbSweep(sp);
+      if (!sp || sp.state === 'idle') return;  // nothing running yet
+      const panel = document.getElementById('sweepProgressPanel');
+      // Un-hide BEFORE the skip gate so the first running snapshot always
+      // reveals the panel (re-assigning hidden=false is a no-op after that).
+      if (panel) panel.hidden = false;
+      const payload = JSON.stringify(sp);
+      if (payload === lastSweepPayload) return;  // unchanged → skip render
+      lastSweepPayload = payload;
+      sweepBoundEls.forEach(function (el) {
+        const key = el.getAttribute('data-sweep');
+        let v = sp[key];
+        if (key === 'eta_seconds') v = fmtEta(v);
+        else if (key === 'combos_per_sec') v = fmtRate(v);
+        else if (key === 'percent') v = (v === null || v === undefined) ? '0' : v;
+        el.textContent = (v === null || v === undefined) ? '' : String(v);
+      });
     }
     if (window.location.protocol !== 'file:') {
-      pollSweepProgress();
-      setInterval(pollSweepProgress, 2000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) pollSweepProgress(); });
+      // Subscribe to the ONE shared sweep-progress poller (bx-oneclick.js
+      // reads these arrays at CALL time, so registering before the deferred
+      // file executes is safe). The failure twin surfaces the honest
+      // "unreachable — retrying" heartbeat state; BXPoll's hidden guard +
+      // backoff + visibilitychange catch-up cover this renderer for free.
+      (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(renderSweepProgress);
+      (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+        if (window.__bxHbSweepErr) window.__bxHbSweepErr(failures);
+      });
     }
   })();
 
@@ -3409,9 +3441,10 @@
   // Live system-heartbeat hero: three async slots, each resolving skeleton →
   // data / honest idle / honest "unreachable — retrying". All DOM writes go
   // through textContent (zero innerHTML sinks). The sweep slot rides the
-  // existing /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
-  // pull-rate + liveproof poll on their own gentle cadences (5 s / 10 s),
-  // paused while the tab is hidden.
+  // shared /api/v1/sweep-progress poller via the window.__bxHbSweep hooks;
+  // the pull-rate + liveproof slots ride the site-wide widgets' OWN polls
+  // via the __bxPullRateSubs / __bxLiveproofSubs fan-outs
+  // (DEC-FRONTEND-LATENCY-HARDENING-001) — this hero owns ZERO timers.
   (function () {
     const hb = document.getElementById('bxHeartbeat');
     if (!hb) return;
@@ -3474,30 +3507,29 @@
       setSlot('sweep', 'bad', 'sweep feed unreachable — retrying', 'the 2 s poller keeps retrying automatically');
     };
 
-    // ── pull slot: /api/v1/pull/rate every 5 s ──
-    async function pollPull() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/pull/rate', 10000) : fetch('/api/v1/pull/rate'));
-        if (!r.ok) { setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 5 s'); return; }
-        const d = await r.json();
-        const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
-        if (state === 'flowing') {
-          setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
-            'pull active · measured completed rate');
-        } else if (state === 'stalled') {
-          setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
-        } else if (state === 'done') {
-          setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
-        } else {
-          setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
-        }
-      } catch (e) {
-        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'retries every 5 s');
+    // ── pull slot: fed by the site-wide bx-rate-monitor.js widget's ONE
+    //    /api/v1/pull/rate poll via the __bxPullRateSubs fan-out
+    //    (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720) — the
+    //    former second 5 s setInterval on the same endpoint is gone
+    //    (measured BEFORE: 63 pull/rate requests per idle 120 s = the two
+    //    pollers summed). ──
+    function renderHbPull(d) {
+      const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+      if (state === 'flowing') {
+        setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
+          'pull active · measured completed rate');
+      } else if (state === 'stalled') {
+        setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+      } else if (state === 'done') {
+        setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
+      } else {
+        setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
       }
     }
 
-    // ── proof slot: /api/v1/liveproof every 10 s ──
+    // ── proof slot: fed by the site-wide bx-liveproof.js widget's ONE
+    //    /api/v1/liveproof poll via the __bxLiveproofSubs fan-out (same law:
+    //    the former second 10 s setInterval is gone). ──
     const KIND_TONE = { pass: 'ok', na: 'idle', warn: 'warn', fail: 'bad', error: 'bad' };
     const KIND_RANK = { ok: 0, idle: 1, warn: 2, bad: 3 };
     function verdictTone(block) {
@@ -3505,36 +3537,36 @@
       if (!v) return null;
       return KIND_TONE[v.kind] || 'warn';
     }
-    async function pollProof() {
-      if (document.hidden) return;
-      try {
-        const r = await (window.BXUI ? BXUI.fetchWithTimeout('/api/v1/liveproof', 10000) : fetch('/api/v1/liveproof'));
-        if (!r.ok) { setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'HTTP ' + r.status + ' · retries every 10 s'); return; }
-        const d = await r.json();
-        const pre = verdictTone(d && d.preflight);
-        const prb = verdictTone(d && d.probes);
-        if (pre === null && prb === null) {
-          setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
-          return;
-        }
-        const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
-        const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
-                     (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
-        if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
-        else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
-        else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
-        else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
-      } catch (e) {
-        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'retries every 10 s');
+    function renderHbProof(d) {
+      const pre = verdictTone(d && d.preflight);
+      const prb = verdictTone(d && d.probes);
+      if (pre === null && prb === null) {
+        setSlot('proof', 'idle', 'not yet run', 'preflight + probes run around the first real pull');
+        return;
       }
+      const worst = [pre, prb].filter(Boolean).sort((a, b) => KIND_RANK[b] - KIND_RANK[a])[0];
+      const head = (d.preflight && d.preflight.verdict && d.preflight.verdict.headline) ||
+                   (d.probes && d.probes.verdict && d.probes.verdict.headline) || '';
+      if (worst === 'ok') setSlot('proof', 'ok', 'all checks pass', head);
+      else if (worst === 'idle') setSlot('proof', 'idle', 'not applicable', head);
+      else if (worst === 'warn') setSlot('proof', 'warn', 'checks degraded', head);
+      else setSlot('proof', 'bad', 'checks FAILING', head || 'see the live-proof pill for the failing stages');
     }
 
     if (window.location.protocol !== 'file:') {
-      pollPull();
-      pollProof();
-      setInterval(pollPull, 5000);
-      setInterval(pollProof, 10000);
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) { pollPull(); pollProof(); } });
+      // Both slots SUBSCRIBE to the widgets' own polls (the fan-out arrays
+      // are read at call time inside bx-rate-monitor.js / bx-liveproof.js,
+      // so registering before those deferred files execute is safe). The
+      // widgets own the hidden guard, 10 s fetch abort, capped 3 s→30 s
+      // backoff and visibilitychange catch-up — this page adds NO timer.
+      (window.__bxPullRateSubs = window.__bxPullRateSubs || []).push(renderHbPull);
+      (window.__bxPullRateFailSubs = window.__bxPullRateFailSubs || []).push(function () {
+        setSlot('pull', 'bad', 'rate feed unreachable — retrying', 'rides the shared pull-rate widget poll (backoff capped at 30 s)');
+      });
+      (window.__bxLiveproofSubs = window.__bxLiveproofSubs || []).push(renderHbProof);
+      (window.__bxLiveproofFailSubs = window.__bxLiveproofFailSubs || []).push(function () {
+        setSlot('proof', 'bad', 'liveproof feed unreachable — retrying', 'rides the shared live-proof widget poll (backoff capped at 30 s)');
+      });
     } else {
       // Standalone design review (file://): no endpoints exist — resolve the
       // skeletons to an honest static note instead of infinite shimmer.
@@ -3554,7 +3586,15 @@
     const sweepBar = document.getElementById('sweep-bar');
     const sweepFill = document.getElementById('sweep-bar-fill');
     if (!sweepBtn || !sweepMsg) return;
-    let sweepPoll = null;
+    // Watching flag (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720):
+    // the former THIRD /api/v1/sweep-progress poller (a 1.2 s setInterval with
+    // no hidden guard / backoff / fetch timeout, armed on the Run click) is
+    // replaced by a SUBSCRIPTION to the ONE shared bx-oneclick progressPoller
+    // (BXPoll-disciplined, 3 s). The Run click flips `watching` on + fires an
+    // immediate shared pollNow(); the terminal snapshot flips it off. The
+    // progress bar therefore updates at the shared 3 s cadence (was 1.2 s) —
+    // an accepted trade for one-poller-per-endpoint.
+    let watching = false;
 
     function renderSweep(p) {
       const pct = Math.max(0, Math.min(100, p.percent || 0));
@@ -3567,20 +3607,21 @@
         ' · ' + rate + ' combos/sec';
     }
 
-    async function pollRunSweep() {
-      try {
-        const r = await fetch('/api/v1/sweep-progress');
-        const p = await r.json();
-        renderSweep(p);
-        if (!p.running && p.state !== 'idle') {
-          clearInterval(sweepPoll); sweepPoll = null; sweepBtn.disabled = false;
-          sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
-            ' survivor(s). The report above refreshes from the new run artifacts.';
-        }
-      } catch (e) {
-        sweepMsg.textContent = 'Could not read sweep progress: ' + e;
+    function onRunSweepProgress(p) {
+      if (!watching || !p) return;
+      renderSweep(p);
+      if (!p.running && p.state !== 'idle') {
+        watching = false; sweepBtn.disabled = false;
+        sweepMsg.textContent = '✅ Sweep ' + p.state + ' — ' + (p.survivors || 0) +
+          ' survivor(s). The report above refreshes from the new run artifacts.';
       }
     }
+    (window.__bxSweepProgressSubs = window.__bxSweepProgressSubs || []).push(onRunSweepProgress);
+    (window.__bxSweepProgressFailSubs = window.__bxSweepProgressFailSubs || []).push(function (failures) {
+      if (!watching) return;
+      sweepMsg.textContent = 'Could not read sweep progress (poll failure ×' + failures +
+        ') — the shared poller keeps retrying.';
+    });
 
     sweepBtn.onclick = async () => {
       sweepBtn.disabled = true;
@@ -3618,9 +3659,9 @@
         }
         sweepMsg.textContent = 'Sweep started — ' + j.symbols + ' · ' + j.intervals +
           ' · ' + j.start + ' → ' + j.end + '. Watching progress…';
-        if (sweepPoll) clearInterval(sweepPoll);
-        sweepPoll = setInterval(pollRunSweep, 1200);
-        pollRunSweep();
+        watching = true;
+        // Immediate refresh through the ONE shared poller (no second timer).
+        if (window.__bxSweepProgressPollNow) window.__bxSweepProgressPollNow();
       } catch (e) {
         sweepMsg.textContent = 'Sweep request failed: ' + e;
         sweepBtn.disabled = false;

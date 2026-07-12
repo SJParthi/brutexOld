@@ -724,6 +724,22 @@ class TestWindowStatusApi:
         assert "counts_since_pull_start" not in body
         assert "pull_start_utc" not in body
 
+        # Counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001): ?limit=0 ships the
+        # IDENTICAL counts/meta with rows=[] — the mode the coverage.html KPI +
+        # universe.html all-segments consumers poll (they never read rows, so
+        # the ~5.9 MB default row list stops shipping). The default (no-limit)
+        # response above is the existing-caller byte-parity witness: it stayed
+        # rowful and shape-identical through this change.
+        counts_only = client.get("/api/v1/coverage/windows?limit=0").json()
+        assert counts_only == {
+            **body,
+            "windows": [],
+            "returned": 0,
+            "capped": True,  # matching rows exist, none shipped — honest
+        }
+        # ge=0: a negative limit is still refused at validation (422), never a 500.
+        assert client.get("/api/v1/coverage/windows?limit=-1").status_code == 422
+
     def test_windows_per_run_counts_from_pull_journal(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
@@ -889,6 +905,35 @@ class TestCoverageFreshnessStamps:
         pull_on["v"] = False
         third = client.get("/api/v1/coverage/spot").json()
         assert third["duty_degraded"] is False
+
+    def test_spot_coverage_page_renders_the_floor_stale_badge(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage/spot page RENDERS
+        the payload's own duty_degraded/snapshot_age_s honesty fields — an amber
+        badge, textContent-only, shown ONLY when the payload says so. Substring
+        presence (the accepted #1529/#1530 no-headless-JS-runner envelope);
+        fails before: no template consumed either field."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage/spot").text
+        # The badge element + its style hook.
+        assert 'id="stalechip"' in page
+        assert ".stalechip" in page
+        # The render logic keys on the payload's OWN honesty fields.
+        assert "duty_degraded === true" in page
+        assert "snapshot_age_s" in page
+        # The badge copy (age + throttle explanation + the documented worst case).
+        assert "refresh throttled during the pull" in page
+        assert "chips may lag up to ~4 min" in page
+        # textContent-only DOM writes for the badge (never innerHTML).
+        assert "staleChip.textContent" in page
+
+    def test_coverage_hub_spot_card_renders_the_stale_suffix(self, store: Any) -> None:
+        """Item pin (DEC-STALENESS-CACHE-TRUTH-001): the /coverage hub's spot card
+        appends an honest "· stale" suffix when the payload says duty_degraded.
+        Substring presence only (the #1529/#1530 envelope)."""
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        page = client.get("/coverage").text
+        assert "duty_degraded === true" in page
+        assert '" · stale"' in page
 
 
 class TestCompletenessScoreboard:
@@ -1322,14 +1367,19 @@ class TestWindowLedgerApi:
         tail = client.get("/api/v1/db/window-ledger?limit=10&offset=999").json()
         assert tail["rows"] == [] and tail["total"] == 5
 
-    def test_paging_clicks_parse_the_ledger_once_per_generation(
+    def test_paging_clicks_never_run_the_python_ledger_parse(
         self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """D3 read-count SPY (DEC-SUSPICION-SWEEP-FIXES-001): the route previously
-        re-PARSED the whole ledger Parquet (~841k rows measured on a full-universe
-        options pull) on EVERY paging click. Now every click within one ledger
-        generation rides ONE cached parse (``db_view.window_ledger_rows_cached``);
-        a ledger flush (mtime bump) costs exactly one more."""
+        """The D3 read-count SPY, TIGHTENED by DEC-DB-LATENCY-HARDENING-001
+        (MIGRATION.md #1719): the route previously re-PARSED the whole ledger
+        Parquet on EVERY paging click (pre-D3), then ONE cached
+        ``load_window_ledger`` Python parse per ledger stamp (D3 — measured
+        7,177.5 ms of a 7,628 ms request at 400k rows). The route now serves
+        the page via the DuckDB fast path (``query_window_ledger_page``), so a
+        healthy full-schema ledger pays ZERO Python record parses — the spy
+        bound tightens 1 → 0 (the legacy parse remains ONLY the degrade path,
+        pinned in tests/unit/test_dashboard_db_view_window_ledger_page.py).
+        The byte-parity half of the original pin is unchanged below."""
         from datetime import UTC, date, datetime
 
         from brutex.data.fetch_coverage import WindowKey
@@ -1364,8 +1414,11 @@ class TestWindowLedgerApi:
         full = client.get("/api/v1/db/window-ledger?limit=500&offset=0").json()
         page1 = client.get("/api/v1/db/window-ledger?limit=2&offset=0").json()
         page2 = client.get("/api/v1/db/window-ledger?limit=2&offset=2").json()
-        assert parses["n"] == 1  # three clicks, ONE parse (was one parse PER click)
-        # The cached read serves byte-identical pages (sort + derived cols intact).
+        # DEC-DB-LATENCY-HARDENING-001: ZERO Python parses — the DuckDB fast
+        # path serves every click (was 1 cached parse per stamp; pre-D3, 1 PER
+        # click). Fails against the pre-fix route (parses == 1).
+        assert parses["n"] == 0
+        # The fast path serves byte-identical pages (sort + derived cols intact).
         assert page1["rows"] == full["rows"][0:2]
         assert page2["rows"] == full["rows"][2:4]
         assert full["total"] == 4

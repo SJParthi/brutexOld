@@ -199,12 +199,16 @@ def test_auto_grow_covers_persisted_and_respects_the_wall_or_raises(
         # The raise arm fires ONLY when a genuine grow was needed and its
         # sizing busts the wall — re-derived independently here.
         assert persisted > capacity
-        would_grow = max(persisted, math.ceil(capacity * 1.25))
+        would_grow = max(math.ceil(persisted * 1.25), math.ceil(capacity * 1.25))
         assert _compute_m_bytes(would_grow, fpr) > MAX_BLOOM_BYTES
     else:
         assert grown >= persisted
         if persisted <= capacity:
             assert grown == capacity  # identity arm — byte-identical behaviour.
         else:
-            assert grown == max(persisted, math.ceil(capacity * 1.25))
+            # C6 fix: the grow leaves HEADROOM above *persisted* (25%) so a
+            # resumed sweep records NEW tuples, not just rebuilds — the old
+            # ``max(persisted, …)`` sized to exactly *persisted* (zero headroom).
+            assert grown == max(math.ceil(persisted * 1.25), math.ceil(capacity * 1.25))
+            assert grown > persisted
             assert _compute_m_bytes(grown, fpr) <= MAX_BLOOM_BYTES

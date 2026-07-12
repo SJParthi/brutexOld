@@ -205,6 +205,85 @@ def test_kernel_bar_bits_immune_to_extreme_suffix_mutation(
 
 
 # ────────────────────────────────────────────────────────────────────────
+# Stage-1A futures arm — the STITCHED roll-aware stream is suffix-independent
+# (ADR-0012 / DEC-STAGE1A-ROLL-RESET-001, extending DEC-SWEEP-LOOKAHEAD-GUARD-001
+# to the roll machinery: neither the monotone roll cursor nor the per-contract
+# hard reset may consult a bar past the consumption front)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@st.composite
+def _futures_stream(draw: st.DrawFn) -> tuple[list[CandleBar], tuple[int, ...], list[int]]:
+    """Draw (stitched multi-contract bars, roll_schedule, boundary indices).
+
+    2-3 per-contract segments over consecutive IST dates (1-2 dates × 2-6
+    volume-bearing bars each); the schedule entry for each segment is its
+    LAST date's ordinal (the resolver's ``(E_{k-1}, E_k]`` ownership law), so
+    every segment boundary is a genuine roll. The returned boundary indices
+    (index of each segment's first bar, beyond bar 0) let the cut draw be
+    boundary-adjacent-weighted.
+    """
+    n_segments = draw(st.integers(min_value=2, max_value=3))
+    day_cursor = 0
+    bars: list[CandleBar] = []
+    schedule: list[int] = []
+    boundaries: list[int] = []
+    for seg_index in range(n_segments):
+        if seg_index > 0:
+            boundaries.append(len(bars))
+        n_days = draw(st.integers(min_value=1, max_value=2))
+        for _ in range(n_days):
+            day_offset = day_cursor
+            day_cursor += 1
+            n_bars = draw(st.integers(min_value=2, max_value=6))
+            for minute in range(n_bars):
+                open_i = draw(_price)
+                close_i = draw(_price)
+                ts = _SESSION_OPEN_IST + timedelta(days=day_offset, minutes=minute)
+                bars.append(
+                    CandleBar(
+                        timestamp=ts.astimezone(UTC),
+                        open=Decimal(open_i),
+                        high=Decimal(max(open_i, close_i)),
+                        low=Decimal(min(open_i, close_i)),
+                        close=Decimal(close_i),
+                        volume=100,
+                        open_interest=None,
+                    )
+                )
+        schedule.append((_SESSION_OPEN_IST + timedelta(days=day_cursor - 1)).date().toordinal())
+    return bars, tuple(schedule), boundaries
+
+
+@given(stream=_futures_stream(), data=st.data())
+@settings(suppress_health_check=[HealthCheck.too_slow], deadline=None)
+def test_stage1a_futures_prefix_projection_suffix_absent(
+    stream: tuple[list[CandleBar], tuple[int, ...], list[int]], data: st.DataObject
+) -> None:
+    """`build_bar_bits(bars, roll_schedule=S)[: k+1] == build_bar_bits(bars[: k+1], roll_schedule=S)`.
+
+    The ABSENT-suffix form over the STITCHED futures stream, with the cut ``k``
+    drawn boundary-adjacent-weighted (the bar before a roll, the roll bar
+    itself, the bar after) so the reset/cursor edges are genuinely exercised —
+    the roll machinery's state at bar ``k`` must be byte-identical whether the
+    stream continues across the next roll or simply ends.
+    """
+    bars, schedule, boundaries = stream
+    boundary_adjacent = sorted(
+        {min(max(b + delta, 0), len(bars) - 1) for b in boundaries for delta in (-1, 0, 1)}
+    )
+    k = data.draw(
+        st.one_of(
+            st.sampled_from(boundary_adjacent),
+            st.integers(min_value=0, max_value=len(bars) - 1),
+        )
+    )
+    full = build_bar_bits(bars, roll_schedule=schedule)
+    prefix = build_bar_bits(bars[: k + 1], roll_schedule=schedule)
+    assert full[: k + 1] == prefix
+
+
+# ────────────────────────────────────────────────────────────────────────
 # The resample path into the engine — earlier buckets never change
 # ────────────────────────────────────────────────────────────────────────
 

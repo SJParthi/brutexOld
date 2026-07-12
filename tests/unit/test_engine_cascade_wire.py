@@ -869,6 +869,198 @@ class TestRunCascadeOverSpecs:
         assert report.groups == ()
 
 
+# ── ADR-0012 futures roll-schedule carriage (review round-1) ─────────────────
+
+#: The pinned NIFTY-futures series alias (import-identity asserted in
+#: test_futures_series / test_universe; spelled literally to self-describe).
+_FUT_ALIAS = "NSE-NIFTY-FUT"
+#: An arbitrary two-roll schedule (expiry day-ordinals).
+_FUT_SCHEDULE = (date(2026, 5, 28).toordinal(), date(2026, 6, 25).toordinal())
+
+
+class TestFuturesRollScheduleCarriage:
+    """Stage-4 re-scores a futures pool under the SWEEP's roll schedule — never
+    schedule-blind (review round-1 findings 3/6/11/13/17/21: the automatic
+    cascade rebuilt futures winners' bar_bits with ``roll_schedule=None`` over
+    roll-stitched bars, silently violating the D11 hard-reset law)."""
+
+    def _spy(self, calls: list[tuple[str, tuple[int, ...] | None]]) -> Callable[..., list[Any]]:
+        def spy(
+            spec: cw.CascadeTupleSpec,
+            bars: Sequence[CandleBar],
+            *,
+            lockbox_default_window_days: int,
+            lockbox_min_trades: int,
+            roll_schedule: tuple[int, ...] | None = None,
+        ) -> list[Any]:
+            calls.append((spec.instrument, roll_schedule))
+            return []
+
+        return spy
+
+    def test_pool_schedule_threads_into_candidates_for_spec(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fails-before: run_cascade_over_specs never passed roll_schedule, so
+        # the spy recorded None for the futures pool.
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        cw.run_cascade_over_specs(
+            [_spec(), _spec(instrument=_FUT_ALIAS)],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64),
+            sweep_id="a" * 64,
+            roll_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+        )
+        assert sorted(calls) == [
+            ("NIFTY", None),  # spot pools stay on the byte-identical None path
+            (_FUT_ALIAS, _FUT_SCHEDULE),
+        ]
+
+    @pytest.mark.parametrize("schedules", [None, {}], ids=["no-map", "alias-missing"])
+    def test_futures_pool_without_schedule_skips_loudly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        schedules: dict[str, tuple[int, ...]] | None,
+    ) -> None:
+        # A pre-carriage manifest replay must never re-score a futures pool
+        # schedule-blind: the pool SKIPS with one WARN naming the remedy.
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        with capture_logs() as logs:
+            report = cw.run_cascade_over_specs(
+                [_spec(instrument=_FUT_ALIAS)],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                roll_schedules=schedules,
+            )
+        assert report.groups == ()
+        assert calls == []  # candidates never rebuilt schedule-blind
+        warned = [
+            rec
+            for rec in logs
+            if rec["event"] == "cascade_wire.futures_pool_skipped_no_roll_schedule"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["instrument"] == _FUT_ALIAS
+        assert "sweep-all" in str(warned[0]["remedy"])
+
+    def test_spot_pool_with_a_schedule_entry_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-3 finding 2, the POSITIVE invariant direction at the shared
+        # core: a schedule entry for a NON-alias pool must never be applied
+        # silently (pre-fix `roll_schedules.get(instrument)` threaded it into
+        # candidates_for_spec → build_bar_bits(roll_schedule=...), breaking
+        # the replay's byte-identity contract, then dying on Stage-1A's raw
+        # beyond-schedule ValueError for a short schedule).
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        with pytest.raises(cw.CascadeWireError, match="non-futures instrument 'NIFTY'"):
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                roll_schedules={"NIFTY": _FUT_SCHEDULE},
+            )
+        assert calls == []  # the schedule never reached a spot bar_bits build
+
+    def test_auto_path_records_schedules_and_replay_threads_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AUTOMATIC: the launch's resolved map lands in the manifest…
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="FNO", start="2026-05-01", end="2026-06-30"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            roll_schedule_by_instrument={_FUT_ALIAS: _FUT_SCHEDULE},
+        )
+        manifest = cw.load_manifest(tmp_path)
+        assert manifest.roll_schedules == ((_FUT_ALIAS, _FUT_SCHEDULE),)
+        # …and the MANUAL replay hands the SAME frozen schedules to the core.
+        seen: dict[str, object] = {}
+
+        def spy_core(*args: Any, **kwargs: Any) -> cw.CascadeWireReport:
+            seen.update(kwargs)
+            return cw.CascadeWireReport(sweep_id="a" * 64, groups=())
+
+        monkeypatch.setattr(cw, "run_cascade_over_specs", spy_core)
+        cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        assert seen["roll_schedules"] == {_FUT_ALIAS: _FUT_SCHEDULE}
+
+    def test_spot_only_auto_path_records_none(self, tmp_path: Path) -> None:
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+        )
+        assert cw.load_manifest(tmp_path).roll_schedules is None
+
+
+class TestCheckReplayRollSchedule:
+    """The replay's frozen-vs-re-derived schedule cross-check (review round-2
+    findings 1/4/9): `load_bars_for_manifest` stitches bars from the CURRENT
+    lake while `run_and_write_from_manifest` re-scores under the manifest's
+    FROZEN schedule — a drifted lake must REFUSE loudly naming both schedules,
+    never silently rewrite the report under mismatched Stage-1A resets."""
+
+    def test_matching_schedules_pass(self) -> None:
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+    def test_drifted_lake_refuses_naming_both_schedules(self) -> None:
+        fresh = (*_FUT_SCHEDULE, date(2026, 7, 30).toordinal())  # a pulled successor
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+        message = str(excinfo.value)
+        assert str(list(_FUT_SCHEDULE)) in message  # the FROZEN schedule named
+        assert str(list(fresh)) in message  # the re-derived schedule named
+        assert "contract set changed" in message
+        assert "brutex sweep-all" in message  # the remediation
+
+    def test_backfilled_head_contract_refuses_too(self) -> None:
+        # The silent-D11 direction: a head contract backfilled AFTER the
+        # launch (the head_unowned WARN's own remediation) PREPENDS an expiry.
+        fresh = (date(2026, 4, 30).toordinal(), *_FUT_SCHEDULE)
+        with pytest.raises(cw.CascadeWireError, match="contract set changed"):
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+
+    @pytest.mark.parametrize(
+        "frozen", [None, {}, {"OTHER": _FUT_SCHEDULE}], ids=["no-map", "empty", "other-instrument"]
+    )
+    def test_pre_carriage_manifest_abstains(
+        self, frozen: dict[str, tuple[int, ...]] | None
+    ) -> None:
+        # No frozen schedule for this instrument ⇒ nothing to enforce — the
+        # pool is loudly SKIPPED downstream by run_cascade_over_specs instead.
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules=frozen,
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+
 # ── Report serialisation ──────────────────────────────────────────────────────
 
 
@@ -1035,6 +1227,104 @@ class TestManifestSerialisation:
         del payload["specs"][0]["fib_anchor"]
         restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
         assert restored.specs[0].fib_anchor is FibAnchorKind.PREV_DAY
+
+    def test_roll_schedules_round_trip(self) -> None:
+        # ADR-0012 carriage (review round-1): the futures schedules survive
+        # serialize → deserialize so the MANUAL replay uses the sweep's own
+        # per-contract hard resets.
+        base = _manifest()
+        manifest = cw.CascadeManifest(
+            version=base.version,
+            sweep_id=base.sweep_id,
+            cascade_config=base.cascade_config,
+            bars_context=base.bars_context,
+            specs=base.specs,
+            roll_schedules=(("NSE-NIFTY-FUT", (739034, 739062)),),
+        )
+        restored = cw.manifest_from_json(cw.manifest_to_json(manifest))
+        assert restored == manifest
+        assert restored.roll_schedules == (("NSE-NIFTY-FUT", (739034, 739062)),)
+
+    def test_pre_carriage_manifest_without_roll_schedules_key_parses(self) -> None:
+        # A manifest written before the schedule carriage has no key at all —
+        # it parses with roll_schedules=None (the additive-parse precedent).
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        del payload["roll_schedules"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.roll_schedules is None
+
+    def test_malformed_roll_schedules_raises(self) -> None:
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", ["not-an-ordinal"]]]
+        with pytest.raises(cw.CascadeWireError, match="invalid roll_schedules"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [[True, 739030], [739000.9, 739030], ["739000", 739030]],
+        ids=["bool", "float", "int-string"],
+    )
+    def test_non_int_ordinal_types_refused_not_coerced(self, schedule: list[object]) -> None:
+        # Round-4 finding 2: the parse boundary documented itself as THE
+        # validator for a hand-edited manifest, yet bare `int()` silently
+        # coerced `true` → 1, truncated 739000.9 → 739000, and parsed an
+        # int-string — now strictly int-not-bool, mirroring the audit reader
+        # `_schedules_from_entries`.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="non-int roll_schedule ordinal"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_duplicate_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-7 finding 8: the parse boundary validated each entry's alias
+        # + shape but never UNIQUENESS — both `dict(manifest.roll_schedules)`
+        # consumers silently adopted whichever contradictory entry sorted
+        # LAST, while the audit twin `_schedules_from_entries` refuses the
+        # same per-instrument disagreement. The parse boundary now refuses
+        # identically.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [
+            ["NSE-NIFTY-FUT", [738000, 738030]],
+            ["NSE-NIFTY-FUT", [738000, 738031]],
+        ]
+        with pytest.raises(cw.CascadeWireError, match="duplicate entry for instrument"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_spot_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-3 finding 2: the manifest has no integrity digest, so a
+        # hand-edited/corrupt `roll_schedules` entry for a SPOT instrument
+        # was trusted verbatim and silently rebuilt that pool's bar_bits
+        # WITH per-contract hard resets. The presence ⟺ alias invariant is
+        # now enforced at the parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NIFTY", [738000, 738100]]]
+        with pytest.raises(cw.CascadeWireError, match="not.*the NIFTY-futures series alias"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [[], [738100, 738000], [738000, 738000], [-5]],
+        ids=["empty", "decreasing", "duplicate", "negative"],
+    )
+    def test_shape_violating_roll_schedule_refused_at_parse(self, schedule: list[int]) -> None:
+        # The SweepRunConfig shape law (non-empty, strictly increasing,
+        # non-negative ordinals), mirrored at the manifest parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="strictly increasing"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
     def test_bad_json_raises(self) -> None:
         with pytest.raises(cw.CascadeWireError, match="not valid JSON"):
@@ -1998,3 +2288,25 @@ class TestStage3CellRelPath:
     def test_bad_rel_path_raises(self, bad: str) -> None:
         with pytest.raises(cw.CascadeWireError, match="rel_path"):
             _stage3_cell_with(rel_path=bad)
+
+
+# ── _manifest_window_dt (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────────
+
+
+class TestManifestWindowDt:
+    """The ONE manifest window-endpoint parse for the manual replay's slice reads.
+
+    The seam's behavioural suite also pins this in
+    ``tests/unit/test_engine_vix_stamper_wiring.py``; these mirrors keep THIS
+    module's per-file 100% gate honest on its OWN discovered covering suite
+    (``scripts/ci/coverage_gate_discovery.py`` maps ``cascade_wire.py`` to the
+    ``test_*cascade_wire*`` files only).
+    """
+
+    def test_naive_endpoint_is_utc(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05")
+        assert parsed == datetime(2026, 1, 5, tzinfo=UTC)
+
+    def test_aware_endpoint_offset_preserved(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
+        assert parsed.utcoffset() == timedelta(hours=5, minutes=30)

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
+from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -43,6 +44,23 @@ _hyp_settings.register_profile(
     suppress_health_check=(HealthCheck.too_slow,),
 )
 _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
+
+# DEC-GROWW-MARKET-HOURS-GUARD-001 test hermeticity (the #1380 philosophy —
+# hermetic against the real HOST, here the WALL CLOCK instead of the disk):
+# the market-hours START gate's production default (`guard_active_default`)
+# reads the REAL clock + `os.environ`, so any test that starts a
+# `BackgroundPullJob` / drives a pull route WITHOUT injecting a guard would
+# pass out-of-hours and FAIL between 08:45-15:35 IST on an NSE trading day (a
+# wall-clock flake class over the whole suite — reproduced locally 2026-07-10
+# 12:02 IST: 13 untouched `test_dashboard_pull_stall.py` starts deferred).
+# The suite therefore runs under the DOCUMENTED operator kill switch
+# (`BRUTEX_MARKET_HOURS_GUARD=0`, `setdefault` so an explicit outer choice
+# wins). The guard's OWN tests stay fully armed on both arms — they inject
+# `env=` mappings / guard callables / monkeypatched clocks explicitly
+# (test_market_hours.py, the gate tests in test_pull_jobs.py /
+# test_cli_retry_storm.py / test_nightly_pipeline_binding.py) — so this
+# default disables ONLY the ambient real-clock read, never the tested law.
+os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
 
 
 @pytest.fixture
@@ -80,6 +98,32 @@ def _isolate_groww_token_cache(
     """
     cache = tmp_path_factory.mktemp("groww-token-cache") / "groww_access_token.json"
     monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(cache))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_run_forensics_mirror(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect the Row-15 run-forensics mirror at a per-test tmp root for the suite.
+
+    DEC-SWEEP-UNKILLABLE-CORE-001 Row 15: the sweep run core mirrors its R40
+    forensics to ``~/.brutex/runs/<run_id>/`` on the INTERNAL disk by default.
+    Point every test's mirror at a fresh tmp root (via the public
+    ``BRUTEX_RUN_MIRROR_ROOT`` env override) so a run-core exercise NEVER writes
+    into the operator's real home — the same isolation discipline as the Groww
+    token cache above. A per-file fixture can still re-point or disable it (empty
+    value); ``monkeypatch`` auto-restores at teardown.
+    """
+    # LITERAL env-var name, deliberately NOT `from brutex.engine.run_layout
+    # import MIRROR_ROOT_ENV`: this fixture is suite-wide autouse, and the
+    # nightly red-team harness (redteam-nightly.yml) runs a PYTHON-ONLY
+    # editable install with no Rust wheels — importing brutex.engine here
+    # (package __init__ -> combo_mask -> fno_math) errored the SETUP of all
+    # 156 pre-existing tests/redteam tests (run 29145422566). The literal is
+    # drift-pinned against run_layout.MIRROR_ROOT_ENV by
+    # tests/unit/test_run_layout.py (a wheels-present suite).
+    mirror = tmp_path_factory.mktemp("run-forensics-mirror")
+    monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", str(mirror))
 
 
 @pytest.fixture(autouse=True)

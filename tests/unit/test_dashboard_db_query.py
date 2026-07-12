@@ -16,7 +16,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import pytest
 from brutex.dashboard.db_view import (
     _IST_DATE_EXPR,
@@ -476,8 +475,14 @@ def test_query_candles_returns_all_rows(store: InstrumentStore, tmp_path: Path) 
         limit=50,
     )
     assert out["total"] == 2
-    # The two server-computed derived %-columns are appended (DEC-DB-CANDLE-DERIVED-001).
-    assert out["columns"] == [*CANDLE_COLUMNS, "change_pct", "open_gap_pct"]
+    # The server-computed derived columns are appended (DEC-DB-CANDLE-DERIVED-001)
+    # + the prev-close contiguity flag (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001).
+    assert out["columns"] == [
+        *CANDLE_COLUMNS,
+        "change_pct",
+        "open_gap_pct",
+        "prev_close_contiguous",
+    ]
     assert out["symbol"] == "NSE-NIFTY"
 
 
@@ -493,9 +498,16 @@ def test_query_candles_column_subset(store: InstrumentStore, tmp_path: Path) -> 
         columns=("timestamp", "close"),
         limit=50,
     )
-    # Projection + the two appended derived %-columns (DEC-DB-CANDLE-DERIVED-001).
-    assert out["columns"] == ["timestamp", "close", "change_pct", "open_gap_pct"]
-    assert all(len(r) == 4 for r in out["rows"])
+    # Projection + the appended derived %-columns (DEC-DB-CANDLE-DERIVED-001) +
+    # the prev-close contiguity flag (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001).
+    assert out["columns"] == [
+        "timestamp",
+        "close",
+        "change_pct",
+        "open_gap_pct",
+        "prev_close_contiguous",
+    ]
+    assert all(len(r) == 5 for r in out["rows"])
 
 
 def test_query_candles_empty_columns_tuple_raises(store: InstrumentStore, tmp_path: Path) -> None:
@@ -642,7 +654,13 @@ def test_query_candles_empty_partition_set_returns_empty_page(
     assert out["total"] == 0
     assert out["rows"] == []
     # Even an empty partition exposes the stable derived-column set.
-    assert out["columns"] == ["timestamp", "close", "change_pct", "open_gap_pct"]
+    assert out["columns"] == [
+        "timestamp",
+        "close",
+        "change_pct",
+        "open_gap_pct",
+        "prev_close_contiguous",
+    ]
 
 
 def test_query_candles_empty_partition_default_columns(
@@ -657,7 +675,12 @@ def test_query_candles_empty_partition_default_columns(
         interval="1minute",
         limit=50,
     )
-    assert out["columns"] == [*CANDLE_COLUMNS, "change_pct", "open_gap_pct"]
+    assert out["columns"] == [
+        *CANDLE_COLUMNS,
+        "change_pct",
+        "open_gap_pct",
+        "prev_close_contiguous",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1123,6 +1146,8 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
             store.connection,
             base,
             RuntimeError("whole-glob failed"),
+            sql='SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+            extra_params=[],
             source="unit",
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
@@ -1132,6 +1157,7 @@ def test_readable_parquet_subset_logs_skip_and_keeps_good(
     skips = [e for e in logs if e["event"] == "db.parquet_skip"]
     assert len(skips) == 1
     assert skips[0]["path"].endswith(april.name)
+    assert skips[0]["reason"] == "unreadable"  # the stage-1 readability skip, not alien
     assert not [e for e in logs if e["event"] == "db.parquet_unreadable"]
 
 
@@ -1139,9 +1165,9 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
     # The transient-error branch: the whole-glob read raised but EVERY file probes
-    # readable → ``omitted=False`` (nothing dropped), so an adjacency-sensitive caller
-    # keeps its baseline. (A genuine SQL bug rides this branch and is re-raised by the
-    # caller's re-run — see test_execute_parquet_resilient_genuine_sql_error_propagates.)
+    # readable (stage-1 readability AND the stage-2 real-sql schema probe) →
+    # ``omitted=False`` (nothing dropped), so an adjacency-sensitive caller keeps its
+    # baseline (DEC-ALIEN-SCHEMA-READ-HEAL-001 — the probe now runs the real sql too).
     march, april = _write_two_month_candles(tmp_path)
     base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
     with capture_logs() as logs:
@@ -1149,6 +1175,8 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
             store.connection,
             base,
             RuntimeError("transient"),
+            sql='SELECT "timestamp", close FROM read_parquet(?, union_by_name=true)',
+            extra_params=[],
             source="unit",
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
@@ -1158,23 +1186,31 @@ def test_readable_parquet_subset_all_readable_reports_not_omitted(
     assert not [e for e in logs if e["event"].startswith("db.parquet")]
 
 
-def test_execute_parquet_resilient_genuine_sql_error_propagates(
+def test_execute_parquet_resilient_genuine_sql_error_degrades_loud(
     store: InstrumentStore, tmp_path: Path
 ) -> None:
-    # A genuine SQL bug (a non-existent column) is NEVER swallowed by the resilient
-    # helper: the whole-glob read raises duckdb.Error, every file probes readable
-    # (omitted=False), and the degraded re-run over the SAME files RE-RAISES — so a real
-    # bug surfaces as a 500, not a silent empty result (the over-broad-catch MINOR).
+    # DEC-ALIEN-SCHEMA-READ-HEAL-001 SUPERSEDES the earlier re-raise carve-out: a
+    # query that fails on EVERY individual file (here a non-existent column — the same
+    # per-file shape a single alien-schema file produces) now degrades to an EMPTY
+    # result with ONE loud db.parquet_unreadable ERROR, never a raise/500. Sanctioned:
+    # the constant SQL strings are pinned by the per-module 100% gate (the bug net);
+    # the operator-facing alien-DATA sticky-500 outweighed the lab-only raise signal.
     _write_two_month_candles(tmp_path)
     base = tmp_path / "bars" / "NSE" / "CASH" / "NSE-NIFTY" / "1minute"
-    with pytest.raises(duckdb.Error):
-        _execute_parquet_resilient(
+    with capture_logs() as logs:
+        rows = _execute_parquet_resilient(
             store.connection,
             base,
             "SELECT definitely_not_a_column FROM read_parquet(?, union_by_name=true)",
             [],
             source="unit",
         )
+    assert rows == []
+    unreadable = [e for e in logs if e["event"] == "db.parquet_unreadable"]
+    assert len(unreadable) == 1
+    skips = [e for e in logs if e["event"] == "db.parquet_skip"]
+    assert len(skips) == 2  # both files fail the stage-2 schema probe
+    assert all(e["reason"] == "alien_schema" for e in skips)
 
 
 def test_aggregate_parquet_resilient_uses_coverage_namespace(
@@ -2598,6 +2634,99 @@ def test_intraday_last_close_picks_each_days_final_1min_bar(
     assert out[date(2024, 3, 4)] == Decimal("110.0")
 
 
+def _write_two_day_session(tmp_path: Path) -> None:
+    """Two adjacent NSE sessions of 1-minute bars for the tz-invariance tests."""
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            # 2024-03-01: 09:15 open 98 / close 99, 15:29 close 100.
+            _ocbar(
+                datetime(2024, 3, 1, 3, 45, tzinfo=UTC),
+                open_="98",
+                high="101",
+                low="97",
+                close="99",
+            ),
+            _ocbar(
+                datetime(2024, 3, 1, 9, 59, tzinfo=UTC),
+                open_="99",
+                high="101",
+                low="98",
+                close="100",
+            ),
+            # 2024-03-04: 09:15 open 112 / close 111, 15:29 close 110.
+            _ocbar(
+                datetime(2024, 3, 4, 3, 45, tzinfo=UTC),
+                open_="112",
+                high="113",
+                low="109",
+                close="111",
+            ),
+            _ocbar(
+                datetime(2024, 3, 4, 9, 59, tzinfo=UTC),
+                open_="111",
+                high="112",
+                low="109",
+                close="110",
+            ),
+        ],
+    )
+
+
+def test_intraday_readers_ist_date_key_invariant_under_negative_session_tz(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # Regression (DEC-SPOT-SESSION-DAYS-IST-TZ-001, Defect 2): the intraday
+    # %-change baseline readers keyed their GROUP BY on a bare
+    # ``CAST("timestamp" AS DATE)``, which resolves in the ambient DuckDB session
+    # ``TimeZone``. Under a NEGATIVE-offset host (America/Los_Angeles, UTC-8/-7) a
+    # 03:45-UTC (09:15 IST) session-open bar CASTs to the PREVIOUS calendar day →
+    # the last-close / predecessor / first-open maps are mis-keyed → the prev-close
+    # baseline binds to the wrong day → a sign-flipped / fake %-change. They now key
+    # on the COMMON ``_IST_DATE_EXPR``, so the {ist_date: value} maps are
+    # BYTE-IDENTICAL across a negative-offset zone and the IST/UTC baseline.
+    _write_two_day_session(tmp_path)
+    conn = store.connection
+    (original_tz,) = conn.execute("SELECT current_setting('TimeZone')").fetchall()[0]
+
+    def _read_all() -> tuple[dict[date, Decimal], dict[date, Decimal], dict[date, Decimal]]:
+        last = _intraday_last_close_by_date(
+            conn, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+        )
+        prev = _intraday_prev_close_by_page_date(
+            conn,
+            tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-NIFTY",
+            page_dates={date(2024, 3, 1), date(2024, 3, 4)},
+        )
+        opens = _intraday_open_by_date(
+            conn, tmp_path, exchange="NSE", segment="CASH", symbol="NSE-NIFTY"
+        )
+        return last, prev, opens
+
+    conn.execute("SET TimeZone = 'UTC'")
+    try:
+        base = _read_all()
+        conn.execute("SET TimeZone = 'America/Los_Angeles'")
+        neg = _read_all()
+    finally:
+        conn.execute(f"SET TimeZone = '{original_tz}'")
+
+    # The IST-date keying is identical in EVERY ambient zone (the fix).
+    assert base == neg
+    last, prev, opens = base
+    assert last == {date(2024, 3, 1): Decimal("100.0"), date(2024, 3, 4): Decimal("110.0")}
+    # prev-close: 03-04 baselines on 03-01's last close (100); 03-01 has no
+    # predecessor in the page → absent.
+    assert prev == {date(2024, 3, 4): Decimal("100.0")}
+    assert opens == {date(2024, 3, 1): Decimal("98"), date(2024, 3, 4): Decimal("112")}
+
+
 # ── _intraday_open_by_date (DEC-PREOPEN-MINUTE-BASIS-001) ────────────
 
 
@@ -2741,57 +2870,61 @@ def _row(ts: object, *, open_: object = "105", close: object = "110") -> tuple[o
 
 def test_spot_derived_915_bar_has_change_and_gap() -> None:
     ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)  # 09:15 IST on a day in _PREV
-    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
+    [(change, gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
     assert float(change) == pytest.approx(10.0)  # (110-100)/100*100
     assert float(gap) == pytest.approx(5.0)  # (105-100)/100*100
+    assert contig is None  # no provenance map passed → no contiguity verdict
 
 
 def test_spot_derived_non_open_bar_has_change_only() -> None:
     ts = datetime(2024, 3, 4, 3, 46, tzinfo=UTC)  # 09:16 IST → not the gap anchor
-    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
+    [(change, gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, _PREV)
     assert float(change) == pytest.approx(10.0)
     assert gap is None
+    assert contig is None
 
 
 def test_spot_derived_date_absent_from_prev_map_is_blank() -> None:
     ts = datetime(2024, 3, 1, 3, 45, tzinfo=UTC)  # date not in _PREV (first day)
-    assert _spot_derived_rows([_row(ts)], _ALL, _PREV) == [(None, None)]
+    assert _spot_derived_rows([_row(ts)], _ALL, _PREV) == [(None, None, None)]
 
 
 def test_spot_derived_non_datetime_timestamp_is_blank() -> None:
     # A non-datetime ts cell (never the real column) → both blank.
-    assert _spot_derived_rows([_row("not-a-dt")], _ALL, _PREV) == [(None, None)]
+    assert _spot_derived_rows([_row("not-a-dt")], _ALL, _PREV) == [(None, None, None)]
 
 
 def test_spot_derived_no_timestamp_column_is_blank() -> None:
     # Projection without "timestamp" → no date → both blank.
     cols = ["open", "close"]
-    assert _spot_derived_rows([("105", "110")], cols, _PREV) == [(None, None)]
+    assert _spot_derived_rows([("105", "110")], cols, _PREV) == [(None, None, None)]
 
 
 def test_spot_derived_no_close_column_keeps_gap_only() -> None:
     # timestamp+open but NO close → change blank, gap still computed on the 09:15 bar.
     cols = ["timestamp", "open"]
     ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
-    [(change, gap)] = _spot_derived_rows([(ts, "105")], cols, _PREV)
+    [(change, gap, contig)] = _spot_derived_rows([(ts, "105")], cols, _PREV)
     assert change is None
     assert float(gap) == pytest.approx(5.0)
+    assert contig is None
 
 
 def test_spot_derived_no_open_column_keeps_change_only() -> None:
     # timestamp+close but NO open → gap blank even on the 09:15 bar; change set.
     cols = ["timestamp", "close"]
     ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
-    [(change, gap)] = _spot_derived_rows([(ts, "110")], cols, _PREV)
+    [(change, gap, contig)] = _spot_derived_rows([(ts, "110")], cols, _PREV)
     assert float(change) == pytest.approx(10.0)
     assert gap is None
+    assert contig is None
 
 
 def test_spot_derived_zero_prev_close_is_blank() -> None:
     # A zero previous close must not divide-by-zero (pct_change returns None).
     prev = {date(2024, 3, 4): Decimal("0")}
     ts = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
-    assert _spot_derived_rows([_row(ts)], _ALL, prev) == [(None, None)]
+    assert _spot_derived_rows([_row(ts)], _ALL, prev) == [(None, None, None)]
 
 
 def test_spot_derived_1day_gap_on_every_bar() -> None:
@@ -2799,9 +2932,62 @@ def test_spot_derived_1day_gap_on_every_bar() -> None:
     # gap is computed on EVERY bar — not gated to the 09:15 IST instant (a 1-day
     # bar is stamped at midnight/other times, which is why it used to read null).
     ts = datetime(2024, 3, 4, 0, 0, tzinfo=UTC)  # IST 05:30 — NOT the 09:15 anchor
-    [(change, gap)] = _spot_derived_rows([_row(ts)], _ALL, _PREV, interval="1day")
+    [(change, gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, _PREV, interval="1day")
     assert float(change) == pytest.approx(10.0)  # (110-100)/100*100
     assert float(gap) == pytest.approx(5.0)  # (105-100)/100*100 — gap on a non-09:15 bar
+    assert contig is None
+
+
+# ── _spot_derived_rows contiguity verdict (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001) ──
+# The prev_close_contiguous flag: True when the baseline predecessor date is the
+# NSE-calendar-adjacent session, False when a real session was BRIDGED (a lake
+# hole → the served %-change is confidently wrong, so it is MARKED), None when the
+# calendar abstains past its coverage floor (never a fabricated verdict).
+
+
+def test_spot_derived_contiguity_true_when_adjacent() -> None:
+    # Bar on Thu 2024-07-04; baseline predecessor Wed 2024-07-03 IS the calendar's
+    # immediately-preceding session → contiguous True.
+    ts = datetime(2024, 7, 4, 3, 45, tzinfo=UTC)
+    prev = {date(2024, 7, 4): Decimal("100")}
+    pred = {date(2024, 7, 4): date(2024, 7, 3)}
+    [(change, _gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, prev, pred, exchange="NSE")
+    assert float(change) == pytest.approx(10.0)
+    assert contig is True
+
+
+def test_spot_derived_contiguity_false_when_hole_bridged() -> None:
+    # Bar on Thu 2024-07-04; the baseline predecessor used is Tue 2024-07-02 — NOT
+    # the calendar's true prior session Wed 2024-07-03 (a real session was bridged)
+    # → contiguous False (the %-change is marked, not changed).
+    ts = datetime(2024, 7, 4, 3, 45, tzinfo=UTC)
+    prev = {date(2024, 7, 4): Decimal("100")}
+    pred = {date(2024, 7, 4): date(2024, 7, 2)}
+    [(change, _gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, prev, pred, exchange="NSE")
+    assert float(change) == pytest.approx(10.0)  # value unchanged — MARK, don't fix
+    assert contig is False
+
+
+def test_spot_derived_contiguity_abstains_at_coverage_floor() -> None:
+    # A bar at the published-holiday coverage floor: previous_trading_session walks
+    # into out-of-coverage 2019 and abstains (None), so the verdict is honestly
+    # None (never a guessed marker) even though a baseline predecessor exists.
+    ts = datetime(2020, 1, 1, 3, 45, tzinfo=UTC)
+    prev = {date(2020, 1, 1): Decimal("100")}
+    pred = {date(2020, 1, 1): date(2019, 12, 31)}
+    [(_change, _gap, contig)] = _spot_derived_rows([_row(ts)], _ALL, prev, pred, exchange="NSE")
+    assert contig is None
+
+
+def test_spot_derived_contiguity_memo_single_calendar_walk_per_date() -> None:
+    # Two bars on the SAME IST date resolve the calendar ONCE (the per-page memo),
+    # both carrying the same verdict.
+    ts1 = datetime(2024, 7, 4, 3, 45, tzinfo=UTC)
+    ts2 = datetime(2024, 7, 4, 3, 46, tzinfo=UTC)
+    prev = {date(2024, 7, 4): Decimal("100")}
+    pred = {date(2024, 7, 4): date(2024, 7, 3)}
+    rows = _spot_derived_rows([_row(ts1), _row(ts2)], _ALL, prev, pred, exchange="NSE")
+    assert [r[2] for r in rows] == [True, True]
 
 
 # ── query_candles end-to-end with the derived columns ────────────────
@@ -2902,10 +3088,11 @@ def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_pa
         interval="1minute",
         limit=50,
     )
-    assert out["columns"][-2:] == list(SPOT_DERIVED_COLUMNS)
+    assert out["columns"][-3:] == list(SPOT_DERIVED_COLUMNS)
     ts_i = out["columns"].index("timestamp")
     chg_i = out["columns"].index("change_pct")
     gap_i = out["columns"].index("open_gap_pct")
+    con_i = out["columns"].index("prev_close_contiguous")
     by_ts = {r[ts_i]: r for r in out["rows"]}
     open_row = by_ts["2024-03-04 09:15:00"]
     later_row = by_ts["2024-03-04 09:16:00"]
@@ -2913,9 +3100,90 @@ def test_query_candles_derived_columns_end_to_end(store: InstrumentStore, tmp_pa
     assert float(open_row[gap_i]) == pytest.approx(5.0)  # (105-100)/100*100
     assert float(later_row[chg_i]) == pytest.approx(21.0)  # (121-100)/100*100
     assert later_row[gap_i] is None  # gap only on the 09:15 bar
-    # 2024-03-01 is the FIRST day in the 1-min lake → no prior close → blank.
+    # 03-04 (Mon) baselines on 03-01 (Fri) — the calendar-adjacent session → contiguous.
+    assert open_row[con_i] is True
+    assert later_row[con_i] is True
+    # 2024-03-01 is the FIRST day in the 1-min lake → no prior close → blank + no verdict.
     assert by_ts["2024-03-01 09:15:00"][chg_i] is None
     assert by_ts["2024-03-01 09:15:00"][gap_i] is None
+    assert by_ts["2024-03-01 09:15:00"][con_i] is None
+
+
+def test_query_candles_prevclose_contiguity_marker_across_lake_hole(
+    store: InstrumentStore, tmp_path: Path
+) -> None:
+    # DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001 (Defect 3a): a %-change baselined
+    # across a genuine NSE-session lake hole is MARKED (prev_close_contiguous
+    # False), never silently changed. Mon 07-01 + Tue 07-02 are present, Wed 07-03
+    # (a REAL trading session) is a hole, Thu 07-04 is present — so Thu's %-change
+    # bridges the missing Wed onto Tue's close → non-contiguous. Tue baselines on
+    # the calendar-adjacent Mon → contiguous.
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        bars=[
+            _ocbar(
+                datetime(2024, 7, 1, 3, 45, tzinfo=UTC),
+                open_="100",
+                high="101",
+                low="99",
+                close="100.5",
+            ),
+            _ocbar(
+                datetime(2024, 7, 1, 9, 59, tzinfo=UTC),
+                open_="100.5",
+                high="101",
+                low="99",
+                close="101",
+            ),
+            _ocbar(
+                datetime(2024, 7, 2, 3, 45, tzinfo=UTC),
+                open_="101",
+                high="103",
+                low="100",
+                close="102",
+            ),
+            _ocbar(
+                datetime(2024, 7, 2, 9, 59, tzinfo=UTC),
+                open_="102",
+                high="103",
+                low="101",
+                close="103",
+            ),
+            # Wed 07-03 absent (the lake hole).
+            _ocbar(
+                datetime(2024, 7, 4, 3, 45, tzinfo=UTC),
+                open_="110",
+                high="112",
+                low="109",
+                close="111",
+            ),
+        ],
+    )
+    out = query_candles(
+        store.connection,
+        tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-NIFTY",
+        interval="1minute",
+        limit=50,
+    )
+    ts_i = out["columns"].index("timestamp")
+    con_i = out["columns"].index("prev_close_contiguous")
+    chg_i = out["columns"].index("change_pct")
+    by_ts = {r[ts_i]: r for r in out["rows"]}
+    # Tue 07-02 09:15 → baselined on Mon 07-01 (adjacent) → contiguous True.
+    assert by_ts["2024-07-02 09:15:00"][con_i] is True
+    # Thu 07-04 09:15 → baselined on Tue 07-02 (bridging the missing Wed) → False,
+    # but the SERVED %-change is untouched ((111-103)/103*100 = 7.77%), only MARKED.
+    thu = by_ts["2024-07-04 09:15:00"]
+    assert thu[con_i] is False
+    assert round(float(thu[chg_i]), 2) == 7.77
+    # Mon 07-01 is the first day → no baseline → no verdict.
+    assert by_ts["2024-07-01 09:15:00"][con_i] is None
 
 
 def test_query_candles_daily_interval_is_date_only_with_change(

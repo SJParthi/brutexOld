@@ -191,8 +191,12 @@ LOCKED_TOP: Final[int] = 20
 #: Worker count exported to the detached CLI process (CLAUDE.md §8 envelope).
 LOCKED_SWEEP_WORKERS: Final[str] = "8"
 
-#: Rank-region byte budget exported to the child (audit delta, W07_m4_oom_table:
-#: the divisor=1 worker OOM was live-proven and the 1 GiB arm bit-identical).
+#: Rank-region byte budget exported to the child. The divisor=1 worker-OOM gap
+#: this pin originally mitigated (audit delta, W07_m4_oom_table — live-proven,
+#: 1 GiB arm bit-identical) is CLOSED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+#: (MIGRATION.md #1671 — the engine now divides the derived budget across
+#: workers itself); this 1 GiB export REMAINS a deliberate PER-WORKER pin,
+#: passed undivided per the #1352 env-override contract.
 #: Verified against main's real env name (`sweep_mem_budget.MEM_BUDGET_ENV`) and
 #: its fail-loud positive-int parser (`resolve_mem_budget_bytes` accepts this
 #: literal).
@@ -483,11 +487,28 @@ def _wheels_check(
     )
 
 
+def _default_disk_usage(path: str) -> Any:
+    """The PRODUCTION disk probe — resolves ``shutil.disk_usage`` at CALL time.
+
+    DEC-LAUNCH-DISK-GATE-HERMETIC-001: ``run_preconditions`` previously bound
+    ``shutil.disk_usage`` as a DEF-TIME default argument, so tests could not
+    monkeypatch the probe and the ``/launch`` route suite read the REAL
+    runner disk — a CI runner with < 20 GiB free failed 7 POST tests with
+    412s (the disk gate itself was correct; the TESTS were not hermetic).
+    The default is now the ``spawner=None`` module-seam pattern:
+    ``disk_usage=None`` resolves THIS wrapper at call time, so tests pin
+    ``launch_button._default_disk_usage`` deterministically while production
+    behavior is identical — one ``shutil.disk_usage`` call per check, the
+    same floor, the same OSError arm.
+    """
+    return shutil.disk_usage(path)
+
+
 def run_preconditions(
     lake_root: Path | None,
     *,
     min_free_bytes: int = DEFAULT_MIN_DISK_FREE_BYTES,
-    disk_usage: Callable[[str], Any] = shutil.disk_usage,
+    disk_usage: Callable[[str], Any] | None = None,
 ) -> list[PreconditionCheck]:
     """Run the cheap launch preconditions (bounded — a few stats, zero scans).
 
@@ -495,7 +516,10 @@ def run_preconditions(
     free ≥ *min_free_bytes* · Rust wheels importable · sweeps root writable ·
     no launch already active. Deep lake-completeness checks are deliberately
     NOT duplicated here — the launched CLI itself refuses loudly on missing
-    slices (DEC-SWEEP-PREFLIGHT-001).
+    slices (DEC-SWEEP-PREFLIGHT-001). *disk_usage* ``None`` resolves the
+    module seam :func:`_default_disk_usage` (→ ``shutil.disk_usage``) at
+    call time (DEC-LAUNCH-DISK-GATE-HERMETIC-001 — test-injectable, never a
+    def-time binding).
     """
     checks: list[PreconditionCheck] = []
     if lake_root is None:
@@ -532,8 +556,9 @@ def run_preconditions(
         )
     )
 
+    disk_probe = disk_usage if disk_usage is not None else _default_disk_usage
     try:
-        free = int(disk_usage(str(lake_root)).free)
+        free = int(disk_probe(str(lake_root)).free)
         ok = free >= min_free_bytes
         detail = f"{free / 1024**3:.1f} GiB free (floor {min_free_bytes / 1024**3:.1f} GiB)"
     except OSError as exc:
@@ -1249,6 +1274,19 @@ def register_launch_routes(
     from fastapi import HTTPException, Query
     from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import HTMLResponse, JSONResponse
+
+    # Hoist ``JSONResponse`` into module globals (the app.py `_make_ws_handler`
+    # hoist idiom — DEC-OPENAPI-ANNOTATIONS-RESOLVE-001): the two API closures'
+    # stringified ``-> JSONResponse`` return annotations
+    # (``from __future__ import annotations``) resolve against THIS module's
+    # ``endpoint.__globals__``, where the function-local import above is
+    # invisible — without the hoist ``app.openapi()`` raises
+    # ``PydanticUserError`` even after app.py's own hoist, 500ing
+    # ``/openapi.json`` for the whole dashboard. ``HTMLResponse`` is only a
+    # runtime value (``response_class=``), never an annotation, so it is
+    # deliberately NOT hoisted. The lazy-import contract stands: this module
+    # still imports without fastapi installed.
+    globals()["JSONResponse"] = JSONResponse
 
     async def launch_page() -> str:
         """GET /launch — the INTERIM Run-Sweep launch page."""

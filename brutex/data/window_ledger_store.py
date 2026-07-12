@@ -51,14 +51,30 @@ appends only the dirtied rows to ``window_ledger/deltas/``
 deltas`` newer-file-wins and the pull-end :func:`save_window_ledger` subsumes +
 deletes the deltas. Scheduled compaction of crash-orphaned deltas (and an
 SQL-side delta fold for the /coverage DuckDB fast paths) are NAMED follow-ups.
+
+**Load-cost honesty (DEC-LEDGER-LOAD-SPACE-V1-001, measured 2026-07-09):** the
+full load materialises EVERY recorded row — measured pre-fix at **794 B/row
+logical / 1,305 B/row RSS** (~13.6 µs/row) on an 87,573-row real-writer
+fixture, ~60-100× the ~13 B/row on disk, because ``to_pylist()`` decodes a
+DISTINCT ``str`` per cell. The per-load intern memo
+(:data:`_INTERNED_COLUMNS`) cuts the low-cardinality string share (~40% of the
+logical per-row cost) and :func:`shared_pull_ledger_scope` collapses the full
+pipeline's TWO whole-ledger materialisations to ONE. Both reduce the
+PER-ROW/PER-RUN constant only — the base itself still grows without bound
+(~4.4M rows/yr at the documented accumulation rate; the only in-memory delete
+is the plan-scoped ``prune_superseded``). Bounding the growth CLASS (an
+expiry-keyed ARCHIVAL policy for terminal F&O rows) is the NAMED follow-up
+F1-FU1 — designed, deliberately NOT claimed here.
 """
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -83,6 +99,7 @@ from brutex.data.window_ledger import (
     WindowLedger,
     WindowLedgerRecord,
 )
+from brutex.observability.progress_beat import emit_progress_beat
 
 #: Structured logger — surfaces a corrupt/absent ledger into ``/logs``.
 _LOG = structlog.get_logger("brutex.data.window_ledger_store")
@@ -350,8 +367,49 @@ _LEDGER_READ_ERRORS: tuple[type[BaseException], ...] = (
     ImportError,
 )
 
+#: The LOW-cardinality string columns the per-load intern memo deduplicates
+#: (DEC-LEDGER-LOAD-SPACE-V1-001): ``pyarrow``'s ``to_pylist()`` yields a
+#: DISTINCT ``str`` object per CELL — even the constant ``"1minute"`` shares
+#: nothing across rows (measured 794 B/row logical / 1,305 B/row RSS on an
+#: 87,573-row real-writer fixture; the on-disk row is ~13 B). These seven
+#: columns are the ones whose value sets are small relative to the row count
+#: (market ~3 · interval 1 · status ~5 · window dates ~hundreds · security_id
+#: ~2-3 windows per contract · last_error a small error-string set), so
+#: deduplicating equal cells onto ONE shared object cuts ~40% of the per-row
+#: decode cost. ``first_seen_at`` / ``last_attempt_at`` are DELIBERATELY
+#: excluded — µs-ISO timestamps are essentially unique, so a memo would just
+#: double-hold them (skip decided per COLUMN, never a per-value heuristic).
+_INTERNED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "market",
+        "security_id",
+        "interval",
+        "window_start",
+        "window_end",
+        "status",
+        "last_error",
+    }
+)
 
-def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
+
+def _intern_cells(cells: list[Any], memo: dict[str, str]) -> list[Any]:
+    """Dedup equal ``str`` cells onto one shared object — values byte-identical.
+
+    DEC-LEDGER-LOAD-SPACE-V1-001. Only object IDENTITY changes (``==``-equal
+    strings collapse onto the memo's first instance); a non-``str`` cell (the
+    ``None`` of a nullable column) passes through untouched. The *memo* is
+    per-:func:`load_window_ledger`-call (shared across the base + every delta
+    file) — deliberately NOT :func:`sys.intern`, whose process-lifetime table
+    would accumulate high-cardinality ``security_id`` strings across many
+    lakes/tests forever; the per-call dict has exactly the load's lifetime.
+    O(cells) with one O(1) dict op per string cell.
+    """
+    return [memo.setdefault(v, v) if type(v) is str else v for v in cells]
+
+
+def _read_ledger_file_rows(
+    path: Path, *, memo: dict[str, str] | None = None
+) -> list[tuple[Any, ...]]:
     """Read ONE ledger-shaped Parquet into the coerced 16-field row tuples.
 
     The single per-file read (CLAUDE.md §11 COMMON) shared by the BASE load and
@@ -365,12 +423,26 @@ def _read_ledger_file_rows(path: Path) -> list[tuple[Any, ...]]:
     of :data:`_LEDGER_READ_ERRORS` on a malformed / unreadable file — the CALLER
     decides the degrade (base → empty + ``load_failed``; delta → skip that one
     file).
+
+    *memo* is the per-load string-intern table (DEC-LEDGER-LOAD-SPACE-V1-001):
+    :func:`load_window_ledger` threads ONE dict across the base + every delta so
+    equal low-cardinality cells (:data:`_INTERNED_COLUMNS`) share one object
+    across ALL folded files; ``None`` (a direct call) interns within this one
+    file only. Values are byte-identical either way — only identity changes.
     """
     import pyarrow.parquet as pq
 
     table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
     present = set(table.schema.names)
-    columns = {name: table.column(name).to_pylist() for name in _CORE_COLUMNS}
+    intern_memo: dict[str, str] = {} if memo is None else memo
+    columns = {
+        name: (
+            _intern_cells(table.column(name).to_pylist(), intern_memo)
+            if name in _INTERNED_COLUMNS
+            else table.column(name).to_pylist()
+        )
+        for name in _CORE_COLUMNS
+    }
     n = len(columns[_CORE_COLUMNS[0]])
 
     def _optional(name: str) -> list[Any]:
@@ -418,14 +490,24 @@ def load_window_ledger(
     SKIPPED (the never-raises degrade contract) — only a failed BASE read sets
     ``load_failed=True``. A base-less lake with deltas (a first pull's mid-flight
     checkpoint) reconstructs from the deltas alone.
+
+    **Interned decode (DEC-LEDGER-LOAD-SPACE-V1-001):** ONE per-call string
+    memo is threaded through every per-file read (base + deltas), so equal
+    low-cardinality cells (:data:`_INTERNED_COLUMNS`) share one object across
+    the whole load instead of ``to_pylist()``'s one-distinct-``str``-per-cell
+    (~40% of the measured 794 B/row logical decode cost). Values byte-identical
+    — only object identity changes; the memo dies with this call.
     """
     path = ledger_path(lake_root)
     delta_files = list_ledger_deltas(lake_root)
     load_failed = False
+    # The per-LOAD intern memo — shared across the base + every delta file so a
+    # delta's re-write of a base row re-uses the base's string objects too.
+    memo: dict[str, str] = {}
     base_rows: list[tuple[Any, ...]] = []
     if path.is_file():
         try:
-            base_rows = _read_ledger_file_rows(path)
+            base_rows = _read_ledger_file_rows(path, memo=memo)
         except _LEDGER_READ_ERRORS as exc:
             _LOG.warning("window_ledger.load_failed", path=str(path), error=str(exc))
             # LOUD degrade (DEC-WINDOW-LEDGER-RESCUE-001): the file EXISTED but could
@@ -442,7 +524,7 @@ def load_window_ledger(
     }
     for delta in delta_files:
         try:
-            delta_rows = _read_ledger_file_rows(delta)
+            delta_rows = _read_ledger_file_rows(delta, memo=memo)
         except _LEDGER_READ_ERRORS as exc:
             _LOG.warning("window_ledger.delta_load_failed", path=str(delta), error=str(exc))
             continue
@@ -688,6 +770,16 @@ def append_ledger_delta(ledger: WindowLedger, lake_root: Path) -> int:
     rows = ledger.dirty_rows()
     if not rows:
         return 0
+    # MID-PULL COMPACTION FOLLOW-UP (deferred by the coordinator with
+    # DEC-WINDOWS-MIDPULL-FLOOR-001, distinct from the crash-orphan compactor
+    # named above): deltas accrue HERE ~1 file per LIVE_FLUSH_MIN_INTERVAL_S
+    # (2 s) and are pruned only by the next FULL save's subsumption, so a
+    # multi-hour pull reaches thousands of pending files and every fresh-stamp
+    # reader fold pays one Parquet footer open per file (db_view's
+    # `_ledger_scan_source` envelope). The read side is floor-throttled + page-
+    # cached (MIGRATION.md #1637); bounding the FILE COUNT itself (periodic
+    # mid-pull delta consolidation under this same lock) stays the named
+    # follow-up.
     directory = deltas_dir(lake_root)
     directory.mkdir(parents=True, exist_ok=True)
     try:
@@ -783,6 +875,17 @@ def save_window_ledger(
 
     import pyarrow.parquet as pq
 
+    # Liveness beats around the whole synchronous save body
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001): the drain-time full save is a single
+    # multi-second synchronous read-merge-write (a forensically-measured
+    # 12.96 s ``window_ledger.save_slow`` over 68,234 rows) running on the
+    # beat-watched pull worker AFTER the last fetched-window heartbeat — the
+    # entry beat marks the save alive and the completion beat (both arms of
+    # the try/except below) refreshes liveness before the next silent stage.
+    # HONEST envelope: no mid-save heartbeat thread — a save LONGER than the
+    # ~600 s stall timeout would still gap (the ``save_slow`` WARN makes it
+    # visible); ``emit_progress_beat`` is a cheap no-op with no watchdog.
+    emit_progress_beat()
     tick = clock if clock is not None else time.monotonic
     started = tick()
     directory = ledger_dir(lake_root)
@@ -883,6 +986,11 @@ def save_window_ledger(
             path=str(path),
             error=str(exc),
         )
+    # Completion beat (both the completed-save AND lock-timeout-skip arms; a
+    # RAISING save skips it — the pull is halting anyway): a multi-second save
+    # can no longer leave the watchdog's last heartbeat stranded at its entry
+    # (DEC-HEAL-SCAN-LIVENESS-BEATS-001).
+    emit_progress_beat()
 
 
 def _migrate_legacy_sidecars(lake_root: Path, *, threshold: int) -> WindowLedger:
@@ -1791,6 +1899,69 @@ def run_skipped_audit_guarded(
         return 0
 
 
+#: The ACTIVE shared-pull-ledger scope (DEC-LEDGER-LOAD-SPACE-V1-001): ``None``
+#: outside any scope (every :func:`begin_pull_ledger` loads fresh — the
+#: pre-existing behaviour, byte-identical); inside a
+#: :func:`shared_pull_ledger_scope` it holds one ``{str(lake_root) →
+#: WindowLedger}`` reuse map. A :class:`~contextvars.ContextVar` (the
+#: ``pull_id_scope`` correlation precedent, NOT module-global mutable state):
+#: the scope is confined to the opening thread/context, so an unrelated thread's
+#: ``begin_pull_ledger`` can never observe another pipeline's live instance.
+_SHARED_PULL_LEDGER: contextvars.ContextVar[dict[str, WindowLedger] | None] = (
+    contextvars.ContextVar("brutex_shared_pull_ledger", default=None)
+)
+
+
+@contextmanager
+def shared_pull_ledger_scope() -> Generator[None, None, None]:
+    """Reuse ONE loaded ledger per lake across this scope's :func:`begin_pull_ledger` calls.
+
+    DEC-LEDGER-LOAD-SPACE-V1-001. A full-pipeline run performs TWO whole-ledger
+    materialisations of the SAME lake — ``pull_all_spot`` and the historical
+    phase's ``_run_phase`` each ``begin_pull_ledger`` (measured 1,305 B/row RSS
+    + ~13.6 µs/row per load; ~16 s + a second full-resident copy across the
+    phase boundary at the documented ~1.2M-row scale). Inside this scope the
+    FIRST ``begin_pull_ledger`` per lake loads; every later one returns the SAME
+    instance, so one pipeline run pays ONE load and never holds two distinct
+    materialisations.
+
+    Safety (why reuse is sound where the pipeline uses it):
+
+    * the pipeline phases run **sequentially on one thread** under the
+      account-wide pull single-flight lock — SAME-HOST concurrency is excluded
+      by the flock/single-flight (``reopen_skipped`` refuses under the same
+      lock), so on this host the re-load this scope skips could only ever have
+      observed what this same process just saved (the save is a
+      read-MERGE-write whose merge partner is our own prior save — the fold is
+      idempotent). CROSS-HOST the lease is DETECTION, not mutual exclusion
+      (DEC-ACCOUNT-LEASE-CROSSHOST-001): a cross-host peer's rows are folded
+      at the save's read-MERGE-write — the in-memory instance may not see them
+      until then, the same visibility as any mid-window write, and negligible
+      in practice (foreign keys never enter group-scoped ``progress_counts``);
+    * each phase's END-OF-PHASE SAVE is UNCHANGED (durability byte-identical —
+      the mid-pull delta flush + per-phase :func:`end_pull_ledger` cadence all
+      still run); ONLY the redundant re-load is skipped;
+    * :class:`~brutex.data.window_ledger.WindowLedger` is internally locked, so
+      even a caller that DID share across threads mutates safely;
+    * a **dry-run** ``begin_pull_ledger`` still returns ``None`` and never
+      enters the map; lakes are keyed by ``str(lake_root)`` — two spellings of
+      one lake simply load twice (today's behaviour, never worse).
+
+    Disclosed edge (Golden Rule #10): a corrupt base at pipeline start now
+    carries ``load_failed=True`` into the LATER phases too (pre-scope, the
+    second load read the first phase's rescue save and reported a clean
+    reload) — the honest carry: the history genuinely was lost at pull start,
+    and the re-verify note already fired from the first phase's flag.
+
+    The scope always resets on exit (exception included). O(1) per call.
+    """
+    token = _SHARED_PULL_LEDGER.set({})
+    try:
+        yield
+    finally:
+        _SHARED_PULL_LEDGER.reset(token)
+
+
 def begin_pull_ledger(
     lake_root: Path, *, dry_run: bool, now: datetime | None = None
 ) -> WindowLedger | None:
@@ -1799,11 +1970,23 @@ def begin_pull_ledger(
     A **live** pull loads (or one-shot migrates) the persisted ledger so the table
     reflects the full cross-run history; a **dry-run** returns ``None`` (no
     recording, no disk touch) — its synthetic fetch would otherwise pollute the
-    real ledger.
+    real ledger. Under an active :func:`shared_pull_ledger_scope`
+    (DEC-LEDGER-LOAD-SPACE-V1-001) the first live call per lake loads and every
+    later one returns the SAME instance — one materialisation per pipeline run;
+    outside any scope (every other caller) the behaviour is byte-identical to
+    before.
     """
     if dry_run:
         return None
-    return load_or_migrate_window_ledger(lake_root, now=now)
+    shared = _SHARED_PULL_LEDGER.get()
+    if shared is None:
+        return load_or_migrate_window_ledger(lake_root, now=now)
+    key = str(lake_root)
+    ledger = shared.get(key)
+    if ledger is None:
+        ledger = load_or_migrate_window_ledger(lake_root, now=now)
+        shared[key] = ledger
+    return ledger
 
 
 def end_pull_ledger(ledger: WindowLedger | None, lake_root: Path, *, dry_run: bool) -> None:
@@ -1844,5 +2027,6 @@ __all__ = [
     "save_skipped_audit_cursor",
     "save_window_ledger",
     "seed_enclosed_windows",
+    "shared_pull_ledger_scope",
     "skipped_audit_cursor_path",
 ]

@@ -30,9 +30,17 @@ stale illusion).
 
 ## Opt-in PULL-TIME adaptive floor (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001)
 
-A generation MISMATCH normally forces an immediate recompute — correct for the
-movers candidate sets (a pull must never serve pre-pull movers rows), but
-punishing for the **discovery-walk memos** that ride this same class (the
+A generation MISMATCH normally forces an immediate recompute. The original
+design (DEC-DB-DISCOVERY-ADAPTIVE-FLOOR-001) deliberately kept the movers
+candidate-set instance on that strict rule ("a pull must never serve pre-pull
+movers rows") and floored only the discovery-walk memos; that carve-out is
+SUPERSEDED by DEC-LATENCY-HONESTY-BATCH-001 — the production ``/movers``
+candidate cache now ALSO opts in, so during an active pull a poll may serve a
+snapshot up to the floor window stale (bounded, logged, pull-scoped — never
+pre-pull data beyond the floor window; see the sanctioned-change comment at
+its ``app.py`` construction site). The strict always-recompute rule remains
+the DEFAULT for any instance that does not opt in. The floor exists because a
+mismatch is punishing for the **discovery-walk memos** that ride this same class (the
 ``/db`` datasets triple-walk, the spot + F&O cascades, the latest-movers-date
 resolve): during a pull the write generation bumps on EVERY window tick, so a
 poll re-paid the full ``O(datasets)`` ``bars/`` walk back-to-back — the exact
@@ -50,6 +58,24 @@ stale. A CLI pull in a SEPARATE process has no in-process job signal, so the
 probe reads ``False`` there and the floor simply never applies (stated, not
 hidden — Golden Rule #10).
 
+## Serve-last-known on a revision-probe OUTAGE (DEC-CACHE-SERVE-LAST-KNOWN-001)
+
+Callers that key freshness on a lake CONTENT token (``lake_revision`` /
+artifact stat tokens) receive ``None`` from the probe when the volume is
+wedged — and the pre-change doctrine ("compute fresh, cache NOTHING") made
+every poll re-pay the full build exactly while the volume was least able to
+serve it (the probe-outage compute storm). :meth:`MoversSnapshotCache.
+serve_last_known` + the ``mru_prefix=`` bookkeeping on
+:meth:`~MoversSnapshotCache.get_or_compute` port the
+:class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache` posture here:
+during an outage the most-recent entry for the caller's stable key PREFIX is
+served — LABELLED by the caller, WARNed once per outage (latched), recovered
+with one INFO — and a prefix with no last-known entry computes once and
+seeds the slot (:data:`OUTAGE_GENERATION`), so a persistent outage pays the
+build once, not per poll. Absent-artifact ``None``\\ s (a merely missing
+file) are the CALLER's branch — they stay cheap fresh computes, never a
+stale serve of a deleted artifact.
+
 ## Honest envelope (Golden Rule #10 — stated, not hidden)
 
 * A cached **hit** (the dominant interaction after the first view of a
@@ -60,9 +86,17 @@ hidden — Golden Rule #10).
   pull) still pays the real ``O(instruments × bars-read)`` lake scan — this is
   NOT claimed away. The cache bounds how OFTEN that cost is paid (once per
   coordinate per generation), it does not make the scan itself O(1).
-* Memory is **bounded**: an LRU keeps at most ``capacity`` snapshots resident
-  (``O(capacity)`` space), so a long session that views thousands of coordinates
-  never grows without bound — the least-recently-used snapshot is evicted.
+* Memory is bounded in **ENTRY COUNT** (``capacity``), NOT in bytes
+  (DEC-LATENCY-HONESTY-BATCH-001 corrects the prior unqualified "memory is
+  bounded" wording): an LRU keeps at most ``capacity`` snapshots resident —
+  ``O(capacity)`` ENTRIES, so a long session that views thousands of
+  coordinates never grows without bound in count (the least-recently-used
+  snapshot is evicted) — but each entry retains its WHOLE payload, so total
+  resident bytes are ``capacity × payload-size``: large payloads (e.g. sweep
+  scans keyed per revision) can retain gigabytes at the default capacity
+  (≈256 × 4 MiB ≈ 1 GiB — the latency audit's probe figure, arithmetically
+  derived, not re-measured on this branch). A byte-watermark / size-aware
+  eviction is a NAMED follow-up, not claimed.
 * An opted-in instance may serve a **bounded-stale** entry while a pull runs
   (age < the adaptive floor, capped at ``adaptive_floor_cap_s``); the staleness
   window closes the moment the pull ends (probe ``False`` → recompute) and the
@@ -92,6 +126,7 @@ __all__ = [
     "DEFAULT_ADAPTIVE_BASE_FLOOR_S",
     "DEFAULT_MOVERS_CACHE_CAPACITY",
     "MAX_ADAPTIVE_FLOOR_CAP_S",
+    "OUTAGE_GENERATION",
     "MoversSnapshotCache",
     "candidate_key",
     "revision_generation",
@@ -124,6 +159,21 @@ DEFAULT_ADAPTIVE_BASE_FLOOR_S: Final[float] = 2.0
 #: pull-duty cap (``summary_cache.MAX_PULL_DUTY_FLOOR_S``) for one consistent
 #: pull-time staleness bound.
 MAX_ADAPTIVE_FLOOR_CAP_S: Final[float] = 600.0
+
+#: Sentinel generation stamped on an entry seeded by :meth:`MoversSnapshotCache.
+#: serve_last_known`'s fresh-compute arm (a revision-probe OUTAGE with no
+#: last-known entry to serve — DEC-CACHE-SERVE-LAST-KNOWN-001). Strictly
+#: negative: :func:`revision_generation` yields non-negative 64-bit ints and
+#: every production caller passes ``generation >= 0``, so a recovered probe's
+#: first REAL generation can never MATCH it as clean. HONEST QUALIFIER
+#: (review fold): on a NO-floor cache (the oneclick instance) that makes the
+#: first post-outage read recompute fresh ABSOLUTELY; on an
+#: ``adaptive_floor`` cache the first post-recovery poll while a pull is
+#: genuinely running may still FLOOR-SERVE the seed within its bounded,
+#: LOGGED window (``movers_cache.stale_served`` with ``entry_generation=-1``
+#: — the same envelope every floored serve accepts), after which the
+#: generation mismatch recomputes; the seed is never served as CLEAN.
+OUTAGE_GENERATION: Final[int] = -1
 
 #: The candidate-key field separator. ``|`` cannot appear in any of the keyed
 #: coordinates (an interval label, an ISO date, an ``HH:MM`` time, a lower-cased
@@ -334,6 +384,21 @@ class MoversSnapshotCache:
         #: wait on the event instead of each paying the lake scan; the owner
         #: ident lets a re-entrant miss recompute instead of self-deadlock.
         self._inflight: dict[str, tuple[threading.Event, int]] = {}
+        #: Per-PREFIX most-recently-stored full-key pointer
+        #: (DEC-CACHE-SERVE-LAST-KNOWN-001): ``prefix → key``, recorded by
+        #: :meth:`get_or_compute` when the caller threads ``mru_prefix=`` and
+        #: read by :meth:`serve_last_known` during a revision-probe outage.
+        #: Bounded like ``_entries`` (LRU, ``capacity``) so revision-folded
+        #: key families can never grow it without bound.
+        self._mru_by_prefix: OrderedDict[str, str] = OrderedDict()
+        #: Prefixes currently in a revision-probe OUTAGE (an ordered SET —
+        #: values unused). Drives the once-per-outage WARN latch (the
+        #: ``rate_bridge_cache`` ``_degraded`` pattern): the FIRST
+        #: :meth:`serve_last_known` per prefix WARNs, repeats stay silent,
+        #: and the next successful :meth:`get_or_compute` for that prefix
+        #: clears it (one INFO) so the NEXT outage WARNs again. Bounded by
+        #: ``capacity`` (same eviction discipline).
+        self._outage_latched: OrderedDict[str, None] = OrderedDict()
 
     def _pull_active(self) -> bool:
         """``True`` iff the wired probe reports a pull genuinely running — O(1).
@@ -350,6 +415,52 @@ class MoversSnapshotCache:
         except Exception:  # pylint: disable=broad-except — probe must never break a read
             return False
 
+    def _note_result_locked(self, key: str, mru_prefix: str | None) -> bool:
+        """Record *key* as *mru_prefix*'s last-known pointer + clear its outage latch.
+
+        Called with ``self._lock`` HELD on every successful
+        :meth:`get_or_compute` resolution (clean hit, floor stale-serve,
+        fresh store) — O(1) dict ops. Returns ``True`` iff the prefix WAS
+        outage-latched (a genuine recovery flip — the caller logs the one
+        ``movers_cache.revision_probe_recovered`` INFO outside the lock).
+        """
+        if mru_prefix is not None:
+            self._mru_by_prefix[mru_prefix] = key
+            self._mru_by_prefix.move_to_end(mru_prefix)
+            while len(self._mru_by_prefix) > self._capacity:
+                self._mru_by_prefix.popitem(last=False)
+        latch_key = mru_prefix if mru_prefix is not None else key
+        if latch_key not in self._outage_latched:
+            return False  # the common (no-outage) path — one O(1) membership check.
+        del self._outage_latched[latch_key]
+        return True
+
+    def _latch_outage_locked(self, prefix: str) -> bool:
+        """Latch *prefix* as in-outage; ``True`` iff this is the FIRST flip.
+
+        Called with ``self._lock`` HELD by :meth:`serve_last_known`. The
+        latch is a bounded ordered set (``capacity``) — a pathological
+        prefix flood evicts the oldest latched prefix (its next serve
+        re-WARNs: louder, never silent — Golden Rule #1).
+
+        Known edge (review fold, documented not mechanised): recovery is
+        observed only by the next successful :meth:`get_or_compute` for the
+        prefix — an artifact DELETED during the outage window routes its
+        post-recovery polls down the ABSENT fresh-uncached arm (which never
+        calls :meth:`get_or_compute`), so this cache-level latch stays armed
+        for that prefix until the artifact returns (the recovery INFO fires
+        then; ``oneclick_artifacts``' module-level probe latch recovers
+        immediately regardless). Bias: at worst one extra WARN later, never
+        a missed one.
+        """
+        if prefix in self._outage_latched:
+            self._outage_latched.move_to_end(prefix)
+            return False
+        self._outage_latched[prefix] = None
+        while len(self._outage_latched) > self._capacity:
+            self._outage_latched.popitem(last=False)
+        return True
+
     @property
     def capacity(self) -> int:
         """The maximum number of resident entries — O(1)."""
@@ -361,7 +472,13 @@ class MoversSnapshotCache:
             return len(self._entries)
 
     def get_or_compute(
-        self, key: str, *, generation: int, compute: Callable[[], _T], force_fresh: bool = False
+        self,
+        key: str,
+        *,
+        generation: int,
+        compute: Callable[[], _T],
+        force_fresh: bool = False,
+        mru_prefix: str | None = None,
     ) -> _T:
         """Return *key*'s cached candidate set for *generation*, computing on a miss.
 
@@ -399,6 +516,17 @@ class MoversSnapshotCache:
             fast path): the post-pipeline discovery warm passes it so the
             end-of-pull re-seed always lands fresh even though the pull job is
             still ``running`` while it executes. Default ``False``.
+        mru_prefix
+            Optional stable prefix (DEC-CACHE-SERVE-LAST-KNOWN-001): every
+            successful resolution (hit / floor-serve / store) records ``key``
+            as this prefix's last-known pointer, so a later
+            :meth:`serve_last_known` under a revision-probe OUTAGE can serve
+            the most-recent entry for the prefix even though the outage
+            yields no key to look up. Also clears the prefix's outage latch
+            (one ``movers_cache.revision_probe_recovered`` INFO). Default
+            ``None`` — byte-identical pre-change behaviour (a bare ``key``
+            still clears its OWN latch, covering callers whose key IS the
+            prefix).
 
         Returns
         -------
@@ -410,12 +538,20 @@ class MoversSnapshotCache:
         # a clean hit returns immediately; otherwise, while a pull is active in
         # this process, a still-fresh-enough stale entry is served instead of
         # recomputing (or waiting on an in-flight scan). The `_pull_active`
-        # probe runs OUTSIDE the lock (it takes the pull job's own lock).
+        # probe runs OUTSIDE the lock (it takes the pull job's own lock); the
+        # once-per-outage recovery INFO logs outside it too.
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and entry.generation == generation:
+            hit = entry is not None and entry.generation == generation
+            if hit:
                 self._entries.move_to_end(key)  # mark most-recently-used.
-                return entry.value  # type: ignore[return-value]
+                recovered = self._note_result_locked(key, mru_prefix)
+            else:
+                recovered = False
+        if hit and entry is not None:
+            if recovered:
+                self._log_probe_recovered(key, mru_prefix)
+            return entry.value  # type: ignore[return-value]
         if entry is not None and self._adaptive_floor and not force_fresh and self._pull_active():
             age = self._clock() - entry.computed_at
             # Delegates to the ONE extracted #920 formula (byte-equal arithmetic
@@ -438,33 +574,52 @@ class MoversSnapshotCache:
                 with self._lock:
                     if key in self._entries:
                         self._entries.move_to_end(key)  # keep the served key MRU.
+                    recovered = self._note_result_locked(key, mru_prefix)
+                if recovered:
+                    self._log_probe_recovered(key, mru_prefix)
                 return entry.value  # type: ignore[return-value]
         # Single-flight (DEC-SCAN-SINGLE-FLIGHT-001): exactly one thread pays a
         # cold miss for a key; the rest wait on a per-key event, then re-plan.
         while True:
             with self._lock:
                 entry = self._entries.get(key)
-                if entry is not None and entry.generation == generation:
+                hit = entry is not None and entry.generation == generation
+                if hit:
                     self._entries.move_to_end(key)  # mark most-recently-used.
-                    return entry.value  # type: ignore[return-value]
-                inflight = self._inflight.get(key)
-                if inflight is None:
-                    event = threading.Event()
-                    self._inflight[key] = (event, my_ident)
-                    break  # this thread computes.
-                wait_event, owner = inflight
-                if owner == my_ident:
-                    # Re-entrant miss (the in-flight compute re-entered the same
-                    # key on this thread): waiting would self-deadlock — compute
-                    # WITHOUT re-registering; the completion pop below releases
-                    # the OUTER registration only after a value is stored.
-                    event = wait_event
-                    break
+                    recovered = self._note_result_locked(key, mru_prefix)
+                else:
+                    recovered = False
+                    inflight = self._inflight.get(key)
+                    if inflight is None:
+                        event = threading.Event()
+                        self._inflight[key] = (event, my_ident)
+                        break  # this thread computes.
+                    wait_event, owner = inflight
+                    if owner == my_ident:
+                        # Re-entrant miss (the in-flight compute re-entered the
+                        # same key on this thread): waiting would self-deadlock —
+                        # compute WITHOUT re-registering; the completion pop
+                        # below releases the OUTER registration only after a
+                        # value is stored.
+                        event = wait_event
+                        break
+            if hit and entry is not None:
+                if recovered:
+                    self._log_probe_recovered(key, mru_prefix)
+                return entry.value  # type: ignore[return-value]
             # SINGLE-FLIGHT wait: another thread is paying the scan for this
             # exact key — wait (no lock held), then loop: a stored
             # same-generation entry serves as a hit; a raised / stale-generation
-            # compute makes THIS thread the next computer.
-            wait_event.wait()
+            # compute makes THIS thread the next computer. When this runs on a
+            # dashboard offload worker, the waiting THREAD holds a LAKE-limiter
+            # token (DEC-DASHBOARD-LAKE-IO-LIMITER-001): wedged waiters are
+            # bounded by the 32-token lake pool and can no longer exhaust
+            # AnyIO's default 40-token pool — the waiter SEMANTICS here are
+            # deliberately unchanged. `wait_event` IS bound on every path that
+            # reaches here (not-hit ⇒ the else arm ran; not-break ⇒ a FOREIGN
+            # in-flight owner assigned it) — pyright's flow analysis cannot
+            # correlate `hit` with the assignment, hence the targeted ignore.
+            wait_event.wait()  # pyright: ignore[reportPossiblyUnboundVariable]
         started_at = self._clock()
         try:
             value = compute()
@@ -487,8 +642,121 @@ class MoversSnapshotCache:
             self._entries.move_to_end(key)
             while len(self._entries) > self._capacity:
                 self._entries.popitem(last=False)  # evict the LRU entry.
+            recovered = self._note_result_locked(key, mru_prefix)
             # Store BEFORE waking waiters (same lock block) so a woken waiter
             # always finds the fresh entry — never a duplicate scan.
             self._inflight.pop(key, None)
         event.set()
+        if recovered:
+            self._log_probe_recovered(key, mru_prefix)
         return value
+
+    def serve_last_known(self, prefix: str, *, compute: Callable[[], _T]) -> tuple[_T, bool]:
+        """Serve *prefix*'s most-recent entry during a revision-probe OUTAGE.
+
+        DEC-CACHE-SERVE-LAST-KNOWN-001 — the keystone replacing the probe-``None``
+        "compute fresh, cache NOTHING" doctrine at the poll routes: when the
+        caller's revision probe returned ``None`` because of a genuine probe
+        OUTAGE (a stalled lake volume — NOT a merely-absent artifact, which
+        the caller distinguishes), recomputing per poll re-ran the full
+        O(stores × rows)/O(artifact) build back-to-back exactly when the
+        volume was least able to serve it. This ports the
+        :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache`
+        serve-last-known posture onto this cache:
+
+        * **Last-known serve** — the per-prefix MRU pointer (recorded by
+          :meth:`get_or_compute` ``mru_prefix=``, with a direct
+          ``key == prefix`` fallback for stable-key callers) resolves the
+          most-recent entry for the prefix REGARDLESS of its stamped
+          generation; it is marked MRU and served. Returns ``(value, True)``
+          — the caller MUST label the payload (an additive degrade field,
+          Golden Rule #1: a stale serve is never silent).
+        * **Fresh seed** — no entry exists for the prefix: ``compute`` runs
+          (outside the lock; may raise — nothing stored) and the result is
+          stored at ``key = prefix`` stamped :data:`OUTAGE_GENERATION`, so a
+          PERSISTENT outage pays the build ONCE and later outage polls serve
+          the seed. The sentinel generation can never equal a real caller
+          generation, so the first post-recovery read always recomputes.
+          Returns ``(value, False)``.
+
+        One ``movers_cache.revision_probe_outage`` WARN per prefix per outage
+        (the ``rate_bridge_cache`` ``_degraded`` latch pattern — never
+        per-poll); the next successful :meth:`get_or_compute` for the prefix
+        logs ``movers_cache.revision_probe_recovered`` and re-arms the latch.
+        Concurrent fresh-seed misses of one prefix may each compute (the
+        single-flight machinery is deliberately not engaged here — the seed
+        store bounds the storm to the outage's first poll wave).
+
+        Parameters
+        ----------
+        prefix
+            The stable (revision-free) key prefix identifying the payload
+            family.
+        compute
+            Zero-arg closure building the fresh payload when no last-known
+            entry exists. May raise — the exception propagates, nothing is
+            stored, the latch stays armed (the next poll retries).
+
+        Returns
+        -------
+        tuple
+            ``(value, served_last_known)`` — ``True`` iff a previously-stored
+            entry was served rather than freshly computed.
+        """
+        first_flip = False
+        with self._lock:
+            entry: _Entry | None = None
+            served_key: str | None = None
+            for cand in (self._mru_by_prefix.get(prefix), prefix):
+                if cand is None:
+                    continue
+                found = self._entries.get(cand)
+                if found is not None:
+                    entry, served_key = found, cand
+                    break
+            if entry is not None and served_key is not None:
+                self._entries.move_to_end(served_key)  # keep the served key MRU.
+                first_flip = self._latch_outage_locked(prefix)
+        if entry is not None:
+            if first_flip:
+                _LOG.warning(
+                    "movers_cache.revision_probe_outage",
+                    prefix=prefix,
+                    served="last_known",
+                    stale=True,
+                )
+            return entry.value, True  # type: ignore[return-value]
+        started_at = self._clock()
+        value = compute()  # outside the lock; a raise propagates, nothing stored.
+        finished_at = self._clock()
+        with self._lock:
+            self._entries[prefix] = _Entry(
+                value=value,
+                generation=OUTAGE_GENERATION,
+                computed_at=finished_at,
+                compute_duration=finished_at - started_at,
+            )
+            self._entries.move_to_end(prefix)
+            while len(self._entries) > self._capacity:
+                self._entries.popitem(last=False)  # evict the LRU entry.
+            self._mru_by_prefix[prefix] = prefix
+            self._mru_by_prefix.move_to_end(prefix)
+            while len(self._mru_by_prefix) > self._capacity:
+                self._mru_by_prefix.popitem(last=False)
+            first_flip = self._latch_outage_locked(prefix)
+        if first_flip:
+            _LOG.warning(
+                "movers_cache.revision_probe_outage",
+                prefix=prefix,
+                served="fresh_seeded",
+                stale=False,
+            )
+        return value, False
+
+    @staticmethod
+    def _log_probe_recovered(key: str, mru_prefix: str | None) -> None:
+        """One INFO per outage→recovery flip (the ``rate_bridge`` ``recovered`` twin)."""
+        _LOG.info(
+            "movers_cache.revision_probe_recovered",
+            prefix=mru_prefix if mru_prefix is not None else key,
+        )

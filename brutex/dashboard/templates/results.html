@@ -149,8 +149,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results" aria-current="page">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">loading</span></div>
@@ -545,7 +548,17 @@ async function load() {
 }
 
 [fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
-fTop.onchange = load;
+/* ~200 ms trailing debounce for the Top-N NUMBER input
+   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the movers.html
+   #topn precedent): a spinner run fires a discrete `change` per click —
+   the debounce coalesces the burst into ONE fetch. The selects keep the
+   immediate load (a single discrete user action; nothing to coalesce). */
+const FTOP_DEBOUNCE_MS = 200;
+let fTopDebounceTimer = null;
+fTop.onchange = () => {
+  clearTimeout(fTopDebounceTimer);
+  fTopDebounceTimer = setTimeout(load, FTOP_DEBOUNCE_MS);
+};
 document.getElementById("refreshBtn").onclick = load;
 /* First load waits for DOMContentLoaded so the deferred bx-ui.js helpers are
    available (defer scripts run before DOMContentLoaded); everything above also

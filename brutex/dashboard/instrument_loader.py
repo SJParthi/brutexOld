@@ -960,11 +960,15 @@ def _summarise_stored(store: Any) -> dict[str, int]:
     candidates plus the SQL-derived eligible set — the COMMON ``universe_summary``
     classifier. A REFERENCE_ONLY constituent counts as a "stock" here (every
     persisted NSE EQ is eligible-by-storage), so the operator sees the full
-    ~750-name universe.
+    ~750-name universe. The store's reference-id set is threaded so the summary
+    ALSO carries the additive ``reference_stock_count`` / ``stock_count_total``
+    split (DEC-LABEL-TRUTH-001) — the load message can then read
+    "N stocks · M F&O" instead of an undifferentiated stock count.
     """
     eligible = store.fno_eligible_underlyings()
     candidates = store.list_index_equity_instruments()
-    return universe_summary(candidates, fno_eligible=eligible)
+    reference = store.reference_only_security_ids()
+    return universe_summary(candidates, fno_eligible=eligible, reference_only_ids=reference)
 
 
 def _fold_leg_economics(
@@ -1387,6 +1391,13 @@ def load_instrument_master(
         "index_count": summary["index_count"],
         "stock_count": summary["stock_count"],
         "total": summary["total"],
+        # ADDITIVE label-truth split (DEC-LABEL-TRUTH-001): the Stocks figure
+        # above counts the FULL held universe on the lean store (reference rows
+        # included — eligible-by-storage, see _summarise_stored); these two keys
+        # let the /universe load message honestly label the F&O subset beside it
+        # ("N stocks · M F&O", M = stock_count_total − reference_stock_count).
+        "reference_stock_count": summary["reference_stock_count"],
+        "stock_count_total": summary["stock_count_total"],
         # NTM admission status (DEC-NTM-GROWW-REPOINT-001) — surfaced so the
         # operator SEES whether NIFTY Total Market's constituents were admitted
         # this load (and, if skipped, the honest reason).

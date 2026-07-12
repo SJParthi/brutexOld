@@ -79,10 +79,18 @@ class TestActiveBranchConsistency:
         )
 
     def test_active_branch_is_a_claude_branch(self) -> None:
-        """The shared name follows the repo's `claude/<slug>` convention."""
+        """The shared name follows a sanctioned branch-naming convention.
+
+        Convention (going forward): coordinator-driven integration-train /
+        vehicle branches use ``integration/<slug>``; everything else uses
+        ``claude/<slug>``. The T1 sweep-core train (PR #1357) is the first
+        ``integration/*`` vehicle — its CLAUDE.md honestly names the train
+        branch itself as active, per Golden Rule #10, rather than faking a
+        ``claude/`` name. Any other form is a merge artifact.
+        """
         text = _CLAUDE_MD.read_text(encoding="utf-8")
         s1 = _single_branch(_S1_PATTERN, text, "§1 '**Active branch:**'")
-        assert s1.startswith("claude/"), f"unexpected active-branch form: {s1!r}"
+        assert s1.startswith(("claude/", "integration/")), f"unexpected active-branch form: {s1!r}"
 
 
 def _normalized_region(text: str, start_marker: str, end_marker: str) -> str:
@@ -133,11 +141,22 @@ class TestHeaderRoundNarrationRetired:
     rounds 3-8 — a within-file freshness drift baked into the header's shape.
     The header now carries a stale-proof POINTER to the two authoritative
     per-round records instead; these pins keep the narration from returning.
+
+    2026-07-09 merge-reconcile (DEC-PREOPEN-PREVDAY-COMMON-002 — renamed from -001 — landing on
+    top): a NEWER decision now heads the ``_Last updated:`` region and the
+    DEC-LAKE-STATS-MANIFEST-001 blurb was demoted verbatim to the header
+    chain's first ``Earlier:`` slot — so the pin anchors on THAT blurb's own
+    ``(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #`` marker (renumber-proof,
+    position-independent) instead of assuming it still heads the file. The
+    guarded law is unchanged: the compressed blurb carries the pointer, not
+    the per-round story.
     """
 
     def test_header_points_at_the_authoritative_records(self) -> None:
         text = _CLAUDE_MD.read_text(encoding="utf-8")
-        header = _normalized_region(text, "_Last updated:", "Earlier:")
+        header = _normalized_region(
+            text, "(DEC-LAKE-STATS-MANIFEST-001, MIGRATION.md #", "Earlier:"
+        )
         assert "review round 1 (which" not in header, (
             "the CLAUDE.md _Last updated: header resurrected per-round narration — "
             "it froze at round 2 once (endgame round 2); keep the pointer, not the story"

@@ -1399,6 +1399,18 @@ class TestIsPoolIsolatable:
         assert _is_pool_isolatable(DailyQuotaExceeded("quota spent")) is False
         assert _is_pool_isolatable(QuotaInvariantError("ledger invariant broke")) is False
 
+    def test_market_hours_halt_trips_the_pool(self) -> None:
+        # DEC-GROWW-MARKET-HOURS-GUARD-001: the NSE session opened mid-pull — every
+        # remaining vendor window is equally forbidden until 15:35 IST (shared-account
+        # protection), so a MarketHoursHalt is a pull-wide STOP (the async twin of the
+        # sync spines' `_GLOBAL_STOP_ERRORS` carve-out), NEVER a per-window quarantine.
+        # Both the default-reason and an explicit-reason instance must trip the pool.
+        from brutex.adapters.groww.fetch_pipeline import _is_pool_isolatable
+        from brutex.data.errors import MarketHoursHalt
+
+        assert _is_pool_isolatable(MarketHoursHalt()) is False
+        assert _is_pool_isolatable(MarketHoursHalt("market_hours")) is False
+
     def test_matches_the_spine_global_stop_set(self) -> None:
         # Pin the re-listed global-stop classes against BOTH spines' authoritative tuples so the
         # cycle-avoidance re-list in fetch_pipeline can never drift from EITHER spine. The async

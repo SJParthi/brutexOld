@@ -117,10 +117,11 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
-from brutex.data.errors import StoreWriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, StoreWriteDeadlineExceeded
 from brutex.data.greeks_enrich_pass import GREEKS_NOT_RUN as _GREEKS_NOT_RUN
 from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome as _GreeksEnrichOutcome
 from brutex.data.greeks_enrich_pass import run_greeks_enrich_pass
@@ -1142,12 +1143,19 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
+    ledger: WindowLedger | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
-    Opens its OWN pull-ledger (each phase's windows are namespaced by interval already), runs
+    Opens its OWN pull-ledger (each phase's windows are namespaced by interval already) —
+    UNLESS the caller injects an already-loaded *ledger*
+    (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline-instance seam: the phase's own
+    full-ledger load is skipped, its end-of-phase SAVE runs unchanged; IGNORED under
+    ``dry_run``, which always keeps the ``None`` never-records ledger; a ``None``
+    *ledger* loads exactly as before, and that load then honours an active
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`) — runs
     the one-shot path OR the bounded until-clean loop, and returns the folded
     :class:`_PhaseResult`. The barrier flag :attr:`_PhaseResult.clean` is True iff EVERY
     selected contract landed clean with no quarantine / still-failing / auth death.
@@ -1163,7 +1171,11 @@ def _run_phase(
     likewise announced. *step_monitor* attributes every per-pair settle to its step
     (late writes WARN + count) and is the tests' hard ordering oracle.
     """
-    ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
+    # An injected `ledger=` (DEC-LEDGER-LOAD-SPACE-V1-001) skips the load and reuses
+    # the caller's instance — LIVE pulls only: a dry-run always resolves through
+    # begin_pull_ledger, which returns None (never records, never persists).
+    if ledger is None or dry_run:
+        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
     # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger existed
     # but could not be read — the store already WARNed (window_ledger.load_failed);
     # surface it on THIS phase's result too so the pull report/note announces
@@ -1264,6 +1276,16 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the live-clock
+    # predicate consulted per contract (mid-round) + between until-clean rounds. Armed
+    # ONLY for a REAL live pull — a dry-run threads ``None`` (the ``storm_breaker``
+    # gating pattern), so a synthetic F&O pull never gates. When it flips ``True`` a
+    # contract raises ``MarketHoursHalt`` (a global stop) — caught below, the committed
+    # work kept + the not-yet-started later step buckets announced ``pull.step.halted``.
+    # The env kill switch is parsed ONCE here (fail-loud on junk); the bound predicate
+    # then reads the live clock only, so a junk env set mid-pull can never crash a long
+    # F&O phase with a per-contract ValueError.
+    market_closed = None if dry_run else resolve_market_closed()
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
     # phase and threaded into the FUTURES partial-window observe margin ONLY (an
     # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
@@ -1360,6 +1382,7 @@ def _run_phase(
                 observed_holidays=observed_holidays,
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
+                market_closed=market_closed,
                 audit=audit,
                 # ONE shared &-form preference across every step bucket AND
                 # every until-clean round (DEC-FORM-WINNER-PERSIST-001; the
@@ -1509,6 +1532,7 @@ def _run_phase(
                     _bucket_round_runner(bucket_key, bucket),
                     max_rounds=until_clean_rounds,
                     quota_exhausted=quota_hook,
+                    market_closed=market_closed,
                     stop_when_stuck=True,
                 )
             else:
@@ -1591,6 +1615,35 @@ def _run_phase(
                 step=later_step.label,
                 ordinal=int(later_step),
                 reason="mass_empty_halt",
+            )
+    except MarketHoursHalt as exc:
+        # A contract raised MarketHoursHalt mid-bucket (DEC-GROWW-MARKET-HOURS-GUARD-001):
+        # the F&O pull crossed into the NSE market-hours window and halted to leave the
+        # shared Groww account free for TickVault's live feed. Everything already
+        # committed survives (bars via the sink; window records via the finally's drain
+        # + ledger persist below); every un-settled window stays PLANNED/FAILED →
+        # resumable on the next out-of-hours run. CAUGHT here (like the mass-empty /
+        # auth halts) so it never escapes as a generic error; the CRITICAL Telegram
+        # pull-halt alert fires HERE (best-effort, can never mask the flow). The
+        # not-yet-started later step buckets are announced LOUDLY, per step.
+        emit_pull_halt_alert(exc)
+        halted_key = ordered_buckets[buckets_started - 1][0]
+        _LOG.warning(
+            "historical.pull.market_hours_halt",
+            error=str(exc),
+            step=_STEP_FOR_BUCKET[halted_key].label,
+            note=(
+                "pull crossed into NSE market hours — F&O pull halted before settling; "
+                "committed work kept; un-settled windows resume next out-of-hours run"
+            ),
+        )
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="market_hours",
             )
     finally:
         # CRITICAL ORDER (DEC-FNO-ASYNC-PIPELINE-WIRE-001): drain the async fetch_pipeline
@@ -1794,6 +1847,17 @@ def _heal_lake_after_pull(
     rebuilt contracts' ``(exchange, "FNO", groww_symbol)`` coordinates,
     bounded to the UNION of their resolved minute-window spans (a months
     SUPERSET of every per-contract span — bounded, never the whole lake).
+    This seam ALSO opts into the bounded ``options/`` expired-options-table
+    census+heal (``include_options=True`` —
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001; months-scoped by FILENAME — a CLEAN
+    out-of-scope file is never read, but a FLAGGED in-scope file still costs
+    targeted canonical-sibling reads — and, in auto mode, reassignment
+    writes — in its foreign rows' HOME months, which may lie OUTSIDE the
+    span (anomaly-only cost, the :func:`~brutex.data.lake_heal.heal_after_pull`
+    round-2 honesty wording); the ONE seam owning the options wiring — the
+    spot glue stays ``False``). Honest bound: the existing zero-targets
+    early-out also skips the options census (a pull that rebuilt no
+    contracts pulled no months to bound by; L3 covers).
     Runs BEFORE :func:`_enrich_greeks_from_minute` (and before the pipeline's
     final prebuild phase — DEC-PIPELINE-AUTOPREBUILD-001 — which derives the
     intraday TFs + ``1day``) so every downstream derivation reads clean
@@ -1843,6 +1907,7 @@ def _heal_lake_after_pull(
                     catalog=catalog,
                     audit=audit,
                     on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                    include_options=True,
                 )
             finally:
                 if catalog is not None:
@@ -1945,6 +2010,7 @@ def pull_contract_candles(
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    ledger: WindowLedger | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -2111,6 +2177,15 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         is re-derivable, the next pull re-attempts). ``None`` (every
         non-pipeline caller — the /db selection route, tests) keeps today's
         best-effort behavior byte-identical.
+    ledger
+        Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
+        to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
+        pipeline-instance seam, threaded to ``_run_phase``): skips the phase's
+        own full-ledger load; the end-of-phase SAVE runs unchanged. ``None``
+        (every existing caller) loads exactly as before — that load then
+        honours an active
+        :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`,
+        the production full-pipeline sharing path. IGNORED under ``dry_run``.
     """
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
@@ -2289,6 +2364,9 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
                 form_preference=form_preference,
+                # Shared pipeline ledger seam (DEC-LEDGER-LOAD-SPACE-V1-001):
+                # an injected instance skips _run_phase's own full-ledger load.
+                ledger=ledger,
             )
         finally:
             # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
