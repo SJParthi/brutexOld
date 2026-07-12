@@ -430,7 +430,11 @@ class TestFlockRootAlignment:
 
         monkeypatch.setattr(app_module, "BackgroundPullJob", _Recording)
         build_app(DashboardState(), instrument_store=store)
-        assert len(created) == 2  # the pull job + the backfill job
+        # The pull job + the backfill job + the cross-verify job
+        # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753 — an
+        # intent-preserved pin update: EVERY job keys its flock resolver on
+        # the store-derived WRITE root, which is exactly what this asserts).
+        assert len(created) == 3
         for kwargs in created:
             resolver = kwargs["lake_root_resolver"]
             assert resolver() == tmp_path  # the store's parent — the WRITE root

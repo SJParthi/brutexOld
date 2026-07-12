@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -43,7 +43,7 @@ from tests.fakes.fake_completeness_gate import FakeVerdict, ScriptedClassifier
 from tests.fakes.fake_s3_client import FakeS3Client
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Sequence
     from contextlib import ExitStack
 
 _DAY = date(2026, 7, 10)
@@ -346,7 +346,7 @@ class TestLocks:
         client = _OrderedClient()
 
         @contextmanager
-        def _lock_cm() -> Iterator[None]:
+        def _lock_cm() -> Generator[None]:
             yield
             events.append("locks_released")
 
@@ -764,11 +764,41 @@ class TestJournalSaveCadence:
 
 
 class TestDefaultAlerter:
-    def test_missing_helper_returns_false(self) -> None:
+    def test_missing_helper_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Phase B LANDED the real sweep_alerts helpers (MIGRATION.md #1753),
+        # so the pre-merge absence this adapter tolerates is now SIMULATED by
+        # deleting them — the WARN-and-False degrade must survive a future
+        # rename/removal exactly as it survived the phase-A gap.
+        from brutex.notifications import sweep_alerts
+
+        monkeypatch.delattr(sweep_alerts, "emit_crossverify_summary_alert")
+        monkeypatch.delattr(sweep_alerts, "emit_crossverify_refused_alert")
         alerter = _default_alerter()
         report = _harness_report_stub()
         assert alerter.crossverify_summary(run_id="cv-x", report=report) is False
         assert alerter.crossverify_refused(run_id="cv-x", reason="r") is False
+
+    def test_landed_helpers_publish_end_to_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The phase-B helpers are PRESENT: the adapter's getattr-by-NAME
+        # binding reaches the REAL emit_crossverify_* helpers, which drive a
+        # (faked-at-the-notifier-layer) SweepAlerter — the zero-producer-edit
+        # wake-up the phase-A handoff promised, pinned through the real chain.
+        fired: list[str] = []
+
+        class _FakeAlerter:
+            def crossverify_summary(self, *, run_id: str, report: Any) -> bool:
+                fired.append(f"summary:{run_id}")
+                return True
+
+            def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+                fired.append(f"refused:{run_id}:{reason}")
+                return True
+
+        monkeypatch.setattr("brutex.notifications.sweep_alerts.SweepAlerter", _FakeAlerter)
+        alerter = _default_alerter()
+        assert alerter.crossverify_summary(run_id="cv-x", report=_harness_report_stub()) is True
+        assert alerter.crossverify_refused(run_id="cv-x", reason="r") is True
+        assert fired == ["summary:cv-x", "refused:cv-x:r"]
 
     def test_present_helper_is_called(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex.notifications import sweep_alerts
@@ -1028,7 +1058,7 @@ class TestDefaultSeams:
             _seams_config(tmp_path),
             env=_GUARD_OFF,
             account_key_resolver=lambda: None,
-            lease_factory=lambda lake: contextmanager(lambda: iter([None]))(),
+            lease_factory=lambda lake: nullcontext(),
         )
         with pull_singleflight_lock(tmp_path, holder_note="peer"), RealExitStack() as stack:
             assert seams.acquire_locks(stack) is False
