@@ -377,7 +377,8 @@ def test_distinct_bps_triple_parity_with_anti_swap_teeth() -> None:
     and the bearish retrace-38 at 10_236; day-2 closes 100.20 (20 paisa off
     P — near under 41 or 23 bps, far under 7), 102.16 (20 paisa off
     retrace-38, near only under 41) and 109.70 (30 paisa off PDH — near
-    under 41 bps [threshold 45], far under 23 [25] and 7 [7]).
+    under 41 bps [threshold 44 — the close-based floor 10_970·41 div 10_000], far
+    under 23 [25] and 7 [7]).
     """
     d1, d2 = _TRADING_DAYS[0], _TRADING_DAYS[1]
     bars = [
