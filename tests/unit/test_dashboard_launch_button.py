@@ -431,7 +431,8 @@ class TestLaunchOffloadDispatch:
     def test_sweep_route_dispatches_both_call_sites_through_run_lake(
         self, lake: Path, fake_spawner: dict[str, Any]
     ) -> None:
-        """Order-exact list: converting :1338 but not :1347 (or vice versa) FAILS."""
+        """Order-exact list: converting only ONE of the two _offload call
+        sites (the run_preconditions one or the launch_sweep one) FAILS."""
         calls: list[str] = []
         client = self._register(lake, calls)
         resp = client.post("/api/v1/launch/sweep?card=spot")
