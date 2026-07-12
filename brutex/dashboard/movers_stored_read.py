@@ -80,6 +80,7 @@ the 1st — the daily movers path has its own reader,
 
 from __future__ import annotations
 
+from datetime import date as date_cls
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -87,7 +88,6 @@ from brutex.data.lake_day_glob import read_day_intraday_frame, read_day_month_fr
 from brutex.data.session import is_session_exempt
 
 if TYPE_CHECKING:
-    from datetime import date as date_cls
     from pathlib import Path
 
     import polars as pl
@@ -110,11 +110,19 @@ def _prior_month_label_probe_applies(*, interval: str, day: date_cls, symbol: st
     before **05:30 IST** (minute < 330) maps to the PRIOR **UTC** day — and on
     the **1st of an IST month** the prior UTC day is the prior UTC *month*, so
     :func:`~brutex.data.partition.partition_for_timestamp` files the bucket row
-    under the PRIOR month's ``<yyyy>/<mm>.parquet``. Three exact conjuncts:
+    under the PRIOR month's ``<yyyy>/<mm>.parquet``. Four exact conjuncts:
 
     * ``day.day == 1`` — on any other day the prior UTC day is the SAME month
       file, so the month-bounded read already sees every same-IST-day label
       (the healthy path pays ZERO extra reads — spy-pinned).
+    * ``day > date.min`` — ``0001-01-01`` has no prior day AT ALL, hence no
+      prior-month file: the probe is definitionally inapplicable (REFUTER
+      ROUND 3 defect R3-N1 — it is also the ONE well-formed ISO date where
+      the probe's ``day - timedelta(days=1)`` raises ``OverflowError``, which
+      is neither a ``PolarsError`` nor an ``OSError`` and so escaped the
+      per-symbol read-fault isolation and 500'd the route; the explicit gate
+      is chosen over a blanket ``except OverflowError`` — narrower and
+      self-documenting).
     * ``interval != "1minute"`` — every DERIVED intraday TF can hold a
       sub-05:30 label: the lowest 09:15-anchored rung is ``555 mod m ∈ [0, m)``
       and every derived TF has ``m ≤ 240 < 330``, so a sufficiently early bar
@@ -129,7 +137,12 @@ def _prior_month_label_probe_applies(*, interval: str, day: date_cls, symbol: st
       :func:`~brutex.data.lake_day_glob.read_day_intraday_frame` (prior month
       file included); probing again would double-read the same rows.
     """
-    return day.day == 1 and interval != "1minute" and not is_session_exempt(symbol)
+    return (
+        day.day == 1
+        and day > date_cls.min
+        and interval != "1minute"
+        and not is_session_exempt(symbol)
+    )
 
 
 def read_stored_day_frame(

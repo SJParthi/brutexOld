@@ -803,6 +803,47 @@ class TestMonthEdgeBucketRouting:
         assert frame_2m is not None and frame_2m.height > 0
         assert calls == [date(2024, 6, 30), date(2024, 6, 30)]
 
+    def test_date_min_gates_probe_off_no_overflow(self, tmp_path: Path) -> None:
+        """REFUTER ROUND 3 defect R3-N1: ``date.min`` must never overflow the probe.
+
+        ``0001-01-01`` is the ONE well-formed ISO date where the probe body's
+        ``day - timedelta(days=1)`` raises ``OverflowError`` — neither a
+        ``PolarsError`` nor an ``OSError``, so pre-fix it ESCAPED the
+        per-symbol ``movers_read_skip_errors()`` isolation and 500'd the
+        route (pre-probe code returned ``None`` — the silent fallback).
+        ``date.min`` has no prior day AT ALL, hence no prior-month file: the
+        probe is definitionally inapplicable — the predicate reads False and
+        the read serves an honest ``None`` with NO raise. Fails pre-fix
+        (OverflowError at the read level) with the ``day > date.min`` gate
+        reverted.
+        """
+        from brutex.dashboard.movers_stored_read import _prior_month_label_probe_applies
+
+        # The predicate gates OFF at date.min on an otherwise-qualifying shape
+        # (1st of a month × derived TF × session-filtered symbol)...
+        assert not _prior_month_label_probe_applies(
+            interval="5minute", day=date.min, symbol="NIFTY"
+        )
+        # ...while every OTHER 1st-of-month keeps qualifying (the gate is
+        # exactly one date wide — year 1, month 2 already subtracts fine).
+        assert _prior_month_label_probe_applies(
+            interval="5minute", day=date(1, 2, 1), symbol="NIFTY"
+        )
+        # Read level: a real month-edge lake read at date.min is an honest
+        # None (no bars can exist on a year-1 date), never an OverflowError.
+        _seed_month_edge_lake(tmp_path)
+        assert (
+            read_stored_day_frame(
+                tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="5minute",
+                day=date.min,
+            )
+            is None
+        )
+
 
 # ── read_stored_day_frame edges ───────────────────────────────────────────
 

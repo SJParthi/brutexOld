@@ -594,6 +594,30 @@ class TestMoversApi:
         assert resp.status_code == 400
         assert "malformed time" in resp.json()["detail"]
 
+    def test_date_min_derived_tf_serves_200_not_500(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # REFUTER ROUND 3 defect R3-N1 (r3_attack_overflow.py port): ?date=0001-01-01
+        # is WELL-FORMED per parse_snapshot_date (only malformed dates 400), yet the
+        # round-2 month-edge probe's `day - timedelta(days=1)` raised OverflowError
+        # for date.min — neither a PolarsError nor an OSError, so it escaped the
+        # per-symbol movers_read_skip_errors() isolation and 500'd the route on any
+        # DERIVED TF (pre-probe code served the honest empty 200). The `day >
+        # date.min` probe gate restores the 200: date.min has no prior day at all,
+        # hence no prior-month file to probe. Fails pre-fix (HTTP 500) with the
+        # gate reverted.
+        _seed_spot_lake(tmp_path)
+        client = TestClient(
+            build_app(DashboardState(), instrument_store=store),
+            raise_server_exceptions=False,
+        )
+        resp = client.get("/api/v1/movers", params={"interval": "5minute", "date": "0001-01-01"})
+        assert resp.status_code == 200
+        body = resp.json()
+        # Honest empty ranking — no bars exist on a year-1 date; never a 500.
+        assert body["price_gainers"] == []
+        assert body["price_losers"] == []
+
     def test_unknown_asset_is_pending_not_500(self, store: InstrumentStore) -> None:
         # Spot / Futures / Options are all wired now; an UNKNOWN asset still gets
         # an honest "ships after Spot" pending payload (never a 500). The wired
