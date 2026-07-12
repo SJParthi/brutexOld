@@ -981,9 +981,18 @@ sweep via `cmd_sweep_all` on the daemon key-list precedent, the three
 unattended escape flags structurally absent AND dispatch-hard-refused —
 STRICTER than the daemon, which refuses only `--allow-out-of-scope`), under a
 NEW nightly flock + acquire-and-HELD pull locks (the LAKE pull lock held
-through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical;
+through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical
+[MECHANISM SUPERSEDED by DEC-NIGHTLY-SWEEP-LOCK-POSTURE-001, MIGRATION.md
+#1772: the lake pull lock now transitions EX → SHARED at the SWEEP link —
+the G10 SH read-guard is held for the WHOLE sweep leg, so pull/heal EX
+writers stay excluded for the entire leg while `cmd_sweep_all`'s own G10
+SH composes instead of self-conflicting with the nightly's EX
+(LakeBusyError — the post-#1445 SWEEP-link killer); a lost
+release→reacquire race is a loud REFUSED "pull_in_flight" leg, never a
+silent exclusion gap];
 holder-note honesty on refusals — a pull refused mid-nightly reads
-"(holder: nightly:<id>)"), with the R42 break law (first failing link stops;
+"(holder: nightly:<id>)", preserved through the EX → SH transition), with
+the R42 break law (first failing link stops;
 later links BLOCKED-because-<link>; tripwires — link-transition, DURABLE-audit
 read-back reconcile, pull coherence, snapshot re-read, sweep-count identity —
 ⇒ SUSPECT ⇒ cron-RED exit 2) and the R50 sealed-snapshot backup
