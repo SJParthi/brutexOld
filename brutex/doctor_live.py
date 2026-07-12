@@ -595,9 +595,11 @@ DIAGNOSTICS: Final[dict[str, str]] = {
         "it), then re-run with --rate-probe."
     ),
     "rate.lock_halt": (
-        "FAIL rate: could not take the pull single-flight lock ({detail}) — lake volume "
-        "write halt (disk full / OOM); free space / fix the volume, then re-run. ZERO "
-        "probe calls were issued."
+        "FAIL rate: could not take the pull single-flight lock ({detail}) — a write halt "
+        "(disk full / OOM) creating the lock file, on EITHER the lake root's .locks/ "
+        "volume or the HOME account-lock dir (~/.brutex/locks — a different filesystem "
+        "in the external-SSD envelope); free space / fix whichever volume holds that "
+        "dir, then re-run. ZERO probe calls were issued."
     ),
     # ── stage 14 · ampersand (%26) form probe (opt-in) ─────────────────
     "amp.pass": (
@@ -2377,6 +2379,16 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
             lines=(render_diagnostic("rate.pull_lock_held", detail=str(exc)),),
         )
     except LakeWriteHalt as exc:
+        # HONEST exposure (round-2 refuter NIT): this transcript append — and
+        # the stage loop's own subsequent ``stage.done`` event — writes to the
+        # file sink under ``<lake_root>/_liveproof/``, possibly the SAME
+        # volume whose ENOSPC just raised the halt. If THAT write hits
+        # ENOSPC too, the OSError deliberately rides ``run_live_doctor``'s
+        # kit contract ("kit-side I/O errors → KitInternalError, exit 3 —
+        # evidence loss must be loud"), superseding this crafted FAIL line.
+        # A best-effort swallow here would violate that contract, so the
+        # exposure is documented, not guarded. Same pre-change exposure as
+        # every stage's ``stage.done`` event.
         ctx.transcript.event("rate.lock_halt", detail=str(exc))
         return StageOutcome(
             stage=13,

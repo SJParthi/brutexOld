@@ -125,6 +125,18 @@ _LEGACY_HARD_CAP_RPS: Final[float] = 5.0
 #: contention loops (a woken sleeper can lose its token to a peer) —
 #: fail-OPEN, the same posture as ``_GOVERNOR_LOOP_CAP`` /
 #: ``_SMOOTH_LOOP_CAP`` in ``brutex/adapters/rate_common.py``.
+#:
+#: RATE-SAFETY RELEVANCE (round-2 refuter, MIGRATION.md #1751): each cap trip
+#: force-grants ONE token WITHOUT a matching refill (a "phantom" issue that
+#: momentarily exceeds the configured SOFT per-second rate), and the trip is
+#: production-REACHABLE under sustained contention at demand > rate — so
+#: LOWERING this value MULTIPLIES phantoms (measured ~10x overshoot at cap=2
+#: on a 32-thread hammer) while raising it only delays the fail-open. Change
+#: it consciously: the value is pinned by
+#: ``test_peer_steal_to_cap_force_grant_is_counted`` and every trip is
+#: counted observably (:meth:`AdaptiveTokenBucket.acquire_fail_open_count`).
+#: The HARD 500/min rolling governor in ``rate_common.py`` is independent of
+#: this cap and remains the true account cap (CLAUDE.md §2 Rule 6).
 _ACQUIRE_LOOP_CAP: Final[int] = 16
 
 
@@ -242,6 +254,7 @@ class AdaptiveTokenBucket:
     _last_success_at: float = field(init=False)
     _lock: threading.Lock = field(init=False)
     _pending_events: list[RateLimiterEvent] = field(init=False, default_factory=list)
+    _acquire_fail_opens: int = field(init=False)
 
     def __post_init__(self) -> None:
         if self.initial_rps <= 0:
@@ -278,6 +291,7 @@ class AdaptiveTokenBucket:
         self._last_429_at = float("-inf")
         self._last_success_at = self.clock()
         self._lock = threading.Lock()
+        self._acquire_fail_opens = 0
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -332,6 +346,15 @@ class AdaptiveTokenBucket:
                         # (post-fix) wake/re-test contention loops; fails
                         # OPEN like _GOVERNOR_LOOP_CAP/_SMOOTH_LOOP_CAP.
                         self._tokens = 1.0
+                        # Observe-only accounting (round-2 refuter fold,
+                        # MIGRATION.md #1751): the force-granted token has NO
+                        # matching refill — a "phantom" issue past the SOFT
+                        # per-second rate — so every trip is counted
+                        # (acquire_fail_open_count()). The module is
+                        # deliberately logger-free (nothing blocks under or
+                        # around _lock — the DEC-RATE-LOG-OUTSIDE-LOCK-001
+                        # program), so the counter IS the exposure surface.
+                        self._acquire_fail_opens += 1
                         # ``# pragma: no mutate`` (DEC-MUTATION-RUNTIME-001):
                         # ``_tokens`` was just set to 1.0 UNDER the lock and
                         # the lock is held through the guard re-test (the
@@ -499,6 +522,19 @@ class AdaptiveTokenBucket:
             while self._recent_429s and self._recent_429s[0] < cutoff:
                 self._recent_429s.popleft()
             return len(self._recent_429s)
+
+    def acquire_fail_open_count(self) -> int:
+        """Dashboard stat — cumulative :meth:`acquire` fail-OPEN force-grants.
+
+        Each count is ONE "phantom" token granted WITHOUT a matching refill:
+        the retry loop lost its refilled token to peers ``_ACQUIRE_LOOP_CAP``
+        consecutive times and force-granted rather than starve — production-
+        reachable under sustained contention at demand > rate since
+        DEC-RATE-SLEEP-OUTSIDE-LOCK-001 (quantified envelope in MIGRATION.md
+        #1751). Observe-only; the HARD 500/min governor is unaffected.
+        """
+        with self._lock:
+            return self._acquire_fail_opens
 
     def pending_events(self) -> list[RateLimiterEvent]:
         """Drain and return any pending events.

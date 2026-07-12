@@ -1708,9 +1708,14 @@ class TestRateProbePullExclusion:
 
         Pre-fix the stage took no lock at all — it issued its calls and
         returned PASS beside the running pull. Post-fix: a NAMED WARN refusal
-        echoing the holder note, ZERO vendor calls, ZERO budget spends.
+        echoing the holder note, ZERO vendor calls, ZERO budget spends, and
+        transcript evidence (``rate.lock_refused`` — the WARN-arm mirror of
+        the FAIL arm's asserted ``rate.lock_halt`` event; asserted here so
+        deleting the emission line is a KILLED mutant — round-2 refuter).
         """
         deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        events: list[str] = []
+        ctx.transcript = dl.Transcript(events.append, now_utc=deps.now_utc)
         calls = {"n": 0}
 
         def counting(kwargs: dict[str, object]) -> Mapping[str, object]:
@@ -1727,6 +1732,9 @@ class TestRateProbePullExclusion:
         assert "holder: pull:fake-peer" in joined
         assert calls["n"] == 0  # ZERO vendor calls
         assert ctx.budget.used == used_before  # ZERO budget spends
+        assert len(events) == 1  # the refusal leaves transcript evidence
+        assert '"event": "rate.lock_refused"' in events[0]
+        assert "holder: pull:fake-peer" in events[0]  # the detail echoes the holder
 
     def test_rate_probe_refuses_while_account_lock_held(self, tmp_path: Path) -> None:
         """The ACCOUNT-keyed lock (taken FIRST) refuses the probe on its own.

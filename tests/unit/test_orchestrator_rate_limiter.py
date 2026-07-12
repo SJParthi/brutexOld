@@ -1493,12 +1493,22 @@ class TestNoSleepUnderLock:
 
         peer = threading.Thread(target=_peer, daemon=True)
         peer.start()
-        peer_completed = peer_done.wait(5.0)
-        assert peer_completed, "peer acquire() blocked behind the parked retry sleeper"
-        assert peer_result == [0.0]  # the peer consumed the refilled token, no wait
-        now["t"] += 0.2  # one more token for the sleeper
+        # The bound must stay WELL UNDER the _GateSleep 5.0 s release timeout:
+        # on the failure path (lock held across the sleep) the peer times out
+        # here and the release below still reaches the parked worker BEFORE
+        # its own gate assert fires — a clean FAIL, zero thread-exception
+        # ERRORs (round-2 refuter). Post-fix the peer completes in microseconds.
+        peer_completed = peer_done.wait(2.0)
+        now["t"] += 0.2  # one more token for the sleeper (fed on BOTH paths)
+        # Unblock BEFORE any assert (the siblings' "unblock either way"
+        # discipline — round-2 refuter): on the failure path the parked
+        # sleeper must never leak past this test and misattribute its
+        # _GateSleep teardown ERROR to a neighboring test.
         gate.release.set()
         t.join(timeout=5.0)
+        peer.join(timeout=5.0)
+        assert peer_completed, "peer acquire() blocked behind the parked retry sleeper"
+        assert peer_result == [0.0]  # the peer consumed the refilled token, no wait
         assert not t.is_alive()
         assert results and results[0] >= 0.0
         assert bucket.available_tokens() == 0.0  # 2 consumed of exactly 2 refilled — atomic
@@ -1557,6 +1567,66 @@ class TestNoSleepUnderLock:
         assert len(calls) == 1 + _ACQUIRE_LOOP_CAP  # 17 sleeps total
         assert wait == pytest.approx(sum(calls))  # wait accrues once per performed sleep
         assert bucket.available_tokens() == 0.0  # the force-granted token was consumed
+
+    def test_peer_steal_to_cap_force_grant_is_counted(self) -> None:
+        """Deterministic pin of the fail-open accounting envelope (round 2).
+
+        A "stealing" sleep exploits the fix itself — the retry sleep runs
+        with the lock RELEASED — to advance the clock by exactly the
+        requested wait (refilling exactly ONE token at 5 r/s) and immediately
+        consume it as the peer, all on ONE thread (no races, no wall clock).
+        The worker therefore wakes to an empty bucket every iteration: it
+        loses the pre-loop token once and the retry-loop token exactly
+        ``_ACQUIRE_LOOP_CAP`` consecutive times, then the cap arm force-grants
+        ONE phantom token, the loop TERMINATES, and the grant is COUNTED.
+
+        Mutant teeth: counter-increment dropped/flipped ⇒ the exact 0 → 1
+        pins fail; force-grant dropped ⇒ the −1.0 balance fails the 0.0 pin;
+        cap value drift ⇒ the bounded steal budget raises (never a hang; the
+        literal 16 is separately pinned by
+        ``test_module_constants_byte_exact``). On REVERTED (lock-held-sleep)
+        code the in-sleep lock probe fails LOUDLY instead of self-deadlocking
+        — the CI reversion gate sees a clean FAIL, no leaked thread.
+        """
+        now = {"t": 1000.0}
+        holder: dict[str, AdaptiveTokenBucket] = {}
+        steal_waits: list[float] = []
+        calls = {"n": 0}
+
+        def stealing_sleep(seconds: float) -> None:
+            calls["n"] += 1
+            assert calls["n"] <= 1 + _ACQUIRE_LOOP_CAP + 5, (
+                "force-grant never fired within the cap envelope (cap-arm mutant?)"
+            )
+            b = holder["bucket"]
+            # Reversion hygiene: on lock-held-across-sleep code this
+            # same-thread steal would self-deadlock — probe non-blocking
+            # and FAIL loudly instead (also asserts the sleep runs unlocked).
+            assert b._lock.acquire(blocking=False), "sleep ran with the bucket lock HELD"
+            b._lock.release()
+            now["t"] += seconds  # refill exactly the awaited token…
+            steal_waits.append(b.acquire())  # …and steal it (the lock is FREE mid-sleep)
+
+        bucket = AdaptiveTokenBucket(
+            initial_rps=5.0,
+            downshift_rps=2.5,
+            burst=1,
+            start_empty=True,
+            clock=lambda: now["t"],
+            sleep=stealing_sleep,
+        )
+        holder["bucket"] = bucket
+        assert bucket.acquire_fail_open_count() == 0  # fresh bucket — nothing counted
+        wait = bucket.acquire()
+        assert bucket.acquire_fail_open_count() == 1  # the force-grant fired + was COUNTED
+        assert calls["n"] == 1 + _ACQUIRE_LOOP_CAP  # pre-loop sleep + exactly cap retries
+        assert steal_waits == [0.0] * (1 + _ACQUIRE_LOOP_CAP)  # every steal took a REAL token
+        assert wait == pytest.approx(0.2 * (1 + _ACQUIRE_LOOP_CAP))  # accrued per sleep
+        # Accounting identity: total issues == real refilled tokens + counted
+        # fail-opens (18 == 17 + 1) — every issue is token-backed or counted.
+        issues = 1 + len(steal_waits)
+        assert issues == (1 + _ACQUIRE_LOOP_CAP) + bucket.acquire_fail_open_count()
+        assert bucket.available_tokens() == 0.0  # the phantom token was consumed
 
     def test_raising_sleep_unwinds_with_lock_free_and_no_token(self) -> None:
         """An exception from the retry sleep unwinds with the lock FREE.
