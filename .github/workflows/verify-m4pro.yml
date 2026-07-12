@@ -100,7 +100,7 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install --upgrade pip
-          pip install -e ".[dev,optimize]"
+          pip install -e ".[dev,data,ui,optimize]"
           pip install maturin
           # Belt-and-suspenders crates.io flake guard (on top of the
           # workflow-level CARGO_NET_RETRY=10): retry each maturin build up to
@@ -130,7 +130,11 @@ jobs:
       - name: Type check (mypy --strict + pyright)
         run: |
           . .venv/bin/activate
-          mypy --strict brutex
+          # mypy analysis pinned to linux to match the required ubuntu gate;
+          # this job's value is the REAL-hardware test suite + benches, not a
+          # second type-check platform (darwin narrowing flags e.g.
+          # process_probe.py's sys.platform branch as unreachable).
+          mypy --strict --platform linux brutex
           pyright brutex
 
       - name: Full test suite (unit + integration + property + golden + bench)
