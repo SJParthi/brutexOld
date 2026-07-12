@@ -2010,6 +2010,118 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
 
+    # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753) ──
+    # The daily TickVault cross-verification producer: post-close priority
+    # pull → completeness gate → day-scoped prebuild → CSV export → idempotent
+    # S3 publish, all through the 100%-tested brutex.crossverify runner.
+    crossverify = sub.add_parser(
+        "crossverify",
+        help=(
+            "Daily TickVault cross-verify producer (pull → gate → prebuild → "
+            "CSV export → S3 publish) + launchd scheduling "
+            "(DEC-CROSSVERIFY-PRODUCER-001)"
+        ),
+    )
+    crossverify_sub = crossverify.add_subparsers(dest="crossverify_command", required=True)
+
+    cv_run = crossverify_sub.add_parser(
+        "run",
+        help=(
+            "Run the producer once (launchd/cron entry point). Exit 0 on "
+            "published/staged/skips, 1 on lock refusal / gate absent / junk "
+            "config, 2 on halts/blocked/withheld/publish-failed (cron-red)"
+        ),
+    )
+    cv_run.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_run.add_argument(
+        "--day",
+        default=None,
+        help="Export day YYYY-MM-DD (default: today IST — the post-close run's day)",
+    )
+    cv_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Render in memory ONLY — no locks, no pulls, no derives, no staging, no S3",
+    )
+    cv_run.add_argument(
+        "--skip-pull",
+        action="store_true",
+        dest="skip_pull",
+        help="Export/stage/publish from the EXISTING lake only (no vendor calls)",
+    )
+    cv_run.add_argument(
+        "--no-publish",
+        action="store_true",
+        dest="no_publish",
+        help="Render + stage only — the bring-up mode (no S3 puts)",
+    )
+
+    cv_install = crossverify_sub.add_parser(
+        "install",
+        help=(
+            "One-time launchd bootstrap (macOS): write + load the LaunchAgent "
+            "and VERIFY launchctl lists it. --at is REQUIRED (probe-decided "
+            "operator config — no default fire time ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--at",
+        default=None,
+        help=(
+            "Local fire time HH:MM — REQUIRED; choose it from the 5-day "
+            "post-close settle probe (no default ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--label",
+        default="com.brutex.crossverify",
+        help="launchd label (default com.brutex.crossverify)",
+    )
+    cv_install.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+    cv_install.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Baked into the plist EnvironmentVariables when set",
+    )
+
+    cv_uninstall = crossverify_sub.add_parser(
+        "uninstall", help="Unload + remove the LaunchAgent, verifying it is no longer listed"
+    )
+    cv_uninstall.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_uninstall.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
+    cv_status = crossverify_sub.add_parser(
+        "status",
+        help=(
+            "Schedule presence, launchctl listing, newest publish journal, "
+            "trading-day-aware dead-man verdict — honest lines even when "
+            "nothing ran"
+        ),
+    )
+    cv_status.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_status.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_status.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
     return parser
 
 
@@ -5978,6 +6090,182 @@ def cmd_nightly_status(
     return EXIT_OK
 
 
+# ────────────────────────────────────────────────────────────────────────
+# crossverify (DEC-CROSSVERIFY-PRODUCER-001) — thin, fully-covered shims
+# over the 100%-tested brutex.crossverify modules (the cmd_nightly template).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_crossverify_run(
+    *,
+    lake_root: Path | None,
+    day: str | None,
+    dry_run: bool,
+    skip_pull: bool,
+    no_publish: bool,
+) -> int:
+    """Run the cross-verify producer once (the launchd/cron entry point).
+
+    Thin by design: fail-loud config resolve → :func:`default_seams` →
+    :func:`run_crossverify` → the report's own exit code. The runner NEVER
+    raises for a data/vendor/publish problem (halts fold into the ``suspect``
+    verdict, exit 2) and owns the market-hours START gate at its step E — an
+    in-window vendor-calling invocation returns the honest
+    ``deferred_market_hours`` verdict with a clean EXIT_OK (the ``cmd_fetch``
+    deferral posture, DEC-GROWW-MARKET-HOURS-GUARD-001; ``--dry-run`` /
+    ``--skip-pull`` make no vendor calls and are exempt); this shim NEVER
+    passes any exemption. Exit law (DEC-CROSSVERIFY-PRODUCER-001 §4):
+    0 published/staged_only/nothing/skips/disabled/deferred · 1 junk config /
+    lock refusal / gate-module-absent · 2 halts/blocked/withheld-final/
+    publish-failed/deadline-suspect/calendar-abstain (cron-red).
+    """
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify run")
+    parsed_day: date | None = None
+    if day is not None:
+        try:
+            parsed_day = date.fromisoformat(day)
+        except ValueError:
+            print(f"[brutex] --day must be YYYY-MM-DD, got {day!r}", file=sys.stderr)
+            return EXIT_USER_ERROR
+    from brutex.crossverify.config import resolve_crossverify_config
+    from brutex.crossverify.run import default_seams, run_crossverify
+
+    try:
+        config = resolve_crossverify_config(
+            lake_root=resolved,
+            day=parsed_day,
+            dry_run=dry_run,
+            skip_pull=skip_pull,
+            no_publish=no_publish,
+        )
+        # Seam build resolves the market-hours env ONCE, fail-loud
+        # (resolve_market_closed) — junk env exits EXIT_USER_ERROR here,
+        # before any lock/vendor work (the DEC-RAM-BUDGETS-001 convention).
+        seams = default_seams(config)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    report = run_crossverify(config, seams)
+    detail = f": {report.detail}" if report.detail else ""
+    print(f"[brutex] crossverify {report.day.isoformat()} — {report.verdict}{detail}")
+    print(
+        f"[brutex]   published {report.published} · already {report.skipped_already} · "
+        f"recovered-prior {report.recovered_prior} · withheld {report.withheld} · "
+        f"blocked {report.blocked} · nothing {report.nothing} · "
+        f"excluded {report.excluded} · publish-failed {report.publish_failed} · "
+        f"derived {report.derived} ({report.derive_failed} failed)"
+    )
+    return report.exit_code
+
+
+def cmd_crossverify_install(
+    *,
+    at: str | None,
+    label: str,
+    plist_dir: Path | None,
+    lake_root: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+    platform: str | None = None,
+) -> int:
+    """One-time launchd bootstrap — ``--at`` REQUIRED (probe-decided config)."""
+    from brutex.crossverify.schedule import (
+        AT_REQUIRED_MESSAGE,
+        CROSSVERIFY_CRON_GUIDANCE,
+        install_crossverify,
+    )
+    from brutex.nightly.schedule import parse_at, pmset_wake_command
+
+    plat = sys.platform if platform is None else platform
+    if plat != "darwin":
+        print(
+            "[brutex] crossverify install targets macOS launchd; on Linux schedule via cron:",
+            file=sys.stderr,
+        )
+        print(f"[brutex]   {CROSSVERIFY_CRON_GUIDANCE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if at is None or not at.strip():
+        print(f"[brutex] {AT_REQUIRED_MESSAGE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    try:
+        hour, minute = parse_at(at)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    outcome = install_crossverify(
+        at=at,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        lake_root=lake_root,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    print(
+        "[brutex] REQUIRED for on-time fires: launchd does NOT wake a sleeping "
+        "Mac — run this scheduled wake yourself (one-time, sudo — BruteX never "
+        f"runs pmset): {pmset_wake_command(hour, minute)}"
+    )
+    return EXIT_OK
+
+
+def cmd_crossverify_uninstall(
+    *,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """Unload + remove the producer's LaunchAgent, verifying it is unlisted."""
+    from brutex.crossverify.schedule import uninstall_crossverify
+
+    outcome = uninstall_crossverify(
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    return EXIT_OK
+
+
+def cmd_crossverify_status(
+    *,
+    lake_root: Path | None,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """The morning command — honest producer status even when nothing ran."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify status")
+    from brutex.crossverify.schedule import status
+
+    report = status(
+        lake_root=resolved,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    for line in report.lines():
+        print(f"[brutex] {line}")
+    if report.deadman.verdict == "MISSED":
+        # The row-20 posture (the nightly-status precedent): a Mac asleep at
+        # the trigger starts NO process, so only the surface that NOTICES the
+        # silence can alert. Best-effort — a disabled Telegram is a silent
+        # no-op; a raise never breaks the read-only status command.
+        with contextlib.suppress(Exception):
+            from brutex.notifications.sweep_alerts import SweepAlerter
+
+            SweepAlerter().crossverify_refused(
+                run_id="deadman", reason=f"DEAD-MAN: {report.deadman.detail}"
+            )
+    return EXIT_OK
+
+
 def cmd_wipe(*, execute: bool, assume_yes: bool) -> int:  # pragma: no cover — interactive + real FS
     """Delete all persisted BruteX data — dry-run by default, typed-confirm to execute.
 
@@ -9903,6 +10191,29 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_nightly_status(
             lake_root=args.lake_root,
             results_root=args.results_root,
+            label=args.label,
+            plist_dir=args.plist_dir,
+        )
+    if args.command == "crossverify":
+        if args.crossverify_command == "run":
+            return cmd_crossverify_run(
+                lake_root=args.lake_root,
+                day=args.day,
+                dry_run=args.dry_run,
+                skip_pull=args.skip_pull,
+                no_publish=args.no_publish,
+            )
+        if args.crossverify_command == "install":
+            return cmd_crossverify_install(
+                at=args.at,
+                label=args.label,
+                plist_dir=args.plist_dir,
+                lake_root=args.lake_root,
+            )
+        if args.crossverify_command == "uninstall":
+            return cmd_crossverify_uninstall(label=args.label, plist_dir=args.plist_dir)
+        return cmd_crossverify_status(
+            lake_root=args.lake_root,
             label=args.label,
             plist_dir=args.plist_dir,
         )

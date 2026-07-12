@@ -146,6 +146,7 @@ def render_launchd_plist(
     minute: int,
     env_vars: Mapping[str, str],
     log_dir: Path,
+    log_stem: str = "nightly-launchd",
 ) -> str:
     """Render the LaunchAgent plist (golden-pinned bytes).
 
@@ -153,6 +154,12 @@ def render_launchd_plist(
     ``EnvironmentVariables`` dict emitted ONLY when *env_vars* is non-empty —
     and NEVER Telegram secrets (``bootstrap_env`` loads ``~/.brutex/.env`` in
     the process itself).
+
+    *log_stem* (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1753 — ADDITIVE,
+    defaulted so the nightly plist bytes are UNCHANGED, golden-pinned) names
+    the ``<stem>.out.log`` / ``<stem>.err.log`` pair, so a SECOND LaunchAgent
+    (the cross-verify producer, label ``com.brutex.crossverify``) renders
+    through this ONE law without clobbering the nightly's log files.
     """
     argv_xml = "".join(
         f"    <string>{_xml_escape(token)}</string>\n" for token in program_arguments
@@ -164,8 +171,8 @@ def render_launchd_plist(
             for key, value in sorted(env_vars.items())
         )
         env_xml = f"  <key>EnvironmentVariables</key><dict>\n{rows}  </dict>\n"
-    out_log = log_dir / "nightly-launchd.out.log"
-    err_log = log_dir / "nightly-launchd.err.log"
+    out_log = log_dir / f"{log_stem}.out.log"
+    err_log = log_dir / f"{log_stem}.err.log"
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -213,6 +220,8 @@ def install(
     minute: int,
     env_vars: Mapping[str, str],
     log_dir: Path,
+    log_stem: str = "nightly-launchd",
+    next_step: str = "brutex nightly run --dry-run",
 ) -> InstallOutcome:
     """Write + load the LaunchAgent, then VERIFY it is actually listed.
 
@@ -220,6 +229,14 @@ def install(
     — idempotent re-install) → ``launchctl load -w`` → the MANDATORY
     ``launchctl list <label>`` verification. installed-but-unverified IS a
     failure (exit 2 at the CLI) — the job would NEVER fire.
+
+    *log_stem* rides through to :func:`render_launchd_plist` (ADDITIVE,
+    defaulted — every nightly caller byte-identical) so the cross-verify
+    producer's install DELEGATES here instead of copying the whole
+    write/load/verify flow (CLAUDE.md §11 COMMON;
+    DEC-CROSSVERIFY-PRODUCER-001); *next_step* names the delegating
+    surface's own follow-up command in the success detail (same additive
+    defaulted posture).
     """
     from brutex.data.atomic_io import atomic_write_simple
 
@@ -231,6 +248,7 @@ def install(
         minute=minute,
         env_vars=env_vars,
         log_dir=log_dir,
+        log_stem=log_stem,
     )
     plist_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +278,7 @@ def install(
         plist_path=plist_path,
         detail=(
             f"installed + VERIFIED ({label} listed). Next fire {hour:02d}:{minute:02d} "
-            "local. Next step: brutex nightly run --dry-run"
+            f"local. Next step: {next_step}"
         ),
     )
 
