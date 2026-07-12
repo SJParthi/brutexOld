@@ -63,9 +63,10 @@ the engine canonicaliser; "fixing" any of them is a wire-format break:
 2. ``Decimal`` scale is significant (``Decimal("1.0") !=
    Decimal("1.00")``) — asymmetric with float's repr scale-collapse
    (``1.0`` ≡ ``1.00``).
-3. Signed zero is split (``0.0`` -> ``"0.0"``, ``-0.0`` ->
-   ``"-0.0"``) — the SAFE dedup direction: a spurious split at worst
-   re-runs an identical combo, it never silently drops one.
+3. Signed zero is NORMALISED (``-0.0`` -> ``+0.0`` before ``repr``, so
+   both canonicalise to ``"0.0"``) — two mathematically-equal params
+   hash to the SAME run identity (the results_store / trial_stats
+   precedent; see the float branch of :func:`_canonicalise_value`).
 4. ``tuple`` / ``list`` / ``range`` all canonicalise to a JSON array.
 
 This module imports ``fno_math`` (the BruteX Rust hot-kernel wheel,
