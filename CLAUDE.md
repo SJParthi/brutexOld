@@ -18,7 +18,29 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
+_Last updated: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 —
+bounded cold lake I/O on the dashboard read path: the SummaryCache COLD
+single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S`
+60 s, fail-safe) + a per-owner-Event fail-fast latch — exactly ONE waiter pays
+the budget per wedged owner, a blown budget raises the typed
+`SummaryColdWaitTimeout` the five summary routes map to an honest 503
+`summary_scan_pending` (never a raw 500, never a fabricated empty payload;
+zero new threads — the waiter's own `Event.wait`, no scan takeover, warm/dirty
+paths byte-identical) — and the read-side lake METADATA sweeps (the
+stats-manifest consult + /db TOCTOU re-stat + `_bars_file_windows` +
+`lake_revision`'s composite generation probe) ride the ONE new breach-armed
+`StatSweepGate` leaf (`brutex/data/stat_deadline.py`,
+`BRUTEX_LAKE_STAT_DEADLINE_S` 5 s fail-safe): a wedged volume times out into
+the NAMED `consult_deadline`/`restat_deadline` fallback clauses / the probe's
+existing `None` no-signal contract, the /db seed is SUPPRESSED on a timeout
+(never re-hits the wedged volume), latched polls cost ZERO threads, and every
+zombie self-clears on the volume's release. Healthy-path stat COUNTS + bytes
+unchanged (parity-pinned); write-side hooks byte-untouched (already under the
+90 s spine guard); the movers_cache sibling wait is the named follow-up
+DEC-DASHBOARD-COLD-IO-DEADLINE-002 (behind PR #1488). READ-side dashboard +
+ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
+record lives in the §1 Active-branch blurb + MIGRATION.md #1774.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
 past the adaptive floor the discovery / windows / ledger / tables caches
@@ -2334,7 +2356,77 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
+- **Active branch:** `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774** —
+  bounded cold lake I/O on the dashboard read path (guarantee-audit BUG-1 + BUG-2 — the audit report is
+  NOT in-repo, stated honestly; BUG-1 is equally the #1648 honest-limits named follow-up). **BUG-1:**
+  `SummaryCache.get_or_refresh`'s COLD cross-thread arm no longer parks waiters in an UNBOUNDED
+  `decision.wait()` on a lake-limiter token — the wait runs under a TOTAL budget across re-plan
+  iterations (`BRUTEX_SUMMARY_COLD_WAIT_S`, default 60 s = 2× the observed 27-30 s legitimate mid-pull
+  cold scan; fail-SAFE via the COMMON `resolve_env_seconds`, resolved ONCE at construction — the hit arm
+  gains zero instructions), a blown budget ARMS a per-owner-Event fail-fast latch (exactly ONE waiter
+  pays the budget per wedged owner; every later cold poll raises instantly in O(1) — stacked 4-15 s
+  pollers can never re-approach the 32-token `_LakeOffload` exhaustion) and raises the typed
+  `SummaryColdWaitTimeout(RuntimeError` — deliberately NOT `TimeoutError ⊂ OSError`, the
+  `except OSError` misclassification leak class`)`; the timed-out waiter NEVER takes the scan over (the
+  single-scan law stays structural) and NEVER touches `_refreshing`; the latch identity-matches the
+  CURRENT owner Event (a fresh post-takeover owner auto-invalidates a stale latch), clears on the
+  owner's success (ONE `cold_wait_recovered` INFO) and silently on its abort. FIVE app.py route arms
+  (the per-route `_store_outage_response` precedent — an app-level exception handler has zero in-repo
+  precedent, REJECTED): /coverage/spot · /completeness/scoreboard · scoreboard.csv (text/plain) ·
+  /universe/completeness (beside its store-outage arm) · /coverage/options each map the timeout to the
+  NEW `_summary_warming_response(kind)` honest **503** `error_type="summary_scan_pending"` — a truly
+  cold kind has NOTHING last-known, so a labeled empty 200 would fabricate an empty lake (Golden Rule
+  #1); byte-STABLE degrade bodies (skip-render poller discipline), pollers already self-recover from
+  non-ok ticks — zero JS edits. ZERO new threads on BUG-1 (bounded `Event.wait` on the waiter's own
+  thread; `run_with_deadline` around the recompute is FORBIDDEN — DEC-DASHBOARD-FASTREAD-001's
+  store-connection thread law). **BUG-2:** NEW leaf `brutex/data/stat_deadline.py` — `StatSweepGate`,
+  ONE `run_with_deadline` daemon per WHOLE metadata sweep (never per file) behind a BREACH-armed
+  per-`str(lake_root)` fail-fast latch (the `StoreWriteDeadlineGuard` family adapted for lock-less
+  concurrent readers: armed ONLY by an actual breach — healthy concurrent consults/probes ALL proceed;
+  latched calls raise `StatSweepTimeout(latched=True)` instantly with ZERO new threads; the FIRST
+  breached flight owns the latch via `setdefault`, its zombie's `finally` token-identity clears it +
+  ONE `stat_gate.recovered` INFO; the done-flag race law — a fn completing inside the expiry→latch
+  window can never wedge the latch; `StatSweepTimeout` is caught + converted to RETURN SHAPES inside
+  the two leaf modules, never crossing into db_view/app). Applied at: (a) `lake_stats_manifest.py` —
+  the clause-1..4 body extracted VERBATIM to `_validate_dataset_stats`; NEW
+  `load_valid_dataset_stats_guarded → StatsConsult(stats, timed_out)` + the NAMED `consult_deadline`
+  fallback clause (a volume outage never misattributed as `stat_token`/`file_set` drift); the public
+  `load_valid_dataset_stats` stays the never-raises thin wrapper; NEW `bounded_token_sweep`
+  (`TOKEN_SWEEP_OK/MOVED/TIMEOUT`, first-moved rel in today's exact order) under the SAME gate + key;
+  (b) `db_view.py`, 5 touch points ONLY (the PR #1488 hotspot minimized): `consult_timed_out` ctx
+  field, `should_seed` SUPPRESSION on a timeout (the seed's three unbounded stat sweeps + grouped scan
+  never re-hit the wedged volume; NO `statseed|` latch entry — a genuinely-absent shard still seeds on
+  the next healthy click), the guarded-consult call, `_stats_tokens_intact` on ONE `bounded_token_sweep`
+  pass (MOVED payload byte-preserved; TIMEOUT → `restat_deadline`, no fabricated `rel`; both → the
+  existing whole-request legacy degrade), and `_bars_file_windows`' timeout-early-return BEFORE the
+  grammar arm's O(files) `rglob` (the D1 hole closed); (c) `lake_revision.py` — the composite probe
+  body extracted to `_lake_revision_probe`, the public fn gate-wrapped, timeout → the module's EXACT
+  existing `None` no-signal contract (never a fabricated token, never `ABSENT_TOKEN`; every consumer
+  verified `None`-safe — SummaryCache no-bump, app's never-raising closure, `pull_jobs`' abstain now
+  bounded for free). ONE shared stat knob `BRUTEX_LAKE_STAT_DEADLINE_S` (default 5 s, ≥1000× healthy
+  headroom — pure hang detection), fail-SAFE (the disclosed divergence from the rate-bridge fail-loud
+  resolvers). WRITE hooks byte-untouched (already under the 90 s `GROWW_WRITE_DEADLINE_S` spine guard;
+  guarding the shared `_load_shard_with_clause` would add a surprise thread inside the pull's
+  partition-locked section). HONEST: bounds the WAITERS + the SWEEPS, never the wedged syscall
+  (abandoned daemons unkillable, #999; ≤ ~3 per outage, zero per poll while latched; the wedged BUG-1
+  owner still pins one thread + one token; the legacy DuckDB scan the degrades fall back to — and
+  `query_candles`' pre-existing early `base.is_dir()` guard stat — stay UNBOUNDED on a truly dead
+  volume, the 32-token limiter remains that containment); healthy-path payloads, clause logs, stat
+  COUNTS + bytes pinned unchanged (the whole pre-existing byte-equality/fallback/TOCTOU/seed suites
+  re-run UNMODIFIED through the guarded wrappers; no module-level `os.stat` capture — the bench
+  stat-spy law test-pinned); the five wedge regressions (W1/W2 summary_cache · W3 lake_stats_manifest ·
+  W4 through the REAL `query_candles` in the db_view 21-file gate — zero ci.yml edits · W5
+  lake_revision) are join/SIGALRM-watchdog-bounded and EXECUTED failing at the merge-base with their
+  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1774); NEW
+  `tests/unit/test_stat_deadline.py` (+ the mutation.yml proven-pair line, wiring test-pinned) + NEW
+  `tests/unit/test_dashboard_cold_degrade_routes.py`; `stat_deadline.py` + `summary_cache.py` +
+  `lake_stats_manifest.py` 100.00% line+branch on their gates. NAMED follow-up
+  DEC-DASHBOARD-COLD-IO-DEADLINE-002: the `MoversSnapshotCache` sibling cold wait (movers_cache.py —
+  PR #1488 rewrites that module's very cold path; the mechanism ports 1:1 once it settles). READ-side
+  dashboard + ONE new data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the
+  pre-change baseline.)
+  Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
   IMMEDIATELY while a pull is active (or a revalidator is in flight) and refreshes in AT MOST ONE tokenless
@@ -5952,7 +6044,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/pull-contention-feed-decoupled`
+- **Active feature branch:** `claude/dashboard-cold-io-deadline`
+  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 — bounded cold lake
+  I/O on the dashboard read path: the SummaryCache cold single-flight wait
+  gains a TOTAL budget + per-owner-Event fail-fast latch with the honest 503
+  `summary_scan_pending` degrade on the five summary routes (BUG-1), and the
+  read-side lake metadata sweeps — the stats-manifest consult, the /db TOCTOU
+  re-stat, `_bars_file_windows`, `lake_revision`'s generation probe — ride the
+  ONE new breach-armed `StatSweepGate` leaf (`brutex/data/stat_deadline.py`)
+  with named `consult_deadline`/`restat_deadline` fallback clauses, seed
+  suppression on a timeout, and zero-thread latched polls (BUG-2); knobs
+  `BRUTEX_SUMMARY_COLD_WAIT_S` 60 s / `BRUTEX_LAKE_STAT_DEADLINE_S` 5 s, both
+  fail-safe; write-side hooks byte-untouched; healthy-path stat counts + bytes
+  unchanged; the movers_cache sibling wait is the named follow-up
+  DEC-DASHBOARD-COLD-IO-DEADLINE-002; READ-side dashboard + one data leaf —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1774 for the full blurb)
+  Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
   the discovery / windows / ledger / tables caches (tokenless background

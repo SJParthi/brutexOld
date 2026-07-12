@@ -34,6 +34,11 @@ the sweeps-tree component of DEC-RESULTS-SURFACE-HONESTY-001).
 from __future__ import annotations
 
 import os
+import signal as _signal
+import threading as _threading
+import time as _time
+from collections.abc import Generator as _Generator
+from contextlib import contextmanager as _contextmanager
 from pathlib import Path
 
 import pytest
@@ -568,3 +573,165 @@ class TestCascadeReportRevision:
 
         pinned = tmp_path.joinpath("sweeps", *probe_mod._CASCADE_REPORT_RELPATH)
         assert pinned == report_path(tmp_path / "sweeps")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Probe stat deadline (DEC-DASHBOARD-COLD-IO-DEADLINE-001, BUG-2c)
+# ────────────────────────────────────────────────────────────────────────
+#
+# REVERSION-GATE DISCIPLINE (ci.yml validate_bugfix_reversion.py): the new
+# gate names (``_PROBE_GATE`` etc.) are only touched AFTER the watchdog-bounded
+# first call, and no new name is imported at module level — so this file still
+# collects at the merge-base and W5 fails with its GENUINE watchdog-caught
+# HANG shape rather than a collection error.
+
+
+@_contextmanager
+def _probe_hang_watchdog(seconds: int = 5) -> _Generator[None, None, None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the BUG-2c defect is an ``os.stat`` on a wedged
+    volume that blocks FOREVER — a plain regression test would HANG the whole
+    run rather than fail; the ``SIGALRM`` handler raising interrupts the
+    blocked wait instead (the ``test_lake_stats_manifest._hang_watchdog``
+    template).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"lake_revision probe blocked > {seconds}s (wedged-volume hang)")
+
+    previous = _signal.signal(_signal.SIGALRM, _alarm)
+    _signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        _signal.alarm(0)
+        _signal.signal(_signal.SIGALRM, previous)
+
+
+@_contextmanager
+def _wedged_ledger_stat(
+    monkeypatch: pytest.MonkeyPatch, lake_root: Path
+) -> _Generator[_threading.Event, None, None]:
+    """Monkeypatch ``os.stat`` to BLOCK (on a test Event) for the ledger file.
+
+    Everything else delegates to the locally-captured real ``os.stat`` (never
+    a module-level capture — the bench stat-spy law). Released in ``finally``
+    so the abandoned zombie drains at teardown.
+    """
+    release = _threading.Event()
+    real_stat = os.stat
+    target = str(ledger_path(lake_root))
+
+    def _wedge(path: object, *args: object, **kwargs: object) -> object:
+        if isinstance(path, (str, Path)) and str(path) == target:
+            release.wait(30.0)
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", _wedge)
+    try:
+        yield release
+    finally:
+        release.set()
+
+
+class TestProbeDeadline:
+    def test_wedged_ledger_stat_probe_is_bounded_and_recovers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W5 — a WEDGED ledger stat no longer hangs the generation probe.
+
+        DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2c).
+        Fails-before shape: at the merge-base the wedged ``lake_revision``
+        call blocks until the SIGALRM watchdog raises — a clean LOUD failure.
+        Pass-after: the first call returns ``None`` (the module's exact
+        existing no-signal contract) well inside the watchdog + ONE
+        ``stat_gate.deadline_exceeded`` WARN; N calls while wedged return
+        ``None`` instantly with the guard seam invoked exactly ONCE across
+        the outage (zero threads per poll while latched); the release drains
+        the zombie (ONE recovered INFO) and the next call returns the REAL
+        token again.
+        """
+        lake = tmp_path
+        _write_ledger_bytes(lake, b"ledger-v1")
+        healthy = lake_revision(lake)
+        assert healthy is not None
+        monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+        with _wedged_ledger_stat(monkeypatch, lake) as release:
+            with capture_logs() as logs, _probe_hang_watchdog(5):
+                first = lake_revision(lake)
+            assert first is None
+            warns = [e for e in logs if e["event"] == "stat_gate.deadline_exceeded"]
+            assert len(warns) == 1
+            assert warns[0]["key"] == str(lake)
+            # Latched: N later polls are instant Nones with the guard seam
+            # invoked exactly ONCE across the whole outage (the first breach).
+            from brutex.dashboard import lake_revision as lake_revision_module
+
+            guard_calls = {"n": 0}
+            original_guard = lake_revision_module._PROBE_GATE._guard
+
+            def _counting_guard(*args: object, **kwargs: object) -> object:
+                guard_calls["n"] += 1
+                return original_guard(*args, **kwargs)
+
+            monkeypatch.setattr(lake_revision_module._PROBE_GATE, "_guard", _counting_guard)
+            with capture_logs() as logs2:
+                for _ in range(3):
+                    assert lake_revision(lake) is None
+            assert guard_calls["n"] == 0  # the latch never reached the guard
+            assert [e for e in logs2 if e["event"] == "stat_gate.deadline_exceeded"] == []
+            assert lake_revision_module._PROBE_GATE.wedged(str(lake))
+            with capture_logs() as logs3:
+                release.set()
+                deadline = _time.monotonic() + 5.0
+                while (
+                    lake_revision_module._PROBE_GATE.wedged(str(lake))
+                    and _time.monotonic() < deadline
+                ):
+                    _time.sleep(0.01)
+            assert not lake_revision_module._PROBE_GATE.wedged(str(lake))
+            recovered = [e for e in logs3 if e["event"] == "stat_gate.recovered"]
+            assert len(recovered) == 1
+        # Post-outage: the REAL token again (identical lake ⇒ identical token).
+        assert lake_revision(lake) == healthy
+
+    def test_summary_cache_with_wedged_probe_serves_warm_and_mark_dirty_completes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The wired SummaryCache stays servable under a wedged probe.
+
+        Re-runs the DEC-SURFACE-TRIAL-001 stalled-probe law against the NEW
+        bounded shape: with the production ``lake_revision`` probe wired and
+        the ledger stat wedged, a warm ``get_or_refresh`` still serves its
+        entry (probe → ``None`` → no bump) and ``mark_dirty`` completes —
+        both bounded by the watchdog, never a hang.
+        """
+        from brutex.dashboard.summary_cache import SPOT, SummaryCache
+
+        lake = tmp_path
+        _write_ledger_bytes(lake, b"ledger-v1")
+        cache = SummaryCache(ttl_floor_s=2.0, revision_probe=lambda: lake_revision(lake))
+        payload = [{"rows": 1}]
+        assert cache.get_or_refresh(SPOT, recompute=lambda: payload) == payload
+        monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+        with _wedged_ledger_stat(monkeypatch, lake), _probe_hang_watchdog(5):
+            gen_before = cache.generation
+            assert cache.get_or_refresh(SPOT, recompute=lambda: [{"rows": 2}]) == payload
+            cache.mark_dirty()  # the write funnel must never block
+            assert cache.generation == gen_before + 1
+
+
+class TestProbeExtractionEquivalence:
+    def test_healthy_token_identical_through_the_gate(self, tmp_path: Path) -> None:
+        """The gate-wrapped public fn ≡ the extracted probe body, byte-for-byte."""
+        from brutex.dashboard import lake_revision as lake_revision_module
+
+        lake = tmp_path
+        _write_ledger_bytes(lake, b"ledger-v1")
+        _write_store_file(lake, "NSE-NIFTY", "5minute", "store.parquet")
+        assert lake_revision(lake) == lake_revision_module._lake_revision_probe(lake)
+        # The empty-lake sentinel composite too.
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        assert lake_revision(empty) == lake_revision_module._lake_revision_probe(empty)

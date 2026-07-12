@@ -1019,3 +1019,367 @@ def test_effective_adaptive_floor_boundaries() -> None:
         effective_adaptive_floor(27.0, base_s=DEFAULT_TTL_FLOOR_S, cap_s=MAX_ADAPTIVE_FLOOR_S)
         == 27.0
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# BOUNDED cold wait (DEC-DASHBOARD-COLD-IO-DEADLINE-001, guarantee-audit BUG-1)
+# ────────────────────────────────────────────────────────────────────────
+#
+# REVERSION-GATE DISCIPLINE (ci.yml validate_bugfix_reversion.py): the new
+# names (SummaryColdWaitTimeout, cold_wait_budget_s, resolve_cold_wait_budget_s)
+# are imported FUNCTION-LOCALLY (PLC0415 is repo-ignored — lazy imports are
+# deliberate) so this file still COLLECTS against the merge-base tree and the
+# wedge regressions below fail with their GENUINE bounded-join shape (waiters
+# parked forever) rather than a whole-file collection error.
+
+
+class _SpyEvent(threading.Event):
+    """A ``threading.Event`` counting its ``wait`` calls (deterministic spy)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_calls = 0
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.wait_calls += 1
+        return super().wait(timeout)
+
+
+def test_cold_wait_times_out_bounded_no_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W1 — the cold single-flight wait is BOUNDED; the latch fail-fasts waiter 2.
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-1): a WEDGED
+    first-ever scan (blocked on a test Event, never released until teardown)
+    previously parked every cold waiter FOREVER on its lake-limiter token.
+    Now: waiter 1 pays the (tiny, env-resolved) budget and raises
+    ``SummaryColdWaitTimeout(latched=False)`` with ONE WARN; waiter 2 fails
+    fast ``latched=True`` with its owner-Event ``wait`` NEVER invoked again;
+    NEITHER takes the scan over (single-scan law — the leader stays
+    registered, the scan spy counts exactly one call). Fails-before shape:
+    at the merge-base both waiters park forever → the bounded ``join(5.0)``
+    + ``is_alive`` assertions fail LOUDLY (never a suite hang — the leader
+    Event is released in ``finally``).
+    """
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv("BRUTEX_SUMMARY_COLD_WAIT_S", "0.05")
+    cache = SummaryCache(ttl_floor_s=2.0)  # budget resolved from env at construction
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    calls = {"n": 0}
+
+    def slow_scan() -> list[dict[str, object]]:
+        calls["n"] += 1
+        scan_started.set()
+        assert release_scan.wait(timeout=30)
+        return [{"census": "payload"}]
+
+    errors: list[BaseException] = []
+
+    def waiter() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=slow_scan)
+        except Exception as exc:
+            errors.append(exc)
+
+    lead = threading.Thread(
+        target=cache.get_or_refresh, args=(SPOT,), kwargs={"recompute": slow_scan}, daemon=True
+    )
+    lead.start()
+    try:
+        assert scan_started.wait(timeout=10)  # the leader is REGISTERED + scanning
+        # Swap a wait-counting spy into the registration so the latched
+        # fail-fast's "no second wait" law is mechanically provable.
+        with cache._lock:
+            _event, ident = cache._refreshing[SPOT]
+            spy = _SpyEvent()
+            cache._refreshing[SPOT] = (spy, ident)
+        with capture_logs() as logs:
+            w1 = threading.Thread(target=waiter, daemon=True)
+            w1.start()
+            w1.join(5.0)
+            assert not w1.is_alive(), "unbounded cold wait (waiter 1 parked forever)"
+            w2 = threading.Thread(target=waiter, daemon=True)
+            w2.start()
+            w2.join(5.0)
+            assert not w2.is_alive(), "unbounded cold wait (waiter 2 parked forever)"
+        assert len(errors) == 2
+        # Imported ONLY after the hang assertions (reversion-gate discipline:
+        # at the merge-base the joins above have already failed loudly).
+        from brutex.dashboard.summary_cache import SummaryColdWaitTimeout
+
+        assert isinstance(errors[0], SummaryColdWaitTimeout)
+        assert isinstance(errors[1], SummaryColdWaitTimeout)
+        assert errors[0].latched is False
+        assert errors[0].kind == SPOT
+        assert errors[0].budget_s == 0.05
+        assert errors[1].latched is True
+        assert spy.wait_calls == 1  # waiter 2's latched fail-fast NEVER waited
+        # Exactly ONE WARN (the latch-arming waiter; the latched one is silent).
+        warns = [e for e in logs if e["event"] == "summary_cache.cold_wait_timeout"]
+        assert len(warns) == 1
+        assert warns[0]["kind"] == SPOT
+        assert calls["n"] == 1  # single-scan law: no takeover, no duplicate scan
+        with cache._lock:
+            assert SPOT in cache._refreshing  # the wedged leader is still the owner
+    finally:
+        release_scan.set()
+        lead.join(10.0)
+    assert not lead.is_alive()
+
+
+def test_cold_wait_budget_total_across_owner_handoffs() -> None:
+    """W2 — the budget is TOTAL across re-plan iterations, never per-wait.
+
+    A crash-looping owner chain must consume ONE budget: after a genuine
+    wake (owner handoff), the waiter re-plans, finds a FRESH owner Event,
+    and — with the injected clock already past the deadline — raises via the
+    ``remaining <= 0.0`` branch WITHOUT a second wait (wait-spy count == 1).
+    Zero real sleeps: the fake clock drives the budget arithmetic; the only
+    real wait is Event-released. Fails-before shape: at the merge-base the
+    waiter re-waits on owner 2's never-set event forever → the bounded join
+    fails.
+    """
+    clock = _FakeClock(start=1000.0)
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0, cold_wait_budget_s=10.0)
+    event1 = _SpyEvent()
+    event2 = _SpyEvent()
+    foreign_ident = threading.get_ident() - 1  # never a real thread's ident here
+    with cache._lock:
+        cache._refreshing[SPOT] = (event1, foreign_ident)
+
+    errors: list[BaseException] = []
+    entered_wait = threading.Event()
+
+    class _SignallingSpyEvent(_SpyEvent):
+        def wait(self, timeout: float | None = None) -> bool:
+            entered_wait.set()
+            return super().wait(timeout)
+
+    signalling = _SignallingSpyEvent()
+    with cache._lock:
+        cache._refreshing[SPOT] = (signalling, foreign_ident)
+
+    def waiter() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=_CountingRecompute())
+        except Exception as exc:
+            errors.append(exc)
+
+    w = threading.Thread(target=waiter, daemon=True)
+    w.start()
+    assert entered_wait.wait(5.0)  # the waiter is inside its FIRST (bounded) wait
+    # The owner "hands off": clock jumps past the deadline, a FRESH owner
+    # registers, and the old event wakes the waiter (a genuine wake).
+    clock.advance(11.0)
+    with cache._lock:
+        cache._refreshing[SPOT] = (event2, foreign_ident)
+    signalling.set()
+    w.join(5.0)
+    assert not w.is_alive(), "unbounded cold wait (waiter re-waited past its total budget)"
+    assert len(errors) == 1
+    # Imported ONLY after the hang assertion (reversion-gate discipline).
+    from brutex.dashboard.summary_cache import SummaryColdWaitTimeout
+
+    assert isinstance(errors[0], SummaryColdWaitTimeout)
+    assert errors[0].latched is False
+    assert signalling.wait_calls == 1  # ONE wait total
+    assert event2.wait_calls == 0  # the exhausted budget never waited on owner 2
+    # The latch armed on the CURRENT decision event (owner 2's).
+    with cache._lock:
+        assert cache._cold_wait_timed_out[SPOT] is event2
+
+
+def test_cold_wait_latch_clears_on_owner_success_with_recovered_info() -> None:
+    """The wedged owner finally completing pops the latch + ONE recovered INFO.
+
+    Recovery law: after the latch armed (a waiter's blown budget), the
+    owner's success must (a) serve every later reader normally and (b) emit
+    ``summary_cache.cold_wait_recovered`` exactly once — the flip twin of the
+    arming WARN.
+    """
+    from structlog.testing import capture_logs
+
+    cache = SummaryCache(ttl_floor_s=2.0, cold_wait_budget_s=0.05)
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def slow_scan() -> list[dict[str, object]]:
+        scan_started.set()
+        assert release_scan.wait(timeout=30)
+        return [{"census": "payload"}]
+
+    errors: list[BaseException] = []
+
+    def waiter() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=slow_scan)
+        except Exception as exc:
+            errors.append(exc)
+
+    lead = threading.Thread(
+        target=cache.get_or_refresh, args=(SPOT,), kwargs={"recompute": slow_scan}, daemon=True
+    )
+    lead.start()
+    assert scan_started.wait(timeout=10)
+    w1 = threading.Thread(target=waiter, daemon=True)
+    w1.start()
+    w1.join(5.0)
+    assert not w1.is_alive()
+    assert len(errors) == 1  # the latch is armed
+    with cache._lock:
+        assert SPOT in cache._cold_wait_timed_out
+    with capture_logs() as logs:
+        release_scan.set()
+        lead.join(10.0)
+        assert not lead.is_alive()
+    infos = [e for e in logs if e["event"] == "summary_cache.cold_wait_recovered"]
+    assert len(infos) == 1
+    assert infos[0]["kind"] == SPOT
+    with cache._lock:
+        assert SPOT not in cache._cold_wait_timed_out
+    # Later readers serve the stored payload normally (clean hit).
+    follow_up = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=follow_up) == [{"census": "payload"}]
+    assert follow_up.calls == 0
+
+
+def test_cold_wait_latch_cleared_silently_on_owner_abort() -> None:
+    """A RAISED owner scan pops the latch silently; the takeover law survives.
+
+    The abort wake re-scopes everything: the woken taker-over registers a
+    FRESH owner Event, so the stale latch entry is popped WITHOUT a recovery
+    INFO (nothing recovered — the scan failed) and the next reader takes
+    over exactly as the pre-existing takeover pin proves.
+    """
+    from structlog.testing import capture_logs
+
+    cache = SummaryCache(ttl_floor_s=0.0, cold_wait_budget_s=0.05)
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    class _Boom(RuntimeError):
+        pass
+
+    def failing_scan() -> list[dict[str, object]]:
+        scan_started.set()
+        assert release_scan.wait(timeout=30)
+        raise _Boom
+
+    waiter_errors: list[BaseException] = []
+
+    def waiter() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=failing_scan)
+        except Exception as exc:
+            waiter_errors.append(exc)
+
+    leader_errors: list[BaseException] = []
+
+    def leader() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=failing_scan)
+        except _Boom as exc:
+            leader_errors.append(exc)
+
+    lead = threading.Thread(target=leader, daemon=True)
+    lead.start()
+    assert scan_started.wait(timeout=10)
+    w1 = threading.Thread(target=waiter, daemon=True)
+    w1.start()
+    w1.join(5.0)
+    assert not w1.is_alive()
+    assert len(waiter_errors) == 1  # latch armed
+    with capture_logs() as logs:
+        release_scan.set()
+        lead.join(10.0)
+        assert not lead.is_alive()
+    assert len(leader_errors) == 1  # the owner's exception propagated untouched
+    assert [e for e in logs if e["event"] == "summary_cache.cold_wait_recovered"] == []
+    with cache._lock:
+        assert SPOT not in cache._cold_wait_timed_out  # popped silently
+    # The next reader takes over with ONE fresh scan (the pre-existing law).
+    good = _CountingRecompute()
+    assert cache.get_or_refresh(SPOT, recompute=good) == [{"call": 1}]
+    assert good.calls == 1
+
+
+def test_cold_wait_stale_latch_is_identity_invalidated_by_a_fresh_owner() -> None:
+    """A latch keyed to a DEAD owner's Event never fail-fasts a fresh wait.
+
+    The latched check is ``get(kind) is decision`` — identity against the
+    CURRENT registration's event — so a stale latch entry (an older owner's
+    event) is inert: the reader waits normally, wakes on the (released)
+    fresh registration, takes over, and the success path sweeps the stale
+    entry out.
+    """
+    cache = SummaryCache(ttl_floor_s=2.0, cold_wait_budget_s=10.0)
+    stale_event = threading.Event()
+    fresh_event = _SpyEvent()
+    foreign_ident = threading.get_ident() - 1
+    entered_wait = threading.Event()
+
+    class _SignallingSpyEvent(_SpyEvent):
+        def wait(self, timeout: float | None = None) -> bool:
+            entered_wait.set()
+            return super().wait(timeout)
+
+    signalling = _SignallingSpyEvent()
+    with cache._lock:
+        cache._refreshing[SPOT] = (signalling, foreign_ident)
+        cache._cold_wait_timed_out[SPOT] = stale_event  # a DEAD owner's latch
+
+    results: list[list[dict[str, object]]] = []
+    good = _CountingRecompute()
+
+    def reader() -> None:
+        results.append(cache.get_or_refresh(SPOT, recompute=good))
+
+    r = threading.Thread(target=reader, daemon=True)
+    r.start()
+    assert entered_wait.wait(5.0)  # it WAITED — the stale latch did not fail-fast
+    with cache._lock:
+        del cache._refreshing[SPOT]  # the fake foreign owner "vanishes"
+    signalling.set()
+    r.join(5.0)
+    assert not r.is_alive()
+    assert results == [[{"call": 1}]]  # the reader took over and computed
+    assert good.calls == 1
+    assert fresh_event.wait_calls == 0
+    with cache._lock:
+        assert SPOT not in cache._cold_wait_timed_out  # stale entry swept
+
+
+def test_cold_wait_budget_resolver_and_ctor_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolver fail-safe matrix + ctor-override-beats-env (fail-safe knob law)."""
+    from brutex.dashboard.summary_cache import (
+        COLD_WAIT_BUDGET_S,
+        resolve_cold_wait_budget_s,
+    )
+
+    monkeypatch.delenv("BRUTEX_SUMMARY_COLD_WAIT_S", raising=False)
+    assert resolve_cold_wait_budget_s() == COLD_WAIT_BUDGET_S
+    for junk in ("", "  ", "abc", "nan", "inf", "-3", "0"):
+        assert resolve_cold_wait_budget_s(junk) == COLD_WAIT_BUDGET_S
+    assert resolve_cold_wait_budget_s("12.5") == 12.5
+    monkeypatch.setenv("BRUTEX_SUMMARY_COLD_WAIT_S", "7.5")
+    assert SummaryCache()._cold_wait_budget_s == 7.5  # env drives the default
+    assert SummaryCache(cold_wait_budget_s=0.25)._cold_wait_budget_s == 0.25  # ctor wins
+
+
+def test_cold_wait_timeout_typing_and_attributes() -> None:
+    """The exception is a RuntimeError, deliberately NOT TimeoutError/OSError.
+
+    ``TimeoutError ⊂ OSError`` — a raw timeout crossing the dashboard read
+    path would be one refactor away from an ``except OSError`` corrupt-file
+    misclassification (the D-5 typing law).
+    """
+    from brutex.dashboard.summary_cache import SummaryColdWaitTimeout
+
+    exc = SummaryColdWaitTimeout(SPOT, 60.0, latched=False)
+    assert isinstance(exc, RuntimeError)
+    assert not isinstance(exc, TimeoutError)
+    assert not isinstance(exc, OSError)
+    assert (exc.kind, exc.budget_s, exc.latched) == (SPOT, 60.0, False)
+    assert "budget exhausted" in str(exc)
+    assert "latched" in str(SummaryColdWaitTimeout(OPTIONS, 5.0, latched=True))

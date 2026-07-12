@@ -57,17 +57,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
 
+import structlog
+
+from brutex.config.deadline import resolve_env_seconds
+
+_LOG = structlog.get_logger(__name__)
+
 #: The summary kinds the cache stores — the spot candle lake summary and the
 #: expired-option lake summary. A :meth:`SummaryCache.get_or_refresh` call
 #: names exactly one of these. The lake duplicate-census kind
 #: (:data:`LAKE_UNIQUENESS`) is RETIRED from this cache
 #: (DEC-LAKE-CENSUS-NONBLOCKING-001): the ``/universe`` lake-uniqueness census
 #: now rides the ``LakeCensusHolder`` daemon-thread runner — the COLD
-#: single-flight below parks every concurrent waiter in an UNBOUNDED
-#: ``decision.wait()`` ON a threadpool worker, and the census's 26-minute
-#: production scan × the 15 s chip poll exhausted the shared AnyIO limiter
-#: (the reproduced dashboard-wide freeze). The constant is kept for the
-#: historical single-flight tests; no production route keys on it any more.
+#: single-flight below parked every concurrent waiter in a then-UNBOUNDED
+#: ``decision.wait()`` ON a threadpool worker (bounded since
+#: DEC-DASHBOARD-COLD-IO-DEADLINE-001 — :data:`COLD_WAIT_BUDGET_S`), and the
+#: census's 26-minute production scan × the 15 s chip poll exhausted the
+#: shared AnyIO limiter (the reproduced dashboard-wide freeze). The constant
+#: is kept for the historical single-flight tests; no production route keys
+#: on it any more.
 SPOT: Final[str] = "spot"
 OPTIONS: Final[str] = "options"
 LAKE_UNIQUENESS: Final[str] = "lake_uniqueness"
@@ -102,6 +110,73 @@ PULL_DUTY_FLOOR_MULTIPLIER: Final[float] = 9.0
 #: stays bounded AND is surfaced honestly (``duty_degraded`` /
 #: ``snapshot_age_s`` via :meth:`SummaryCache.stamp_freshness` — never silent).
 MAX_PULL_DUTY_FLOOR_S: Final[float] = 600.0
+
+#: Environment override for the COLD single-flight wait budget (operator
+#: escape hatch, no code change) — fail-SAFE validated via the COMMON
+#: :func:`~brutex.config.deadline.resolve_env_seconds` (a junk value can
+#: never disable the bound NOR refuse a dashboard boot — the ledgered
+#: divergence from the rate-bridge fail-loud resolvers).
+COLD_WAIT_BUDGET_ENV: Final[str] = "BRUTEX_SUMMARY_COLD_WAIT_S"
+
+#: Default TOTAL wall-clock budget one COLD reader may spend waiting on
+#: another thread's in-flight first scan (DEC-DASHBOARD-COLD-IO-DEADLINE-001,
+#: guarantee-audit BUG-1). The observed legitimate worst is the 27-30 s
+#: mid-pull full-lake completeness scan (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001),
+#: so 60 s is 2× headroom — the store-guard "GENEROUS: only a genuine hang can
+#: exhaust it" doctrine; with the owner-Event latch, generosity costs exactly
+#: ONE waiter thread per wedged owner. The budget is TOTAL across the re-plan
+#: loop (a crash-looping owner chain consumes one budget, never one per
+#: takeover).
+COLD_WAIT_BUDGET_S: Final[float] = 60.0
+
+
+def resolve_cold_wait_budget_s(raw: str | None = None) -> float:
+    """Resolve the cold-wait budget: env override, else the audited default.
+
+    Reads :data:`COLD_WAIT_BUDGET_ENV` (``BRUTEX_SUMMARY_COLD_WAIT_S``); any
+    unset / blank / non-numeric / non-positive / non-finite value fails SAFE
+    to :data:`COLD_WAIT_BUDGET_S` via the ONE COMMON validation shape
+    :func:`~brutex.config.deadline.resolve_env_seconds` — a bad value can
+    NEVER disable the bound (Golden Rule #1). O(1).
+
+    Parameters
+    ----------
+    raw
+        The value to validate (``None`` reads the env); a test may pass one.
+    """
+    return resolve_env_seconds(COLD_WAIT_BUDGET_ENV, COLD_WAIT_BUDGET_S, raw)
+
+
+class SummaryColdWaitTimeout(RuntimeError):
+    """A COLD reader's total wait budget on an in-flight first scan expired.
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-1): the owner
+    thread's first-ever scan is wedged (or legitimately slower than the
+    budget), and this reader has NOTHING last-known to serve — the routes map
+    this to the honest 503 ``summary_scan_pending`` degrade, never a raw 500,
+    never a fabricated empty payload (Golden Rule #1). Deliberately a
+    :class:`RuntimeError`, NOT a :class:`TimeoutError`:
+    ``TimeoutError ⊂ OSError``, and a raw timeout crossing the dashboard read
+    path would be one refactor away from silent misclassification by an
+    ``except OSError`` corrupt-file arm.
+
+    Attributes
+    ----------
+    kind
+        The summary kind whose first scan is still in flight.
+    budget_s
+        The resolved total wait budget that expired.
+    latched
+        ``True`` when this raise was the instant fail-fast behind a PRIOR
+        waiter's blown budget on the SAME owner Event (no wait was paid).
+    """
+
+    def __init__(self, kind: str, budget_s: float, *, latched: bool) -> None:
+        detail = "latched" if latched else "budget exhausted"
+        super().__init__(f"cold {kind} summary scan still in flight ({budget_s:g}s {detail})")
+        self.kind = kind
+        self.budget_s = budget_s
+        self.latched = latched
 
 
 def effective_adaptive_floor(compute_duration: float, *, base_s: float, cap_s: float) -> float:
@@ -269,10 +344,17 @@ class SummaryCache:
         clock: Callable[[], float] = _monotonic,
         ttl_floor_s: float = DEFAULT_TTL_FLOOR_S,
         revision_probe: Callable[[], str | None] | None = None,
+        cold_wait_budget_s: float | None = None,
     ) -> None:
         self._clock = clock
         self._ttl_floor_s = ttl_floor_s
         self._revision_probe = revision_probe
+        #: TOTAL cold-wait budget (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+        #: ``None`` resolves the env-tunable default ONCE at construction —
+        #: zero per-call env cost on the hit arm (the bench-pinned path).
+        self._cold_wait_budget_s = (
+            resolve_cold_wait_budget_s() if cold_wait_budget_s is None else cold_wait_budget_s
+        )
         #: Late-bound in-process pull signal (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001):
         #: ``None`` (the default) keeps today's semantics byte-identical; the app
         #: wiring assigns the real probe via :meth:`set_pull_active_probe` AFTER the
@@ -301,18 +383,32 @@ class SummaryCache:
         #: scans, one per cold poll, because the pre-fix cold path deliberately
         #: fell through to a "transient double-scan"). SUPERSESSION NOTE
         #: (DEC-LAKE-CENSUS-NONBLOCKING-001): that census no longer rides this
-        #: cache AT ALL — the unbounded cold wait parks each waiter ON a
+        #: cache AT ALL — the then-unbounded cold wait parked each waiter ON a
         #: threadpool worker, and the census's 26-min scan × the 15 s poll
         #: starved the shared AnyIO limiter; LAKE_UNIQUENESS moved to the
-        #: non-blocking ``LakeCensusHolder``. The SPOT/OPTIONS kinds KEEP this
-        #: wait (their scans are seconds, not tens of minutes) — the same
-        #: hazard class at a smaller scale, a NAMED follow-up in #1648's
-        #: honest-limits clause. The owner thread ident
+        #: non-blocking ``LakeCensusHolder``. The SPOT/OPTIONS kinds keep the
+        #: wait itself, now BOUNDED by the TOTAL ``_cold_wait_budget_s``
+        #: budget with a per-owner-Event fail-fast latch
+        #: (``_cold_wait_timed_out``) — DEC-DASHBOARD-COLD-IO-DEADLINE-001,
+        #: closing the #1648 honest-limits named follow-up for these kinds
+        #: (the ``MoversSnapshotCache`` sibling wait is the named follow-up
+        #: DEC-DASHBOARD-COLD-IO-DEADLINE-002). The owner thread ident
         #: preserves the one legal fall-through: a RE-ENTRANT read from inside
         #: the in-flight recompute itself (same thread) must recompute rather
         #: than self-deadlock waiting on its own event (the
         #: DEC-COMPLETENESS-O1-LATENCY-001 cold-reentrancy case, still pinned).
         self._refreshing: dict[str, tuple[threading.Event, int]] = {}
+        #: kind → the owner Event whose TOTAL cold-wait budget a waiter blew
+        #: (the fail-fast latch, DEC-DASHBOARD-COLD-IO-DEADLINE-001): exactly
+        #: ONE waiter pays the budget per wedged owner — every later cold
+        #: reader of the SAME owner Event raises instantly (O(1), no wait),
+        #: so stacked 4-15 s pollers can never re-approach the 32-token lake
+        #: limiter's exhaustion. Identity-matched against the CURRENT
+        #: ``_refreshing`` event, so a FRESH owner (post-takeover) auto-
+        #: invalidates a stale latch; cleared on the owner's success (with one
+        #: recovery INFO) and on its abort (silently — the fresh owner's fresh
+        #: Event re-scopes everything).
+        self._cold_wait_timed_out: dict[str, threading.Event] = {}
 
     def set_pull_active_probe(self, probe: Callable[[], bool | None] | None) -> None:
         """LATE-BIND the in-process pull probe (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001).
@@ -460,7 +556,23 @@ class SummaryCache:
         -------
         SummaryPayload
             The cached or freshly-computed summary for *kind*.
+
+        Raises
+        ------
+        SummaryColdWaitTimeout
+            A COLD reader's TOTAL wait budget on another thread's in-flight
+            first scan expired (``latched=False``, one WARN), or a prior
+            waiter already blew the budget on the SAME owner Event
+            (``latched=True``, instant — no wait, no log). The timed-out
+            waiter NEVER takes the scan over (the single-scan law stands);
+            the routes map this to the honest 503 ``summary_scan_pending``
+            degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
         """
+        # TOTAL cold-wait budget deadline across re-plan iterations (a
+        # crash-looping owner chain consumes ONE budget, never one per
+        # takeover). ``None`` until this reader first hits the cold-wait arm
+        # — the hit / recompute arms never read the clock for it.
+        wait_deadline: float | None = None
         while True:
             # Probe OUTSIDE the lock (a hung stat must never block mark_dirty —
             # DEC-SURFACE-TRIAL-001), then reconcile + plan under it: the
@@ -483,21 +595,43 @@ class SummaryCache:
                 # wait for it (no lock held), then re-plan: the stored entry
                 # serves as a hit/throttled read; if the scan RAISED instead,
                 # exactly one woken waiter re-registers and becomes the new
-                # computer. Unbounded wait is deliberate + honest for the
-                # remaining SPOT/OPTIONS kinds (seconds-scale scans): pre-fix,
-                # every cold poller duplicated the wedged scan and hung anyway
-                # — now at most ONE scan is in flight to wedge. When this
-                # runs on a dashboard offload worker, the waiting THREAD holds
-                # a LAKE-limiter token (DEC-DASHBOARD-LAKE-IO-LIMITER-001):
-                # wedged waiters are bounded by the 32-token lake pool and can
-                # no longer exhaust AnyIO's default 40-token pool — the waiter
-                # SEMANTICS here are deliberately unchanged. For the
-                # LAKE_UNIQUENESS census this clause is SUPERSEDED entirely
-                # (DEC-LAKE-CENSUS-NONBLOCKING-001): its 26-min scan × stacked
-                # 15 s polls made even a bounded wait unacceptable — that route
-                # now rides the non-blocking ``LakeCensusHolder`` instead and
-                # never enters this wait at all.
-                decision.wait()
+                # computer. The wait is BOUNDED by a TOTAL budget
+                # (DEC-DASHBOARD-COLD-IO-DEADLINE-001, guarantee-audit BUG-1
+                # — closes the #1648 honest-limits named follow-up): a WEDGED
+                # owner scan (a hung syscall that never raises) parked every
+                # cold waiter forever ON its lake-limiter token
+                # (DEC-DASHBOARD-LAKE-IO-LIMITER-001), so stacked 4-15 s
+                # pollers marched toward the 32-token pool's exhaustion. A
+                # timed-out waiter NEVER takes the scan over (the single-scan
+                # law is structural — `_plan` holds the only registration
+                # site) and ARMS the per-owner-Event latch so every LATER
+                # cold reader fails fast in O(1) with no wait: exactly ONE
+                # waiter pays the budget per wedged owner. The wedged OWNER
+                # itself still pins its token until the volume releases (the
+                # #999 un-killable stance — this bounds the WAITERS, not the
+                # owner). For the LAKE_UNIQUENESS census this clause is
+                # SUPERSEDED entirely (DEC-LAKE-CENSUS-NONBLOCKING-001): its
+                # 26-min scan × stacked 15 s polls made even a bounded wait
+                # unacceptable — that route now rides the non-blocking
+                # ``LakeCensusHolder`` instead and never enters this wait.
+                with self._lock:
+                    latched = self._cold_wait_timed_out.get(kind) is decision
+                if latched:
+                    # A prior waiter blew the budget on this SAME owner Event
+                    # — fail fast: no wait, no log (the arming waiter WARNed).
+                    raise SummaryColdWaitTimeout(kind, self._cold_wait_budget_s, latched=True)
+                if wait_deadline is None:
+                    wait_deadline = self._clock() + self._cold_wait_budget_s
+                remaining = wait_deadline - self._clock()
+                if remaining <= 0.0 or not decision.wait(remaining):
+                    with self._lock:
+                        self._cold_wait_timed_out[kind] = decision  # arm the latch
+                    _LOG.warning(
+                        "summary_cache.cold_wait_timeout",
+                        kind=kind,
+                        budget_s=self._cold_wait_budget_s,
+                    )
+                    raise SummaryColdWaitTimeout(kind, self._cold_wait_budget_s, latched=False)
                 continue
             gen_at_start = decision
             started_at = self._clock()
@@ -506,6 +640,11 @@ class SummaryCache:
             except BaseException:
                 with self._lock:
                     aborted = self._refreshing.pop(kind, None)
+                    # A raised scan re-scopes the cold wait: the woken
+                    # taker-over registers a FRESH owner Event, so a stale
+                    # latch entry keyed to the dead owner's event is popped
+                    # silently (identity-matching already made it inert).
+                    self._cold_wait_timed_out.pop(kind, None)
                 if aborted is not None:
                     aborted[0].set()  # wake waiters so one can take over
                 raise
@@ -524,6 +663,10 @@ class SummaryCache:
                 # A fresh recompute is by definition NOT duty-degraded (the honest
                 # flag tracks the LAST served read of this kind).
                 self._duty_degraded[kind] = False
+                # The owner's success clears the cold-wait latch (the wedged
+                # scan finally returned — the volume recovered): the next cold
+                # reader waits a fresh budget instead of failing fast forever.
+                cleared = self._cold_wait_timed_out.pop(kind, None)
                 # Entry stored BEFORE the event is set (same lock block), so a
                 # woken waiter always finds a servable payload — never a second
                 # scan. A RE-ENTRANT recompute (see `_plan`) is not registered,
@@ -533,6 +676,8 @@ class SummaryCache:
                 done = self._refreshing.pop(kind, None)
             if done is not None:
                 done[0].set()
+            if cleared is not None:
+                _LOG.info("summary_cache.cold_wait_recovered", kind=kind)
             return payload
 
     def entry_meta(self, kind: str) -> SummaryEntryMeta | None:
@@ -736,6 +881,8 @@ class CoverageCountersSnapshot:
 
 
 __all__ = [
+    "COLD_WAIT_BUDGET_ENV",
+    "COLD_WAIT_BUDGET_S",
     "DEFAULT_TTL_FLOOR_S",
     "LAKE_UNIQUENESS",
     "MAX_ADAPTIVE_FLOOR_S",
@@ -747,7 +894,9 @@ __all__ = [
     "CoverageCountersSnapshot",
     "Recompute",
     "SummaryCache",
+    "SummaryColdWaitTimeout",
     "SummaryEntryMeta",
     "SummaryPayload",
     "effective_adaptive_floor",
+    "resolve_cold_wait_budget_s",
 ]
