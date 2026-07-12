@@ -133,6 +133,43 @@ def test_clean_lake_prints_no_note(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "low-density" not in out
 
 
+def test_observed_overlay_day_silences_the_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round-3 (fails before): ``cmd_sweep_all`` loads the
+    observed-holiday overlay and threads it into the preflight census exactly
+    like BOTH ingest wirings — the SAME holey lake that prints the
+    missing_session note un-overlaid prints NOTHING once 2024-01-03 is an
+    observed holiday (an overlaid date is NOT a session; the false
+    "re-pull this window" remediation could never succeed on it)."""
+    import json
+
+    from brutex.calendars.observed_sessions import (
+        OBSERVED_LABEL,
+        OBSERVED_OVERLAY_VERSION,
+        overlay_path,
+    )
+
+    monkeypatch.delenv(SESSION_DENSITY_KILL_ENV, raising=False)
+    lake_root, catalog_path = _seed(tmp_path, holey=True)
+    sidecar = overlay_path(lake_root)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": OBSERVED_OVERLAY_VERSION,
+                "entries": [{"date": "2024-01-03", "label": OBSERVED_LABEL}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc = cmd_sweep_all(symbols="NIFTY", **_kwargs(lake_root, catalog_path, tmp_path))
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK
+    assert "low-density" not in out
+    assert "2024-01-03" not in out
+
+
 def test_kill_switch_silences_the_preflight_note_too(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

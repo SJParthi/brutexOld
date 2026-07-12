@@ -141,6 +141,22 @@ class TestDetectExtremeDailyRanges:
         )
         assert len(out) == 1  # the 0.09 default still governs
 
+    def test_env_knob_zero_never_becomes_a_flag_everything_threshold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round-3 mutant killer (`<= 0.0` -> `< 0.0` in _tunable_ratio):
+        # env "0" — the plausible operator attempt to DISABLE the detector —
+        # must fall back to the 0.09 default, so a calm 5% day stays unflagged.
+        # Under the mutant "0" is ACCEPTED as threshold 0.0 and EVERY complete
+        # session flags (a WARN flood exactly where the docstring promises
+        # fail-soft fallback). The parametrized "0" case above cannot see it:
+        # its 9.5% fixture flags at 0.0 AND at 0.09 alike.
+        monkeypatch.setenv("BRUTEX_DAILY_RANGE_WARN_RATIO", "0")
+        out = detect_extreme_daily_ranges(
+            _frame([_day_row(date(2024, 1, 3), 105.0, 100.0)]), before=_FAR_FUTURE
+        )
+        assert out == ()  # 5% < the 0.09 default — never threshold 0.0
+
 
 class TestEmitExtremeDailyRanges:
     def test_known_day_emits_one_info_no_warn(self) -> None:
@@ -189,6 +205,27 @@ class TestEmitExtremeDailyRanges:
         assert len(warns) == MAX_RANGE_WARNS
         (summary,) = [e for e in logs if e["event"] == DAILY_RANGE_SUPPRESSED_EVENT]
         assert summary["total"] == MAX_RANGE_WARNS + 3
+
+    def test_exactly_cap_days_emit_all_warns_and_no_false_suppressed(self) -> None:
+        # Review round-3 mutant killer (`>` -> `>=` at the suppressed gate):
+        # EXACTLY MAX_RANGE_WARNS unknown days emit exactly that many WARN
+        # lines and NO suppressed summary — the mutant emits a lying
+        # {cap: 20, total: 20} "suppression" line when all 20 rendered
+        # (Golden Rule #1: the cap never lies).
+        days = tuple(
+            ExtremeRangeDay(
+                session_date=date(2024, 1, 1) + timedelta(days=i),
+                range_ratio=0.10,
+                known_halt=False,
+                reason=None,
+            )
+            for i in range(MAX_RANGE_WARNS)
+        )
+        with capture_logs() as logs:
+            emit_extreme_daily_ranges(days, symbol="NIFTY")
+        warns = [e for e in logs if e["event"] == DAILY_RANGE_EVENT]
+        assert len(warns) == MAX_RANGE_WARNS
+        assert [e for e in logs if e["event"] == DAILY_RANGE_SUPPRESSED_EVENT] == []
 
     def test_zero_hit_scan_emits_nothing(self) -> None:
         with capture_logs() as logs:

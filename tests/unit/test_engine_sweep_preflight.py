@@ -13,12 +13,15 @@ from decimal import Decimal
 import pytest
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
+from brutex.data.session_density import SESSION_DENSITY_ERROR_EVENT
 from brutex.engine import sweep_preflight as sweep_preflight_mod
 from brutex.engine.sweep_preflight import (
     PreflightReport,
+    SessionDensityNote,
     preflight_session_density,
     preflight_slices,
 )
+from structlog.testing import capture_logs
 
 
 class TestPreflightSlices:
@@ -296,6 +299,84 @@ class TestSessionDensityNote:
         )
         capped = note.lines(cap=0)
         assert capped == ("... +1 more low-density session(s)",)
+
+    def _two_flag_note(self) -> SessionDensityNote:
+        # Two symbols, each with the same interior hole -> exactly 2 flags
+        # in symbol-major order (AAA before BBB).
+        return preflight_session_density(
+            {
+                ("AAA", "1minute"): self._holey_slice(),
+                ("BBB", "1minute"): self._holey_slice(),
+            },
+            today_ist=date(2026, 12, 31),
+        )
+
+    def test_lines_cap_one_of_two_shows_first_flag_plus_honest_tail(self) -> None:
+        # Review round-3 mutant killer (`[:cap]` -> `[:cap-1]`): at cap=1 with
+        # 2 flags the output must be the FIRST flag line + a "+1 more" tail —
+        # the mutant renders ZERO flag lines while the tail still claims only
+        # 1 was suppressed (a lying count line at any real cap).
+        note = self._two_flag_note()
+        lines = note.lines(cap=1)
+        assert len(lines) == 2
+        assert lines[0].startswith("AAA/1minute 2024-01-03: 0/375 bars")
+        assert lines[1] == "... +1 more low-density session(s)"
+
+    def test_lines_at_exactly_cap_have_no_tail(self) -> None:
+        # Review round-3 mutant killer (`>` -> `>=` at the tail gate): at
+        # cap == len(flagged) every flag line renders and NO overflow tail is
+        # appended (a "+0 more" tail would lie — nothing was suppressed).
+        note = self._two_flag_note()
+        lines = note.lines(cap=2)
+        assert len(lines) == 2
+        assert all("more low-density" not in line for line in lines)
+
+    def test_observed_overlay_day_is_not_flagged(self) -> None:
+        # Review round-3 (fails before): the preflight arm now threads the
+        # observed-holiday overlay exactly like BOTH ingest wirings — an
+        # overlaid interior date abstains non_trading instead of
+        # false-flagging missing_session at every sweep launch.
+        slices = {("NIFTY", "1minute"): self._holey_slice()}
+        unoverlaid = preflight_session_density(slices, today_ist=date(2026, 12, 31))
+        assert not unoverlaid.ok  # the un-overlaid twin still flags
+        overlaid = preflight_session_density(
+            slices,
+            today_ist=date(2026, 12, 31),
+            observed=frozenset({date(2024, 1, 3)}),
+        )
+        assert overlaid.ok
+        assert overlaid.flagged == ()
+        assert overlaid.slices_checked == 1
+
+    def test_belt_swallows_a_raising_slice_and_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round-3 belt: a slice whose classify raises logs ONE error
+        # event and is SKIPPED — the remaining slices are still censused and
+        # the WARN-only note can never crash the launch it decorates (the
+        # ingest twin's swallow-and-continue discipline).
+        real = sweep_preflight_mod.classify_session_density
+
+        def _selective(stamps: list[datetime], **kwargs: object) -> object:
+            if len(stamps) == 1:
+                raise RuntimeError("injected classify crash")
+            return real(stamps, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sweep_preflight_mod, "classify_session_density", _selective)
+        slices = {
+            # sorted first -> the RAISING slice; continuation is proven by
+            # the later healthy slice still being censused + flagged.
+            ("AAA", "1minute"): self._minute_bars(date(2024, 1, 2), count=1),
+            ("NIFTY", "1minute"): self._holey_slice(),
+        }
+        with capture_logs() as logs:
+            note = preflight_session_density(slices, today_ist=date(2026, 12, 31))
+        assert note.slices_checked == 1  # the healthy slice still censused
+        assert len(note.flagged) == 1  # NIFTY's hole still named
+        assert note.flagged[0][0] == "NIFTY"
+        errors = [e for e in logs if e["event"] == SESSION_DENSITY_ERROR_EVENT]
+        assert len(errors) == 1
+        assert "injected classify crash" in errors[0]["error"]
 
     def test_note_is_pure_data_never_a_refusal(self) -> None:
         # The note carries NO refusal surface — no remediation() gate method,

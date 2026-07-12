@@ -20,8 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import structlog
+
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.session_density import (
+    SESSION_DENSITY_ERROR_EVENT,
     SESSION_DENSITY_WARN_CAP,
     SessionDensityFlag,
     classify_session_density,
@@ -30,9 +33,12 @@ from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from datetime import date
 
     from brutex.data.models import CandleBar
+
+_LOG = structlog.get_logger(__name__)
 
 #: The base interval the pull fetches directly from the vendor; anything else is a
 #: derived timeframe whose remedy is materialization, not a re-pull. ``1minute``
@@ -247,8 +253,9 @@ def preflight_session_density(
     slices: Mapping[tuple[str, str], Sequence[CandleBar]],
     *,
     today_ist: date | None = None,
+    observed: AbstractSet[date] = frozenset(),
 ) -> SessionDensityNote:
-    """Census every loaded ``1minute`` slice's per-session bar density — pure.
+    """Census every loaded ``1minute`` slice's per-session bar density.
 
     DELEGATES to the ONE COMMON classifier
     (:func:`~brutex.data.session_density.classify_session_density` — CLAUDE.md
@@ -267,6 +274,21 @@ def preflight_session_density(
     :func:`~brutex.data.session_density.session_density_census_enabled` — so
     the switch kills ALL census output while the note builder carries no
     kill-switch read of its own.
+
+    *observed* threads the observed-holiday overlay
+    (DEC-CALENDAR-OBSERVED-SESSIONS-001) into the classifier exactly like
+    BOTH ingest wirings do (review round-3 — the asymmetry re-opened the
+    ``missing_session`` false-flag the classifier's ``observed`` param was
+    built to close): an overlaid interior date abstains ``non_trading``
+    instead of false-flagging at every sweep launch. ``cmd_sweep_all`` loads
+    it via the never-raising
+    :func:`~brutex.calendars.observed_sessions.load_observed_holidays`.
+
+    Pure modulo the BELT (review round-3, the ingest twin's
+    swallow-and-continue discipline): a slice whose classify raises logs ONE
+    :data:`~brutex.data.session_density.SESSION_DENSITY_ERROR_EVENT` WARNING
+    and is skipped — a WARN-only note must NEVER crash the launch it
+    decorates (the classifier is itself total; this is defense-in-depth).
     """
     flagged: list[tuple[str, str, SessionDensityFlag]] = []
     checked = 0
@@ -276,7 +298,18 @@ def preflight_session_density(
         bars = slices[(symbol, interval)]
         if not bars:
             continue
-        verdict = classify_session_density([bar.timestamp for bar in bars], today_ist=today_ist)
+        try:
+            verdict = classify_session_density(
+                [bar.timestamp for bar in bars], today_ist=today_ist, observed=observed
+            )
+        except Exception as exc:  # belt: a WARN-only note never crashes the launch
+            _LOG.warning(
+                SESSION_DENSITY_ERROR_EVENT,
+                symbol=repr(symbol),
+                interval=interval,
+                error=str(exc),
+            )
+            continue
         checked += 1
         flagged.extend((symbol, interval, flag) for flag in verdict.flags)
     return SessionDensityNote(flagged=tuple(flagged), slices_checked=checked)

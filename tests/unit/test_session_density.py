@@ -154,6 +154,15 @@ class TestLargestMissingRun:
         present = set(range(10)) - {1, 2, 7, 8}
         assert sd._largest_missing_run(present, 10) == (1, 2)  # pyright: ignore[reportPrivateUsage]
 
+    def test_earliest_run_wins_trailing_tie(self) -> None:
+        # Review round-3 mutant killer: an interior run TIED by a TRAILING
+        # run (slots 1-2 vs 8-9) must report the EARLIEST run's bounds — the
+        # trailing-arm `>` -> `>=` mutant flips this to (8, 9), contradicting
+        # the docstring's "ties: the earliest run wins" law (the interior tie
+        # arm above cannot see it: its tie never reaches the trailing arm).
+        present = set(range(10)) - {1, 2, 8, 9}
+        assert sd._largest_missing_run(present, 10) == (1, 2)  # pyright: ignore[reportPrivateUsage]
+
     def test_all_missing(self) -> None:
         assert sd._largest_missing_run(frozenset(), 5) == (0, 4)  # pyright: ignore[reportPrivateUsage]
 
@@ -327,10 +336,11 @@ class TestTfScaling:
     Both production wirings hard-gate to ``1minute``, but ``tf_minutes`` is an
     advertised public parameter and ``expected_bars_for_session`` is
     TF-generic (derived-TF use is plausible) — so the tf-scaling arithmetic
-    stays and gets teeth: the bucket division ``(m - open_min) // tf_minutes``,
-    the gap-LENGTH clamp ``min(run_len * tf, duration)``, and the gap-END
-    clamp ``min((end_slot + 1) * tf, duration)`` at the truncated final
-    bucket. A regular session at tf=30 expects only ``ceil(375/30) = 13``
+    stays and gets teeth: the bucket division ``(m - open_min) // tf_minutes``
+    and the gap-END clamp ``min((end_slot + 1) * tf, duration)`` at the
+    truncated final bucket, from which the gap LENGTH now derives
+    (``gap_end_minutes - start_slot * tf`` — review round-3, so length and
+    bounds can never disagree). A regular session at tf=30 expects only ``ceil(375/30) = 13``
     buckets — below the default 30-bar abs floor — so these cases inject
     ``abs_floor`` (the round-2 injection seam that also makes the census
     golden hermetic).
@@ -338,12 +348,13 @@ class TestTfScaling:
 
     def test_tf30_missing_session_engages_both_duration_clamps(self) -> None:
         # A fully-missing interior Wednesday at tf=30: the largest missing run
-        # is slots 0..12, whose UNclamped scaled length is 13*30 = 390 > the
+        # is slots 0..12, whose UNclamped scaled end is 13*30 = 390 > the
         # 375-minute session duration:
-        #   * largest_gap_minutes == 375 kills the gap-LENGTH clamp mutant
-        #     (dropping min(..., duration) would read 390);
         #   * gap_end == 15:30 kills the gap-END clamp mutant (dropping
-        #     min(..., duration) would read open + 390min = 15:45).
+        #     min(..., duration) would read open + 390min = 15:45);
+        #   * largest_gap_minutes == 375 rides the SAME clamp (the length
+        #     derives from gap_end_minutes — review round-3), so an unclamped
+        #     end would ALSO read a fabricated 390-minute gap.
         verdict = classify_session_density(
             _bracketed([]), tf_minutes=30, abs_floor=1, today_ist=_FAR_FUTURE
         )
@@ -360,9 +371,11 @@ class TestTfScaling:
         # Buckets 0..9 present (one bar at each 30-min bucket open), tail
         # buckets 10..12 missing: the run ENDS at the TRUNCATED final bucket
         # (slot 12 covers only 15:15..15:29), so the gap-END clamp engages
-        # ((12+1)*30 = 390 > 375 → 15:30) while the gap-LENGTH clamp does NOT
-        # (3*30 = 90 <= 375) — kills the gap-end mutant INDEPENDENTLY of the
-        # gap-length one (unclamped gap_end would read 15:45).
+        # ((12+1)*30 = 390 > 375 → 15:30) and the gap LENGTH is the REAL
+        # wall-clock span of those bounds — 2 full buckets + the 15-min tail
+        # = 75, NOT the bucket-granular 90 (review round-3: the two fields on
+        # one frozen flag can never disagree; unclamped gap_end would read
+        # 15:45).
         present = [_minute_ts(_WED, *divmod(9 * 60 + 15 + slot * 30, 60)) for slot in range(10)]
         verdict = classify_session_density(
             _bracketed(present), tf_minutes=30, abs_floor=1, today_ist=_FAR_FUTURE
@@ -371,9 +384,11 @@ class TestTfScaling:
         flag = verdict.flags[0]
         assert (flag.expected, flag.observed) == (13, 10)
         assert flag.shape == SHAPE_INTRADAY_HOLE
-        assert flag.largest_gap_minutes == 90  # bucket-granular: 2 full + the 15-min tail
+        assert flag.largest_gap_minutes == 75  # 2 full + the 15-min tail — the real span
         assert flag.gap_start_ist == time(14, 15)
         assert flag.gap_end_ist == time(15, 30)  # NOT 15:45 — clamped at close
+        # The internal-consistency law itself: length == gap_end − gap_start.
+        assert flag.largest_gap_minutes == (15 * 60 + 30) - (14 * 60 + 15)
 
     def test_tf30_two_bars_in_one_bucket_count_one_observed(self) -> None:
         # The bucket-division mutant killer: 09:15 + 09:16 land in bucket 0
@@ -391,8 +406,11 @@ class TestTfScaling:
         assert len(verdict.flags) == 1
         flag = verdict.flags[0]
         assert (flag.expected, flag.observed) == (13, 2)
-        # Largest missing run = buckets 7..12 (six buckets beat 1..5's five).
-        assert flag.largest_gap_minutes == 180
+        # Largest missing run = buckets 7..12 (six buckets beat 1..5's five);
+        # the run includes the TRUNCATED final bucket, so the length is the
+        # real 12:45→15:30 span = 165 minutes (review round-3 consistency —
+        # 5 full buckets + the 15-min tail, never the bucket-granular 180).
+        assert flag.largest_gap_minutes == 165
         assert flag.gap_start_ist == time(12, 45)
         assert flag.gap_end_ist == time(15, 30)
 
@@ -500,6 +518,52 @@ class TestAbstains:
         verdict = classify_session_density(bars, today_ist=_FAR_FUTURE)
         walked = (date(2024, 1, 10) - date(2024, 1, 5)).days + 1
         assert verdict.sessions_checked + sum(n for _, n in verdict.abstained) == walked
+
+
+class TestDatetimeBoundaryTotality:
+    """Review round-3: the classifier is TOTAL at the ``datetime`` boundary.
+
+    Both raise sites are corrupt-lake-only (a stored stamp at/near
+    ``datetime.max``), but repo precedent (#1594 round 18) treats stored
+    out-of-range datetimes as an in-scope hostile class — and the unguarded
+    sweep-preflight consumer would have turned either raise into a
+    refusal-by-crash at launch. Fails before the round-3 fix (both arms
+    raised ``OverflowError``).
+    """
+
+    def test_date_max_bar_never_overflows_the_span_walk(self) -> None:
+        # An IST stamp ON date.max previously overflowed the span walk's
+        # `cursor += timedelta(days=1)`; the ordinal walk is total. date.max
+        # (year 9999) is out of holiday coverage → the out_of_coverage
+        # abstain, never a raise.
+        stamp = datetime(9999, 12, 31, 12, 0, tzinfo=_IST)
+        verdict = classify_session_density([stamp], today_ist=_FAR_FUTURE)
+        assert verdict.flags == ()
+        assert verdict.abstained == (("out_of_coverage", 1),)
+        assert verdict.stamps_out_of_range == 0
+
+    def test_near_datetime_max_utc_stamp_skips_counted(self) -> None:
+        # A UTC stamp within 5:30 of datetime.max previously raised
+        # OverflowError at `ts.astimezone(IST)`; it now folds into the
+        # COUNTED stamps_out_of_range skip (never silently dropped).
+        stamp = datetime(9999, 12, 31, 23, 0, tzinfo=UTC)
+        verdict = classify_session_density([stamp], today_ist=_FAR_FUTURE)
+        assert verdict.stamps_out_of_range == 1
+        assert verdict.sessions_checked == 0
+        assert verdict.flags == ()
+
+    def test_out_of_range_stamp_never_disturbs_a_valid_window(self) -> None:
+        # One poison stamp beside a real holey window: the SAME flag verdict
+        # as without it, plus the honest count — the skip is surgical.
+        hole = set(range(600, 645))
+        bars = _bracketed(_session_minutes(_WED, skip=hole))
+        clean = classify_session_density(bars, today_ist=_FAR_FUTURE)
+        poisoned = classify_session_density(
+            [*bars, datetime(9999, 12, 31, 23, 0, tzinfo=UTC)], today_ist=_FAR_FUTURE
+        )
+        assert poisoned.flags == clean.flags
+        assert poisoned.stamps_out_of_range == 1
+        assert clean.stamps_out_of_range == 0
 
 
 class TestKnownIrregularArm:
@@ -667,6 +731,34 @@ class TestObserveSessionDensity:
         assert summary["cap"] == SESSION_DENSITY_WARN_CAP
         assert summary["total"] == len(trading) - 2  # every interior day flagged
         assert summary["total"] > SESSION_DENSITY_WARN_CAP
+
+    def test_exactly_cap_flags_emit_all_warns_and_no_false_suppressed(self) -> None:
+        # Review round-3 mutant killer (`>` -> `>=` at the suppressed gate):
+        # EXACTLY cap flagged sessions emit exactly cap WARN lines and NO
+        # suppressed summary — the mutant emits a lying {cap: 20, total: 20}
+        # "suppression" line when nothing was suppressed (Golden Rule #1: the
+        # cap never lies). 22 real trading days -> 20 flagged interiors.
+        log = _Log()
+        trading: list[date] = []
+        d = date(2024, 1, 2)
+        while len(trading) < SESSION_DENSITY_WARN_CAP + 2:
+            if is_trading_day(d):
+                trading.append(d)
+            d += timedelta(days=1)
+        bars = _session_minutes(trading[0])
+        for t in trading[1:-1]:
+            bars.append(_minute_ts(t, 9, 15))  # one hollow bar per interior day
+        bars += _session_minutes(trading[-1])
+        observe_session_density(
+            log,
+            bar_timestamps=bars,
+            symbol="NIFTY",
+            interval="1minute",
+            today_ist=_FAR_FUTURE,
+        )
+        warns = log.events(SESSION_DENSITY_LOW_EVENT)
+        assert len(warns) == SESSION_DENSITY_WARN_CAP  # every flag emitted
+        assert log.events(SESSION_DENSITY_SUPPRESSED_EVENT) == []
 
     def test_kill_switch_disables_with_zero_work(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(SESSION_DENSITY_KILL_ENV, "0")

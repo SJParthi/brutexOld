@@ -59,7 +59,15 @@ Everything here is pure modulo the documented fail-soft env reads (the kill
 switch inside :func:`session_density_census_enabled` — never the classifier —
 plus the two threshold tunables the classifier reads only when the matching
 override is not injected), stdlib + structlog + :mod:`brutex.calendars.nse`
-only (the observed-sessions layering law).
+(the observed-sessions layering law) + the COMMON
+:func:`brutex.data.errors.datetime_out_of_range_errors` set consumed ONLY
+around the per-stamp IST conversion (its documented consumption law — the
+#1594 round-18 precedent), which makes the classifier TOTAL over the full
+representable ``datetime`` domain (review round-3): a stamp within the IST
+offset of ``datetime.max`` folds into the counted
+``SessionDensityVerdict.stamps_out_of_range`` skip instead of raising, and
+the span walk iterates date ORDINALS so a ``date.max`` bar can never
+overflow the day increment.
 """
 
 from __future__ import annotations
@@ -84,6 +92,7 @@ from brutex.calendars.nse import (
     known_irregular_reason,
     now_ist,
 )
+from brutex.data.errors import datetime_out_of_range_errors
 
 __all__ = [
     "SESSION_DENSITY_ABS_FLOOR",
@@ -240,8 +249,11 @@ class SessionDensityFlag:
     fraction
         ``observed / expected`` (0.0 for a fully-missing session).
     largest_gap_minutes
-        The longest contiguous run of missing in-session minutes (capped at
-        the session duration).
+        The longest contiguous run of missing in-session minutes — always
+        exactly the wall-clock span of the emitted gap bounds
+        (``gap_end − gap_start``; a truncated final ``tf_minutes`` bucket
+        counts only its REAL in-session minutes, review round-3 — the two
+        fields can never disagree).
     gap_start_ist / gap_end_ist
         IST wall-clock bounds of that largest gap (``[start, end)``), or
         ``None`` when no bucket is missing (unreachable on a flagged session
@@ -282,12 +294,19 @@ class SessionDensityVerdict:
     abstained
         ``((reason, count), ...)`` sorted by reason — every walked date that
         was NOT judged, so the judged + abstained sets partition the walk.
+    stamps_out_of_range
+        Bar TIMESTAMPS (not dates — deliberately outside the walk partition)
+        whose IST conversion overflows the representable ``datetime`` range —
+        a corrupt-lake-only artifact, SKIPPED + COUNTED so the classifier is
+        TOTAL and never raises (review round-3; Golden Rule #1 — counted,
+        never silently dropped).
     """
 
     flags: tuple[SessionDensityFlag, ...]
     known_irregular: tuple[SessionDensityFlag, ...]
     sessions_checked: int
     abstained: tuple[tuple[str, int], ...]
+    stamps_out_of_range: int = 0
 
 
 def _largest_missing_run(present: AbstractSet[int], expected: int) -> tuple[int, int]:
@@ -345,11 +364,16 @@ def _judge_session(
     # A deficient session has ``deficit >= abs_floor >= 1`` missing buckets,
     # so the run finder is total here (its no-gap ValueError is unreachable).
     start_slot, end_slot = _largest_missing_run(present, expected)
-    gap_minutes = min((end_slot - start_slot + 1) * tf_minutes, duration)
     open_dt = datetime.combine(d, session.open_time_ist)
     gap_start = (open_dt + timedelta(minutes=start_slot * tf_minutes)).time()
     gap_end_minutes = min((end_slot + 1) * tf_minutes, duration)
     gap_end = (open_dt + timedelta(minutes=gap_end_minutes)).time()
+    # The gap LENGTH is derived from the SAME clamped end the bounds use, so
+    # a truncated final bucket (tf=30 slot 12 covers only 15:15..15:29) counts
+    # its real minutes and largest_gap_minutes == gap_end − gap_start ALWAYS
+    # (review round-3 — the bucket-granular length that read 90 while its own
+    # bounds spanned 75 is gone; tf=1 is bit-identical: buckets == minutes).
+    gap_minutes = gap_end_minutes - start_slot * tf_minutes
     if observed == 0:
         shape = SHAPE_MISSING_SESSION
     elif gap_minutes >= _INTRADAY_HOLE_MIN_MINUTES:
@@ -394,7 +418,11 @@ def classify_session_density(
     bar_timestamps
         UTC-aware timestamps of the window's kept bars (any order; naive
         timestamps are treated per ``astimezone`` semantics — the lake stores
-        UTC-aware). Empty → an all-zero verdict.
+        UTC-aware). Empty → an all-zero verdict. TOTAL over the full
+        representable ``datetime`` domain (review round-3): a stamp whose IST
+        conversion overflows is skipped + counted
+        (``stamps_out_of_range``), and a ``date.max`` bar cannot overflow the
+        ordinal span walk — the classifier NEVER raises on timestamp content.
     tf_minutes
         The bars' timeframe in whole minutes (``>= 1``; the production wiring
         is ``1minute``-only).
@@ -425,11 +453,26 @@ def classify_session_density(
         else _tunable_floor("BRUTEX_SESSION_DENSITY_ABS_FLOOR", SESSION_DENSITY_ABS_FLOOR)
     )
     by_date: dict[date, set[int]] = {}
+    out_of_range = 0
     for ts in bar_timestamps:
-        ist = ts.astimezone(IST)
+        try:
+            # Sole Python-side failure mode here is the timestamp conversion
+            # itself (a stamp within the IST offset of ``datetime.max``), so
+            # the COMMON full set is safe per its consumption law (the #1594
+            # round-18 precedent) — skip + count, never raise (round-3).
+            ist = ts.astimezone(IST)
+        except datetime_out_of_range_errors():
+            out_of_range += 1
+            continue
         by_date.setdefault(ist.date(), set()).add(ist.hour * 60 + ist.minute)
     if not by_date:
-        return SessionDensityVerdict(flags=(), known_irregular=(), sessions_checked=0, abstained=())
+        return SessionDensityVerdict(
+            flags=(),
+            known_irregular=(),
+            sessions_checked=0,
+            abstained=(),
+            stamps_out_of_range=out_of_range,
+        )
     today = today_ist if today_ist is not None else now_ist().date()
     first = min(by_date)
     last = max(by_date)
@@ -437,10 +480,11 @@ def classify_session_density(
     flags: list[SessionDensityFlag] = []
     known: list[SessionDensityFlag] = []
     checked = 0
-    cursor = first
-    while cursor <= last:
-        d = cursor
-        cursor += timedelta(days=1)
+    # Ordinal iteration is TOTAL at date.max — the former ``cursor +=
+    # timedelta(days=1)`` overflowed when a (corrupt-lake) bar's IST date was
+    # literally ``date.max`` (review round-3).
+    for ordinal in range(first.toordinal(), last.toordinal() + 1):
+        d = date.fromordinal(ordinal)
         if not is_holiday_data_available(d):
             abstains["out_of_coverage"] = abstains.get("out_of_coverage", 0) + 1
             continue
@@ -477,6 +521,7 @@ def classify_session_density(
         known_irregular=tuple(known),
         sessions_checked=checked,
         abstained=tuple(sorted(abstains.items())),
+        stamps_out_of_range=out_of_range,
     )
 
 
