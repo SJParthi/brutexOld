@@ -399,15 +399,20 @@ class SummaryCache:
         #: DEC-COMPLETENESS-O1-LATENCY-001 cold-reentrancy case, still pinned).
         self._refreshing: dict[str, tuple[threading.Event, int]] = {}
         #: kind → the owner Event whose TOTAL cold-wait budget a waiter blew
-        #: (the fail-fast latch, DEC-DASHBOARD-COLD-IO-DEADLINE-001): exactly
-        #: ONE waiter pays the budget per wedged owner — every later cold
-        #: reader of the SAME owner Event raises instantly (O(1), no wait),
-        #: so stacked 4-15 s pollers can never re-approach the 32-token lake
+        #: (the fail-fast latch, DEC-DASHBOARD-COLD-IO-DEADLINE-001): the
+        #: budget is paid by AT MOST the waiters already parked in the wait
+        #: when it first expires — each runs out its own deadline, since the
+        #: latch is checked only at loop entry (sequentially: exactly ONE) —
+        #: while every LATER cold reader of the SAME owner Event raises
+        #: instantly (O(1), no wait). Token pressure from stacked 4-15 s
+        #: pollers is therefore bounded to ONE budget window per wedged
+        #: owner, never the pre-fix unbounded march toward the 32-token lake
         #: limiter's exhaustion. Identity-matched against the CURRENT
         #: ``_refreshing`` event, so a FRESH owner (post-takeover) auto-
         #: invalidates a stale latch; cleared on the owner's success (with one
-        #: recovery INFO) and on its abort (silently — the fresh owner's fresh
-        #: Event re-scopes everything).
+        #: identity-guarded recovery INFO — a swept STALE entry logs nothing)
+        #: and on its abort (silently — the fresh owner's fresh Event
+        #: re-scopes everything).
         self._cold_wait_timed_out: dict[str, threading.Event] = {}
 
     def set_pull_active_probe(self, probe: Callable[[], bool | None] | None) -> None:
@@ -561,8 +566,10 @@ class SummaryCache:
         ------
         SummaryColdWaitTimeout
             A COLD reader's TOTAL wait budget on another thread's in-flight
-            first scan expired (``latched=False``, one WARN), or a prior
-            waiter already blew the budget on the SAME owner Event
+            first scan expired (``latched=False`` — the waiter that FLIPS the
+            latch WARNs once; a concurrently-timed-out sibling on the same
+            owner Event raises silently), or a prior waiter already blew the
+            budget on the SAME owner Event
             (``latched=True``, instant — no wait, no log). The timed-out
             waiter NEVER takes the scan over (the single-scan law stands);
             the routes map this to the honest 503 ``summary_scan_pending``
@@ -605,8 +612,12 @@ class SummaryCache:
                 # timed-out waiter NEVER takes the scan over (the single-scan
                 # law is structural — `_plan` holds the only registration
                 # site) and ARMS the per-owner-Event latch so every LATER
-                # cold reader fails fast in O(1) with no wait: exactly ONE
-                # waiter pays the budget per wedged owner. The wedged OWNER
+                # cold reader fails fast in O(1) with no wait. Waiters
+                # ALREADY parked in this wait when the budget expires still
+                # run out their OWN deadlines (the latch is checked only at
+                # loop entry), so the budget is paid by at most the waiters
+                # in flight during ONE budget window — sequentially, exactly
+                # one — after which token pressure plateaus. The wedged OWNER
                 # itself still pins its token until the volume releases (the
                 # #999 un-killable stance — this bounds the WAITERS, not the
                 # owner). For the LAKE_UNIQUENESS census this clause is
@@ -625,12 +636,22 @@ class SummaryCache:
                 remaining = wait_deadline - self._clock()
                 if remaining <= 0.0 or not decision.wait(remaining):
                     with self._lock:
-                        self._cold_wait_timed_out[kind] = decision  # arm the latch
-                    _LOG.warning(
-                        "summary_cache.cold_wait_timeout",
-                        kind=kind,
-                        budget_s=self._cold_wait_budget_s,
-                    )
+                        # Arm-once (the StatSweepGate WARN discipline): only
+                        # the waiter that actually FLIPS the latch onto THIS
+                        # owner Event logs — a sibling that also timed out on
+                        # the same owner (it passed the loop-entry latched
+                        # check before the flip) raises silently below, so a
+                        # burst of concurrent timeouts emits ONE WARN per
+                        # (kind, owner-Event) flip.
+                        armed_now = self._cold_wait_timed_out.get(kind) is not decision
+                        if armed_now:
+                            self._cold_wait_timed_out[kind] = decision  # arm the latch
+                    if armed_now:
+                        _LOG.warning(
+                            "summary_cache.cold_wait_timeout",
+                            kind=kind,
+                            budget_s=self._cold_wait_budget_s,
+                        )
                     raise SummaryColdWaitTimeout(kind, self._cold_wait_budget_s, latched=False)
                 continue
             gen_at_start = decision
@@ -666,6 +687,10 @@ class SummaryCache:
                 # The owner's success clears the cold-wait latch (the wedged
                 # scan finally returned — the volume recovered): the next cold
                 # reader waits a fresh budget instead of failing fast forever.
+                # The pop is unconditional (a STALE entry keyed to a dead
+                # owner's event is swept too — identity-matching already made
+                # it inert), but the recovery INFO below fires only when the
+                # latch was armed against THIS owner's own Event.
                 cleared = self._cold_wait_timed_out.pop(kind, None)
                 # Entry stored BEFORE the event is set (same lock block), so a
                 # woken waiter always finds a servable payload — never a second
@@ -676,7 +701,10 @@ class SummaryCache:
                 done = self._refreshing.pop(kind, None)
             if done is not None:
                 done[0].set()
-            if cleared is not None:
+            if cleared is not None and done is not None and cleared is done[0]:
+                # Identity-guarded recovery INFO: log only for a latch armed
+                # against THIS owner's Event — a swept stale entry (a dead
+                # owner's / pre-planted latch) recovered nothing.
                 _LOG.info("summary_cache.cold_wait_recovered", kind=kind)
             return payload
 

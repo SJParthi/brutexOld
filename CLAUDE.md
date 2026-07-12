@@ -21,8 +21,9 @@
 _Last updated: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1774 —
 bounded cold lake I/O on the dashboard read path: the SummaryCache COLD
 single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S`
-60 s, fail-safe) + a per-owner-Event fail-fast latch — exactly ONE waiter pays
-the budget per wedged owner, a blown budget raises the typed
+60 s, fail-safe) + a per-owner-Event fail-fast latch — at most the
+already-in-flight waiters pay the budget per wedged owner (sequentially
+exactly ONE; every later cold poll fails fast), a blown budget raises the typed
 `SummaryColdWaitTimeout` the five summary routes map to an honest 503
 `summary_scan_pending` (never a raw 500, never a fabricated empty payload;
 zero new threads — the waiter's own `Event.wait`, no scan takeover, warm/dirty
@@ -2363,14 +2364,19 @@ hostile-review pass._
   `decision.wait()` on a lake-limiter token — the wait runs under a TOTAL budget across re-plan
   iterations (`BRUTEX_SUMMARY_COLD_WAIT_S`, default 60 s = 2× the observed 27-30 s legitimate mid-pull
   cold scan; fail-SAFE via the COMMON `resolve_env_seconds`, resolved ONCE at construction — the hit arm
-  gains zero instructions), a blown budget ARMS a per-owner-Event fail-fast latch (exactly ONE waiter
-  pays the budget per wedged owner; every later cold poll raises instantly in O(1) — stacked 4-15 s
-  pollers can never re-approach the 32-token `_LakeOffload` exhaustion) and raises the typed
+  gains zero instructions), a blown budget ARMS a per-owner-Event fail-fast latch (the budget is paid
+  by AT MOST the waiters already parked when it first expires — each runs out its own deadline, the
+  latch is checked at loop entry; sequentially exactly ONE — and every later cold poll raises
+  instantly in O(1), so stacked 4-15 s pollers' token pressure is bounded to ONE budget window, never
+  the pre-fix unbounded march toward the 32-token `_LakeOffload` exhaustion; ONE
+  `cold_wait_timeout` WARN per (kind, owner-Event) latch flip — a photo-finish sibling raises
+  silently) and raises the typed
   `SummaryColdWaitTimeout(RuntimeError` — deliberately NOT `TimeoutError ⊂ OSError`, the
   `except OSError` misclassification leak class`)`; the timed-out waiter NEVER takes the scan over (the
   single-scan law stays structural) and NEVER touches `_refreshing`; the latch identity-matches the
   CURRENT owner Event (a fresh post-takeover owner auto-invalidates a stale latch), clears on the
-  owner's success (ONE `cold_wait_recovered` INFO) and silently on its abort. FIVE app.py route arms
+  owner's success (ONE identity-guarded `cold_wait_recovered` INFO — a swept STALE entry logs
+  nothing) and silently on its abort. FIVE app.py route arms
   (the per-route `_store_outage_response` precedent — an app-level exception handler has zero in-repo
   precedent, REJECTED): /coverage/spot · /completeness/scoreboard · scoreboard.csv (text/plain) ·
   /universe/completeness (beside its store-outage arm) · /coverage/options each map the timeout to the

@@ -1128,7 +1128,9 @@ def test_cold_wait_times_out_bounded_no_takeover(monkeypatch: pytest.MonkeyPatch
     assert not lead.is_alive()
 
 
-def test_cold_wait_budget_total_across_owner_handoffs() -> None:
+def test_cold_wait_budget_total_across_owner_handoffs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """W2 — the budget is TOTAL across re-plan iterations, never per-wait.
 
     A crash-looping owner chain must consume ONE budget: after a genuine
@@ -1136,12 +1138,19 @@ def test_cold_wait_budget_total_across_owner_handoffs() -> None:
     and — with the injected clock already past the deadline — raises via the
     ``remaining <= 0.0`` branch WITHOUT a second wait (wait-spy count == 1).
     Zero real sleeps: the fake clock drives the budget arithmetic; the only
-    real wait is Event-released. Fails-before shape: at the merge-base the
-    waiter re-waits on owner 2's never-set event forever → the bounded join
-    fails.
+    real wait is Event-released. The budget rides the env knob
+    (``BRUTEX_SUMMARY_COLD_WAIT_S``) — deliberately NOT the new ctor param —
+    so the test compiles at the merge-base and its fails-before shape is
+    GENUINE: there the woken waiter re-waits on owner 2's never-set event
+    forever → the bounded ``join(5.0)`` + ``is_alive`` assertion fails
+    LOUDLY ("re-waited past its total budget"). HEAD regression value: the
+    ``event2.wait_calls == 0`` spy kills the ``remaining <= 0.0`` → ``< 0.0``
+    boundary mutant (M4 — an exactly-exhausted budget must raise, never pay
+    one extra ``wait(0.0)`` on owner 2's event).
     """
+    monkeypatch.setenv("BRUTEX_SUMMARY_COLD_WAIT_S", "10.0")
     clock = _FakeClock(start=1000.0)
-    cache = SummaryCache(clock=clock, ttl_floor_s=2.0, cold_wait_budget_s=10.0)
+    cache = SummaryCache(clock=clock, ttl_floor_s=2.0)  # budget resolved from env
     event1 = _SpyEvent()
     event2 = _SpyEvent()
     foreign_ident = threading.get_ident() - 1  # never a real thread's ident here
@@ -1191,6 +1200,71 @@ def test_cold_wait_budget_total_across_owner_handoffs() -> None:
     # The latch armed on the CURRENT decision event (owner 2's).
     with cache._lock:
         assert cache._cold_wait_timed_out[SPOT] is event2
+
+
+def test_cold_wait_concurrent_double_timeout_warns_once() -> None:
+    """A photo-finish double-timeout on ONE owner Event emits exactly ONE WARN.
+
+    Two waiters both pass the loop-entry latched check (neither has timed
+    out yet) and then time out "simultaneously" — their waits return False
+    only after BOTH are parked (Event-orchestrated, no timing margin). The
+    arm is flip-gated (the StatSweepGate WARN discipline): only the waiter
+    that actually FLIPS the latch onto the owner Event WARNs; the sibling
+    raises ``latched=False`` silently. Kills the gate-dropped mutant (an
+    unconditional arm+WARN would emit one WARN per timed-out waiter).
+    """
+    from brutex.dashboard.summary_cache import SummaryColdWaitTimeout
+    from structlog.testing import capture_logs
+
+    cache = SummaryCache(ttl_floor_s=2.0, cold_wait_budget_s=30.0)
+    foreign_ident = threading.get_ident() - 1  # never a real thread's ident here
+    both_parked = threading.Event()
+    park_lock = threading.Lock()
+    parked = {"n": 0}
+
+    class _BothTimeoutEvent(threading.Event):
+        """Returns False (a timeout) only once BOTH waiters are parked."""
+
+        def wait(self, timeout: float | None = None) -> bool:
+            with park_lock:
+                parked["n"] += 1
+                if parked["n"] == 2:
+                    both_parked.set()
+            assert both_parked.wait(10.0)
+            return False  # both budgets expire "at the same instant"
+
+    owner_event = _BothTimeoutEvent()
+    with cache._lock:
+        cache._refreshing[SPOT] = (owner_event, foreign_ident)
+
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def waiter() -> None:
+        try:
+            cache.get_or_refresh(SPOT, recompute=_CountingRecompute())
+        except Exception as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    with capture_logs() as logs:
+        w1 = threading.Thread(target=waiter, daemon=True)
+        w2 = threading.Thread(target=waiter, daemon=True)
+        w1.start()
+        w2.start()
+        w1.join(5.0)
+        w2.join(5.0)
+        assert not w1.is_alive() and not w2.is_alive()
+    timeouts = [e for e in errors if isinstance(e, SummaryColdWaitTimeout)]
+    assert len(timeouts) == 2  # any foreign error (orchestration assert) fails here
+    # BOTH passed the loop-entry check before either armed — both latched=False.
+    assert [e.latched for e in timeouts] == [False, False]
+    # Exactly ONE WARN — the latch-flipping waiter; the photo-finish sibling is silent.
+    warns = [e for e in logs if e["event"] == "summary_cache.cold_wait_timeout"]
+    assert len(warns) == 1
+    assert warns[0]["kind"] == SPOT
+    with cache._lock:
+        assert cache._cold_wait_timed_out[SPOT] is owner_event
 
 
 def test_cold_wait_latch_clears_on_owner_success_with_recovered_info() -> None:
@@ -1314,8 +1388,12 @@ def test_cold_wait_stale_latch_is_identity_invalidated_by_a_fresh_owner() -> Non
     CURRENT registration's event — so a stale latch entry (an older owner's
     event) is inert: the reader waits normally, wakes on the (released)
     fresh registration, takes over, and the success path sweeps the stale
-    entry out.
+    entry out SILENTLY — the recovery INFO is identity-guarded to the
+    completing owner's own Event, so sweeping a dead owner's latch never
+    logs a recovery that did not happen.
     """
+    from structlog.testing import capture_logs
+
     cache = SummaryCache(ttl_floor_s=2.0, cold_wait_budget_s=10.0)
     stale_event = threading.Event()
     fresh_event = _SpyEvent()
@@ -1343,14 +1421,18 @@ def test_cold_wait_stale_latch_is_identity_invalidated_by_a_fresh_owner() -> Non
     assert entered_wait.wait(5.0)  # it WAITED — the stale latch did not fail-fast
     with cache._lock:
         del cache._refreshing[SPOT]  # the fake foreign owner "vanishes"
-    signalling.set()
-    r.join(5.0)
-    assert not r.is_alive()
+    with capture_logs() as logs:
+        signalling.set()
+        r.join(5.0)
+        assert not r.is_alive()
     assert results == [[{"call": 1}]]  # the reader took over and computed
     assert good.calls == 1
     assert fresh_event.wait_calls == 0
     with cache._lock:
         assert SPOT not in cache._cold_wait_timed_out  # stale entry swept
+    # Swept SILENTLY: the stale entry was keyed to the DEAD owner's event,
+    # not the completing taker-over's own — no spurious recovery INFO.
+    assert [e for e in logs if e["event"] == "summary_cache.cold_wait_recovered"] == []
 
 
 def test_cold_wait_budget_resolver_and_ctor_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
