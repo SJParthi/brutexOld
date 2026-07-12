@@ -50,6 +50,12 @@ Muhurat-date 1day bars disclosed UNVERIFIED + counted once · the instrument-mas
 became an in-memory SNAPSHOT so the in-process #1482/#1646 drift ladder stays live ·
 seed-rotated F&O contract sampling + bounded/pruned coverage ledger — per-round record in
 MIGRATION.md #1756, never this header).
+HOSTILE-REVIEW ROUND 3 folded pre-merge (stdout-pure `--json`/table via the #1630 logging
+seam · the evidence-tree symlink refusal hoisted before the audit write · BOTH serving-path
+residuals disclosed (registry + `.manifest/`) · the engine set made code-true (INDIAVIX +
+NSE-NIFTY-*-FUT dirs full-history) · off-chain `--out` · loud SUSPECT on a failed report
+write · report.txt renders limits/routed/Muhurat — per-round record in MIGRATION.md #1756,
+never this header).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1756.)
 Earlier: 2026-07-11 (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 —
@@ -2218,8 +2224,10 @@ hostile-review pass._
   ABSTAIN(no_per_call_persistence)), the AST-FENCED `independent.py` movers leg (raw parquet + hand IST/#1601
   bucket-anchor/Fraction %CHNG/half-up-2dp/HLC3-paisa/hand calendar back-walk; fence = a red BUILD), the
   price/bad-tick/tick-grid/session/interior-gap/VIX-silent-empty/completeness sanity battery, and best-of-N-MIN
-  latency probes vs on-box absolute budgets (never the CI 1.1x tier). Daily-rotating seeded sampling (engine set
-  ALWAYS full-history; coverage{} REQUIRED per check; coverage ledger makes accumulation visible). Report:
+  latency probes vs on-box absolute budgets (never the CI 1.1x tier). Daily-rotating seeded sampling (engine set —
+  3 indexes + INDIAVIX + the NSE-NIFTY-*-FUT engine-track contract dirs — ALWAYS in scope: unique.engine scans them
+  full-history, tf force-includes the engine futures contracts; coverage{} REQUIRED per check; coverage ledger makes
+  accumulation visible). Report:
   `<lake>/acceptance/<run_id>/report.json` schema-self-validated before writing + report.txt (ABSTAINs FIRST) +
   evidence spill + LATEST + the SweepAuditWriter hash chain verified by the EXISTING `brutex audit verify`; deltas +
   abstain streaks carried in the report chain. Exits 0/1/2/3/4 (2>3>4>0). HOSTILE-REVIEW ROUND 1 folded
@@ -2260,7 +2268,24 @@ hostile-review pass._
   is dead) and contracts join the coverage-ledger population (capped 5000, truncation disclosed); the
   coverage ledger read is bounded 16 MiB + pruned-on-save to the live population; NITs: symlinked
   `<lake>/acceptance` write refusal, BaseException-safe env restore in ctx.close, the vacuous-tail
-  O(eligible×records) note, the moneyness grammar tightened to `[1-9]\d*` depths. 415+ tests; every module re-measured 100.00%
+  O(eligible×records) note, the moneyness grammar tightened to `[1-9]\d*` depths.
+  HOSTILE-REVIEW ROUND 3 folded (same branch, pre-merge — every CONFIRMED finding fixed with a
+  fails-before regression): the CLI dispatch runs the #1630 logging seam for `verify-acceptance`
+  (unconfigured structlog's stdout PrintLogger buried the human table + broke `--json`; logs now
+  STDERR, stdout = exactly the table/JSON — the round-2 test that sliced from `{` fixed to full-stdout
+  parse); ONE evidence-tree symlink refusal HOISTED before ANY write (the audit JSONL no longer writes
+  through a symlinked `<lake>/acceptance` before the report-side guard); the read-only headline
+  discloses BOTH serving-path residuals (registry re-stamp + a possible `<lake>/.manifest/`
+  discovery-cache refresh, exactly as production); the engine set is code-true (C-F1 — INDIAVIX +
+  every `NSE-NIFTY-*-FUT` contract dir join unique.engine full-history, tf force-includes the engine
+  futures contracts; `sampling.engine_futures_contracts` via the canonical `parse_fno_symbol`);
+  `--out` reports are OFF-CHAIN (LATEST/deltas/streaks track only the default chain — the dangling
+  pointer + silent streak reset are dead); a report-write failure restamps overall SUSPECT/exit-2 +
+  one loud stderr line (the "→ exit 0" table on a 2-exit process is dead); `--sample < 0` refused at
+  CLI AND core; report.txt renders every limits line + the routed non_default_window_shape count +
+  the Muhurat-unverified dates (the ABSTAIN-prominence law extended); the open_by_design fold's
+  future-dated-phantom scope + the never-planned-window merged-span twin are named in limits.
+  415+ tests; every module re-measured 100.00%
   line+branch on the ci.yml-exact gates; full battery 15/15 detected, 0 false FAILs on the clean twin;
   ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
   pyright 0 errors on the new package (net −12 on the touched test files). ENGINE UNCHANGED —
@@ -5622,6 +5647,11 @@ hostile-review pass._
   Muhurat-date 1day bars disclosed unverified · in-memory master snapshot keeps the drift ladder
   live · seed-rotated F&O sampling + bounded/pruned coverage ledger — per-round record in
   MIGRATION.md #1756);
+  hostile-review round 3 folded pre-merge (stdout-pure --json/table via the #1630 logging seam ·
+  evidence-tree symlink refusal hoisted before the audit write · both serving-path residuals
+  disclosed (registry + .manifest/) · engine set made code-true (INDIAVIX + NSE-NIFTY-*-FUT dirs
+  full-history) · off-chain --out · loud SUSPECT on a failed report write · report.txt renders
+  limits/routed/Muhurat — per-round record in MIGRATION.md #1756);
   additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/frontend-latency-hardening-r2`

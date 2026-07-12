@@ -5,14 +5,20 @@
 > writes a hash-chained evidence report (tamper-EVIDENT against accidental
 > damage — see the §5 honest limit). Read-only on the lake (instruments.duckdb
 > is snapshotted into memory via a short-lived read-only attach, never
-> migrated); writes ONLY under `<lake_root>/acceptance/`. ONE disclosed
-> residual: the movers check exercises the REAL serving path, which opens
-> `registry.duckdb` exactly as the production dashboard does (a schema-MATCHED
-> open is a no-net-bytes re-stamp; a schema-DRIFTED registry ABSTAINS
-> `registry_schema_drift` BEFORE the route runs, so the open's latent
-> drop+recreate can never fire under the verifier; an ABSENT registry is
-> never created — the route falls back before any open). ZERO vendor calls,
-> ever (AST-pinned) — the pull lock is never taken.
+> migrated); the verifier's OWN writes land ONLY under
+> `<lake_root>/acceptance/`. TWO disclosed serving-path residuals (the
+> movers/latency checks exercise the REAL in-process serving path): (1) it
+> opens `registry.duckdb` exactly as the production dashboard does (a
+> schema-MATCHED open is a no-net-bytes re-stamp; a schema-DRIFTED registry
+> ABSTAINS `registry_schema_drift` BEFORE the route runs, so the open's
+> latent drop+recreate can never fire under the verifier; an ABSENT registry
+> is never created — the route falls back before any open); (2) it may
+> refresh the `<lake_root>/.manifest/` discovery caches exactly as the
+> production dashboard does (a benign self-healing rebuild, results-safe —
+> round-3 disclosure, named in the movers/latency limits too). ZERO vendor
+> calls, ever (AST-pinned) — the pull lock is never taken. A symlinked
+> `<lake>/acceptance` dir refuses the WHOLE run (SUSPECT) before any write —
+> audit chain included.
 
 ## 1. The one command
 
@@ -31,8 +37,13 @@ compare and every sanity read are month-bounded; the INTRADAY freshness seam
 disclosed in the report's limits. Rotating-log / ingest-audit evidence reads
 are bounded 16 MiB seek-from-end tails; the coverage ledger read is bounded
 16 MiB too and pruned on save to the live dataset population. The engine set
-(NIFTY/BANKNIFTY/SENSEX + INDIAVIX + the NIFTY-FUT contract dirs) is ALWAYS
-in scope; the `unique.engine` census line is full stored history. The
+is ALWAYS in scope, exactly this (round-3 code/docs match, C-F1): the
+`unique.engine` line scans NIFTY/BANKNIFTY/SENSEX **+ INDIAVIX + every
+`NSE-NIFTY-*-FUT` engine-track contract dir (ADR-0012)** full stored history
+(each futures contract holds ≤60 days of 1m + its derived TFs — bounded),
+and tf FORCE-includes the engine futures contracts in its selection every
+run (never left to the rotation; the tf 1day compare stays month-bounded —
+`--full` lifts). The
 sampled F&O contract fill (6 per run) seed-ROTATES like the spot fill, and
 contracts join the coverage ledger's population (capped 5,000 keys — a
 ~10^5-contract lake's truncation is disclosed as
@@ -47,7 +58,7 @@ locked/older-schema store reads a named ABSTAIN).
 |---|---|---|
 | unique | census scans (`scan_lake_invariants`, per sampled coordinate) clean AND complete — a skipped file FAILs; `unique.engine` full-history | sampled × month-bounded by default (`--full` = the whole-lake scan) |
 | tf | 19 intraday TFs fresh (the sweep-preflight seam) + the 1day re-derive compare (Muhurat sessions skipped PER-DAY, one count per distinct IST date, never a whole-history abstain) | `tf.oi` ABSTAINs until follow-up F2 (OI not value-compared); intraday seam reads full history; **stored 1day bars on Muhurat session dates are NOT verified** — corruption on those ~6 dates is invisible to tf.daily (the dates are named in `muhurat_days_unverified`) |
-| pull | re-plan over each MERGED covered span (production expiry-capped contract windows) mints ZERO new fetchable windows for DEFAULT-law series; keep-first counter laws; SUCCESS rows have backing files (sampled) | plan-level convergence, not vendor determinism; presence PASS is sample-scoped; a deleted ledger row that splits a span is invisible to replan; a non-default coverage shape (explicit-dates F&O rows, overlapping-anchor ranges, in-coverage re-tiling mismatches — indistinguishable from planner re-tiling drift in ledger evidence) reads `non_default_window_shape`, never a phantom FAIL; a replanned key ESCAPING the covered spans still hard-FAILs |
+| pull | re-plan over each MERGED covered span (production expiry-capped contract windows) mints ZERO new fetchable windows for DEFAULT-law series; keep-first counter laws; SUCCESS rows have backing files (sampled) | plan-level convergence, not vendor determinism; presence PASS is sample-scoped; a deleted ledger row OR a never-planned window that splits a span is invisible to replan (the sanity interior-hole detector owns the missing data); `open_by_design` folds unsettled rows + out-of-coverage replanned keys incl. a future-dated phantom past the ledger max end — the hard double-fetch FAIL bites past-dated phantoms only; a non-default coverage shape (explicit-dates F&O rows, overlapping-anchor ranges, in-coverage re-tiling mismatches — indistinguishable from planner re-tiling drift in ledger evidence) reads `non_default_window_shape`, never a phantom FAIL — routed series are counted on the report.txt check line; a replanned key ESCAPING the covered spans still hard-FAILs |
 | rate | constants pin · market-hours conformance (#1692; genuine vendor-attempt records only — journal heartbeats never count) · bridge/log point evidence (bounded tails) | `rate.per_call_history` = PERMANENT ABSTAIN — no per-call record persists (F3 needs an operator ruling); live probe = `brutex doctor --live --stage 13` |
 | movers | page cells == the FENCED independent recompute (raw parquet + hand math; literal `glob=False` reads); moneyness grammar = the FULL production vocabulary incl. the honest `?`/`—`/bare-ITM/OTM sentinels | rank verified within served rows; Greeks presence-only; the options leg exercises the REAL serving path, which opens `registry.duckdb` as production does (schema-drift ⇒ named ABSTAIN before the route; matched schema = no net bytes) |
 | sanity | price sanity · bad-tick (4x screen, #1616 escapes named) · tick grid · session windows · interior holes · VIX presence · completeness (read-only master) | heuristic screens stay heuristics; reads month-bounded by default |
@@ -110,7 +121,17 @@ chain and pass `brutex audit verify`. Off-box anchoring (the backup lane's
 immutable store) is what defeats restatement, not this file.
 
 Run-over-run deltas + consecutive-ABSTAIN streaks are carried in the report
-chain (previous report via LATEST) — no separate state file.
+chain (previous report via LATEST) — no separate state file. `report.txt`
+renders ABSTAINs FIRST, every check's + sub-check's honest-envelope `limits`
+lines, the routed `non_default_window_shape` series count and the
+Muhurat-unverified dates (round 3 — the honest envelope is readable without
+opening report.json).
+
+`--out DIR` reports are OFF-CHAIN (round-3 fix): the report/evidence land at
+DIR, but `LATEST`, the deltas and the ABSTAIN streaks track ONLY the default
+`<lake>/acceptance/` chain — a redirected run never dangles the pointer or
+resets the chain. A failed report write is LOUD: one stderr SUSPECT line,
+the table restamped to exit 2, process exit 2.
 
 ## 6. Nightly cron (standalone-first; chain link = follow-up F1)
 
@@ -135,7 +156,13 @@ tool observes, never remediates).
 --max-runtime-s 900         # unreached checks ABSTAIN(time_budget_exhausted)
 --repro tf                  # print the exact single-check repro command
 --json                      # machine summary on stdout (files always written)
+--out DIR                   # OFF-CHAIN report copy: LATEST/deltas/streaks untouched
 ```
+
+stdout carries EXACTLY the human table (or the `--json` summary) — every log
+line rides STDERR at INFO by default (`BRUTEX_LOG_LEVEL` overrides, junk
+fails loud; the #1630 seam — round-3 fix), so `brutex verify-acceptance
+--json | jq .` works. `--sample` must be ≥ 0 (usage error otherwise).
 
 ## 8. Triage notes
 
