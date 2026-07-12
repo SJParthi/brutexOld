@@ -1,0 +1,214 @@
+"""Dhan adapter constants — the pure, verified leaf.
+
+DEC-DHAN-SPOT-PULL-001 (umbrella DEC-DHAN-SPOT-FEED-001, ADR-0022). Every value
+here is traceable to the VERIFIED DhanHQ-v2 research (the official ``dhanhq``
+SDK read verbatim + official-doc snippets); UNVERIFIED live-only facts carry the
+``_UNVERIFIED`` honesty suffix (the Groww ``*_UNVERIFIED`` precedent, CLAUDE.md
+§6 / Golden Rule #1) and are NEVER read by a decision branch — an AST pin proves
+it, so the pull can never gate on a fabricated "verified" flag.
+
+Scope: SPOT indices ONLY — NIFTY / BANKNIFTY / SENSEX (the brute-force ENGINE
+surface) + INDIA VIX (REFERENCE_ONLY). All ride the SHARED ``IDX_I`` segment /
+``INDEX`` instrument token on ``POST /charts/intraday`` at 1-minute granularity.
+NO options, NO expired futures (an operator A/B hold).
+
+Read path (no minting): ``DhanContext(client_id, access_token)`` makes NO network
+call at construction; the two credentials are READ from AWS SSM (SecureString for
+the 24-h JWT access token) and never PutParameter'd by BruteX.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Final
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Endpoint + request shape (VERIFIED-live: SDK ``_historical_data.py`` + ``dhan_http.py``)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The DhanHQ v2 REST base (SDK ``dhan_http.py`` ``API_BASE_URL``). Not used to build
+#: requests here (the vendor ``dhanhq`` SDK owns the transport) — recorded for provenance.
+API_BASE: Final[str] = "https://api.dhan.co/v2"
+
+#: The SHARED index exchange-segment for NSE **and** BSE indices (SDK const
+#: ``INDEX='IDX_I'``) — there is NO separate BSE-index segment (VERIFIED-live).
+SEGMENT_INDEX: Final[str] = "IDX_I"
+
+#: The instrument-type token for an index spot series (SDK README INDEX example).
+INSTRUMENT_INDEX: Final[str] = "INDEX"
+
+#: The intraday interval code for 1-minute candles (SDK default ``interval=1``).
+DHAN_INTERVAL_1MIN: Final[int] = 1
+
+#: The single canonical interval this SPOT track fetches (1-minute only). The 19
+#: derived intraday timeframes + the daily anchor are DERIVED from the stored
+#: 1-minute by the prebuild stage, never separately fetched (CLAUDE.md §3).
+DHAN_FETCH_INTERVAL: Final[str] = "1minute"
+
+#: The market timezone of Dhan candle timestamps AFTER conversion. Dhan sends Unix
+#: EPOCH seconds (UTC POSIX); the lake stores UTC and renders IST by a FIXED +05:30
+#: (Asia/Kolkata, no DST) — 09:15 IST ⇔ 03:45 UTC (VERIFIED-live: SDK
+#: ``convert_to_date_time`` uses ``timezone(timedelta(hours=5, minutes=30))``).
+NATIVE_TIMEZONE: Final[str] = "Asia/Kolkata"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windowing + rate limits (PARTIAL: official-doc snippets / support pages)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Per-request window cap for ``/charts/intraday`` — 90 days per call (any interval).
+DHAN_INTRADAY_WINDOW_DAYS: Final[int] = 90
+
+#: Data-API per-second ceiling (5 req/s). Injected into the adaptive
+#: :class:`~brutex.adapters.rate_common.RateController`; the AIMD ladder still steps
+#: DOWN on throttle and recovers up to this ceiling.
+DHAN_RATE_LIMIT_RPS: Final[float] = 5.0
+
+#: Data-API daily cap (100,000 req/day). Honestly enforced; a full 3-index
+#: June-2022→today 1-minute pull is ≈ 51 requests — trivial vs this cap.
+DHAN_DAILY_QUOTA: Final[int] = 100_000
+
+#: Dhan's Data API has NO per-minute / per-hour governor — only 5/s + 100k/day.
+#: ``None`` means honestly none (Golden Rule #1), NOT a fabricated cap.
+DHAN_RATE_LIMIT_PER_MIN: Final[int | None] = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ledger namespace + lake feed id (own namespace → no Groww collision)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The window-ledger market namespace for Dhan spot windows (own namespace so a
+#: Dhan window can never collide with a Groww window on the shared lake ledger).
+DHAN_COVERAGE_MARKET: Final[str] = "dhan"
+
+#: The feed id under which the Dhan lake nests: ``<lake_root>/feeds/dhan/`` (the
+#: :mod:`brutex.data.feed_root` nesting law; path-structural attribution, no column).
+DHAN_FEED_ID: Final[str] = "dhan"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scrip-master + securityId resolution (VERIFIED-live approach; ids in-repo-verified)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The compact scrip-master CSV the SDK resolves securityIds from (SDK
+#: ``_security.py`` constant). Body host is egress-blocked in-sandbox — the id map
+#: is resolved at runtime from this CSV in production, with the fallback map below.
+SCRIP_MASTER_URL: Final[str] = "https://images.dhan.co/api-data/api-scrip-master.csv"
+
+#: The three ENGINE index symbols (brute-force scope) + INDIA VIX (REFERENCE_ONLY).
+#: The canonical BruteX symbol keys; the scrip master / fallback map resolves each to
+#: its Dhan ``securityId`` on the shared ``IDX_I`` segment.
+NIFTY_SYMBOL: Final[str] = "NIFTY"
+BANKNIFTY_SYMBOL: Final[str] = "BANKNIFTY"
+SENSEX_SYMBOL: Final[str] = "SENSEX"
+INDIAVIX_SYMBOL: Final[str] = "INDIAVIX"
+
+#: The brute-force ENGINE spot index symbols (NIFTY / BANKNIFTY / SENSEX). INDIA VIX
+#: is deliberately EXCLUDED — it is REFERENCE_ONLY, never in the vocabulary / run
+#: identity (CLAUDE.md §3).
+DHAN_ENGINE_INDEX_SYMBOLS: Final[tuple[str, ...]] = (
+    NIFTY_SYMBOL,
+    BANKNIFTY_SYMBOL,
+    SENSEX_SYMBOL,
+)
+
+#: Every index this SPOT track may pull (ENGINE indices + the reference-only VIX).
+DHAN_SPOT_INDEX_SYMBOLS: Final[tuple[str, ...]] = (
+    *DHAN_ENGINE_INDEX_SYMBOLS,
+    INDIAVIX_SYMBOL,
+)
+
+#: Fallback ``{symbol → securityId}`` used ONLY when the live scrip-master resolution
+#: is unavailable. NIFTY 13 is official (SDK README ``security_id=13``); the others
+#: are in-repo-verified (MIGRATION #87/#72 + TickVault CSV-pins): BANKNIFTY 25,
+#: SENSEX 51, INDIA VIX 21 (NOT 26 — a known third-party mirror error). A symbol
+#: ABSENT from both the live CSV and this map is loud-skipped (never a blind id).
+DHAN_FALLBACK_SECURITY_IDS: Final[dict[str, int]] = {
+    NIFTY_SYMBOL: 13,
+    BANKNIFTY_SYMBOL: 25,
+    SENSEX_SYMBOL: 51,
+    INDIAVIX_SYMBOL: 21,
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History floor + per-index servability — UNVERIFIED until a probe transcript lands
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The earliest 1-minute date Dhan is CONFIRMED to serve. ``None`` = UNVERIFIED
+#: (Golden Rule #1): Dhan's official policy is a ROLLING "last 5 years" window, so
+#: June-2022 is reachable TODAY but the true floor + rolling edge are UNVERIFIED
+#: (all ``*.dhan.co`` hosts are egress-blocked in-sandbox). The credentialed probe
+#: (docs/runbooks §6 gate G1) flips this to a real ``date`` in a ONE-line data
+#: change; until then the pull NEVER fabricates a floor — it plans from the operator
+#: date range and records honest empty windows for a too-old span.
+DHAN_HISTORY_FLOOR: Final[date | None] = None
+
+#: Per-index intraday SERVABILITY — UNVERIFIED until a credentialed probe transcript
+#: lands (Golden Rule #1). These are HONESTY MARKERS ONLY: no decision branch reads
+#: them (AST-pinned in ``tests/unit/test_dhan_constants.py``), so the pull can never
+#: gate on a fabricated "verified" flag — an index either resolves a securityId
+#: (attempted; honest no-data on empty arrays) or is loud-skipped. Flipping a marker
+#: to a probe transcript is the one-line data change of §6 gates G1 (depth) / G2
+#: (VIX) / G3 (SENSEX). ``None`` = "no probe transcript yet".
+NIFTY_SERVABILITY_UNVERIFIED: Final[None] = None
+BANKNIFTY_SERVABILITY_UNVERIFIED: Final[None] = None
+SENSEX_SERVABILITY_UNVERIFIED: Final[None] = None
+INDIAVIX_SERVABILITY_UNVERIFIED: Final[None] = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Known vendor error codes (PARTIAL: doc/community snippets; throttle code UNVERIFIED)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: DH-901 ``Invalid_Authentication`` — a bad / expired 24-h JWT. Handled by RE-READING
+#: SSM (never a mint) — the read-only reauth self-heal.
+DHAN_ERR_INVALID_AUTH: Final[str] = "DH-901"
+
+#: DH-905 — authorization / subscription / missing-field class (an inactive Data API
+#: subscription surfaces here). TERMINAL: fix the subscription, not a retry.
+DHAN_ERR_AUTHORIZATION: Final[str] = "DH-905"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AWS SSM parameter paths for the READ-ONLY Dhan credentials (own params)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The (public) Dhan client id — SSM ``String`` (not a secret; still read from SSM
+#: so a rotation propagates to every consumer). Env-overridable path name.
+DHAN_TOKEN_PARAM_CLIENT_ID_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_DHAN_CLIENT_ID"  # noqa: S105 — env var name, not a secret
+DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT: Final[str] = "/tickvault/prod/dhan/client-id"  # noqa: S105 — parameter path, not a secret
+
+#: The Dhan 24-h JWT access token — SSM ``SecureString`` (a secret). Env-overridable
+#: path name. Minted by the Lambda / TickVault; BruteX only ``GetParameter``s it.
+DHAN_TOKEN_PARAM_ACCESS_TOKEN_ENV: Final[str] = "BRUTEX_TOKEN_PARAM_DHAN_ACCESS_TOKEN"  # noqa: S105 — env var name, not a secret
+DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT: Final[str] = "/tickvault/prod/dhan/access-token"  # noqa: S105 — parameter path, not a secret
+
+
+__all__ = [
+    "API_BASE",
+    "BANKNIFTY_SERVABILITY_UNVERIFIED",
+    "BANKNIFTY_SYMBOL",
+    "DHAN_COVERAGE_MARKET",
+    "DHAN_DAILY_QUOTA",
+    "DHAN_ENGINE_INDEX_SYMBOLS",
+    "DHAN_ERR_AUTHORIZATION",
+    "DHAN_ERR_INVALID_AUTH",
+    "DHAN_FALLBACK_SECURITY_IDS",
+    "DHAN_FEED_ID",
+    "DHAN_FETCH_INTERVAL",
+    "DHAN_HISTORY_FLOOR",
+    "DHAN_INTERVAL_1MIN",
+    "DHAN_INTRADAY_WINDOW_DAYS",
+    "DHAN_RATE_LIMIT_PER_MIN",
+    "DHAN_RATE_LIMIT_RPS",
+    "DHAN_SPOT_INDEX_SYMBOLS",
+    "DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT",
+    "DHAN_TOKEN_PARAM_ACCESS_TOKEN_ENV",
+    "DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT",
+    "DHAN_TOKEN_PARAM_CLIENT_ID_ENV",
+    "INDIAVIX_SERVABILITY_UNVERIFIED",
+    "INDIAVIX_SYMBOL",
+    "INSTRUMENT_INDEX",
+    "NATIVE_TIMEZONE",
+    "NIFTY_SERVABILITY_UNVERIFIED",
+    "NIFTY_SYMBOL",
+    "SCRIP_MASTER_URL",
+    "SEGMENT_INDEX",
+    "SENSEX_SERVABILITY_UNVERIFIED",
+    "SENSEX_SYMBOL",
+]

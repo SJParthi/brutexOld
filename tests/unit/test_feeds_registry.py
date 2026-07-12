@@ -1,8 +1,8 @@
 """Unit tests for :mod:`brutex.feeds.registry` (DEC-FEED-INTERFACE-001, #1752).
 
-100% line + branch. The registry ships ONLY the default feed (PR-2 is
-vendor-token-free); an unknown id raises a typed refusal naming the registered
-ids.
+100% line + branch. The registry ships the default feed plus the ``dhan`` feed
+(DEC-DHAN-FEED-BINDING-001 — the real second consumer); an unknown id raises a
+typed refusal naming the registered ids.
 """
 
 from __future__ import annotations
@@ -17,8 +17,9 @@ from brutex.feeds.registry import (
 )
 
 
-def test_registry_ships_only_default_feed() -> None:
-    assert registered_feed_ids() == (DEFAULT_FEED,)
+def test_registry_ships_default_and_dhan_feeds() -> None:
+    # Sorted: the default feed (groww) + the dhan feed (the real second consumer).
+    assert registered_feed_ids() == ("dhan", DEFAULT_FEED)
 
 
 def test_resolve_default_returns_binding() -> None:

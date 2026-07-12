@@ -17,8 +17,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Final
 
+from brutex.adapters.dhan.constants import DHAN_FEED_ID
 from brutex.data.feed_root import DEFAULT_FEED
 from brutex.feeds.binding import FeedBinding
+from brutex.feeds.dhan_binding import build_dhan_binding
 from brutex.feeds.groww_binding import build_groww_binding
 from brutex.models import BruteXError
 
@@ -27,10 +29,13 @@ class UnknownFeedError(BruteXError):
     """Raised when :func:`resolve_feed_binding` is asked for an unregistered feed."""
 
 
-#: The registry: feed id → zero-arg builder of its :class:`FeedBinding`.
-#: PR-2 ships ONLY the default feed (vendor-token-free).
+#: The registry: feed id → zero-arg builder of its :class:`FeedBinding`. The default
+#: feed (Groww) resolves to the top lake root by identity; the ``dhan`` feed
+#: (DEC-DHAN-FEED-BINDING-001 — the real second consumer) nests under
+#: ``<lake_root>/feeds/dhan/``.
 _BUILDERS: Final[dict[str, Callable[[], FeedBinding]]] = {
     DEFAULT_FEED: build_groww_binding,
+    DHAN_FEED_ID: build_dhan_binding,
 }
 
 
