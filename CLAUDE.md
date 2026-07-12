@@ -2357,7 +2357,14 @@ hostile-review pass._
   autoreverted kernel bug can never print a vacuous/masked byte-identity PASS — stub-CLI-pinned by
   `TestTwinRunEngagementGate`; plus the "measured 0.257" → carried provenance reword in `rust_enum.py`,
   source-pinned; per-fix record in MIGRATION.md #1738) + the `rust-enum-twin-run.yml` M4-Pro dispatch job;
-  operator fallback: `bash scripts/ci/rust_enum_twin_run.sh <lake-root>`. MUTATION: enum_kernel 782 raw →
+  operator fallback: `bash scripts/ci/rust_enum_twin_run.sh <lake-root>`. REVIEW ROUND 3 fold (both NITs):
+  the lower-work-cells-clamp disclosure ("a degenerate `=1` can never produce a one-mask-per-call stream")
+  honestly SCOPED — the min-hits-blind charging rule means a window deeper than the 2^16 clamp (every
+  production 1-minute window) at the minimum knob still streams one mask per range, correctness-INVARIANT
+  (kept lists cap-invariant), extra FFI round-trips only — reworded at all three sites + pinned by NEW
+  `TestLowerClampDeepWindowEnvelope` (fails-before doc-pin + a real-kernel deep-window set-AND-order walk);
+  plus the PR-body draft's stale ci-gate count reconciled to the measured 88 at both sites; per-fix record
+  in MIGRATION.md #1738. MUTATION: enum_kernel 782 raw →
   204 after the exclude_re dropping ONLY the 578 provably-UNVIABLE whole-fn `-> PyResult` constructor
   guesses on the two pyclass shims (zero body mutants excluded, verified); crate total 803 → the #1597
   dial taken AGAIN (7 → 8 shards, ceil(803/8)=101). HONEST: SEGMENT-level lever, NO whole-sweep claim; no
