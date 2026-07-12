@@ -225,6 +225,26 @@ class TestAlerts:
         assert ev.dedupe_key == "auth-renew"
         assert "token expired" in ev.message
 
+    def test_token_auth_failed(self) -> None:
+        fake = FakeNotifier()
+        ok = SweepAlerter(notifier=fake).token_auth_failed(
+            vendor="dhan", reason="invalid_credentials", detail="locked down (invalid_credentials)"
+        )
+        assert ok is True
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "token-auth-failed:dhan:invalid_credentials"
+        assert "dhan" in ev.message
+
+    def test_token_auth_failed_silent_without_notifier(self) -> None:
+        assert (
+            SweepAlerter(resolver=lambda: None).token_auth_failed(
+                vendor="dhan", reason="x", detail="y"
+            )
+            is False
+        )
+
     def test_pull_halted(self) -> None:
         fake = FakeNotifier()
         SweepAlerter(notifier=fake).pull_halted(reason="disk_full")

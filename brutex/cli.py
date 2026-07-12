@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
+    from brutex.adapters.dhan.reauth import DhanTokenManager
     from brutex.data.greeks_enrich import GreeksEnrichTarget
 
 from brutex import __version__
@@ -804,6 +805,26 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub.add_parser(
         "clear",
         help="Delete the stored token credentials file",
+    )
+
+    # ── dhan-token (DEC-DHAN-AUTH-001) ────────────────────────────
+    dhan_token = sub.add_parser(
+        "dhan-token",
+        help="Inspect / mint / renew the daily DhanHQ v2 access token (AWS-SSM only)",
+    )
+    dhan_token_sub = dhan_token.add_subparsers(dest="dhan_action", required=True)
+    dhan_token_sub.add_parser(
+        "status",
+        help="Print token age / remaining life / fingerprint (never the token); "
+        "exit 0 if fresh, 1 if stale/absent",
+    )
+    dhan_token_sub.add_parser(
+        "mint",
+        help="Force a fresh headless PIN+TOTP mint + store (never prints the token)",
+    )
+    dhan_token_sub.add_parser(
+        "renew",
+        help="Renew the active token via RenewToken + store (never prints the token)",
     )
 
     # ── dashboard ─────────────────────────────────────────────────
@@ -2673,6 +2694,70 @@ def cmd_auth_clear() -> int:  # pragma: no cover — thin print wrapper
         print(f"[brutex] credentials removed: {path}")
     else:
         print(f"[brutex] no credentials file to remove: {path}")
+    return EXIT_OK
+
+
+def _build_dhan_manager() -> DhanTokenManager:  # pragma: no cover — real AWS + network
+    """Build the production :class:`DhanTokenManager` (real SSM store + urllib transport)."""
+    from brutex.adapters.dhan.auth_audit import DhanAuthAudit
+    from brutex.adapters.dhan.reauth import DhanTokenManager
+    from brutex.adapters.dhan.token_store_aws import build_dhan_token_store
+    from brutex.config.credentials_aws import load_dhan_aws_credentials
+    from brutex.notifications.sweep_alerts import SweepAlerter
+
+    return DhanTokenManager(
+        build_dhan_token_store(),
+        load_dhan_aws_credentials,
+        alerter=SweepAlerter(),
+        audit=DhanAuthAudit(),
+    )
+
+
+def cmd_dhan_token_status() -> int:  # pragma: no cover — real AWS read
+    """Print the stored Dhan token's age / remaining life / fingerprint (never the token).
+
+    Exit :data:`EXIT_OK` when a usable (fresh) token is present, else
+    :data:`EXIT_USER_ERROR` (stale / absent / corrupt). The token bytes are NEVER printed —
+    only the ``sha256(token)[:8]`` fingerprint.
+    """
+    from datetime import UTC, datetime
+
+    from brutex.adapters.dhan.constants import DHAN_TOKEN_LIFETIME_S
+    from brutex.adapters.dhan.token_lifecycle import token_age_s, token_usable
+    from brutex.adapters.dhan.token_store_aws import build_dhan_token_store, token_fingerprint
+
+    store = build_dhan_token_store()
+    envelope = store.load()
+    if envelope is None:
+        print("[brutex] dhan token: absent or unreadable (mint required)", file=sys.stderr)
+        return EXIT_USER_ERROR
+    now = datetime.now(tz=UTC)
+    age = token_age_s(envelope, now)
+    remaining = float(DHAN_TOKEN_LIFETIME_S) - age
+    usable = token_usable(envelope, now)
+    print(f"[brutex] dhan token: fingerprint {token_fingerprint(envelope.token)}")
+    print(f"[brutex]   source={envelope.source} age={age:.0f}s remaining≈{remaining:.0f}s")
+    print(f"[brutex]   status={'fresh' if usable else 'stale (refresh due)'}")
+    return EXIT_OK if usable else EXIT_USER_ERROR
+
+
+def cmd_dhan_token_mint() -> int:  # pragma: no cover — real AWS + network mint
+    """Force a fresh headless PIN+TOTP mint + store (prints only a fingerprint)."""
+    from brutex.adapters.dhan.token_store_aws import token_fingerprint
+
+    manager = _build_dhan_manager()
+    manager.reauth(manager.current_generation())
+    print(f"[brutex] dhan token minted: fingerprint {token_fingerprint(manager.current_token())}")
+    return EXIT_OK
+
+
+def cmd_dhan_token_renew() -> int:  # pragma: no cover — real AWS + network renew
+    """Renew the active token via RenewToken + store (prints only a fingerprint)."""
+    from brutex.adapters.dhan.token_store_aws import token_fingerprint
+
+    manager = _build_dhan_manager()
+    manager.reauth(manager.current_generation())
+    print(f"[brutex] dhan token renewed: fingerprint {token_fingerprint(manager.current_token())}")
     return EXIT_OK
 
 
@@ -9592,6 +9677,14 @@ def _dispatch(argv: list[str] | None) -> int:
         if args.auth_command == "clear":
             return cmd_auth_clear()
         parser.error(f"unknown auth subcommand: {args.auth_command}")
+    if args.command == "dhan-token":  # pragma: no cover — real AWS/network shims
+        if args.dhan_action == "status":
+            return cmd_dhan_token_status()
+        if args.dhan_action == "mint":
+            return cmd_dhan_token_mint()
+        if args.dhan_action == "renew":
+            return cmd_dhan_token_renew()
+        parser.error(f"unknown dhan-token subcommand: {args.dhan_action}")
     if args.command == "dashboard":
         return cmd_dashboard(
             lake_root=args.lake_root,

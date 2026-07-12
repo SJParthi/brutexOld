@@ -740,6 +740,39 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def token_auth_failed(self, *, vendor: str, reason: str, detail: str) -> bool:
+        """Alert that a vendor's token auth EXHAUSTED / LOCKED DOWN (CRITICAL; deduped).
+
+        Fired ONLY on an unrecoverable auth outcome (a lockdown latch, or an exhausted retry
+        budget) — success is audit + log only. The daily token auth is the keystone of an
+        unattended pull, so a lockdown must reach the operator in real time: the fix (verify
+        the credentials / preconditions per the runbook, then restart) is a deliberate action,
+        not an auto-recovery. Best-effort, silent when Telegram is disabled. The ``dedupe_key``
+        is per ``(vendor, reason)`` so a repeated failure of the SAME cause coalesces.
+
+        Parameters
+        ----------
+        vendor
+            The vendor whose auth failed (e.g. ``"dhan"``).
+        reason
+            A short, non-secret cause token (e.g. ``"invalid_credentials"``,
+            ``"repeated_terminal"``).
+        detail
+            A short, SECRET-FREE description (the caller passes an already-scrubbed
+            ``safe_message`` — never a raw credential or URL).
+        """
+        message = escape_markdown_v2(
+            f"🛑 {vendor} token auth FAILED ({reason}): {detail}. The pull cannot get a "
+            "token — verify the credentials / preconditions (see docs/runbooks/dhan-auth.md) "
+            "and restart. No further fetches until this is resolved."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"token-auth-failed:{vendor}:{reason}",
+        )
+
     def nightly_summary(
         self,
         *,
