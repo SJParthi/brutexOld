@@ -72,6 +72,8 @@ from brutex.adapters.groww.client import GrowwClientProtocol, GrowwSDK
 from brutex.adapters.groww.constants import (
     BRUTE_FORCE_INDEX_SYMBOLS,
     EARLIEST_HISTORY,
+    GROWW_RATE_LIMIT_PER_MIN,
+    GROWW_RATE_LIMIT_RPS_CEILING,
     INDIA_VIX_SYMBOL,
 )
 from brutex.adapters.groww.contracts import underlying_symbol_forms
@@ -98,6 +100,11 @@ from brutex.adapters.groww.probe import (
     probe_depth,
     probe_vix,
 )
+from brutex.adapters.groww.pull_singleflight import (
+    PullAlreadyRunningError,
+    account_pull_singleflight_lock,
+    pull_singleflight_lock,
+)
 from brutex.adapters.groww.symbol_form_preference import (
     FORM_PROBE_VERDICT_KEY,
     PersistentSymbolFormPreference,
@@ -123,6 +130,7 @@ from brutex.data.bhavcopy import (
     fetch_index_bhavcopy,
     nse_index_name_for,
 )
+from brutex.data.errors import LakeWriteHalt
 from brutex.data.meta_kv import MetaKV
 from brutex.data.models import CandleBar
 from brutex.data.raw_integrity import RawIntegrityError, RawIntegrityRecord, build_record
@@ -578,6 +586,18 @@ DIAGNOSTICS: Final[dict[str, str]] = {
     "rate.aborted": (
         "WARN rate: aborted after {bursts} consecutive raised vendor errors (sustained "
         "throttle burst) — do NOT raise the ceiling; the transcript records every shape."
+    ),
+    "rate.pull_lock_held": (
+        "WARN rate: REFUSED — a pull is currently running against this account/lake "
+        "({detail}); running the ≤480-call probe beside it would put ~960 req/min on the "
+        "shared 500/min Groww account cap (Golden Rule #6) and contaminate the ladder "
+        "evidence. ZERO probe calls were issued. Wait for the pull to finish (or stop "
+        "it), then re-run with --rate-probe."
+    ),
+    "rate.lock_halt": (
+        "FAIL rate: could not take the pull single-flight lock ({detail}) — lake volume "
+        "write halt (disk full / OOM); free space / fix the volume, then re-run. ZERO "
+        "probe calls were issued."
     ),
     # ── stage 14 · ampersand (%26) form probe (opt-in) ─────────────────
     "amp.pass": (
@@ -2298,6 +2318,25 @@ def stage_resume(deps: KitDeps, ctx: KitContext) -> StageOutcome:
 # ────────────────────────────────────────────────────────────────────────
 
 
+def _account_lock_dir(home: Path) -> Path:
+    """Account-keyed lock dir under *home* — the injected-deps mirror of
+    ``pull_singleflight.default_account_lock_dir()`` (pinned equal at
+    ``Path.home()``, ``test_account_lock_dir_mirrors_default``), so tests
+    never touch the real ``$HOME``."""
+    return home / ".brutex" / "locks"
+
+
+def real_controller_factory() -> RateController:
+    """The stage-3 kit controller at the PRODUCTION ceilings (8 r/s, 500/min) —
+    extracted from :func:`build_real_deps` so the ceiling pins have an
+    executable target. VALUES byte-identical to the pre-fix inline
+    ``_controller`` (CLAUDE.md §2 Rule 6 — no rate value change)."""
+    return RateController(
+        ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
+        ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
+    )
+
+
 def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     """Stage 13 — ≤ 60 s of cheap calls via the REAL controller+client, abort on burst.
 
@@ -2305,13 +2344,61 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
     bounded in-call retry was already exhausted — so the loop's logical-call
     count under-counts physical attempts by at most one call's retry budget
     (register M8's evidence-starvation point, stated on the PASS line too).
+
+    Runs ONLY under the account+lake pull single-flight locks
+    (DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001) — account flock FIRST then
+    lake-root flock (the fixed order law), HELD through the whole probe
+    traffic window; a concurrent pull refuses the probe (WARN, zero vendor
+    calls) and, reverse, the probe's <=60 s hold refuses a pull start naming
+    ``doctor:rate-probe:<run_id>``. HONEST: same-host serialisation only —
+    the cross-host lease is deliberately NOT entered for a <=60 s diagnostic;
+    TickVault takes no BruteX lock (accepted envelope); the other stages'
+    <=40-call diagnostic traffic remains unlocked (bounded, out of scope).
     """
     if not ctx.options.rate_probe:
         return _skip(13, "rate", "opt-in probe not enabled (pass --rate-probe to run it)")
-    if ctx.client is None or ctx.probe_day is None:
-        return _skip(13, "rate", "stage 3 did not run — no live client")
+    if ctx.client is None or ctx.probe_day is None or ctx.creds is None:
+        return _skip(13, "rate", "stage 1/3 did not run — no live client/creds")
+    holder = f"doctor:rate-probe:{ctx.run_id}"
+    try:
+        with (
+            account_pull_singleflight_lock(
+                ctx.creds.api_key, lock_dir=_account_lock_dir(deps.home)
+            ),
+            pull_singleflight_lock(ctx.lake_root, holder_note=holder),
+        ):
+            return _run_rate_probe(deps, ctx, client=ctx.client, probe_day=ctx.probe_day)
+    except PullAlreadyRunningError as exc:
+        ctx.transcript.event("rate.lock_refused", detail=str(exc))
+        return StageOutcome(
+            stage=13,
+            name="rate",
+            status=STATUS_WARN,
+            lines=(render_diagnostic("rate.pull_lock_held", detail=str(exc)),),
+        )
+    except LakeWriteHalt as exc:
+        return StageOutcome(
+            stage=13,
+            name="rate",
+            status=STATUS_FAIL,
+            lines=(render_diagnostic("rate.lock_halt", detail=str(exc)),),
+        )
+
+
+def _run_rate_probe(
+    deps: KitDeps, ctx: KitContext, *, client: GrowwClientProtocol, probe_day: date
+) -> StageOutcome:
+    """The stage-13 probe loop body — runs with BOTH single-flight locks held.
+
+    Moved verbatim out of :func:`stage_rate` (budget spend, loop, abort burst,
+    ``rate.summary`` event, WARN/PASS outcomes — the only delta is that the
+    caller's already-narrowed ``ctx.client``/``ctx.probe_day`` arrive as typed
+    parameters, so no assert / dead guard is needed here). A
+    :class:`CallBudgetExceeded` raised here unwinds THROUGH the caller's
+    ``with`` (locks released) to ``run_live_doctor``'s existing handler.
+    """
     exchange, segment = ctx.exchange_segment()
-    start, end = _day_window(ctx.probe_day)
+    start, end = _day_window(probe_day)
     started = deps.monotonic()
     calls = 0
     clean = 0
@@ -2324,7 +2411,7 @@ def stage_rate(deps: KitDeps, ctx: KitContext) -> StageOutcome:
         ctx.budget.spend(label="rate.probe")
         calls += 1
         try:
-            ctx.client.historical_candles(
+            client.historical_candles(
                 exchange=exchange,
                 segment=segment,
                 groww_symbol=ctx.options.symbol,
@@ -2852,11 +2939,7 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
     import brutex
     from brutex.adapters.groww.auth import _real_token_factory, _real_totp
     from brutex.adapters.groww.aws_client import build_real_aws_client
-    from brutex.adapters.groww.constants import (
-        GROWW_RATE_LIMIT_PER_MIN,
-        GROWW_RATE_LIMIT_RPS_CEILING,
-        resolve_token_broker_region,
-    )
+    from brutex.adapters.groww.constants import resolve_token_broker_region
     from brutex.adapters.groww.instrument_loader import urllib_http_get
     from brutex.adapters.groww.live import installed_growwapi_version
     from brutex.adapters.groww.reauth import _real_sdk_factory
@@ -2926,12 +3009,6 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         # only supplies the clock + the loaded overlay.
         return resolve_probe_day(datetime.now(UTC), observed=observed_holidays)
 
-    def _controller() -> RateController:
-        return RateController(
-            ceiling_rps=GROWW_RATE_LIMIT_RPS_CEILING,
-            ceiling_per_min=GROWW_RATE_LIMIT_PER_MIN,
-        )
-
     return KitDeps(
         now_utc=lambda: datetime.now(UTC),
         monotonic=time_module.monotonic,
@@ -2956,7 +3033,7 @@ def build_real_deps() -> KitDeps:  # pragma: no cover — the real network/git/c
         sdk_factory=_real_sdk_factory,
         real_token_factory=_real_token_factory,
         real_totp_minter=_real_totp,
-        controller_factory=_controller,
+        controller_factory=real_controller_factory,
         http_get=urllib_http_get,
         nse_http_get=urllib_http_get_nse,
         probe_day=_probe_day,
@@ -2990,6 +3067,7 @@ __all__ = [
     "compute_call_budget",
     "make_file_transcript_sink",
     "probe_sdk_shape",
+    "real_controller_factory",
     "render_diagnostic",
     "run_live_doctor",
 ]

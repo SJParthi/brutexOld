@@ -67,6 +67,8 @@ def test_every_diagnostic_is_register_cross_referenced_or_infra() -> None:
             "bhavcopy.no_row",
             "bhavcopy.no_daily_bar",
             "rate.aborted",  # companion to the tagged rate.throttle_evidence
+            "rate.pull_lock_held",  # operational single-flight refusal, not a register row
+            "rate.lock_halt",  # infra halt (disk full/OOM) relayed from the lock, not a register row
             "depth.error",  # transport-failure arm of the tagged R6 family
         }
     ]

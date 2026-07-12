@@ -10,7 +10,8 @@ purpose, not a gap these tests can close.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -18,11 +19,21 @@ from typing import Any
 import pytest
 from brutex import doctor_live as dl
 from brutex.adapters.groww.constants import (
+    GROWW_RATE_LIMIT_PER_MIN,
+    GROWW_RATE_LIMIT_RPS_CEILING,
     GROWW_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     INSTRUMENT_CSV_COLUMNS,
 )
+from brutex.adapters.groww.pull_singleflight import (
+    PullAlreadyRunningError,
+    account_pull_singleflight_lock,
+    default_account_lock_dir,
+    pull_singleflight_lock,
+    pull_singleflight_lock_path,
+)
 from brutex.adapters.rate_common import RateController
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
+from brutex.data.errors import LakeWriteHalt
 
 from tests.fakes.fake_aws_client import FakeAwsClient
 
@@ -1683,6 +1694,198 @@ class TestStageRate:
         outcome = dl.stage_rate(deps, ctx)
         assert outcome.status == dl.STATUS_PASS
         assert "(5 calls, 0 raised throttles)" in outcome.lines[0]
+
+
+class TestRateProbePullExclusion:
+    """DEC-DOCTOR-RATE-PROBE-SINGLEFLIGHT-001: stage 13 is exclusive-or-refuse
+    against the pull single-flight locks (account FIRST, then lake-root),
+    HELD through the whole probe traffic window. Same-process contention is
+    real — an flock binds to the open file description, so a second open of
+    the same lock file genuinely contends."""
+
+    def test_rate_probe_refuses_while_pull_lock_held(self, tmp_path: Path) -> None:
+        """The fail-before pin: a held lake lock refuses the probe LOUDLY.
+
+        Pre-fix the stage took no lock at all — it issued its calls and
+        returned PASS beside the running pull. Post-fix: a NAMED WARN refusal
+        echoing the holder note, ZERO vendor calls, ZERO budget spends.
+        """
+        deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        calls = {"n": 0}
+
+        def counting(kwargs: dict[str, object]) -> Mapping[str, object]:
+            calls["n"] += 1
+            return default_handler(kwargs)
+
+        box["handler"] = counting
+        used_before = ctx.budget.used
+        with pull_singleflight_lock(ctx.lake_root, holder_note="pull:fake-peer"):
+            outcome = dl.stage_rate(deps, ctx)
+        assert outcome.status == dl.STATUS_WARN
+        joined = " ".join(outcome.lines)
+        assert "REFUSED" in joined
+        assert "holder: pull:fake-peer" in joined
+        assert calls["n"] == 0  # ZERO vendor calls
+        assert ctx.budget.used == used_before  # ZERO budget spends
+
+    def test_rate_probe_refuses_while_account_lock_held(self, tmp_path: Path) -> None:
+        """The ACCOUNT-keyed lock (taken FIRST) refuses the probe on its own.
+
+        The fake creds api_key is ``"key"`` (``make_deps``); the account lock
+        dir derives from the injected ``deps.home``, so the contention is real
+        and hermetic. The lake lock must be freely acquirable DURING the
+        refusal — it is never left held when the account lock refused.
+        """
+        deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        calls = {"n": 0}
+
+        def counting(kwargs: dict[str, object]) -> Mapping[str, object]:
+            calls["n"] += 1
+            return default_handler(kwargs)
+
+        box["handler"] = counting
+        with account_pull_singleflight_lock("key", lock_dir=dl._account_lock_dir(deps.home)):
+            outcome = dl.stage_rate(deps, ctx)
+            assert outcome.status == dl.STATUS_WARN
+            assert "REFUSED" in " ".join(outcome.lines)
+            # The lake lock was never taken (account is FIRST) — acquirable now.
+            with pull_singleflight_lock(ctx.lake_root):
+                pass
+        assert calls["n"] == 0
+
+    @pytest.mark.parametrize("throttling", [False, True])
+    def test_lock_held_through_traffic_released_after(
+        self, tmp_path: Path, throttling: bool
+    ) -> None:
+        """The lake lock is HELD during traffic and released on BOTH exits.
+
+        The handler's every call attempts the lake lock and records the
+        outcome: each in-flight attempt must be REFUSED naming
+        ``doctor:rate-probe:<run_id>`` (held DURING traffic + holder note —
+        kills a probe-and-release mutant); a post-return acquire succeeds
+        (released on the clean PASS exit AND the throttle-abort WARN exit —
+        the ``throttling`` arm raises a terminal vendor error per call, so
+        ``RATE_PROBE_ABORT_BURST`` trips fast + deterministically).
+        """
+        deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        ctx.options.rate_probe_seconds = 1.0
+        inflight: list[str] = []
+
+        def handler(kwargs: dict[str, object]) -> Mapping[str, object]:
+            try:
+                with pull_singleflight_lock(ctx.lake_root):
+                    inflight.append("ACQUIRED")  # the probe-and-release mutant's path
+            except PullAlreadyRunningError as exc:
+                inflight.append(f"REFUSED:{exc}")
+            if throttling:
+                raise RuntimeError("vendor melted")  # terminal — raises out once per call
+            return default_handler(kwargs)
+
+        box["handler"] = handler
+        outcome = dl.stage_rate(deps, ctx)
+        assert outcome.status in {dl.STATUS_PASS, dl.STATUS_WARN}
+        assert inflight
+        assert all(entry.startswith("REFUSED:") for entry in inflight)
+        assert f"doctor:rate-probe:{ctx.run_id}" in inflight[0]  # the holder note
+        with pull_singleflight_lock(ctx.lake_root):  # released after return
+            pass
+
+    def test_lock_order_account_before_lake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fixed order law: account flock FIRST, lake-root flock second."""
+        deps, ctx, _box = prepare_client(tmp_path, rate_probe=True)
+        ctx.options.rate_probe_seconds = 0.0  # zero-call probe body
+        order: list[str] = []
+
+        @contextmanager
+        def spy_account(api_key: str, **kwargs: Any) -> Generator[None, None, None]:
+            order.append("account")
+            with account_pull_singleflight_lock(api_key, **kwargs):
+                yield
+
+        @contextmanager
+        def spy_lake(lake_root: Path, **kwargs: Any) -> Generator[None, None, None]:
+            order.append("lake")
+            with pull_singleflight_lock(lake_root, **kwargs):
+                yield
+
+        monkeypatch.setattr(dl, "account_pull_singleflight_lock", spy_account)
+        monkeypatch.setattr(dl, "pull_singleflight_lock", spy_lake)
+        assert dl.stage_rate(deps, ctx).status == dl.STATUS_PASS
+        assert order == ["account", "lake"]
+
+    def test_lock_halt_is_a_named_stage_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``LakeWriteHalt`` from lock-file creation is an HONEST stage FAIL.
+
+        Pre-fix it would have propagated RAW out of the CLI — it is a
+        ``BruteXError``, not an ``OSError``, so ``run_live_doctor``'s loop
+        would not catch it. Zero vendor calls are issued.
+        """
+        deps, ctx, box = prepare_client(tmp_path, rate_probe=True)
+        calls = {"n": 0}
+
+        def counting(kwargs: dict[str, object]) -> Mapping[str, object]:
+            calls["n"] += 1
+            return default_handler(kwargs)
+
+        box["handler"] = counting
+
+        def halting(lake_root: Path, **kwargs: Any) -> Any:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr(dl, "pull_singleflight_lock", halting)
+        outcome = dl.stage_rate(deps, ctx)
+        assert outcome.status == dl.STATUS_FAIL
+        assert outcome.lines[0] == dl.render_diagnostic(
+            "rate.lock_halt", detail="lake write halted: disk_full"
+        )
+        assert calls["n"] == 0
+
+    def test_missing_creds_skips(self, tmp_path: Path) -> None:
+        """Guard totality: a ctx with a client but no creds skips honestly."""
+        deps, ctx, _box = prepare_client(tmp_path, rate_probe=True)
+        ctx.creds = None
+        assert dl.stage_rate(deps, ctx).status == dl.STATUS_SKIP
+
+    def test_rate_probe_skips_take_no_lock(self, tmp_path: Path) -> None:
+        """BOTH ``_skip`` arms create no lock file — zero new locking behavior
+        for a plain ``doctor --live`` run without ``--rate-probe``."""
+        # Arm 1: probe not enabled (client present).
+        deps, ctx, _box = prepare_client(tmp_path)
+        assert dl.stage_rate(deps, ctx).status == dl.STATUS_SKIP
+        assert not pull_singleflight_lock_path(ctx.lake_root).exists()
+        assert not dl._account_lock_dir(deps.home).exists()
+        # Arm 2: probe enabled but no live client.
+        deps2, _box2 = make_deps(tmp_path)
+        ctx2, _events = make_ctx(tmp_path, deps2, rate_probe=True)
+        assert dl.stage_rate(deps2, ctx2).status == dl.STATUS_SKIP
+        assert not pull_singleflight_lock_path(ctx2.lake_root).exists()
+        assert not dl._account_lock_dir(deps2.home).exists()
+
+
+class TestRateProbeControllerPins:
+    """The extracted production controller factory + the composition arithmetic."""
+
+    def test_real_controller_factory_ceilings_pinned(self) -> None:
+        """The factory builds at the PRODUCTION ceilings — values pinned, not edited.
+
+        The disjunctive composition (the autorun MAJOR-3 convention mirrored to
+        the lock-only form): exclusivity (the refusal/held-through-traffic pins)
+        + the probe's OWN 500/min governor + the whole probe budget fitting one
+        governor window ⇒ the BruteX-side account stream stays ≤ 500/min.
+        """
+        ctrl = dl.real_controller_factory()
+        assert ctrl.current_rps == GROWW_RATE_LIMIT_RPS_CEILING == 8.0
+        assert ctrl.snapshot()["ceiling_per_min"] == GROWW_RATE_LIMIT_PER_MIN == 500
+        assert dl.RATE_PROBE_BUDGET <= GROWW_RATE_LIMIT_PER_MIN  # 480 <= 500
+
+    def test_account_lock_dir_mirrors_default(self) -> None:
+        """The injected-deps lock-dir derivation equals the production default
+        at ``Path.home()`` — ``build_real_deps`` stays byte-honest."""
+        assert dl._account_lock_dir(Path.home()) == default_account_lock_dir()
 
 
 # ── stage 14 · ampersand (%26) form probe (DEC-FORM-WINNER-PERSIST-001) ──
