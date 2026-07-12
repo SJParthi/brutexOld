@@ -938,7 +938,7 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
     :data:`SNAPSHOT_ERA_UNKNOWN` (DEC-RESULTS-SURFACE-HONESTY-001).
 
     The THREE additive gate keys (DEC-SWEEP-SERVING-GATE-PROVENANCE-001):
-    ``gate_provenance`` (the row's verbatim gate+selection token, ``None`` for
+    ``gate_provenance`` (the row's verbatim gate-config token, ``None`` for
     ungated/legacy — this is gate-scoped-DEDUP provenance, NOT the statutory
     5-door gate re-check; a sibling PR's ``hard_gates_recheck`` verdict is a
     DISJOINT surface), ``gate_coordinate`` (its :func:`gate_coordinate_of`

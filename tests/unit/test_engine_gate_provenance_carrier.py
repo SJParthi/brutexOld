@@ -156,6 +156,35 @@ class TestGridGateProvenance:
         )
         assert token is not None and "gate_config" in token
 
+    def test_gated_grid_excludes_selection_while_address_keeps_it(self) -> None:
+        """A gated grid with a NON-default ``top_k`` carries ONLY the gate_config
+        leg in the SERVING token, while the store ADDRESS still folds ``top_k``.
+
+        This pins the fix's CORE property directly (not trivially, unlike the
+        default-selection case in :meth:`test_gated_grid_matches_fragments`):
+        even when BOTH an overfit gate AND a non-default selection are present,
+        the serving carrier drops the selection leg (the CLI-default
+        0-row-misfold closer) — so ``'selection' not in`` the token FAILS on a
+        revert of the ``selection=None`` seam — yet :func:`_tuple_digest` STILL
+        separates on ``top_k`` so a different ``--top`` writes a distinct Parquet
+        (#1336 store-address separation intact).
+        """
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=0.95), top_k=7)
+        token = grid_gate_provenance(grid)
+        # (a) SERVING carrier: gate_config only — the selection leg is dropped
+        #     even with a non-default top_k (fails on revert to selection=<frag>).
+        assert token is not None
+        assert "gate_config" in token
+        assert "selection" not in token
+        # (b) STORE address: _tuple_digest STILL folds top_k, so the overfit grid
+        #     at top_k=7 addresses a DIFFERENT store than the same overfit grid at
+        #     the default (top_k=None) selection.
+        overfit_default_top = _grid(overfit=OverfitGateConfig(dsr_min=0.95))
+        tuple_ = _tuple()
+        assert _tuple_digest(tuple_, grid) != _tuple_digest(tuple_, overfit_default_top)
+
     def test_selection_only_grid_carries_no_serving_token(self) -> None:
         """A non-default top_k alone does NOT gate the SERVING carrier (ungated).
 
