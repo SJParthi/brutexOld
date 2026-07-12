@@ -13,8 +13,10 @@ follow-up). Both were invisible to the suite because nothing pinned WHICH pool
 a dispatch rides — this file is that pin, the mechanical ratchet.
 
 THE RULE: a bare ``run_in_threadpool`` CALL in ``brutex/dashboard/*.py`` is
-sanctioned ONLY on the enumerated default-pool set below (each named
-deliberate in-code at its site + in #1642's deliberate-keep list). Counter
+sanctioned ONLY on the enumerated default-pool set below — the five are
+enumerated CENTRALLY at app.py's ``_run_lake`` doctrine comment AND each
+carries an at-site "Deliberately on the DEFAULT AnyIO pool" naming, with the
+ledger record in #1642's deliberate-keep list + #1751. Counter
 EQUALITY over ``(file, enclosing-def)`` — the #1492-G3 drift-pin pattern
 crossed with the exact-count enumeration of the VIX stamper binding pin — so:
 
@@ -53,9 +55,11 @@ import brutex
 
 _DASHBOARD = Path(brutex.__file__).resolve().parent / "dashboard"
 
-#: DEC-DASHBOARD-LAKE-IO-LIMITER-001 deliberate default-pool set — each named
-#: in-code at its site; a NEW entry requires a ledgered DEC + an in-code
-#: "deliberately default pool" comment (the #1642 doctrine).
+#: DEC-DASHBOARD-LAKE-IO-LIMITER-001 deliberate default-pool set — enumerated
+#: centrally at app.py's `_run_lake` doctrine comment AND named deliberate
+#: in-code at each site (#1642's deliberate-keep list + #1751); a NEW entry
+#: requires a ledgered DEC + an at-site "deliberately on the DEFAULT AnyIO
+#: pool" comment (the #1642 doctrine).
 _SANCTIONED: Counter[tuple[str, str]] = Counter(
     {
         ("app.py", "api_pull_rate"): 1,  # deadline-guarded liveness memo (#1522)

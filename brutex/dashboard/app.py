@@ -2143,6 +2143,10 @@ def build_app(
         if bridge_lake_root is None:
             bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
         else:
+            # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — the
+            # deadline-guarded RateBridgeCache memo (#1522) caps the worker hold per
+            # outage, and this liveness poll must stay startable through a lake
+            # outage; sanctioned in the threadpool pin allowlist (#1751).
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
@@ -6863,6 +6867,9 @@ def build_app(
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         # The workbook serialisation is CPU-bound over every report row — off the
         # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1751).
         return Response(
             content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -6938,6 +6945,9 @@ def build_app(
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1751).
         blob = await run_in_threadpool(
             render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
         )
@@ -7951,8 +7961,12 @@ def build_app(
         path = resolve_log_file()
         # A bounded read, but still DISK I/O — on a stalled/contended volume a
         # synchronous tail would wedge the event loop with every other request
-        # behind it, so it rides the same threadpool offload as the lake reads
-        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # behind it, so it runs off the loop on a threadpool worker
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001). Deliberately on the DEFAULT
+        # AnyIO pool (not the lake limiter) — resolve_log_file() tails the LOCAL
+        # rotating log under ~/.brutex/logs, not lake I/O, and riding _run_lake
+        # would let a lake outage starve the log route; sanctioned in the
+        # threadpool pin allowlist (#1751).
         records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 

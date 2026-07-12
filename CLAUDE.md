@@ -2330,13 +2330,13 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1751** —
   the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
-  app.py:7815, now :7818 — the #1665 merge-seam straggler, the ONLY oneclick
+  app.py:7815, now :7828 — the #1665 merge-seam straggler, the ONLY oneclick
   route still on the bare default pool) joins its six siblings on
   `await _run_lake(_resolve)`, and
   `register_launch_routes` gains the kw-only injection seam
   `run_lake: Callable[..., Awaitable[Any]] | None = None` (None → the
   lazily-imported default-pool `run_in_threadpool`, byte-identical for direct
-  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8702
+  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8716
   (pre-fix :8699) passes the app's `_run_lake`; no-fastapi-at-import contract +
   one-way import direction preserved) so ALL THREE /api/v1/launch/* offloads
   (`build_launch_state` · `run_preconditions` · `launch_sweep` — 21 partition
@@ -2360,15 +2360,25 @@ hostile-review pass._
   api_preopen_zip · api_logs), importer-set belt {app.py, launch_button.py},
   anti-vacuousness + detector teeth per the #1492-G3 idiom — the guaranteed
   reversion-gate kill, pure ast, no importorskip). The stale app.py:7405
-  section comment reconciled to name `_run_lake` (the wording at :7409).
+  (now :7415) section comment reconciled to name `_run_lake` (the wording now
+  at :7419).
   HONEST: ISOLATION not a
   deadline — a wedged worker stays wedged until the volume recovers and a
   client abort never cancels the offload (the token is held to thread
   completion); the AST pin cannot see an aliased call (disclosed residual,
   owned by the behavioral pins); the launch POST queues FIFO on the lake
-  limiter under an outage (it queued on the default pool before); app.py:7956's
+  limiter under an outage (it queued on the default pool before); app.py:7970's
   log tail (pre-fix :7953) stays DELIBERATELY default-pool (~/.brutex/logs
   LOCAL disk).
+  REFUTER ROUND-3 FOLD (finding G, MINOR — prose-claim drift, made TRUE at the
+  source): the pin's "each named deliberate in-code at its site" claim was
+  ahead of the code — only api_sweep_progress carried an at-site pool-choice
+  naming, and api_logs's at-site comment affirmatively said the OPPOSITE
+  (stale since #1642 moved the lake reads onto the limiter); the four unmarked
+  sanctioned sites now carry at-site "Deliberately on the DEFAULT AnyIO pool
+  (not the lake limiter)" namings with site-specific reasons (api_logs's stale
+  sentence REPLACED, never stacked), and the pin's docstring + _SANCTIONED
+  comment reworded to the precise central-enumeration + at-site truth.
   READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
   on the discovery gate's stem suite; app.py rides the whole-package floor.)
