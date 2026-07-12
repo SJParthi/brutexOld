@@ -40,6 +40,20 @@ liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; healthy-lake payloads
 byte-identical; the per-item record lives in the §1 Active-branch blurb +
 MIGRATION.md #1752 — this header carries the one-line summary, never the
 story.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
+MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
+the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
+past the adaptive floor the discovery / windows / ledger / tables caches
+serve the LAST-KNOWN payload instantly and refresh in at most ONE tokenless
+background revalidator per key (newest-wins store guard; payloads
+byte-identical, pinned); the /db spot-cascade walk PRUNES the F&O contract
+tree at descent; six db.html loaders become self-recovering with
+keep-last-good; NEW `observability/loop_watchdog.py` turns event-loop
+silence into WARN/CRITICAL alerts (`SweepAlerter.loop_stalled`). READ-side
+dashboard + observability only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change; touched modules 100% line+branch;
+the per-round record lives in the §1 Active-branch blurb + MIGRATION.md
+#1751 — this header carries the one-line summary, never the story).
 Earlier: 2026-07-10 (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md
 #1685 — Slice 0 of the Rust sweep-core conversion: a behavior-identical
 FOLD/COMBINE decomposition of the metric body in `brutex/metrics/compute.py`
@@ -2346,13 +2360,13 @@ hostile-review pass._
   renumbered #1751 → #1752 at the 2026-07-12 merge-reconcile (main took #1751
   for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, PR #1488) —
   the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
-  app.py:7815, now :7828 — the #1665 merge-seam straggler, the ONLY oneclick
+  app.py:7815, now :7928 — the #1665 merge-seam straggler, the ONLY oneclick
   route still on the bare default pool) joins its six siblings on
   `await _run_lake(_resolve)`, and
   `register_launch_routes` gains the kw-only injection seam
   `run_lake: Callable[..., Awaitable[Any]] | None = None` (None → the
   lazily-imported default-pool `run_in_threadpool`, byte-identical for direct
-  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8716
+  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8908
   (pre-fix :8699) passes the app's `_run_lake`; no-fastapi-at-import contract +
   one-way import direction preserved) so ALL THREE /api/v1/launch/* offloads
   (`build_launch_state` · `run_preconditions` · `launch_sweep` — 21 partition
@@ -2376,14 +2390,14 @@ hostile-review pass._
   api_preopen_zip · api_logs), importer-set belt {app.py, launch_button.py},
   anti-vacuousness + detector teeth per the #1492-G3 idiom — the guaranteed
   reversion-gate kill, pure ast, no importorskip). The stale app.py:7405
-  (now :7415) section comment reconciled to name `_run_lake` (the wording now
-  at :7419).
+  (now :7515) section comment reconciled to name `_run_lake` (the wording now
+  at :7519).
   HONEST: ISOLATION not a
   deadline — a wedged worker stays wedged until the volume recovers and a
   client abort never cancels the offload (the token is held to thread
   completion); the AST pin cannot see an aliased call (disclosed residual,
   owned by the behavioral pins); the launch POST queues FIFO on the lake
-  limiter under an outage (it queued on the default pool before); app.py:7970's
+  limiter under an outage (it queued on the default pool before); app.py:8070's
   log tail (pre-fix :7953) stays DELIBERATELY default-pool (~/.brutex/logs
   LOCAL disk).
   REFUTER ROUND-3 FOLD (finding G, MINOR — prose-claim drift, made TRUE at the
@@ -2398,6 +2412,41 @@ hostile-review pass._
   READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
   on the discovery gate's stem suite; app.py rides the whole-package floor.)
+  Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
+  the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
+  `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
+  IMMEDIATELY while a pull is active (or a revalidator is in flight) and refreshes in AT MOST ONE tokenless
+  background daemon per key (zero lake/AnyIO tokens; NEWEST-WINS store guard — a revalidator result landing after a
+  later store is SKIPPED, store-order not numeric because the counts generations are sha256 digests; every stale
+  serve logged); adopters = the three discovery memos (fno-cascade / db-datasets / spot-cascade) + **(G4)** the
+  window-payload COUNTS + PAGE caches + the `_LEDGER_READ_CACHE` records/rollup families + **(G4t)** the
+  previously-UNCACHED `GET /api/v1/db/tables` `table_summary` sweep (master_revision-digest-keyed SWR memo;
+  fresh-compute payload byte-identity-pinned vs the pre-cache route) — so /universe pull-progress,
+  /coverage/windows, the /db window-ledger grid and the /db tables list all serve last-known instantly past-floor
+  mid-pull; **(G2)** the /db SPOT-cascade build prunes the F&O contract tree at walk descent
+  (`exclude_segments={FNO}` — the walk-flatness bench-pinned; a corrupt FNO dir can no longer break the SPOT
+  picker); **(G3, the client half)** SIX db.html loaders become self-recovering with keep-last-good (a failed poll
+  never clobbers a rendered grid); **(G5)** NEW `brutex/observability/loop_watchdog.py` — a 1 s event-loop
+  heartbeat + monitor daemon (pure injectable-clock `check_once` state machine; WARN ≥5 s / CRITICAL ≥30 s → NEW
+  best-effort `SweepAlerter.loop_stalled`, the `pull_halted` twin; /metrics gauge + counter; `build_app`
+  lifespan-wired, `None` = zero threads; `cli.cmd_dashboard` binding behind `BRUTEX_LOOP_WATCHDOG` default ON,
+  junk fails loud). REVIEW FOLDS: the r1 BLOCKER (SWR revalidators shared ONE `_LockedReadConn` view — NEW
+  `_LockedReadConn.cursor()` mints a fresh view per revalidator over the SAME serialized read lock, isolating all
+  FIVE conn-bound computes; cross-thread `_held` corruption + the leaked-lock freeze killed), the r7 MAJOR (the
+  tables probe degrade catches the wedge latch's `CatalogError` via `_TABLES_PROBE_FAULT_TYPES` — a wedged store
+  answers the honest 0-counts 200, never a 500), and the r8 probe→compute TOCTOU (NEW
+  `table_summary(raise_on_fault=True)` + exported `TABLE_SUMMARY_FAULT_TYPES` — the cached strict compute raises
+  out of `get_or_compute`, so NOTHING is stored on either degrade arm; a healthy-probe-then-wedge can no longer
+  cache all-zero counts under the pre-wedge token). FAILS-BEFORE anchors (operator's live 31-min heavy-pull run):
+  `/api/v1/db/candles/datasets` ZERO completions in the entire log; `/api/v1/coverage/windows` 221 serves then
+  ZERO once the options leg churned the ledger; `/api/v1/universe/pull-progress` ≥154 s silent. HONEST residuals:
+  a cold FIRST-ever fill still pays one blocking compute on the single-flight (every SWR family); ≤1 zombie
+  revalidator per key on a wedged volume (the #999 no-kill stance); wire-level EMIT-ON-STALE staleness keys +
+  the G6 L2-heal `per_file_pause` throttle DEFERRED. READ-side dashboard + observability only — ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; ZERO
+  new routes; `movers_cache.py` + `loop_watchdog.py` + `sweep_alerts.py` + `db_view.py` +
+  `instrument_store.py` 100% line+branch on their ci.yml-exact gates; touched `app.py`/`cli.py` lines covered;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright 0 new vs the base.)
   Earlier: `claude/sweep-core-slice0` (**DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685** — Slice 0
   of the Rust sweep-core conversion: a BEHAVIOR-IDENTICAL fold/combine decomposition of the metric body in
   `brutex/metrics/compute.py` — NEW frozen `TradeFolds` (17 fields, the exact per-trade fold intermediates) +
@@ -5995,6 +6044,17 @@ hostile-review pass._
   drift pin over brutex/dashboard/'s five sanctioned bare sites; READ-ONLY
   dashboard liveness; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
   Active branch line)
+  Earlier: `claude/pull-contention-feed-decoupled`
+  (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
+  dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
+  the discovery / windows / ledger / tables caches (tokenless background
+  revalidators + newest-wins guard, payloads byte-identical pinned), the
+  FNO-pruned /db spot-cascade walk, six self-recovering db.html loaders with
+  keep-last-good, and the event-loop watchdog (`loop_watchdog` +
+  `SweepAlerter.loop_stalled`); the r1 `_LockedReadConn.cursor()` BLOCKER +
+  r7 wedge-degrade MAJOR + r8 probe→compute TOCTOU folds; READ-side
+  dashboard + observability only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/sweep-core-slice0`
   (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001, MIGRATION.md #1685 — Slice 0 of the Rust
   sweep-core conversion: the behavior-identical fold/combine decomposition of
