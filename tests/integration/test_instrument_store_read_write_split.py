@@ -140,14 +140,14 @@ def test_cursor_view_isolates_hold_state_across_threads(store: InstrumentStore) 
     without `cursor()` this dies on AttributeError in the revalidator thread."""
     view = store.connection
     view.execute("SELECT count(*) FROM instruments")  # holds the read lock — no fetch yet
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
     finished = threading.Event()
 
     def _revalidator() -> None:
         try:
             row = view.cursor().execute("SELECT count(*) FROM instruments").fetchone()
             assert row[0] == 2
-        except BaseException as exc:  # the oracle collects EVERYTHING
+        except Exception as exc:  # the oracle collects every failure
             errors.append(exc)
         finally:
             finished.set()

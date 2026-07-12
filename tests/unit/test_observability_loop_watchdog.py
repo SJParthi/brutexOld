@@ -515,7 +515,7 @@ class TestWiringDocstringPins:
     """
 
     def test_module_docstring_names_the_lifespan_seam(self) -> None:
-        import brutex.observability.loop_watchdog as mod
+        from brutex.observability import loop_watchdog as mod
 
         doc = mod.__doc__
         assert doc is not None

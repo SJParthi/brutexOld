@@ -1114,7 +1114,7 @@ class TestComputeCursor:
         _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
         conn = duckdb.connect()
         counts_cache, page_cache = make_window_payload_caches()  # REAL daemon runner
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def _poll() -> None:
             try:
@@ -1126,7 +1126,7 @@ class TestComputeCursor:
                         page_cache=page_cache,
                         generation=0,
                     )
-            except BaseException as exc:
+            except Exception as exc:  # the oracle collects every failure
                 errors.append(exc)
 
         import threading as _threading
@@ -1154,15 +1154,12 @@ class TestComputeCursor:
         exact class this branch exists to fix)."""
         from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             view = store.connection
             isolated = _compute_cursor(view)
             assert isolated is not view, "production store conn fell back to the shared view"
             assert type(isolated) is type(view)
             assert isolated.execute("SELECT 42").fetchone() == (42,)
-        finally:
-            store.close()
 
     def test_concurrent_compute_on_store_conn_waits_never_corrupts(self, tmp_path: Path) -> None:
         """The refuter's deterministic held-lock interleave, at db_view's own
@@ -1177,17 +1174,16 @@ class TestComputeCursor:
 
         from brutex.data.instrument_store import InstrumentStore
 
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             view = store.connection
             view.execute("SELECT 1")  # the request thread's live hold — no fetch yet
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             finished = _threading.Event()
 
             def _revalidator() -> None:
                 try:
                     assert _compute_cursor(view).execute("SELECT 2").fetchone() == (2,)
-                except BaseException as exc:  # the oracle collects everything
+                except Exception as exc:  # the oracle collects every failure
                     errors.append(exc)
                 finally:
                     finished.set()
@@ -1211,8 +1207,6 @@ class TestComputeCursor:
             probe.start()
             assert done.wait(timeout=5.0), "store read lock leaked — later reads deadlock"
             probe.join(timeout=5.0)
-        finally:
-            store.close()
 
     def test_legacy_probe_raise_never_leaks_the_store_read_lock(self, tmp_path: Path) -> None:
         """The `_close_cursor` hygiene regression: the legacy-shape probe
@@ -1226,8 +1220,7 @@ class TestComputeCursor:
         from brutex.data.instrument_store import InstrumentStore
 
         _write_legacy_base(tmp_path, "EMPTYCO")
-        store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-        try:
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
             rows, total = query_window_ledger_page(store.connection, tmp_path, limit=100, offset=0)
             assert total == 1  # served by the byte-identical legacy parse
             assert len(rows) == 1
@@ -1244,8 +1237,6 @@ class TestComputeCursor:
                 "store read lock — later dashboard reads deadlock"
             )
             probe.join(timeout=5.0)
-        finally:
-            store.close()
 
     def test_close_cursor_never_closes_the_shared_conn(self) -> None:
         """The fallback arm (`cursor is conn` — the caller's own connection)
