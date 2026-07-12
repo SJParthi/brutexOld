@@ -51,6 +51,8 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from brutex.adapters.dhan.constants import DHAN_SPOT_INDEX_SYMBOLS
+from brutex.adapters.dhan.live_controller import build_dhan_live_controller
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
@@ -115,6 +117,13 @@ from brutex.dashboard.db_view import (
     table_summary,
 )
 from brutex.dashboard.derivatives_pull import resolve_pull_intervals
+from brutex.dashboard.dhan_pull import (
+    DhanPullReport,
+    DhanPullRequest,
+    DhanSpotPullFn,
+    default_dhan_spot_pull,
+    dhan_credentials_error,
+)
 from brutex.dashboard.discovery_warm import (
     DB_DATASETS_KEY,
     FNO_CASCADE_KEY,
@@ -292,6 +301,7 @@ from brutex.dashboard.verdict_banner import banner_for
 from brutex.data.derive_lock import derive_in_progress, derive_lock_held_by_this_process
 from brutex.data.economics_integrity import META_KEY as ECONOMICS_INTEGRITY_META_KEY
 from brutex.data.economics_integrity import report_from_dict as economics_report_from_dict
+from brutex.data.feed_root import feed_lake_root
 from brutex.data.greeks_backfill import (
     dry_run_backfill_report,
     plan_greeks_backfill,
@@ -1194,6 +1204,7 @@ def build_app(
     pull_intent_store: PullIntentStore | None = None,
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
+    dhan_spot_pull: DhanSpotPullFn | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
 ) -> Any:
@@ -2009,6 +2020,12 @@ def build_app(
     # pull restarting at the 5 r/s ceiling and re-storming the vendor. Injectable
     # (DEC-RATE-METER-LIFECYCLE-001 test seam); ``None`` builds the production holder.
     _session_rate = session_rate if session_rate is not None else SessionRateController()
+    # A SEPARATE rate controller for the standalone Dhan SPOT feed track
+    # (DEC-DHAN-PULL-SURFACE-001): its own 5 r/s + 100k/day ceiling
+    # (``build_dhan_live_controller``), so a Dhan pull's learned rate never mixes
+    # with the Groww ``_session_rate`` and a Dhan+Groww pull can pace independently
+    # (they write to DISJOINT lake trees — the top root vs ``feeds/dhan/``).
+    _dhan_session_rate = SessionRateController(factory=build_dhan_live_controller)
     # The Greeks-enrichment consecutive-failure health counter
     # (DEC-GREEKS-ENRICH-OBSERVE-001): the fully-guarded post-pull Greeks pass can
     # NEVER fail a pull, so a persistently broken enrichment used to be one
@@ -2824,6 +2841,19 @@ def build_app(
         summary_cache=_summary_cache,
         on_run_end=_session_rate.clear_meter,
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
+
+    # The standalone Dhan SPOT feed pull job (DEC-DHAN-PULL-SURFACE-001) — a
+    # SEPARATE BackgroundPullJob so it never collides with Groww's ``_pull_job``.
+    # Its cross-process single-flight flock keys on the DHAN WRITE root
+    # (``feeds/dhan/`` — the ``_dhan_job_lake_root_resolver`` nesting), distinct
+    # from Groww's top-root flock, so a Dhan pull and a Groww pull can run
+    # concurrently (disjoint lake trees) while two Dhan pulls serialise. Its meter
+    # clear rides the Dhan session controller.
+    _dhan_pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_dhan_session_rate.clear_meter,
+        lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
     )
 
     # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
@@ -4672,6 +4702,116 @@ def build_app(
                     to_date=to_date,
                     dry_run=dry_run,
                 )
+            )
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001 / DEC-DHAN-SPOT-FEED-001).
+    # The standalone read-only Dhan SPOT track: pulls NIFTY/BANKNIFTY/SENSEX
+    # 1-minute (+ INDIA VIX reference-only) into its OWN ``feeds/dhan/`` lake,
+    # via the lean Dhan spot spine + a Dhan-scoped prebuild (bound to dhan_root).
+    # It reuses NOTHING of the Groww ``BulkSpotReport``-coupled ``run_full_pipeline``
+    # (DEC-FEED-SPINE-GENERALIZE-001, option b — the deferred full-spine unification);
+    # movers-warm is deferred with it (a feed-aware movers reader is the named
+    # follow-up DEC-DHAN-MOVERS-FEED-AWARE-001).
+    # ─────────────────────────────────────────────────────────────────────────
+    def _default_dhan_spot_pull_production(
+        request: DhanPullRequest,
+    ) -> DhanPullReport:  # pragma: no cover — production wiring: real SSM + dhanhq + LMDB
+        """The production Dhan pull seam: the real SSM/dhanhq pull paced by the Dhan controller."""
+        return default_dhan_spot_pull(request, pace=_dhan_session_rate.get().pace)
+
+    _dhan_spot_pull_fn: DhanSpotPullFn = (
+        dhan_spot_pull if dhan_spot_pull is not None else _default_dhan_spot_pull_production
+    )
+
+    def _launch_dhan_pipeline(
+        *, from_date: str | None, to_date: str | None, dry_run: bool
+    ) -> dict[str, Any]:
+        """The ``/pull-pipeline-dhan`` launch body: validate → resolve dhan_root → start.
+
+        Credential gate FIRST (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001): a real Dhan pull
+        with missing/unreachable read-only SSM credentials is a LOUD **HTTP 503**
+        carrying the actionable fix text, never a silent synthetic downgrade; an
+        explicit ``?dry_run=true`` is exempt (no creds resolved). The operator date
+        range is validated EAGERLY via
+        :func:`~brutex.dashboard.pull_controller.resolve_candle_range` (a reversed /
+        non-ISO pick → clean 400); blank ⇒ the canonical ``[2020-01-01, prev day]``
+        default (the Dhan honest-degrade records clean-empty windows for the
+        pre-servable span until ``DHAN_HISTORY_FLOOR`` is probe-verified, Golden Rule
+        #1). The pull runs on the SEPARATE single-flight ``_dhan_pull_job`` (own flock
+        on ``feeds/dhan/`` — no collision with Groww's ``_pull_job``), and is
+        ``market_hours_exempt`` because Dhan uses its OWN account (the 08:45-15:35 NSE
+        guard exists only to free the SHARED Groww account for TickVault → the Dhan
+        pull passes ``market_closed=None``).
+        """
+        refusal = gate_pull_credentials(
+            dry_run_requested=dry_run, credentials_error=dhan_credentials_error
+        )
+        if refusal is not None:
+            _LOG.error(
+                "universe.pull_pipeline_dhan.refused_no_credentials", reason=refusal.auth_cause
+            )
+            raise HTTPException(status_code=503, detail=verdict_message(refusal))
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
+        try:
+            start_dt, end_dt = resolve_candle_range(
+                from_date=from_date, to_date=to_date, year=None, now=datetime.now(UTC)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        dhan_root = feed_lake_root(lake_root, feed="dhan")
+        request = DhanPullRequest(
+            lake_root=lake_root, start=start_dt.date(), end=end_dt.date(), dry_run=dry_run
+        )
+        _LOG.info(
+            "universe.pull_pipeline_dhan.requested",
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=dry_run,
+            dhan_root=str(dhan_root),
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — job thread
+            """Background body: run the Dhan spot pull (+ Dhan-scoped prebuild)."""
+            _dhan_pull_job.set_phase("spot")
+            report = _dhan_spot_pull_fn(request)
+            return report.to_dict()
+
+        detail = "dhan spot pipeline"
+        if dry_run:
+            detail = label_synthetic(detail)
+        started = _dhan_pull_job.start(
+            _work,
+            total=len(DHAN_SPOT_INDEX_SYMBOLS),
+            detail=detail,
+            market_hours_exempt=True,
+        )
+        return {
+            "started": started,
+            "feed": "dhan",
+            "total": len(DHAN_SPOT_INDEX_SYMBOLS),
+            "dry_run": dry_run,
+        }
+
+    @app.post("/api/v1/universe/pull-pipeline-dhan")
+    async def api_universe_pull_pipeline_dhan(
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-pipeline-dhan — the standalone Dhan SPOT pull.
+
+        Thin delegator over :func:`_launch_dhan_pipeline`, offloaded via ``_run_lake``
+        (the app.py offload doctrine — the launch acquires the cross-process
+        single-flight guards synchronously). ``HTTPException``s (400 validation / 503
+        credential refusal) propagate unchanged.
+        """
+        return JSONResponse(
+            await _run_lake(
+                lambda: _launch_dhan_pipeline(from_date=from_date, to_date=to_date, dry_run=dry_run)
             )
         )
 
@@ -8781,6 +8921,38 @@ def _job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
         return resolve_lake_root()
 
     return _resolve
+
+
+def _dhan_feed_root_resolver(
+    base: Callable[[], Path | None],
+) -> Callable[[], Path | None]:
+    """Nest a top-root resolver *base* onto the Dhan feed subtree ``<top>/feeds/dhan/``.
+
+    Pure wrapper (O(1), zero I/O): the value of *base* — the top write root — is
+    resolved to ``feed_lake_root(<top>, feed="dhan")``; a ``None`` top root (no
+    resolvable root) propagates ``None`` so the job takes no lock (mirroring
+    :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob._acquire_singleflight`).
+    Split from :func:`_dhan_job_lake_root_resolver` so both arms are directly tested.
+    """
+
+    def _resolve() -> Path | None:
+        root = base()
+        return None if root is None else feed_lake_root(root, feed="dhan")
+
+    return _resolve
+
+
+def _dhan_job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | None]:
+    """Build the DHAN pull job's single-flight lake-root resolver — the ``feeds/dhan/`` root.
+
+    DEC-DHAN-PULL-SURFACE-001. The Dhan job flocks its OWN write tree
+    (``feed_lake_root(<top>, feed="dhan")`` == ``<top>/feeds/dhan/``), distinct from
+    Groww's top-root flock (:func:`_job_lake_root_resolver`), so a Dhan pull and a
+    Groww pull never contend on one lock (they write DISJOINT trees) while two Dhan
+    pulls serialise. Thin composition of :func:`_dhan_feed_root_resolver` over the
+    Groww job's own top-root resolver.
+    """
+    return _dhan_feed_root_resolver(_job_lake_root_resolver(instrument_store))
 
 
 def _resume_singleflight_probe(

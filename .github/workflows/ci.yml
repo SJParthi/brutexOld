@@ -638,6 +638,14 @@ jobs:
           else
             echo "(brutex.feeds.dhan_binding test file not present yet — gate inactive)"
           fi
+          # DEC-DHAN-PULL-SURFACE-001 (ADR-0022): the Dhan SPOT pull core (sink +
+          # ingest + prebuild) driving the dashboard route + CLI. Fake-driven 100%
+          # (the real SSM/dhanhq build + production seam are pragma-no-cover).
+          if compgen -G "tests/unit/test_dhan_pull.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.dhan_pull --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_pull.py
+          else
+            echo "(brutex.dashboard.dhan_pull test file not present yet — gate inactive)"
+          fi
           # DEC-CONSTITUENTS-CACHE-001 (MIGRATION.md #457): the new
           # constituent disk-cache module ships at 100% line+branch from
           # the start (its live-network surface lives in nse_constituents,
