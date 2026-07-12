@@ -1080,8 +1080,8 @@ class TestDayJournalLockSerialization:
                 lock_path = partition_lock_path(tmp_path, journal_file)
                 lock_path.parent.mkdir(parents=True, exist_ok=True)
                 fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX)
                 holder_fd.append(fd)
+                fcntl.flock(fd, fcntl.LOCK_EX)
             return base()
 
         h = _harness(tmp_path, clock=_grab_after_staging)  # type: ignore[arg-type]
@@ -1318,7 +1318,7 @@ class TestJournalSaveCadence:
 
 class TestDefaultAlerter:
     def test_missing_helper_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Phase B LANDED the real sweep_alerts helpers (MIGRATION.md #1753),
+        # Phase B LANDED the real sweep_alerts helpers (MIGRATION.md #1757),
         # so the pre-merge absence this adapter tolerates is now SIMULATED by
         # deleting them — the WARN-and-False degrade must survive a future
         # rename/removal exactly as it survived the phase-A gap.
