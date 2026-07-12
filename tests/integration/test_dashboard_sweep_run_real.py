@@ -143,15 +143,12 @@ def lake_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def client(lake_root: Path) -> Iterator[TestClient]:
-    store = InstrumentStore.open(lake_root / "instruments.duckdb")
-    store.upsert_many(
-        [_nifty()], snapshot_date=date(2024, 1, 2), run_id="r1", csv_source_sha256="0" * 64
-    )
-    try:
+    with InstrumentStore.open(lake_root / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_nifty()], snapshot_date=date(2024, 1, 2), run_id="r1", csv_source_sha256="0" * 64
+        )
         with TestClient(build_app(DashboardState(), instrument_store=store)) as c:
             yield c
-    finally:
-        store.close()
 
 
 def _wait_for_job(client: TestClient, *, timeout: float = 300.0) -> dict[str, Any]:
