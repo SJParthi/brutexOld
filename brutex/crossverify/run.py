@@ -27,7 +27,7 @@ import shutil
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import structlog
@@ -51,8 +51,10 @@ from brutex.crossverify.journal import (
     journal_path,
     load_journal,
     scan_pending_journals,
+    scan_withheld_journals,
     staging_dir,
     staging_path,
+    write_last_run,
 )
 from brutex.crossverify.prebuild_leg import DeriveOutcome, run_prebuild_leg
 from brutex.crossverify.pull_leg import (
@@ -118,6 +120,52 @@ _SUMMARY_VERDICTS: frozenset[str] = frozenset(
     }
 )
 
+#: Verdicts that persist the durable ``last_run.json`` record (the summary
+#: verdicts + ``refused``) — every MATERIAL outcome. The honest skip
+#: verdicts (non-trading / Muhurat / deferred / disabled) do NOT write it
+#: UNLESS the run did material catch-up work (``regated``/``recovered_prior``
+#: > 0 — the R1 "nothing ships invisibly" law): a true no-op weekend skip
+#: must never clobber Friday's failure record, while a weekend re-gate that
+#: published real S3 objects records + summarises — the record it may
+#: overwrite was resolved by that very re-gate (material-actions-only
+#: writes win; documented in the runbook §3).
+_LAST_RUN_VERDICTS: frozenset[str] = _SUMMARY_VERDICTS | frozenset({"refused"})
+
+
+def _store_read_errors() -> tuple[type[Exception], ...]:
+    """The CONFIRMED error classes escaping the store-backed target
+    enumeration (mirrors ``spot_drift._master_read_errors`` — the house
+    degrade set): :class:`~brutex.data.errors.CatalogError` (the domain
+    error ``InstrumentStore.open`` wraps every open failure into),
+    ``OSError`` (the pre-guard ``mkdir``), plus ``duckdb.Error`` (raw reads)
+    when duckdb is importable — absent, the store's own ``open`` raises
+    ``CatalogError`` first, so the tuple is complete without it.
+    """
+    from brutex.data.errors import CatalogError
+
+    errors: list[type[Exception]] = [CatalogError, OSError]
+    try:
+        import duckdb
+    except ImportError:
+        return tuple(errors)
+    errors.append(duckdb.Error)
+    return tuple(errors)
+
+
+def _log_regate_day(
+    *, run_id: str, prior: DayJournal, staged: int, published: int, dropped_nothing: int
+) -> None:
+    """The one per-re-gated-day INFO (step D2 observability)."""
+    _LOG.info(
+        "crossverify.regate_day",
+        run_id=run_id,
+        prior_day=prior.day.isoformat(),
+        staged=staged,
+        published=published,
+        still_withheld=len(prior.withheld),
+        dropped_nothing=dropped_nothing,
+    )
+
 
 class CrossverifyAlerter(Protocol):
     """The two producer alerts (bound to ``SweepAlerter`` methods at merge)."""
@@ -174,6 +222,11 @@ class CrossverifyReport:
     excluded: int
     publish_failed: int
     recovered_prior: int
+    #: PRIOR days' previously-WITHHELD symbols published by the step-D2
+    #: auto-re-gate (DEC-CROSSVERIFY-WITHHELD-REGATE-001) — put-level, like
+    #: ``recovered_prior`` (the still-withheld remainder stays visible in
+    #: each day's journal ``withheld`` map).
+    regated: int
     derived: int
     derive_failed: int
     movers_warm: str
@@ -188,9 +241,11 @@ class _RunState:
         "derive_failed",
         "derived",
         "excluded",
+        "failed_keys",
         "publish_failed",
         "published",
         "recovered_prior",
+        "regated",
         "skipped_already",
     )
 
@@ -200,8 +255,21 @@ class _RunState:
         self.excluded = 0
         self.publish_failed = 0
         self.recovered_prior = 0
+        self.regated = 0
         self.derived = 0
         self.derive_failed = 0
+        #: Capped sample of still-failing S3 keys across EVERY publish pass
+        #: (recovery + re-gate + today) — feeds the publish_failed detail +
+        #: the durable last-run record; ``publish_failed`` is the true count.
+        self.failed_keys: list[str] = []
+
+    def note_failed_keys(self, keys: tuple[str, ...]) -> None:
+        """Fold a publish pass's capped failed-key sample, bounded overall."""
+        from brutex.crossverify.s3_publish import FAILED_KEYS_CAP
+
+        room = FAILED_KEYS_CAP - len(self.failed_keys)
+        if room > 0:
+            self.failed_keys.extend(keys[:room])
 
 
 def _settle_retry_affected(exports: Mapping[str, SymbolExport]) -> list[CanonicalIdentity]:
@@ -259,6 +327,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             excluded=state.excluded,
             publish_failed=state.publish_failed,
             recovered_prior=state.recovered_prior,
+            regated=state.regated,
             derived=state.derived,
             derive_failed=state.derive_failed,
             movers_warm=movers_warm,
@@ -267,8 +336,56 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         )
 
     def _finish(report: CrossverifyReport) -> CrossverifyReport:
-        """Emit the exactly-once summary for post-gate verdicts (best-effort)."""
-        if report.verdict in _SUMMARY_VERDICTS:
+        """Emit the exactly-once summary for post-gate verdicts (best-effort)
+        and persist the durable last-run record (the dashboard's reload-proof
+        failure surface — a finished failure no longer vanishes with the
+        in-memory job state).
+
+        MATERIAL-SKIP override (the R1 "nothing ships invisibly" law): a
+        skip-verdict run that re-gated or recovered prior days' keys
+        published REAL S3 objects, so it summarises (WARN — the alerter's
+        catch-up tier) AND writes the last-run record like any material run;
+        a ``refused`` run stays summary-free (``crossverify_refused`` is its
+        alert) and a true no-op skip stays silent.
+        """
+        material_skip = report.verdict not in _LAST_RUN_VERDICTS and (
+            report.regated > 0 or report.recovered_prior > 0
+        )
+        if not config.dry_run and (report.verdict in _LAST_RUN_VERDICTS or material_skip):
+            try:
+                write_last_run(
+                    config.lake_root,
+                    {
+                        "version": 1,
+                        "finished_at_utc": seams.now_ist().astimezone(UTC).isoformat(),
+                        "failed_keys": list(state.failed_keys),
+                        "day": report.day.isoformat(),
+                        "run_id": report.run_id,
+                        "verdict": report.verdict,
+                        "exit_code": report.exit_code,
+                        "published": report.published,
+                        "skipped_already": report.skipped_already,
+                        "publish_strict": report.publish_strict,
+                        "publish_observe": report.publish_observe,
+                        "withheld": report.withheld,
+                        "blocked": report.blocked,
+                        "nothing": report.nothing,
+                        "excluded": report.excluded,
+                        "publish_failed": report.publish_failed,
+                        "recovered_prior": report.recovered_prior,
+                        "regated": report.regated,
+                        "derived": report.derived,
+                        "derive_failed": report.derive_failed,
+                        "detail": report.detail,
+                    },
+                )
+            except Exception as exc:  # best-effort VIEW write — never kills a run
+                _LOG.warning(
+                    "crossverify.last_run_write_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        if report.verdict in _SUMMARY_VERDICTS or material_skip:
             try:
                 seams.alerter.crossverify_summary(run_id=run_id, report=report)
             except Exception as exc:  # fire-and-forget — an alert never kills a run
@@ -317,6 +434,259 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             client_holder.append(seams.s3_client_factory())
         return client_holder[0]
 
+    def _regate_withheld_scan() -> CrossverifyReport | None:
+        """Step D2 — the withheld-day AUTO-RE-GATE (DEC-CROSSVERIFY-WITHHELD-REGATE-001).
+
+        For every PRIOR day inside the catchup window whose journal still
+        names WITHHELD symbols, re-gate exactly those symbols from the
+        (since-healed) lake — re-export → stage → publish the now-complete
+        ones — and rewrite the journal's ``withheld`` map to the honest
+        remainder. Closes the runbook's "manual ``--day`` re-run" remediation
+        for the common heal-within-catchup case. Laws:
+
+        * fail-closed — the completeness gate binds FIRST; an absent gate
+          module skips the WHOLE scan with one WARN (never publish ungated);
+        * already-published keys are NEVER re-put — the re-gate touches only
+          the withheld map's symbols, and :func:`publish_staged` puts only
+          journal-PENDING keys (a re-render whose sha matches a published
+          entry keeps ``published=True`` — the ``mark_staged`` idempotency
+          law);
+        * vendor-free + pull-lock-free — reads the lake, writes only the
+          day's staging/journal sidecars under that day's LEAF journal flock
+          (the step-D/M lock law), then publishes over the network;
+        * per-day isolation — a contended day / calendar-abstain day is
+          skipped loudly; the next run's scan re-finds it. Returns a terminal
+          report ONLY for the whole-run failure classes (S3 backend absent /
+          a ``LakeWriteHalt`` staging halt → ``suspect``), mirroring steps
+          D/K.
+
+        HONEST envelope: each re-gated symbol pays one month-partition read
+        (the ``export_symbol`` read law — O(one month of 1-minute bars) per
+        (symbol, day)); the scan is O(catchup_days) journal probes + ONE
+        target enumeration (lazy, first re-gated day only; a transient store
+        fault there skips the scan FAIL-OPEN with one
+        ``crossverify.regate_scan_failed`` WARN — the main day never sinks).
+        Only WITHHELD symbols re-gate — a day whose symbol read honest
+        ``nothing`` (zero bars) is never in the withheld map, so a
+        later-backfilled zero-bar day still needs the manual ``--day``
+        re-run (named limit). Attribution: a prior PENDING key that reaches
+        S3 via THIS pass's publish (rather than the step-D recovery scan —
+        e.g. a day carrying both pending keys and withheld symbols) counts
+        as ``regated``, not ``recovered_prior`` — attribution only, both
+        roads end published (harmless, named in MIGRATION.md #1789).
+        """
+        days = scan_withheld_journals(
+            config.lake_root, today=config.day, lookback_days=config.catchup_days
+        )
+        if not days:
+            return None
+        try:
+            classifier = seams.classifier_factory()
+        except CompletenessGateUnavailable as exc:
+            _LOG.warning(
+                "crossverify.regate_gate_unavailable",
+                run_id=run_id,
+                error=str(exc),
+                note="withheld re-gate skipped FAIL-CLOSED — never publish ungated",
+            )
+            return None
+        from brutex.calendars.nse import HolidayDataUnavailableError, SessionType
+        from brutex.data.atomic_io import atomic_write_via
+
+        identities: dict[str, CanonicalIdentity] | None = None
+        for prior in days:
+            try:
+                prior_session = seams.session_for(prior.day)
+            except HolidayDataUnavailableError as exc:
+                _LOG.warning(
+                    "crossverify.regate_session_unavailable",
+                    run_id=run_id,
+                    prior_day=prior.day.isoformat(),
+                    error=str(exc),
+                    note="calendar abstained for the withheld day — skipped this run",
+                )
+                continue
+            if prior_session is None or prior_session.session_type is SessionType.MUHURAT:
+                # Defensive totality: a withheld map is only ever WRITTEN by
+                # a run that passed the session gate (non-trading + Muhurat
+                # runs skip before any journal exists) — a journal claiming
+                # withheld symbols on such a day is foreign/tampered state.
+                _LOG.warning(
+                    "crossverify.regate_day_not_regatable",
+                    run_id=run_id,
+                    prior_day=prior.day.isoformat(),
+                    note="non-trading/Muhurat day carries a withheld map — never re-gated",
+                )
+                continue
+            if identities is None:
+                try:
+                    targets, _excluded = seams.enumerate_targets(prior.day)
+                except _store_read_errors() as exc:
+                    # FAIL-OPEN for the main day (R1 hardening): a transient
+                    # store/catalog fault in the re-gate's OWN enumeration
+                    # must never sink today's work — skip the whole re-gate
+                    # scan this run (the withheld maps stay untouched; the
+                    # next run's scan re-finds them). A non-store exception
+                    # is a genuine code bug and still propagates.
+                    _LOG.warning(
+                        "crossverify.regate_scan_failed",
+                        run_id=run_id,
+                        prior_day=prior.day.isoformat(),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        note=(
+                            "target enumeration failed — withheld re-gate "
+                            "skipped this run; the main day continues"
+                        ),
+                    )
+                    return None
+                identities = {identity.canonical_symbol: identity for identity in targets}
+            try:
+                with partition_write_lock(
+                    config.lake_root, journal_path(config.lake_root, prior.day)
+                ):
+                    # Re-load UNDER the lock — a peer may have re-gated the
+                    # day between the scan and our acquire (stale ⇒ skip).
+                    current = load_journal(config.lake_root, prior.day)
+                    if current is None or not current.withheld:
+                        continue
+                    current.run_id = run_id  # the latest run owns the journal
+                    try:
+                        still_withheld: dict[str, str] = {}
+                        staged = 0
+                        dropped_nothing = 0
+                        for symbol, prior_reason in sorted(current.withheld.items()):
+                            identity = identities.get(symbol)
+                            if identity is None:
+                                _LOG.warning(
+                                    "crossverify.regate_symbol_unknown",
+                                    run_id=run_id,
+                                    prior_day=prior.day.isoformat(),
+                                    symbol=repr(symbol),  # journal-derived — repr()'d (#907)
+                                    note=(
+                                        "withheld symbol no longer enumerates — kept on "
+                                        "the honest withheld record, never re-gated"
+                                    ),
+                                )
+                                still_withheld[symbol] = prior_reason
+                                continue
+                            export = export_symbol(
+                                identity=identity,
+                                day=prior.day,
+                                session=prior_session,
+                                reader=seams.reader,
+                                classifier=classifier,
+                            )
+                            if (
+                                export.disposition == "publish"
+                                and export.csv_bytes is not None
+                                and export.sha256 is not None
+                            ):
+                                body = export.csv_bytes
+                                dest = staging_path(config.lake_root, prior.day, identity)
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+
+                                def _write(tmp: Path, data: bytes = body) -> None:
+                                    tmp.write_bytes(data)
+
+                                atomic_write_via(dest, _write)
+                                current.mark_staged(
+                                    s3_key(
+                                        prefix=config.key_prefix,
+                                        day=prior.day,
+                                        identity=identity,
+                                    ),
+                                    export.sha256,
+                                    len(body),
+                                )
+                                staged += 1
+                            elif export.disposition == "nothing":
+                                # The lake now honestly holds NOTHING for the
+                                # symbol (e.g. a heal removed junk rows) —
+                                # drop the stale withheld record, never
+                                # fabricate a file.
+                                dropped_nothing += 1
+                                _LOG.info(
+                                    "crossverify.regate_now_nothing",
+                                    run_id=run_id,
+                                    prior_day=prior.day.isoformat(),
+                                    symbol=repr(symbol),  # vendor-derived — repr()'d (#907)
+                                    prior_reason=prior_reason,
+                                    reason=export.reason,
+                                )
+                            else:  # withheld | blocked — still not publishable
+                                still_withheld[symbol] = export.reason
+                        current.withheld = still_withheld
+                        current.save(config.lake_root)
+                    except LakeWriteHalt as exc:
+                        seams.emit_pull_halt(exc)
+                        return _suspect(f"re-gate staging halt: {exc}")
+                    published_now = 0
+                    if current.pending_keys():
+                        try:
+                            outcome = publish_staged(
+                                client=_client(),
+                                bucket=config.bucket,
+                                journal=current,
+                                lake_root=config.lake_root,
+                                sleeper=seams.sleeper,
+                            )
+                        except S3BackendUnavailable as exc:
+                            state.note_failed_keys(current.pending_keys())
+                            state.publish_failed += len(current.pending_keys())
+                            return _finish(_report("publish_failed", 2, detail=str(exc)))
+                        published_now = outcome.published
+                        state.regated += outcome.published
+                        state.publish_failed += outcome.failed_count
+                        state.note_failed_keys(outcome.failed_keys)
+                        if outcome.aborted_nonretryable:
+                            # The step-D/M abort law: a broken grant/bucket
+                            # fails every later day identically — stop the
+                            # scan; the untouched days' withheld maps stay
+                            # for the next run.
+                            _LOG.error(
+                                "crossverify.regate_aborted_nonretryable",
+                                run_id=run_id,
+                                prior_day=prior.day.isoformat(),
+                                note=(
+                                    "whole re-gate scan stopped — later withheld "
+                                    "days left for the next run"
+                                ),
+                            )
+                            _log_regate_day(
+                                run_id=run_id,
+                                prior=current,
+                                staged=staged,
+                                published=published_now,
+                                dropped_nothing=dropped_nothing,
+                            )
+                            return None
+                        if not current.pending_keys():
+                            # The step-N cleanup, applied to the re-gated
+                            # PRIOR day: fully published ⇒ its staged bytes
+                            # served their purpose.
+                            shutil.rmtree(
+                                staging_dir(config.lake_root, prior.day), ignore_errors=True
+                            )
+                    _log_regate_day(
+                        run_id=run_id,
+                        prior=current,
+                        staged=staged,
+                        published=published_now,
+                        dropped_nothing=dropped_nothing,
+                    )
+            except PartitionLockTimeout:
+                # A peer holds this day's lock past the bound — it is
+                # actively recovering/re-gating the day; skip it this run.
+                _LOG.warning(
+                    "crossverify.regate_day_contended",
+                    run_id=run_id,
+                    prior_day=prior.day.isoformat(),
+                    note="a peer holds the day-journal lock — skipped this run",
+                )
+                continue
+        return None
+
     # ── D: recovery scan — re-publish prior pending STAGED bytes (no re-gate).
     # Deliberately BEFORE the session gate (round-1 hostile review): a
     # weekend/holiday run must still republish a PRIOR trading day's pending
@@ -354,10 +724,12 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                             sleeper=seams.sleeper,
                         )
                     except S3BackendUnavailable as exc:
+                        state.note_failed_keys(current.pending_keys())
                         state.publish_failed += len(current.pending_keys())
                         return _finish(_report("publish_failed", 2, detail=str(exc)))
                     state.recovered_prior += outcome.published
                     state.publish_failed += outcome.failed_count
+                    state.note_failed_keys(outcome.failed_keys)
                     _LOG.info(
                         "crossverify.recovery_scan",
                         run_id=run_id,
@@ -415,6 +787,14 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                             "re-runs the day idempotently"
                         ),
                     )
+            # ── D2: withheld-day AUTO-RE-GATE (the runbook's "manual --day
+            # re-run" remediation, automated for the heal-within-catchup
+            # case — DEC-CROSSVERIFY-WITHHELD-REGATE-001). Skipped after a
+            # nonretryable recovery abort exactly like the orphan scan (a
+            # broken grant fails every later publish identically).
+            terminal = _regate_withheld_scan()
+            if terminal is not None:
+                return terminal
 
     def _early_ok(
         verdict: Verdict, *, detail: str = "", log_event: str | None = None
@@ -433,7 +813,13 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             )
         if log_event is not None:
             _LOG.info(log_event, run_id=run_id, day=config.day.isoformat())
-        return _report(verdict, 0, detail=detail)
+        report = _report(verdict, 0, detail=detail)
+        if state.regated > 0 or state.recovered_prior > 0:
+            # MATERIAL skip-day run (a weekend/holiday re-gate or recovery
+            # published real S3 objects) — ride _finish so the summary +
+            # last-run record fire; a true no-op skip stays silent below.
+            return _finish(report)
+        return report
 
     # ── B: day + session gate (never fabricates a session) ────────────────
     from brutex.calendars.nse import HolidayDataUnavailableError, SessionType
@@ -691,11 +1077,13 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                             sleeper=seams.sleeper,
                         )
                     except S3BackendUnavailable as exc:
+                        state.note_failed_keys(current.pending_keys())
                         state.publish_failed += len(current.pending_keys())
                         return _finish(_report("publish_failed", 2, detail=str(exc)))
                     state.published = outcome.published
                     state.skipped_already = outcome.skipped_already
                     state.publish_failed += outcome.failed_count
+                    state.note_failed_keys(outcome.failed_keys)
                     if outcome.aborted_nonretryable:
                         return _finish(
                             _report(
@@ -721,7 +1109,20 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
     blocked = sum(1 for e in exports.values() if e.disposition == "blocked")
     withheld = sum(1 for e in exports.values() if e.disposition == "withheld")
     if state.publish_failed > 0:
-        return _finish(_report("publish_failed", 2))
+        # The retryable-exhaustion arm gets a REAL detail (the abort arm's
+        # shape): the true failing count + the capped key sample, so the
+        # summary alert / CLI line / last-run panel name what to look at.
+        sample = ", ".join(state.failed_keys)
+        return _finish(
+            _report(
+                "publish_failed",
+                2,
+                detail=(
+                    f"{state.publish_failed} key(s) still failing after retries"
+                    + (f" (first: {sample})" if sample else "")
+                ),
+            )
+        )
     if blocked > 0:
         return _finish(_report("blocked", 2))
     if withheld > 0:
@@ -732,7 +1133,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         )
     if not config.publish:
         return _finish(_report("staged_only", 0, detail="publish disabled — staged only"))
-    if state.published + state.skipped_already + state.recovered_prior > 0:
+    if state.published + state.skipped_already + state.recovered_prior + state.regated > 0:
         return _finish(_report("published", 0))
     return _finish(_report("nothing_to_do", 0))
 

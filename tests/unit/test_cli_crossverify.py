@@ -45,6 +45,7 @@ def _report() -> CrossverifyReport:
         excluded=2,
         publish_failed=0,
         recovered_prior=0,
+        regated=0,
         derived=4,
         derive_failed=0,
         movers_warm="revision-propagated (headless)",
@@ -197,6 +198,7 @@ class TestCmdRun:
         assert "withheld 2" in out
         # The #1788-fix-round three-way split reaches the CLI line too.
         assert "strict-published 2" in out
+        assert "re-gated 0" in out  # DEC-CROSSVERIFY-WITHHELD-REGATE-001
         assert "observe-published 1" in out
         assert "derived 4 (0 failed)" in out
 
