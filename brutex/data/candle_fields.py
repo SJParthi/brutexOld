@@ -24,12 +24,65 @@ exact order a no-trade bar is recognised regardless of its timestamp.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from typing import Final
 
+from brutex.data.bad_tick import BAD_TICK_MAX_RATIO
 from brutex.data.models import CandleBar
 from brutex.models import BruteXError
+
+#: Env kill switch for the bounded-clamp REFUSAL (DEC-OHLC-CLAMP-BOUNDED-001).
+#: Default ON (fabricating a ≥4× extreme from a corrupt vendor field is never
+#: the safe posture); the off-tokens restore the legacy unbounded clamp-store
+#: byte-identically. Anything else fails LOUD at parse-window start (the
+#: ``BRUTEX_TODAY_COMPLETENESS_GATE`` fail-loud template — junk is never
+#: silently coerced).
+OHLC_CLAMP_REFUSE_ENV: Final[str] = "BRUTEX_OHLC_CLAMP_REFUSE"
+
+#: ENABLE tokens (case-insensitive, whitespace-stripped). ``""`` (unset) is ENABLED.
+_ENV_ON_TOKENS: Final[frozenset[str]] = frozenset({"", "1", "on", "true", "yes"})
+
+#: DISABLE tokens (the operator escape hatch — legacy clamp-store).
+_ENV_OFF_TOKENS: Final[frozenset[str]] = frozenset({"0", "off", "false", "no"})
+
+#: The bounded-clamp refusal ratio — imported from the ONE bad-tick constant
+#: (CLAUDE.md §11 COMMON: never re-mint ``4.0``), converted once to exact
+#: ``Decimal`` so the compare below runs in the price plane's own arithmetic.
+_CLAMP_REFUSE_RATIO: Final[Decimal] = Decimal(str(BAD_TICK_MAX_RATIO))
+
+
+def resolve_clamp_refuse_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Resolve the ``BRUTEX_OHLC_CLAMP_REFUSE`` kill switch — fail-loud.
+
+    unset / ``""`` / ``"1"`` / ``"on"`` / ``"true"`` / ``"yes"`` (case-insensitive,
+    whitespace-stripped) → ``True`` (default-ENABLED: refusing a clamp that
+    would MANUFACTURE a ≥4× extreme from a corrupt vendor field is the safe
+    posture — DEC-OHLC-CLAMP-BOUNDED-001); ``"0"`` / ``"off"`` / ``"false"`` /
+    ``"no"`` → ``False`` (the legacy unbounded clamp-store, byte-identical).
+    Anything else raises — junk is never silently coerced (the
+    DEC-RAM-BUDGETS-001 fail-loud env convention, resolved ONCE per parse
+    window by the caller, never per row).
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+    """
+    mapping = os.environ if env is None else env
+    raw = mapping.get(OHLC_CLAMP_REFUSE_ENV, "")
+    token = raw.strip().lower()
+    if token in _ENV_ON_TOKENS:
+        return True
+    if token in _ENV_OFF_TOKENS:
+        return False
+    raise ValueError(
+        f"{OHLC_CLAMP_REFUSE_ENV}={raw!r} is not a recognised switch value; "
+        f"expected one of '1', 'on', 'true', 'yes' (enable — the default when unset) "
+        f"or '0', 'off', 'false', 'no' (disable)"
+    )
 
 
 class CandleParseError(BruteXError):
@@ -157,6 +210,8 @@ def assemble_candle(
     volume: object,
     open_interest: object,
     on_clamp: Callable[[], None] | None = None,
+    clamp_refuse: bool = True,
+    on_clamp_refused: Callable[[], None] | None = None,
 ) -> CandleBar:
     """Build a validated :class:`CandleBar` from raw field values.
 
@@ -176,11 +231,41 @@ def assemble_candle(
         window and WARN instead of the clamp firing silently. ``None`` (the
         default — every other caller) is byte-identical to before; the
         returned bar is IDENTICAL either way (parse behavior unchanged).
+    clamp_refuse
+        The bounded-clamp REFUSAL arm (DEC-OHLC-CLAMP-BOUNDED-001, default
+        ON): when the clamp above is NEEDED and the clamp MOVE itself is
+        LARGE — ``max(prices) > high · 4`` or ``min(prices) · 4 < low``
+        (:data:`~brutex.data.bad_tick.BAD_TICK_MAX_RATIO`, strict
+        inequalities — a move of EXACTLY 4× still clamps-and-stores) — the
+        row is a scaled corrupt vendor field, NOT the 1-tick under-report
+        the clamp was built for, and storing the widened bar would
+        FABRICATE a ≥4× extreme that passes every downstream screen
+        (price-sanity is ordering-only; the bad-tick screen tests CLOSE
+        only) and poisons every derived bucket + the 1day PDH anchor
+        (live-reproduced: a corrupt ×10 ``open`` stored ``high=1000.55``
+        at 1m/5m/1day). Such a row takes the SAME graceful
+        :class:`EmptyCandleRow` skip the partial-absent class takes —
+        counted via *on_clamp_refused*, never stored, re-pullable
+        (keep-first sink + durable ledger). ``False`` (the
+        ``BRUTEX_OHLC_CLAMP_REFUSE`` off-tokens — see
+        :func:`resolve_clamp_refuse_enabled`) restores the legacy
+        unbounded clamp-store byte-identically. A within-4× clamp (the
+        1-tick fix, even on a genuinely wide-range bar) stores exactly as
+        before on BOTH arms.
+    on_clamp_refused
+        OBSERVE hook: invoked exactly once per row the bounded-clamp
+        refusal rejects, BEFORE the :class:`EmptyCandleRow` raise, so a
+        caller can count refusals per window + capture the offender
+        (the Groww parser's ``groww.parse.ohlc_clamp_refused`` WARNING).
+        Never invoked when *clamp_refuse* is ``False``.
 
     Raises
     ------
     EmptyCandleRow
-        Every OHLC price absent / empty / zero (graceful skip).
+        Every OHLC price absent / empty / zero (graceful skip); or — with
+        *clamp_refuse* — a row whose needed OHLC clamp would move ``high`` /
+        ``low`` by MORE than 4× (a scaled corrupt field; skipped, counted,
+        never stored).
     CandleParseError
         Any field unparseable, or the timestamp invalid.
     ValueError
@@ -188,8 +273,9 @@ def assemble_candle(
         negative volume / open-interest. Inconsistent OHLC (a vendor
         ``open`` / ``close`` outside the reported ``[low, high]``) is
         **normalized** here — ``high`` / ``low`` are clamped to bound all
-        four prices (DEC-OHLC-VENDOR-NORMALIZE-001) — never raised (the
-        clamp is COUNTED via *on_clamp*).
+        four prices (DEC-OHLC-VENDOR-NORMALIZE-001) when the move is
+        bounded (≤ 4×) — never raised (the clamp is COUNTED via
+        *on_clamp*; an UNBOUNDED move is REFUSED per *clamp_refuse*).
     """
     if all(has_no_price(v) for v in (open_, high, low, close)):
         raise EmptyCandleRow("candle has no OHLC data (no-trade / halted / unlisted bar)")
@@ -241,6 +327,23 @@ def assemble_candle(
     prices = (open_price, high_price, low_price, close_price)
     clamped_high = max(prices)
     clamped_low = min(prices)
+    # Bounded-clamp REFUSAL (DEC-OHLC-CLAMP-BOUNDED-001): a clamp whose MOVE
+    # exceeds BAD_TICK_MAX_RATIO (strict — exactly 4× still stores) is a
+    # scaled corrupt field being LEGITIMIZED, not a 1-tick fix: refuse the
+    # row (graceful counted skip), never store the fabricated extreme. The
+    # condition implies a clamp was needed (ratio > 1 and every price > 0
+    # here, the ``has_no_price`` guards above), so no separate needed-check.
+    if clamp_refuse and (
+        clamped_high > high_price * _CLAMP_REFUSE_RATIO
+        or clamped_low * _CLAMP_REFUSE_RATIO < low_price
+    ):
+        if on_clamp_refused is not None:
+            on_clamp_refused()
+        raise EmptyCandleRow(
+            "candle refused: the vendor-OHLC clamp would move high/low by more "
+            f"than {BAD_TICK_MAX_RATIO}x (a scaled corrupt field, not a 1-tick "
+            "under-report) — skipped, never stored (DEC-OHLC-CLAMP-BOUNDED-001)"
+        )
     # Clamp observability (DEC-STORED-DATA-VALIDATION-001): the normalization
     # above used to fire SILENTLY with no counter — a vendor systematically
     # under-reporting highs would never surface. Observe-only: the bar built
@@ -259,11 +362,13 @@ def assemble_candle(
 
 
 __all__ = [
+    "OHLC_CLAMP_REFUSE_ENV",
     "CandleParseError",
     "EmptyCandleRow",
     "assemble_candle",
     "has_no_price",
     "is_absent",
+    "resolve_clamp_refuse_enabled",
     "to_int",
     "to_price",
 ]

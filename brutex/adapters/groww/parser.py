@@ -32,6 +32,7 @@ from brutex.data.candle_fields import (
     CandleParseError,
     EmptyCandleRow,
     assemble_candle,
+    resolve_clamp_refuse_enabled,
 )
 from brutex.data.models import CandleBar
 from brutex.observability.correlation import current_pull_id
@@ -213,12 +214,22 @@ def parse_candle_rows(
     CandleParseError
         If ``"candles"`` is missing/non-array, a row is neither a 7-element nor a
         6-element array, or any non-empty field is unparseable.
+    ValueError
+        A junk ``BRUTEX_OHLC_CLAMP_REFUSE`` env value — resolved ONCE at
+        parse-window start, fail-loud, never per row
+        (:func:`~brutex.data.candle_fields.resolve_clamp_refuse_enabled`,
+        DEC-OHLC-CLAMP-BOUNDED-001).
     """
     if "candles" not in payload:
         raise CandleParseError("missing required 'candles' key in Groww payload")
     candles = payload["candles"]
     if not isinstance(candles, (list, tuple)):
         raise CandleParseError(f"'candles' must be an array, got {type(candles).__name__}")
+
+    # Bounded-clamp refusal switch (DEC-OHLC-CLAMP-BOUNDED-001): resolved ONCE
+    # per parse window (this function is called once per fetched window); junk
+    # fails loud HERE, before any row work.
+    clamp_refuse = resolve_clamp_refuse_enabled()
 
     bars: list[CandleBar] = []
     # OHLC-clamp counter (DEC-STORED-DATA-VALIDATION-001): the vendor-OHLC
@@ -233,6 +244,29 @@ def parse_candle_rows(
     def _count_clamp() -> None:
         nonlocal clamped_bars
         clamped_bars += 1
+
+    # Clamp-REFUSAL counter (DEC-OHLC-CLAMP-BOUNDED-001): rows whose needed
+    # OHLC clamp would move high/low by MORE than BAD_TICK_MAX_RATIO are
+    # gracefully SKIPPED (never stored) — counted per window, first offender
+    # captured (raw ts + the four raw prices, ``repr()``'d per the #907
+    # raw-vendor-value log convention), ONE WARNING per window below.
+    refused_bars = 0
+    first_refused: dict[str, str] | None = None
+
+    def _count_clamp_refused() -> None:
+        nonlocal refused_bars, first_refused
+        refused_bars += 1
+        if first_refused is None:
+            # The loop variables below are rebound per iteration; this hook is
+            # invoked synchronously from ``assemble_candle`` DURING the same
+            # iteration, so they name the offending row's raw fields.
+            first_refused = {
+                "ts": repr(ts_raw),
+                "open": repr(open_),
+                "high": repr(high),
+                "low": repr(low),
+                "close": repr(close),
+            }
 
     # Epoch-verdict samples (DEC-GROWW-EPOCH-VERDICT-001): raw NUMERIC row
     # timestamps, collected at ROW level (before ``assemble_candle``, so even
@@ -270,15 +304,29 @@ def parse_candle_rows(
                 volume=None if drop_volume else volume,
                 open_interest=open_interest,
                 on_clamp=_count_clamp,
+                clamp_refuse=clamp_refuse,
+                on_clamp_refused=_count_clamp_refused,
             )
         except EmptyCandleRow:
-            continue  # graceful skip — no-trade minute
+            continue  # graceful skip — no-trade minute / refused unbounded clamp
         bars.append(bar)
     if clamped_bars:
         _LOG.warning(
             "groww.parse.ohlc_clamped",
             clamped_bars=clamped_bars,
             total_rows=len(candles),
+            pull_id=current_pull_id(),
+        )
+    if refused_bars:
+        # ONE per-window WARNING (DEC-OHLC-CLAMP-BOUNDED-001, the ohlc_clamped
+        # per-payload precedent): count + the first offender's raw ts + four
+        # raw prices (repr()'d — #907). The refused rows are ABSENT from the
+        # returned bars (never stored; re-pullable via keep-first + ledger).
+        _LOG.warning(
+            "groww.parse.ohlc_clamp_refused",
+            refused_bars=refused_bars,
+            total_rows=len(candles),
+            first_offender=first_refused,
             pull_id=current_pull_id(),
         )
     if epoch_ts_samples:

@@ -1611,8 +1611,11 @@ jobs:
           fi
           # DEC-FETCH-PARSER-001 (entry #285): strict gate on the pure
           # Groww candle-row parser (IST→UTC + exact-Decimal price rules).
+          # DEC-OHLC-CLAMP-BOUNDED-001: the bounded-clamp refusal counter/WARN
+          # + the per-window kill-switch resolution live in the parser, covered
+          # by tests/unit/test_candle_fields_clamp_refuse.py.
           if compgen -G "tests/unit/test_groww_parser.py" > /dev/null; then
-            pytest --cov=brutex.adapters.groww.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_parser.py
+            pytest --cov=brutex.adapters.groww.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_groww_parser.py tests/unit/test_candle_fields_clamp_refuse.py
           else
             echo "(brutex.adapters.groww.parser test file not present yet — gate inactive)"
           fi
@@ -1735,8 +1738,10 @@ jobs:
           # DEC-GROWW-DHAN-REVERT-001 (#341): strict gates on the Dhan adapter
           # modules + the shared candle-field rules. Import-light (pure data /
           # parser over brutex.data.models), so standalone-gateable.
+          # DEC-OHLC-CLAMP-BOUNDED-001: the magnitude-bounded clamp refusal +
+          # its fail-loud env switch join the gate's covering set.
           if compgen -G "tests/unit/test_candle_fields.py" > /dev/null; then
-            pytest --cov=brutex.data.candle_fields --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_candle_fields.py
+            pytest --cov=brutex.data.candle_fields --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_candle_fields.py tests/unit/test_candle_fields_clamp_refuse.py
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
