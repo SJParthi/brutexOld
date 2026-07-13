@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from brutex.data.derive_stamp import (
+    CURRENT_WRITER_CONVENTION,
     DERIVE_STAMP_DIR,
     DeriveStamp,
     derive_stamp_path,
@@ -32,6 +33,7 @@ def _stamp(
     include_daily: bool = True,
     daily_before: str | None = "2026-07-04",
     last_1m_ist_date: str | None = "2026-07-03",
+    writer_convention: int = CURRENT_WRITER_CONVENTION,
 ) -> DeriveStamp:
     return DeriveStamp(
         token=token,
@@ -40,6 +42,7 @@ def _stamp(
         daily_before=daily_before,
         last_1m_ist_date=last_1m_ist_date,
         written_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        writer_convention=writer_convention,
     )
 
 
@@ -387,3 +390,95 @@ class TestGroundedStampInterplay:
             )
             is False
         )
+
+
+# ── writer convention (DEC-DERIVED-OI-NULL-HONEST-001 — the mechanised heal
+#    lever: a stamp written under an OLD derived-partition byte contract never
+#    skips, so the next prebuild rewrites every derived partition ONCE) ───────
+
+
+class TestWriterConvention:
+    def test_matching_convention_skips(self) -> None:
+        stamp = _stamp(writer_convention=CURRENT_WRITER_CONVENTION)
+        assert (
+            should_skip_derive(
+                stamp,
+                token="tok",
+                tfs=("15m", "5m"),
+                include_daily=True,
+                daily_before="2026-07-04",
+            )
+            is True
+        )
+
+    def test_mismatched_convention_never_skips(self) -> None:
+        # An OLD-convention stamp (e.g. pre-audit 0, or a FUTURE 2 read by
+        # older code) fails the skip even when every other clause matches —
+        # the full re-derive is the heal.
+        for old in (0, CURRENT_WRITER_CONVENTION + 1):
+            stamp = _stamp(writer_convention=old)
+            assert (
+                should_skip_derive(
+                    stamp,
+                    token="tok",
+                    tfs=("15m", "5m"),
+                    include_daily=True,
+                    daily_before="2026-07-04",
+                )
+                is False
+            )
+
+    def test_legacy_stamp_json_without_the_field_loads_as_zero(self, tmp_path: Path) -> None:
+        # A stamp file written BEFORE the field existed: loads (never a
+        # corrupt-→None degrade — the skip decision, not the load, refuses),
+        # with writer_convention=0 → never skips → one full re-derive.
+        import json
+
+        legacy = {
+            "token": "tok",
+            "tfs": ["15m", "5m"],
+            "include_daily": True,
+            "daily_before": "2026-07-04",
+            "last_1m_ist_date": "2026-07-03",
+            "written_at": "2026-07-01T00:00:00+00:00",
+        }
+        path = tmp_path / "legacy.json"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        stamp = load_derive_stamp(path)
+        assert stamp is not None
+        assert stamp.writer_convention == 0
+        assert (
+            should_skip_derive(
+                stamp,
+                token="tok",
+                tfs=("15m", "5m"),
+                include_daily=True,
+                daily_before="2026-07-04",
+            )
+            is False
+        )
+
+    def test_new_stamp_roundtrips_the_convention(self, tmp_path: Path) -> None:
+        path = derive_stamp_path(tmp_path, "NSE", "INDEX", "NIFTY")
+        save_derive_stamp(path, _stamp())
+        loaded = load_derive_stamp(path)
+        assert loaded is not None
+        assert loaded.writer_convention == CURRENT_WRITER_CONVENTION
+
+    def test_junk_convention_value_degrades_to_full_derive(self, tmp_path: Path) -> None:
+        # A tampered/corrupt writer_convention (unparseable) → the loader's
+        # documented corrupt-→None degrade → full derive, never a crash.
+        import json
+
+        junk = {
+            "token": "tok",
+            "tfs": ["5m"],
+            "include_daily": False,
+            "daily_before": None,
+            "last_1m_ist_date": None,
+            "written_at": "2026-07-01T00:00:00+00:00",
+            "writer_convention": "not-an-int",
+        }
+        path = tmp_path / "junk.json"
+        path.write_text(json.dumps(junk), encoding="utf-8")
+        assert load_derive_stamp(path) is None

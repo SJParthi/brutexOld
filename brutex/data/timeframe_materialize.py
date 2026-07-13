@@ -604,6 +604,7 @@ def materialize_lake_timeframes(
 
         from brutex.calendars.nse import daily_derive_cutoff, daily_derive_cutoff_grounded
         from brutex.data.derive_stamp import (
+            CURRENT_WRITER_CONVENTION,
             DeriveStamp,
             derive_stamp_path,
             incremental_prebuild_enabled,
@@ -703,6 +704,7 @@ def materialize_lake_timeframes(
                     daily_before=daily_before_iso,
                     last_1m_ist_date=last_1m_ist_date,
                     written_at=datetime.now(UTC).isoformat(timespec="seconds"),
+                    writer_convention=CURRENT_WRITER_CONVENTION,
                 ),
             )
 
@@ -975,9 +977,16 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
     mechanism + honest envelope) and appends them to the lake via a
     :class:`~brutex.data.sink.ParquetBarSink` under the TF's own stored interval
     partition (:data:`INTRADAY_TF_INTERVALS`). ``open_interest`` is carried from
-    the resampled frame when the OI-aware F&O futures resampler emitted it
-    (DEC-PREBUILD-SELECT-001), else ``0`` (the spot convention — spot frames
-    have no OI column; a present-but-null OI bucket also maps to 0). The sink
+    the resampled frame when the OI-aware F&O resampler emitted it
+    (DEC-PREBUILD-SELECT-001) with **nulls PRESERVED**
+    (DEC-DERIVED-OI-NULL-HONEST-001: ``absent_open_interest=None`` — a
+    null-last-OI bucket stores null, exactly what the resampler emitted and
+    what the 1-minute base + the derived ``1day`` already store; the former
+    default fabricated ``open_interest=0``, a REAL market value, on every
+    null-OI derived intraday F&O bucket. The old comment called ``0`` "the
+    spot convention", which was never true even of the spot 1-minute base —
+    it stores null); a spot frame has no OI column, so every bar's OI is
+    honestly ``None``. The sink
     snaps prices to the 2-decimal tick grid + merges idempotently by
     ``(year, month)`` (CLAUDE.md §7 / DEC-SPOT-PRICE-2DP-001) in
     **latest-wins** mode (DEC-TF-REMAT-LATEST-WINS-001 — a re-materialised
@@ -1009,7 +1018,11 @@ def make_lake_write_tf(  # pragma: no cover — raw lake write, integration-test
             segment=segment,
             symbol=symbol,
             interval=interval,
-            bars=frame_to_candle_bars(frame),
+            # DEC-DERIVED-OI-NULL-HONEST-001: preserve the resampler's null
+            # OI (never fabricate 0 — see the docstring above). The argument
+            # is passed HERE, at the ONE derived-intraday writer, so every
+            # other frame_to_candle_bars caller stays byte-identical.
+            bars=frame_to_candle_bars(frame, absent_open_interest=None),
             # LATEST-WINS on the DERIVED intraday partitions (DEC-TF-REMAT-LATEST-WINS-001,
             # mirroring the derived ``1day``'s make_lake_write_1day): a re-materialise
             # recomputes every bucket from the CURRENT stored 1-minute, so the fresh

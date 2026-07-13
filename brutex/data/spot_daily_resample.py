@@ -651,9 +651,17 @@ def frame_to_candle_bars(
         volume`` and optionally ``open_interest``.
     absent_open_interest
         The ``open_interest`` used when the frame has NO OI column, and for a
-        present-but-null OI value. ``0`` is the derived-intraday-TF/spot lake
-        convention (the legacy ``_oi`` helper's contract); the spot daily
-        resampler passes ``None`` (spot/index daily bars carry no OI).
+        present-but-null OI value. The derived-intraday-TF writer
+        (:func:`~brutex.data.timeframe_materialize.make_lake_write_tf`) and
+        the spot daily resampler BOTH pass ``None``
+        (DEC-DERIVED-OI-NULL-HONEST-001: a null OI is honestly unknown — the
+        1-minute base, the derived ``1day`` and the resampler all preserve
+        it, so fabricating ``0``, a REAL market value, at the intraday store
+        boundary was a cross-TF honesty split; the "0 is the spot
+        convention" claim the legacy ``_oi`` helper carried was never true
+        even of the spot 1-minute base, which stores null). The ``0``
+        DEFAULT is kept only for signature back-compat with pre-audit
+        callers; every production caller passes ``None`` explicitly.
     """
     # Local imports keep the module import graph free of polars + the bar model
     # for callers that only need the dataclasses (module discipline, §11).
@@ -674,9 +682,9 @@ def frame_to_candle_bars(
     volumes = frame.get_column("volume").to_list()
     open_interests: list[int | None]
     if "open_interest" in frame.columns:
-        # Present-but-null OI maps to *absent_open_interest* (the legacy `_oi`
-        # contract: the lake stored 0 for spot, so 0 is the consistent absent
-        # value on the intraday path).
+        # Present-but-null OI maps to *absent_open_interest* — every
+        # production caller passes None (null preserved, never fabricated
+        # as 0; DEC-DERIVED-OI-NULL-HONEST-001).
         open_interests = [
             absent_open_interest if value is None else int(value)
             for value in frame.get_column("open_interest").to_list()

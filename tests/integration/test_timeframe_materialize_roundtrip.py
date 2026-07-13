@@ -770,14 +770,21 @@ def test_default_cutoff_is_session_close_aware(
 
 
 def _legacy_bars_from_frame(frame: pl.DataFrame) -> list[CandleBar]:
-    """Verbatim pre-change `make_lake_write_tf._write` per-row conversion."""
+    """The pre-vectorize `make_lake_write_tf._write` per-row conversion.
+
+    The absent/null-OI value is ``None`` — DELIBERATELY updated from the
+    original loop's ``0`` when DEC-DERIVED-OI-NULL-HONEST-001 flipped the
+    production writer to null-preserving OI: this oracle proves the BATCHED
+    conversion equals the per-row one under the SAME OI convention (the
+    convention itself is pinned in test_derived_oi_null_honest.py).
+    """
     has_oi = "open_interest" in frame.columns
 
-    def _oi(row: dict[str, object]) -> int:
+    def _oi(row: dict[str, object]) -> int | None:
         if not has_oi:
-            return 0
+            return None
         value = row["open_interest"]
-        return 0 if value is None else int(value)  # type: ignore[call-overload]
+        return None if value is None else int(value)  # type: ignore[call-overload]
 
     return [
         CandleBar(

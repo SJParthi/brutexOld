@@ -69,6 +69,7 @@ if TYPE_CHECKING:
 _LOG = structlog.get_logger(__name__)
 
 __all__ = [
+    "CURRENT_WRITER_CONVENTION",
     "DERIVE_STAMP_DIR",
     "DISABLED_ENV_VALUES",
     "DeriveStamp",
@@ -80,6 +81,18 @@ __all__ = [
     "should_skip_derive",
     "source_1m_token",
 ]
+
+#: The derived-partition WRITER convention generation — the heal lever for a
+#: writer-side byte-contract change (DEC-DERIVED-OI-NULL-HONEST-001): a stamp
+#: written under an OLDER convention (or one with NO ``writer_convention``
+#: field — loaded as ``0``) never satisfies :func:`should_skip_derive`, so the
+#: next prebuild re-derives the symbol in FULL exactly once and latest-wins
+#: rewrites every derived intraday partition under the current convention
+#: (crash-convergent; no CLI, no runbook step; disclosed one-time cost —
+#: ~hours on a full options tree). History: ``0`` = the pre-audit era
+#: (derived intraday OI fabricated as 0); ``1`` = derived intraday OI
+#: null-preserving. Bump to ``2`` when DEC-PREBUILD-BAD-TICK-001 lands.
+CURRENT_WRITER_CONVENTION: Final[int] = 1
 
 #: The stamp sidecar directory under the lake root — OUTSIDE ``bars/`` +
 #: ``options/`` and never ``*.parquet``, so no lake scanner ever sees it
@@ -142,6 +155,14 @@ class DeriveStamp:
     written_at
         ISO UTC instant the stamp was written (diagnostic only — never part of
         the skip rule).
+    writer_convention
+        The derived-partition writer convention generation the stamped run
+        wrote under (DEC-DERIVED-OI-NULL-HONEST-001). A stamp whose value
+        differs from :data:`CURRENT_WRITER_CONVENTION` never skips — the ONE
+        mechanised heal lever that forces a full re-derive after a
+        writer-side byte-contract change. A stamp file predating the field
+        loads as ``0`` (the pre-audit era), so every legacy lake re-derives
+        exactly once on the next prebuild.
     """
 
     token: str
@@ -150,6 +171,7 @@ class DeriveStamp:
     daily_before: str | None
     last_1m_ist_date: str | None
     written_at: str
+    writer_convention: int
 
 
 def derive_stamp_path(lake_root: Path, exchange: str, segment: str, symbol: str) -> Path:
@@ -209,6 +231,11 @@ def load_derive_stamp(path: Path) -> DeriveStamp | None:
                 None if raw["last_1m_ist_date"] is None else str(raw["last_1m_ist_date"])
             ),
             written_at=str(raw["written_at"]),
+            # A stamp predating DEC-DERIVED-OI-NULL-HONEST-001 carries no
+            # writer_convention — load it as 0 (the pre-audit era), which
+            # can never equal CURRENT_WRITER_CONVENTION, so the next
+            # prebuild re-derives in full (the mechanised heal).
+            writer_convention=int(raw.get("writer_convention", 0)),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -262,6 +289,10 @@ def should_skip_derive(
 
     * a stamp exists and its ``token`` equals the CURRENT source token (the
       1-minute file set is byte-for-byte the one the stamped run read);
+    * the stamp's ``writer_convention`` equals
+      :data:`CURRENT_WRITER_CONVENTION` (DEC-DERIVED-OI-NULL-HONEST-001 —
+      a partition written under an OLDER writer byte-contract must be
+      rewritten once, so an old-convention stamp never skips);
     * the requested timeframe set (order-insensitively) equals the stamped set;
     * ``include_daily`` matches; and
     * for a daily run, the forming-session cutoff cannot change the output:
@@ -274,6 +305,8 @@ def should_skip_derive(
     chronological), so the rule needs no date parsing.
     """
     if stamp is None or stamp.token != token:
+        return False
+    if stamp.writer_convention != CURRENT_WRITER_CONVENTION:
         return False
     if tuple(sorted(set(tfs))) != tuple(sorted(set(stamp.tfs))):
         return False

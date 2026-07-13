@@ -3234,6 +3234,10 @@ class TestDerivedRecall:
                 daily_before="2024-06-03",
                 last_1m_ist_date="2024-06-02",
                 written_at=_dt.now(_UTC).isoformat(timespec="seconds"),
+                # DEC-DERIVED-OI-NULL-HONEST-001: DeriveStamp gained the
+                # writer_convention field; this fixture stamps the current one
+                # (the heal recall it pins is orthogonal to the convention).
+                writer_convention=1,
             ),
         )
         assert stamp_file.exists()
