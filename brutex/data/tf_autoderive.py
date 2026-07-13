@@ -635,13 +635,19 @@ def lake_derived_freshness_verdicts(
     (:func:`_gate_belt_errors`, the #1594 round-18
     ``(Exception, *escape)`` blanket shape; the #1774 ``today_gate_error``
     wrapper is the diagnostic-gate precedent), so ANY residual exception
-    fail-closes to the typed ``"stale"`` verdict + ONE capped
-    ``derived_freshness_gate_error`` WARN carrying ``repr(exc)`` + the
-    coordinate — never an uncaught raise crashing ``brutex sweep-all`` with
-    a raw traceback (live escapes closed by the belt, each proven at
-    pre-belt HEAD: a garbage-bytes parquet in the base OR derived partition;
-    a stored partition missing a canonical column — both crashed the gate
-    raw). The house ValueError-in-broad-guards law (#1594) is addressed
+    inside a per-pair unit fail-closes to the typed ``"stale"`` verdict +
+    ONE capped ``derived_freshness_gate_error`` WARN carrying ``repr(exc)``
+    + the coordinate, instead of an uncaught raise crashing ``brutex
+    sweep-all`` with a raw traceback (live escapes closed by the belt, each
+    proven at pre-belt HEAD: a garbage-bytes parquet in the base OR derived
+    partition; a stored partition missing a canonical column — both crashed
+    the gate raw). HONEST ENVELOPE of that guarantee: the belt spans
+    exactly the per-pair units — OUTSIDE it remain this gate's own
+    filesystem-existence scans (the ``is_dir()``/``rglob`` probes that
+    decide whether a pair is keyed at all — an ``OSError`` there still
+    propagates) and every DIRECT ``compare_*_freshness`` call (the doctor's
+    probe), which keep their documented per-plane envelopes. The house
+    ValueError-in-broad-guards law (#1594) is addressed
     HEAD-ON: unlike a heal batch, this is a fail-CLOSED diagnostic REFUSAL
     gate — a masked genuine code bug becomes a LOUD named refusal (the
     sweep is REFUSED, the WARN names the coordinate + ``repr(exc)``), never

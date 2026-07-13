@@ -35,7 +35,7 @@ from brutex.data.models import CandleBar
 from brutex.models import BruteXError
 
 #: Env kill switch for the bounded-clamp REFUSAL (DEC-OHLC-CLAMP-BOUNDED-001).
-#: Default ON (fabricating a ≥4× extreme from a corrupt vendor field is never
+#: Default ON (fabricating a >4× extreme from a corrupt vendor field is never
 #: the safe posture); the off-tokens restore the legacy unbounded clamp-store
 #: byte-identically. Anything else fails LOUD at parse-window start (the
 #: ``BRUTEX_TODAY_COMPLETENESS_GATE`` fail-loud template — junk is never
@@ -59,7 +59,7 @@ def resolve_clamp_refuse_enabled(env: Mapping[str, str] | None = None) -> bool:
 
     unset / ``""`` / ``"1"`` / ``"on"`` / ``"true"`` / ``"yes"`` (case-insensitive,
     whitespace-stripped) → ``True`` (default-ENABLED: refusing a clamp that
-    would MANUFACTURE a ≥4× extreme from a corrupt vendor field is the safe
+    would MANUFACTURE a >4× extreme from a corrupt vendor field is the safe
     posture — DEC-OHLC-CLAMP-BOUNDED-001); ``"0"`` / ``"off"`` / ``"false"`` /
     ``"no"`` → ``False`` (the legacy unbounded clamp-store, byte-identical).
     Anything else raises — junk is never silently coerced (the
@@ -239,7 +239,7 @@ def assemble_candle(
         inequalities — a move of EXACTLY 4× still clamps-and-stores) — the
         row is a scaled corrupt vendor field, NOT the 1-tick under-report
         the clamp was built for, and storing the widened bar would
-        FABRICATE a ≥4× extreme that passes every downstream screen
+        FABRICATE a >4× extreme that passes every downstream screen
         (price-sanity is ordering-only; the bad-tick screen tests CLOSE
         only) and poisons every derived bucket + the 1day PDH anchor
         (live-reproduced: a corrupt ×10 ``open`` stored ``high=1000.55``

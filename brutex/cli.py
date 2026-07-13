@@ -6983,9 +6983,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # G1 expansion (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the futures ALIAS names
     # no lake dir — probing `bars/NSE/FNO/NSE-NIFTY-FUT/` would silently abstain
     # (a gate bypass) — so the gate probes the resolved CONTRACT dirs instead.
-    # HONEST envelope (pre-existing #1492): the gate stays OI-blind
-    # (`read_lake_bars_frame` drops open_interest) and 1day-abstaining —
-    # results-safe, no condition bit reads OI.
+    # Since DEC-DERIVED-1DAY-FRESHNESS-001 (MIGRATION.md #1793) the gate is
+    # OI-AWARE (`read_lake_bars_frame` projects open_interest when stored;
+    # a drifted/fabricated OI reads stale) AND keys a requested `1day` via the
+    # segment-routed VALUE arm `compare_daily_freshness` — the old OI-blind /
+    # 1day-abstaining envelope is CLOSED; every per-(symbol, interval) unit
+    # (its lake reads included) additionally rides the gate's
+    # defensive-totality belt — any residual exception inside a unit
+    # fail-closes to the typed "stale" + one capped WARN instead of a raw
+    # traceback (the gate's own dir-existence probes stay outside the belt).
     freshness_symbols = [s for s in symbol_list if not is_futures_series_symbol(s)]
     if resolution is not None:
         freshness_symbols.extend(resolution.contract_symbols)

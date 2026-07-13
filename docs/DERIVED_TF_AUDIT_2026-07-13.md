@@ -275,10 +275,11 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   intraday AND daily arms — now runs under ONE belt guard,
   `(Exception, *datetime_out_of_range_escape_errors())` (the #1594
   round-18 L3 blanket shape; the #1774 `today_gate_error` wrapper is the
-  diagnostic-gate precedent), so ANY residual exception fail-closes to the
-  typed `stale` verdict + ONE capped `derived_freshness_gate_error` WARN
-  carrying `repr(exc)` + the coordinate (cap 20/gate call + a suppressed
-  summary) — never an uncaught raise crashing `brutex sweep-all`. The
+  diagnostic-gate precedent), so ANY residual exception inside a per-pair
+  unit fail-closes to the typed `stale` verdict + ONE capped
+  `derived_freshness_gate_error` WARN carrying `repr(exc)` + the coordinate
+  (cap 20/gate call + a suppressed summary) instead of an uncaught raise
+  crashing `brutex sweep-all`. The
   ValueError-in-broad-guards trade is taken deliberately: this is a
   fail-CLOSED diagnostic REFUSAL gate, so a masked genuine code bug becomes
   a loud named refusal (never wrong results, never silence) — the
@@ -290,18 +291,30 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   missing a canonical column each crashed the pre-belt gate raw (executed:
   polars ComputeError / ColumnNotFoundError, both arms). With the belt,
   the per-plane bullets above describe the DIAGNOSTIC precision of the
-  inner guards; gate totality no longer depends on their enumeration
-  being complete. Direct `compare_*_freshness` calls (the doctor's probe)
-  keep the documented per-plane envelope — the belt is the GATE's.
+  inner guards; the per-pair no-uncaught-raise guarantee no longer depends
+  on their enumeration being complete. HONEST envelope (refuter-measured):
+  the belt spans exactly the per-pair units — OUTSIDE it remain the gate's
+  own filesystem-existence scans (the `is_dir()`/`rglob` probes deciding
+  whether a pair is keyed at all; an OSError there still propagates) and
+  direct `compare_*_freshness` calls (the doctor's probe), which keep the
+  documented per-plane envelope — the belt is the GATE's, and that
+  residual is named rather than claimed away.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
-  ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
-  (the original observe-only envelope, now bounded); a corrupt extreme that
-  never triggers a clamp is untouched (DEC-BADTICK-EXTREMES-002).
+  ledger re-pulls them); a corrupt field whose clamp MOVE is at-or-within 4×
+  still clamps-and-stores — the refusal boundary is STRICT >4×, a move of
+  exactly 4× stores (the original observe-only envelope, now bounded); a
+  corrupt extreme that never triggers a clamp is untouched
+  (DEC-BADTICK-EXTREMES-002).
 - The 1day freshness arm is VALUE-fidelity only — recency-by-absence
   (prebuild lag) deliberately stays out of the gate; orphan stored days WARN
   observe-only.
 - The doctor census is O(symbols × stored bars) per invocation — an
-  on-demand diagnostic, honesty > speed.
+  on-demand diagnostic, honesty > speed. PRE-EXISTING residual (out of this
+  pack's scope, behavior deliberately untouched): `check_derived_freshness`'s
+  own `except Exception` FAIL-wrapper (`doctor.py`) does not include the
+  polars `PanicException` (a BaseException), so a panicking direct compare
+  would propagate out of the doctor probe rather than fold into its FAIL
+  result — the doctor is an operator-run diagnostic, not the sweep gate.
 - Overflow/wrap behavior is as observed on polars 1.42.1 (repo pin
   `>=1.0,<2.0`); the R5 pin is the upgrade canary.
 - E2 ancillary observation (no confirmed verdict, no DEC minted — flagged

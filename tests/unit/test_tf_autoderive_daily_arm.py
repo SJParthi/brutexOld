@@ -466,7 +466,7 @@ class TestOutOfRangeBaseStamp:
         assert tf_autoderive.compare_daily_freshness(base, stored, segment="FNO") == "stale"
 
     def test_corrupt_base_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
-        """The refuter's /tmp/repro_gate.py shape: an on-disk lake whose
+        """The refuter's executed end-to-end shape: an on-disk lake whose
         1-minute BASE month file is hand-poisoned with the out-of-range row;
         the exact cli sweep-preflight call (lake_derived_freshness_verdicts)
         must return the typed verdict, never a raw Rust-panic traceback."""
@@ -636,7 +636,7 @@ class TestCorruptStoredValue:
         }
 
     def test_null_close_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
-        """The refuter's /tmp/repro_null_gate.py shape verbatim: a real lake
+        """The refuter's executed end-to-end shape verbatim: a real lake
         whose STORED 1day partition is hand-poisoned with ``close=null`` on
         the intersecting date (1-minute base left CLEAN); the exact cli
         sweep-preflight call must return the typed verdict — never an
@@ -723,7 +723,7 @@ class TestCorruptStoredStamp:
         )
 
     def test_null_ts_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
-        """The refuter's /tmp/repro_null_ts.py shape verbatim: a real lake
+        """The refuter's executed end-to-end shape verbatim: a real lake
         whose STORED 1day partition is hand-poisoned with a null
         ``timestamp`` (1-minute base left CLEAN); the exact cli
         sweep-preflight call must return the typed verdict — never an
@@ -743,7 +743,7 @@ class TestCorruptStoredStamp:
         }
 
     def test_wrong_dtype_int64_ts_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
-        """The refuter's /tmp/repro_int_ts.py shape: the stored 1day
+        """The refuter's executed end-to-end shape: the stored 1day
         ``timestamp`` column hand-planted as Int64 epoch-µs — same gate,
         same typed verdict."""
         lake = tmp_path / "lake"

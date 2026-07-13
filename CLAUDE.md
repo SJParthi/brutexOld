@@ -2507,9 +2507,12 @@ hostile-review pass._
   blanket shape; the #1774 `today_gate_error` diagnostic-wrapper
   precedent), ANY residual exception fail-closing to the typed `stale` +
   ONE capped `derived_freshness_gate_error` WARN (`repr(exc)` +
-  coordinate; 20/call + suppressed summary) — so "never an uncaught raise
-  out of the sweep-preflight gate" is now STRUCTURALLY true, not
-  enumeration-dependent; the ValueError-in-broad-guards trade is taken
+  coordinate; 20/call + suppressed summary) — so the no-uncaught-raise
+  guarantee holds for every per-pair UNIT without depending on plane
+  enumeration; HONEST envelope: OUTSIDE the belt remain the gate's own
+  filesystem-existence scans (`is_dir()`/`rglob` — an OSError there still
+  propagates) and DIRECT `compare_*_freshness` calls (the doctor's probe)
+  — the named residual; the ValueError-in-broad-guards trade is taken
   deliberately (a fail-CLOSED diagnostic REFUSAL gate — a masked genuine
   code bug becomes a loud named refusal, never wrong results, never
   silence; the sanctioned price of totality), every narrow inner guard
@@ -6404,8 +6407,10 @@ hostile-review pass._
   window read; the derived-1day freshness VALUE arm + OI-aware compare +
   doctor all-symbols (+ the refuter-loop structural close-out: the
   sweep-preflight freshness gate's per-pair defensive-totality belt —
-  any residual exception fail-closes to the typed `stale` + one capped
-  WARN, never an uncaught raise); series_load predicting on the resampler's ACTUAL
+  any residual exception inside a per-pair unit fail-closes to the typed
+  `stale` + one capped WARN instead of an uncaught raise; the gate's
+  dir-existence probes + direct compare calls stay outside it —
+  see §1); series_load predicting on the resampler's ACTUAL
   09:15-IST grid; the magnitude-bounded parse-time OHLC clamp
   (BRUTEX_OHLC_CLAMP_REFUSE, default ON). Residuals pinned + named
   (DEC-PREBUILD-BAD-TICK-001 + DEC-DERIVED-SERVE-FRESHNESS-001 lead the
