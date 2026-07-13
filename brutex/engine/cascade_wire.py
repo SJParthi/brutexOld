@@ -1401,6 +1401,19 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
     # scalar coercions below read cleanly. Every malformed value is caught by the
     # ``(KeyError, TypeError, ValueError)`` guard and re-raised as a CascadeWireError.
     raw = cast(dict[str, Any], data)
+    if raw.get("fill_mode") is not None and str(raw["fill_mode"]) == FillMode.PRECISE.value:
+        # DEC-FILL-WORST-CASE-001 fix round 3 (each reader refuses what ITS
+        # OWN writer never emits): `_spec_to_dict` keeps the
+        # emit-on-non-PRECISE elision law — a literal "precise" token in a
+        # manifest is a hand-edited/tampered line, refused like a junk
+        # token (absent key = PRECISE legacy stays). The AUDIT wire is the
+        # opposite convention by design: its writers record the mode always
+        # and explicitly, so ITS reader accepts the literal token.
+        raise CascadeWireError(
+            "invalid cascade tuple spec in manifest: the PRECISE fill mode is "
+            "recorded by KEY ABSENCE, never a literal token — the manifest is "
+            "corrupt or tampered"
+        )
     try:
         proximity = raw["proximity_bps"]
         proximity_bps = (

@@ -128,6 +128,19 @@ class TestSpecFillModeRoundTrip:
         with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
             cw._spec_from_dict(payload)
 
+    def test_literal_precise_token_refuses_as_tampered(self) -> None:
+        # DEC-FILL-WORST-CASE-001 fix round 3 (NIT-1 — each reader refuses
+        # what ITS OWN writer never emits): `_spec_to_dict` elides at
+        # PRECISE, so a literal "precise" token in a manifest is a
+        # hand-edited/tampered line — refused like a junk token, never
+        # silently accepted (the AUDIT wire is the opposite convention by
+        # design: its writers always record explicitly, its reader accepts
+        # the literal token).
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(cw.CascadeWireError, match="KEY ABSENCE"):
+            cw._spec_from_dict(payload)
+
     def test_candidates_for_spec_threads_the_spec_mode(self) -> None:
         # The re-deriver sources the mode from the SAME spec it sources sl/tp
         # from: a WORST_CASE spec's candidate re-sim produces DIFFERENT
