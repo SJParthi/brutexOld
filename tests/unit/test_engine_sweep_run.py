@@ -3383,3 +3383,111 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ────── The WORST_CASE finalist-projection threading pin (fix round 2) ──────
+
+
+def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    """A drift strong enough that combos RANK under the WORST_CASE floor.
+
+    ``_trending_bars``'s gentle 0.6-per-3-bars drift loses every trade once
+    entries fill at the bar HIGH (the ±0.5 pad dwarfs the drift), so the
+    worst-case arm never persists a finalist there. This variant rises 1.0
+    with a 0.5 dip every 4th bar under a tight ±0.05 pad — worst-case fills
+    still clear the rank gates, and the SL/TP levels' re-anchoring on the
+    adverse entry moves TRIGGER TIMING between the modes (the observable the
+    projection pin below needs).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 1.0 if m % 4 else price - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            hi = max(price, close) + 0.05
+            lo = min(price, close) - 0.05
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestWorstCaseFinalistProjection:
+    """FIX-ROUND-2 MINOR seam pin (MIGRATION.md #1786): sweep_run's finalist
+    projection ``ranked_combo_to_result_row(..., fill_mode=cfg.fill_mode)``.
+
+    The refuters' executed mutant — severing that kwarg — survived ~1,500
+    tests because no test executed a WORST_CASE run WITH a persisted
+    finalist: the projector re-simulates the finalist's trades for the
+    row's ``avg_entry_price`` / ``avg_exit_price`` anchors, so a severed
+    kwarg silently re-simulates under the PRECISE library default while the
+    RANKING ran worst-case — persisting PRECISE-timing price anchors on a
+    worst-case row. This fixture ranks + persists under WORST_CASE and its
+    SL/TP trigger timing diverges hard between the modes (mask 16: 218
+    worst-case trades vs 389 precise — different exit bars, different
+    subsequent re-arms), so the pinned anchors kill the mutant.
+    """
+
+    def test_worst_case_run_persists_projection_under_the_run_mode(self, tmp_path: Path) -> None:
+        bars = _worst_case_ranking_bars()
+        cfg = _make_config(fill_mode=FillMode.WORST_CASE, sl_paisa=200, tp_paisa=100)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        assert summary.persisted >= 1  # the seam is EXERCISED, not vacuously skipped
+        rows = {row.mask_bits: row for row in store.rows()}
+        assert 16 in rows, sorted(rows)
+        row = rows[16]
+        # Hand-derived worst-case anchors (the oracle re-derivation below
+        # reproduces them): 218 trades, avg entry-bar open 149.86, avg
+        # exit-bar close 151.42. The PRECISE projection of the SAME mask is
+        # 389 trades with avg exit 153.79 — a severed fill_mode kwarg would
+        # persist THOSE anchors on this worst-case row and fail these pins.
+        assert row.total_trades == 218
+        assert row.avg_entry_price == Decimal("149.86")
+        assert row.avg_exit_price == Decimal("151.42")
+        # Independent oracle re-derivation of BOTH modes' anchors — proves
+        # the pinned values are the WORST_CASE projection and that the two
+        # modes genuinely diverge on this fixture (anti-vacuity).
+        from brutex.engine.sweep_driver import mask_to_entry_signals
+        from brutex.engine.trade_sim import FillPolicy, simulate_trades
+        from brutex.money import round_money
+
+        bar_bits = build_bar_bits(bars)
+        ts_to_bar = {bar.timestamp: bar for bar in bars}
+        anchors: dict[FillMode, tuple[int, Decimal, Decimal]] = {}
+        for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
+            trades = simulate_trades(
+                bars,
+                mask_to_entry_signals(bar_bits, 16),
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=200,
+                take_profit_paisa=100,
+                policy=FillPolicy(fill_mode=mode),
+            )
+            entries = [ts_to_bar[t.entry_ts].open for t in trades]
+            exits = [ts_to_bar[t.exit_ts].close for t in trades]
+            anchors[mode] = (
+                len(trades),
+                round_money(sum(entries, Decimal("0")) / len(entries)),
+                round_money(sum(exits, Decimal("0")) / len(exits)),
+            )
+        assert anchors[FillMode.WORST_CASE] == (218, Decimal("149.86"), Decimal("151.42"))
+        assert anchors[FillMode.PRECISE] == (389, Decimal("152.76"), Decimal("153.79"))
+        assert anchors[FillMode.WORST_CASE] != anchors[FillMode.PRECISE]
+        assert (row.total_trades, row.avg_entry_price, row.avg_exit_price) == anchors[
+            FillMode.WORST_CASE
+        ]
