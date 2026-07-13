@@ -2457,7 +2457,9 @@ hostile-review pass._
   skip or honestly-bucket it by default; the `G1S-` PREFIX is REFUTED — it
   parses as an exchange token and would JOIN the real chain; run identity is
   provenance-distinct via the snapshot-hash slice header, no formula change);
-  19 TFs + 1day via a direct `materialize_lake_timeframes` call; /db
+  19 TFs + 1day via the direct per-symbol
+  `materialize_lake_timeframes(..., kind=)` loop (the seam is single-symbol
+  with a REQUIRED `kind: PrebuildKind`); /db
   discovery + pager mirroring the expired-options pattern with a
   generation-keyed count memo; a 41-row edge matrix naming a planned test per
   measured/UNVERIFIED case; honest limits (NO API backfill — GDFL tick-class
@@ -2473,7 +2475,11 @@ hostile-review pass._
   + the API/WS capture leg (own DEC + ADR — DEC-LIVE-REMOVE-001 stands).
   Companion: the sibling vendor-docs tree (PR #1506) owns
   docs/vendors/gdfl/'s other files; this doc fills the slot its
-  INGEST_POINTER.md reserves. DOCS-ONLY — zero brutex/rust/test/CI source
+  INGEST_POINTER.md reserves. HOSTILE-REVIEW ROUND 1 folded (4-lens panel —
+  the per-finding record lives in MIGRATION.md #1781): the derive seam
+  restated to the real single-symbol kind-routed loop, the UNCONFIRMED
+  native-1m depth label corrected, the G1 bucket edit made two-token
+  precise. DOCS-ONLY — zero brutex/rust/test/CI source
   change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
   REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
