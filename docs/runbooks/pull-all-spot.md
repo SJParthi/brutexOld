@@ -1,7 +1,11 @@
-# Runbook — the scoped-ALL spot pull (`brutex pull-all-spot` / the ▶ Pull EVERYTHING — spot only button)
+# Runbook — the scoped-ALL spot pull (`brutex pull-all-spot` / the ▶ Pull Spot button)
 
 > DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779). ONE dashboard button +
 > ONE CLI subcommand pulling the ENTIRE spot universe — nothing else.
+> Round-6 TWO-BUTTON split: the button is relabeled **▶ Pull Spot** (formerly
+> "▶ Pull EVERYTHING — spot only") and /universe gains its manual sibling
+> **▶ Pull F&O** (`scope=fno-only` — see §8); the combined "Pull · full
+> pipeline" button is removed (the route's full-chain API default survives).
 
 ## 1. What it does — and will NEVER do
 
@@ -48,8 +52,8 @@ WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
 
 ## 2. Fully automatic daily — the SELF-ARMING button (round-5 fold)
 
-**One click does everything.** The FIRST click of ▶ Pull EVERYTHING — spot
-only runs the pull now (if allowed) AND arms the daily post-market
+**One click does everything.** The FIRST click of ▶ Pull Spot runs the
+pull now (if allowed) AND arms the daily post-market
 auto-pull: from then on, while the dashboard process is up, a background
 ticker (`brutex/dashboard/auto_pull_scheduler.py`, 60 s cadence —
 `BRUTEX_AUTO_PULL_TICK_S`) fires the SAME button launch path once per
@@ -61,7 +65,15 @@ after the first click.
   survives dashboard restarts; the boot lifespan resumes ticking when armed
   (and if today's window is open and today's pull has not yet succeeded, an
   early tick catches up). A corrupt/unreadable state file reads DISARMED
-  with one WARN — never a crash.
+  with one WARN — never a crash, for EVERY corruption shape (junk JSON,
+  wrong shape, invalid UTF-8, a nesting bomb, an oversized file — the
+  round-6 N-1 hardening; the same template hardens `.pull_intent.json`).
+- **One dashboard process per lake** (round-6 M-3 disclosure): the
+  once-per-day law is per DASHBOARD PROCESS — two armed dashboards over ONE
+  lake each hold their own in-memory mirror of the state file, so both may
+  fire once on the same day (flock-serialized + ledger-idempotent — bounded
+  waste, never wrong data) and a disarm from a stale-mirror process can
+  clobber the other's day-marks on disk. Run ONE dashboard per lake.
 - **Once per day**: a STARTED run marks the day attempted (a FAILED run does
   NOT retry the same day — it retries the next eligible day, and the
   incremental ledger heals whatever it missed); a run that completes ok
@@ -260,3 +272,48 @@ F-3):** a `--dry-run` / `dry_run=true` run writes no bars, so on a fresh
 lake the (real) prebuild fails every target and the note honestly reads
 `prebuild failures: …` — the inherited full-pipeline dry-run shape, not a
 defect of this button/command.
+
+## 8. ▶ Pull F&O — the manual fno-only sibling (round-6 two-button split)
+
+The round-6 coordinator ruling replaced the combined "Pull · full pipeline"
+button with TWO buttons on `/universe`:
+
+- **▶ Pull Spot** — the spot-only auto-arming button this runbook describes
+  (`scope=spot-only`, `auto_arm=1` on first click).
+- **▶ Pull F&O** — the NEW manual sibling: the SAME
+  `POST /api/v1/universe/pull-pipeline` launcher with `scope=fno-only`.
+
+`fno-only` is the exact structural mirror of `spot-only`:
+
+- **SPOT phase = honest no-op.** An all-zeros `BulkSpotReport` (empty
+  dates/symbols; verdict reads `spot clean (0 pair(s))`) passes the
+  sequencer's `spot_phase_ok` gate vacuously; the note surgery replaces that
+  clause with **"spot skipped by design (F&O-only scope)"** — a designed
+  no-op must never read like a real empty spot pull (negative-pinned).
+- **METADATA + F&O HISTORICAL run for REAL** over the whole universe (or
+  the ticked selection — the selection checkboxes + the from/to date
+  pickers scope the ▶ Pull F&O button exactly as they scoped the removed
+  combined button; dates additionally scope which expiries are pulled per
+  DEC-FNO-EXPIRY-SCOPE-001). The fenced Greeks pass runs as on any real
+  F&O pull.
+- **Prebuild = the F&O contract cascade ONLY** (spot materialisation not
+  injected — reported as a skipped-by-design phase, the mirror of
+  spot-only's empty cascade); the movers warm covers futures + options
+  segments only (the spot warm is honestly absent).
+- **All rails inherited**: market-hours start gate + mid-run guard, the
+  composed Muhurat belt (armed for every non-full scope), the
+  today-completeness gate, the intent scope field — a crashed fno-only
+  pull resumes FNO-ONLY, never a silently-widened full pull.
+
+**Ruled exclusivities (pinned):**
+
+- The cross-verify tail NEVER fires on an fno-only pull — the tail is
+  Spot-exclusive (its contract is the spot CSV byte contract).
+- The scheduler NEVER arms or fires fno-only — `auto_arm=1` on any
+  non-spot-only scope stays a clean 400. ▶ Pull F&O is manual-only.
+- The bare route (no `scope=`) REMAINS the full-chain API default,
+  byte-identical (exact-payload-pinned) — nothing existing re-routes.
+
+**CLI:** there is deliberately NO `brutex pull-fno` subcommand in this
+change; the headless binding REFUSES `scope=fno-only` loudly. The CLI twin
+is the named one-line follow-up in MIGRATION.md #1779 (round-6 record).

@@ -35,7 +35,12 @@ widened; since the round-5 fold the button SELF-ARMS the daily post-market
 auto-pull (NEW `dashboard/auto_pull_scheduler.py` — first click = run now +
 arm forever; the same gate + launcher reused, once-per-day law, durable
 `.pull_all_spot_auto.json`, disarm chip; the CLI `--auto` + cron lane is the
-headless alternative). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+headless alternative); since the round-6 fold the durable state loads are
+corruption-hardened (never crash the boot — the #1776 M1 template) and the
+combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + ▶ Pull
+F&O (the NEW manual `scope=fno-only` mirror — spot no-op by note surgery,
+metadata/historical/Greeks real, F&O-only prebuild + warm; tail + scheduler
+stay Spot-exclusive, pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
 summary, never the story.)
@@ -2548,12 +2553,51 @@ hostile-review pass._
   `docs(migration+claude+runbook)` subject reworded to the comma form — tree
   byte-identical; orphaned interim SHA citations swept to round labels) +
   the J-NIT-1 held-I/O-envelope wording quantified on all three surfaces.
+  ROUND-6 FOLD — refuter round 6 (M CLEAN + O CLEAN + N: 1 MAJOR) + the
+  coordinator-ruled TWO-BUTTON SPLIT: [N-1 MAJOR] the durable-state loads
+  can no longer crash the dashboard — `AutoPullStateStore.load` AND
+  `PullIntentStore.load` adopt the crossverify #1776 round-2 M1 template
+  (bytes read + decode INSIDE the corruption-tolerant path; UnicodeDecodeError
+  / RecursionError / OverflowError folded; a 16 MiB size cap checked
+  PRE-read) — every corruption shape reads DISARMED / no-intent with ONE
+  WARN; F/B-proven through the REAL `build_app` lifespan boot (invalid-UTF-8 ·
+  nesting-bomb · oversized each CRASHED the boot at the pre-fix head in a
+  scratch worktree; a corrupt intent file 500'd the pull click — all clean
+  post-fix); [M-2] `cmd_dashboard` eagerly validates
+  `BRUTEX_PULL_ALL_SETTLE_IST` beside the tick env (junk = clean exit-1 at
+  boot, never a delayed tick crash) + `auto_pull.tick_error` dedupes per
+  (day, error-type) with the day-rollover re-WARN as the heartbeat and
+  `status().last_outcome` carrying the live error; [M-3] the
+  two-dashboard-processes-on-one-lake residual disclosed (docstring + ledger
+  + runbook — the scheduler state file is process-local-mutex'd only);
+  [N-2/N-4/M-1] orphaned pre-rebase SHA citations swept to round labels, the
+  unsigned reworded commit re-created SIGNED via `commit-tree -S` (tree +
+  message bytes + dates verbatim; whole chain re-verified), the ledger test
+  count recounted honestly. THE TWO-BUTTON SPLIT (all rulings
+  coordinator-locked): NEW scope token `fno-only` — the exact spot-only
+  mirror: the SPOT phase is an honest all-zeros no-op `BulkSpotReport`
+  passing `spot_phase_ok` vacuously with note surgery to "spot skipped by
+  design (F&O-only scope)" (negative-pinned — never reads like a real empty
+  spot pull); metadata + F&O historical + Greeks run REAL; prebuild = the
+  F&O cascade ONLY (`include_spot=False` → the gated spine's
+  `materialize_spot=None` reported-noop, the options-noop mirror); movers
+  warm = futures+options only; guard/belt/completeness/intent-scope rails
+  inherited (a crashed fno-only pull resumes FNO-ONLY). RULED exclusivities,
+  each pinned: the crossverify tail NEVER fires on fno-only (Spot-exclusive);
+  the scheduler NEVER arms/fires fno-only (`auto_arm` on a non-spot-only
+  scope stays 400); the bare route stays the full-chain API default
+  byte-identical; the headless binding REFUSES fno-only loudly (`brutex
+  pull-fno` = the named one-line follow-up). UI: the combined "Pull · full
+  pipeline" button is REMOVED — universe.html carries exactly TWO pull
+  buttons, ▶ Pull Spot (auto-arming, relabeled) + ▶ Pull F&O (manual,
+  selection- + date-aware, `scope=fno-only`); `setBulkDisabled` covers both.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; `pull_scope.py` (80/18) + `auto_pull_gate.py`
-  (80/28) + `auto_pull_scheduler.py` (245/52) 100.00%
-  line+branch on NEW ci.yml gates; touched app.py/cli.py/pipeline_binding.py/
-  pull_intent.py lines covered; ruff/ruff-format clean, `mypy --strict` clean, pyright
-  0 errors on every touched file.)
+  lake/schema/scope/vocab/rate change; `pull_scope.py` (99/24) + `auto_pull_gate.py`
+  (80/28) + `auto_pull_scheduler.py` (257/54) + `pull_intent.py` (227/46)
+  100.00% line+branch on their ci.yml gates (+ `gated_prebuild.py` 134/24 ·
+  `pipeline_prebuild.py` 193/54 re-measured 100.00%); touched
+  app.py/cli.py/pipeline_binding.py lines covered; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 errors on every touched file.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
@@ -6411,6 +6455,17 @@ hostile-review pass._
   ticks; a successful manual click counts as the day's pull; disarm chip +
   toggle route; boot resumes ticking iff durably armed; zero threads
   otherwise; the CLI `--auto` + cron lane stays the headless alternative);
+  since the round-6 fold the durable state loads (`.pull_all_spot_auto.json`
+  + `.pull_intent.json`) are corruption-hardened on the #1776 M1 template
+  (size cap + decode-inside-tolerant-path — a corrupt file never crashes the
+  boot or 500s a click, F/B-proven through the real lifespan) and the
+  combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + the NEW
+  manual ▶ Pull F&O (`scope=fno-only` — the exact spot-only mirror: spot
+  phase = honest no-op with note surgery, metadata/historical/Greeks real,
+  F&O-only prebuild + futures/options warm; the crossverify tail + the
+  scheduler stay Spot-EXCLUSIVE, pinned; the bare route stays the
+  full-chain API default byte-identical; the headless binding refuses
+  fno-only — `pull-fno` CLI twin is the named follow-up);
   ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)
@@ -6977,7 +7032,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5054-5055` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5090-5091` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
