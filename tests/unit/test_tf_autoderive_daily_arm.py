@@ -753,3 +753,171 @@ class TestCorruptStoredStamp:
             ("NIFTY", "5minute"): "fresh",
             ("NIFTY", "1day"): "stale",
         }
+
+
+class TestCorruptBaseValue:
+    """Refuter round 4 (seat 2, MAJOR): the base re-derive guard's escape set
+    deliberately EXCLUDES ``ValueError``, so a corrupt/hand-planted 1-MINUTE
+    BASE **VALUE** — a negative volume or an inconsistent OHLC row whose
+    daily aggregate breaks the ``CandleBar`` ordering law (``ValueError``
+    from ``resample_1m_to_daily``'s validating bar build), or a NaN price
+    whose ``Decimal("NaN")`` comparison raises ``decimal.InvalidOperation``
+    — previously ESCAPED ``lake_derived_freshness_verdicts`` (the exact
+    ``cli.py`` sweep-preflight call) as an uncaught raise, while the
+    polars-only intraday twin (no ``CandleBar`` build) stayed graceful on
+    the identical base — the #1594 isolation-escape class, falsifying the
+    #1793 "never an uncaught raise out of the sweep-preflight gate"
+    absolute. The base frame is now VALUE-SCREENED (one vectorized pass
+    over exactly the ``CandleBar`` refusal plane) BEFORE the daily law
+    runs, reading the typed "stale" verdict + ONE
+    ``derived_1day_corrupt_base`` WARN."""
+
+    def _base(
+        self,
+        *,
+        open_: list[float] | None = None,
+        close: list[float] | None = None,
+        volume: pl.Series | None = None,
+        oi: pl.Series | None = None,
+    ) -> pl.DataFrame:
+        frame = pl.DataFrame(
+            {
+                "ts_utc": [
+                    datetime(2024, 6, 12, 3, 45, tzinfo=UTC) + timedelta(minutes=i)
+                    for i in range(5)
+                ],
+                "open": open_ if open_ is not None else [100.0] * 5,
+                "high": [100.5] * 5,
+                "low": [99.5] * 5,
+                "close": close if close is not None else [100.1] * 5,
+                "volume": volume if volume is not None else pl.Series([10] * 5, dtype=pl.Int64),
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+        if oi is not None:
+            frame = frame.with_columns(oi.alias("open_interest"))
+        return frame
+
+    def _stored(self, *, oi: int | None = None) -> pl.DataFrame:
+        frame = pl.DataFrame(
+            {
+                "ts_utc": [datetime(2024, 6, 11, 18, 30, tzinfo=UTC)],
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+        if oi is not None:
+            frame = frame.with_columns(pl.lit(oi).cast(pl.Int64).alias("open_interest"))
+        return frame
+
+    def test_negative_volume_base_reads_stale_with_one_warn(self) -> None:
+        """The refuter's executed repro shape: pre-fix an ESCAPED
+        ``ValueError: CandleBar.volume must be non-negative`` out of the
+        daily law's validating bar build."""
+        base = self._base(volume=pl.Series([10, 10, -1_000_000, 10, 10], dtype=pl.Int64))
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["log_level"] == "warning"
+        assert event["source"] == "NIFTY/1day"
+        assert event["side"] == "1minute-base"
+        assert event["corrupt_rows"] == 1
+        assert "2024" in event["first_offender"]  # the repr()'d offending instant
+
+    def test_inconsistent_ohlc_base_reads_stale(self) -> None:
+        """An ``open`` above every high of the day: the daily aggregate's
+        open lands outside [daily_low, daily_high] — pre-fix an ESCAPED
+        ``ValueError: CandleBar: open ... must be in [low=..., high=...]``."""
+        base = self._base(open_=[500.0, 100.0, 100.0, 100.0, 100.0])
+        assert tf_autoderive.compare_daily_freshness(base, self._stored(), segment="INDEX") == (
+            "stale"
+        )
+
+    def test_nan_last_close_base_reads_stale(self) -> None:
+        """A NaN close on the LAST bar makes the daily close ``Decimal("NaN")``
+        — pre-fix an ESCAPED ``decimal.InvalidOperation`` from the CandleBar
+        ordering comparison (in NO catch set anywhere)."""
+        base = self._base(close=[100.1] * 4 + [float("nan")])
+        assert tf_autoderive.compare_daily_freshness(base, self._stored(), segment="INDEX") == (
+            "stale"
+        )
+
+    def test_nan_f64_volume_base_reads_stale(self) -> None:
+        """A NaN Float64 base volume sums to NaN — pre-fix an ESCAPED
+        ``ValueError: cannot convert float NaN to integer`` from the law's
+        bar build."""
+        base = self._base(volume=pl.Series([10.0] * 4 + [float("nan")], dtype=pl.Float64))
+        assert tf_autoderive.compare_daily_freshness(base, self._stored(), segment="INDEX") == (
+            "stale"
+        )
+
+    def test_inf_f64_volume_base_reads_stale_with_base_warn(self) -> None:
+        """An inf Float64 base volume: pre-fix the ``int(inf)`` OverflowError
+        WAS caught by the escape-set guard but MISLABELLED as the
+        ``derived_1day_out_of_range_stamp`` WARN (wrong remediation — the
+        stamps are fine). Now the honest ``derived_1day_corrupt_base`` WARN."""
+        base = self._base(volume=pl.Series([10.0] * 4 + [float("inf")], dtype=pl.Float64))
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        assert [e["event"] for e in logs if e["event"].startswith("derived_1day")] == [
+            "derived_1day_corrupt_base"
+        ]
+
+    def test_negative_last_oi_fno_base_reads_stale_with_one_warn(self) -> None:
+        """A negative last-of-day OI in an F&O base — the FNO daily law's
+        ``CandleBar.open_interest`` refusal plane (and the screen's OI
+        sign-check branch)."""
+        base = self._base(oi=pl.Series([1000, 1000, 1000, 1000, -5], dtype=pl.Int64))
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(oi=1000), segment="FNO", source="NIFTY-FUT/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["corrupt_rows"] == 1
+
+    def test_unprobeable_volume_dtype_reads_stale_with_marker(self) -> None:
+        """A hand-planted Utf8 ``volume`` column makes the screen's probe
+        expressions THEMSELVES raise (polars ``ComputeError``) — the narrow
+        ``PolarsError`` arm fail-closes with the unprobeable marker; pre-fix
+        the same hostile dtype escaped out of the law's aggregation."""
+        base = self._base(volume=pl.Series(["10"] * 5, dtype=pl.Utf8))
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["first_offender"] == "<unprobeable column dtype>"
+        assert event["corrupt_rows"] == 5
+
+    def test_negative_volume_base_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's executed end-to-end repro verbatim: a real lake whose
+        1-minute BASE month file is hand-poisoned with a negative volume
+        (clean stored 1day + 5minute, so the intraday arm runs FIRST and
+        stays graceful); the exact cli sweep-preflight call
+        (``lake_derived_freshness_verdicts``) must return the typed verdict
+        on BOTH arms — never an uncaught ``ValueError`` traceback out of the
+        daily arm."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1m = _partition(lake, "INDEX", "NIFTY", "1minute")
+        df = pl.read_parquet(p1m)
+        df.with_columns(
+            pl.Series(
+                "volume", [-1_000_000, *df.get_column("volume").to_list()[1:]], dtype=pl.Int64
+            )
+        ).write_parquet(p1m)
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }

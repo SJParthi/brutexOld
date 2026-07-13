@@ -2468,8 +2468,23 @@ hostile-review pass._
   OverflowError outside the round-2 narrow pair) + the refuter-round-3
   corrupt-STAMP `(AttributeError, TypeError)` clause
   (`derived_1day_corrupt_stamp` — a null / wrong-dtype stored `ts_utc`
-  raised AttributeError in NEITHER out-of-range set), never an uncaught
-  raise out of the sweep-preflight gate) keyed
+  raised AttributeError in NEITHER out-of-range set) + the refuter-round-4
+  1-minute-BASE VALUE screen (`derived_1day_corrupt_base` — the base
+  re-derive guard deliberately excludes ValueError, so a hand-planted
+  negative-volume / inconsistent-OHLC / NaN-price base previously escaped
+  the daily law's `CandleBar` build as an uncaught
+  ValueError/`decimal.InvalidOperation`; the base frame is now
+  VALUE-SCREENED before the law runs — ONE vectorized pass over exactly
+  the `CandleBar` refusal plane via the COMMON `price_violation_expr` +
+  negative/non-finite volume & OI probes, an unprobeable hostile column
+  dtype fail-closing via a narrow `PolarsError` clause; disclosed
+  corrupt-lake-only narrowing: a value-corrupt base that previously
+  laundered into a `fresh` compare now reads `stale`), never an uncaught
+  raise out of the sweep-preflight gate on the daily arm's STAMP/VALUE
+  corruption plane — the ONE disclosed residual is a wrong-dtype/null-ts
+  1-minute-base COLUMN fault, which raises identically on the pre-existing
+  intraday twin (the adjudicated round-4 MINOR: a loud diagnostic crash
+  with no daily-vs-intraday asymmetry)) keyed
   `(symbol, "1day")` in `lake_derived_freshness_verdicts` (sweep preflight picks
   it up with ZERO changes), the intraday compare made OI-AWARE (legacy OI=0
   partitions — SPOT engine lakes included — read stale ≤1 nightly with the

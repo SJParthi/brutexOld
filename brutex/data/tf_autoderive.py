@@ -176,6 +176,39 @@ def compare_daily_freshness(
     elsewhere keeps propagating) — and reads the typed ``"stale"`` verdict
     + ONE ``derived_1day_corrupt_value`` WARN.
 
+    A corrupt 1-MINUTE-BASE VALUE fail-closes the same way (refuter
+    round 4): the base re-derive guard's escape set deliberately EXCLUDES
+    ``ValueError`` (the law spans arbitrary derive code), so a corrupt /
+    hand-planted base VALUE — a negative volume or an inconsistent OHLC row
+    whose daily aggregate breaks the ``CandleBar`` ordering law
+    (``ValueError``), or a NaN price whose ``Decimal("NaN")`` comparison
+    raises ``decimal.InvalidOperation`` — previously ESCAPED the daily
+    law's validating bar build as an uncaught raise through the
+    sweep-preflight gate, while the polars-only intraday twin (no
+    ``CandleBar`` build) stayed graceful on the identical base. The base
+    frame is therefore VALUE-SCREENED here — ONE vectorized polars pass
+    BEFORE the law runs: price sanity via the COMMON
+    :func:`~brutex.data.price_sanity.price_violation_expr` (null /
+    non-positive / broken-ordering prices) + negative / non-finite
+    volume & ``open_interest`` (exactly the refusal plane of the law's
+    ``CandleBar`` build) — reading the typed ``"stale"`` verdict + ONE
+    ``derived_1day_corrupt_base`` WARN; a column dtype so hostile the probe
+    expressions themselves raise (a hand-planted Utf8/List numeric column —
+    ``polars.exceptions.PolarsError``, a NARROW span whose sole failure
+    mode is that hostile dtype, the #1594 consumption law) fail-closes the
+    same way. Disclosed narrowing (corrupt-lake-only): the screen judges
+    the WHOLE base frame (including rows past the ``before`` bound), and a
+    value-corrupt base that previously happened to compare ``"fresh"``
+    (the corruption laundered into BOTH sides) or drift-``"stale"`` now
+    short-circuits to the same ``"stale"`` with the honest corrupt-base
+    WARN — the prebuild's own read boundary (#1792 price-sanity + the
+    writer's ``CandleBar`` refusal) refuses to DERIVE from such a base
+    anyway, so remediation is heal / re-pull, exactly what the WARN names.
+    Base COLUMN faults outside the probed value plane (e.g. a wrong-dtype
+    ``ts_utc``) keep the documented propagation envelope (the adjudicated
+    round-4 MINOR — the pre-existing intraday twin raises identically on
+    that class).
+
     HONEST cost (Golden Rule #10): the per-date compare below is a
     NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
     per TRADING DAY per symbol (a full-history partition is hundreds-to-low-
@@ -245,6 +278,58 @@ def compare_daily_freshness(
             ),
         )
         return "stale"
+
+    import polars as pl
+
+    from brutex.data.price_sanity import PRICE_SANITY_COLUMNS, price_violation_expr
+
+    # Refuter round 4 (seat 2, MAJOR): VALUE-SCREEN the 1-minute base BEFORE
+    # the daily law runs — the escape-set guard below deliberately excludes
+    # ValueError, so a corrupt/hand-planted base VALUE (negative volume /
+    # inconsistent OHLC → the daily law's CandleBar refusal ValueError; a
+    # NaN price → Decimal("NaN") comparison decimal.InvalidOperation)
+    # previously ESCAPED lake_derived_freshness_verdicts uncaught while the
+    # polars-only intraday twin stayed graceful. ONE vectorized pass over
+    # exactly the CandleBar refusal plane; an unprobeable column dtype (the
+    # probe expressions themselves raise PolarsError — a NARROW span whose
+    # sole failure mode is that hostile dtype) fail-closes the same way.
+    numeric_columns = [*PRICE_SANITY_COLUMNS, "volume"]
+    sign_checks = [pl.col("volume") < 0]
+    if "open_interest" in df_1m.columns:
+        numeric_columns.append("open_interest")
+        sign_checks.append(pl.col("open_interest") < 0)
+    try:
+        mask = price_violation_expr()
+        for check in sign_checks:
+            mask = mask | check
+        for name in numeric_columns:
+            # cast(strict=False) makes the finite probe dtype-agnostic (a
+            # legit Int64 volume casts cleanly; null casts stay null → never
+            # flagged — null volume/OI is the honest vendor-absent value).
+            mask = mask | pl.col(name).cast(pl.Float64, strict=False).is_finite().not_()
+        corrupt = df_1m.filter(mask)
+        base_corrupt = corrupt.height > 0
+        corrupt_rows = corrupt.height
+        first_offender = repr(corrupt.get_column("ts_utc")[0]) if base_corrupt else ""
+    except pl.exceptions.PolarsError:
+        base_corrupt = True
+        corrupt_rows = df_1m.height
+        first_offender = "<unprobeable column dtype>"
+    if base_corrupt:
+        _LOG.warning(
+            "derived_1day_corrupt_base",
+            source=source or "1day",
+            side="1minute-base",
+            corrupt_rows=corrupt_rows,
+            first_offender=first_offender,
+            detail=(
+                "1-minute base carries value-corrupt row(s) (non-positive/"
+                "non-finite/misordered OHLC, or negative/non-finite volume/OI "
+                "— a corrupt/hand-planted partition) — verdict 'stale' "
+                "fail-closed; heal or re-pull the 1-minute base"
+            ),
+        )
+        return "stale"
     try:
         if segment == "FNO":
             from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
@@ -264,9 +349,13 @@ def compare_daily_freshness(
         # "stale" gracefully on the SAME base. The ESCAPE set (OverflowError
         # + PanicException — ValueError deliberately EXCLUDED per the
         # consumption law: this try spans the whole daily law, where a
-        # ValueError can be a genuine code bug such as the R5
-        # negative-volume-wrap CandleBar refusal) folds the shape into the
-        # same typed fail-closed refusal. Loud: ONE WARN per partition.
+        # ValueError is the genuine-code-bug class that must keep
+        # propagating — the corrupt-VALUE shapes that could legitimately
+        # raise it, e.g. the R5 negative-volume-wrap CandleBar refusal, are
+        # screened out by the round-4 base value screen ABOVE, so a
+        # ValueError reaching this span is no longer attributable to a
+        # corrupt partition) folds the shape into the same typed
+        # fail-closed refusal. Loud: ONE WARN per partition.
         _LOG.warning(
             "derived_1day_out_of_range_stamp",
             source=source or "1day",

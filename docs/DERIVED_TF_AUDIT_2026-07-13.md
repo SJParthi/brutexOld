@@ -211,6 +211,26 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   stamp neither stamp guard vetted; the intraday twin (polars-only,
   null-safe `.equals`) was verified graceful on the identical null-ts
   corruption.
+- A corrupt 1-MINUTE-BASE VALUE fail-closes too (refuter round 4 — the base
+  re-derive guard's escape set deliberately excludes `ValueError`): a
+  negative volume or an inconsistent-OHLC base row whose daily aggregate
+  breaks the `CandleBar` ordering law (`ValueError` from the validating bar
+  build), or a NaN price whose `Decimal("NaN")` comparison raises
+  `decimal.InvalidOperation` (in NO catch set), previously escaped the daily
+  arm uncaught through the sweep-preflight gate while the polars-only
+  intraday twin (no `CandleBar` build) stayed graceful. The base frame is
+  now VALUE-SCREENED before the law runs — one vectorized pass over exactly
+  the `CandleBar` refusal plane (the COMMON `price_violation_expr` +
+  negative/non-finite volume & OI probes; an unprobeable hostile column
+  dtype fail-closes via a narrow `PolarsError` clause) → `stale` + one
+  `derived_1day_corrupt_base` WARN. Disclosed narrowing (corrupt-lake-only):
+  the screen judges the WHOLE base frame, and a value-corrupt base that
+  previously laundered into a `fresh` compare now reads `stale` — the
+  prebuild's own boundaries refuse to derive from such a base anyway, so
+  remediation is heal/re-pull. Wrong-dtype base COLUMN faults outside the
+  probed value plane (e.g. an Int64 `ts_utc`) keep the documented
+  propagation envelope (the adjudicated round-4 MINOR — the pre-existing
+  intraday twin raises identically on that class).
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that
