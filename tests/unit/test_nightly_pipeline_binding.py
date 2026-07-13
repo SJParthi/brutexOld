@@ -840,6 +840,18 @@ def test_scope_spot_only_dry_run_threads_into_noop_reports(
     assert hp_wet.run_historical(prior).dry_run is False
 
 
+def test_scope_fno_only_refused_no_headless_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[round-6 two-button split] the registry-valid ``fno-only`` token has NO
+    headless binding (dashboard-only by ruling — the manual ▶ Pull F&O
+    button): the build REFUSES loudly instead of silently running the FULL
+    chain (the B H9 never-widen law). The ``pull-fno`` CLI twin is a named
+    one-line follow-up (#1779)."""
+    with pytest.raises(ValueError, match="no headless binding"):
+        _wire(monkeypatch, tmp_path, scope="fno-only")
+
+
 def test_scope_unknown_token_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown pull scope"):
         _wire(monkeypatch, tmp_path, scope="spotonly")

@@ -244,11 +244,14 @@ from brutex.dashboard.pull_jobs import (
     ProgressHook,
 )
 from brutex.dashboard.pull_scope import (
+    SCOPE_FNO_ONLY,
     SCOPE_FULL,
     SCOPE_SPOT_ONLY,
     CrossverifyTail,
     CrossverifyTailOutcome,
+    build_fno_only_note,
     build_spot_only_note,
+    fno_only_spot_report,
     normalize_pull_scope,
     run_crossverify_tail,
     spot_only_historical_report,
@@ -4077,10 +4080,15 @@ def build_app(
         Raises ``HTTPException`` exactly as the route did (400 validation /
         503 credential refusal); returns the route's JSON payload dict.
 
-        Backs BOTH the "▶ Pull EVERYTHING" hero button (no selection → the WHOLE
-        admitted universe — DEC-ONE-CLICK-PIPELINE-001) AND the "▶ Pull selected · N
-        — full pipeline" button (``?symbols=a,b,c`` → ONLY the ticked underlyings —
-        DEC-PULL-SELECTED-PIPELINE-001). Precedence ``symbols`` > ``symbol`` >
+        Backs the TWO /universe buttons (DEC-PULL-SCOPED-ALL-ONECLICK-001
+        round-6 two-button split): "▶ Pull Spot" (``scope=spot-only``,
+        whole-universe, ``auto_arm=1``) and "▶ Pull F&O" (``scope=fno-only``,
+        selection/date-aware, manual only) — while the bare ``scope=full``
+        default stays the API-reachable full chain, byte-identical, for the
+        nightly binding + old intents + external callers (the
+        DEC-ONE-CLICK-PIPELINE-001 / DEC-PULL-SELECTED-PIPELINE-001 semantics
+        live on at the ROUTE even though the UI no longer offers the combined
+        button). Precedence ``symbols`` > ``symbol`` >
         whole-universe is resolved by the SHARED
         :func:`~brutex.dashboard.pull_controller.resolve_pull_targets` (O(1) per id,
         fail-CLOSED on an empty/unknown selection → 400, so a typo never silently
@@ -4212,6 +4220,13 @@ def build_app(
         reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in targets if inst.security_id not in reference_only_ids]
         spot_only = scope_token == SCOPE_SPOT_ONLY
+        # The round-6 two-button split (DEC-PULL-SCOPED-ALL-ONECLICK-001):
+        # fno-only is the exact mirror — the SPOT phase becomes the honest
+        # no-op report, metadata + F&O historical run for REAL, the prebuild
+        # excludes the spot phase, only the futures/options movers warm, the
+        # crossverify tail never fires (Spot-exclusive by ruling) and the
+        # auto-pull scheduler never arms/fires it (auto_arm 400s below).
+        fno_only = scope_token == SCOPE_FNO_ONLY
         # ── Self-arming daily auto-pull (round-5 fold) ────────────────────
         # Validate + ARM before the launch attempt: a refused start (market
         # hours / contention) must still leave the operator armed — the
@@ -4285,19 +4300,21 @@ def build_app(
             # (_run_metadata → pull_expiries_contracts), and the sequencer's
             # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
             # set MID-pull can never crash a long run with a per-call ValueError.
-            # The SPOT-ONLY arm additionally composes the Muhurat session belt
+            # EVERY scoped arm (spot-only AND — round-6 — fno-only) additionally
+            # composes the Muhurat session belt
             # (DEC-PULL-SCOPED-ALL-ONECLICK-001 — the trading-day-keyed guard is
             # structurally blind to a holiday-listed Muhurat session; composed,
             # the guard module untouched; the belt honors the SAME
             # BRUTEX_MARKET_HOURS_GUARD kill switch — guard off ⇒ belt off,
             # hostile-review r1 ruling; wiring frozen-clock-pinned by
             # test_scope_spot_only_market_closed_is_composed_muhurat_belt —
-            # the R4 M6 mutant killer). The full-scope arm keeps the bare
-            # resolve byte-identically (the Muhurat blindness there is the named
-            # follow-up DEC-PIPELINE-MUHURAT-BELT-001).
+            # the R4 M6 mutant killer — plus its round-6 fno-only twin). The
+            # full-scope arm keeps the bare resolve byte-identically (the
+            # Muhurat blindness there is the named follow-up
+            # DEC-PIPELINE-MUHURAT-BELT-001).
             _market_closed = (
                 compose_market_closed(resolve_market_closed())
-                if spot_only
+                if scope_token != SCOPE_FULL
                 else resolve_market_closed()
             )
 
@@ -4790,6 +4807,12 @@ def build_app(
                         materialize=_materialize,
                         source="pipeline",
                         exclude_symbols=exclude_symbols,
+                        # FNO-ONLY scope (round-6 two-button split): the SPOT
+                        # prebuild phase is a REPORTED no-op — the exact
+                        # spot-exclusion mirror of the empty-cascade arm above
+                        # (a spot lake untouched by this pull is not re-derived;
+                        # the F&O cascade phases run for real).
+                        include_spot=not fno_only,
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
@@ -4874,8 +4897,18 @@ def build_app(
                     # The no-op builders echo the LAUNCH's dry_run flag
                     # (refuter round 1, r2 NIT-6 — a dry-run payload's nested
                     # sub-reports must never read ``dry_run: false``).
+                    # FNO-ONLY scope (round-6 two-button split): the exact
+                    # mirror — swap EXACTLY the spot phase closure for the
+                    # no-op report builder (it passes the UNCHANGED
+                    # spot_phase_ok gate vacuously) and honestly OMIT the
+                    # spot movers warmer; metadata + historical are bound
+                    # kwarg-for-kwarg IDENTICALLY to the full arm.
                     report = run_full_pipeline(
-                        run_spot=_run_spot,
+                        run_spot=(
+                            (lambda: fno_only_spot_report(dry_run=dry_run))
+                            if fno_only
+                            else _run_spot
+                        ),
                         run_metadata=(
                             (lambda: spot_only_metadata_report(dry_run=dry_run))
                             if spot_only
@@ -4886,7 +4919,7 @@ def build_app(
                             if spot_only
                             else _run_historical
                         ),
-                        warm_spot_movers=_warm_spot_movers,
+                        warm_spot_movers=None if fno_only else _warm_spot_movers,
                         warm_futures_movers=None if spot_only else _warm_futures_movers,
                         warm_options_movers=None if spot_only else _warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
@@ -4919,7 +4952,10 @@ def build_app(
                     fno_cascade_cache=_fno_cascade_cache,
                     latest_date_cache=_latest_movers_date_cache,
                 )
-                if report.spot is not None:
+                # The fno-only arm's spot report is a DESIGNED no-op — its
+                # vacuous "clean" verdict must never clobber the last REAL
+                # pull's verdict surface (the B H1 honesty law's spot axis).
+                if report.spot is not None and not fno_only:
                     _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
                 # Consecutive-failure health over the post-pull Greeks pass
                 # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
@@ -4968,6 +5004,13 @@ def build_app(
                                 error=str(note_exc),
                                 error_type=type(note_exc).__name__,
                             )
+                elif fno_only:
+                    # Round-6 two-button split: the fno-only note surgery ONLY
+                    # — deliberately NO crossverify tail (Spot-exclusive by
+                    # ruling; the producer verifies spot+futures files a SPOT
+                    # pull settles) and NO note_run_complete (an F&O pull must
+                    # never count as the day's spot auto-pull).
+                    result["note"] = build_fno_only_note(report.note)
                 return result
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a

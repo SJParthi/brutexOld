@@ -1,17 +1,22 @@
-"""Pull-scope registry + spot-only no-op reports + note surgery + crossverify tail.
+"""Pull-scope registry + scoped-arm no-op reports + note surgery + crossverify tail.
 
 DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779). The ONE home for the
 ``scope=`` token vocabulary the ``/pull-pipeline`` launcher and the headless
-nightly binding share, the spot-only arm's no-op F&O phase reports (they pass
-the unchanged :mod:`~brutex.dashboard.pipeline_pull` gates vacuously — the
-sequencer itself is never edited), the deterministic NOTE SURGERY that keeps a
-spot-only completion note honest (a designed F&O no-op must never read like a
-real empty vendor enumeration — the B H1 negative pin), and the fail-soft
-CROSSVERIFY TAIL seam + fence both surfaces (dashboard launcher + the
-``brutex pull-all-spot`` CLI) run strictly AFTER the pull chain settled.
+nightly binding share, the scoped arms' no-op phase reports (the spot-only
+arm's no-op F&O pair and — since the round-6 two-button split — the fno-only
+arm's no-op SPOT report; each passes the unchanged
+:mod:`~brutex.dashboard.pipeline_pull` gates vacuously — the sequencer itself
+is never edited), the deterministic NOTE SURGERY that keeps a scoped
+completion note honest (a designed no-op phase must never read like a real
+empty vendor result — the B H1 negative pin, both axes), and the fail-soft
+CROSSVERIFY TAIL seam + fence both SPOT-ONLY surfaces (dashboard launcher +
+the ``brutex pull-all-spot`` CLI) run strictly AFTER the pull chain settled —
+the tail is Spot-EXCLUSIVE by the round-6 ruling (an fno-only run never fires
+it, exactly like the full-scope arm).
 
-Leaf discipline: imports ONLY the two report dataclasses + the lake-halt error
-— never ``app``/``pipeline_pull`` (no cycle; the sequencer stays byte-untouched).
+Leaf discipline: imports ONLY the three report dataclasses + the lake-halt
+error — never ``app``/``pipeline_pull`` (no cycle; the sequencer stays
+byte-untouched).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import structlog
 
 from brutex.dashboard.composite_pull import CompositePullReport
 from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.pull_controller import BulkSpotReport
 from brutex.data.errors import LakeWriteHalt
 
 _LOG = structlog.get_logger("brutex.dashboard.pull_scope")
@@ -32,16 +38,20 @@ __all__ = [
     "FNO_SKIPPED_CLAUSE",
     "GREEKS_NOT_RUN_NOTE",
     "KNOWN_PULL_SCOPES",
+    "SCOPE_FNO_ONLY",
     "SCOPE_FULL",
     "SCOPE_SPOT_ONLY",
     "SPOT_ONLY_HISTORICAL_NOTE",
     "SPOT_ONLY_METADATA_NOTE",
     "SPOT_ONLY_SESSION_RESUME_HINT",
+    "SPOT_SKIPPED_CLAUSE",
     "TAIL_ALERT_STATUSES",
     "CrossverifyTail",
     "CrossverifyTailOutcome",
+    "build_fno_only_note",
     "build_spot_only_note",
     "crossverify_clause",
+    "fno_only_spot_report",
     "normalize_pull_scope",
     "rewrite_market_hours_note",
     "run_crossverify_tail",
@@ -64,9 +74,25 @@ SCOPE_FULL: Final[str] = "full"
 #: pull — refuter round 3 F-D2, route-pinned).
 SCOPE_SPOT_ONLY: Final[str] = "spot-only"
 
+#: The F&O-only pull (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 two-button
+#: split — the coordinator-ruled EXACT MIRROR of :data:`SCOPE_SPOT_ONLY`):
+#: the SPOT phase is structurally replaced by the honest no-op
+#: :func:`fno_only_spot_report` (it passes the unchanged ``spot_phase_ok``
+#: gate vacuously), while METADATA + F&O HISTORICAL run for REAL over the
+#: same whole-universe selection the full pipeline uses; the prebuild runs
+#: the F&O cascade only (``include_spot=False`` — the spot-exclusion mirror
+#: of the spot-only empty-cascade arm) and only the futures + options movers
+#: warmers are injected. MANUAL only: the crossverify tail never fires
+#: (Spot-exclusive by ruling) and the auto-pull scheduler never arms/fires
+#: this scope (``auto_arm`` stays a 400 on it). The route may combine the
+#: token with ``symbols=``/``from_date=``/``to_date=`` — a SUPPORTED
+#: NARROWING exactly like spot-only (the token only swaps the spot phase, so
+#: the combination can never widen a vendor pull).
+SCOPE_FNO_ONLY: Final[str] = "fno-only"
+
 #: The whole scope vocabulary. Phase 2 adds e.g. ``"spot+options"`` HERE — one
 #: token, no launcher rewrite (the launcher inherits every rail either way).
-KNOWN_PULL_SCOPES: Final[frozenset[str]] = frozenset({SCOPE_FULL, SCOPE_SPOT_ONLY})
+KNOWN_PULL_SCOPES: Final[frozenset[str]] = frozenset({SCOPE_FULL, SCOPE_SPOT_ONLY, SCOPE_FNO_ONLY})
 
 
 def normalize_pull_scope(token: str | None) -> str:
@@ -146,6 +172,27 @@ def spot_only_historical_report(dry_run: bool = False) -> CompositePullReport:
     )
 
 
+def fno_only_spot_report(dry_run: bool = False) -> BulkSpotReport:
+    """The all-zeros SPOT no-op the fno-only arm binds as ``run_spot``.
+
+    The exact mirror of :func:`spot_only_metadata_report` (round-6 two-button
+    split): every failure signal at its zero default, so the REAL
+    :func:`~brutex.dashboard.pipeline_pull.spot_phase_ok` gate passes
+    VACUOUSLY (``auth_aborted=False`` · ``quota_exhausted=False`` ·
+    ``still_failed_windows=0`` · ``mass_empty_cause=None``) and
+    ``_spot_quarantine_names`` reads the empty set (``symbols=[]`` — the
+    ``PriorStepsVerdict.spot_clean`` arm is vacuously True too). The machine
+    tell-apart from a real empty pull: EMPTY ``start_date``/``end_date`` +
+    zero symbols (a real pull always stamps the resolved range and one row
+    per target); the classifier folds the all-zeros tallies to the ``clean``
+    verdict kind, whose rendered ``"spot clean (0 pair(s))"`` clause is then
+    surgically replaced by :func:`build_fno_only_note` — the B H1 honesty law
+    on the spot axis. *dry_run* mirrors the LAUNCH's flag (the r2 NIT-6 law);
+    the report is a designed no-op either way.
+    """
+    return BulkSpotReport(dry_run=dry_run, start_date="", end_date="", symbols=[])
+
+
 # ── note surgery (B negative pins + C wording; SURGERY, not a suffix-append) ──
 
 #: The explicit Greeks honesty constant (C 5): the sequencer note renders
@@ -155,6 +202,19 @@ GREEKS_NOT_RUN_NOTE: Final[str] = "Greeks: not run — no options in this pull"
 
 #: What the no-op F&O clause becomes: an honest by-design statement.
 FNO_SKIPPED_CLAUSE: Final[str] = ", F&O skipped by design (spot-only scope)"
+
+#: The fno-only mirror (round-6 two-button split): what the no-op SPOT clause
+#: becomes — the coordinator-ruled exact wording.
+SPOT_SKIPPED_CLAUSE: Final[str] = "spot skipped by design (F&O-only scope)"
+
+#: The EXACT spot clause ``pipeline_pull._complete_note`` renders for the
+#: all-zeros :func:`fno_only_spot_report` (verdict kind ``clean``, zero
+#: completed pairs). Surgically REPLACED — a "spot clean (0 pair(s))" wording
+#: on an fno-only pull would read like a real empty spot pull (the B H1 law's
+#: spot axis); the same exact-string-coupling posture as
+#: :data:`_NOOP_FNO_CLAUSE` (the e2e negative pin + the surgery-miss WARN
+#: guard a wording refactor).
+_NOOP_SPOT_CLAUSE: Final[str] = "spot clean (0 pair(s))"
 
 #: The EXACT wording the all-zeros no-op reports produce inside
 #: ``pipeline_pull._complete_note`` (pipeline_pull.py — ``metadata
@@ -186,6 +246,9 @@ _FULL_PREFIX: Final[str] = "pipeline complete — "
 
 #: The spot-only replacement prefix.
 _SPOT_ONLY_PREFIX: Final[str] = "spot-only pipeline complete — "
+
+#: The fno-only replacement prefix (round-6 two-button split).
+_FNO_ONLY_PREFIX: Final[str] = "F&O-only pipeline complete — "
 
 # ── market-hours deferral honesty (refuter round 1, r2 MINOR-1 + r1 NIT-A) ───
 #
@@ -221,6 +284,14 @@ _MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE: Final[str] = (
     "F&O not applicable — spot-only scope)"
 )
 
+#: The fno-only replacement for :data:`_MARKET_HOURS_PHASES_CLAUSE` (round-6
+#: two-button split — the metadata/historical phases ARE real there while
+#: spot is the designed no-op).
+_MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE: Final[str] = (
+    "(metadata / historical deferred to keep the shared Groww account free for "
+    "the live feed; spot not applicable — F&O-only scope)"
+)
+
 #: The self-contradictory-during-Muhurat resume advice.
 _MARKET_HOURS_RESUME_CLAUSE: Final[str] = "resume on the next out-of-hours run"
 
@@ -236,20 +307,24 @@ SPOT_ONLY_SESSION_RESUME_HINT: Final[str] = (
 )
 
 
-def rewrite_market_hours_note(note: str) -> str:
-    """Spot-only surgery on the sequencer's market-hours deferral note.
+def rewrite_market_hours_note(
+    note: str, *, phases_replacement: str = _MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE
+) -> str:
+    """Scoped-arm surgery on the sequencer's market-hours deferral note.
 
-    Refuter round 1 (r2 MINOR-1 + r1 NIT-A): the composed spot-only belt also
+    Refuter round 1 (r2 MINOR-1 + r1 NIT-A): the composed scoped-arm belt also
     defers during a Muhurat session, where the sequencer's single deferral
     note makes a FALSE clock claim and self-contradictory resume advice.
     Replaces the three exact clauses with wording true for BOTH arms and
-    spot-only-aware for the phase list; a drifted note (anchors absent)
-    passes through UNCHANGED — the clause is diagnostic, never load-bearing,
-    so no WARN (the ``_STOP_FNO_CLAUSE`` posture). Pure; idempotent on an
+    scope-aware for the phase list (*phases_replacement* — the spot-only
+    wording by default, the CALLER's default-arm back-compat; the round-6
+    fno-only builder passes its own); a drifted note (anchors absent) passes
+    through UNCHANGED — the clause is diagnostic, never load-bearing, so no
+    WARN (the ``_STOP_FNO_CLAUSE`` posture). Pure; idempotent on an
     already-rewritten note (the replacement strings contain no anchor).
     """
     note = note.replace(_MARKET_HOURS_WINDOW_CLAUSE, _MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE, 1)
-    note = note.replace(_MARKET_HOURS_PHASES_CLAUSE, _MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE, 1)
+    note = note.replace(_MARKET_HOURS_PHASES_CLAUSE, phases_replacement, 1)
     return note.replace(_MARKET_HOURS_RESUME_CLAUSE, _MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE, 1)
 
 
@@ -392,3 +467,49 @@ def build_spot_only_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
             base_note=base_note[:200],
         )
     return f"{note}, {GREEKS_NOT_RUN_NOTE}{crossverify_clause(tail)}"
+
+
+def build_fno_only_note(base_note: str) -> str:
+    """Deterministic SURGERY on the sequencer's note for an fno-only run.
+
+    The exact mirror of :func:`build_spot_only_note` on the spot axis
+    (round-6 two-button split), MINUS its unconditional appends — an fno-only
+    run pulls options for real, so the Greeks pass genuinely runs (no
+    "Greeks: not run" claim), and the crossverify tail is Spot-EXCLUSIVE by
+    ruling (never fired here, exactly like the full-scope arm — no clause).
+
+    1. Rewrite a market-hours deferral note's clauses through
+       :func:`rewrite_market_hours_note` with the fno-only phases wording
+       (the composed Muhurat belt is inherited by every non-full scope, so
+       the evening-Muhurat FALSE-clock-claim class applies here too).
+    2. Replace the exact :data:`_NOOP_SPOT_CLAUSE` (what the all-zeros
+       :func:`fno_only_spot_report` renders through ``_complete_note``) with
+       :data:`SPOT_SKIPPED_CLAUSE` — a by-design spot no-op must never read
+       like a real empty spot pull (the B H1 law's spot axis).
+    3. Replace the first :data:`_FULL_PREFIX` with :data:`_FNO_ONLY_PREFIX`
+       (a ledger-failure prefix stays LEADING — the B R3/H5 posture).
+
+    A STOPPED/deferred note (neither anchor — e.g. a metadata stop, whose
+    "historical NOT started" trailer is TRUE here) gets no surgery and no
+    WARN; a note carrying exactly ONE anchor is a ``_complete_note`` wording
+    DRIFT — ONE ``pull_scope.note_surgery_miss`` WARN (the e2e negative pin
+    fails loudly on a full drift, forcing a conscious re-pin). Pure beyond
+    the WARN.
+    """
+    note = rewrite_market_hours_note(
+        base_note, phases_replacement=_MARKET_HOURS_PHASES_FNO_ONLY_CLAUSE
+    )
+    prefix_present = _FULL_PREFIX in note
+    clause_present = _NOOP_SPOT_CLAUSE in note
+    if clause_present:
+        note = note.replace(_NOOP_SPOT_CLAUSE, SPOT_SKIPPED_CLAUSE, 1)
+    if prefix_present:
+        note = note.replace(_FULL_PREFIX, _FNO_ONLY_PREFIX, 1)
+    if prefix_present != clause_present:
+        _LOG.warning(
+            "pull_scope.note_surgery_miss",
+            prefix_present=prefix_present,
+            spot_clause_present=clause_present,
+            base_note=base_note[:200],
+        )
+    return note

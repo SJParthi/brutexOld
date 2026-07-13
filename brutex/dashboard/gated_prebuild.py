@@ -41,7 +41,7 @@ for the futures/options discovery + materialise — NOT an O(1)-total claim
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -211,6 +211,15 @@ PREBUILD_PHASE_ORDER: tuple[PrebuildKind, ...] = (
     PrebuildKind.SPOT,
     PrebuildKind.FUTURES,
     PrebuildKind.OPTIONS,
+)
+
+#: The reported-no-op SPOT phase note (DEC-PULL-SCOPED-ALL-ONECLICK-001
+#: round-6 two-button split): rendered when NO ``materialize_spot`` is
+#: injected — the fno-only pipeline's spot-exclusion arm, the structural
+#: mirror of the options not-injected no-op. ONE constant shared with the
+#: parallel path in :mod:`brutex.dashboard.pipeline_prebuild` (§11 COMMON).
+SPOT_PREBUILD_SKIPPED_NOTE: Final[str] = (
+    "spot materialisation not injected — skipped by design (F&O-only scope)"
 )
 
 
@@ -424,6 +433,26 @@ def _run_contract_phase(
     )
 
 
+def _run_spot_noop_phase() -> PhasePrebuildReport:
+    """SPOT phase when NO ``materialize_spot`` is injected: a reported no-op.
+
+    The fno-only spot-exclusion arm (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6
+    two-button split), mirroring :func:`_run_options_noop_phase`'s honesty
+    posture: nothing is attempted BY DESIGN (unlike the options no-op, whose
+    underlyings were genuinely in scope but un-materialisable), zero work,
+    and the by-design note keeps the skip visible — never silent, never
+    mistakable for a real empty spot prebuild.
+    """
+    return PhasePrebuildReport(
+        phase=PrebuildKind.SPOT.value,
+        attempted=(),
+        succeeded=(),
+        failed=(),
+        total_bars=0,
+        note=SPOT_PREBUILD_SKIPPED_NOTE,
+    )
+
+
 def _run_options_noop_phase(underlyings: Sequence[Instrument]) -> PhasePrebuildReport:
     """OPTIONS phase when the options callables are NOT injected: a reported no-op.
 
@@ -445,7 +474,7 @@ def _run_options_noop_phase(underlyings: Sequence[Instrument]) -> PhasePrebuildR
 def run_gated_prebuild(
     *,
     underlyings: Sequence[Instrument],
-    materialize_spot: Callable[[Instrument], MaterializeResult],
+    materialize_spot: Callable[[Instrument], MaterializeResult] | None,
     futures_contracts_for: Callable[[Instrument], Sequence[str]],
     materialize_future: Callable[[str], MaterializeResult],
     options_contracts_for: Callable[[Instrument], Sequence[str]] | None = None,
@@ -489,7 +518,10 @@ def run_gated_prebuild(
         The resolved underlying instruments to pre-build.
     materialize_spot
         ``instrument -> MaterializeResult`` — pre-builds ONE underlying's SPOT
-        timeframes; raises on a per-symbol data error.
+        timeframes; raises on a per-symbol data error. ``None`` makes the
+        SPOT phase an explicit, REPORTED no-op (the fno-only spot-exclusion
+        arm, DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 — the options-no-op
+        posture: never a silent skip).
     futures_contracts_for
         ``instrument -> Sequence[contract_symbol]`` — the underlying's futures
         contract symbols discovered in the F&O candle lake (bounded).
@@ -531,8 +563,19 @@ def run_gated_prebuild(
         def _options_phase() -> PhasePrebuildReport:
             return _run_options_noop_phase(underlyings)
 
+    if materialize_spot is not None:
+        # Bind the narrowed callable so the closure below is statically non-None.
+        materialize_spt = materialize_spot
+
+        def _spot_phase() -> PhasePrebuildReport:
+            return _run_spot_phase(underlyings, materialize_spt)
+    else:
+
+        def _spot_phase() -> PhasePrebuildReport:
+            return _run_spot_noop_phase()
+
     runners: tuple[tuple[PrebuildKind, Callable[[], PhasePrebuildReport]], ...] = (
-        (PrebuildKind.SPOT, lambda: _run_spot_phase(underlyings, materialize_spot)),
+        (PrebuildKind.SPOT, _spot_phase),
         (
             PrebuildKind.FUTURES,
             lambda: _run_contract_phase(
@@ -569,6 +612,7 @@ def run_gated_prebuild(
 
 __all__ = [
     "PREBUILD_PHASE_ORDER",
+    "SPOT_PREBUILD_SKIPPED_NOTE",
     "GatedPrebuildReport",
     "PhasePrebuildReport",
     "discover_futures_contracts",

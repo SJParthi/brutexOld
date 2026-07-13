@@ -156,6 +156,71 @@ def test_prebuild_empty_instruments_is_clean_zero() -> None:
     )
 
 
+# ── the fno-only spot-exclusion arm (round-6 two-button split) ──────────────
+
+
+def test_prebuild_include_spot_false_runs_fno_phases_only() -> None:
+    """[round-6] ``include_spot=False``: the SPOT phase is a REPORTED no-op
+    (zero spot materialise calls, the by-design note) while the F&O contract
+    phases run for REAL over the same instruments-driven discovery — the
+    spot-exclusion mirror of the spot-only empty-cascade arm."""
+    mat = _FakeMaterializer()
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            include_spot=False,
+        )
+    # 1 future + 2 options, each 4 bars — NO spot target ever materialised.
+    assert outcome == PrebuildOutcome(
+        symbols_built=3, total_bars=12, failed=(), failed_count=0, ok=True
+    )
+    assert [t.kind for t in mat.targets] == [
+        PrebuildKind.FUTURES,
+        PrebuildKind.OPTIONS,
+        PrebuildKind.OPTIONS,
+    ]
+    # The started log reports the honest zero spot scope; the by-design note
+    # is the gated spine's REPORTED no-op (never a silent skip).
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["spot_symbols"] == 0
+    assert started[0]["futures_contracts"] == 1
+    phase_done = [e for e in logs if e["event"] == "pipeline.prebuild.phase_done"]
+    assert phase_done[0]["phase"] == "spot"
+    assert phase_done[0]["attempted"] == 0  # the note shape is pinned in test_gated_prebuild
+
+
+def test_prebuild_include_spot_default_true_is_byte_identical() -> None:
+    """The default arm is byte-identical to the pre-round-6 prebuild."""
+    mat_default = _FakeMaterializer()
+    default_outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")], cascade=_cascade(), materialize=mat_default
+    )
+    mat_explicit = _FakeMaterializer()
+    explicit_outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=mat_explicit,
+        include_spot=True,
+    )
+    assert default_outcome == explicit_outcome
+    assert [t.symbol for t in mat_default.targets] == [t.symbol for t in mat_explicit.targets]
+
+
+def test_guarded_prebuild_forwards_include_spot_sequential() -> None:
+    """The guard forwards ``include_spot`` to the sequential path."""
+    mat = _FakeMaterializer()
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=mat,
+        include_spot=False,
+    )
+    assert outcome.symbols_built == 3
+    assert all(t.kind is not PrebuildKind.SPOT for t in mat.targets)
+
+
 # ── the clean-set exclusion (DEC-PREBUILD-CLEANSET-001) ─────────────────────
 
 

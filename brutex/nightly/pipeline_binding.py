@@ -155,8 +155,10 @@ def build_headless_pipeline(
         instruments once, then re-run").
     ValueError
         A junk ``BRUTEX_PIPELINE_STRICT_GATE`` value (fail-loud, resolved ONCE
-        at build — the pre-chain refusal), junk ISO dates, or an unknown
-        *scope* token.
+        at build — the pre-chain refusal), junk ISO dates, an unknown *scope*
+        token, or the dashboard-only ``"fno-only"`` token (round-6 two-button
+        split: no headless binding shipped — refused loudly, never a silent
+        full-chain widening).
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
     from brutex.calendars.auto_pull_gate import compose_market_closed
@@ -175,6 +177,7 @@ def build_headless_pipeline(
         resolve_fetch_intervals,
     )
     from brutex.dashboard.pull_scope import (
+        SCOPE_FNO_ONLY,
         SCOPE_SPOT_ONLY,
         normalize_pull_scope,
         spot_only_historical_report,
@@ -187,7 +190,18 @@ def build_headless_pipeline(
     from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 
     strict_gate = strict_gate_enabled(env)  # fail-loud, once at build
-    spot_only = normalize_pull_scope(scope) == SCOPE_SPOT_ONLY  # fail-loud, once
+    scope_token = normalize_pull_scope(scope)  # fail-loud, once
+    if scope_token == SCOPE_FNO_ONLY:
+        # Round-6 two-button split: fno-only is DASHBOARD-ONLY by ruling (the
+        # manual ▶ Pull F&O button; no CLI/nightly twin shipped) — refuse
+        # loudly HERE so a caller passing the registry-valid token can never
+        # silently run the FULL chain (the B H9 never-widen law). The
+        # ``pull-fno`` CLI twin is a one-line follow-up if wanted (#1779).
+        raise ValueError(
+            "scope='fno-only' has no headless binding (dashboard-only — use the "
+            "▶ Pull F&O button); the headless surface accepts 'full' or 'spot-only'"
+        )
+    spot_only = scope_token == SCOPE_SPOT_ONLY
 
     db_path = lake_root / DEFAULT_DB_NAME
     if not db_path.exists():

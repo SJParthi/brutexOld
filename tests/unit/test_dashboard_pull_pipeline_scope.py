@@ -530,6 +530,294 @@ def test_scope_spot_only_dry_run_threads_into_noop_reports(
     assert hist.historical is None
 
 
+# ── the fno-only mirror (round-6 two-button split) ───────────────────────
+
+
+def test_scope_fno_only_swaps_exactly_the_spot_binding(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[spy] fno-only: the SPOT spine is NEVER called while the two F&O
+    spines run for REAL (bound kwarg-for-kwarg identically to the full arm) —
+    the exact mirror of the spot-only swap."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        resp = client.post(_ROUTE, params={"scope": "fno-only", "dry_run": "true"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is True
+        assert body["scope"] == "fno-only"
+        assert "auto_pull" not in body  # the additive block stays spot-only-scoped
+        _wait_for_job(client)
+    assert spines.spot_kwargs == []  # the spot spine is structurally unreachable
+    assert spines.metadata_calls == 1
+    assert spines.historical_calls == 1
+
+
+def test_scope_fno_only_noop_spot_note_surgery_e2e(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[e2e negative pin — B H1, the spot axis] the REAL sequencer's note over
+    the no-op spot report is surgically rewritten: the finish detail reads
+    the by-design clause, never the fake-empty "spot clean (0 pair(s))"; no
+    Greeks-not-run claim (options ARE pulled here) and no cross-verify clause
+    (the tail is Spot-exclusive by ruling)."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        assert (
+            client.post(_ROUTE, params={"scope": "fno-only", "dry_run": "true"}).status_code == 200
+        )
+        snap = _wait_for_job(client)
+    detail = snap["detail"]
+    assert "F&O-only pipeline complete — " in detail
+    assert "spot skipped by design (F&O-only scope)" in detail
+    assert "spot clean (0 pair(s))" not in detail  # the fake-empty render, dead
+    assert "Greeks: not run" not in detail
+    assert "cross-verify" not in detail
+
+
+def test_scope_fno_only_tail_never_fires_on_a_real_run(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[negative pin — the coordinator ruling] the crossverify tail is
+    Spot-EXCLUSIVE: a REAL (non-dry) fno-only run never invokes it, while the
+    SAME client's real spot-only run does (the teeth — the spy provably
+    fires on the spot arm)."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert client.post(_ROUTE, params={"scope": "fno-only"}).status_code == 200
+        _wait_for_job(client)
+        assert calls == []  # [spy] never invoked on fno-only
+        assert client.post(_ROUTE, params={"scope": "spot-only"}).status_code == 200
+        snap = _wait_for_job(client)
+    assert calls == ["tail"]  # the SAME spy fires on the spot-only arm
+    assert "cross-verify: producer started" in snap["detail"]
+    assert spines.metadata_calls == 1  # fno-only ran the real F&O spines once
+    assert spines.historical_calls == 1
+
+
+def test_scope_fno_only_auto_arm_400_never_arms(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[the coordinator ruling] the scheduler NEVER arms/fires fno-only:
+    ``auto_arm=1`` on the fno-only scope is a clean 400 and the wired
+    scheduler stays disarmed with zero launches."""
+    from brutex.calendars.auto_pull_gate import AutoGateVerdict as _Verdict
+    from brutex.dashboard.auto_pull_scheduler import AutoPullScheduler as _Sched
+    from brutex.dashboard.auto_pull_scheduler import AutoPullStateStore as _SchedStore
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    lake = tmp_path / "lake"
+    lake.mkdir(exist_ok=True)
+    scheduler = _Sched(
+        _SchedStore(lake),
+        gate=lambda _instant: _Verdict(allowed=True, reason="ok", detail="ok"),
+        tick_seconds=3600.0,
+    )
+    with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+        resp = client.post(_ROUTE, params={"scope": "fno-only", "auto_arm": "1"})
+        assert resp.status_code == 400
+        assert "auto_arm requires scope=spot-only" in resp.json()["detail"]
+    assert scheduler.status()["armed"] is False
+    assert spines.metadata_calls == 0  # the refused click launched nothing
+
+
+def test_scope_fno_only_prebuild_spot_excluded_real_cascade(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[spy] the fno-only prebuild is the spot-exclusion mirror: the guarded
+    runner receives ``include_spot=False`` with the REAL F&O cascade walk
+    still enumerated; the full arm AND the spot-only arm keep
+    ``include_spot=True``."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    fno_walks: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "list_fno_candle_datasets",
+        lambda _lake: fno_walks.append("walk") or [],
+    )
+    prebuild_kwargs: list[dict[str, Any]] = []
+
+    def fake_prebuild(**kwargs: Any) -> PrebuildOutcome:
+        kwargs["cascade_or_error"]()  # force the cascade factory
+        prebuild_kwargs.append(dict(kwargs))
+        return PrebuildOutcome(symbols_built=1, total_bars=5, failed=(), failed_count=0, ok=True)
+
+    monkeypatch.setattr(app_module, "run_pipeline_prebuild_guarded", fake_prebuild)
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert (
+            client.post(_ROUTE, params={"scope": "fno-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+        assert fno_walks == ["walk"]  # the REAL F&O cascade IS enumerated
+        assert prebuild_kwargs[-1]["include_spot"] is False
+        assert client.post(_ROUTE, params={"dry_run": "true"}).status_code == 200
+        _wait_for_job(client)
+        assert prebuild_kwargs[-1]["include_spot"] is True
+        assert (
+            client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+    assert prebuild_kwargs[-1]["include_spot"] is True
+    assert fno_walks == ["walk", "walk"]  # spot-only never walked (the empty cascade)
+
+
+def test_scope_fno_only_segment_movers_futures_options_only(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only the FUTURES + OPTIONS movers warmers are injected — the spot
+    segment is honestly ABSENT (never a fabricated 0-count segment); the
+    exact mirror of the spot-only warm law."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setattr(
+        app_module,
+        "run_pipeline_prebuild_guarded",
+        lambda **kwargs: PrebuildOutcome(
+            symbols_built=1, total_bars=5, failed=(), failed_count=0, ok=True
+        ),
+    )
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        with capture_logs() as logs:
+            assert (
+                client.post(_ROUTE, params={"scope": "fno-only", "dry_run": "true"}).status_code
+                == 200
+            )
+            _wait_for_job(client)
+        started = [e for e in logs if e["event"] == "pipeline.movers_warm.started"]
+        assert len(started) == 1
+        assert started[0]["segments"] == ["futures", "options"]
+        done = [e for e in logs if e["event"] == "pipeline.movers_warm.done"]
+        assert len(done) == 1
+        assert set(done[0]["warmed"]) == {"futures", "options"}
+
+
+def test_scope_fno_only_market_closed_is_composed_muhurat_belt(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[the round-6 fno-only twin of the R4 M6 mutant killer] the fno-only
+    arm's ``market_closed`` predicate (captured from the REAL metadata spine
+    kwargs — the spot spine never runs here) is the composed Muhurat belt:
+    True inside the frozen 2025-10-21 afternoon session while the full arm's
+    bare guard reads False (its structural Muhurat blindness)."""
+    _pin_creds_present(monkeypatch)
+    metadata_kwargs: list[dict[str, Any]] = []
+
+    def spy_metadata(*args: Any, **kwargs: Any) -> MetadataPullReport:
+        metadata_kwargs.append(dict(kwargs))
+        return _fake_metadata(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", spy_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+    launch = datetime(2025, 10, 21, 10, 0)  # holiday; before the 13:15 margin
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: launch)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: launch)
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        # NOTE: the dry-run metadata binding threads market_closed=None, so a
+        # REAL run captures the launcher-composed predicate.
+        assert client.post(_ROUTE, params={"scope": "fno-only"}).status_code == 200
+        _wait_for_job(client)
+        assert client.post(_ROUTE).status_code == 200
+        _wait_for_job(client)
+    assert len(metadata_kwargs) == 2
+    composed = metadata_kwargs[0]["market_closed"]
+    bare = metadata_kwargs[1]["market_closed"]
+    frozen = datetime(2025, 10, 21, 14, 0)  # inside the margined Muhurat session
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    assert bare() is False  # the bare guard is provably BLIND
+    assert composed() is True  # the fno-only belt fires
+
+
+def test_scope_fno_only_market_hours_start_gate_defers(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The market-hours START gate is inherited by the fno-only arm too."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+    monkeypatch.setattr(
+        "brutex.calendars.market_hours.now_ist",
+        lambda: datetime(2024, 1, 2, 10, 0),  # Tue, trading day, in-window
+    )
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        resp = client.post(_ROUTE, params={"scope": "fno-only"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is False
+    assert spines.metadata_calls == 0  # no vendor phase ever ran
+
+
+def test_scope_fno_only_dry_run_threads_into_noop_spot_report(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[spy — the r2 NIT-6 law on the spot axis] the launcher threads its
+    dry_run flag into the bound no-op SPOT builder."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    captured: list[dict[str, Any]] = []
+    real_run = app_module.run_full_pipeline
+
+    def spy_run(**kwargs: Any) -> Any:
+        captured.append(dict(kwargs))
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(app_module, "run_full_pipeline", spy_run)
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        assert (
+            client.post(_ROUTE, params={"scope": "fno-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+    assert len(captured) == 1
+    spot = captured[0]["run_spot"]()
+    assert spot.dry_run is True  # echoes the launch flag, never a constant False
+    assert spot.symbols == []  # still the designed no-op
+    assert captured[0]["warm_spot_movers"] is None  # the spot warm is honestly absent
+
+
+def test_scope_fno_only_intent_resumes_fno_only(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[the resume-pin extension] a persisted ``scope="fno-only"`` intent
+    resumes FNO-ONLY through the production boot-resume seam: the spot spine
+    stays at ZERO calls while the F&O spines run — never a silently-widened
+    (or spot-widened) pull."""
+    from brutex.dashboard.pull_intent import PullIntent, PullIntentStore
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    lake = tmp_path / "lake"
+    lake.mkdir(exist_ok=True)
+    intent_store = PullIntentStore(lake)
+    intent_store.write(
+        PullIntent(symbols=None, symbol=None, from_date=None, to_date=None, scope="fno-only")
+    )
+    with _make_client(store, monkeypatch, tmp_path, pull_intent_store=intent_store) as client:
+        client.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
+        snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    assert spines.spot_kwargs == []  # the resumed run never widened onto spot
+    assert spines.metadata_calls == 1
+    assert spines.historical_calls == 1
+    assert "F&O-only pipeline complete" in snap["detail"]
+
+
 # ── inherited launcher rails ─────────────────────────────────────────────
 
 
@@ -1134,3 +1422,74 @@ class TestAutoArmRoute:
         with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=disarmed_scheduler):
             names = [t.name for t in threading.enumerate()]
             assert "brutex-auto-pull-scheduler" not in names
+
+    @pytest.mark.parametrize(
+        "corruption",
+        ["invalid_utf8", "nesting_bomb", "oversized"],
+    )
+    def test_boot_lifespan_survives_every_state_corruption_shape(
+        self,
+        store: InstrumentStore,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        corruption: str,
+    ) -> None:
+        """[F/B — refuter round 6 N-1, the REAL build_app lifespan] a
+        bit-rotted / nesting-bomb / oversized ``.pull_all_spot_auto.json``
+        boots CLEAN and DISARMED with ONE ``auto_pull.state_corrupt`` WARN.
+        Executed pre-fix at the round-5 head: the invalid-UTF-8 byte CRASHED
+        BOOT (uvicorn "Application startup failed", ``UnicodeDecodeError``)
+        and every restart re-crashed until the sidecar was hand-deleted;
+        the nesting bomb raised ``RecursionError`` the same way."""
+        from brutex.dashboard.auto_pull_scheduler import (
+            AUTO_PULL_STATE_FILENAME,
+            MAX_STATE_BYTES,
+        )
+
+        _pin_creds_present(monkeypatch)
+        lake = tmp_path / "lake"
+        lake.mkdir(exist_ok=True)
+        state_path = lake / AUTO_PULL_STATE_FILENAME
+        if corruption == "invalid_utf8":
+            state_path.write_bytes(b'\xff{"schema": 1, "armed": true}')
+        elif corruption == "nesting_bomb":
+            depth = 200_000
+            state_path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        else:
+            body = b'{"schema": 1, "armed": true}'
+            state_path.write_bytes(body + b" " * (MAX_STATE_BYTES + 1 - len(body)))
+        scheduler = _wired_scheduler(tmp_path)
+        with (
+            capture_logs() as logs,
+            _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client,
+        ):
+            # Boot survived; the corrupt file reads DISARMED (zero threads).
+            names = [t.name for t in threading.enumerate()]
+            assert "brutex-auto-pull-scheduler" not in names
+            snap = client.get("/api/v1/universe/pull-progress").json()
+            assert snap["auto_pull"]["armed"] is False
+        corrupt = [e for e in logs if e["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+
+    def test_boot_lifespan_belt_survives_a_raising_scheduler(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """[refuter round 6 N-1, the defense-in-depth belt] even a scheduler
+        whose ``start_if_armed`` RAISES cannot kill dashboard boot — the
+        lifespan guard logs ``auto_pull.boot_start_failed`` and serves (the
+        run_auto_resume never-crash-boot posture)."""
+        _pin_creds_present(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+
+        def _boom() -> bool:
+            raise RuntimeError("scheduler exploded at boot")
+
+        monkeypatch.setattr(scheduler, "start_if_armed", _boom)
+        with (
+            capture_logs() as logs,
+            _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client,
+        ):
+            assert client.get("/api/v1/universe/pull-progress").status_code == 200
+        failed = [e for e in logs if e["event"] == "auto_pull.boot_start_failed"]
+        assert len(failed) == 1
+        assert failed[0]["error_type"] == "RuntimeError"

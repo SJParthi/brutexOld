@@ -2,7 +2,8 @@
 
 DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779, round-5 fold — the
 operator hard requirement: ONE click ⇒ fully automatic daily; zero manual
-steps after). The dashboard's "▶ Pull EVERYTHING — spot only" button ARMS this
+steps after). The dashboard's "▶ Pull Spot" button (the round-6 two-button
+split label; formerly "▶ Pull EVERYTHING — spot only") ARMS this
 scheduler on its first click (``auto_arm=1`` on the launcher route); from then
 on a daemon-thread ticker fires the SAME spot-only launcher path the button
 uses — all launcher rails inherited (market-hours guard, single-flight,
@@ -560,7 +561,7 @@ class AutoPullScheduler:
     def _next_eligible(self, state: AutoPullState, instant: datetime) -> str:
         """The honest next-fire description — never a fabricated instant."""
         if not state.armed:
-            return "disarmed — the ▶ Pull EVERYTHING (spot only) button arms the daily auto-pull"
+            return "disarmed — the ▶ Pull Spot button arms the daily auto-pull"
         try:
             settle = resolve_settle_time(self._env)
         except ValueError as exc:

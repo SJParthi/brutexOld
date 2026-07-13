@@ -264,8 +264,9 @@
   .pull-div { width:1px; align-self:stretch; min-height:var(--ctl-h);
     background:var(--border-strong); margin:0 3px; }
   /* The from→to .daterange group is RE-ADDED + properly wired
-     (DEC-UNIVERSE-PULL-DATERANGE-001) — it scopes the SPOT history phase of the
-     ▶ Pull · full pipeline button (F&O keeps its per-contract default lookback).
+     (DEC-UNIVERSE-PULL-DATERANGE-001) — since the round-6 two-button split it
+     scopes the ▶ Pull F&O button's expiry selection (F&O keeps its
+     per-contract default lookback; ▶ Pull Spot ignores it by promise).
      The static .ctl-field "granularity · 1-minute" chip that shared this shape
      is REMOVED (DEC-UNIVERSE-UI-POLISH-002): since DEC-1MINUTE-ONLY-DERIVE-1DAY-001
      1-minute is the ONLY fetched granularity, so the chip was dead UI noise —
@@ -496,11 +497,16 @@
 
   <div class="band" id="tabs"></div>
 
-  <!-- ── Zone 0: the ONE selection-aware full-pipeline hero (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+  <!-- ── Zone 0: the TWO-BUTTON pull hero (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6
+       two-button split, superseding the one-button law of DEC-UNIVERSE-PULL-CONSOLIDATE-001
+       at the UI level ONLY — the /pull-pipeline route keeps the full-chain API default
+       for the nightly + old intents + external callers, byte-identically).
        The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull historical) +
-       the bulk ①②③④ matrix + the separate "Pull selected" button are GONE: the pipeline ALWAYS
-       runs the fixed gated order spot → expiries+contracts → historical → pre-build, advancing only
-       when the prior stage fully succeeds, so one button does the whole thing. -->
+       the bulk ①②③④ matrix + the separate "Pull selected" button REMAIN gone, and the combined
+       combined full-pipeline button is now REMOVED too: the operator surface is exactly
+       ▶ Pull Spot (scope=spot-only, whole-universe, auto-arming) and ▶ Pull F&O
+       (scope=fno-only, selection/date-aware, manual only). -->
+
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
@@ -511,33 +517,37 @@
            contract resolution" — get_contracts returns "all listed strikes, not
            relative-to-spot" (brutex/adapters/groww/contracts.py). -->
       Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built lake costs a <b>measured multiple of its 1-minute footprint</b> — the pipeline measures the real multiplier after every pre-build and uses a conservative <b>6.5×</b> estimate before the first measurement (the earlier "2–3×" figure ignored the Greeks-enriched option 1-minute rewrite; DEC-LAKE-FOOTPRINT-MEASURED-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). A pre-run disk guard skips the pre-build when free space is short (<code>BRUTEX_PREBUILD_DISK_GUARD=off</code> to override). There is no manual pre-build button — the pipeline runs it itself.</div>
-    <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
-         TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
-         /pull-pipeline route (resolve_pull_targets: ?symbols= for a selection, bare = everything).
-         Always runs the fixed gated chain spot → expiries+contracts → historical (futures then
-         options) → pre-build, advancing only on each stage's FULL success. Single-flight via
-         startAndPoll; the label reflects the selection count. -->
-    <button class="pull-everything-btn" id="pullPipelineBtn"
-            title="ONE click — the full gated pipeline: pull spot (2020 → prev day, 1-minute), then ALL expiries + contracts metadata, then ALL historical F&amp;O candles (futures then options), then pre-build the derived timeframes — in that order. Each stage only starts once the previous one finishes clean (a dead token / quota / failed window stops the chain). Tick rows to scope it to your selection, or leave none ticked to pull the WHOLE universe. Re-click is safe — already-pulled windows are skipped.">
-      <span class="pe-icon">▶</span>
-      <span class="pe-text">
-        <b id="pullPipelineLabel">Pull · full pipeline</b>
-        <span class="pe-sub">spot → expiries + contracts → historical → pre-build · auto-gated, fail-closed · ticked rows scope it, else the whole universe</span>
-      </span>
-    </button>
-    <!-- The scoped-ALL spot-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001):
-         the SAME /pull-pipeline launcher with the additive scope=spot-only
-         token — all launcher rails inherited byte-identically. Deliberately
-         NOT wired to #pipeFrom/#pipeTo: full-range convergence
-         (2020-01-01 → previous day, incremental) IS the promise; date-scoped
-         pulls stay on the full-pipeline button above. Static HTML +
-         startAndPoll only — no dynamic markup (textContent discipline). -->
+    <!-- ▶ Pull Spot — the whole-universe spot-only button (DEC-PULL-SCOPED-ALL-
+         ONECLICK-001; relabeled at the round-6 two-button split): the SAME
+         /pull-pipeline launcher with the additive scope=spot-only token — all
+         launcher rails inherited byte-identically. Deliberately NOT wired to
+         the row ticks OR #pipeFrom/#pipeTo: full-range convergence
+         (2020-01-01 → previous day, incremental) IS the promise; scoped/dated
+         pulls belong to ▶ Pull F&O below. Static HTML + startAndPoll only —
+         no dynamic markup (textContent discipline). -->
     <button class="pull-everything-btn" id="pullAllSpotBtn"
             title="ONE click — pull the ENTIRE spot universe (all indices + all ~750 stocks), 1-minute, 2020-01-01 → previous day, auto-incremental (already-pulled windows are skipped). NO options, NO Greeks — the F&amp;O phases are skipped by design; the derived-timeframe pre-build + spot movers warm still run, then the TickVault cross-verify producer starts. The FIRST click also ARMS the daily post-market auto-pull (runs itself every trading day after the settle time while this dashboard is up — disarm via the auto chip below). Re-click is always safe.">
       <span class="pe-icon">▶</span>
       <span class="pe-text">
-        <b id="pullAllSpotLabel">Pull EVERYTHING — spot only</b>
+        <b id="pullAllSpotLabel">Pull Spot</b>
         <span class="pe-sub">all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · incremental (settled windows skipped) · NO options, NO Greeks · cross-verify producer runs after the pull · first click arms the daily auto-pull</span>
+      </span>
+    </button>
+    <!-- ▶ Pull F&O — the fno-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001
+         round-6 two-button split): the SAME /pull-pipeline launcher with the
+         additive scope=fno-only token — spot is a designed no-op, metadata +
+         F&amp;O historical run for real, Greeks enrichment runs (options ARE
+         pulled), the F&amp;O prebuild + futures/options movers warm follow.
+         MANUAL only: never arms the auto-pull (no auto_arm param) and never
+         fires the cross-verify producer (spot-exclusive). Selection-aware:
+         ticked rows scope it (bare = the whole F&amp;O universe); the from/to
+         pickers select which expiries are pulled. -->
+    <button class="pull-everything-btn" id="pullFnoBtn"
+            title="ONE click — pull the F&amp;O side: ALL expiries + contracts metadata, then ALL historical F&amp;O candles (futures then options, 1-minute; per-contract default windows — futures expiry−60d, options expiry−30d), then Greeks enrichment + the F&amp;O derived-timeframe pre-build + the futures/options movers warm. Spot is skipped by design (use ▶ Pull Spot). Tick rows to scope it to your selection, or leave none ticked for the WHOLE F&amp;O universe; the from/to dates select which expiries are pulled. Manual only — never arms the daily auto-pull and never runs the cross-verify producer. Re-click is safe — already-pulled windows are skipped.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b id="pullFnoLabel">Pull F&amp;O</b>
+        <span class="pe-sub">expiries + contracts → historical futures + options → Greeks → F&amp;O pre-build · spot skipped by design · ticked rows scope it, else the whole F&amp;O universe · manual only</span>
       </span>
     </button>
     <div class="hsub" id="pullAllSpotVerify" style="margin-top:4px; font-size:12px;">
@@ -567,7 +577,7 @@
       To fill it:
       <b>1)</b> the instrument master loads automatically on this page (a public list — no keys needed; it is loading now if this is a fresh clone);
       <b>2)</b> live candle pulls read the Groww credentials + daily token from <b>AWS Parameter Store</b>
-      (<code>/tickvault/prod/groww/*</code>, minted by the dedicated Lambda), then hit <b>▶ Pull · full pipeline</b>
+      (<code>/tickvault/prod/groww/*</code>, minted by the dedicated Lambda), then hit <b>▶ Pull Spot</b> / <b>▶ Pull F&amp;O</b>
       above — with no AWS token available the pull fails fast (it never falls back to env vars or a local file).
     </div>
     <div style="font-size:12px; color:var(--muted); margin-top:10px;">
@@ -579,7 +589,7 @@
   </div>
 
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
-    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above. The from/to dates below scope the SPOT history phase AND select which F&amp;O expiries are pulled (each in-scope contract keeps its per-contract default window). Left at the defaults (or blank) the pull covers EVERYTHING — 2020-01-01 → previous trading day for spot, ALL expiries including live/unexpired contracts for F&amp;O.</div>
+    <div class="lead" id="pulllead">Tick rows to scope ▶ Pull F&amp;O to your selection — or leave none ticked for the whole F&amp;O universe — then hit ▶ Pull F&amp;O above. The from/to dates below select which F&amp;O expiries ▶ Pull F&amp;O pulls (each in-scope contract keeps its per-contract default window); ▶ Pull Spot always covers everything — 2020-01-01 → previous trading day, ignoring ticks and dates. Left at the defaults (or blank) ▶ Pull F&amp;O covers ALL expiries including live/unexpired contracts.</div>
     <div class="pull-row">
       <!-- The from/to date-range picker (DEC-UNIVERSE-PULL-DATERANGE-001) scopes
            the SPOT history phase AND selects which F&O expiries are pulled
@@ -1470,13 +1480,13 @@ async function selectInstrument(i) {
        REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
     const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
     if (!r.ok) {
-      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load expiries — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load expiries — registry may be unreadable; try ▶ Pull F&O above") + '</div>';
       return;
     }
     const body = await r.json();
     const rows = (body.rows || []);
     if (!rows.length) {
-      const msg = body.note || 'No expiries pulled yet — run ▶ Pull · full pipeline above';
+      const msg = body.note || 'No expiries pulled yet — run ▶ Pull F&O above';
       ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
       return;
     }
@@ -1510,7 +1520,7 @@ async function renderContracts(symbol, expiryDate) {
     const r = await fetch('/api/v1/db/registry/contracts?underlying=' + encodeURIComponent(symbol)
       + '&expiry_date=' + encodeURIComponent(expiryDate));
     if (!r.ok) {
-      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load contracts — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load contracts — registry may be unreadable; try ▶ Pull F&O above") + '</div>';
       return;
     }
     const body = await r.json();
@@ -1566,15 +1576,18 @@ function optionCell(side, present, ix) {
   return cell;
 }
 
-/* ── The ONE selection-aware full-pipeline button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+/* ── The pull chain — the TWO-BUTTON law (DEC-PULL-SCOPED-ALL-ONECLICK-001
+   round-6 two-button split, superseding the one-button law of
+   DEC-UNIVERSE-PULL-CONSOLIDATE-001 at the UI level only).
    The redundant per-stage handlers (runPull / pull spot / pull expiries+contracts /
-   pull historical) + the separate "Pull selected" + bulk-button handlers are GONE.
-   The single ▶ Pull · full pipeline button posts the SHARED /api/v1/universe/pull-pipeline
-   route: with ticked rows it sends ?symbols= so resolve_pull_targets scopes the pull to the
-   selection; with NO ticks it posts the bare route so resolve_pull_targets pulls the WHOLE
-   universe. The pipeline ALWAYS runs the fixed gated chain spot → expiries+contracts →
-   historical → pre-build, advancing only on each stage's full success. Single-flight via
-   startAndPoll. ── */
+   pull historical) + the separate "Pull selected" + bulk-button handlers REMAIN gone,
+   and the combined full-pipeline handler is now REMOVED too. ▶ Pull F&O posts
+   the SHARED /api/v1/universe/pull-pipeline route with scope=fno-only: with ticked rows
+   it sends ?symbols= so resolve_pull_targets scopes the pull to the selection; with NO
+   ticks it posts the whole F&O universe; the from/to pickers select which expiries are
+   pulled. ▶ Pull Spot (below) is the whole-universe scope=spot-only auto-arming button.
+   The route's full-chain default stays API-reachable (nightly / old intents / external
+   callers) — the UI just no longer offers it. Single-flight via startAndPoll. ── */
 function pipelineSelection() {
   // The ticked rows scope the pull; a lone single-highlight also scopes it (so a
   // one-row highlight pulls just that name). Empty ⇒ the whole universe.
@@ -1586,11 +1599,11 @@ function pipelineSelection() {
 // &from_date=/&to_date= ONLY when non-blank AND actually CHANGED from the
 // stamped data-default (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): an untouched
 // pre-filled picker behaves exactly like a blank one, so the default one-click
-// pull threads NO dates → the server keeps the F&O expiry scope UNBOUNDED
-// (live/unexpired contracts included) and the spot phase resolves its own
-// canonical [2020-01-01, prev-day] default. A date the operator changed IS
-// sent and scopes the spot window + the F&O expiry selection. The backend
-// normalize_expiry_scope() is authoritative either way.
+// ▶ Pull F&O threads NO dates → the server keeps the F&O expiry scope
+// UNBOUNDED (live/unexpired contracts included). A date the operator changed
+// IS sent and scopes the F&O expiry selection (+ the metadata year grid; the
+// fno-only spot phase is a designed no-op, so no spot window is affected).
+// The backend normalize_expiry_scope() is authoritative either way.
 function pipelineDateQuery() {
   const fromEl = document.getElementById("pipeFrom");
   const toEl = document.getElementById("pipeTo");
@@ -1601,34 +1614,31 @@ function pipelineDateQuery() {
     q += "&to_date=" + encodeURIComponent(toEl.value);
   return q;
 }
-const PIPELINE_BTN = document.getElementById("pullPipelineBtn");
-if (PIPELINE_BTN) {
-  PIPELINE_BTN.onclick = () => {
+const PULL_FNO_BTN = document.getElementById("pullFnoBtn");
+if (PULL_FNO_BTN) {
+  PULL_FNO_BTN.onclick = () => {
     const items = pipelineSelection();
     const dq = pipelineDateQuery();
     if (items.length) {
       const ids = items.map(it => it.pull_symbol).join(",");
       startAndPoll(
-        "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids) + dq,
-        `${items.length} selected — spot → expiries + contracts → historical → pre-build`);
+        "/api/v1/universe/pull-pipeline?scope=fno-only&symbols=" + encodeURIComponent(ids) + dq,
+        `${items.length} selected — F&O: expiries + contracts → historical → pre-build`);
     } else {
-      // No selection ⇒ the whole universe (the bare route; resolve_pull_targets
-      // falls back to the whole admitted universe). A leading "&" is harmless on a
-      // query string with no "?"-params — guard it so the URL stays well-formed.
-      const url = dq
-        ? "/api/v1/universe/pull-pipeline?" + dq.slice(1)
-        : "/api/v1/universe/pull-pipeline";
+      // No selection ⇒ the whole F&O universe (resolve_pull_targets falls back
+      // to the whole admitted universe; reference-only names are a true no-op).
       startAndPoll(
-        url,
-        "EVERYTHING — spot → expiries + contracts → historical → pre-build");
+        "/api/v1/universe/pull-pipeline?scope=fno-only" + dq,
+        "F&O — expiries + contracts → historical → pre-build");
     }
   };
 }
-/* The scoped-ALL spot-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001): the SAME
+/* ▶ Pull Spot — the whole-universe spot-only button (DEC-PULL-SCOPED-ALL-
+   ONECLICK-001; relabeled at the round-6 two-button split): the SAME
    /pull-pipeline launcher with the additive scope=spot-only token. Deliberately
    ignores the row ticks AND the #pipeFrom/#pipeTo pickers — the whole-universe
-   full-range convergence IS this button's promise; scoped/dated pulls stay on
-   the full-pipeline button above. Static URL string only (no user input).
+   full-range convergence IS this button's promise; scoped/dated pulls belong to
+   ▶ Pull F&O above. Static URL string only (no user input).
    auto_arm=1 (round-5 fold): the first click ARMS the daily post-market
    auto-pull scheduler — one click, fully automatic daily thereafter; a
    market-hours-refused click still arms (the chip below says so). */
@@ -1660,7 +1670,7 @@ function renderAutoPullChip(ap) {
     chip.textContent = 'auto: ON — ' + (ap.next_eligible || 'armed');
     btn.textContent = 'disarm';
   } else {
-    chip.textContent = 'auto: OFF — the ▶ button click arms the daily post-market auto-pull';
+    chip.textContent = 'auto: OFF — the ▶ Pull Spot click arms the daily post-market auto-pull';
     btn.textContent = 'arm';
   }
   btn.onclick = async () => {
@@ -1685,7 +1695,8 @@ async function refreshAutoPullChip() {
 refreshAutoPullChip();
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
-   tick several rows → the ONE ▶ Pull · full pipeline button scopes its pull to them.
+   tick several rows → the ▶ Pull F&O button scopes its pull to them (the round-6
+   two-button law; ▶ Pull Spot stays whole-universe by promise).
    The per-row checkbox toggles selMulti; the row BODY click still does single-select +
    expiries — stopPropagation on the checkbox keeps the two independent. ── */
 function toggleMulti(i, on) {
@@ -1712,10 +1723,10 @@ function updateSelectionLead() {
     const named = syms.slice(0, LEAD_MAX_NAMED).join(", ");
     const more = syms.length > LEAD_MAX_NAMED ? ` +${syms.length - LEAD_MAX_NAMED} more` : "";
     lead.textContent = `Selected: ${named}${more} (${n}) — one combined selection across the `
-      + `Index + Stocks lists. Hit ▶ Pull · full pipeline above (✗ clear unticks both lists).`;
+      + `Index + Stocks lists. Hit ▶ Pull F&O above (✗ clear unticks both lists).`;
   } else if (selInst) {
     lead.textContent = `Selected ${selInst} — tick more rows to scope the pull, `
-      + `or hit ▶ Pull · full pipeline above`;
+      + `or hit ▶ Pull F&O above`;
   } else {
     lead.textContent = DEFAULT_PULL_LEAD;
   }
@@ -1728,8 +1739,8 @@ function updateMultiBtn() {
   // DEC-PIPELINE-AUTOPREBUILD-001.) The button is ALWAYS enabled (no ticks ⇒
   // whole universe).
   const n = selMulti.size;
-  const lbl = document.getElementById("pullPipelineLabel");
-  if (lbl) lbl.textContent = n > 0 ? `Pull · ${n} selected — full pipeline` : "Pull · full pipeline";
+  const lbl = document.getElementById("pullFnoLabel");
+  if (lbl) lbl.textContent = n > 0 ? `Pull F&O · ${n} selected` : "Pull F&O";
   updateSelectionLead();
 }
 document.getElementById("selallbtn").onclick = () => {
@@ -1752,7 +1763,7 @@ document.getElementById("clrselbtn").onclick = () => {
    fetched on the operator's machine; NSE bot-blocks + this build env
    network-blocks nseindia.com), intersected with our F&O-eligible stocks.
    source:"nse"  → switch to the Stocks tab + tick the returned members in
-                   the existing selMulti multi-select (scoping ▶ Pull · full pipeline).
+                   the existing selMulti multi-select (scoping ▶ Pull F&O).
    source:"unknown-index" / "unavailable" → show the honest note (leave none
                    ticked to pull the whole universe). NEVER 500. */
 document.getElementById("tickconstbtn").onclick = async () => {
@@ -1795,7 +1806,7 @@ document.getElementById("tickconstbtn").onclick = async () => {
      tab/view: fetch the stock instruments in the BACKGROUND (so selMulti gets real
      inst objects) into a LOCAL list — never replacing the visible UNIV nor touching
      `filter` — then add the members to selMulti and re-render the CURRENT view, so
-     only the selection count + the ▶ Pull · full pipeline button label update. The
+     only the selection count + the ▶ Pull F&O button label update. The
      ticked stocks show their checkboxes if/when the operator later switches to the
      Stocks tab (renderInstruments reads selMulti.has(symbol)). */
   let stockUniv;
@@ -1828,9 +1839,9 @@ document.getElementById("tickconstbtn").onclick = async () => {
        the FULL count); OFF, prefer the backend note (it says "fresh from NSE" vs
        "from cache (fetched …)" correctly per source). */
     msg.textContent = fnoOnly
-      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ▶ Pull · full pipeline.`
+      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ▶ Pull F&O.`
       : (note
-        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull · full pipeline.`);
+        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull F&O.`);
   }
   btn.disabled = false;
 };
@@ -1838,13 +1849,13 @@ document.getElementById("tickconstbtn").onclick = async () => {
 /* ── In-flight lock for the pull buttons (DEC-UNIVERSE-PULL-CONSOLIDATE-001 +
    DEC-PULL-SCOPED-ALL-ONECLICK-001, refuter-r1 NIT-5) ──
    The bulk ①②③④ matrix + its multi-button disable loop are GONE: "disable the
-   pull controls while a pull runs" disables BOTH pull buttons — the full
-   pipeline button AND the scoped-ALL spot-only button (both were declared with
-   their click handlers above), so an in-page re-click really IS impossible on
-   either (the wedged-POST comments below reason from that invariant). Kept as
+   pull controls while a pull runs" disables BOTH pull buttons — ▶ Pull F&O AND
+   ▶ Pull Spot (the round-6 two-button law; both were declared with their click
+   handlers above), so an in-page re-click really IS impossible on either (the
+   wedged-POST comments below reason from that invariant). Kept as
    setBulkDisabled so startAndPoll / finishLive call it unchanged. */
 function setBulkDisabled(on) {
-  if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
+  if (PULL_FNO_BTN) PULL_FNO_BTN.disabled = on;
   if (PULL_ALL_SPOT_BTN) PULL_ALL_SPOT_BTN.disabled = on;
 }
 
