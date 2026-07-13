@@ -2957,7 +2957,13 @@ def build_app(
     # gives their `_work` bodies), so a `brutex dashboard --lake-root X` launch with
     # a divergent/unset $BRUTEX_LAKE_ROOT still contends with a CLI pull/backfill
     # flocking X (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — the lock root and the
-    # write root can no longer diverge).
+    # write root can no longer diverge). ONE start-time exception on _pull_job:
+    # the SWEEP route starts with ``cross_process_lock=False``
+    # (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001) because cmd_sweep_all owns its own
+    # discipline on the SAME flock file — the G10 preload SH read-guard + the
+    # G6 sweep single-flight; a job-level EX would self-conflict G10 (flock is
+    # per open file description) and lock the daily pull/crossverify out for
+    # the sweep's multi-day wall time.
     _pull_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         on_run_end=_session_rate.clear_meter,
@@ -7370,8 +7376,14 @@ def build_app(
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
         the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
-        pull OR sweep is already running is a no-op (``{"started": false}``) — one
-        lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
+        pull OR sweep is already running IN THIS PROCESS is a no-op
+        (``{"started": false}``) — one lake, one writer (CLAUDE.md §2 Rule 7
+        idempotence). Cross-process exclusion is owned by ``cmd_sweep_all``
+        itself (G10 preload read-guard + G6 sweep single-flight,
+        DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): a sweep started while another
+        process's pull holds the lake flock fails loudly at preload
+        (``LakeBusyError`` in the progress feed), and a pull/crossverify can run
+        CONCURRENTLY with the sweep's compute phase.
 
         The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
         partly-pulled lake simply sweeps whatever slices exist and reports the
@@ -7436,12 +7448,26 @@ def build_app(
         # stays honest dark "idle" for the sweep's 2-4-day wall time — never a red
         # "stalled" off the (correctly) zero vendor rate. Single-flight, progress and
         # the duty-degrade probes are unchanged (they stay sweep-inclusive).
+        # cross_process_lock=False (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): the
+        # sweep engine OWNS its own cross-process exclusion — cmd_sweep_all
+        # takes the G10 lake read-guard (LOCK_SH on the SAME pull single-flight
+        # file, held across the bar PRELOAD ONLY) + the G6 sweep single-flight
+        # (DEC-SWEEP-UNKILLABLE-CORE-001). A job-level whole-run EX here BOTH
+        # self-conflicted with G10 (flock is per open file description — the
+        # dashboard sweep died at preload with LakeBusyError since G10 landed,
+        # commit 3f32b3e) AND would lock the daily pull/crossverify out for the
+        # sweep's multi-day wall time (the crossverify precedent — the callee
+        # owns its locks). A sweep started while a CROSS-process pull holds the
+        # lake flock now fails LOUDLY at preload (LakeBusyError in the progress
+        # feed, bounded to the preload) instead of a start()-refusal; the
+        # IN-process second click stays the started=false no-op (layer 1).
         started = _pull_job.start(
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
             on_success=_summary_cache.mark_dirty,
             job_kind=JOB_KIND_SWEEP,
+            cross_process_lock=False,
         )
         payload = request.to_dict()
         payload["started"] = started

@@ -443,6 +443,126 @@ def test_cross_process_lock_false_skips_both_locks_for_a_zero_write_run(tmp_path
     assert spy_ok.entered == 1 and spy_ok.exited == 1
 
 
+# ── the SWEEP job's lock posture (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001) ────────
+
+
+def _sweep_shaped_job(tmp_path: Path) -> BackgroundPullJob:
+    """A job composed exactly like the dashboard sweep route's ``_pull_job``:
+    the REAL lake flock factory + the production no-AWS-creds graceful account
+    skip (``account_key_resolver`` → None), synchronous spawn."""
+    return BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=pull_singleflight_lock,
+        account_key_resolver=lambda: None,
+    )
+
+
+def test_sweep_job_lock_free_worker_takes_the_g10_preload_guard(tmp_path: Path) -> None:
+    """THE self-conflict regression (fails before) — the investigation's Repro B
+    as a permanent test.
+
+    DEC-SWEEP-LOCK-PULL-CONCURRENCY-001: a job composed exactly like the
+    ``/api/v1/sweep/run`` route (``job_kind=SWEEP``, and — since the fix —
+    ``cross_process_lock=False``) whose worker performs ``cmd_sweep_all``'s
+    verbatim preload step: the REAL G10 ``lake_read_guard`` ``LOCK_SH`` on the
+    job's OWN lake. The guard must ACQUIRE (no ``LakeBusyError``) and the job
+    must finish DONE. BEFORE the fix the route left ``cross_process_lock`` at
+    the default ``True``: the job's whole-run ``LOCK_EX`` on the same file made
+    the SH acquire raise ``LakeBusyError`` (flock is per open file description)
+    — every dashboard sweep died at preload with ``state='error'`` since G10
+    landed (commit 3f32b3e).
+    """
+    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+    from brutex.engine.sweep_singleflight import lake_read_guard
+
+    guard_outcome: dict[str, bool] = {}
+
+    def work(on_progress: ProgressHook) -> None:
+        with lake_read_guard(tmp_path):  # cmd_sweep_all's G10 preload step
+            guard_outcome["acquired"] = True
+        on_progress("X", 1, False, False)
+
+    job = _sweep_shaped_job(tmp_path)
+    started = job.start(work, total=1, job_kind=JOB_KIND_SWEEP, cross_process_lock=False)
+    assert started is True
+    assert guard_outcome == {"acquired": True}  # G10 acquired — no self-conflict
+    assert job.snapshot().state == STATE_DONE
+
+
+def test_sweep_job_with_job_level_ex_lock_self_conflicts_g10(tmp_path: Path) -> None:
+    """The INVERSE pin — the PRE-fix composition MUST self-conflict.
+
+    With ``cross_process_lock=True`` (the route's old default) the job holds
+    the lake pull flock EX for the whole run, and the worker's G10 ``LOCK_SH``
+    acquire on the SAME file — a second open file description in the SAME
+    process — is DENIED (flock(2) locks attach to the open file description).
+    Pins the mechanism the fix removes from the route path, so the
+    flock-per-OFD fact this whole DEC rests on can never silently drift.
+    """
+    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+    from brutex.engine.sweep_singleflight import LakeBusyError, lake_read_guard
+
+    outcome: dict[str, str] = {}
+
+    def work(_on_progress: ProgressHook) -> None:
+        try:
+            with lake_read_guard(tmp_path):  # pragma: no cover — must NOT acquire
+                outcome["acquired"] = "yes"
+        except LakeBusyError as exc:
+            outcome["error"] = str(exc)
+
+    job = _sweep_shaped_job(tmp_path)
+    started = job.start(work, total=1, job_kind=JOB_KIND_SWEEP, cross_process_lock=True)
+    assert started is True  # the job STARTS — it dies at (the fake) preload
+    assert "acquired" not in outcome
+    assert "pull single-flight lock held exclusively" in outcome["error"]
+    assert "refusing to preload sweep bars" in outcome["error"]
+
+
+def test_sweep_job_lock_free_never_touches_the_pull_lock_file(tmp_path: Path) -> None:
+    """A ``JOB_KIND_SWEEP`` start with ``cross_process_lock=False`` consults
+    NEITHER lock factory and creates NO ``.locks/pull_singleflight.lock`` —
+    at the JOB layer the file is never opened; the only toucher during a real
+    sweep is cmd_sweep_all's own G10 guard (SH, preload-bounded)."""
+    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+
+    lake_calls: list[Path] = []
+    account_calls: list[str] = []
+
+    def lake_factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover
+        lake_calls.append(root)
+        return _SpyGuard()
+
+    def account_factory(key: str) -> AbstractContextManager[None]:  # pragma: no cover
+        account_calls.append(key)
+        return _SpyGuard()
+
+    captured: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_capture_spawn(captured),
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lake_factory,
+        account_singleflight_factory=account_factory,
+        account_key_resolver=lambda: "key-A",
+    )
+    started = job.start(
+        lambda on_progress: on_progress("X", 1, False, False),
+        total=1,
+        job_kind=JOB_KIND_SWEEP,
+        cross_process_lock=False,
+    )
+    assert started is True
+    # Probe BETWEEN start() and the worker run: no lock file materialised.
+    assert not pull_singleflight_lock_path(tmp_path).exists()
+    captured[0]()  # run the worker
+    assert job.snapshot().state == STATE_DONE
+    assert lake_calls == [] and account_calls == []
+    assert not pull_singleflight_lock_path(tmp_path).exists()
+
+
 def test_none_lake_root_disables_both_locks(tmp_path: Path) -> None:
     """A None lake root (dry-run/test) skips BOTH locks AND the key resolver."""
     resolver_calls: list[bool] = []

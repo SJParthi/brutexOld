@@ -261,6 +261,44 @@ def test_second_click_while_running_is_a_noop(
         release.set()
 
 
+def test_route_starts_job_with_cross_process_lock_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-SWEEP-LOCK-PULL-CONCURRENCY-001 — the route wiring pin (fails before).
+
+    The sweep route must start its job with ``cross_process_lock=False``:
+    ``cmd_sweep_all`` owns the cross-process exclusion itself (the G10 lake
+    read-guard ``LOCK_SH`` across the bar PRELOAD only + the G6 sweep
+    single-flight). BEFORE the fix the route left the default ``True``, so the
+    job held the lake pull flock EX for the whole run and cmd_sweep_all's own
+    G10 SH acquire on the SAME file SELF-CONFLICTED (flock is per open file
+    description) — every dashboard sweep died at preload with ``LakeBusyError``
+    in its progress feed (dead-on-arrival since G10 landed, commit 3f32b3e),
+    invisible to CI because these route tests fake ``run_sweep_from_request``.
+    The kwargs spy is the route-level pin; the REAL lock composition is proven
+    in ``test_pull_jobs_singleflight.py`` +
+    ``tests/integration/test_sweep_pull_concurrency.py``.
+    """
+    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP, BackgroundPullJob
+
+    _CAPTURED.clear()
+    monkeypatch.setattr(app_module, "run_sweep_from_request", _fake_run_sweep_from_request)
+    captured_kwargs: dict[str, Any] = {}
+    real_start = BackgroundPullJob.start
+
+    def spy_start(self: BackgroundPullJob, work: Any, **kwargs: Any) -> bool:
+        captured_kwargs.update(kwargs)
+        return real_start(self, work, **kwargs)
+
+    monkeypatch.setattr(BackgroundPullJob, "start", spy_start)
+    resp = client.post("/api/v1/sweep/run")
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert captured_kwargs["cross_process_lock"] is False  # THE pin
+    assert captured_kwargs["job_kind"] == JOB_KIND_SWEEP
+    assert _wait_for_job(client)["state"] == "done"
+
+
 # ── page wiring ───────────────────────────────────────────────────────────────
 
 

@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
+_Last updated: 2026-07-13 (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md
+#1785, branch `claude/sweep-lock-pull-concurrency` — the dashboard sweep route
++ the nightly sweep leg stop holding the LAKE pull flock through the sweep:
+CLI parity — cmd_sweep_all's OWN G10 lake read-guard (SH, held across the bar
+PRELOAD only) + G6 sweep single-flight own the sweep-vs-pull exclusion — fixing
+the CONFIRMED G10 self-conflict BLOCKER (flock is per open file description, so
+the job/chain-held EX made the same-process G10 SH acquire raise LakeBusyError
+at EVERY dashboard/nightly sweep preload since G10 landed at 3f32b3e; CI-blind
+via faked seams) AND delivering the operator requirement that the daily pull +
+crossverify→S3 run CONCURRENTLY with a multi-day sweep's compute phase.
+SUPERSEDES DEC-SWEEP-NIGHTLY-AUTOMATION-001 (#1612)'s lake-lock
+held-through-SWEEP clause. Run identity frozen at preload; byte-identity
+proven by the executed concurrency regression. Lock COMPOSITION only — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1785.)
+Earlier: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
 `claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
 merge event off main tip 3f32b3ef (merged forward over main through 81052345 on 2026-07-13): #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
 #1699 + DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
@@ -2410,7 +2426,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
+- **Active branch:** `claude/sweep-lock-pull-concurrency`
+  (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
+  the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
+  CLI parity: `cmd_sweep_all` OWNS the sweep-vs-pull exclusion — the G10 lake read-guard
+  (`LOCK_SH` on the pull single-flight file, held across the bar PRELOAD ONLY) + the G6 sweep
+  single-flight (DEC-SWEEP-UNKILLABLE-CORE-001 #1712). FIXES the CONFIRMED BLOCKER (executed
+  repro): the route's `BackgroundPullJob.start(...)` left `cross_process_lock` at the default
+  True and the nightly held the lake lock in its chain-lifetime stack, so the job/chain EX on
+  `<lake>/.locks/pull_singleflight.lock` made cmd_sweep_all's own G10 SH acquire on the SAME
+  file (a second open file description, SAME process) raise `LakeBusyError: a pull/heal is
+  running against this lake …` at EVERY dashboard/nightly sweep preload since G10 landed
+  (commit 3f32b3e) — CI-blind because the route tests fake `run_sweep_from_request` and the
+  nightly tests inject a fake `run_sweep`. THE FIX: (1) the sweep route passes
+  `cross_process_lock=False` (the crossverify callee-owns-its-locks precedent); (2) the
+  nightly's LAKE lock moves into a `lake_stack` closed in `pull_fn`'s `finally` — the exact
+  account-lock post-PULL+PREBUILD release pattern, with a chain-lifetime backstop so every
+  failure path still releases; the stale "no sweep-level flock exists" docstring + runbook
+  passages rewritten. SUPERSEDES #1612's "LAKE pull lock held through the sweep leg" clause —
+  the operator's daily-pull/crossverify concurrency requirement overrides the old whole-run
+  exclusion. SAFETY (verified): run identity (`data_snapshot_hash`) is FROZEN at preload from
+  the bars memo; the sweep spine/stage-3/cascade/diffcheck read only the memoised `_bars_for`;
+  mid/post-run lake reads (VIX stamper, results-depth loader, launch freshness gate) are
+  reference/display-only and never in run identity; pull writes are per-partition-flocked
+  atomic `os.replace` keep-first. PROOF (executed): the new
+  `tests/integration/test_sweep_pull_concurrency.py` runs the REAL cmd_sweep_all while a peer
+  takes the REAL pull lock EX mid-compute AND rewrites the preloaded partition through the
+  production writer — sweep completes EXIT_OK, result trees BYTE-IDENTICAL to the solo control
+  (the #1712 `_result_tree` idiom + TUPLE_DONE store_content_hash parity + an anti-vacuous
+  sensitivity arm), the concurrent bars land intact; fails-before pins on the route kwargs,
+  the nightly hold-span (held through PULL+PREBUILD, FREE during SWEEP — probed live both
+  sides), the e2e sweep-leg EX acquire, + the pull_jobs G10 self-conflict mechanism pair and
+  the parametrized every-failure-path lock-release law. HONEST: a pull mid-WRITE still refuses
+  a STARTING sweep at preload (G10 unchanged — bounded, relaunch); a preloading sweep still
+  refuses a pull start for the preload instant (D-13 wording debt stays
+  DEC-SWEEP-LOCK-WORDING-001); a nightly sweep-leg preload racing a contending pull can fail
+  that night's link loudly (break law, cron-red — accepted, implausible at 01:30); the
+  dashboard sweep-during-cross-process-pull shape moves from a start() refusal to an honest
+  job-error LakeBusyError at preload (test-pinned). Lock COMPOSITION only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change;
+  `pull_jobs.py` (371/78) + `nightly/run.py` (296/54) 100.00% line+branch on their gates;
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the pre-change baseline (0 new).)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
   vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
   3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
   DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
@@ -6255,7 +6312,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/quad-dashboard-lakeinv-universe-docs`
+- **Active feature branch:** `claude/sweep-lock-pull-concurrency`
+  (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — the dashboard
+  sweep route + the nightly sweep leg stop holding the LAKE pull flock through
+  the sweep: `cross_process_lock=False` at the sweep route's job start + the
+  nightly lake lock released after PULL+PREBUILD (the account-lock pattern) —
+  cmd_sweep_all's OWN G10 preload-only SH read-guard + G6 sweep single-flight
+  own the sweep-vs-pull exclusion (CLI parity); fixes the confirmed G10
+  self-conflict BLOCKER (LakeBusyError at every dashboard/nightly sweep
+  preload since 3f32b3e) and lets the daily pull + crossverify run
+  CONCURRENTLY with a multi-day sweep's compute phase; SUPERSEDES #1612's
+  held-through-SWEEP clause; run identity frozen at preload, byte-identity
+  proven by the executed concurrency regression
+  (tests/integration/test_sweep_pull_concurrency.py); lock COMPOSITION only —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1785 for the full blurb)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs`
   (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
   #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
   DEC-DASHBOARD-READ-SCREEN-001 #1759 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 ·
