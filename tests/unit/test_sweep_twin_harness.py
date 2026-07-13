@@ -227,11 +227,13 @@ class TestStableViews:
             "eta_seconds": None,
             "started_at": 1.0,
             "updated_at": 2.0,
+            "wall_time_utc": 1_752_000_000.5,
         }
         view = progress_stable_view(raw)
         assert set(view) == set(raw) - PROGRESS_VOLATILE_KEYS
         assert view["state"] == "done"
         assert "updated_at" not in view
+        assert "wall_time_utc" not in view
 
     def test_progress_stable_view_tolerates_absent_keys(self) -> None:
         assert progress_stable_view({"state": "done"}) == {"state": "done"}
@@ -242,13 +244,18 @@ class TestStableViews:
         view = progress_stable_view({"state": "done", "belt_served": 7, "updated_at": 2.0})
         assert view == {"state": "done", "belt_served": 7}
 
-    def test_progress_volatile_keys_are_exactly_the_wall_clock_five(self) -> None:
+    def test_progress_volatile_keys_are_exactly_the_wall_clock_six(self) -> None:
+        # ``wall_time_utc`` joined the set when main's #1712 G4
+        # (DEC-SWEEP-UNKILLABLE-CORE-001) made publish_progress always stamp
+        # it from ``time.time()``; its G4 siblings ``pid``/``running`` are
+        # deterministic in the in-process twin and stay compared.
         assert {
             "combos_per_sec",
             "elapsed_seconds",
             "eta_seconds",
             "started_at",
             "updated_at",
+            "wall_time_utc",
         } == PROGRESS_VOLATILE_KEYS
 
     def test_checkpoint_stable_view_drops_only_the_wall_clock(self) -> None:

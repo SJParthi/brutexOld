@@ -127,6 +127,13 @@ PROGRESS_VOLATILE_KEYS: Final[frozenset[str]] = frozenset(
         "eta_seconds",
         "started_at",
         "updated_at",
+        # wall-clock stamp added by main's #1712 G4 liveness keys
+        # (DEC-SWEEP-UNKILLABLE-CORE-001 — publish_progress always stamps
+        # ``wall_time_utc = time.time()``) — wall-clock-derived by
+        # construction, per this denylist's admission criterion. Its G4
+        # siblings ``pid`` + ``running`` stay COMPARED: both are
+        # deterministic in today's in-process twin (compare-by-default).
+        "wall_time_utc",
     }
 )
 
