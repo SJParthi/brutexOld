@@ -359,13 +359,24 @@ def check_runtime_file(runtime_file: Path) -> CheckResult:
 def check_derived_freshness(lake_root: Path) -> CheckResult:
     """Verify stored derived-TF tables still equal a fresh re-derivation.
 
-    The DEC-TF-MATERIALIZE-002 freshness probe: for the FIRST symbol that
-    has both a stored ``1minute`` partition and at least one stored derived
+    The DEC-TF-MATERIALIZE-002 freshness probe, made an ALL-SYMBOLS census
+    by DEC-DERIVED-1DAY-FRESHNESS-001: for EVERY symbol that has both a
+    stored ``1minute`` partition and at least one stored derived intraday
     timeframe partition, re-derive each stored timeframe from the 1-minute
     base via the canonical session-anchored resampler and compare
     frame-for-frame (:func:`brutex.data.tf_autoderive.compare_derived_freshness`).
     Any drift — a stale table left behind by a 1m backfill, or a
-    pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
+    pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL`` naming
+    the stale pairs (capped at 20 + the true count). Pre-census the check
+    RETURNED at the first checkable symbol, so a healthy first symbol
+    masked every later stale one (the first-symbol PASS illusion the
+    derived-TF audit flagged).
+
+    HONEST cost (Golden Rule #10): O(symbols × stored bars) per invocation
+    — the doctor is an on-demand diagnostic, honesty > speed. The derived
+    ``1day`` VALUE arm rides the sweep-preflight gate
+    (:func:`brutex.data.tf_autoderive.lake_derived_freshness_verdicts`),
+    deliberately not duplicated here.
 
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
@@ -395,6 +406,12 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
                 symbol_dir, interval, source=f"doctor:{symbol_dir.name}/{interval}"
             )
 
+        # ALL-SYMBOLS accumulation (DEC-DERIVED-1DAY-FRESHNESS-001): never
+        # return inside the loop — a healthy FIRST symbol must not mask a
+        # stale LATER one (the first-symbol PASS illusion).
+        stale_pairs: list[str] = []
+        symbols_checked = 0
+        intervals_checked = 0
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
             base = symbol_dir / "1minute"
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
@@ -406,36 +423,41 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             )
             if not stored_intervals:
                 continue
+            symbols_checked += 1
             df_1m = _read(symbol_dir, "1minute")
-            stale: list[str] = []
             for interval in stored_intervals:
+                intervals_checked += 1
                 tf_minutes = parse_label(interval_to_label[interval])
                 verdict = compare_derived_freshness(df_1m, _read(symbol_dir, interval), tf_minutes)
                 if verdict != "fresh":
-                    stale.append(interval)
-            symbol = symbol_dir.name
-            if stale:
-                return CheckResult(
-                    name="derived_freshness",
-                    status="FAIL",
-                    detail=(
-                        f"{symbol}: stored derived TFs drift from a fresh re-derivation: "
-                        f"{stale} — re-derive via the pipeline's automatic prebuild "
-                        "stage (▶ Pull · full pipeline, DEC-PIPELINE-AUTOPREBUILD-001)"
-                    ),
-                )
+                    stale_pairs.append(f"{symbol_dir.name}/{interval}")
+        if symbols_checked == 0:
             return CheckResult(
                 name="derived_freshness",
-                status="PASS",
+                status="SKIP",
+                detail="no symbol has stored derived timeframes yet (auto-derive opt-in OFF)",
+            )
+        if stale_pairs:
+            cap = 20  # the #1649a capped-listing convention: 20 + the true count
+            shown = ", ".join(stale_pairs[:cap])
+            suffix = "" if len(stale_pairs) <= cap else f" (+{len(stale_pairs) - cap} more)"
+            return CheckResult(
+                name="derived_freshness",
+                status="FAIL",
                 detail=(
-                    f"{symbol}: {len(stored_intervals)} stored derived TFs byte-equal "
-                    "a fresh re-derivation"
+                    f"{len(stale_pairs)} stored derived TF partition(s) drift from a "
+                    f"fresh re-derivation: {shown}{suffix} — re-derive via the "
+                    "pipeline's automatic prebuild stage (▶ Pull · full pipeline, "
+                    "DEC-PIPELINE-AUTOPREBUILD-001)"
                 ),
             )
         return CheckResult(
             name="derived_freshness",
-            status="SKIP",
-            detail="no symbol has stored derived timeframes yet (auto-derive opt-in OFF)",
+            status="PASS",
+            detail=(
+                f"{symbols_checked} symbol(s), {intervals_checked} stored derived TF "
+                "partition(s) byte-equal a fresh re-derivation"
+            ),
         )
     except Exception as exc:
         return CheckResult(

@@ -1546,8 +1546,10 @@ jobs:
           #          freshness compare core. 100% line+branch via
           #          tests/unit/test_tf_autoderive.py (fakes; the pull-settle glue
           #          is # pragma: no cover raw I/O over this tested core).
+          # DEC-DERIVED-1DAY-FRESHNESS-001: the 1day VALUE arm + the OI-aware
+          # compare join the gate via tests/unit/test_tf_autoderive_daily_arm.py.
           if compgen -G "tests/unit/test_tf_autoderive.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_autoderive --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_autoderive.py
+            pytest --cov=brutex.data.tf_autoderive --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_autoderive.py tests/unit/test_tf_autoderive_daily_arm.py
           else
             echo "(brutex.data.tf_autoderive test file not present yet — gate inactive)"
           fi

@@ -465,11 +465,13 @@ class TestMain:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _write_lake_partition(lake_root: Path, interval: str, frame: object) -> None:
+def _write_lake_partition(
+    lake_root: Path, interval: str, frame: object, *, symbol: str = "NIFTY"
+) -> None:
     """Write one synthetic month partition in the canonical lake layout."""
     import polars as pl
 
-    out = lake_root / "bars" / "NSE" / "INDEX" / "NIFTY" / interval / "2025"
+    out = lake_root / "bars" / "NSE" / "INDEX" / symbol / interval / "2025"
     out.mkdir(parents=True, exist_ok=True)
     assert isinstance(frame, pl.DataFrame)
     frame.rename({"ts_utc": "timestamp"}).write_parquet(out / "06.parquet")
@@ -524,7 +526,31 @@ class TestDerivedFreshness:
         _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5))
         result = check_derived_freshness(tmp_path)
         assert result.status == "PASS"
-        assert "NIFTY" in result.detail
+        # DEC-DERIVED-1DAY-FRESHNESS-001: the PASS detail is the all-symbols
+        # census count (was the first symbol's name pre-census).
+        assert "1 symbol(s), 1 stored derived TF partition(s)" in result.detail
+
+    def test_fail_when_a_later_symbol_is_stale(self, tmp_path: Path) -> None:
+        """DEC-DERIVED-1DAY-FRESHNESS-001 (kills the return-in-loop mutant):
+        a healthy FIRST symbol must not mask a stale SECOND one — pre-census
+        the check RETURNED at the first checkable symbol (the first-symbol
+        PASS illusion; this test fails at the merge base)."""
+        import polars as pl
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        df_1m = _synthetic_1m()
+        assert isinstance(df_1m, pl.DataFrame)
+        # "AAA" sorts BEFORE "NIFTY" in the symbol walk — AAA is fresh.
+        _write_lake_partition(tmp_path, "1minute", df_1m, symbol="AAA")
+        _write_lake_partition(tmp_path, "5minute", resample_1m_to_tf(df_1m, 5), symbol="AAA")
+        # NIFTY (the SECOND symbol) is stale.
+        _write_lake_partition(tmp_path, "1minute", df_1m)
+        stale = resample_1m_to_tf(df_1m, 5).with_columns((pl.col("close") + 1.0).alias("close"))
+        _write_lake_partition(tmp_path, "5minute", stale)
+        result = check_derived_freshness(tmp_path)
+        assert result.status == "FAIL"
+        assert "NIFTY/5minute" in result.detail
+        assert "1 stored derived TF partition(s) drift" in result.detail
 
     def test_fail_when_stored_table_is_stale(self, tmp_path: Path) -> None:
         import polars as pl

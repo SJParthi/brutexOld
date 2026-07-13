@@ -17,20 +17,29 @@ frame-for-frame. Any drift (a stale table left behind by a 1m backfill, a
 pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid) returns ``"stale"`` — never
 silently absorbed. Both sides hold lake values already snapped to the
 2-decimal tick grid at the write boundary (DEC-SPOT-PRICE-2DP-001), so
-exact equality is the honest comparison.
+exact equality is the honest comparison. Since
+DEC-DERIVED-1DAY-FRESHNESS-001 the compare is OI-AWARE (a drifted F&O
+``open_interest`` reads stale — null ≡ null) and the derived ``1day`` has
+its own VALUE arm, :func:`compare_daily_freshness`.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from datetime import date, datetime
     from pathlib import Path
 
     import polars as pl
 
+_LOG = structlog.get_logger(__name__)
+
 __all__ = [
+    "compare_daily_freshness",
     "compare_derived_freshness",
     "lake_derived_freshness_verdicts",
     "read_lake_bars_frame",
@@ -47,14 +56,146 @@ def compare_derived_freshness(df_1m: pl.DataFrame, df_stored: pl.DataFrame, tf_m
     values). Lake prices on both sides are already 2dp-tick-snapped at the
     write boundary (DEC-SPOT-PRICE-2DP-001), so exact equality is the
     honest comparison — no tolerance band that could hide real drift.
-    """
-    from brutex.data.tf_resampler import REQUIRED_COLUMNS, resample_1m_to_tf
 
-    expected = resample_1m_to_tf(df_1m, tf_minutes).select(*REQUIRED_COLUMNS)
-    stored = df_stored.select(*REQUIRED_COLUMNS).sort("ts_utc")
+    OI-aware (DEC-DERIVED-1DAY-FRESHNESS-001): when BOTH the re-derived
+    frame (*df_1m* carried an ``open_interest`` column — the F&O lake read)
+    AND *df_stored* carry the column, ``open_interest`` joins the compared
+    columns (null ≡ null — polars ``equals`` treats nulls as equal), so a
+    stored partition whose ONLY drift is a fabricated/stale OI reads
+    ``"stale"``. Disclosed transient: a legacy pre-DEC-DERIVED-OI-NULL-
+    HONEST-001 partition (OI fabricated as 0 where the base is null) reads
+    stale for at most one nightly — the writer_convention stamp bump forces
+    its rewrite on that SAME nightly (bounded, self-healing).
+    """
+    from brutex.data.tf_resampler import (
+        OPEN_INTEREST_COLUMN,
+        REQUIRED_COLUMNS,
+        resample_1m_to_tf,
+    )
+
+    expected_full = resample_1m_to_tf(df_1m, tf_minutes)
+    compare_columns: tuple[str, ...] = REQUIRED_COLUMNS
+    if OPEN_INTEREST_COLUMN in expected_full.columns and OPEN_INTEREST_COLUMN in df_stored.columns:
+        compare_columns = (*REQUIRED_COLUMNS, OPEN_INTEREST_COLUMN)
+    expected = expected_full.select(*compare_columns)
+    stored = df_stored.select(*compare_columns).sort("ts_utc")
     if expected.height != stored.height:
         return "stale"
     return "fresh" if expected.equals(stored.cast(expected.schema)) else "stale"
+
+
+def _ist_date_of(ts: datetime) -> date:
+    """A bar instant's IST trading date (naive instants are treated as UTC)."""
+    from datetime import UTC, timedelta, timezone
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    aware = ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+    return aware.astimezone(ist).date()
+
+
+def compare_daily_freshness(
+    df_1m: pl.DataFrame,
+    df_stored_1day: pl.DataFrame,
+    *,
+    segment: str,
+    source: str = "",
+) -> str:
+    """Compare a STORED derived ``1day`` table against a fresh re-derivation.
+
+    The ``1day`` VALUE arm (DEC-DERIVED-1DAY-FRESHNESS-001 — pre-fix the
+    derived ``1day``, the PDH/PDL anchor source, was checked NOWHERE): the
+    stored partition is re-derived from the 1-minute base via the
+    segment-routed daily law — :func:`~brutex.data.fno_daily_resample.
+    resample_1m_to_fno_daily` for ``FNO`` (carries last-of-day OI), else
+    :func:`~brutex.data.spot_daily_resample.resample_1m_to_daily` — and
+    compared per-date: midnight-IST stamp + OHLCV + volume + ``open_interest``
+    (null ≡ null; the stored side always carries the column, and the daily
+    laws always emit a value — honest ``None`` for spot).
+
+    This is deliberately a VALUE-FIDELITY check, never a RECENCY check:
+
+    * the re-derive is bounded ``before = last stored 1day IST date + 1`` —
+      bounding by the stored partition's OWN last date avoids every
+      entanglement with ``daily_derive_cutoff`` / the grounded-deferral arm
+      (a legitimately-DEFERRED forming session can never read stale — a
+      clock-bound variant would refusal-loop on a healthy lake);
+    * only the INTERSECTING dates are compared. A re-derived date ABSENT
+      from the store (the 1day lagging a 1m backfill — prebuild lag) stays
+      OUT of the gate (recency-by-absence is the prebuild's job, not a
+      corruption verdict); a STORED date absent from the re-derive (an
+      orphan row whose 1m base vanished) is an observe-only
+      ``derived_1day_orphan_rows`` WARN, never a stale verdict —
+      latest-wins cannot delete an orphan, so a stale verdict would be an
+      un-remediable refusal loop.
+
+    Returns ``"fresh"`` / ``"stale"``; *source* labels the orphan WARN.
+    """
+    from datetime import timedelta
+
+    if df_stored_1day.height == 0:
+        return "fresh"  # nothing stored to drift (callers key only stored partitions)
+
+    last_stored = max(_ist_date_of(ts) for ts in df_stored_1day.get_column("ts_utc").to_list())
+    before = last_stored + timedelta(days=1)
+    if segment == "FNO":
+        from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
+
+        bars = resample_1m_to_fno_daily(df_1m, before=before)
+    else:
+        from brutex.data.spot_daily_resample import resample_1m_to_daily
+
+        bars = resample_1m_to_daily(df_1m, before=before)
+
+    from datetime import UTC
+
+    def _instant(ts: datetime) -> datetime:
+        """Normalize a stamp to an aware-UTC instant (naive = UTC by contract)."""
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+    expected_by_date = {_ist_date_of(bar.timestamp): bar for bar in bars}
+    has_oi = "open_interest" in df_stored_1day.columns
+    orphans: list[str] = []
+    verdict = "fresh"
+    for row in df_stored_1day.sort("ts_utc").iter_rows(named=True):
+        ist_date = _ist_date_of(row["ts_utc"])
+        bar = expected_by_date.get(ist_date)
+        if bar is None:
+            orphans.append(ist_date.isoformat())
+            continue
+        stored_oi = row["open_interest"] if has_oi else None
+        stored_key = (
+            _instant(row["ts_utc"]),
+            float(row["open"]),
+            float(row["high"]),
+            float(row["low"]),
+            float(row["close"]),
+            int(row["volume"]),
+            None if stored_oi is None else int(stored_oi),
+        )
+        expected_key = (
+            _instant(bar.timestamp),
+            float(bar.open),
+            float(bar.high),
+            float(bar.low),
+            float(bar.close),
+            bar.volume,
+            bar.open_interest,
+        )
+        if stored_key != expected_key:
+            verdict = "stale"
+    if orphans:
+        _LOG.warning(
+            "derived_1day_orphan_rows",
+            source=source or "1day",
+            orphan_dates=orphans[:20],
+            orphan_count=len(orphans),
+            detail=(
+                "stored 1day row(s) whose 1-minute base is gone — observe-only "
+                "(latest-wins cannot delete an orphan; re-pull the 1-minute or "
+                "heal-recall the partition to converge)"
+            ),
+        )
+    return verdict
 
 
 def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -> pl.DataFrame:
@@ -66,8 +207,12 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     share ONE reader): keep-FIRST read dedup BEFORE the sort
     (DEC-LAKE-READ-UNIQUE-001 — the compare must see the same deduped bars every
     wired reader serves, never a poisoned-era physical duplicate), renamed +
-    projected to the resampler's canonical ``ts_utc``/OHLCV columns, sorted.
-    *source* labels the dedup log event; blank derives ``<symbol>/<interval>``.
+    projected to the resampler's canonical ``ts_utc``/OHLCV columns — plus
+    ``open_interest`` when the stored partition carries the column
+    (DEC-DERIVED-1DAY-FRESHNESS-001: the OI-aware compare needs it; every
+    production partition carries it, so the compares are OI-aware end-to-end)
+    — sorted. *source* labels the dedup log event; blank derives
+    ``<symbol>/<interval>``.
     """
     import polars as pl
 
@@ -77,11 +222,10 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
         pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
         source=source or f"{symbol_dir.name}/{interval}",
     )
-    return (
-        frame.rename({"timestamp": "ts_utc"})
-        .select("ts_utc", "open", "high", "low", "close", "volume")
-        .sort("ts_utc")
-    )
+    columns = ["ts_utc", "open", "high", "low", "close", "volume"]
+    if "open_interest" in frame.columns:
+        columns.append("open_interest")
+    return frame.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
 
 
 def lake_derived_freshness_verdicts(
@@ -100,15 +244,18 @@ def lake_derived_freshness_verdicts(
     AND the lake stores BOTH the symbol's ``1minute`` base and the derived
     partition, re-derive from the 1-minute via the canonical session-anchored
     resampler and record :func:`compare_derived_freshness`'s verdict (``"fresh"``
-    / ``"stale"``). HONEST abstain envelope (Golden Rule #1 — never guess):
+    / ``"stale"``). Since DEC-DERIVED-1DAY-FRESHNESS-001 a requested ``"1day"``
+    is keyed too — via the segment-routed :func:`compare_daily_freshness` VALUE
+    arm — closing the hole where the derived ``1day`` (the PDH/PDL anchor
+    source) was checked NOWHERE. HONEST abstain envelope (Golden Rule #1 —
+    never guess):
 
-    * a NON-derived interval (``1minute`` / ``1day``) is never keyed — there is
-      nothing to re-derive (the daily partition derives via the midnight-IST
-      resample, a different law — deliberately out of this gate's scope, exactly
-      as the doctor probe scopes it);
+    * ``1minute`` is never keyed — there is nothing to re-derive;
     * a pair with NO stored derived partition is never keyed — the ZERO-bar
       slice preflight (:func:`~brutex.engine.sweep_preflight.preflight_slices`)
-      already owns the missing-data refusal;
+      already owns the missing-data refusal; for ``1day`` this also keeps
+      recency-by-absence OUT of the gate (a 1day lagging the 1m base is the
+      prebuild's job — disclosed in :func:`compare_daily_freshness`);
     * a symbol with NO stored ``1minute`` base is never keyed — the verdict is
       unknowable without the base (abstain, mirroring the doctor's skip).
 
@@ -122,7 +269,8 @@ def lake_derived_freshness_verdicts(
     interval_to_label = {v: k for k, v in INTRADAY_TF_INTERVALS.items()}
     verdicts: dict[tuple[str, str], str] = {}
     requested = [i for i in intervals if i in interval_to_label]
-    if not requested:
+    want_daily = "1day" in intervals
+    if not requested and not want_daily:
         return verdicts
     for symbol in symbols:
         symbol_dir = lake_root / "bars" / exchange / segment / symbol
@@ -141,4 +289,15 @@ def lake_derived_freshness_verdicts(
                 read_lake_bars_frame(symbol_dir, interval),
                 parse_label(interval_to_label[interval]),
             )
+        if want_daily:
+            daily_dir = symbol_dir / "1day"
+            if daily_dir.is_dir() and any(daily_dir.rglob("*.parquet")):
+                if df_1m is None:
+                    df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+                verdicts[(symbol, "1day")] = compare_daily_freshness(
+                    df_1m,
+                    read_lake_bars_frame(symbol_dir, "1day"),
+                    segment=segment,
+                    source=f"{symbol}/1day",
+                )
     return verdicts

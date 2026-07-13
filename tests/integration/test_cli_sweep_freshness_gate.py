@@ -99,7 +99,11 @@ def _seed(tmp_path: Path, *, derived: str) -> tuple[Path, Path]:
                 segment=_SEGMENT,
                 symbol="NIFTY",
                 interval="5minute",
-                bars=frame_to_candle_bars(resample_1m_to_tf(df_1m, 5)),
+                # The production writer convention (DEC-DERIVED-OI-NULL-
+                # HONEST-001): null OI preserved — the OI-aware freshness
+                # compare (DEC-DERIVED-1DAY-FRESHNESS-001) would honestly
+                # read a legacy fabricated-0 fixture as stale.
+                bars=frame_to_candle_bars(resample_1m_to_tf(df_1m, 5), absent_open_interest=None),
             )
     return lake_root, catalog_path
 

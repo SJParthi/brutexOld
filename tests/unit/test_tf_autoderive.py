@@ -87,10 +87,12 @@ class TestAutoDeriveSurfaceRemoved:
                 f"{gone} must stay removed — derived TFs are written only by the "
                 "pipeline prebuild (DEC-PIPELINE-AUTOPREBUILD-001)"
             )
-        # The compare core + the sweep-preflight freshness source + its shared lake
-        # reader (DEC-SUSPICION-SWEEP-FIXES-001 G1) — and NOTHING of the removed
+        # The compare core (+ the DEC-DERIVED-1DAY-FRESHNESS-001 daily arm) +
+        # the sweep-preflight freshness source + its shared lake reader
+        # (DEC-SUSPICION-SWEEP-FIXES-001 G1) — and NOTHING of the removed
         # auto-derive arm.
         assert tf_autoderive.__all__ == [
+            "compare_daily_freshness",
             "compare_derived_freshness",
             "lake_derived_freshness_verdicts",
             "read_lake_bars_frame",
@@ -143,7 +145,9 @@ def _write_derived(lake_root, sink, *, symbol: str = "NIFTY", interval: str = "5
         segment="INDEX",
         symbol=symbol,
         interval=interval,
-        bars=frame_to_candle_bars(derived),
+        # The production writer convention (DEC-DERIVED-OI-NULL-HONEST-001):
+        # null OI preserved, never fabricated as 0.
+        bars=frame_to_candle_bars(derived, absent_open_interest=None),
     )
 
 
@@ -155,9 +159,35 @@ class TestReadLakeBarsFrame:
         frame = tf_autoderive.read_lake_bars_frame(
             tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY", "1minute"
         )
-        assert frame.columns == ["ts_utc", "open", "high", "low", "close", "volume"]
+        # DEC-DERIVED-1DAY-FRESHNESS-001: stored partitions carry the OI
+        # column, so the compare frame projects it too (the OI-aware compare;
+        # pre-fix this pin listed the OHLCV-6 only — deliberately flipped).
+        assert frame.columns == [
+            "ts_utc",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "open_interest",
+        ]
         assert frame.height == len(bars)
         assert frame.get_column("ts_utc").is_sorted()
+
+    def test_reads_ohlcv_only_when_stored_partition_has_no_oi_column(self, tmp_path) -> None:
+        """A hand-written legacy partition WITHOUT the OI column projects the
+        OHLCV-6 (the compare degrades to OI-blind on that partition only)."""
+        import polars as pl
+
+        _, bars = _seed_lake_1m(tmp_path)
+        symbol_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY"
+        raw = pl.read_parquet(symbol_dir.as_posix() + "/1minute/**/*.parquet")
+        out = symbol_dir / "2minute" / "2024"
+        out.mkdir(parents=True)
+        raw.drop("open_interest").write_parquet(out / "01.parquet")
+        frame = tf_autoderive.read_lake_bars_frame(symbol_dir, "2minute")
+        assert frame.columns == ["ts_utc", "open", "high", "low", "close", "volume"]
+        assert frame.height == len(bars)
 
     def test_source_label_defaults_and_overrides(self, tmp_path) -> None:
         """The dedup log source: blank derives <symbol>/<interval>; explicit wins
@@ -211,7 +241,10 @@ class TestLakeDerivedFreshnessVerdicts:
 
     def test_abstains_without_stored_derived_partition(self, tmp_path) -> None:
         """No stored derived partition → NOT keyed (the zero-bar slice preflight
-        owns missing data); non-derived intervals are never keyed either."""
+        owns missing data). Since DEC-DERIVED-1DAY-FRESHNESS-001 a requested
+        "1day" IS a checkable interval — but with no stored 1day partition it
+        abstains identically (recency-by-absence stays out of the gate);
+        "1minute" is never keyed."""
         _seed_lake_1m(tmp_path)
         verdicts = tf_autoderive.lake_derived_freshness_verdicts(
             tmp_path,
@@ -243,14 +276,17 @@ class TestLakeDerivedFreshnessVerdicts:
         )
         assert verdicts == {}
 
-    def test_no_derived_intervals_requested_returns_empty_fast(self, tmp_path) -> None:
-        """A fetched-intervals-only request short-circuits with ZERO lake reads."""
+    def test_no_checkable_intervals_requested_returns_empty_fast(self, tmp_path) -> None:
+        """A 1minute-only request short-circuits with ZERO lake reads. (The
+        pre-DEC-DERIVED-1DAY-FRESHNESS-001 pin ALSO listed "1day" here —
+        deliberately flipped: "1day" is now a checkable interval, so only
+        "1minute" short-circuits.)"""
         verdicts = tf_autoderive.lake_derived_freshness_verdicts(
             tmp_path,
             exchange="NSE",
             segment="INDEX",
             symbols=["NIFTY"],
-            intervals=["1minute", "1day"],
+            intervals=["1minute"],
         )
         assert verdicts == {}
 
