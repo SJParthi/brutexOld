@@ -34,6 +34,7 @@ from brutex.dashboard.pull_intent import (
     pull_intent_resume_active,
     resolve_pull_intent_resume,
     restart_cap_message,
+    restore_intent_after_refused_start,
     run_auto_resume,
     run_legacy_resume,
     synthesize_legacy_intent,
@@ -454,6 +455,100 @@ def test_started_launch_with_no_banner_stays_silent_and_unchanged(tmp_path: Path
         "2024-01-01",
         "2024-02-01",
     )
+
+
+# ── restore_intent_after_refused_start (refuter round 3 F-1) ─────────────────
+
+
+def test_refused_start_restores_the_prior_intent_verbatim(tmp_path: Path) -> None:
+    # THE r3 F-1 root fix: a refused start's pre-start persist has clobbered
+    # the RUNNING pull's on-disk intent — the restore puts the prior snapshot
+    # back VERBATIM (scope + restarts + created_at included), so a crash in
+    # the window resumes the RUNNING pull's scope, never the refused click's.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only", restarts=1)
+    assert store.write(prior) is True
+    # The refused click's persist (the clobber the pre-start ordering leaves).
+    persist_intent_for_launch(
+        store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
+    )
+    clobbered = store.load()
+    assert clobbered is not None and clobbered.scope is None, "precondition: clobber landed"
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is True
+    assert store.load() == prior, "the prior intent must round-trip field-for-field"
+
+
+def test_refused_start_with_no_prior_clears_the_orphan_clobber(tmp_path: Path) -> None:
+    # The A2 sibling shape: a launch refused by a FOREIGN-process flock left a
+    # fresh intent on disk with nothing in-process to ever clear it — a later
+    # boot would "resume" a pull that never started. prior=None ⇒ clear.
+    store = PullIntentStore(tmp_path)
+    persist_intent_for_launch(
+        store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+    )
+    assert store.path.exists()
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=False, started=False)
+    assert restored is True
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_refused_start_current_absent_never_resurrects(tmp_path: Path) -> None:
+    # The winner's on_finally clear raced between the persist and the restore
+    # (its pull FINISHED) — "no intent" is the correct durable record; writing
+    # the prior back would resurrect an intent for a completed pull.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only")
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is False
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_started_launch_restores_nothing(tmp_path: Path) -> None:
+    # A STARTED launch's own persisted intent is the correct durable record —
+    # the restore must not touch it (the started gate).
+    store = PullIntentStore(tmp_path)
+    persist_intent_for_launch(
+        store, dry_run=False, symbols="NIFTY", symbol=None, from_date=None, to_date=None
+    )
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=False, started=True)
+    assert restored is False
+    loaded = store.load()
+    assert loaded is not None and loaded.symbols == "NIFTY"
+
+
+def test_dry_run_restores_nothing(tmp_path: Path) -> None:
+    # A dry-run never persisted an intent (persist_intent_for_launch's law) —
+    # there is nothing to undo, and a pre-existing REAL intent must survive.
+    store = PullIntentStore(tmp_path)
+    prior = _intent()
+    assert store.write(prior) is True
+    restored = restore_intent_after_refused_start(store, prior=None, dry_run=True, started=False)
+    assert restored is False
+    assert store.load() == prior
+
+
+def test_refused_start_restore_write_failure_degrades_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Best-effort like every store I/O: a failed restore write is logged
+    # (pull_intent.write_failed + restored="write_failed") and returns False —
+    # never a raise into the launch path.
+    store = PullIntentStore(tmp_path)
+    prior = _intent(scope="spot-only")
+    assert store.write(prior) is True
+    persist_intent_for_launch(
+        store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
+    )
+
+    def _boom(dest: Path, write_to: Any, **kwargs: Any) -> None:
+        raise OSError("disk exploded mid-restore")
+
+    monkeypatch.setattr(pull_intent_module, "atomic_write_simple", _boom)
+    restored = restore_intent_after_refused_start(store, prior=prior, dry_run=False, started=False)
+    assert restored is False
 
 
 # ── probe_pull_singleflight (the REAL flock against a tmp lake root) ──────────

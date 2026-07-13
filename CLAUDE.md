@@ -2463,7 +2463,13 @@ hostile-review pass._
   2025-10-21 session — and since the r1 fix round the DASHBOARD wiring itself is
   frozen-clock predicate-pinned (the R4 M6 mutant re-applied + verified killed). `PullIntent` gains the OPTIONAL `scope` field (pre-scope files
   parse to None = full) so a crashed spot-only pull resumes SPOT-ONLY — never a
-  silently-widened F&O pull. M2 verify-then-wire outcome: NO new ledger-flush wiring
+  silently-widened F&O pull; since the refuter-round-3 fold a REFUSED concurrent
+  launch RESTORES the running pull's persisted intent (the pre-start persist had
+  clobbered it — a refused full-scope click during a live spot-only pull left a
+  full-scope intent whose crash-replay resumed the WRONG scope; NEW
+  `restore_intent_after_refused_start`, fails-before-pinned at 08d1bb43 — the
+  clobber CLASS is inherited, the restore fixes the symbols/dates dimensions
+  too). M2 verify-then-wire outcome: NO new ledger-flush wiring
   needed — `pull_all_spot` flushes the durable ledger per processed window internally
   (mid-run-interrupt durability e2e GREEN with zero wiring). HONEST residuals: settle
   time UNMEASURED (mis-set ⇒ bounded deferral churn, never wrong data — the #1774
@@ -6350,7 +6356,9 @@ hostile-review pass._
   the composed mid-run Muhurat belt — `market_hours.py` byte-untouched, the
   belt honoring the SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch (guard off ⇒
   belt off — the hostile-review r1 ruling);
-  spot-only intents resume spot-only; ENGINE UNCHANGED —
+  spot-only intents resume spot-only — and a REFUSED concurrent launch
+  restores the running pull's persisted intent (refuter-round-3 F-1;
+  the pre-start persist no longer clobbers it); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)
   Earlier: `claude/crossverify-producer`

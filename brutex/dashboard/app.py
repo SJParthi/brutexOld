@@ -231,6 +231,7 @@ from brutex.dashboard.pull_intent import (
     clear_banner_after_start,
     persist_intent_for_launch,
     probe_pull_singleflight,
+    restore_intent_after_refused_start,
     run_auto_resume,
     run_legacy_resume,
 )
@@ -4885,6 +4886,7 @@ def build_app(
         # REAL pull's intent. The clear fires in the job's finally, on the
         # worker's success AND failure, BEFORE the single-flight release.
         on_finally: Callable[[], None] | None = None
+        prior_intent: PullIntent | None = None
         if pull_intent_store is not None and not dry_run:
             # Best-effort write (a failed write is logged, never blocks the
             # pull); the clear hook is wired for EVERY real pull regardless —
@@ -4893,6 +4895,11 @@ def build_app(
             # fires AFTER start() below, gated on `started`
             # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
             # a refused start launches nothing and must not drop the banner).
+            # Snapshot the CURRENT on-disk intent FIRST so a REFUSED start can
+            # put it back (refuter round 3 F-1, DEC-PULL-SCOPED-ALL-ONECLICK-001
+            # — the pre-start persist otherwise CLOBBERS a RUNNING pull's
+            # intent, and a crash in that window resumes the WRONG scope).
+            prior_intent = pull_intent_store.load()
             persist_intent_for_launch(
                 pull_intent_store,
                 dry_run=dry_run,
@@ -4925,6 +4932,16 @@ def build_app(
             # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
             # touches it (both gates live inside the helper).
             clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
+            # Refused-start intent RESTORE (refuter round 3 F-1): the persist
+            # above ran BEFORE start() for pre-crash durability, so a REFUSED
+            # start (a pull already RUNNING here, flock contention, or the
+            # foreign-host lease) clobbered the running pull's on-disk intent
+            # — put the prior snapshot back (prior=None ⇒ clear the orphan;
+            # already-cleared-by-the-winner ⇒ leave absent). A started or
+            # dry-run launch restores nothing (gates live in the helper).
+            restore_intent_after_refused_start(
+                pull_intent_store, prior=prior_intent, dry_run=dry_run, started=started
+            )
         return {
             "started": started,
             "targets": len(targets),

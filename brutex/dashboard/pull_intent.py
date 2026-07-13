@@ -87,6 +87,7 @@ __all__ = [
     "pull_intent_resume_active",
     "resolve_pull_intent_resume",
     "restart_cap_message",
+    "restore_intent_after_refused_start",
     "run_auto_resume",
     "run_legacy_resume",
     "synthesize_legacy_intent",
@@ -481,6 +482,75 @@ def clear_banner_after_start(
         )
         return True
     return False
+
+
+def restore_intent_after_refused_start(
+    store: PullIntentStore,
+    *,
+    prior: PullIntent | None,
+    dry_run: bool,
+    started: bool,
+) -> bool:
+    """Undo the pre-start intent persist when the start was REFUSED — never raises.
+
+    Refuter round 3 F-1 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779):
+    :func:`persist_intent_for_launch` deliberately runs BEFORE
+    ``BackgroundPullJob.start`` (pre-crash durability — a SIGKILL between the
+    worker spawn and a later persist would leave a running-then-dead pull with
+    NO durable intent, and the ``on_finally`` clear must be wired INTO
+    ``start()``), so a REFUSED start (a pull already RUNNING in-process, lake
+    ``flock`` contention, or the foreign-host lease) has already CLOBBERED the
+    on-disk intent with the refused click's payload. Executed proof: a refused
+    FULL-scope click during a live spot-only pull left ``scope=null`` on disk,
+    and a crash in that window resumed the WRONG scope (the F&O metadata spine
+    entered). The clobber CLASS is inherited (pre-scope it clobbered
+    ``symbols``/``from_date``/``to_date``/``restarts`` the same way); this
+    restore closes every dimension at once.
+
+    *prior* is the caller's snapshot of the on-disk intent taken BEFORE its
+    persist. On a refused REAL start (``started=False``, not *dry_run*):
+
+    * current on-disk intent ABSENT → leave absent, restore NOTHING (the
+      RUNNING winner's ``on_finally`` clear raced between the persist and this
+      restore — its pull finished, so "no intent" IS the correct durable
+      record; writing *prior* back would resurrect an intent for a completed
+      pull);
+    * *prior* is ``None`` → :meth:`~PullIntentStore.clear` the orphan clobber
+      (the foreign-flock refusal shape: nothing in-process would EVER clear
+      it, so a later boot would "resume" a pull that never started);
+    * else → re-write *prior* VERBATIM (``restarts``/``created_at``/``scope``
+      included), so a crash in the window resumes the RUNNING pull's
+      scope/selection, never the refused click's.
+
+    A started launch or a *dry_run* restores nothing (``False`` —
+    :func:`persist_intent_for_launch`'s dry-run law means there is nothing to
+    undo). Returns ``True`` iff an on-disk restore/clear was performed.
+    HONEST residual (best-effort, the :func:`probe_pull_singleflight` TOCTOU
+    posture): a winner clear landing between this function's load and its
+    restore write resurrects the winner's OWN just-finished intent — worst
+    case one idempotent zero-fetch boot re-pull, never a wrong scope.
+    """
+    if dry_run or started:
+        return False
+    if store.load() is None:
+        return False
+    if prior is None:
+        store.clear()
+        _LOG.info(
+            "pull_intent.refused_start_restored",
+            path=str(store.path),
+            restored="cleared_orphan",
+        )
+        return True
+    written = store.write(prior)
+    _LOG.info(
+        "pull_intent.refused_start_restored",
+        path=str(store.path),
+        restored="prior" if written else "write_failed",
+        prior_scope=prior.scope,
+        prior_restarts=prior.restarts,
+    )
+    return written
 
 
 def probe_pull_singleflight(lake_root: Path) -> bool:

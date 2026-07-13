@@ -226,3 +226,92 @@ def test_spot_only_intent_resumes_spot_only_never_widened(
         assert ", F&O skipped by design (spot-only scope)" in snap["detail"]
         assert "Greeks: not run — no options in this pull" in snap["detail"]
         _wait_for(lambda: not intent_store.path.exists())
+
+
+def test_refused_full_scope_click_never_clobbers_running_spot_only_intent(
+    store: InstrumentStore, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuter round 3 F-1 (fails-before-proven at 08d1bb43): while a SPOT-ONLY
+    pull genuinely RUNS (blocked mid-spot), a FULL-scope click is REFUSED by
+    the single-flight — its pre-start intent persist must NOT clobber the
+    running pull's persisted scope, and a SIGKILL inside that window
+    (simulated with the exact on-disk artifact the crash leaves) must resume
+    SPOT-ONLY through the production boot-resume seam: the F&O spines stay at
+    ZERO calls. Pre-fix the clobbered intent read ``scope=null`` and the
+    crash-replay entered ``pull_expiries_contracts`` (the executed probe)."""
+    _pin_creds_present(monkeypatch)
+    gate = threading.Event()
+    fno_calls: list[str] = []
+
+    def _blocking_spot(*args: Any, **kwargs: Any) -> Any:
+        opened = gate.wait(timeout=10.0)
+        assert opened
+        return _fake_spot(*args, **kwargs)
+
+    def _spy_metadata(*args: Any, **kwargs: Any) -> Any:
+        fno_calls.append("metadata")  # pragma: no cover — must never run
+        return _fake_metadata(*args, **kwargs)
+
+    def _spy_historical(*args: Any, **kwargs: Any) -> Any:
+        fno_calls.append("historical")  # pragma: no cover — must never run
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _blocking_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _spy_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _spy_historical)
+
+    from brutex.dashboard.pull_scope import CrossverifyTailOutcome
+
+    def _tail() -> CrossverifyTailOutcome:
+        # Injected fake tail (the sibling-test idiom): the REAL default tail
+        # would start the crossverify producer, whose held lake flock would
+        # make the boot resume read peer_active — out of this pin's scope.
+        return CrossverifyTailOutcome(status="started", human="producer started (probe tail)")
+
+    def _client() -> TestClient:
+        app = build_app(
+            DashboardState(),
+            instrument_store=store,
+            pull_intent_store=intent_store,
+            crossverify_tail=_tail,
+        )
+        return TestClient(app)
+
+    with _client() as client:
+        started = client.post(
+            "/api/v1/universe/pull-pipeline", params={"scope": "spot-only"}
+        ).json()
+        assert started["started"] is True
+        mid = intent_store.load()
+        assert mid is not None and mid.scope == "spot-only"
+        # The REFUSED full-scope click while the winner is blocked mid-spot.
+        refused = client.post("/api/v1/universe/pull-pipeline")
+        assert refused.status_code == 200
+        assert refused.json()["started"] is False
+        after = intent_store.load()
+        assert after is not None, "the running pull's intent must survive the refused click"
+        assert after.scope == "spot-only", (
+            "a REFUSED full-scope click must never clobber the RUNNING "
+            "spot-only pull's persisted intent scope (refuter r3 F-1)"
+        )
+        # The SIGKILL artifact: the on-disk intent a crash INSIDE the window
+        # would leave behind (the winner's on_finally clear never runs).
+        crash_raw = intent_store.path.read_text(encoding="utf-8")
+        gate.set()
+        assert _wait_for_job(client)["state"] == "done"
+        _wait_for(lambda: not intent_store.path.exists())
+
+    # Crash replay: restore the captured window artifact, then drive the
+    # PRODUCTION boot-resume seam on a fresh app.
+    intent_store.path.write_text(crash_raw, encoding="utf-8")
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    with _client() as boot:
+        boot.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
+        snap = _wait_for_job(boot)
+        assert snap["state"] == "done"
+        assert fno_calls == [], (
+            "the crash-replay resume must stay SPOT-ONLY — pre-fix the "
+            "clobbered intent resumed FULL scope and entered the F&O spines"
+        )
+        assert snap["detail"].startswith("spot-only pipeline complete — ")
+        _wait_for(lambda: not intent_store.path.exists())

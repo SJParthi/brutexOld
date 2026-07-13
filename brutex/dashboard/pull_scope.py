@@ -55,7 +55,13 @@ SCOPE_FULL: Final[str] = "full"
 
 #: The scoped-ALL spot pull (DEC-PULL-SCOPED-ALL-ONECLICK-001): every admitted
 #: index + stock, 1-minute, 2020-01-01 → prev day, F&O phases structurally
-#: replaced by the no-op reports below. NO options, NO Greeks.
+#: replaced by the no-op reports below. NO options, NO Greeks. That whole-
+#: universe full-range shape is what the button + the CLI always send; the
+#: ``/pull-pipeline`` ROUTE may additionally combine the token with a
+#: ``symbols=``/``symbol=`` selection and/or a ``from_date=``/``to_date=``
+#: range — a SUPPORTED NARROWING (a smaller spot-only pull; the token only
+#: swaps the two F&O phases, so the combination can never widen a vendor
+#: pull — refuter round 3 F-D2, route-pinned).
 SCOPE_SPOT_ONLY: Final[str] = "spot-only"
 
 #: The whole scope vocabulary. Phase 2 adds e.g. ``"spot+options"`` HERE — one
@@ -268,9 +274,11 @@ class CrossverifyTailOutcome:
     human: str  # the exact clause tail (never empty)
 
 
-#: The tail statuses ``--strict-exit`` escalates (the crossverify exit-2
-#: verdict family + the fence's own ``failed``). ``disabled`` /
-#: ``not_configured`` / the skip family never escalate.
+#: The tail statuses ``--strict-exit`` escalates (the crossverify ALERT-status
+#: verdict family + the fence's own ``failed`` — named by alert STATUS, never
+#: by exit code: ``refused`` exits 1 on a lock refusal on the direct
+#: ``brutex crossverify run`` surface, so it is not uniformly exit-2).
+#: ``disabled`` / ``not_configured`` / the skip family never escalate.
 TAIL_ALERT_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "refused", "withheld_partial", "blocked", "publish_failed", "suspect"}
 )

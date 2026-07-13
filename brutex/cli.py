@@ -1008,9 +1008,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Exit 2 when the pull left quarantined symbols or the cross-verify "
-            "tail's verdict is in the exit-2 family — default keeps those exit 0 "
-            "(printed, re-attempted next run). Still-failing windows exit 2 "
-            "regardless (they stop the chain — no flag needed)"
+            "tail's verdict is in the alert-status family (TAIL_ALERT_STATUSES) "
+            "— default keeps those exit 0 (printed, re-attempted next run). "
+            "Still-failing windows exit 2 regardless (they stop the chain)"
         ),
     )
 

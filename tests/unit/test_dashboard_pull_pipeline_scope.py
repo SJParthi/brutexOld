@@ -269,6 +269,45 @@ def test_scope_spot_only_swaps_exactly_two_fno_bindings(
     assert spines.historical_calls == 1
 
 
+def test_scope_spot_only_composes_with_selection_and_dates_narrowing_only(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter r3 F-D2 pin] ``scope=spot-only`` composes with ``symbols=`` +
+    ``from_date=``/``to_date=`` on the public route as a SUPPORTED NARROWING:
+    the selection + the date range thread into the spot phase verbatim while
+    the two F&O spines stay structurally unreachable — the extra params can
+    narrow a spot-only pull but can never widen one (the B H9 law holds with
+    the combination too). A future refactor must not silently turn the
+    combination into a 400 (the intent RESUME re-fires through the SAME
+    launch path and may legitimately carry it) or into a widening."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    with _make_client(store, monkeypatch, tmp_path) as client:
+        resp = client.post(
+            _ROUTE,
+            params={
+                "scope": "spot-only",
+                "symbols": "NIFTY",
+                "from_date": "2024-01-02",
+                "to_date": "2024-02-01",
+                "dry_run": "true",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is True
+        assert body["scope"] == "spot-only"
+        assert body["target_source"] == "selection"
+        _wait_for_job(client)
+    assert len(spines.spot_kwargs) == 1
+    assert spines.spot_kwargs[0]["from_date"] == "2024-01-02"
+    assert spines.spot_kwargs[0]["to_date"] == "2024-02-01"
+    # Widening impossible regardless of the extra params: F&O spines at ZERO.
+    assert spines.metadata_calls == 0
+    assert spines.historical_calls == 0
+
+
 def test_scope_spot_only_market_closed_is_composed_muhurat_belt(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

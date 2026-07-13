@@ -19,15 +19,26 @@ DOES (every invocation, identically):
 - fires the **TickVault cross-verify producer** as the LAST step (fail-soft:
   a broken verify config/tail NEVER fails the pull).
 
-WILL NEVER:
+WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
 
-- pull options or futures metadata/candles (the note says
-  `F&O skipped by design (spot-only scope)` — never a fake "0 expiries");
+- pull options — and the pull itself never pulls futures metadata/candles
+  either (the note says `F&O skipped by design (spot-only scope)` — never a
+  fake "0 expiries"). HONEST tail scope (refuter-round-3 F-D1): the
+  cross-verify tail (default ON; `BRUTEX_CROSSVERIFY=off` disables it) runs
+  the #1776 producer, whose OWN pull leg currently fetches NIFTY/BANKNIFTY
+  FUTURES candles + their F&O metadata under its own DEC
+  (DEC-CROSSVERIFY-PRODUCER-001 — that leg's scope is the producer's,
+  not this command's). PR #1515 (the crossverify spot-only trim, in flight)
+  removes that leg — once it lands the whole chain is spot-only;
 - run Greeks enrichment (the note says
   `Greeks: not run — no options in this pull`);
 - accept a date range (`--start`/`--end` deliberately do not exist — full-range
   convergence IS the promise; date-scoped pulls stay on `brutex fetch` / the
-  full-pipeline button's pickers);
+  full-pipeline button's pickers). The underlying `/pull-pipeline` ROUTE, by
+  contrast, MAY combine `scope=spot-only` with `symbols=`/`from_date=`/
+  `to_date=` — a supported NARROWING (a smaller spot-only pull; the token only
+  swaps the F&O phases, so the combination can never widen — refuter-round-3
+  F-D2, route-pinned);
 - touch the ENGINE (NIFTY/BANKNIFTY/SENSEX), the vocabulary, the rate caps, or
   the lake schema.
 
@@ -36,6 +47,16 @@ WILL NEVER:
 ```
 30 17 * * *  /path/to/brutex pull-all-spot --auto --lake-root /Volumes/lake
 ```
+
+The crontab time is HOST-LOCAL (refuter-round-3 F-D3): schedule it so it
+lands AT/AFTER the settle time **in IST** — run the cron on an IST host, or
+shift the line (e.g. 17:30 IST = 12:00 UTC). A TZ-misplaced line lands
+`before_settle` every day: one printed deferral line, exit 0, FOREVER — a
+silent permanent no-pull. That silence is BY DESIGN (deferrals are
+cron-green) and this lane has NO dead-man/freshness check (unlike the
+nightly chain); an operator who wants "no pull landed today" alerting should
+wire the existing healthcheck patterns (the nightly chain's dead-man lane is
+the precedent) — deliberately not built into this command.
 
 `--auto` gates BEFORE any lock/vendor work; every deferral is ONE
 `pull-all-spot deferred: …` line + **exit 0** (cron-green):
@@ -94,7 +115,10 @@ data.
 ## 4. Verification loop (after every run)
 
 1. The finish note / stdout `spot:` line — `N window(s) FAILED (will retry)`
-   must match the **/coverage/windows** FAILED tab count.
+   must match the **/coverage/windows** FAILED tab count. Pre-#1515 you may
+   ALSO see `groww-future` (FUT) windows there — those are written by the
+   cross-verify tail's #1776 producer pull leg (see §1's honest tail note),
+   not by this command's spot pull.
 2. **/completeness** — spot coverage per symbol (a late-listed symbol reads
    honest `partial`).
 3. **/coverage** — the per-symbol rollup. The dashboard button's finish detail
@@ -110,7 +134,11 @@ Every processed window is checkpointed to the durable ledger MID-pull
 the un-flushed tail; the next run re-pulls ONLY missing/FAILED windows. A
 dashboard-launched real pull additionally persists a crash-recovery intent —
 the boot-time resume re-fires it **spot-only** (the scope rides the intent;
-it never widens into an F&O pull).
+it never widens into an F&O pull). A concurrently-REFUSED click cannot
+clobber the running pull's intent either: the launcher restores the prior
+on-disk intent on a refused start (refuter-round-3 F-1 — pre-fix a refused
+full-scope click during a live spot-only pull left a full-scope intent on
+disk, so a crash in that window resumed the wrong scope).
 
 NAMED RESIDUAL (refuter-round-1 r2 MINOR/NIT-4 — the ROLLBACK direction):
 that scope law holds only on scope-aware code. If you roll the DEPLOYED code
