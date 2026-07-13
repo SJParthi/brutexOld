@@ -48,7 +48,15 @@ Per-class criteria (the binding table — DEC-PULL-TODAY-COMPLETENESS-GATE-001):
   wording — same bug class, same mechanism — and a HEURISTIC: a genuinely
   settled all-zero-volume cash day would false-demote (near-impossible — a
   settled cash candle exists because trades happened), costing one bounded
-  streak-exempt same-evening deferral, never a loss or a SKIP.
+  streak-exempt same-evening deferral, never a loss or a SKIP. The mirror
+  false NEGATIVE (MIGRATION.md #1755 (b), round-2/3 review): a
+  PROGRESSIVELY-settling mixed CASH day (some minutes settled ``volume > 0``,
+  some forming ``volume == 0``) PASSES this all-bars rule and keep-first
+  freezes the forming minutes — a disclosed residual, conditional on
+  UNVERIFIED per-minute CASH settlement behavior, probe-measurable via the
+  #1756 probe's per-CASH ``raw_null_volume``/``rows_len6`` fields (an ANY-bar
+  CASH rule was deliberately not chosen — it would false-demote every
+  illiquid microcap with one quiet minute).
 * ``FUT`` — shape mandatory: INCOMPLETE iff ANY today bar has
   ``open_interest is None`` (ANY-bar, not all-bars: an all-bars rule would pass
   a progressively-settling mixed day and freeze its OI-null minutes) OR bars
