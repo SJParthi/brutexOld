@@ -113,6 +113,16 @@ def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_
     ``close * max_ratio <= prev_close`` (a down-spike). The boundary
     (exactly ``max_ratio``x) is treated as bad (``>=`` / ``<=``).
 
+    RULE SCOPE (DEC-DERIVED-TF-AUDIT-001, honesty note): the rule judges the
+    CLOSE only — a bar with a sane close but a corrupt scaled EXTREME (a ×10
+    ``high`` beside an ordinary close) passes this screen (pinned in
+    ``tests/integration/test_derived_tf_defect_pins.py``). The parse-time
+    bounded clamp (DEC-OHLC-CLAMP-BOUNDED-001) now refuses the clamp-TRIGGERED
+    subset of that class at ingest; a corrupt extreme that never triggers a
+    clamp remains unjudged here — the named follow-up
+    DEC-BADTICK-EXTREMES-002 (extend the test to the bar's extremes vs the
+    previous close).
+
     Parameters
     ----------
     prev_close

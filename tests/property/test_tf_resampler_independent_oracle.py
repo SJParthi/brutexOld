@@ -450,3 +450,287 @@ def test_stored_daily_jan1_ist_bar_lands_in_the_december_utc_partition(
     assert datetime(2024, 12, 30, 18, 30) in labels  # the Dec-31-IST session's bar
     january_daily = lake / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1day" / "2025" / "01.parquet"
     assert not january_daily.exists(), "Jan-1-IST daily wrongly stored in a January partition"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-DERIVED-TF-AUDIT-001 — the audit's oracle extensions. Six legs the
+# original harness did not cover: Muhurat/evening + 13:45-open minute draws,
+# pre-09:15 whole-minute draws (the P2 formula-parity capture), longer
+# multi-day frames across a weekend gap, the FNO STORED-lake OI leg (the
+# DEC-DERIVED-OI-NULL-HONEST-001 permanent net — fails at the merge base),
+# the as-of cut leg through the movers filter, and the OI strict-last
+# discrimination pin (the docstring-literal semantic E1 proved: 1,670/1,670
+# ambiguity buckets == strict-last; "last non-null" REFUTED).
+# ────────────────────────────────────────────────────────────────────────
+
+#: Calendar-verified off-09:15 session opens (IST wall-clock): the 2024
+#: Diwali Muhurat evening (18:00) and the 2025 afternoon Muhurat (13:45).
+_EVENING_POOLS: tuple[tuple[date, time], ...] = (
+    (date(2024, 11, 1), time(18, 0)),
+    (date(2024, 11, 1), time(18, 15)),
+    (date(2025, 10, 21), time(13, 45)),
+)
+
+
+@st.composite
+def _evening_frames(draw: st.DrawFn) -> pl.DataFrame:
+    """Minute draws INSIDE a Muhurat/evening session (offsets 0..59)."""
+    day, open_ist = draw(st.sampled_from(_EVENING_POOLS))
+    open_utc = datetime.combine(day, open_ist) - _IST_OFFSET
+    present = draw(
+        st.lists(st.integers(min_value=0, max_value=59), min_size=1, max_size=25, unique=True)
+    )
+    rows = []
+    for minute in sorted(present):
+        open_, high, low, close = _draw_ohlc(draw)
+        rows.append(
+            (
+                open_utc + timedelta(minutes=minute),
+                open_,
+                high,
+                low,
+                close,
+                draw(st.integers(min_value=0, max_value=1_000_000)),
+            )
+        )
+    return pl.DataFrame(
+        rows,
+        schema={
+            "ts_utc": pl.Datetime(time_unit="us"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+        orient="row",
+    ).sort("ts_utc")
+
+
+@given(df=_evening_frames())  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
+@settings(max_examples=60, deadline=None)
+def test_muhurat_evening_frames_match_the_oracle(df: pl.DataFrame) -> None:
+    """Off-09:15 session opens: the fixed 09:15-anchored grid puts the first
+    in-session label BEFORE the open on non-divisor TFs (the E1 B-S1 class —
+    17:45 @30m on an 18:00 open) — production must equal the independent
+    oracle bucket-for-bucket there too."""
+    for tf in (2, 5, 30, 60, 240):
+        out = resample_1m_to_tf(df, tf)
+        assert _frame_to_buckets(out) == _oracle_intraday(df, tf), f"tf={tf}: oracle disagreement"
+
+
+@st.composite
+def _pre_open_frames(draw: st.DrawFn) -> pl.DataFrame:
+    """Whole-minute bars BEFORE 09:15 IST (00:00..09:14 — the P2 shape)."""
+    day = date(2024, 1, 2)
+    midnight_utc = datetime.combine(day, time(0, 0)) - _IST_OFFSET  # 00:00 IST
+    present = draw(
+        st.lists(st.integers(min_value=0, max_value=554), min_size=1, max_size=15, unique=True)
+    )
+    rows = []
+    for minute in sorted(present):
+        open_, high, low, close = _draw_ohlc(draw)
+        rows.append((midnight_utc + timedelta(minutes=minute), open_, high, low, close, 10))
+    return pl.DataFrame(
+        rows,
+        schema={
+            "ts_utc": pl.Datetime(time_unit="us"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+        orient="row",
+    ).sort("ts_utc")
+
+
+@given(df=_pre_open_frames())  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
+@settings(max_examples=60, deadline=None)
+def test_pre_open_whole_minute_frames_match_the_oracle(df: pl.DataFrame) -> None:
+    """The P2 formula-parity capture: a whole-minute bar BEFORE 09:15 IST
+    floors to a NEGATIVE bucket rank on both sides — labels land on the
+    pre-open (possibly PRIOR-IST-date) grid, production == oracle exactly.
+    (The tf_resampler Anchor prose was corrected by DEC-DERIVED-TF-AUDIT-001
+    to name this: 'buckets never straddle sessions' held only for
+    in-session bars. Dormant in production — ingest session-filters
+    pre-open bars; DEC-SESSION-EXEMPT-RESAMPLE-001 is the follow-up.)"""
+    for tf in (2, 30, 240):
+        out = resample_1m_to_tf(df, tf)
+        assert _frame_to_buckets(out) == _oracle_intraday(df, tf), f"tf={tf}: oracle disagreement"
+
+
+@st.composite
+def _weekend_gap_frames(draw: st.DrawFn) -> pl.DataFrame:
+    """3..5 sessions spanning a REAL weekend gap (Fri 2024-03-22 → Thu)."""
+    pool = [
+        date(2024, 3, 22),  # Friday
+        date(2024, 3, 26),  # Tuesday (the 25th is Holi — a real holiday gap)
+        date(2024, 3, 27),
+        date(2024, 3, 28),
+        date(2024, 4, 1),  # Monday across the month boundary
+    ]
+    n_days = draw(st.integers(min_value=3, max_value=5))
+    rows = []
+    for day in pool[:n_days]:
+        day_open_utc = datetime.combine(day, _SESSION_OPEN_UTC)
+        present = draw(
+            st.lists(st.integers(min_value=0, max_value=374), min_size=1, max_size=15, unique=True)
+        )
+        for minute in sorted(present):
+            open_, high, low, close = _draw_ohlc(draw)
+            rows.append(
+                (
+                    day_open_utc + timedelta(minutes=minute),
+                    open_,
+                    high,
+                    low,
+                    close,
+                    draw(st.integers(min_value=0, max_value=1_000_000)),
+                )
+            )
+    return pl.DataFrame(
+        rows,
+        schema={
+            "ts_utc": pl.Datetime(time_unit="us"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        },
+        orient="row",
+    ).sort("ts_utc")
+
+
+@given(
+    df=_weekend_gap_frames(),  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
+    cutoff_days=st.integers(min_value=0, max_value=11),
+)
+@settings(max_examples=60, deadline=None)
+def test_weekend_gap_multiday_daily_chain_matches_the_oracle(
+    df: pl.DataFrame, cutoff_days: int
+) -> None:
+    """>3-day frames across a real weekend + holiday + month-boundary gap:
+    the midnight-IST daily chain equals the oracle at every drawn cutoff."""
+    first_ts = df.get_column("ts_utc").min()
+    assert isinstance(first_ts, datetime)
+    before = (_to_naive_utc(first_ts) + _IST_OFFSET).date() + timedelta(days=cutoff_days)
+    got = _daily_bars_to_buckets(resample_1m_to_daily(df, before=before))
+    assert got == _oracle_daily_midnight(df, before=before)
+    # The intraday chain holds over the same gapped frames too.
+    for tf in (30, 240):
+        assert _frame_to_buckets(resample_1m_to_tf(df, tf)) == _oracle_intraday(df, tf)
+
+
+def _fno_session_bars(ist_day: date, *, oi_pattern: list[int | None]) -> list[CandleBar]:
+    """F&O bars (2-dp grid) whose per-minute OI follows *oi_pattern*."""
+    day_open_utc = datetime.combine(ist_day, _SESSION_OPEN_UTC, tzinfo=UTC)
+    bars: list[CandleBar] = []
+    for minute, oi in enumerate(oi_pattern):
+        px = round(20_000.0 + minute * 0.05, 2)
+        bars.append(
+            CandleBar(
+                timestamp=day_open_utc + timedelta(minutes=minute),
+                open=Decimal(str(px)),
+                high=Decimal(str(round(px + 0.5, 2))),
+                low=Decimal(str(round(px - 0.5, 2))),
+                close=Decimal(str(round(px + 0.1, 2))),
+                volume=100 + minute,
+                open_interest=oi,
+            )
+        )
+    return bars
+
+
+def test_fno_stored_lake_oi_matches_the_oracle_including_nulls(tmp_path: Path) -> None:
+    """The FNO STORED-lake leg (DEC-DERIVED-OI-NULL-HONEST-001's permanent
+    net — FAILS at the merge base, where the writer fabricated OI=0): real
+    sink → real FUTURES prebuild → the STORED derived partitions' OI equals
+    the oracle's carry-last OI computed FROM the stored 1-minute base,
+    nulls INCLUDED."""
+    lake = tmp_path / "lake"
+    symbol = "NSE-NIFTY-27Jun24-FUT"
+    # Dense → all-null → leading-value-then-null (strict-last: null) → mixed.
+    oi_pattern: list[int | None] = (
+        [1000 + i for i in range(5)] + [None] * 5 + [1010, None, None, None, None]
+    )
+    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+    sink.append(
+        exchange=_EXCHANGE,
+        segment="FNO",
+        symbol=symbol,
+        interval="1minute",
+        bars=_fno_session_bars(date(2024, 6, 12), oi_pattern=oi_pattern),
+    )
+    materialize_lake_timeframes(
+        lake_root=lake,
+        exchange=_EXCHANGE,
+        segment="FNO",
+        symbol=symbol,
+        kind=PrebuildKind.FUTURES,
+        tfs=("5m", "15m"),
+        include_daily=True,
+        daily_before=date(2024, 6, 13),
+        incremental=False,
+    )
+
+    def _read_fno(interval: str) -> pl.DataFrame:
+        path = lake / "bars" / _EXCHANGE / "FNO" / symbol / interval / "2024" / "06.parquet"
+        assert path.is_file(), f"missing stored partition: {path}"
+        return pl.read_parquet(path).rename({"timestamp": "ts_utc"}).sort("ts_utc")
+
+    stored_1m = _read_fno("1minute")
+    for tf in (5, 15):
+        stored = _read_fno(LAKE_INTERVAL_LABELS[tf])
+        assert _frame_to_buckets(stored) == _oracle_intraday(stored_1m, tf), (
+            f"stored {LAKE_INTERVAL_LABELS[tf]} disagrees with the oracle (OI included)"
+        )
+    # The strict-last law end-to-end: [1004, None, None] — never [1004, 0, 0].
+    assert _read_fno("5minute").get_column("open_interest").to_list() == [1004, None, None]
+    # The derived FNO 1day carries the session-last OI — null here.
+    assert _read_fno("1day").get_column("open_interest").to_list() == [None]
+
+
+@given(
+    df=_daily_frames(),  # pyright: ignore[reportCallIssue]  # @st.composite injects draw
+    cutoff_min=st.integers(min_value=555, max_value=929),
+)
+@settings(max_examples=60, deadline=None)
+def test_as_of_cut_then_resample_matches_the_oracle(df: pl.DataFrame, cutoff_min: int) -> None:
+    """The movers as-of leg: cutting the RAW 1-minute frame at an IST
+    minute-of-day (the ONE COMMON ``filter_to_ist_minute``) then resampling
+    equals the oracle over the SAME cut frame — the cut and the bucketing
+    laws compose without drift."""
+    from brutex.dashboard.movers_snapshot import filter_to_ist_minute
+
+    aware = df.with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+    cut = filter_to_ist_minute(aware, cutoff_min, ts_col="ts_utc")
+    if cut.height == 0:
+        return  # everything past the as-of minute — nothing to compare
+    for tf in (5, 30):
+        assert _frame_to_buckets(resample_1m_to_tf(cut, tf)) == _oracle_intraday(cut, tf)
+
+
+def test_oi_strict_last_discrimination_pin() -> None:
+    """The OI semantic E1 settled (1,670/1,670 ambiguity buckets): the
+    bucket's OI is the LAST source bar's OI VERBATIM — a null last bar
+    yields a null bucket OI even when an EARLIER bar in the bucket carries a
+    value ('last non-null' is REFUTED as a description of production)."""
+    day_open_utc = datetime.combine(date(2024, 6, 12), _SESSION_OPEN_UTC)
+    df = pl.DataFrame(
+        {
+            "ts_utc": [day_open_utc, day_open_utc + timedelta(minutes=1)],
+            "open": [100.0, 100.1],
+            "high": [100.5, 100.6],
+            "low": [99.5, 99.6],
+            "close": [100.1, 100.2],
+            "volume": [10, 20],
+            "open_interest": [5, None],
+        },
+        schema_overrides={"open_interest": pl.Int64},
+    )
+    out = resample_1m_to_tf(df, 5)
+    assert out.get_column("open_interest").to_list() == [None]  # strict-last, NOT 5
+    # And the oracle agrees (its own strict-last law).
+    assert _frame_to_buckets(out) == _oracle_intraday(df, 5)
