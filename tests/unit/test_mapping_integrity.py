@@ -659,3 +659,54 @@ def test_all_forms_cross_owned_degrades_to_exact_raw_key() -> None:
     assert reasons == {"A-B": REASON_NONE, "AB": REASON_NOT_ATTEMPTED}
     assert len(report.gating_failures) == 1
     assert report.not_attempted == 1
+
+
+# ── REFUTER ROUND 7 (H1-2): single-shot-iterator covered_years values ──
+
+
+def test_single_shot_iterator_covered_years_matches_set_values() -> None:
+    """H1-2 (port of ``h1_a3_iterator_values.py``): single-shot values survive the fold.
+
+    ``covered_years`` is typed ``Mapping[..., Iterable[int]]`` — a single-shot iterator
+    value is annotation-legal. The round-2/5 fold reads the SAME mapping value in the
+    ``own_years`` fold AND AGAIN in the ``years`` fold (the raw key is always in both),
+    so pre-fix the second read consumed an EXHAUSTED iterator and a fully-covered
+    ATTEMPTED symbol gated a false-RED ``none`` (main iterated each value once → GREEN;
+    proven failing with the materialize-once memo stash-reverted). Both key_forms arms
+    are pinned against the same dict-of-sets verdict; written against the NEW
+    ``key_forms`` signature so the pin is round-7-scoped.
+    """
+    for key_forms in (None, {"SBIN": ("SBIN",)}):
+        report = reconcile_mapping_integrity(
+            eligible_spots=[("NSE", "SBIN")],
+            covered_years={("NSE", "SBIN"): iter({2020, 2021, 2022})},
+            expected_years=_EXPECTED,
+            attempted={("NSE", "SBIN")},
+            now=_NOW,
+            key_forms=key_forms,
+        )
+        assert report.is_green, f"false-RED with key_forms={key_forms!r}"
+        assert report.fully_covered == 1
+        assert report.gating_failures == ()
+        assert report.under_pulled == ()
+
+
+def test_single_shot_iterator_under_primary_form_resolves() -> None:
+    """H1-2 forms-fold arm: an iterator value under the PRIMARY write form resolves.
+
+    The hyphenated shape — coverage keyed under ``BAJAJAUTO`` (the writer's primary
+    form) as a single-shot iterator — must union through BOTH folds exactly as a set
+    value would: the memo materializes each ``(exchange, form)`` probe ONCE, so the
+    ``own_years`` read cannot starve the ``years`` read.
+    """
+    report = reconcile_mapping_integrity(
+        eligible_spots=[("NSE", "BAJAJ-AUTO")],
+        covered_years={("NSE", "BAJAJAUTO"): iter({2020, 2021, 2022})},
+        expected_years=_EXPECTED,
+        attempted={("NSE", "BAJAJAUTO")},
+        now=_NOW,
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.is_green
+    assert report.fully_covered == 1
+    assert report.under_pulled == ()

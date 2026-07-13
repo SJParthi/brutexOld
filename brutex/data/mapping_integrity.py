@@ -284,6 +284,10 @@ def reconcile_mapping_integrity(
         de-duplicated here so a repeated row is counted once.
     covered_years
         Map ``(exchange, symbol) -> years`` that pulled ≥1 expiry (from the coverage ledger).
+        Values may be ANY ``Iterable[int]`` — including a single-shot iterator: each
+        distinct probe key's value is read + materialized EXACTLY ONCE per call (REFUTER
+        ROUND 7, H1-2), so the forms fold's two reads of the same key (``own_years`` +
+        ``years``) can never consume an exhausted iterator into a false-RED verdict.
     expected_years
         The calendar-year span each eligible spot is expected to span (e.g. 2020→today). An
         empty span disables the ``partial`` check (only ``none`` / ``not_attempted`` can fail).
@@ -334,6 +338,24 @@ def reconcile_mapping_integrity(
         for owned in {symbol, forms[0]}:
             owners.setdefault((exchange, owned), set()).add(symbol)
 
+    # REFUTER ROUND 7 (H1-2) — materialize each ``(exchange, form)`` probe's years
+    # EXACTLY ONCE. ``covered_years`` values are typed ``Iterable[int]``, which legally
+    # admits a single-shot iterator; the round-2/5 fold reads the SAME mapping value in
+    # the ``own_years`` fold AND AGAIN in the ``years`` fold (the raw key is always in
+    # both), so a second raw ``covered_years.get`` iteration would consume an EXHAUSTED
+    # iterator and flip a fully-covered symbol to a false-RED ``none``. One ``.get`` +
+    # one materialization per DISTINCT probe key, memoised for this call — re-iterable
+    # inputs (every in-repo producer feeds ``dict[..., set[int]]``) are byte-identical.
+    years_memo: dict[tuple[str, str], frozenset[int]] = {}
+
+    def _probe_years(exchange: str, form: str) -> frozenset[int]:
+        key = (exchange, form)
+        got = years_memo.get(key)
+        if got is None:
+            got = frozenset(covered_years.get(key, ()))
+            years_memo[key] = got
+        return got
+
     under: list[UnderPulledSpot] = []
     fully_covered = 0
     not_attempted = 0
@@ -360,13 +382,11 @@ def reconcile_mapping_integrity(
             for form in forms
             if form == symbol or owners.get((exchange, form), _NO_OWNERS) <= {symbol}
         ) or (symbol,)
-        own_years = frozenset(
-            y for form in own_forms for y in covered_years.get((exchange, form), ())
-        )
+        own_years = frozenset(y for form in own_forms for y in _probe_years(exchange, form))
         own_attempted = attempted is not None and any(
             (exchange, form) in attempted_set for form in own_forms
         )
-        years = frozenset(y for form in forms for y in covered_years.get((exchange, form), ()))
+        years = frozenset(y for form in forms for y in _probe_years(exchange, form))
         if own_attempted and not own_years:
             # Z5-1: this symbol's OWN keys read attempted-and-ZERO — the gating
             # silent-vanish — and a normalize-colliding sibling's coverage (a
