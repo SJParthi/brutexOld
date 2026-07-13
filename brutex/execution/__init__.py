@@ -15,6 +15,11 @@ DEC-COST-001 / ``docs/track2/COSTS_VERIFIED.md``.
 * :mod:`brutex.execution.errors` — typed exceptions: the
   :class:`ExecutionError` hierarchy under
   :class:`~brutex.models.BruteXError`.
+* :mod:`brutex.execution.fill_mode` — the stdlib-only global fill-mode
+  vocabulary (DEC-FILL-WORST-CASE-001): :class:`FillMode`
+  (``WORST_CASE``/``PRECISE``), the production default
+  :data:`DEFAULT_FILL_MODE`, and the fail-loud ``$BRUTEX_FILL_MODE``
+  resolver :func:`resolve_fill_mode`.
 * :mod:`brutex.execution.types` — pure, heavy-dep-free dataclasses:
   :class:`Fill`, :class:`Position`, :class:`FillCosts`,
   :class:`EquityPoint`, :class:`BacktestResult`,
@@ -35,6 +40,12 @@ from brutex.execution.errors import (
     InvalidPriceError,
     NonMonotonicBarError,
 )
+from brutex.execution.fill_mode import (
+    DEFAULT_FILL_MODE,
+    FILL_MODE_ENV,
+    FillMode,
+    resolve_fill_mode,
+)
 from brutex.execution.types import (
     BacktestResult,
     EquityPoint,
@@ -45,11 +56,14 @@ from brutex.execution.types import (
 )
 
 __all__ = [
+    "DEFAULT_FILL_MODE",
+    "FILL_MODE_ENV",
     "BacktestResult",
     "EquityPoint",
     "ExecutionError",
     "Fill",
     "FillCosts",
+    "FillMode",
     "FreezeQuantityExceededError",
     "InstrumentMeta",
     "InsufficientFundsError",
@@ -57,4 +71,5 @@ __all__ = [
     "InvalidPriceError",
     "NonMonotonicBarError",
     "Position",
+    "resolve_fill_mode",
 ]
