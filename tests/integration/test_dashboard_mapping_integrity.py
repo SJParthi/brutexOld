@@ -258,8 +258,7 @@ def test_hyphenated_writer_roundtrip_reads_green(
             for y in years
         },
     )
-    registry = RegistryStore.open(tmp_path / "registry.duckdb")
-    try:
+    with RegistryStore.open(tmp_path / "registry.duckdb") as registry:
         report = pull_expiries_contracts(
             [_eq("BAJAJ-AUTO")],
             registry=registry,
@@ -272,8 +271,6 @@ def test_hyphenated_writer_roundtrip_reads_green(
             today=date_cls(years[-1], 1, 2),
             run_id="rt-1",
         )
-    finally:
-        registry.close()
     # The writer keyed every coverage cell on the PRIMARY form (the unit writer pin).
     assert report.underlyings == ("BAJAJAUTO",)
     assert {r.underlying_symbol for r in bajaj_store.list_coverage()} == {"BAJAJAUTO"}
@@ -319,8 +316,7 @@ def test_colliding_sibling_cannot_mask_attempted_zero_route(tmp_path: Path) -> N
             asm_gsm_flag=False,
         )
 
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
         store.upsert_many(
             [_eq("AB"), _eq("A-B"), _eq("BAJAJ-AUTO"), _fut("AB", 900_101), _fut("A-B", 900_102)],
             snapshot_date=date(2024, 1, 2),
@@ -347,8 +343,6 @@ def test_colliding_sibling_cannot_mask_attempted_zero_route(tmp_path: Path) -> N
         # The CSV download serialises the SAME verdict — RED.
         csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
         assert any(line == "Status,RED" for line in csv_text.splitlines())
-    finally:
-        store.close()
 
 
 def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
@@ -375,8 +369,7 @@ def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
     from tests.unit.test_metadata_pull import _factory, _FakeSDK, _sync_run_parallel
 
     years = _coverage_years()
-    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
         store.upsert_many(
             [_eq("RELIANCE"), _eq("")],
             snapshot_date=date(2024, 1, 2),
@@ -390,23 +383,22 @@ def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
                 for y in years
             },
         )
-        registry = RegistryStore.open(tmp_path / "registry.duckdb")
-        try:
-            with structlog.testing.capture_logs() as logs:
-                report = pull_expiries_contracts(
-                    [_eq("RELIANCE"), _eq("")],
-                    registry=registry,
-                    coverage_store=store,
-                    years=years,
-                    dry_run=False,
-                    run_parallel=_sync_run_parallel,
-                    client_factory=_factory(sdk),
-                    now=datetime.now(UTC),
-                    today=date(years[-1], 1, 2),
-                    run_id="rt-blank",
-                )
-        finally:
-            registry.close()
+        with (
+            RegistryStore.open(tmp_path / "registry.duckdb") as registry,
+            structlog.testing.capture_logs() as logs,
+        ):
+            report = pull_expiries_contracts(
+                [_eq("RELIANCE"), _eq("")],
+                registry=registry,
+                coverage_store=store,
+                years=years,
+                dry_run=False,
+                run_parallel=_sync_run_parallel,
+                client_factory=_factory(sdk),
+                now=datetime.now(UTC),
+                today=date(years[-1], 1, 2),
+                run_id="rt-blank",
+            )
         # The writer never minted a blank cell: zero failures, zero '' rows, one WARN.
         assert report.expiry_failures == 0
         assert [r for r in store.list_coverage() if r.underlying_symbol == ""] == []
@@ -422,5 +414,3 @@ def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
         assert all(u["reason"] == "not_attempted" for u in blank_rows)
         csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
         assert "GREEN" in csv_text.split("VERDICT", 1)[1].splitlines()[1]
-    finally:
-        store.close()

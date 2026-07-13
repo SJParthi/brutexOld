@@ -819,7 +819,7 @@ class TestMonthEdgeBucketRouting:
         session-filtered read fires EXACTLY ONE, aimed at the prior month —
         and degrades cleanly when the prior month's file is absent.
         """
-        import brutex.dashboard.movers_stored_read as msr
+        from brutex.dashboard import movers_stored_read as msr
 
         _seed_month_edge_lake(tmp_path)
         calls: list[date] = []
