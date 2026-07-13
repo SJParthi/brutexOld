@@ -70,6 +70,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_label,
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams
@@ -126,6 +127,11 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's frozen digest
+        # pins were minted under the PRECISE exact-fill mode; the elision law
+        # means an explicit PRECISE grid keeps them byte-identical while the
+        # new WORST_CASE field default re-keys (companion tests pin both).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -214,6 +220,10 @@ class TestIdentity:
             max_combos=200_000,
             top_k=10,
             min_hits=30,
+            # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the frozen digests
+            # below were minted under PRECISE; the elision law keeps an
+            # explicit PRECISE grid byte-identical to the pre-mode bytes.
+            fill_mode=FillMode.PRECISE,
         )
         # Re-locked for DEC-NIFTY-FIB-AXIS-001: the grid descriptor gains the
         # ``fib_anchors`` axis and the tuple-cache params gain the ``fib_anchor``
@@ -224,6 +234,18 @@ class TestIdentity:
         )
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
         assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
+
+    def test_worst_case_fill_mode_rekeys_identity_and_cache_key(self) -> None:
+        # DEC-FILL-WORST-CASE-001 companion pin: a WORST_CASE grid is a
+        # DIFFERENT sweep — its checkpoint identity AND per-tuple cache key
+        # both re-key, so neither mode's work can resume/skip as the other's;
+        # an explicit PRECISE grid elides (the frozen goldens above hold).
+        precise = _grid()
+        worst = _grid(fill_mode=FillMode.WORST_CASE)
+        assert grid_identity(worst) != grid_identity(precise)
+        assert tuple_cache_key(next(iter_sweep_tuples(worst)), worst) != tuple_cache_key(
+            next(iter_sweep_tuples(precise)), precise
+        )
 
     def test_gate_config_change_rekeys_identity_and_cache_key(self) -> None:
         """Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit + Stage-3 gate config

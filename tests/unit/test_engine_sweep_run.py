@@ -42,6 +42,7 @@ from brutex.engine.sweep_run import (
     ranked_combo_to_result_row,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 from brutex.ranking import OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.errors import StrategyError
@@ -112,6 +113,12 @@ def _make_config(**overrides: object) -> SweepRunConfig:
         "tf_minutes": 1,
         "sl_paisa": 80,
         "tp_paisa": 50,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's expectations
+        # — run_ids, store hashes, oracle re-computations — were minted under
+        # the PRECISE exact-fill mode, so the helper pins it explicitly (the
+        # SweepRunConfig field default is now the WORST_CASE production
+        # floor). Worst-case behaviour has its own dedicated suites.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]

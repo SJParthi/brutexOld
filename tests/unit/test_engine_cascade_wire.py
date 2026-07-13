@@ -34,6 +34,7 @@ from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import build_equity_curve
 from brutex.engine.sweep_orchestrator import SweepTuple
 from brutex.engine.trade_sim import simulate_trades
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.cascade import (
     CandidateVerdict,
     CascadeReport,
@@ -98,6 +99,48 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     }
     base.update(overrides)
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
+
+
+class TestSpecFillModeRoundTrip:
+    """DEC-FILL-WORST-CASE-001: the spec's additive fill_mode manifest law."""
+
+    def test_precise_spec_dict_is_byte_stable_no_key(self) -> None:
+        # Emit-on-non-PRECISE: a PRECISE spec's manifest dict carries NO
+        # fill_mode key — pre-mode manifest bytes are unchanged.
+        payload = cw._spec_to_dict(_spec())
+        assert "fill_mode" not in payload
+
+    def test_worst_case_spec_round_trips(self) -> None:
+        spec = _spec(fill_mode=FillMode.WORST_CASE)
+        payload = cw._spec_to_dict(spec)
+        assert payload["fill_mode"] == "worst_case"
+        assert cw._spec_from_dict(payload) == spec
+
+    def test_absent_key_parses_as_precise_legacy(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        parsed = cw._spec_from_dict(payload)
+        assert parsed.fill_mode is FillMode.PRECISE
+        assert parsed == _spec()
+
+    def test_junk_fill_mode_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "worst"
+        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+            cw._spec_from_dict(payload)
+
+    def test_candidates_for_spec_threads_the_spec_mode(self) -> None:
+        # The re-deriver sources the mode from the SAME spec it sources sl/tp
+        # from: a WORST_CASE spec's candidate re-sim produces DIFFERENT
+        # candidate scalars than the PRECISE spec on the same bars (the
+        # adverse-max fills genuinely move the trades).
+        bars = _session_bars()
+        precise = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        worst = cw.candidates_for_spec(
+            _spec(winners=((_rid(1), 0),), fill_mode=FillMode.WORST_CASE), bars
+        )
+        assert len(precise) == 1
+        assert len(worst) == 1
+        assert worst[0].returns != precise[0].returns
 
 
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:

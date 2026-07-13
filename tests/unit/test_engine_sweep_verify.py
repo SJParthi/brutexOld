@@ -47,6 +47,7 @@ from brutex.engine.sweep_verify import (
     plan_expected_stores,
     recorded_audit_facts,
     recorded_context_from_audit,
+    recorded_fill_mode_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
     stale_roll_schedule_refusal,
@@ -65,6 +66,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
     write_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
@@ -115,6 +117,10 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
         "min_hits": 0,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's trees +
+        # expectations were minted under PRECISE (the elision law keeps an
+        # explicit PRECISE grid byte-identical to the pre-mode grid).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -344,6 +350,93 @@ class TestRecordedContext:
         ctx = recorded_context_from_audit(path)
         assert ctx is not None
         assert ctx.data_snapshot_hash == "x"
+
+
+# ── Recorded fill mode (DEC-FILL-WORST-CASE-001) ──
+
+
+class TestRecordedFillMode:
+    """`recorded_fill_mode_from_audit` — no key on any params = PRECISE legacy."""
+
+    def test_absent_audit_reads_precise(self, tmp_path: Path) -> None:
+        assert recorded_fill_mode_from_audit(tmp_path / "nope.jsonl") is FillMode.PRECISE
+
+    def test_legacy_tree_without_the_key_reads_precise(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
+            audit.append(action="SWEEP_START", subject="s", payload={"instrument": "NIFTY"})
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={"instrument": "NIFTY", "params": {"sl_paisa": 80}},
+            )
+        assert recorded_fill_mode_from_audit(path) is FillMode.PRECISE
+
+    def test_worst_case_tree_reads_the_recorded_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s1",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
+            )
+            audit.append(  # consistent repeats agree
+                action="SWEEP_START",
+                subject="s2",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
+            )
+        assert recorded_fill_mode_from_audit(path) is FillMode.WORST_CASE
+
+    def test_junk_token_refuses(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst"}},
+            )
+        with pytest.raises(SweepVerifyError, match="not a known fill mode"):
+            recorded_fill_mode_from_audit(path)
+
+    def test_literal_precise_token_refuses_as_tampered(self, tmp_path: Path) -> None:
+        # canonical_trade_params NEVER emits the PRECISE token (the
+        # emit-on-non-PRECISE law) — a literal key is a hand-edited line.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "precise"}},
+            )
+        with pytest.raises(SweepVerifyError, match="KEY ABSENCE"):
+            recorded_fill_mode_from_audit(path)
+
+    def test_inconsistent_modes_refuse(self, tmp_path: Path) -> None:
+        # Reachable only via a >2-mode future vocabulary or a tampered tree —
+        # the reader refuses rather than picking a winner.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s1",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
+            )
+            audit.append(
+                action="SWEEP_START",
+                subject="s2",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "precise"}},
+            )
+        with pytest.raises(SweepVerifyError):
+            recorded_fill_mode_from_audit(path)
+
+    def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="s", payload={"params": {}})
+        path.write_text(path.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
+            recorded_fill_mode_from_audit(path)
 
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──

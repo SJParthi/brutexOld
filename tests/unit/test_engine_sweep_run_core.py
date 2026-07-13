@@ -47,6 +47,7 @@ from brutex.engine.sweep_run_core import (
 )
 from brutex.engine.sweep_singleflight import SweepAlreadyRunningError
 from brutex.engine.sweep_supervisor import grid_identity
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.cascade import FilterStage
 from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.observability.flight_recorder import iter_run_records
@@ -113,6 +114,11 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite exercises the
+        # R45 diffcheck closure, which is PRECISE-only until the Stage-2
+        # naive worst-case arm lands (a WORST_CASE grid loudly disables it —
+        # pinned by test_diffcheck_disabled_under_worst_case_fill_mode).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1385,6 +1391,26 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     payload = cast("dict[str, Any]", ok_rows[0]["payload"])
     assert payload["checked"] == 2
     assert payload["mismatches"] == 0
+
+
+def test_diffcheck_disabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-001 Stage-1 honest bridge: the R45 naive reference
+    # hard-codes the PRECISE policy, so a WORST_CASE run SKIPS the diffcheck
+    # with ONE loud WARN instead of latching a FALSE SUSPECT (or silently
+    # verifying an arm the run never executed). Stage 2 lands the naive
+    # worst-case arm and removes this skip.
+    from structlog.testing import capture_logs
+
+    grid = _grid(fill_mode=FillMode.WORST_CASE)
+    with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is None
+        assert core.suspect is False
+    warns = [
+        log for log in logs if log.get("event") == "sweep_run_core.diffcheck_disabled_fill_mode"
+    ]
+    assert len(warns) == 1
+    assert warns[0]["fill_mode"] == "worst_case"
+    assert warns[0]["reason"] == "naive_reference_precise_only"
 
 
 def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(

@@ -45,6 +45,7 @@ from brutex.engine.sweep_orchestrator import (
     tuple_store_path,
 )
 from brutex.engine.sweep_run import ComboDedup, SweepComboError, SweepRunConfig
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
@@ -100,6 +101,11 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's frozen digest
+        # pins were minted under the PRECISE exact-fill mode; the elision law
+        # means an explicit PRECISE grid keeps them byte-identical while the
+        # new WORST_CASE field default re-keys (companion tests pin both).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -586,6 +592,18 @@ class TestTupleDigestGateSelectionIdentity:
         d80 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.80)))
         assert d90 != d0
         assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
+
+    def test_worst_case_fill_mode_rekeys_and_precise_elides(self) -> None:
+        # DEC-FILL-WORST-CASE-001 companion pin: the WORST_CASE mode re-keys
+        # the store address (the two modes' finalists must never collide in
+        # one Parquet), while an explicit PRECISE grid keeps the frozen
+        # pre-mode digest byte-identical (the elision law — the helper's
+        # legacy pin above IS an explicit-PRECISE construction).
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert d0 == self._PRE_FIX_DEFAULT_DIGEST
+        assert _tuple_digest(_tuple(), _grid(fill_mode=FillMode.WORST_CASE)) != d0
 
     def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
         from brutex.engine.sweep_orchestrator import _tuple_digest

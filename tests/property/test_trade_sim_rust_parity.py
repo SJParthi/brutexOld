@@ -21,6 +21,7 @@ from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.trade_sim import FillPolicy, LevelFill, SameBarTie, simulate_trades
+from brutex.execution.fill_mode import FillMode
 from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -83,6 +84,10 @@ def _feed_and_params(
         stop_loss=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
         take_profit=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
         same_bar=draw(st.sampled_from([SameBarTie.SL_FIRST, SameBarTie.TP_FIRST])),
+        # DEC-FILL-WORST-CASE-001: the adverse-max mode rides the SAME parity
+        # law — the kernel's worst_case flag must be bit-identical to the
+        # Python walker's on every corpus member.
+        fill_mode=draw(st.sampled_from([FillMode.PRECISE, FillMode.WORST_CASE])),
     )
     # Masks drawn from a small bit space so they actually fire on the feed.
     masks = draw(
@@ -193,6 +198,10 @@ def _wide_feed_and_params(
         stop_loss=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
         take_profit=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
         same_bar=draw(st.sampled_from([SameBarTie.SL_FIRST, SameBarTie.TP_FIRST])),
+        # DEC-FILL-WORST-CASE-001: the adverse-max mode rides the SAME parity
+        # law — the kernel's worst_case flag must be bit-identical to the
+        # Python walker's on every corpus member.
+        fill_mode=draw(st.sampled_from([FillMode.PRECISE, FillMode.WORST_CASE])),
     )
     return bars, bar_bits, masks, direction, sl, tp, policy, widen_bars
 

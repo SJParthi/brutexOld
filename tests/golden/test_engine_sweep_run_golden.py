@@ -42,6 +42,7 @@ from brutex.engine.sweep_run import (
     mask_run_id,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
@@ -102,6 +103,15 @@ def _bars() -> list[CandleBar]:
 
 
 def _config() -> SweepRunConfig:
+    # FROZEN GOLDENS PIN THE **PRECISE** LEGACY MODE (DEC-FILL-WORST-CASE-001):
+    # `_GOLDEN_RUN_ID` / `_GOLDEN_CONTENT_HASH` below were minted under the
+    # exact-fill conventions, so this config pins `fill_mode=PRECISE`
+    # explicitly (the SweepRunConfig field default is now the WORST_CASE
+    # production floor). NEVER regenerate the frozen constants — the
+    # emit-on-non-PRECISE identity law makes an explicit-PRECISE config
+    # byte-identical to the pre-mode config, and these tests are the proof.
+    # The WORST_CASE arm has its OWN locked golden pair below
+    # (`_WORST_CASE_GOLDEN_RUN_ID` / `_WORST_CASE_GOLDEN_CONTENT_HASH`).
     return SweepRunConfig(
         instrument="NIFTY",
         tf="1m",
@@ -115,6 +125,7 @@ def _config() -> SweepRunConfig:
         tf_minutes=1,
         sl_paisa=80,
         tp_paisa=50,
+        fill_mode=FillMode.PRECISE,
     )
 
 
@@ -200,6 +211,122 @@ def test_golden_content_hash_literal(tmp_path: Path) -> None:
     pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
     summary = _run(tmp_path, "a")
     assert summary.store_content_hash == _GOLDEN_CONTENT_HASH
+
+
+# ────── DEC-FILL-WORST-CASE-001 — the LOCKED worst-case golden pair ──────
+#
+# AUDIT NOTE (minted 2026-07-13, this change): the SAME fixture + config run
+# once under ``fill_mode=WORST_CASE`` and locked. The adverse-max floor is
+# BRUTAL on this fixture — the per-mask trade stream keeps the SAME 351
+# trades (matched trigger timing here) but every fill is the bar's worst
+# print: mask 0b101's pnl sum flips +2470 → −52680 paisa, so NO combo clears
+# the rank gates and the persisted store is EMPTY (ranked == persisted == 0).
+# That emptiness is itself the meaningful verdict (the backtest can only
+# understate); the trade-level pins below carry the numeric teeth an
+# empty-store hash alone would lack.
+
+#: mask 0b101's run-identity under the SAME context/params PLUS the
+#: emit-on-non-PRECISE ``"fill_mode": "worst_case"`` key.
+_WORST_CASE_GOLDEN_RUN_ID = "715212420d2cca2dd998aa0f716ef5b658d551a212a61af135fe0cf6fae62fc9"
+
+#: The worst-case store content hash (an EMPTY 0-row store on this fixture —
+#: see the audit note; polars/zstd-build sensitive like its PRECISE sibling).
+_WORST_CASE_GOLDEN_CONTENT_HASH = "cadb06a3eb11d0a232e168282e43d4255bdc4693c8647c1dd0b47ce984893a9f"
+
+
+def _worst_case_config() -> SweepRunConfig:
+    return replace(_config(), fill_mode=FillMode.WORST_CASE)
+
+
+def _worst_case_params() -> dict[str, object]:
+    from brutex.engine.sweep_run import canonical_trade_params
+
+    return canonical_trade_params(
+        sl_paisa=80,
+        tp_paisa=50,
+        prior_n=3,
+        proximity=None,
+        start_equity_paisa=10_000_000,
+        fill_mode=FillMode.WORST_CASE,
+    )
+
+
+def test_worst_case_golden_run_id_is_byte_stable_and_distinct() -> None:
+    wc_run_id = mask_run_id(mask=0b101, params=_worst_case_params(), **_CTX)
+    assert wc_run_id == _WORST_CASE_GOLDEN_RUN_ID
+    assert wc_run_id != _GOLDEN_RUN_ID  # the mode re-keys the identity
+
+
+def test_worst_case_params_add_exactly_the_one_key() -> None:
+    # The emit-on-non-PRECISE law: WORST_CASE params == PRECISE params plus
+    # exactly {"fill_mode": "worst_case"} — nothing else moves.
+    wc = _worst_case_params()
+    assert wc.pop("fill_mode") == "worst_case"
+    assert wc == _PARAMS
+
+
+def _run_worst_case(tmp_path: Path, tag: str) -> SweepRunSummary:
+    store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+    dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+    audit = AuditWriter(path=tmp_path / f"{tag}.jsonl")
+    with audit:
+        return run_persisted_sweep(
+            _bars(), _worst_case_config(), store=store, dedup=dedup, audit=audit
+        )
+
+
+def test_worst_case_golden_summary_and_content_hash(tmp_path: Path) -> None:
+    pytest.importorskip("polars")  # flush needs the [data] extra
+    a = _run_worst_case(tmp_path, "a")
+    b = _run_worst_case(tmp_path, "b")
+    # Deterministic + byte-stable, and DISTINCT from the PRECISE store.
+    assert a.store_content_hash == b.store_content_hash
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+    assert a.store_content_hash == _WORST_CASE_GOLDEN_CONTENT_HASH
+    assert a.store_content_hash != _GOLDEN_CONTENT_HASH
+    # The floor verdict (audit note): same population, zero survivors.
+    assert a.enumerated == 5
+    assert a.evaluated == 5
+    assert a.ranked == 0
+    assert a.persisted == 0
+
+
+def test_worst_case_golden_trade_stream_exact() -> None:
+    # The numeric TEETH behind the empty-store hash: mask 0b101's worst-case
+    # per-trade stream over the fixture, pinned exactly at head/tail/aggregate
+    # against the PRECISE stream's own pins (both locked 2026-07-13).
+    from brutex.engine.combo_mask import mask_to_entry_signals
+    from brutex.engine.stage1a import build_bar_bits
+    from brutex.engine.trade_sim import FillPolicy, simulate_trades
+
+    bars = _bars()
+    signals = mask_to_entry_signals(build_bar_bits(bars), 0b101)
+
+    def stream(mode: FillMode) -> list[tuple[int, int, int, int]]:
+        return [
+            (t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars)
+            for t in simulate_trades(
+                bars,
+                signals,
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=80,
+                take_profit_paisa=50,
+                policy=FillPolicy(fill_mode=mode),
+            )
+        ]
+
+    precise = stream(FillMode.PRECISE)
+    worst = stream(FillMode.WORST_CASE)
+    assert len(precise) == 351
+    assert len(worst) == 351
+    assert sum(t[0] for t in precise) == 2470
+    assert sum(t[0] for t in worst) == -52680
+    assert worst[0] == (-160, 0, 160, 1)
+    assert worst[-1] == (-160, 0, 160, 1)
+    # The anti-illusion floor on the matched streams: worst never beats precise.
+    for w, p in zip(worst, precise, strict=True):
+        assert w[0] <= p[0]
 
 
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 — wired-vs-unwired bit-identity ──────
