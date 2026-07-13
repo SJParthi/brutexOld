@@ -149,6 +149,12 @@ def _kwargs(
         "max_combos": None,
         "data_snapshot_hash": None,
         "options_sim": False,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001 fix round 2): this suite's
+        # fixtures + expectations were minted under PRECISE — under the
+        # WORST_CASE production default the tiny fixture's combos fail the
+        # rank gates and persist NOTHING (the Stage-1 pin sweep missed this
+        # file; the explicit pin is byte-identical to the pre-mode launch).
+        "fill_mode": "precise",
     }
     kwargs.update(overrides)
     return kwargs
