@@ -495,67 +495,70 @@ def _schedules_from_entries(
     return schedules
 
 
-def recorded_fill_mode_from_audit(audit_path: Path) -> FillMode:
-    """Read the tree's RECORDED global fill mode from its audit log.
+def _fill_mode_from_entries(entries: Sequence[AuditEntry], audit_path: Path) -> FillMode:
+    """Derive ONE generation's recorded global fill mode from its scoped entries.
 
     DEC-FILL-WORST-CASE-001: a run's ``SWEEP_START`` payload carries
     ``params["fill_mode"]`` via ``canonical_trade_params`` EMIT-ON-NON-PRECISE
     — the run is SELF-DESCRIBING — so the verify/recount grid re-derives row
     identities (and the Tier-3 shadow re-sweep simulates) under the SAME mode
     the tree was minted with. The law mirrors the params contract exactly:
-    **no ``fill_mode`` key on any recorded params = PRECISE legacy** (every
-    pre-mode tree), an absent audit file likewise reads PRECISE (nothing
-    recorded ⇒ nothing non-default), and a recorded key must parse to a known
-    mode and agree across every context entry.
+    **no ``fill_mode`` key on any scoped params = PRECISE legacy** (every
+    pre-mode generation), a recorded key must parse to a known mode, and
+    same-generation entries must agree.
 
-    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
-    one entry resident at a time (DEC-AUDIT-READERS-STREAM-001).
+    GENERATION-SCOPED (fix round 2, the refuter-confirmed MAJOR-2): *entries*
+    are the ONE generation's context entries :func:`recorded_audit_facts`
+    already selects — NEVER the whole audit file. The original whole-file
+    fold condemned the sanctioned mixed standing root (a legacy PRECISE
+    generation A + a post-upgrade WORST_CASE generation B accreted into ONE
+    ``resume=True`` audit — the SAME sweep-daemon cadence
+    :func:`recorded_audit_facts`'s own generation keying exists for): the
+    fold returned WORST_CASE for the WHOLE tree, the CLI unconditionally
+    replaced the verify grid's mode, and verifying the LEGACY generation
+    yielded a FALSE ``grid_mismatch``/corrupt with ``checked_stores=0`` —
+    PRECISE is recorded by KEY ABSENCE, so the mix was invisible to the
+    inconsistent-modes refusal. Per-generation scoping makes each
+    generation's stores verify under their OWN recorded mode; a genuinely
+    conflicting SAME-generation pair still refuses loudly.
 
     Raises
     ------
     SweepVerifyError
-        If the audit log is unreadable/corrupt, a recorded ``fill_mode`` is
-        not a known mode token, or two entries disagree (an inconsistent tree
-        is not a verifiable tree — refuse, Golden Rule #1).
+        If a recorded ``fill_mode`` is not a known mode token, is the
+        never-emitted literal PRECISE token (a hand-edited/tampered line),
+        or two SAME-generation entries disagree (an inconsistent generation
+        is not a verifiable generation — refuse, Golden Rule #1).
     """
-    if not audit_path.exists():
-        return FillMode.PRECISE
-    from brutex.orchestrator.audit import AuditError, iter_entries
-
     recorded: FillMode | None = None
-    try:
-        for entry in iter_entries(audit_path):
-            if entry.action not in _CONTEXT_ACTIONS:
-                continue
-            params = entry.payload.get("params")
-            if not isinstance(params, dict) or "fill_mode" not in params:
-                continue
-            raw = params["fill_mode"]
-            try:
-                mode = FillMode(str(raw))
-            except ValueError:
-                raise SweepVerifyError(
-                    f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
-                    f"{raw!r} is not a known fill mode"
-                ) from None
-            if mode is FillMode.PRECISE:
-                # canonical_trade_params NEVER emits the PRECISE token (the
-                # emit-on-non-PRECISE law) — a literal "precise" key is a
-                # hand-edited/tampered line, refused like a junk token.
-                raise SweepVerifyError(
-                    f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
-                    f"the PRECISE mode is recorded by KEY ABSENCE, never a literal "
-                    f"token — the audit line is corrupt or tampered"
-                )
-            if recorded is None:
-                recorded = mode
-            elif recorded is not mode:
-                raise SweepVerifyError(
-                    f"inconsistent recorded fill_mode in {audit_path}: "
-                    f"{recorded.value} vs {mode.value}"
-                )
-    except AuditError as exc:
-        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    for entry in entries:
+        params = entry.payload.get("params")
+        if not isinstance(params, dict) or "fill_mode" not in params:
+            continue
+        raw = params["fill_mode"]
+        try:
+            mode = FillMode(str(raw))
+        except ValueError:
+            raise SweepVerifyError(
+                f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
+                f"{raw!r} is not a known fill mode"
+            ) from None
+        if mode is FillMode.PRECISE:
+            # canonical_trade_params NEVER emits the PRECISE token (the
+            # emit-on-non-PRECISE law) — a literal "precise" key is a
+            # hand-edited/tampered line, refused like a junk token.
+            raise SweepVerifyError(
+                f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
+                f"the PRECISE mode is recorded by KEY ABSENCE, never a literal "
+                f"token — the audit line is corrupt or tampered"
+            )
+        if recorded is None:
+            recorded = mode
+        elif recorded is not mode:
+            raise SweepVerifyError(
+                f"inconsistent recorded fill_mode in {audit_path}: "
+                f"{recorded.value} vs {mode.value} within one launch generation"
+            )
     return FillMode.PRECISE if recorded is None else recorded
 
 
@@ -565,8 +568,8 @@ def recorded_audit_facts(
     snapshot: str | None = None,
     indicator_version: str | None = None,
     code_commit_sha: str | None = None,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
-    """Read the audit ONCE and derive ONE generation's context + schedules.
+) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...], FillMode]:
+    """Read the audit ONCE and derive ONE generation's context + schedules + fill mode.
 
     The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
     replacing the prior double read; review round-5 finding 6 — GENERATION
@@ -599,19 +602,33 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
-    Returns ``(None, {}, ())`` when the audit file is absent, and
-    ``(None, {}, other_generations)`` when the explicit flags match no
-    recorded entry (the explicit-flags path — the caller supplies the full
-    context).
+    The fourth element is the SCOPED generation's recorded global fill mode
+    (DEC-FILL-WORST-CASE-001 fix round 2, the refuter-confirmed MAJOR-2):
+    derived from the SAME ``matching`` entry selection as the context +
+    schedules via :func:`_fill_mode_from_entries` — NEVER an independent
+    whole-audit pass. A mixed standing root (a legacy PRECISE generation +
+    a WORST_CASE generation accreted into ONE ``resume=True`` audit — the
+    sanctioned sweep-daemon cadence this function's generation keying
+    exists for) previously folded the WHOLE file to WORST_CASE and falsely
+    condemned every legacy PRECISE store as ``grid_mismatch``/corrupt; each
+    generation now reads its OWN mode. Absent audit / no matching
+    generation ⇒ PRECISE (the key-absence legacy law — nothing recorded for
+    the scoped generation means nothing non-default).
+
+    Returns ``(None, {}, (), FillMode.PRECISE)`` when the audit file is
+    absent, and ``(None, {}, other_generations, FillMode.PRECISE)`` when the
+    explicit flags match no recorded entry (the explicit-flags path — the
+    caller supplies the full context).
 
     Raises
     ------
     SweepVerifyError
         If the audit log is unreadable/corrupt, a context-bearing payload is
-        malformed, or the SCOPED generation's schedules disagree.
+        malformed, the SCOPED generation's schedules disagree, or its
+        recorded fill modes are malformed/conflicting.
     """
     if not audit_path.exists():
-        return None, {}, ()
+        return None, {}, (), FillMode.PRECISE
     # Hash-chain-VERIFIED read (review round-8 finding 12): these facts gate
     # the Tier-2 identity re-derivation, the F16 recorded schedules, and the
     # Tier-3 context_match gate — verdict-grade outcomes must never derive
@@ -619,7 +636,7 @@ def recorded_audit_facts(
     entries = _verified_entries_from_audit(audit_path)
     pairs = _launch_context_pairs(entries, audit_path)
     if not pairs:
-        return None, {}, ()
+        return None, {}, (), FillMode.PRECISE
     candidates = [
         ctx
         for _entry, ctx in pairs
@@ -629,7 +646,7 @@ def recorded_audit_facts(
     ]
     if not candidates:
         others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs))
-        return None, {}, others
+        return None, {}, others, FillMode.PRECISE
     target = candidates[-1]
     matching = [entry for entry, ctx in pairs if ctx == target]
     others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
@@ -637,6 +654,7 @@ def recorded_audit_facts(
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
         others,
+        _fill_mode_from_entries(matching, audit_path),
     )
 
 
@@ -1284,10 +1302,12 @@ def _verify_store_rows(
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
         roll_schedule=cfg.roll_schedule,
-        # DEC-FILL-WORST-CASE-001: the verify grid carries the tree's
-        # RECORDED fill mode (recorded_fill_mode_from_audit — no key on any
-        # recorded params = PRECISE legacy), so a WORST_CASE tree's row
-        # identities re-derive under the SAME mode they were minted with.
+        # DEC-FILL-WORST-CASE-001: the verify grid carries the SCOPED
+        # generation's RECORDED fill mode (recorded_audit_facts →
+        # _fill_mode_from_entries — no key on any scoped params = PRECISE
+        # legacy; fix round 2: per-generation, never a whole-audit fold), so
+        # each generation's row identities re-derive under the SAME mode
+        # they were minted with.
         fill_mode=cfg.fill_mode,
     )
     expected_label = _direction_label(tuple_.direction)
@@ -2152,7 +2172,6 @@ __all__ = [
     "compare_recount",
     "plan_expected_stores",
     "recorded_context_from_audit",
-    "recorded_fill_mode_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
     "stale_roll_schedule_refusal",

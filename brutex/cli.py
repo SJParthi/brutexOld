@@ -8253,7 +8253,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # every explicit flag given, else the LATEST recorded one, and the other
     # generations are an honest warn-grade note below, never a usage refusal.
     try:
-        recorded, recorded_schedules, other_generations = recorded_audit_facts(
+        recorded, recorded_schedules, other_generations, recorded_fill_mode = recorded_audit_facts(
             out_root / "audit" / "sweep-all.jsonl",
             snapshot=data_snapshot_hash,
             indicator_version=indicator_version,
@@ -8386,6 +8386,17 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "indicator_version": indicator,
         "code_commit_sha": code_sha,
         "top_k": top,
+        # DEC-FILL-WORST-CASE-001 (fix round 2): the verify grid carries the
+        # SCOPED generation's RECORDED fill mode — derived by
+        # recorded_audit_facts from the SAME matching-entries selection as
+        # the context + schedules above, NEVER an independent whole-audit
+        # fold (which condemned a mixed PRECISE+WORST_CASE standing root's
+        # legacy generation as a false grid_mismatch/corrupt). The law stays
+        # the params contract's: no fill_mode key on any scoped params =
+        # PRECISE legacy (an absent audit / unmatched explicit flags read
+        # PRECISE too); re-deriving identities under the wrong mode would
+        # read every store of the other mode's generation as corrupt.
+        "fill_mode": recorded_fill_mode,
         # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
         # a legacy out-of-scope tree must stay Tier-1/2 verifiable, so the
         # Layer-1 config invariant is opted out at this ONE forensic rebuild
@@ -8403,26 +8414,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
         print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
-        return EXIT_USER_ERROR
-
-    # DEC-FILL-WORST-CASE-001: the verify grid must carry the tree's RECORDED
-    # fill mode. SweepGridConfig defaults to the WORST_CASE production
-    # default, but the verify/recount law is the params contract's — "no
-    # fill_mode key on any recorded params = PRECISE legacy" (an absent audit
-    # reads PRECISE too) — so the recorded mode is folded UNCONDITIONALLY
-    # here; re-deriving identities under the wrong mode would read every
-    # store of the other mode's tree as corrupt.
-    import dataclasses as _fm_dc
-
-    from brutex.engine.sweep_verify import recorded_fill_mode_from_audit
-
-    try:
-        grid = _fm_dc.replace(
-            grid,
-            fill_mode=recorded_fill_mode_from_audit(out_root / "audit" / "sweep-all.jsonl"),
-        )
-    except SweepVerifyError as exc:
-        print(f"[brutex] sweep-verify: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —

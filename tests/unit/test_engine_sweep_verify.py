@@ -47,7 +47,6 @@ from brutex.engine.sweep_verify import (
     plan_expected_stores,
     recorded_audit_facts,
     recorded_context_from_audit,
-    recorded_fill_mode_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
     stale_roll_schedule_refusal,
@@ -356,81 +355,91 @@ class TestRecordedContext:
 
 
 class TestRecordedFillMode:
-    """`recorded_fill_mode_from_audit` — no key on any params = PRECISE legacy."""
+    """The SCOPED generation's recorded fill mode — `recorded_audit_facts`' 4th element.
+
+    The law: no ``fill_mode`` key on any of the scoped generation's params =
+    PRECISE legacy. FIX-ROUND-2 (refuter-confirmed MAJOR-2, MIGRATION.md
+    #1786): the mode is derived from the SAME matching-entries selection as
+    the context + schedules — the retired ``recorded_fill_mode_from_audit``
+    folded the WHOLE audit, so a mixed standing root (a legacy PRECISE
+    generation + a post-upgrade WORST_CASE generation accreted into ONE
+    ``resume=True`` audit — the sanctioned sweep-daemon cadence) read
+    WORST_CASE for the whole tree and every legacy PRECISE store verified as
+    a FALSE ``grid_mismatch``/corrupt (``checked_stores=0``); PRECISE is
+    recorded by KEY ABSENCE, so the mix was invisible to the
+    inconsistent-modes refusal.
+    """
+
+    _CTX: ClassVar[dict[str, str]] = {
+        "data_snapshot_hash": "snap0001",
+        "indicator_version": "ind-v1",
+        "code_commit_sha": "deadbeef",
+    }
+
+    def _append(
+        self,
+        audit: AuditWriter,
+        *,
+        params: dict[str, object] | None,
+        snapshot: str = "snap0001",
+        action: str = "SWEEP_START",
+    ) -> None:
+        payload: dict[str, object] = {
+            **self._CTX,
+            "data_snapshot_hash": snapshot,
+            "instrument": "NIFTY",
+        }
+        if params is not None:
+            payload["params"] = params
+        audit.append(action=action, subject="s", payload=payload)
 
     def test_absent_audit_reads_precise(self, tmp_path: Path) -> None:
-        assert recorded_fill_mode_from_audit(tmp_path / "nope.jsonl") is FillMode.PRECISE
+        assert recorded_audit_facts(tmp_path / "nope.jsonl")[3] is FillMode.PRECISE
 
     def test_legacy_tree_without_the_key_reads_precise(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
+            # A NON-context action's params are never consulted (junk stays inert).
             audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
-            audit.append(action="SWEEP_START", subject="s", payload={"instrument": "NIFTY"})
-            audit.append(
-                action="SWEEP_START",
-                subject="s",
-                payload={"instrument": "NIFTY", "params": {"sl_paisa": 80}},
-            )
-        assert recorded_fill_mode_from_audit(path) is FillMode.PRECISE
+            self._append(audit, params=None)
+            self._append(audit, params={"sl_paisa": 80})
+        assert recorded_audit_facts(path)[3] is FillMode.PRECISE
 
     def test_worst_case_tree_reads_the_recorded_mode(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(
-                action="SWEEP_START",
-                subject="s1",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
-            )
-            audit.append(  # consistent repeats agree
-                action="SWEEP_START",
-                subject="s2",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
-            )
-        assert recorded_fill_mode_from_audit(path) is FillMode.WORST_CASE
+            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(audit, params={"fill_mode": "worst_case"})  # consistent repeats agree
+        assert recorded_audit_facts(path)[3] is FillMode.WORST_CASE
 
     def test_junk_token_refuses(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(
-                action="SWEEP_START",
-                subject="s",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst"}},
-            )
+            self._append(audit, params={"fill_mode": "worst"})
         with pytest.raises(SweepVerifyError, match="not a known fill mode"):
-            recorded_fill_mode_from_audit(path)
+            recorded_audit_facts(path)
 
     def test_literal_precise_token_refuses_as_tampered(self, tmp_path: Path) -> None:
         # canonical_trade_params NEVER emits the PRECISE token (the
         # emit-on-non-PRECISE law) — a literal key is a hand-edited line.
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(
-                action="SWEEP_START",
-                subject="s",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "precise"}},
-            )
+            self._append(audit, params={"fill_mode": "precise"})
         with pytest.raises(SweepVerifyError, match="KEY ABSENCE"):
-            recorded_fill_mode_from_audit(path)
+            recorded_audit_facts(path)
 
-    def test_inconsistent_modes_refuse(self, tmp_path: Path) -> None:
-        # A worst_case entry followed by a literal "precise" entry: today's
-        # two-member vocabulary makes the second line trip the KEY-ABSENCE
-        # tamper refusal (a literal PRECISE token is never emitted) BEFORE
-        # the inconsistency fold — refused either way, never a picked winner.
+    def test_inconsistent_modes_within_one_generation_refuse(self, tmp_path: Path) -> None:
+        # A worst_case entry followed by a literal "precise" entry in the
+        # SAME generation: today's two-member vocabulary makes the second
+        # line trip the KEY-ABSENCE tamper refusal (a literal PRECISE token
+        # is never emitted) BEFORE the inconsistency fold — refused either
+        # way, never a picked winner.
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(
-                action="SWEEP_START",
-                subject="s1",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
-            )
-            audit.append(
-                action="SWEEP_START",
-                subject="s2",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "precise"}},
-            )
+            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(audit, params={"fill_mode": "precise"})
         with pytest.raises(SweepVerifyError):
-            recorded_fill_mode_from_audit(path)
+            recorded_audit_facts(path)
 
     def test_inconsistent_modes_refuse_under_a_future_vocabulary(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -440,7 +449,8 @@ class TestRecordedFillMode:
         # non-PRECISE member is WORST_CASE; a literal "precise" is refused
         # earlier as tampered) — it is the DEFENSIVE TOTALITY arm for a
         # future third mode. Drive it with a three-member fake vocabulary
-        # patched into the module's own FillMode binding.
+        # patched into the module's own FillMode binding; both entries share
+        # ONE context triple, so the conflict is genuinely SAME-generation.
         import enum
 
         from brutex.engine import sweep_verify as sv_mod
@@ -453,26 +463,128 @@ class TestRecordedFillMode:
         monkeypatch.setattr(sv_mod, "FillMode", _FutureMode)
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(
-                action="SWEEP_START",
-                subject="s1",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
-            )
-            audit.append(
-                action="SWEEP_START",
-                subject="s2",
-                payload={"instrument": "NIFTY", "params": {"fill_mode": "pessimal"}},
-            )
+            self._append(audit, params={"fill_mode": "worst_case"})
+            self._append(audit, params={"fill_mode": "pessimal"})
         with pytest.raises(SweepVerifyError, match="inconsistent recorded fill_mode"):
-            recorded_fill_mode_from_audit(path)
+            recorded_audit_facts(path)
 
-    def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
+    def test_cross_generation_mode_difference_is_sanctioned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE FIX-ROUND-2 SCOPING LAW (pure-reader half): two GENERATIONS may
+        # legitimately record different modes — each scoped read returns its
+        # OWN generation's mode with NO refusal (pre-fix the whole-file fold
+        # under the future vocabulary raised 'inconsistent recorded
+        # fill_mode' on this sanctioned shape; under today's two-member
+        # vocabulary the PRECISE generation is key-ABSENT, which the
+        # whole-file fold silently absorbed instead — the MAJOR-2 bug).
+        import enum
+
+        from brutex.engine import sweep_verify as sv_mod
+
+        class _FutureMode(enum.Enum):
+            WORST_CASE = "worst_case"
+            PESSIMAL = "pessimal"
+            PRECISE = "precise"
+
+        monkeypatch.setattr(sv_mod, "FillMode", _FutureMode)
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
-            audit.append(action="SWEEP_START", subject="s", payload={"params": {}})
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0001")
+            self._append(audit, params={"fill_mode": "pessimal"}, snapshot="snap0002")
+        assert recorded_audit_facts(path, snapshot="snap0001")[3] is _FutureMode.WORST_CASE
+        assert recorded_audit_facts(path, snapshot="snap0002")[3] is _FutureMode.PESSIMAL
+        # Unscoped = the LATEST generation (the append-only law).
+        assert recorded_audit_facts(path)[3] is _FutureMode.PESSIMAL
+
+    def test_mixed_precise_then_worst_case_generations_read_their_own_modes(
+        self, tmp_path: Path
+    ) -> None:
+        # The two-member-vocabulary half of the scoping law: generation A is
+        # PRECISE (key-ABSENT — the elision law), generation B records
+        # worst_case. Pre-fix the whole-file fold returned WORST_CASE for
+        # BOTH; now each scoped read answers for its own generation.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
+            self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
+        assert recorded_audit_facts(path, snapshot="snap0001")[3] is FillMode.PRECISE
+        assert recorded_audit_facts(path, snapshot="snap0002")[3] is FillMode.WORST_CASE
+        assert recorded_audit_facts(path)[3] is FillMode.WORST_CASE
+
+    def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
+        # The verdict-grade read is chain-verified FIRST (round-8 finding 12
+        # of the facts seam), so trailing junk refuses at verification.
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            self._append(audit, params={})
         path.write_text(path.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
-        with pytest.raises(SweepVerifyError, match="unreadable audit log"):
-            recorded_fill_mode_from_audit(path)
+        with pytest.raises(SweepVerifyError, match="failed hash-chain verification"):
+            recorded_audit_facts(path)
+
+    def test_mixed_generation_standing_root_verifies_each_generation_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """THE FIX-ROUND-2 MIXED-TREE REGRESSION (refuter-confirmed MAJOR-2,
+        executed repro): a standing root swept FIRST under explicit PRECISE
+        (generation A — byte-identical to a pre-mode legacy sweep by the
+        elision law) then under the WORST_CASE production default with a
+        moved snapshot (generation B; ``run_sweep_grid`` appends to the SAME
+        ``resume=True`` audit — the sweep-daemon cadence). Pre-fix,
+        ``recorded_fill_mode_from_audit`` folded the WHOLE audit to
+        WORST_CASE and the CLI's unconditional grid replace made the LEGACY
+        generation verify as a FALSE ``grid_mismatch``/corrupt with
+        ``checked_stores=0``. Now each generation's scoped facts carry its
+        OWN mode and both verify with their real stores checked.
+        """
+        from dataclasses import replace as dc_replace
+
+        from brutex.engine.sweep_orchestrator import make_store_for
+
+        root = tmp_path / "results"
+        root.mkdir()
+        grid_a = _grid()  # explicit PRECISE — the legacy generation
+        _sweep(root, grid_a)
+        grid_b = _grid(fill_mode=FillMode.WORST_CASE, data_snapshot_hash="b" * 64)
+        with AuditWriter.open(root / "audit.jsonl", resume=True) as audit:
+            run_sweep_grid(
+                grid_b,
+                bars_for=lambda _i, _t: _trending_bars(),
+                store_for=make_store_for(root, grid_b),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                audit=audit,
+            )
+        audit_path = root / "audit.jsonl"
+        # Scoped facts: each generation reads its OWN recorded mode.
+        _ctx_a, _sched_a, _others_a, mode_a = recorded_audit_facts(
+            audit_path, snapshot=grid_a.data_snapshot_hash
+        )
+        _ctx_b, _sched_b, _others_b, mode_b = recorded_audit_facts(
+            audit_path, snapshot=grid_b.data_snapshot_hash
+        )
+        assert mode_a is FillMode.PRECISE
+        assert mode_b is FillMode.WORST_CASE
+        # Unscoped = the latest generation (B).
+        assert recorded_audit_facts(audit_path)[3] is FillMode.WORST_CASE
+        # The CLI flow: the verify grid folds the SCOPED generation's mode —
+        # BOTH generations now verify with their stores CHECKED and no
+        # grid_mismatch (the other generation's store is the honest
+        # warn-grade `unattributed_store`, never corrupt).
+        for grid, mode in ((grid_a, mode_a), (grid_b, mode_b)):
+            report = verify_identity(root, dc_replace(grid, fill_mode=mode))
+            codes = {finding.code for finding in report.findings}
+            assert "grid_mismatch" not in codes, codes
+            assert report.checked_stores == 1
+            assert not any(finding.severity == "corrupt" for finding in report.findings), (
+                report.findings
+            )
+        # The pre-fix failure shape stays dead: verifying the LEGACY
+        # generation under the OTHER generation's mode is exactly what the
+        # whole-audit fold did — pin that it (still) mis-addresses, so the
+        # scoped fold above is provably load-bearing, not vacuous.
+        wrong = verify_identity(root, dc_replace(grid_a, fill_mode=FillMode.WORST_CASE))
+        assert any(finding.code == "grid_mismatch" for finding in wrong.findings)
+        assert wrong.checked_stores == 0
 
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
@@ -633,12 +745,12 @@ class TestRecordedAuditFacts:
             )
 
     def test_absent_audit_returns_none_and_empty(self, tmp_path: Path) -> None:
-        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, ())
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, (), FillMode.PRECISE)
 
     def test_derives_both_facts_matching_the_single_fact_readers(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         self._write(path)
-        context, schedules, others = recorded_audit_facts(path)
+        context, schedules, others, _fill_mode = recorded_audit_facts(path)
         assert context == recorded_context_from_audit(path)
         assert schedules == recorded_roll_schedules_from_audit(path)
         assert context is not None
@@ -663,7 +775,7 @@ class TestRecordedAuditFacts:
             return real_read(p)
 
         monkeypatch.setattr(audit_mod, "read_entries", counting_read)
-        context, schedules, _others = recorded_audit_facts(path)
+        context, schedules, _others, _fill_mode = recorded_audit_facts(path)
         assert context is not None
         assert schedules
         assert calls == [path]  # ONE parse for BOTH derivations
@@ -708,7 +820,7 @@ class TestRecordedAuditFacts:
         # this exact sanctioned shape.
         path = tmp_path / "a.jsonl"
         self._daemon_audit(path)
-        context, schedules, others = recorded_audit_facts(path)
+        context, schedules, others, _fill_mode = recorded_audit_facts(path)
         assert context == RecordedContext(
             data_snapshot_hash="snap0002",
             indicator_version="ind-v1",
@@ -722,7 +834,7 @@ class TestRecordedAuditFacts:
         # its own (shorter) schedule come back, the newer one is the 'other'.
         path = tmp_path / "a.jsonl"
         self._daemon_audit(path)
-        context, schedules, others = recorded_audit_facts(path, snapshot="snap0001")
+        context, schedules, others, _fill_mode = recorded_audit_facts(path, snapshot="snap0001")
         assert context == RecordedContext(
             data_snapshot_hash="snap0001",
             indicator_version="ind-v1",
@@ -737,7 +849,7 @@ class TestRecordedAuditFacts:
         # flags must supply the full context.
         path = tmp_path / "a.jsonl"
         self._daemon_audit(path)
-        context, schedules, others = recorded_audit_facts(path, snapshot="snap9999")
+        context, schedules, others, _fill_mode = recorded_audit_facts(path, snapshot="snap9999")
         assert context is None
         assert schedules == {}
         assert others == ("snap0001", "snap0002")  # first-appearance order
@@ -756,7 +868,7 @@ class TestRecordedAuditFacts:
         path = tmp_path / "a.jsonl"
         self._write(path, snapshot="snap0001", code_sha="deadbeef")
         self._write(path, snapshot="snap0001", code_sha="cafef00d")
-        context, schedules, others = recorded_audit_facts(path)
+        context, schedules, others, _fill_mode = recorded_audit_facts(path)
         assert context == RecordedContext(
             data_snapshot_hash="snap0001",
             indicator_version="ind-v1",
@@ -774,7 +886,7 @@ class TestRecordedAuditFacts:
         path = tmp_path / "a.jsonl"
         self._write(path, snapshot="snap0001", code_sha="deadbeef", schedule=(739428,))
         self._write(path, snapshot="snap0001", code_sha="cafef00d")
-        context, schedules, _others = recorded_audit_facts(
+        context, schedules, _others, _fill_mode = recorded_audit_facts(
             path, snapshot="snap0001", code_commit_sha="deadbeef"
         )
         assert context == RecordedContext(
@@ -789,11 +901,15 @@ class TestRecordedAuditFacts:
         # derives NOTHING (the explicit-flags path), a matched one scopes.
         path = tmp_path / "a.jsonl"
         self._write(path, snapshot="snap0001", code_sha="deadbeef")
-        context, schedules, others = recorded_audit_facts(path, indicator_version="ind-v9")
+        context, schedules, others, _fill_mode = recorded_audit_facts(
+            path, indicator_version="ind-v9"
+        )
         assert context is None
         assert schedules == {}
         assert others == ("snap0001",)
-        context, _schedules, _others = recorded_audit_facts(path, indicator_version="ind-v1")
+        context, _schedules, _others, _fill_mode = recorded_audit_facts(
+            path, indicator_version="ind-v1"
+        )
         assert context is not None
         assert context.indicator_version == "ind-v1"
 
@@ -814,7 +930,7 @@ class TestRecordedAuditFacts:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             audit.append(action="OTHER", subject="s", payload={})
-        assert recorded_audit_facts(path) == (None, {}, ())
+        assert recorded_audit_facts(path) == (None, {}, (), FillMode.PRECISE)
 
     def test_sweep_launch_line_supplies_context_and_schedule(self, tmp_path: Path) -> None:
         # Round-7 finding 1: the parent's pre-dispatch SWEEP_LAUNCH line is a
@@ -834,7 +950,7 @@ class TestRecordedAuditFacts:
                     "params": {"roll_schedule": list(self._SCHEDULE)},
                 },
             )
-        context, schedules, others = recorded_audit_facts(path)
+        context, schedules, others, _fill_mode = recorded_audit_facts(path)
         assert context == RecordedContext(
             data_snapshot_hash="snap0001",
             indicator_version="ind-v1",
