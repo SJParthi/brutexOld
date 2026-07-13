@@ -581,6 +581,14 @@ class TestOverfitGateConfig:
         with pytest.raises(ValueError, match="weight"):
             OverfitGateConfig(weight=-0.1)
 
+    @pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+    def test_overfit_weight_non_finite_rejected(self, bad: float) -> None:
+        # DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001: a non-finite gate weight is
+        # refused at construction (a separate isfinite arm BEFORE the `< 0`
+        # check), so it can never reach the canonical-JSON run identity.
+        with pytest.raises(ValueError, match="weight must be finite"):
+            OverfitGateConfig(weight=bad)
+
     def test_default_skew_non_finite_raises(self) -> None:
         with pytest.raises(ValueError, match="default_skew"):
             OverfitGateConfig(default_skew=math.inf)

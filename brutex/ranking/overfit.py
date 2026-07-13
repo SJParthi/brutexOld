@@ -141,8 +141,8 @@ class OverfitGateConfig:
     Raises
     ------
     ValueError
-        If ``dsr_min`` is outside ``[0, 1]``, ``weight`` is negative, or a Gaussian
-        fallback moment is non-finite.
+        If ``dsr_min`` is outside ``[0, 1]``, ``weight`` is non-finite or negative,
+        or a Gaussian fallback moment is non-finite.
     """
 
     dsr_min: float = 0.95
@@ -155,6 +155,8 @@ class OverfitGateConfig:
             raise ValueError(
                 f"OverfitGateConfig.dsr_min must be a probability in [0, 1], got {self.dsr_min}"
             )
+        if not math.isfinite(self.weight):
+            raise ValueError(f"OverfitGateConfig.weight must be finite, got {self.weight!r}")
         if self.weight < 0.0:
             raise ValueError(f"OverfitGateConfig.weight must be >= 0, got {self.weight}")
         for name in ("default_skew", "default_excess_kurtosis"):
