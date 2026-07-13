@@ -114,10 +114,12 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite exercises the
-        # R45 diffcheck closure, which is PRECISE-only until the Stage-2
-        # naive worst-case arm lands (a WORST_CASE grid loudly disables it —
-        # pinned by test_diffcheck_disabled_under_worst_case_fill_mode).
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's hand-built
+        # expectations predate the worst-case default; the R45 closure now
+        # runs under BOTH modes (the Stage-2 naive worst-case arm —
+        # test_r45_diffcheck_closure_checks_real_masks parametrizes the mode,
+        # and test_diffcheck_enabled_under_worst_case_fill_mode pins the
+        # Stage-1 disable bridge GONE).
         "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
@@ -1373,10 +1375,14 @@ def test_diffcheck_disabled_is_none(tmp_path: Path) -> None:
         assert core.diffcheck is None
 
 
-def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [FillMode.PRECISE, FillMode.WORST_CASE])
+def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path, mode: FillMode) -> None:
+    # DEC-FILL-WORST-CASE-001 Stage 2: the R45 parity holds under BOTH fill
+    # modes — the production leg simulates under grid.fill_mode and the
+    # naive reference independently re-derives the SAME mode.
     from brutex.engine.stage1a import build_bar_bits
 
-    grid = _grid()
+    grid = _grid(fill_mode=mode)
     tuple_ = next(iter_sweep_tuples(grid))
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
@@ -1393,24 +1399,28 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     assert payload["mismatches"] == 0
 
 
-def test_diffcheck_disabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
-    # DEC-FILL-WORST-CASE-001 Stage-1 honest bridge: the R45 naive reference
-    # hard-codes the PRECISE policy, so a WORST_CASE run SKIPS the diffcheck
-    # with ONE loud WARN instead of latching a FALSE SUSPECT (or silently
-    # verifying an arm the run never executed). Stage 2 lands the naive
-    # worst-case arm and removes this skip.
+def test_diffcheck_enabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-001 Stage 2 (the Stage-1 disable-bridge regression,
+    # REPURPOSED): the naive worst-case arm landed, so a WORST_CASE grid gets
+    # a REAL diffcheck closure — no skip, no diffcheck_disabled_fill_mode
+    # WARN — and the bridge token is GONE from the run core's source.
+    import inspect
+
     from structlog.testing import capture_logs
+
+    from brutex.engine import sweep_run_core as run_core_module
 
     grid = _grid(fill_mode=FillMode.WORST_CASE)
     with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
-        assert core.diffcheck is None
+        assert core.diffcheck is not None
         assert core.suspect is False
-    warns = [
+    assert not [
         log for log in logs if log.get("event") == "sweep_run_core.diffcheck_disabled_fill_mode"
     ]
-    assert len(warns) == 1
-    assert warns[0]["fill_mode"] == "worst_case"
-    assert warns[0]["reason"] == "naive_reference_precise_only"
+    # Source-negative pin: the Stage-1 bridge's WARN event token no longer
+    # exists as an emitted event (this test file is its ONLY remaining home).
+    source = inspect.getsource(run_core_module)
+    assert "diffcheck_disabled_fill_mode" not in source
 
 
 def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(

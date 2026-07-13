@@ -40,6 +40,7 @@ from brutex.engine.sweep_diffcheck import (
     resolve_diffcheck_k,
     sample_masks,
 )
+from brutex.execution.fill_mode import FillMode
 from structlog.testing import capture_logs
 
 #: D-6 traceability — test name → requirement/gap tokens.
@@ -788,6 +789,10 @@ class _Grid:
     condition_bits: tuple[int, ...] = (0, 1, 2)
     data_snapshot_hash: str = "snap"
     start_equity_paisa: int = 10_000_000
+    # DEC-FILL-WORST-CASE-001: the hook threads grid.fill_mode into the
+    # reference (same-mode vs same-mode); PRECISE keeps the legacy fixtures'
+    # hand-derived numbers byte-identical.
+    fill_mode: FillMode = FillMode.PRECISE
 
 
 class _SuspectStub:
@@ -898,6 +903,7 @@ class TestDiffCheckHook:
             tf_minutes: int,
             sl_paisa: int | None,
             tp_paisa: int | None,
+            fill_mode: FillMode = FillMode.PRECISE,
         ) -> list[RefTrade]:
             trades = real(
                 bars,
@@ -906,6 +912,7 @@ class TestDiffCheckHook:
                 tf_minutes=tf_minutes,
                 sl_paisa=sl_paisa,
                 tp_paisa=tp_paisa,
+                fill_mode=fill_mode,
             )
             # The plant: one paisa of drift on the first trade.
             return [
@@ -1114,3 +1121,241 @@ class TestDiffCheckHook:
         sample = _ref_trade(1, 10)
         for field in COMPARED_TRADE_FIELDS:
             assert isinstance(getattr(sample, field), int | datetime)
+
+
+# ── DEC-FILL-WORST-CASE-001 — the independently re-stated worst-case arm ────
+
+
+class TestReferenceSimulateWorstCase:
+    """Rule-by-rule hand fixtures for the worst-case (adverse-max) fill arm."""
+
+    def test_worst_case_entry_fills_bar_extreme(self) -> None:
+        # BUY entry fills at the entry bar's HIGH (not its open); SELL at LOW.
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_010, 10_030, 10_000, 10_020),
+            _bar(2, 10_020, 10_050, 9_990, 10_040),
+        ]
+        for direction, expected_entry in (("BUY", 10_030), ("SELL", 10_000)):
+            trades = reference_simulate(
+                bars,
+                [True, False, False],
+                direction=direction,
+                tf_minutes=1,
+                sl_paisa=None,
+                tp_paisa=None,
+                fill_mode=FillMode.WORST_CASE,
+            )
+            assert len(trades) == 1
+            assert trades[0].entry_paisa == expected_entry, direction
+
+    def test_worst_case_sl_gap_through_fills_at_extreme(self) -> None:
+        # The bar gaps THROUGH the stop: the fill is min(level, low) — the
+        # bar LOW, not the level fantasy (BUY arm).
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry: worst == open
+            _bar(2, 9_990, 9_990, 9_900, 9_950),  # gaps far through sl = 9_950
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=50,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        assert trades[0].exit_reason == "stop_loss"
+        assert trades[0].exit_paisa == 9_900  # min(9_950, 9_900) = the LOW
+        assert trades[0].pnl_paisa == -100
+
+    def test_worst_case_tp_gap_past_clamps_at_level(self) -> None:
+        # THE OVERSTATEMENT COUNTEREXAMPLE: a long-TP bar entirely ABOVE the
+        # target (low > tp) must fill AT the level — min(tp, low) == tp — a
+        # naive sell-at-low would fill BETTER than today's at-level fill.
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
+            _bar(2, 10_100, 10_120, 10_090, 10_110),  # entirely above tp = 10_050
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=50,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        assert trades[0].exit_reason == "take_profit"
+        assert trades[0].exit_paisa == 10_050  # clamped AT the level
+        assert trades[0].pnl_paisa == 50
+
+    def test_worst_case_sell_side_sl_fills_max_level_high(self) -> None:
+        # SELL exit (cover) mirror: max(level, high) — a gap through the SELL
+        # stop fills at the bar HIGH.
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry (SELL at low=open)
+            _bar(2, 10_060, 10_150, 10_060, 10_100),  # gaps through sl = 10_050
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="SELL",
+            tf_minutes=1,
+            sl_paisa=50,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        assert trades[0].exit_reason == "stop_loss"
+        assert trades[0].exit_paisa == 10_150  # max(10_050, high 10_150)
+        assert trades[0].pnl_paisa == 10_000 - 10_150
+
+    def test_worst_case_forced_exit_fills_adverse_extreme_fold_unchanged(self) -> None:
+        # The forced bar fills at its adverse extreme (BUY sells the LOW) but
+        # still folds (open, open) only — the excursion law is mode-invariant.
+        anchor = datetime(2024, 1, 2, 9, 47, tzinfo=UTC)  # 15:17 IST
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # arm
+            _bar(1, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # entry (flat)
+            _bar(2, 10_010, 10_040, 9_980, 10_020, anchor=anchor),  # in-position
+            _bar(3, 10_030, 10_090, 9_900, 10_050, anchor=anchor),  # 15:20 forced
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.exit_reason == "forced_1520"
+        assert trade.exit_paisa == 9_900  # the forced bar's LOW, not its open
+        # Fold law unchanged: bar 2's full range + bar 3's (open, open) only.
+        assert trade.mfe_paisa == 40  # bar2 high 10_040 − entry 10_000
+        assert trade.mae_paisa == 20  # entry 10_000 − bar2 low 9_980 (NOT 9_900)
+
+    def test_worst_case_end_of_data_closes_at_last_bar_extreme(self) -> None:
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_010, 10_040, 9_995, 10_020),
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        assert trades[0].exit_reason == "end_of_data"
+        assert trades[0].exit_paisa == 9_995  # last bar LOW (PRECISE: close 10_020)
+        # Worst entry = bar 1 HIGH 10_040 ⇒ pnl = 9_995 − 10_040.
+        assert trades[0].pnl_paisa == -45
+
+    def test_worst_case_session_gap_closes_at_prior_last_bar_extreme(self) -> None:
+        day1 = datetime(2024, 1, 2, 9, 30, tzinfo=UTC)  # 15:00 IST Tue
+        day2 = datetime(2024, 1, 3, 3, 45, tzinfo=UTC)  # 09:15 IST Wed
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=day1),  # arm
+            _bar(1, 10_010, 10_030, 10_005, 10_020, anchor=day1),  # entry + day-1 LAST
+            _bar(0, 9_000, 12_000, 8_000, 9_500, anchor=day2),  # boundary (wild)
+        ]
+        trades = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=None,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade.exit_reason == "session_gap"
+        assert trade.exit_idx == 1
+        assert trade.exit_paisa == 10_005  # day-1 last bar LOW (PRECISE: 10_020)
+        assert trade.entry_paisa == 10_030  # worst entry = day-1 bar HIGH
+
+    def test_worst_case_levels_anchor_on_the_worst_entry_fill(self) -> None:
+        # The documented honest interaction: SL/TP levels anchor on the
+        # ACTUAL (adverse-extreme) entry fill, so trigger timing can differ
+        # between modes — here the SAME bar trips the stop ONLY under
+        # worst-case (level 10_030 − 50 = 9_980 vs precise 10_000 − 50 =
+        # 9_950; bar 2's low 9_975 touches only the former).
+        bars = [
+            _bar(0, 10_000, 10_000, 10_000, 10_000),
+            _bar(1, 10_000, 10_030, 10_000, 10_010),  # entry: worst 10_030
+            _bar(2, 10_000, 10_010, 9_975, 10_000),
+        ]
+        worst = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=50,
+            tp_paisa=None,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        precise = reference_simulate(
+            bars,
+            [True, False, False],
+            direction="BUY",
+            tf_minutes=1,
+            sl_paisa=50,
+            tp_paisa=None,
+        )
+        assert worst[0].exit_reason == "stop_loss"
+        assert worst[0].exit_paisa == 9_975  # min(level 9_980, low 9_975)
+        assert precise[0].exit_reason == "end_of_data"
+
+    def test_worst_case_parity_with_production_walker(self) -> None:
+        # TEST-SIDE oracle join (the module's own import ban binds the
+        # PRODUCTION file, not this test): the naive worst-case arm agrees
+        # bit-for-bit with the production walker under the SAME mode on a
+        # mixed fixture (range bars, SL+TP, forced tail).
+        from brutex.engine.trade_sim import FillPolicy, simulate_trades
+        from brutex.strategies.types import Side
+
+        anchor = datetime(2024, 1, 2, 9, 40, tzinfo=UTC)  # 15:10 IST
+        bars = [
+            _bar(0, 10_000, 10_020, 9_990, 10_010, anchor=anchor),
+            _bar(1, 10_010, 10_045, 9_995, 10_030, anchor=anchor),
+            _bar(2, 10_030, 10_070, 10_005, 10_050, anchor=anchor),
+            _bar(3, 10_040, 10_080, 9_960, 10_000, anchor=anchor),
+            _bar(4, 10_000, 10_030, 9_945, 9_990, anchor=anchor),
+        ]
+        fires = [True, False, False, True, False]
+        for direction in (Side.BUY, Side.SELL):
+            prod = simulate_trades(
+                bars,
+                fires,
+                direction=direction,
+                tf_minutes=1,
+                stop_loss_paisa=60,
+                take_profit_paisa=60,
+                policy=FillPolicy(fill_mode=FillMode.WORST_CASE),
+            )
+            ref = reference_simulate(
+                bars,
+                fires,
+                direction=direction.value,
+                tf_minutes=1,
+                sl_paisa=60,
+                tp_paisa=60,
+                fill_mode=FillMode.WORST_CASE,
+            )
+            assert len(prod) == len(ref), direction
+            for p, r in zip(prod, ref, strict=True):
+                for field in COMPARED_TRADE_FIELDS:
+                    assert getattr(p, field) == getattr(r, field), (direction, field)

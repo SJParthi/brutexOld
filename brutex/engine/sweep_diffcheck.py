@@ -18,12 +18,15 @@ The production leg is INJECTED into :class:`DiffCheckHook` by the run core
 (``simulate_trades`` + the equity/drawdown fold), so even the hook side of
 this module stays structurally clean of the banned imports. What IS reused
 are canonical INPUT seams only (design R45 note): the NSE session calendar
-(session facts are data, not simulator logic) and the canonical mask
+(session facts are data, not simulator logic), the canonical mask
 enumeration order (:func:`brutex.engine.combo_mask.iter_masks_k_of_bits` +
-conflict pruning — the addressing, not the simulation). The signal
-projection, rupee→paisa snap, entry/exit state machine, equity fold,
-drawdown scan and the float bit-compare key are all RE-DERIVED here in a
-flat forward loop (the ``tests/unit/test_surface_trial_results.py``
+conflict pruning — the addressing, not the simulation), and the
+:class:`~brutex.execution.fill_mode.FillMode` VOCABULARY enum
+(DEC-FILL-WORST-CASE-001 — shared mode-selection DATA, not simulator
+logic; the worst-case fill LAW itself is independently RE-STATED below).
+The signal projection, rupee→paisa snap, entry/exit state machine, equity
+fold, drawdown scan and the float bit-compare key are all RE-DERIVED here
+in a flat forward loop (the ``tests/unit/test_surface_trial_results.py``
 independent-recomputation bar).
 
 ## Rules re-derived (the spec — ``trade_sim`` module docstring / sim-map c.1)
@@ -49,6 +52,21 @@ data closes at the LAST bar's CLOSE — for the same prefix, bit-identical
 to the ``session_gap`` record modulo the reason label (the truncation
 equivalence). P&L is the per-unit directional move in int64 paisa —
 NO costs of any kind (Track-1 spot is signal-only; CLAUDE.md §7).
+
+Under ``fill_mode=WORST_CASE`` (DEC-FILL-WORST-CASE-001, keyed on the
+threaded ``grid.fill_mode`` — the run's OWN mode, same-mode vs same-mode)
+every fill PRICE above is replaced by the independently RE-STATED
+adverse-max law while every TIMING/trigger/tie/excursion/reason rule stays
+byte-identical: entry fills at the entry bar's adverse extreme (BUY at
+HIGH / SELL at LOW — SL/TP levels then anchor on that actual entry fill);
+a triggered SL **or TP** fills at ``min(level, bar low)`` for a BUY /
+``max(level, bar high)`` for a SELL (a gap-through bar fills at the
+extreme; a bar gapping PAST the level in the trade's favour stays clamped
+AT the level — never overstating vs the at-level fill); the forced
+session-close exit fills at the forced bar's adverse extreme (its
+``(open, open)`` excursion fold unchanged); ``end_of_data`` +
+``session_gap`` close at the last managed bar's adverse extreme (the same
+SL_FIRST tie; the default policy still carries no next-open slot).
 
 ## Determinism (design D-11)
 
@@ -96,6 +114,12 @@ import structlog
 from brutex.calendars.nse import IST, forced_exit_seconds_for_session, get_session_checked
 from brutex.engine.combo_mask import iter_masks_k_of_bits
 from brutex.engine.sweep_lookahead import env_flag_tristate
+
+# Shared VOCABULARY only (DEC-FILL-WORST-CASE-001): the stdlib-only FillMode
+# enum is mode-selection DATA, not simulator logic — the worst-case fill LAW
+# is independently re-stated in reference_simulate (the import-ban pin's
+# banned set names the production SIM modules, which this is not).
+from brutex.execution.fill_mode import FillMode
 from brutex.vocabulary.conflicts import has_conflict
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -185,7 +209,14 @@ class RefTrade:
 
 @dataclass(slots=True)
 class _RefPosition:
-    """Mutable open-position state for the naive forward loop (int paisa)."""
+    """Mutable open-position state for the naive forward loop (int paisa).
+
+    ``last_exit_basis`` is the price a retroactive ``session_gap`` /
+    ``end_of_data`` close prices against — the last managed bar's CLOSE
+    under PRECISE, its direction-resolved ADVERSE extreme (LOW for a BUY,
+    HIGH for a SELL) under WORST_CASE (DEC-FILL-WORST-CASE-001) — resolved
+    per managed bar so the close site never re-reads a bar.
+    """
 
     entry_idx: int
     entry_paisa: int
@@ -196,7 +227,7 @@ class _RefPosition:
     mfe: int
     mae: int
     last_idx: int
-    last_close: Decimal
+    last_exit_basis: Decimal
     last_ts: datetime
 
 
@@ -268,12 +299,15 @@ def reference_simulate(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> list[RefTrade]:
     """Naive forward-loop re-simulation of the locked Track-1 fill rules.
 
     Implements the sweep's DEFAULT policy exactly (AT_LEVEL SL/TP fills,
     pessimistic same-bar SL-first tie, no Mode-B exit signals) — see the
-    module docstring for the full re-derived rule list.
+    module docstring for the full re-derived rule list, including the
+    independently RE-STATED worst-case fill arm (DEC-FILL-WORST-CASE-001)
+    the *fill_mode* selects.
 
     Parameters
     ----------
@@ -290,6 +324,11 @@ def reference_simulate(
     sl_paisa, tp_paisa
         Stop / target distances from entry in paisa (``> 0``) or ``None``
         to disable that leg.
+    fill_mode
+        The run's :class:`~brutex.execution.fill_mode.FillMode` — the hook
+        threads ``grid.fill_mode`` so the reference re-derives the SAME
+        mode the production leg simulated (same-mode vs same-mode).
+        Defaults PRECISE (legacy callers byte-identical).
 
     Returns
     -------
@@ -314,6 +353,7 @@ def reference_simulate(
         raise ValueError(f"entry_fires length {len(entry_fires)} != bars length {len(bars)}")
 
     buy = direction == "BUY"
+    worst = fill_mode is FillMode.WORST_CASE
     trades: list[RefTrade] = []
     fe_cache: dict[date, int | None] = {}
     pos: _RefPosition | None = None
@@ -348,7 +388,14 @@ def reference_simulate(
                 same_session = day == pending_day
                 pending_day = None
                 if not forced and same_session:
-                    entry_paisa = _to_paisa(bar.open)
+                    # WORST_CASE (re-stated adverse-max law): the entry fills
+                    # at the entry bar's ADVERSE extreme — BUY at HIGH, SELL
+                    # at LOW; PRECISE keeps the locked next-bar OPEN. The
+                    # SL/TP levels anchor on the ACTUAL entry fill either way.
+                    if worst:
+                        entry_paisa = _to_paisa(bar.high if buy else bar.low)
+                    else:
+                        entry_paisa = _to_paisa(bar.open)
                     if buy:
                         sl_level = None if sl_paisa is None else entry_paisa - sl_paisa
                         tp_level = None if tp_paisa is None else entry_paisa + tp_paisa
@@ -367,7 +414,7 @@ def reference_simulate(
                         mfe=0,
                         mae=0,
                         last_idx=i,
-                        last_close=bar.close,
+                        last_exit_basis=(bar.low if buy else bar.high) if worst else bar.close,
                         last_ts=bar.timestamp,
                     )
 
@@ -389,7 +436,7 @@ def reference_simulate(
                 # re-arm ``i+1``, earliest new fill ``i+2``).
                 closed = _close_position(
                     pos,
-                    exit_paisa=_to_paisa(pos.last_close),
+                    exit_paisa=_to_paisa(pos.last_exit_basis),
                     exit_ts=pos.last_ts,
                     exit_idx=pos.last_idx,
                     reason="session_gap",
@@ -400,14 +447,18 @@ def reference_simulate(
             # (B) Manage the open position on this bar (entry bar included).
             elif pos is not None:
                 pos.last_idx = i
-                pos.last_close = bar.close
+                pos.last_exit_basis = (bar.low if buy else bar.high) if worst else bar.close
                 pos.last_ts = bar.timestamp
                 if forced:
                     open_paisa = _to_paisa(bar.open)
+                    # The excursion fold stays (open, open) in BOTH modes —
+                    # only the fill PRICE moves under WORST_CASE (the forced
+                    # bar's adverse extreme; an open-anchored event, no level).
                     _fold_excursion(pos, open_paisa, open_paisa, buy=buy)
+                    forced_paisa = _to_paisa(bar.low if buy else bar.high) if worst else open_paisa
                     closed = _close_position(
                         pos,
-                        exit_paisa=open_paisa,
+                        exit_paisa=forced_paisa,
                         exit_ts=bar.timestamp,
                         exit_idx=i,
                         reason="forced_1520",
@@ -423,11 +474,19 @@ def reference_simulate(
                     sl_hit = sl is not None and (low_paisa <= sl if buy else high_paisa >= sl)
                     tp_hit = tp is not None and (high_paisa >= tp if buy else low_paisa <= tp)
                     # Pessimistic same-bar tie: the stop fills first (SL_FIRST).
+                    # WORST_CASE fills the chosen level with the adverse-max
+                    # clamp — min(level, low) for a BUY exit / max(level,
+                    # high) for a SELL exit: a gap-through bar fills at the
+                    # extreme, a bar gapping PAST the level in the trade's
+                    # favour stays AT the level (never overstating).
                     if sl_hit:
+                        # sl is narrowed non-None by sl_hit's construction.
+                        level = sl if sl is not None else 0
                         closed = _close_position(
                             pos,
-                            # sl is narrowed non-None by sl_hit's construction.
-                            exit_paisa=sl if sl is not None else 0,
+                            exit_paisa=(min(level, low_paisa) if buy else max(level, high_paisa))
+                            if worst
+                            else level,
                             exit_ts=bar.timestamp,
                             exit_idx=i,
                             reason="stop_loss",
@@ -435,9 +494,12 @@ def reference_simulate(
                         )
                         pos = None
                     elif tp_hit:
+                        level = tp if tp is not None else 0
                         closed = _close_position(
                             pos,
-                            exit_paisa=tp if tp is not None else 0,
+                            exit_paisa=(min(level, low_paisa) if buy else max(level, high_paisa))
+                            if worst
+                            else level,
                             exit_ts=bar.timestamp,
                             exit_idx=i,
                             reason="take_profit",
@@ -453,12 +515,13 @@ def reference_simulate(
             pending = True
             pending_day = bar_day if bar_day is not None else bar.timestamp.astimezone(IST).date()
 
-    # End of data: a still-open position closes at the LAST bar's CLOSE.
+    # End of data: a still-open position closes at the LAST bar's CLOSE
+    # (PRECISE) / its adverse extreme (WORST_CASE) — the resolved basis.
     if pos is not None:
         trades.append(
             _close_position(
                 pos,
-                exit_paisa=_to_paisa(pos.last_close),
+                exit_paisa=_to_paisa(pos.last_exit_basis),
                 exit_ts=pos.last_ts,
                 exit_idx=pos.last_idx,
                 reason="end_of_data",
@@ -761,6 +824,12 @@ class DiffCheckGridLike(Protocol):
         """Starting equity for the simulation, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
+    @property
+    def fill_mode(self) -> FillMode:
+        """The run's global fill mode (DEC-FILL-WORST-CASE-001) — the
+        reference re-derives the SAME mode the production leg simulates."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
 
 class ProductionTradeLike(Protocol):
     """The compare surface of a production ``ClosedTrade`` (ints + datetimes)."""
@@ -984,6 +1053,10 @@ class DiffCheckHook:
             tf_minutes=tf_minutes,
             sl_paisa=tuple_.sl_paisa,
             tp_paisa=tuple_.tp_paisa,
+            # Same-mode vs same-mode (DEC-FILL-WORST-CASE-001): the injected
+            # production leg simulates under the grid's own fill mode, so the
+            # reference re-derives that exact mode.
+            fill_mode=grid.fill_mode,
         )
         diff = _first_trade_mismatch(prod_trades, ref_trades)
         if diff is None:

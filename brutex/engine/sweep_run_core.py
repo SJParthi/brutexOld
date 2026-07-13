@@ -858,25 +858,6 @@ class RunCoreHandles:
         """Build the budgeted R45 per-tuple closure (``None`` when disabled)."""
         if k_per_run <= 0:
             return None
-        from brutex.execution.fill_mode import FillMode
-
-        if self._grid.fill_mode is not FillMode.PRECISE:
-            # DEC-FILL-WORST-CASE-001 honest bridge (Stage 1): the R45 naive
-            # reference (sweep_diffcheck.reference_simulate) hard-codes the
-            # PRECISE default policy, so under a WORST_CASE run it would
-            # mismatch the production leg on every mode-moved fill and latch
-            # a FALSE SUSPECT — while silently comparing a PRECISE production
-            # leg would "verify" an arm the run never executed (a fake
-            # assurance, Golden Rule #10). Until the Stage-2 naive worst-case
-            # arm lands, the diffcheck is SKIPPED for non-PRECISE runs with
-            # ONE loud WARN — a stated gap, never a wrong verdict.
-            _LOG.warning(
-                "sweep_run_core.diffcheck_disabled_fill_mode",
-                fill_mode=self._grid.fill_mode.value,
-                reason="naive_reference_precise_only",
-                follow_up="DEC-FILL-WORST-CASE-001 Stage 2 (diffcheck worst-case arm)",
-            )
-            return None
         from brutex.engine.sweep_driver import build_equity_curve
         from brutex.engine.trade_sim import FillPolicy, simulate_trades
         from brutex.metrics.compute import _drawdown_stats
@@ -884,8 +865,13 @@ class RunCoreHandles:
         from brutex.strategies.types import Side
 
         # The production leg simulates under the RUN'S OWN fill mode (the
-        # grid's — reachable only for PRECISE today, see the skip above; a
-        # Stage-2 re-enable automatically compares the true production arm).
+        # grid's), and the hook threads the SAME grid.fill_mode into the
+        # naive reference's independently re-stated worst-case arm — the R45
+        # differential compares same-mode vs same-mode under BOTH modes
+        # (DEC-FILL-WORST-CASE-001 Stage 2; the Stage-1 bridge that SKIPPED
+        # non-PRECISE runs with a loud disabled-for-fill-mode WARN is
+        # REMOVED — its regression test now pins the event token GONE from
+        # this module's source, so this comment deliberately never spells it).
         production_policy = FillPolicy(fill_mode=self._grid.fill_mode)
 
         def _production_simulate(
