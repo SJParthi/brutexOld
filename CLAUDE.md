@@ -2499,7 +2499,11 @@ hostile-review pass._
   mirrored-law-not-callable-tool clarification, NEW edge row 44 pinning
   `collapse_to_1s` (matrix 43→44,
   `test_collapse_to_1s_last_wins_state_sum_flow`), and the §10 Phase-2
-  `snap1s_derive`-family test enumeration). DOCS-ONLY — zero brutex/rust/test/CI source
+  `snap1s_derive`-family test enumeration). REFUTER ROUND 4: CLEAN (second
+  consecutive — protocol satisfied; 2 cosmetic NITs folded, MIGRATION.md
+  #1781 — the R8 field-count bucket aligned to §4.3's
+  default-FILE-FAIL/`--allow-row-skips` disposition, + the `-001` suffix at
+  §9.5). DOCS-ONLY — zero brutex/rust/test/CI source
   change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
   REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
