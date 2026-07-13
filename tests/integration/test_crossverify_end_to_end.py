@@ -3,7 +3,9 @@
 SPOT-ONLY per DEC-CROSSVERIFY-SPOT-ONLY-001 — MIGRATION.md #1788).
 
 A REAL lake written through the production ``ParquetBarSink`` (the golden
-harness's build law: 3 pinned indices + an ``M&M`` stock enumerated from a
+harness's build law: 3 pinned trio indices + an OBSERVE-tier ``NIFTYIT``
+index (374/375 minutes, close edge complete — the #1788-fix-round
+index-policy arm) + an ``M&M`` stock enumerated from a
 REAL ``instruments.duckdb``, PLUS a NIFTY-future lake partition AND a REAL
 ``registry.duckdb`` holding live FUT rows — the #1788 NEGATIVE-pin fixture:
 futures data present, futures files NEVER produced) driven through the FULL
@@ -38,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity
 from brutex.crossverify.config import resolve_crossverify_config
 from brutex.crossverify.gate_seam import (
     CompletenessGateUnavailable,
@@ -71,7 +74,20 @@ _KEY_NIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTY.csv"
 _KEY_BANKNIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/BANKNIFTY.csv"
 _KEY_SENSEX = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/SENSEX.csv"
 _KEY_MM = f"crossverify/groww/{GOLDEN_DAY}/NSE_EQ/M&M.csv"
-_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM}
+#: The OBSERVE-tier arm (#1788 fix round): a non-trio index with a SHORT but
+#: close-edge-complete day (374 minutes, last bar 15:29) PUBLISHES under the
+#: observe-only count law — never a withhold, never a blocked exit.
+_KEY_NIFTYIT = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTYIT.csv"
+_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM, _KEY_NIFTYIT}
+
+
+def _must_identity(exchange: str, segment: str, symbol: str) -> CanonicalIdentity:
+    identity = canonical_identity(exchange=exchange, segment=segment, lake_symbol=symbol)
+    assert identity is not None
+    return identity
+
+
+_NIFTYIT_IDENTITY = _must_identity("NSE", "INDEX", "NIFTYIT")
 
 
 class _RecordingAlerter:
@@ -88,6 +104,28 @@ class _RecordingAlerter:
     def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
         self.refusals.append((run_id, reason))
         return True
+
+
+def _idx(symbol: str, security_id: int) -> Instrument:
+    """A real IDX master row — the observe-tier index enumerates via the store."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal(0),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
 
 
 def _eq(symbol: str, security_id: int) -> Instrument:
@@ -130,12 +168,21 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
             ),
         ),
         ("M&M", _bars(base_price="2900.00", minutes=range(3), oi_base=None)),
+        # The OBSERVE-tier index arm (#1788 fix round): 374 of 375 minutes
+        # (one interior hole) with the CLOSE EDGE present (minute 374 =
+        # 15:29 IST) — count_short under the real gate, PUBLISHED under the
+        # observe-only count law (a non-trio index never count-withholds).
+        (
+            "NIFTYIT",
+            _bars(base_price="43000.00", minutes=[m for m in full if m != 100], oi_base=None),
+        ),
         # The #1788 NEGATIVE-pin fixture: a FULL futures contract day IS in
         # the lake — the spot-only producer must still emit ZERO *_FNO keys.
         ("NIFTY-2026-07-30-FUT", _bars(base_price="24100.00", minutes=full, oi_base=50_000)),
     ]
+    identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
     for symbol, bars in plans:
-        identity = GOLDEN_IDENTITIES[symbol]
+        identity = identities[symbol]
         sink.append(
             exchange=identity.exchange,
             segment=identity.lake_segment,
@@ -147,7 +194,7 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
     store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         store.upsert_many(
-            [_eq("M&M", 2031)],
+            [_eq("M&M", 2031), _idx("NIFTYIT", 5001)],
             snapshot_date=GOLDEN_DAY,
             run_id="cv-e2e",
             csv_source_sha256="0" * 64,
@@ -209,9 +256,13 @@ class TestCleanChain:
 
         assert report.verdict == "published"
         assert report.exit_code == 0
-        assert report.published == 4
+        assert report.published == 5
         assert report.blocked == 0
         assert report.withheld == 0
+        # The #1788-fix-round three-way split: NIFTYIT (374/375, close edge
+        # complete) ships under the OBSERVE law; the other four are strict.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
         assert set(fake_s3.objects) == _ALL_KEYS
 
         # #1788 NEGATIVE PIN: the lake HOLDS a full futures contract day and
@@ -249,7 +300,7 @@ class TestCleanChain:
         assert report2.verdict == "published"
         assert report2.exit_code == 0
         assert report2.published == 0
-        assert report2.skipped_already == 4
+        assert report2.skipped_already == 5
         assert len(fake_s3.puts) == puts_before
         assert len(alerter2.summaries) == 1
 
@@ -330,7 +381,12 @@ class TestRealGateBinding:
         report = run_crossverify(config, self._seams_real_gate(clean_lake, fake_s3, alerter))
         assert report.verdict == "published"
         assert report.exit_code == 0
-        assert report.published == 4
+        assert report.published == 5
+        # The REAL gate reads NIFTYIT count_short (374 < 375); the producer's
+        # observe tier publishes it (close edge complete) — the F1 e2e arm.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
+        assert _KEY_NIFTYIT in fake_s3.objects
         assert set(fake_s3.objects) == _ALL_KEYS  # spot only — no *_FNO key (#1788)
         assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
 
@@ -378,7 +434,7 @@ class TestPublishCrashConvergence:
         report2 = _run(clean_lake, healthy, _RecordingAlerter())
         assert report2.verdict == "published"
         assert report2.exit_code == 0
-        assert report2.skipped_already == 3
+        assert report2.skipped_already == 4
         assert report2.published == 1
         assert set(healthy.objects) == {_KEY_MM}
         assert healthy.objects[_KEY_MM] == (FIXTURES_DIR / "M&M.csv").read_bytes()

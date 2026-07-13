@@ -370,6 +370,16 @@ class CrossverifyReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
+    def publish_strict(self) -> int | None:
+        """Export DECISIONS admitted under the strict law (#1788 fix round)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def publish_observe(self) -> int | None:
+        """Export DECISIONS admitted under the observe-only index count law."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
     def withheld(self) -> int | None:
         """Files withheld by the completeness gate / render refusals."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -996,6 +1006,14 @@ class SweepAlerter:
         :meth:`crossverify_refused` instead). Unknown counts render the
         literal ``"?"`` via ``_count_or_question`` — NEVER a fabricated 0
         (Golden Rule #1).
+
+        Three-way split visibility (the APPROVED index-policy ruling,
+        DEC-CROSSVERIFY-SPOT-ONLY-001 fix round, MIGRATION.md #1788):
+        ``strict-published`` / ``observe-published`` / the refused tail
+        (``withheld``/``blocked``/``nothing``) are export-DECISION counts —
+        an observe-tier index shipped under the count-anomaly law is never
+        invisible; the leading ``published`` stays the put-level S3 count
+        (an idempotent re-run PUTs 0 while still deciding N publishes).
         """
         verdict = report.verdict
         recovered = report.recovered_prior
@@ -1013,6 +1031,8 @@ class SweepAlerter:
             f"published {_count_or_question(report.published)} · "
             f"already {_count_or_question(report.skipped_already)} · "
             f"recovered-prior {_count_or_question(recovered)} · "
+            f"strict-published {_count_or_question(report.publish_strict)} · "
+            f"observe-published {_count_or_question(report.publish_observe)} · "
             f"withheld {_count_or_question(report.withheld)} · "
             f"blocked {_count_or_question(report.blocked)} · "
             f"nothing {_count_or_question(report.nothing)} · "

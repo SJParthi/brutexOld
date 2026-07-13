@@ -27,7 +27,14 @@ enumeration widens to ALL admitted indices (~25, incl. INDIAVIX +
 sectorals; the engine trio stays the structural floor) + ALL stocks (~751,
 F&O-eligible AND reference-only NTM names) via the ONE
 `whole_universe_spot_targets` law shared by pull AND export (export ≡ pull
-by construction). CSV byte contract (header incl. `oi`; spot empty-oi
+by construction). INDEX policy TIERED (the approved index-policy ruling,
+same-branch fix round): the STRICT count+close-edge withhold law is scoped
+to the VERIFIED engine trio; the other ~22 indices ride an OBSERVE-ONLY
+count law (published-with-a-counter, zero bars = honest nothing, forming
+last bar still withholds) with the three-way
+strict-published/observe-published/withheld split visible in the ONE
+Telegram summary; promotion = probe-evidenced follow-up DEC
+(DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001). CSV byte contract (header incl. `oi`; spot empty-oi
 cell) / gate binding / S3 posture + key layout / 1-minute-only law /
 Muhurat-session semantics / journal-publish machinery ALL UNCHANGED; the
 FUT mapper/renderer/gate/prebuild arms retained STRUCTURAL
@@ -2454,16 +2461,33 @@ hostile-review pass._
   FUT mapping + `NSE_FNO`/`BSE_FNO` tokens + `EXPORT_FUTURES_UNDERLYINGS`, the renderer's oi-int +
   NULL-OI-fut refusal laws (the two FUT fixtures re-labelled STRUCTURAL renderer goldens), the prebuild
   FNO arm, the gate's FUT class + fake-twin arms. (5) GATE POLICY at ~776 symbols (deliverable 2, verified
-  against the #1774 sibling): INDEX = strict count+close-edge, zero-bars ⇒ BLOCKED exit 2 (now covering
-  INDIAVIX/sectorals — disclosed); CASH = all-zero-volume shape ONLY, NO minute-count demand (the #1031
+  against the #1774 sibling; INDEX tiers per the coordinator-APPROVED index-policy ruling, folded in the
+  same-branch fix round): ALL ~25 indices + all stocks stay IN the export — the STRICT count+close-edge
+  WITHHOLD law is scoped to the VERIFIED engine trio ONLY (`day_export.STRICT_INDEX_COORDS`, derived from
+  the ONE `BRUTE_FORCE_INDEX_UNDERLYINGS` engine constant — never re-minted; a zero-bar TRIO index reads
+  `count_short` from the real gate ⇒ withheld_partial exit 2 CRITICAL; the INDEX-`no_today_bars`→BLOCKED
+  arm survives as documented defensive totality, production-dead — the F2 truth-table correction); the
+  other ~22 indices (INDIAVIX — the §6 UNVERIFIED example — + sectorals) ride the OBSERVE-ONLY count law
+  (`index_export_policy`): bars + complete close edge ⇒ PUBLISHED with the short/excess count COUNTED
+  (per-symbol `crossverify.observe_count_anomaly` INFO + the run-level `publish_observe` counter — never a
+  count-withhold); zero bars ⇒ honest `nothing` (never a CRITICAL); a forming last bar still withholds
+  (`last_bar_incomplete`, settle-retry eligible); promotion path = a probe-evidenced follow-up DEC
+  (DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001, named in #1788). CASH = all-zero-volume shape ONLY, NO
+  minute-count demand (the #1031
   illiquid lesson — a legitimately thin day SHIPS, a zero-bar day is honest `nothing`); HONEST LIMIT
   (named): a genuinely-settled all-zero-volume CASH day is indistinguishable from a still-settling one —
-  withheld either way, never wrong bytes; operator visibility: the ONE Telegram summary carries
-  withheld/blocked/nothing counts verbatim (NEW pin) + the journal's `withheld` map names each
-  symbol+reason; the runbook gains the gate-class table. CLOSES AS MOOT
+  withheld either way, never wrong bytes; operator visibility (nothing ships invisibly): the ONE Telegram
+  summary carries the THREE-WAY split strict-published/observe-published (decision-level
+  `CrossverifyReport.publish_strict`/`publish_observe`) beside the withheld/blocked/nothing counts
+  verbatim (pins; the CLI line mirrors the tokens) + the journal's `withheld` map names each
+  symbol+reason; the runbook gains the TIERED gate-class table; e2e arm: a REAL-gate 374/375
+  close-edge-complete NIFTYIT day publishes observe-counted through the full chain. HONEST recovery-scan
+  envelope (F3, ruled benign): a pre-trim staged-but-unpublished FUT file would be honestly COMPLETED by a
+  post-trim recovery scan (correct bytes under the prior contract; stray FUT objects inert under the
+  amendment). CLOSES AS MOOT
   DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (nothing to ingest with futures out; #1776's text NOT edited — the
   closure lives in #1788); DEC-CROSSVERIFY-PREEMPT-002 unaffected. GATES: whole-package
-  `brutex.crossverify` 100.00% line+branch (1210/308, 475 battery tests) + every per-module ci.yml stanza
+  `brutex.crossverify` 100.00% line+branch (1246/330, 534 battery tests) + every per-module ci.yml stanza
   green (no test files deleted — ci.yml untouched); ruff/ruff-format clean; `mypy --strict` clean; pyright
   0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
@@ -6306,7 +6330,13 @@ hostile-review pass._
   the ONE `whole_universe_spot_targets` enumeration (ALL ~25 indices incl.
   INDIAVIX/sectorals via the widened canonical INDEX arm + ALL ~751 stocks
   incl. reference-only NTM names) shared by pull AND export, the engine trio
-  kept as the structural enumeration floor; CSV byte contract / gate binding
+  kept as the structural enumeration floor; INDEX policy TIERED per the
+  approved index-policy ruling (fix round) — strict count+close-edge
+  withhold on the VERIFIED engine trio only, the other ~22 indices
+  observe-only (published-with-a-counter; zero bars = honest nothing;
+  forming last bar withholds) with the
+  strict-published/observe-published/withheld three-way split in the
+  summary; CSV byte contract / gate binding
   / S3 posture / 1-minute law / journal-publish machinery UNCHANGED; the FUT
   mapper/renderer/gate/prebuild arms retained STRUCTURAL
   (direct-unit-covered); DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 CLOSED MOOT;

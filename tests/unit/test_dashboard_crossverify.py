@@ -51,6 +51,8 @@ def _report(**overrides: object) -> CrossverifyReport:
         verdict="published",
         published=3,
         skipped_already=1,
+        publish_strict=3,
+        publish_observe=0,
         withheld=0,
         blocked=0,
         nothing=2,

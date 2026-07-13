@@ -34,6 +34,7 @@ import structlog
 
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.day_export import (
+    OBSERVE_PUBLISH_REASONS,
     SETTLE_RETRY_REASONS_INDEX,
     DayFrameReader,
     SymbolExport,
@@ -159,6 +160,14 @@ class CrossverifyReport:
     verdict: Verdict
     published: int
     skipped_already: int
+    #: Export DECISIONS admitted under the STRICT law (reason ``complete``) —
+    #: decision-level, unlike the put-level ``published`` (an idempotent
+    #: re-run publishes 0 while still deciding N strict publishes).
+    publish_strict: int
+    #: Export DECISIONS admitted under the OBSERVE-ONLY index count law
+    #: (#1788 fix round — count-anomalous non-trio indices shipped with a
+    #: counter, never a withhold). Decision-level, like ``withheld``.
+    publish_observe: int
     withheld: int
     blocked: int
     nothing: int
@@ -225,12 +234,25 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         withheld = sum(1 for e in exports.values() if e.disposition == "withheld")
         blocked = sum(1 for e in exports.values() if e.disposition == "blocked")
         nothing = sum(1 for e in exports.values() if e.disposition == "nothing")
+        # The three-way publish split (the #1788-fix-round index-policy
+        # ruling): observe = publish decisions carrying a gate count token
+        # (only the observe-tier index law admits those); strict = the rest.
+        publish_observe = sum(
+            1
+            for e in exports.values()
+            if e.disposition == "publish" and e.reason in OBSERVE_PUBLISH_REASONS
+        )
+        publish_strict = (
+            sum(1 for e in exports.values() if e.disposition == "publish") - publish_observe
+        )
         return CrossverifyReport(
             day=config.day,
             run_id=run_id,
             verdict=verdict,
             published=state.published,
             skipped_already=state.skipped_already,
+            publish_strict=publish_strict,
+            publish_observe=publish_observe,
             withheld=withheld,
             blocked=blocked,
             nothing=nothing,

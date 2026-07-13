@@ -48,6 +48,8 @@ class _Report:
     verdict: str
     published: int | None
     skipped_already: int | None
+    publish_strict: int | None
+    publish_observe: int | None
     withheld: int | None
     blocked: int | None
     nothing: int | None
@@ -64,6 +66,8 @@ def _report(**overrides: object) -> _Report:
         verdict="published",
         published=748,
         skipped_already=2,
+        publish_strict=748,
+        publish_observe=0,
         withheld=0,
         blocked=0,
         nothing=10,
@@ -152,6 +156,38 @@ class TestCrossverifySummary:
         assert "withheld 17" in event.message
         assert "blocked 2" in event.message
         assert "nothing 41" in event.message
+
+    def test_three_way_publish_split_surfaces_in_the_summary(self) -> None:
+        # The APPROVED index-policy ruling (#1788 fix round): the summary
+        # shows the three-way split VISIBLY — strict-published /
+        # observe-published / the refused tail — so an observe-tier index
+        # shipped under the count-anomaly law never ships invisibly.
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID,
+            report=_report(
+                verdict="withheld_partial",
+                publish_strict=740,
+                publish_observe=8,
+                withheld=17,
+                nothing=41,
+            ),
+        )
+        [event] = notifier.published
+        assert "strict\\-published 740" in event.message
+        assert "observe\\-published 8" in event.message
+        assert "withheld 17" in event.message
+        assert "nothing 41" in event.message
+
+    def test_unknown_publish_split_counts_render_question(self) -> None:
+        # The "?" law covers the new split counts too — never a fabricated 0.
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID, report=_report(publish_strict=None, publish_observe=None)
+        )
+        [event] = notifier.published
+        assert "strict\\-published ?" in event.message
+        assert "observe\\-published ?" in event.message
 
     def test_unknown_counts_render_question_never_zero(self) -> None:
         notifier = FakeNotifier()
@@ -286,6 +322,8 @@ class TestProducerBindingEndToEnd:
             verdict="published",
             published=1,
             skipped_already=0,
+            publish_strict=1,
+            publish_observe=0,
             withheld=0,
             blocked=0,
             nothing=0,

@@ -121,27 +121,36 @@ presence → bounded pull-lock wait (45 min default; a peer pull holding the
 locks past the budget DEFERS the day with a CRITICAL `crossverify_refused`
 — no preemption in v1) → priority pull (the WHOLE spot universe to TODAY —
 the ONE spot leg; no metadata leg, no futures leg, zero F&O vendor calls —
-#1788) → per-symbol completeness gate + export decisions (INDEX missing its
-day = BLOCKED exit 2; a short/incomplete index gets ONE bounded
-settle-retry) → day-scoped derive (#1778; never blocks the export) → stage
+#1788) → per-symbol completeness gate + export decisions (a short/withheld
+index gets ONE bounded settle-retry; per-index tier law below) → day-scoped
+derive (#1778; never blocks the export) → stage
 + journal → **locks released** → publish frozen staged bytes → exactly ONE
 Telegram summary.
 
 Gate-class table at ~776 spot symbols (what ships vs what withholds —
-honest since #1788's whole-universe widening):
+the APPROVED index-policy ruling, #1788 fix round):
 
-| Class | Publishes when | Withholds/blocks when | Thin-day handling |
+| Class | Publishes when | Withholds when | Zero-bar day |
 |---|---|---|---|
-| INDEX (`index_spot`, ALL ~25 indices incl. INDIAVIX) | strict: distinct minutes == the session's expected count AND the last bar is the close edge | `count_short`/`count_excess`/`last_bar_incomplete` → withheld exit 2 (ONE settle-retry first); ZERO bars for the day → **BLOCKED exit 2** (an index always prints — absence is a pull failure) | indices are dense derived series — a "thin" index day IS an incomplete one |
-| CASH (`cash_spot`, ALL ~751 stocks) | any bars whose volumes are not ALL zero — **NO minute-count demand** (the #1031 illiquid lesson: sparsity ≠ incompleteness) | ALL-zero-volume shape → withheld (`volume_all_zero`, exit 2) | a legitimately thin/sparse day SHIPS with exactly its stored minutes; a stock with ZERO bars for the day is honest `nothing` (exit unaffected) |
+| ENGINE-TRIO INDEX (`index_spot`, exactly NIFTY/BANKNIFTY/SENSEX — `day_export.STRICT_INDEX_COORDS`, the brute-force engine surface) | STRICT: distinct minutes == the session's expected count AND the last bar is the close edge | `count_short`/`count_excess`/`last_bar_incomplete` → withheld exit 2 (ONE settle-retry first) | the gate's count branch reads it `count_short` (0 < expected) → **withheld exit 2, CRITICAL** (a trio index always prints — absence is a pull failure) |
+| OBSERVE INDEX (`index_spot`, the other ~22 incl. INDIAVIX + sectorals — print behavior UNVERIFIED, CLAUDE.md §6) | bars exist AND the last bar is the close edge — a short/excess COUNT still publishes, COUNTED (`crossverify.observe_count_anomaly` INFO + the summary's `observe-published` counter), never a count-withhold | a FORMING last bar → withheld `last_bar_incomplete` (genuinely unsettled data; settle-retried) | honest `nothing` — never a CRITICAL |
+| CASH (`cash_spot`, ALL ~751 stocks) | any bars whose volumes are not ALL zero — **NO minute-count demand** (the #1031 illiquid lesson: sparsity ≠ incompleteness) | ALL-zero-volume shape → withheld (`volume_all_zero`, exit 2) | honest `nothing` (exit unaffected); a legitimately thin/sparse day SHIPS with exactly its stored minutes |
+
+Promotion path: an observe index graduates to the strict tier via a small
+follow-up DEC carrying probe evidence of its full-session print behavior
+(`DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001`, named in MIGRATION.md #1788).
+The `blocked` verdict survives only as a DEFENSIVE-TOTALITY arm on the trio
+(production-dead: the real gate's index count branch runs first, so
+`no_today_bars` is never emitted for an index — F2 of the #1788 fix round).
 
 HONEST LIMIT (named, not hidden): the gate cannot distinguish a genuinely
 settled all-zero-volume CASH day from a still-settling one — such a day
 (if the vendor ever serves one) is withheld, never published. The per-day
-refused-symbol counts ARE operator-visible: the ONE Telegram summary
-carries `withheld N · blocked N · nothing N` verbatim (pinned in
-`tests/unit/test_notifications_sweep_alerts_crossverify.py`), and the
-journal's `withheld` map names each symbol + reason.
+counts ARE operator-visible three ways: the ONE Telegram summary carries
+`strict-published N · observe-published N · withheld N · blocked N ·
+nothing N` verbatim (pinned in
+`tests/unit/test_notifications_sweep_alerts_crossverify.py` — nothing ships
+invisibly), and the journal's `withheld` map names each symbol + reason.
 
 Exit codes (cron-red discipline): `0` published / staged-only / honest
 skips / disabled / market-hours deferral · `1` junk config / lock refusal /
@@ -159,8 +168,8 @@ pull excludes ALL F&O (futures AND options — #1788); nothing to enrich.
 |---|---|---|
 | `publish_failed` exit 2, keys named | S3 throttle exhausted retries, or the grant is broken (`aborted_nonretryable`) | Fix the grant/backend; the NEXT run's recovery scan re-publishes the FROZEN staged bytes (no re-render, no re-gate) — or re-run manually |
 | `refused … locks still held` | A pull/backfill held the lake locks past the 45-min wait | Nothing lost — the day deferred; re-run after the peer finishes (`brutex crossverify run --day YYYY-MM-DD`) |
-| `withheld_partial` exit 2 | The gate withheld incomplete files (short index / all-zero-volume stock / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
-| `blocked` exit 2 | A brute-force INDEX has NO bars for the day — a pull failure | Investigate the pull (vendor outage / halt); re-run the day once healed |
+| `withheld_partial` exit 2 | The gate withheld incomplete files (short/zero-bar TRIO index — the gate reads a zero-bar index `count_short` / forming last bar on ANY index / all-zero-volume stock / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
+| `blocked` exit 2 | Production-dead defensive arm (a zero-bar trio index reads `withheld_partial` via `count_short`, never this) — fires only if a FUTURE gate emitted `no_today_bars` for a trio index | Investigate the gate/pull; re-run the day once healed |
 | `refused … gate module absent` | The sibling completeness gate (#1774) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
 | Corrupt journal WARN | `.crossverify/<day>.json` unreadable (junk JSON, invalid UTF-8, a directory) | Self-heals: the run re-renders + re-puts identical bytes (convergent); a corrupt PRIOR-day journal never blocks later runs |
 | `crossverify.staging_orphaned` WARN | A staging dir exists for a day whose journal is wiped/corrupt — invisible to the pending scan | Bytes are left in place; `brutex crossverify run --day YYYY-MM-DD` re-runs that day idempotently |
