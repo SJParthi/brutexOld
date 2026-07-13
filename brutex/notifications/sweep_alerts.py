@@ -54,6 +54,7 @@ from brutex.notifications.telegram import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    from datetime import date
     from decimal import Decimal
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,78 @@ class GreeksBackfillReportLike(Protocol):
     @property
     def bars_written(self) -> int:
         """Bars carried in the latest-wins writes."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class CrossverifyReportLike(Protocol):
+    """The report slice the cross-verify summary alert reads.
+
+    Structural (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) — matches
+    ``brutex.crossverify.run.CrossverifyReport`` without importing the
+    producer package (the :class:`GreeksBackfillReportLike` precedent; this
+    module stays wheel-free at import time). Counts are typed ``int | None``
+    so an unknown renders the honest literal ``"?"`` — never a fabricated 0
+    (Golden Rule #1); today's producer always supplies real ints.
+    """
+
+    @property
+    def day(self) -> date:
+        """The IST export day the run covered."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def verdict(self) -> str:
+        """The run's final verdict token (``published`` … ``suspect``)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def published(self) -> int | None:
+        """Files PUT to S3 this run."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def skipped_already(self) -> int | None:
+        """Journal-verified already-published keys (0 puts)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def withheld(self) -> int | None:
+        """Files withheld by the completeness gate / render refusals."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def blocked(self) -> int | None:
+        """BLOCKED brute-force indices (a missing index day = pull failure)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def nothing(self) -> int | None:
+        """Honest nothing-to-publish symbols (no today bars)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def publish_failed(self) -> int | None:
+        """Keys still pending after the bounded retry ladder."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def recovered_prior(self) -> int | None:
+        """Prior days' pending staged keys re-published by the recovery scan."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def derived(self) -> int | None:
+        """Coordinates whose day-scoped derive succeeded."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def derive_failed(self) -> int | None:
+        """Coordinates whose day-scoped derive failed (isolated, counted)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def detail(self) -> str:
+        """The verdict's short human detail line (may be empty)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -740,6 +813,47 @@ class SweepAlerter:
             dedupe_key=f"pull-halt:{reason}",
         )
 
+    def loop_stalled(self, *, stalled_s: float, threshold_s: float) -> bool:
+        """Alert that the dashboard EVENT LOOP is stalled (CRITICAL).
+
+        Fired by :class:`brutex.observability.loop_watchdog.LoopWatchdog` on the
+        CRITICAL edge — the loop's 1 s heartbeat has not beaten for
+        *stalled_s* ≥ *threshold_s* (30 s = the rate widget's own operator-visible
+        ``STALE_RED_MS`` line), so NO dashboard route is being served
+        (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the 2026-07-11 incident's
+        36 minutes of total poll silence become a named, real-time alert instead
+        of a client-side "STALE … retrying" mystery). Observe-only — the watchdog
+        remediates NOTHING; the operator checks for a blocking on-loop read /
+        GIL-heavy phase (or restarts the dashboard on current main).
+
+        Mirrors :meth:`pull_halted`: best-effort, fire-and-forget, silent no-op
+        when Telegram is disabled (the default). ``PHASE_BLOCKED`` carries a 0.0
+        notifier dedupe window, so the ``dedupe_key`` is identification /
+        defence-in-depth only — the REAL coalescing is upstream: the watchdog's
+        state machine fires the CRITICAL edge once per stall episode and
+        re-alerts at most once per its ``realert_every_s`` (300 s) while the
+        stall persists.
+
+        Parameters
+        ----------
+        stalled_s
+            The measured heartbeat lag at the alert (seconds).
+        threshold_s
+            The CRITICAL threshold that was crossed (seconds).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Dashboard event loop STALLED for {stalled_s:.1f}s "
+            f"(threshold {threshold_s:.0f}s). No dashboard route is being served — "
+            "check for a blocking on-loop read or a GIL-heavy phase; the watchdog "
+            "observes only, nothing is remediated automatically."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key="loop-stalled",
+        )
+
     def nightly_summary(
         self,
         *,
@@ -863,6 +977,87 @@ class SweepAlerter:
             severity=TelegramSeverity.CRITICAL,
             message=escape_markdown_v2(body),
             dedupe_key="nightly-deadman",
+        )
+
+    def crossverify_summary(self, *, run_id: str, report: CrossverifyReportLike) -> bool:
+        """The exactly-once cross-verify producer end-of-run summary.
+
+        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776). Severity law:
+        INFO iff every admitted file published cleanly (``published`` with
+        ``recovered_prior == 0``); WARN for the benign anomalies
+        (``nothing_to_do`` / ``staged_only`` / a ``published`` run that ALSO
+        recovered prior days' pending keys — worth a look, not a page);
+        CRITICAL for ``blocked`` / ``withheld_partial`` / ``publish_failed``
+        / ``suspect`` AND for any UNKNOWN future verdict (never a silent
+        INFO on an unrecognised state). PER-RUN dedupe key
+        (``crossverify-summary:<run_id>``) — a same-day manual retry mints a
+        new run id and is never swallowed by a dedupe window; the runner
+        guarantees exactly ONE summary per run (refusals ride
+        :meth:`crossverify_refused` instead). Unknown counts render the
+        literal ``"?"`` via ``_count_or_question`` — NEVER a fabricated 0
+        (Golden Rule #1).
+        """
+        verdict = report.verdict
+        recovered = report.recovered_prior
+        markers = {
+            "published": "✅ published",
+            "staged_only": "📦 staged only",
+            "nothing_to_do": "⚠️ nothing to do",
+            "blocked": "⛔ BLOCKED",
+            "withheld_partial": "⚠️ WITHHELD (partial)",
+            "publish_failed": "❌ PUBLISH FAILED",
+            "suspect": "🛑 SUSPECT",
+        }
+        marker = markers.get(verdict, f"❌ {verdict}")
+        counts = (
+            f"published {_count_or_question(report.published)} · "
+            f"already {_count_or_question(report.skipped_already)} · "
+            f"recovered-prior {_count_or_question(recovered)} · "
+            f"withheld {_count_or_question(report.withheld)} · "
+            f"blocked {_count_or_question(report.blocked)} · "
+            f"nothing {_count_or_question(report.nothing)} · "
+            f"publish-failed {_count_or_question(report.publish_failed)} · "
+            f"derived {_count_or_question(report.derived)} "
+            f"({_count_or_question(report.derive_failed)} failed)"
+        )
+        body = f"🔁 Cross-verify {report.day.isoformat()} {run_id} — {marker}.\n{counts}"
+        if report.detail:
+            body += f"\n{report.detail}"
+        if verdict == "published" and recovered is not None and recovered == 0:
+            severity = TelegramSeverity.INFO
+        elif verdict in {"published", "staged_only", "nothing_to_do"}:
+            severity = TelegramSeverity.WARN
+        else:
+            severity = TelegramSeverity.CRITICAL
+        return self._publish(
+            kind=TelegramEventKind.RUN_COMPLETE,
+            severity=severity,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"crossverify-summary:{run_id}",
+        )
+
+    def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+        """Instant CRITICAL cross-verify refusal (lock exhaustion / gate absent /
+        calendar abstain).
+
+        DEC-CROSSVERIFY-PRODUCER-001: fired the moment the producer REFUSES —
+        no files are published and no summary follows (refusals bypass the
+        summary verdicts). PER-RUN dedupe key
+        (``crossverify-refused:<run_id>``) so a same-day manual retry is
+        never swallowed by the ``PHASE_BLOCKED`` dedupe window. TickVault
+        sees honest absence for the day, never wrong data.
+        """
+        body = (
+            f"🔁⛔ Cross-verify {run_id} REFUSED: {reason}. "
+            "No files were published for the day — TickVault sees absence, "
+            "never wrong data. Next attempt: next schedule fire (or a manual "
+            "`brutex crossverify run`)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=escape_markdown_v2(body),
+            dedupe_key=f"crossverify-refused:{run_id}",
         )
 
     def backup_failed(self, *, reason: str, detail: str = "") -> bool:
@@ -1234,6 +1429,102 @@ class SweepAlerter:
             dedupe_key=summary.sweep_id,
         )
 
+    # ── Unkillable-run-core alerts (DEC-SWEEP-UNKILLABLE-CORE-001) ──
+
+    def sweep_milestone(self, *, run_id: str, pct: int, tuples_done: int, total: int) -> bool:
+        """Alert a sweep progress milestone — 25/50/75% edges (INFO, R41).
+
+        Fired by the run core's progress tick at each percentage EDGE (the
+        caller edge-gates — this method is fire-and-forget per call). The
+        ``dedupe_key`` carries BOTH the run id and the pct so each milestone of
+        one run cuts through the ``PHASE_PROGRESS`` coalescing window while a
+        re-emit of the SAME milestone coalesces.
+
+        Parameters
+        ----------
+        run_id
+            The run identity (D-1 — the grid-identity digest).
+        pct
+            The milestone percentage reached (e.g. ``25`` / ``50`` / ``75``).
+        tuples_done
+            Tuples applied so far.
+        total
+            The full enumerated tuple count.
+        """
+        message = escape_markdown_v2(
+            f"⏳ Sweep {run_id[:12]} reached {pct}% — {tuples_done}/{total} tuples done. "
+            "The run continues unattended."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_PROGRESS,
+            severity=TelegramSeverity.INFO,
+            message=message,
+            dedupe_key=f"sweep-milestone:{run_id}:{pct}",
+        )
+
+    def run_suspect(self, *, run_id: str, tripwire: str, detail: str) -> bool:
+        """Alert that a tripwire marked the run SUSPECT (CRITICAL, R39/D-12).
+
+        Fired ONCE per run by the SUSPECT latch's first-set fan-out: a tripwire
+        (count reconciliation / NaN screen / diffcheck mismatch / …) found
+        evidence the run's numbers may be wrong. The run CONTINUES — tripwires
+        mark, they never kill (never silent, never lost compute) — but the
+        results are quarantined-of-trust until the operator triages, hence the
+        ``QUARANTINE_NEW`` kind + CRITICAL severity. The ``dedupe_key`` scopes
+        per (run, tripwire) so a distinct second tripwire still cuts through.
+
+        Parameters
+        ----------
+        run_id
+            The run identity.
+        tripwire
+            The tripping rule's name (e.g. ``"count_reconcile"``).
+        detail
+            Short evidence string (values, never secrets).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Sweep {run_id[:12]} marked SUSPECT by tripwire {tripwire}: {detail}. "
+            "The run continues but its results need triage before use — see "
+            "runs/<run_id>/manifest.json + flight-recorder.jsonl."
+        )
+        return self._publish(
+            kind=TelegramEventKind.QUARANTINE_NEW,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"run-suspect:{run_id}:{tripwire}",
+        )
+
+    def sweep_halted(self, *, run_id: str, reason: str) -> bool:
+        """Alert that the sweep HALTED on an unrecoverable condition (CRITICAL).
+
+        The sweep twin of :meth:`pull_halted`: a run-wide stop (disk-full
+        graceful halt, a refused launch, a daemon-init failure via
+        :func:`brutex.engine.sweep_scheduler.daemon_init_guard`) must reach the
+        operator's phone — the checkpoint + sentinel laws mean a relaunch
+        RESUMES, so the message says so. The ``dedupe_key`` scopes per
+        (run, reason) so a repeated halt of the same cause coalesces.
+
+        Parameters
+        ----------
+        run_id
+            The run identity when known; ``""`` for a pre-run failure (e.g.
+            daemon init — no grid identity exists yet).
+        reason
+            A short, non-secret cause token (e.g. ``"disk_full"``,
+            ``"daemon_init"``).
+        """
+        message = escape_markdown_v2(
+            f"🛑 Sweep {run_id[:12]} HALTED: {reason}. Compute already done is safe "
+            "(checkpoint + per-tuple sentinels) — fix the cause and relaunch; the "
+            "run resumes where it stopped."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"sweep-halt:{run_id}:{reason}",
+        )
+
     def greeks_backfill_complete(self, report: GreeksBackfillReportLike) -> bool:
         """Alert that a bulk Greeks v1→v2 backfill run finished (INFO).
 
@@ -1377,6 +1668,39 @@ def emit_pull_halt_alert(exc: Exception) -> None:
         structlog.get_logger("brutex.notifications.sweep_alerts").exception(
             "pull_halt_alert_failed"
         )
+
+
+def emit_run_suspect_alert(*, run_id: str, tripwire: str, detail: str) -> bool:
+    """Fire a best-effort CRITICAL run-SUSPECT alert (DEC-SWEEP-UNKILLABLE-CORE-001).
+
+    The COMMON module helper mirroring :func:`emit_pull_halt_alert` — the ONE
+    place the SUSPECT latch's fan-out (D-12) maps onto
+    :meth:`SweepAlerter.run_suspect` without every seam constructing its own
+    alerter. The whole body is wrapped in a blanket ``try/except`` so the
+    fire-and-forget contract is STRUCTURAL: an alert failure is swallowed +
+    logged and can NEVER change results or kill the run (the I-3 fail-soft
+    law). Silent no-op returning ``False`` when Telegram is disabled (the
+    default). Returns ``True`` iff the publish was attempted on a live
+    notifier.
+
+    Parameters
+    ----------
+    run_id
+        The run identity (D-1).
+    tripwire
+        The tripping rule's name.
+    detail
+        Short, non-secret evidence string.
+    """
+    import structlog
+
+    try:
+        return SweepAlerter().run_suspect(run_id=run_id, tripwire=tripwire, detail=detail)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never kills the run
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "run_suspect_alert_failed"
+        )
+        return False
 
 
 def emit_backup_failed_alert(reason: str, detail: str = "") -> None:
@@ -1548,10 +1872,54 @@ def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> Non
         )
 
 
+def emit_crossverify_summary_alert(*, run_id: str, report: CrossverifyReportLike) -> bool:
+    """Best-effort cross-verify end-of-run summary push; NEVER raises.
+
+    DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) — the producer twin of
+    :func:`emit_pull_halt_alert` (same blanket-guard structure): the
+    fire-and-forget contract is STRUCTURAL, so even a future import-time or
+    construction failure here is swallowed + logged and can never change the
+    producer's exit code. The producer's default alerter binds this helper
+    by NAME via ``getattr`` (``brutex.crossverify.run._default_alerter``), so
+    landing it here wakes the alert with zero producer edits. Silent no-op
+    returning ``False`` when Telegram is disabled (the default). Returns
+    ``True`` iff the publish was attempted on a live notifier.
+    """
+    import structlog
+
+    try:
+        return SweepAlerter().crossverify_summary(run_id=run_id, report=report)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never fails the run
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "crossverify_summary_alert_failed"
+        )
+        return False
+
+
+def emit_crossverify_refused_alert(*, run_id: str, reason: str) -> bool:
+    """Best-effort CRITICAL cross-verify refusal push; NEVER raises.
+
+    DEC-CROSSVERIFY-PRODUCER-001 — the refusal twin of
+    :func:`emit_crossverify_summary_alert` (same blanket-guard structure;
+    bound by NAME from the producer's default alerter). Silent no-op
+    returning ``False`` when Telegram is disabled (the default).
+    """
+    import structlog
+
+    try:
+        return SweepAlerter().crossverify_refused(run_id=run_id, reason=reason)
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never fails the run
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "crossverify_refused_alert_failed"
+        )
+        return False
+
+
 __all__ = [
     "CONFLICT_DELTA_ALERT_ENV",
     "CRASH_LOOP_RELAUNCH_THRESHOLD",
     "DEFAULT_CONFLICT_DELTA_ALERT",
+    "CrossverifyReportLike",
     "GreeksBackfillReportLike",
     "LakeHealActionLike",
     "LakeHealReportLike",
@@ -1562,9 +1930,12 @@ __all__ = [
     "SymbolFailureLike",
     "WorkerEventLike",
     "conflict_alert_threshold",
+    "emit_crossverify_refused_alert",
+    "emit_crossverify_summary_alert",
     "emit_greeks_backfill_complete_alert",
     "emit_lake_heal_alert",
     "emit_pull_halt_alert",
+    "emit_run_suspect_alert",
     "emit_vendor_conflict_alert",
     "escape_markdown_v2",
 ]

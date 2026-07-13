@@ -384,14 +384,18 @@ class TestRunOptionsSnapshot:
 
     def test_intraday_cutoff_path(self, tmp_path: Path) -> None:
         _seed_options_lake(tmp_path)
-        # 5-minute interval at 09:15 → only the 09:15 CE/PE bars (CE close 150).
+        # 5-minute interval at 09:15 → the COMPLETED [09:15, 09:20) CE bucket
+        # (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001): 09:15 is a 5-minute anchor, so the
+        # effective cut resolves forward to 09:19 and the last AVAILABLE minute is
+        # 09:16 → the completed bucket CE close 164 / OI 1100 (was the partial 09:15
+        # close 150 / OI 1050 before the explicit-bucket-asof fix).
         payload = run_options_snapshot(
             lake_root=tmp_path, interval="5minute", date="2024-06-13", time="09:15", top_n=10
         )
         assert payload["instrument_count"] == 2
         ce_row = payload["highest_oi"][0]
-        assert ce_row["ltp"] == "₹150.00"
-        assert ce_row["oi"] == 1050
+        assert ce_row["ltp"] == "₹164.00"
+        assert ce_row["oi"] == 1100
 
 
 # ── run_options_snapshot WITHIN a cadence track (DEC-MOVERS-OPTIONS-TRACK-001) ──
@@ -835,6 +839,126 @@ class TestComputeOptionsCandidatesBranches:
         )
         # The BSE option is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in: the #1482 spot-drift ──
+# recovery ladder on the options moneyness spot probe. Fails-before (executed
+# repro 2026-07-09): a spelling-drifted stock spot dir (chain underlying
+# BAJAJAUTO vs the master's on-disk BAJAJ-AUTO) read spot=None and a silent
+# '?' moneyness on the REAL compute even though the spot data existed.
+
+
+def _eq(symbol: str) -> Instrument:
+    """A minimal NSE cash-equity master row (the test_spot_drift `_eq` pattern)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class TestStockDriftSpotRecoveryOptions:
+    def _seed_drifted_options_lake(self, tmp_path: Path) -> None:
+        """Two BAJAJAUTO CE contracts + the DRIFTED BAJAJ-AUTO spot dir + master."""
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-8000-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="150", volume=30, oi=300)],
+        )
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-8100-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="90", volume=20, oi=200)],
+        )
+        _write(
+            tmp_path,
+            segment="CASH",
+            symbol="BAJAJ-AUTO",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="8010", volume=100, oi=None)],
+        )
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as s:
+            s.upsert_many(
+                [_eq("BAJAJ-AUTO")],
+                snapshot_date=date(2024, 1, 2),
+                run_id="r-drift",
+                csv_source_sha256="0" * 64,
+            )
+
+    def test_drifted_stock_moneyness_recovers_one_log_across_rows(self, tmp_path: Path) -> None:
+        """The fails-before flip: both rows carry the recovered spot + a REAL
+        moneyness label (pre-fix: spot=None, moneyness_label='?'), and the
+        recovery ladder walks + logs ONCE for the whole chain (the per-compute
+        memo — never per row)."""
+        from structlog.testing import capture_logs
+
+        self._seed_drifted_options_lake(tmp_path)
+        with capture_logs() as logs:
+            got = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+                exchange="NSE",
+            )
+        by_strike = {str(m.strike): m for m in got.movers}
+        assert set(by_strike) == {"8000", "8100"}
+        assert by_strike["8000"].spot == Decimal("8010.00")
+        assert by_strike["8000"].moneyness_label == "ATM"
+        assert by_strike["8100"].spot == Decimal("8010.00")
+        assert by_strike["8100"].moneyness_label == "OTM +1"
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1  # memoised across the two rows of one underlying
+        assert events[0]["source"] == "options"
+        assert events[0]["underlying"] == "BAJAJAUTO"
+        assert events[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert events[0]["rung"] == "stock_drift"
+
+    def test_non_drifted_lake_zero_drift_io(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exactly-keyed spot (the NIFTY INDEX dir) resolves on the exact
+        probe: the drift map is NEVER built (spy) and no recovery log fires —
+        index symbols and clean lakes are byte-untouched."""
+        import brutex.dashboard.movers_futures as mf
+        from structlog.testing import capture_logs
+
+        _seed_options_lake(tmp_path)
+
+        def _never(lake_root: Path) -> None:
+            raise AssertionError("load_stock_drift_map must not run on a resolving lake")
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _never)
+        with capture_logs() as logs:
+            got = compute_options_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                expiry_tier="near",
+                expiry_track="all",
+            )
+        assert {m.spot for m in got.movers} == {Decimal("23622.90")}
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
 
 
 # ── DEC-MOVERS-CALENDAR-TIERS-001: calendar-driven tiers over a sparse lake ──
@@ -1891,6 +2015,18 @@ class TestOptionsPcr:
         from tests.fakes.movers_spies import spy_all_movers_readers
 
         _seed_pcr_lake(tmp_path)
+        # The underlying spot must resolve on the EXACT-key probe so the
+        # one-read-per-contract law below stays crisp — a spot-less lake now
+        # additionally pays ONE memoised drift-recovery walk per underlying
+        # (the DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in), which is
+        # pinned in its own suites, not here.
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=16, close="23600.00", volume=10, oi=None)],
+        )
         counts = spy_all_movers_readers(mo_module, monkeypatch)
         candidates = compute_options_candidates(
             lake_root=tmp_path, interval="1day", date="2024-06-13", time=None

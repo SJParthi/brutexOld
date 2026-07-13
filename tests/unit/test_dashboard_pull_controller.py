@@ -3770,3 +3770,260 @@ class TestIngestAuditWiring:
     def test_pull_candles_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert not (tmp_path / "audit").exists()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline ledger seam
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestSharedLedgerSeam:
+    """`ledger=` injection + the production `shared_pull_ledger_scope` engagement.
+
+    Mutant-killing wiring pins (the register-site precedent): the injected /
+    scope-shared instance must be the EXACT object the spot phase records into
+    and persists — a severed kwarg or a dropped scope consult fails by identity.
+    """
+
+    def _capture_end(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Capture the ledger handed to `end_pull_ledger` (then save for real)."""
+        real_end = pull_controller.end_pull_ledger
+        captured: list[object] = []
+
+        def _spy(ledger: object, lake_root: Path, *, dry_run: bool) -> None:
+            captured.append(ledger)
+            real_end(ledger, lake_root, dry_run=dry_run)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pull_controller, "end_pull_ledger", _spy)
+        return captured
+
+    def test_injected_ledger_is_used_and_begin_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+
+        def _never(*args: object, **kwargs: object) -> None:
+            raise AssertionError("begin_pull_ledger must be SKIPPED for an injected ledger")
+
+        monkeypatch.setattr(pull_controller, "begin_pull_ledger", _never)
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        assert report.total_symbols == 1
+        # The spot phase recorded into + persisted EXACTLY the injected instance.
+        assert captured and captured[-1] is mine
+        assert mine.count > 0  # the phase genuinely planned/recorded on it
+
+    def test_injected_ledger_is_ignored_under_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            ledger=mine,
+        )
+        # A dry-run NEVER records/persists — the injected instance is ignored.
+        assert captured and captured[-1] is None
+        assert mine.count == 0
+
+    def test_scope_shared_instance_reaches_spot_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production engagement: under an active scope, the spot phase's own
+        `begin_pull_ledger` (no kwarg passed) returns the scope's ONE instance."""
+        from brutex.data.window_ledger_store import (
+            begin_pull_ledger,
+            shared_pull_ledger_scope,
+        )
+
+        captured = self._capture_end(monkeypatch)
+        with shared_pull_ledger_scope():
+            first = begin_pull_ledger(tmp_path, dry_run=False)
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                adapter_factory=lambda _root, _insts: (_EmptyAdapter(), NullBarSink()),
+                now=_BULK_NOW,
+            )
+        assert captured and captured[-1] is first
+
+
+class TestTodayCompletenessGateArming:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: both dashboard spot arm sites resolve the
+    env kill switch ONCE per pull and thread the flag — live pull only (a dry-run
+    threads ``False``, the ``detect_completeness_gaps`` gating pattern). The bulk
+    ``pull_all_spot`` phase — which never armed ``detect_completeness_gaps`` — IS
+    wired (the gate rides its OWN parameter)."""
+
+    def test_pull_all_spot_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_all_spot_dry_run_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        # Junk env MUST NOT crash a dry-run: the resolve is short-circuited away
+        # (dry-run ⇒ False without touching the env).
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(flag is False for flag in captured)
+
+    def test_pull_candles_arms_today_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    #: Thread-name families owned by the pull's thread-owning resources — a junk
+    #: kill-switch raise must never orphan any of these (round-1 R3-MAJOR-1: the
+    #: pre-hoist ordering leaked groww-fetch-consumer-0..3 + groww-fetch-watchdog
+    #: + volume-keepalive per attempt, the keepalive fsync-ing the lake forever).
+    _LEAKABLE_THREAD_PREFIXES = ("groww-fetch-consumer", "groww-fetch-watchdog", "volume-keepalive")
+
+    def _leaked_pull_threads(self, before: set[str]) -> set[str]:
+        import threading
+
+        after = {t.name for t in threading.enumerate()}
+        return {name for name in after - before if name.startswith(self._LEAKABLE_THREAD_PREFIXES)}
+
+    def test_pull_all_spot_live_junk_env_fails_loud_at_pull_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A LIVE pull with a junk kill-switch value fails LOUD at pull start
+        # (the resolve_market_closed posture) — never a silent coercion, never
+        # a mid-run crash — and CLEAN: the resolve is hoisted ABOVE the
+        # thread-owning resource builds, so the raise leaks ZERO pipeline /
+        # consumer / keepalive threads (name-set delta, not absolute counts —
+        # the suite process owns unrelated threads).
+        import threading
+
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert self._leaked_pull_threads(before) == set()
+
+    def test_pull_candles_live_junk_env_fails_loud_and_leaks_no_threads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The single-symbol twin of the bulk no-leak pin (round-1 R3-MAJOR-1):
+        # pull_candles resolves the kill switch BEFORE building its fetch
+        # pipeline / write consumer, so a junk env raises with zero orphans.
+        import threading
+
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+        before = {t.name for t in threading.enumerate()}
+        with pytest.raises(ValueError, match=TODAY_COMPLETENESS_GATE_ENV):
+            pull_candles(
+                _index(),
+                lake_root=tmp_path,
+                dry_run=False,
+                from_date="2021-01-04",
+                to_date="2021-01-08",
+                adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+            )
+        assert self._leaked_pull_threads(before) == set()
+
+    def test_pull_candles_kill_switch_off_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+        from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+        monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "0")
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("today_completeness_gate"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest", _spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert captured
+        assert all(flag is False for flag in captured)

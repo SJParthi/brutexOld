@@ -607,6 +607,94 @@ class TestSidecarReaderBelts:
             _entry_ts_sets(paths, [run_id_of(1)])
 
 
+class TestOldSchemaAggsBackCompat:
+    def test_49_column_aggs_loads_session_gap_zero_and_tuple_still_pools(
+        self, out_root: Path
+    ) -> None:
+        """A pre-#1743 (49-column) aggs sidecar loads presence-tolerantly (review r1 NIT-3).
+
+        Before the fix, ``ComboAggregate(**record)`` raised ``TypeError`` on the
+        missing ``exits_session_gap`` kwarg — swallowed by the per-tuple fence as
+        a spurious ``tuples_errored`` (double-counted beside
+        ``tuples_skipped_current``) with the stamped-current tuple dropped from
+        the pool. Now the column defaults to the HONEST 0 (the pre-guard walker
+        never emitted the ``session_gap`` label, so 0 IS that old artifact's
+        true label count) per the WindowLedgerRecord / Ruling-5 optional-column
+        template, and the tuple pools normally.
+        """
+        import polars as pl
+
+        grid = _grid()
+        fresh = _run_pass(out_root, grid)
+        assert fresh.tuples_processed == 1
+        paths = _tuple_paths(out_root, grid)
+
+        # Rewrite the aggs sidecar WITHOUT the new column — the exact 49-column
+        # shape a pre-guard writer produced — and re-stamp its per-file hash the
+        # way the OLD code's own write_tuple_sidecars would have (the stamp's
+        # store_content_hash is untouched, so the tuple reads stamped-current —
+        # the #1743 honest clause (ii) shape).
+        df = pl.read_parquet(paths.aggs)
+        assert "exits_session_gap" in df.columns
+        df.drop("exits_session_gap").write_parquet(paths.aggs)
+        import hashlib
+        import json
+
+        stamp_payload = json.loads(paths.stamp.read_text())
+        old_bytes = paths.aggs.read_bytes()
+        stamp_payload["content_hashes"]["aggs"] = hashlib.sha256(old_bytes).hexdigest()
+        stamp_payload["content_sizes"]["aggs"] = len(old_bytes)
+        paths.stamp.write_text(json.dumps(stamp_payload))
+
+        # Unit: the reader loads the honest 0 default — no TypeError, no drop.
+        from brutex.engine.results_depth_pass import _load_agg_records
+
+        aggs = _load_agg_records(paths)
+        assert len(aggs) == 5
+        assert all(agg.exits_session_gap == 0 for agg in aggs)
+
+        # End-to-end: the stamped-current tuple is SKIPPED (not rebuilt) and
+        # still POOLS — never the pre-fix errored/dropped double-count.
+        report = _run_pass(out_root, grid)
+        assert report.tuples_skipped_current == 1
+        assert report.tuples_errored == 0
+        assert report.pool == 5
+        assert report.top100_written is True
+
+    def test_present_column_value_is_preserved_not_clobbered(self, out_root: Path) -> None:
+        """`setdefault` never overwrites a REAL stored count (mutant killer)."""
+        import polars as pl
+
+        grid = _grid()
+        _run_pass(out_root, grid)
+        paths = _tuple_paths(out_root, grid)
+        records = pl.read_parquet(paths.aggs).to_dicts()
+        # Hand-shape the first row to carry a non-zero session_gap count,
+        # keeping the exit-tally sum invariant (move ONE exit out of whichever
+        # real bucket holds it — the fixture's finalists all trade).
+        first = records[0]
+        donor = next(
+            name
+            for name in (
+                "exits_stop_loss",
+                "exits_take_profit",
+                "exits_signal",
+                "exits_forced_1520",
+                "exits_end_of_data",
+            )
+            if int(first[name]) > 0
+        )
+        first[donor] = int(first[donor]) - 1
+        first["exits_session_gap"] = 1
+        pl.DataFrame(records).write_parquet(paths.aggs)
+        from brutex.engine.results_depth_pass import _load_agg_records
+
+        aggs = _load_agg_records(paths)
+        by_id = {agg.run_id: agg for agg in aggs}
+        assert by_id[str(first["run_id"])].exits_session_gap == 1  # the real count survived
+        assert sum(agg.exits_session_gap for agg in aggs) == 1  # every other row stayed 0
+
+
 class TestCompositesFor:
     def test_composites_land_on_the_persisted_aggs(self, out_root: Path) -> None:
         grid = _grid()
@@ -651,3 +739,83 @@ class TestCompositesFor:
         aggs = _load_agg_records(_tuple_paths(out_root, grid))
         assert all(isinstance(agg, ComboAggregate) for agg in aggs)
         assert all(agg.parity_ok for agg in aggs)
+
+
+class TestCascadeJoinThreading:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the kwarg threads VERBATIM."""
+
+    def test_build_top100_receives_the_exact_join_object(
+        self, out_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine import results_depth_pass
+        from brutex.engine.cascade_join import CascadeJoin
+
+        sentinel = CascadeJoin(
+            sweep_id=grid_identity(_grid()),
+            version=1,
+            n_input=0,
+            n_survived=0,
+            by_candidate={},
+            ambiguous_ids=frozenset(),
+            groups=(),
+            skipped_groups=0,
+            skipped_verdicts=0,
+            nulled_values=0,
+            rank_inconsistencies=0,
+        )
+        seen: dict[str, object] = {}
+        real_build = results_depth_pass.build_top100
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            seen["cascade_join"] = kwargs.get("cascade_join")
+            return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(results_depth_pass, "build_top100", _spy)
+        _run_pass(out_root, cascade_join=sentinel)
+        # The EXACT object — identity, not a copy (the writer's sweep_id gate
+        # judges the very join the adapter built).
+        assert seen["cascade_join"] is sentinel
+
+    def test_default_none_writes_no_report_meta(self, out_root: Path) -> None:
+        _run_pass(out_root)
+        run_id = grid_identity(_grid())
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.cascade_join == {
+            "state": "no_report",
+            "sweep_id": None,
+            "n_input": None,
+            "n_survived": None,
+        }
+
+    def test_matching_join_stamps_the_written_artifact(self, out_root: Path) -> None:
+        from brutex.engine.cascade_join import CascadeJoin
+
+        run_id = grid_identity(_grid())
+        join = CascadeJoin(
+            sweep_id=run_id,
+            version=1,
+            n_input=3,
+            n_survived=1,
+            by_candidate={},
+            ambiguous_ids=frozenset(),
+            groups=(),
+            skipped_groups=0,
+            skipped_verdicts=0,
+            nulled_values=0,
+            rank_inconsistencies=0,
+        )
+        _run_pass(out_root, cascade_join=join)
+        loaded = load_top100(sweep_run_dir(out_root, run_id).parent, run_id)
+        assert loaded is not None
+        assert loaded.cascade_join == {
+            "state": "joined",
+            "sweep_id": run_id,
+            "n_input": 3,
+            "n_survived": 1,
+        }
+        # No pooled run_id sits in the (empty) join — honest not_in_cascade_pool.
+        assert all(
+            entry["cascade"] == {"status": "not_validated", "reason": "not_in_cascade_pool"}
+            for entry in loaded.entries
+        )

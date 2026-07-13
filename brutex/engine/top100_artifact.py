@@ -104,6 +104,7 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Sequence
     from pathlib import Path
 
+    from brutex.engine.cascade_join import CascadeJoin, CascadeVerdictView
     from brutex.engine.combo_aggregates import ComboAggregate
     from brutex.engine.results_store import ResultRow
     from brutex.engine.twin_detect import TwinFamilies
@@ -111,6 +112,9 @@ if TYPE_CHECKING:  # pragma: no cover - import only for static typing
 _LOG = structlog.get_logger("brutex.engine.top100_artifact")
 
 __all__ = [
+    "CASCADE_STATE_JOINED",
+    "CASCADE_STATE_NO_REPORT",
+    "CASCADE_STATE_SWEEP_ID_MISMATCH",
     "DEFAULT_TOP100_PRESET",
     "ENTRY_REQUIRED_KEYS",
     "GATE_MAX_CONSECUTIVE_LOSSES",
@@ -225,6 +229,27 @@ _STAMP_KEYS: Final[frozenset[str]] = frozenset(
     {"stage", "run_id", "content_hash", "produced_at_utc"}
 )
 
+# ── Cascade-join state tokens (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) ────────
+#
+# The root ``cascade_join.state`` vocabulary. ADDITIVE display metadata only:
+# ``ENTRY_REQUIRED_KEYS`` is deliberately NOT extended (``load_top100``
+# treats a missing required key as artifact-ABSENT, so extending it would
+# flip every pre-change artifact + the fixture corpus to absent) — the
+# per-entry ``cascade`` object and the root ``cascade_join`` meta are
+# writer-always-emitted, reader-OPTIONAL keys.
+
+#: The threaded join matched this grid (``join.sweep_id == run_id``).
+CASCADE_STATE_JOINED: Final[str] = "joined"
+
+#: No cascade report was threaded (cascade skipped/disabled — every entry
+#: reads the honest ``not_validated``/``no_report``).
+CASCADE_STATE_NO_REPORT: Final[str] = "no_report"
+
+#: A join WAS threaded but for a DIFFERENT grid (the cascade dir is
+#: one-per-root and overwritten per sweep — a stale report must never stamp
+#: this artifact's entries): dropped + WARNed, entries stay not_validated.
+CASCADE_STATE_SWEEP_ID_MISMATCH: Final[str] = "sweep_id_mismatch"
+
 
 class Top100Error(BruteXError):
     """Raised on a broken build invariant (duplicate run_id, bad inputs)."""
@@ -308,6 +333,10 @@ class Top100Artifact:
     keys), in rank order; ``source`` is the honesty header; ``baselines`` maps
     instrument → its baseline artifact filename under the same
     ``sweep_runs/<run_id>/`` directory (R27's comparison series).
+    ``cascade_join`` is the ADDITIVE root cascade-join meta
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``{state, sweep_id, n_input,
+    n_survived}``); ``None`` on a pre-change artifact read back by
+    :func:`load_top100` (the key is then simply not re-emitted).
     """
 
     schema_version: int
@@ -316,10 +345,11 @@ class Top100Artifact:
     source: Mapping[str, object]
     baselines: Mapping[str, str]
     entries: tuple[Mapping[str, object], ...]
+    cascade_join: Mapping[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         """Render the artifact's deterministic JSON payload (B5 shape)."""
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "preset": self.preset,
@@ -327,6 +357,9 @@ class Top100Artifact:
             "baselines": dict(self.baselines),
             "entries": [dict(entry) for entry in self.entries],
         }
+        if self.cascade_join is not None:
+            payload["cascade_join"] = dict(self.cascade_join)
+        return payload
 
     def rendered_bytes(self) -> bytes:
         """The exact bytes :func:`write_top100` persists (pure function)."""
@@ -422,9 +455,19 @@ def _loads_object(rendered: str) -> dict[str, object]:
     return payload
 
 
-def _metrics_payload(row: ResultRow, agg: ComboAggregate) -> dict[str, object]:
-    """Every ResultRow metric + the agg's depth stats — full precision, ints exact."""
-    return {
+def _metrics_payload(
+    row: ResultRow, agg: ComboAggregate, *, cpcv_pass_rate: float | None = None
+) -> dict[str, object]:
+    """Every ResultRow metric + the agg's depth stats — full precision, ints exact.
+
+    ``cpcv_pass_rate`` is the joined cascade verdict's RAW stage-3 fraction
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): when non-``None`` the payload
+    gains the display alias ``cpcv_pass_pct = rate * 100.0`` — an EXACT float
+    unit projection, never a rounding (CLAUDE.md §4). Emitted ONLY when the
+    rate is known: an absent key renders the honest "—" on every display
+    site, NEVER a fabricated 0 (the oneclick_artifacts absent-key law).
+    """
+    payload: dict[str, object] = {
         # ── the persisted ResultRow, field-for-field (R27 traceability) ──
         "net_pnl_paisa": row.net_pnl_paisa,
         "gross_profit_paisa": row.gross_profit_paisa,
@@ -472,9 +515,13 @@ def _metrics_payload(row: ResultRow, agg: ComboAggregate) -> dict[str, object]:
             "signal": agg.exits_signal,
             "forced_1520": agg.exits_forced_1520,
             "end_of_data": agg.exits_end_of_data,
+            "session_gap": agg.exits_session_gap,
         },
         "fingerprint": agg.fingerprint,
     }
+    if cpcv_pass_rate is not None:
+        payload["cpcv_pass_pct"] = cpcv_pass_rate * 100.0
+    return payload
 
 
 def _regime_payload(agg: ComboAggregate) -> dict[str, object]:
@@ -514,6 +561,47 @@ def _vix_band_payload(agg: ComboAggregate) -> dict[str, object]:
     }
 
 
+def _cascade_payload(
+    run_id: str, *, join: CascadeJoin | None, state: str
+) -> tuple[dict[str, object], float | None]:
+    """One entry's ``cascade`` object + its joined CPCV rate (or ``None``).
+
+    The DEC-RESULTS-CASCADE-VERDICT-JOIN-001 law table: a non-``joined``
+    *state* / a duplicate candidate_id / an id absent from the report pool
+    each read the honest ``not_validated`` with a NAMED reason; a matched
+    verdict projects verbatim (``pass`` / ``provisional_pass`` / ``fail``) —
+    the annotation NEVER reranks or hides an entry (R13: a cascade-FAILED
+    rank-1 stays rank-1 and is flagged by the display layer).
+    """
+    if state != CASCADE_STATE_JOINED or join is None:
+        return {"status": "not_validated", "reason": state}, None
+    if run_id in join.ambiguous_ids:
+        return {"status": "not_validated", "reason": "duplicate_candidate_id"}, None
+    verdict: CascadeVerdictView | None = join.by_candidate.get(run_id)
+    if verdict is None:
+        return {"status": "not_validated", "reason": "not_in_cascade_pool"}, None
+    if verdict.passed:
+        status = "provisional_pass" if verdict.provisional else "pass"
+        return {
+            "status": status,
+            "rejected_at": None,
+            "detail": verdict.detail,
+            "cascade_composite": verdict.cascade_composite,
+            "provisional": verdict.provisional,
+            "cpcv_pass_rate": verdict.cpcv_pass_rate,
+            "survivor_rank": verdict.survivor_rank,
+        }, verdict.cpcv_pass_rate
+    return {
+        "status": "fail",
+        "rejected_at": verdict.rejected_at,
+        "detail": verdict.detail,
+        "cascade_composite": None,
+        "provisional": False,
+        "cpcv_pass_rate": verdict.cpcv_pass_rate,
+        "survivor_rank": None,
+    }, verdict.cpcv_pass_rate
+
+
 def _entry_payload(
     rank: int,
     candidate: Top100Candidate,
@@ -522,9 +610,12 @@ def _entry_payload(
     family_members: Sequence[str],
     reasons: Mapping[str, str] | None,
     margin_roi: Mapping[str, object] | None,
+    join: CascadeJoin | None = None,
+    join_state: str = CASCADE_STATE_NO_REPORT,
 ) -> dict[str, object]:
     """Project one ranked candidate onto the binding entry shape (B5)."""
     row = candidate.row
+    cascade, cpcv_rate = _cascade_payload(row.run_id, join=join, state=join_state)
     return {
         "rank": rank,
         "run_id": row.run_id,
@@ -534,7 +625,7 @@ def _entry_payload(
         "tf": row.tf,
         "direction": row.direction,
         "arm": {"sl_paisa": candidate.sl_paisa, "tp_paisa": candidate.tp_paisa},
-        "metrics": _metrics_payload(row, candidate.agg),
+        "metrics": _metrics_payload(row, candidate.agg, cpcv_pass_rate=cpcv_rate),
         "regime": _regime_payload(candidate.agg),
         "vix_band": _vix_band_payload(candidate.agg),
         "family_id": family_id,
@@ -542,6 +633,7 @@ def _entry_payload(
         "reasons": None if reasons is None else dict(reasons),
         "margin_roi": None if margin_roi is None else dict(margin_roi),
         "equity_ref": {"tuple": candidate.tuple_ref, "sidecar": "equity"},
+        "cascade": cascade,
     }
 
 
@@ -559,6 +651,7 @@ def build_top100(
     baselines: Mapping[str, str],
     reason_provider: ReasonProvider | None = None,
     margin_roi_provider: MarginRoiProvider | None = None,
+    cascade_join: CascadeJoin | None = None,
 ) -> Top100Artifact:
     """Build the global artifact from the pooled winners — one O(pool) pass.
 
@@ -587,6 +680,19 @@ def build_top100(
     reason_provider, margin_roi_provider
         The WP3 seams (module docstring) — ``None`` writes honest ``None``
         entries + ``*_wired=False`` header flags.
+    cascade_join
+        The flattened Stage-4 cascade join
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 —
+        :func:`brutex.engine.cascade_join.build_cascade_join` over the SAME
+        in-memory report ``cmd_sweep_all`` produced), or ``None`` when the
+        cascade was skipped/disabled. HARD sweep_id gate at THIS writer (the
+        one place a wrong-grid join could silently stamp a whole artifact):
+        ``join.sweep_id != run_id`` drops the join — root
+        ``cascade_join.state = "sweep_id_mismatch"`` + ONE
+        ``top100.cascade_sweep_id_mismatch`` WARN naming both ids, entries
+        stay ``not_validated``. The join is ANNOTATION-ONLY: ranking /
+        preset order / family collapse are byte-untouched (R13 — a
+        cascade-FAILED rank-1 stays rank-1, flagged never hidden).
 
     Raises
     ------
@@ -599,6 +705,26 @@ def build_top100(
             raise Top100Error(f"build_top100: duplicate candidate run_id {candidate.row.run_id!r}")
         seen.add(candidate.row.run_id)
     resolved = resolve_preset(preset)
+
+    # ── Cascade sweep_id gate (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) ──
+    # The cascade dir is ONE-per-results-root and overwritten per sweep, so a
+    # threaded join must prove it was judged for THIS grid before a single
+    # entry is stamped: a mismatched sweep_id drops the whole join loudly.
+    if cascade_join is None:
+        join_state = CASCADE_STATE_NO_REPORT
+        join_for_entries: CascadeJoin | None = None
+    elif cascade_join.sweep_id != run_id:
+        _LOG.warning(
+            "top100.cascade_sweep_id_mismatch",
+            run_id=run_id,
+            report_sweep_id=cascade_join.sweep_id,
+            note="stale cascade report — entries stay not_validated",
+        )
+        join_state = CASCADE_STATE_SWEEP_ID_MISMATCH
+        join_for_entries = None
+    else:
+        join_state = CASCADE_STATE_JOINED
+        join_for_entries = cascade_join
 
     passers = [c for c in candidates if passes_hard_gates(c.row, c.agg)]
 
@@ -645,6 +771,8 @@ def build_top100(
                 margin_roi=(
                     None if margin_roi_provider is None else margin_roi_provider(candidate)
                 ),
+                join=join_for_entries,
+                join_state=join_state,
             )
         )
 
@@ -660,6 +788,24 @@ def build_top100(
         "reasons_wired": reason_provider is not None,
         "margin_roi_wired": margin_roi_provider is not None,
     }
+    # Root cascade-join meta — writer-ALWAYS-emitted, reader-OPTIONAL. Under
+    # a mismatch the report's sweep_id is NAMED (the diagnosable half) while
+    # the counts stay honest null (a stale report's totals must never read
+    # as this grid's); under no_report everything is null.
+    if join_state == CASCADE_STATE_JOINED and join_for_entries is not None:
+        cascade_meta: dict[str, object] = {
+            "state": join_state,
+            "sweep_id": join_for_entries.sweep_id,
+            "n_input": join_for_entries.n_input,
+            "n_survived": join_for_entries.n_survived,
+        }
+    else:
+        cascade_meta = {
+            "state": join_state,
+            "sweep_id": None if cascade_join is None else cascade_join.sweep_id,
+            "n_input": None,
+            "n_survived": None,
+        }
     artifact = Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
@@ -667,6 +813,7 @@ def build_top100(
         source=source,
         baselines=dict(baselines),
         entries=tuple(entries),
+        cascade_join=cascade_meta,
     )
     _LOG.info(
         "top100.built",
@@ -676,6 +823,7 @@ def build_top100(
         gate_passers=len(passers),
         families_collapsed=families_collapsed,
         entries=len(entries),
+        cascade_join_state=join_state,
     )
     return artifact
 
@@ -822,6 +970,11 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
             _invalid("bad_entry_rank_order")
             return None
         entries.append(item)
+    # ADDITIVE root meta (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): presence-
+    # tolerant — a pre-change artifact simply lacks the key (None, not
+    # re-emitted on a round-trip); a non-object value is dropped, never a
+    # reject (the entries + stamp already proved integrity above).
+    cascade_join_raw = payload.get("cascade_join")
     return Top100Artifact(
         schema_version=TOP100_SCHEMA_VERSION,
         run_id=run_id,
@@ -829,4 +982,5 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         source=source,
         baselines={str(key): str(value) for key, value in baselines.items()},
         entries=tuple(entries),
+        cascade_join=cascade_join_raw if isinstance(cascade_join_raw, dict) else None,
     )

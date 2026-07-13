@@ -144,6 +144,11 @@ var BX_SCREENER_COLUMNS = [
   { key: "metrics.cpcv_pass_pct", label: "CPCV %", type: "num", explain: "cpcv_pass_pct" },
   { key: "metrics.trades", label: "Trades", type: "num", explain: "trades" },
   { key: "vix_band", label: "VIX band", type: "vix", explain: "vix_band" },
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict —
+     cascade.status_text is SERVER-built (oneclick_view.cascade_status_text);
+     a pre-change artifact lacks the key entirely -> "—" (absent-excluded-
+     but-counted under a filter, the #1631 law — never a fabricated PASS). */
+  { key: "cascade.status_text", label: "Cascade", type: "str", explain: "cascade_status" },
   { key: "family_id", label: "Family", type: "str", explain: "family_id" },
   { key: "mask_hex", label: "Mask", type: "str", explain: "mask_hex" }
 ];

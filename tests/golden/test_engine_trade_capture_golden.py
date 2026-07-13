@@ -87,9 +87,15 @@ _GRID_RUN = "grid-feedfacefeedface"
 #: Re-locked 2026-07-08 for gap-register Ruling 18 (lots/costs_paisa became
 #: honest NULL-by-design None — the only diff vs the prior lock is exactly
 #: those two fields; aggs/equity digests unchanged).
+#: Re-locked (AGGS digest ONLY) 2026-07-11 for
+#: DEC-TRADESIM-OPEN-SESSION-GUARD-001 (MIGRATION.md #1743): the aggs sidecar
+#: SCHEMA gained the ``exits_session_gap`` INT64 column (this fixture writes
+#: ZERO agg records, so the diff is the embedded parquet schema alone);
+#: canonical/trades/equity digests verified byte-UNCHANGED — captured-trade
+#: rows and reason VALUES are untouched on this single-session fixture.
 _GOLDEN_CANONICAL_SHA256 = "8cc59fde89b641dffa6f34756e03fb6a2ea4fbcbb848a582097448995c89a2d3"
 _GOLDEN_TRADES_SHA256 = "aa75371589cbd59493fdf844ff26be9792e79455a498e3c42fa7309494257183"
-_GOLDEN_AGGS_SHA256 = "774d0804435d5cda46012ec8fc2acb1b21610418f88eb9e663a493cea86ecf23"
+_GOLDEN_AGGS_SHA256 = "7f213569cdfc7340d98f7d26620ecb4b916a1a52d8ce404b2544c2b57d02b554"
 _GOLDEN_EQUITY_SHA256 = "ed44220996f6f23167b23db37e551da038faf0e1e1d859ba8b71965b782961c2"
 
 

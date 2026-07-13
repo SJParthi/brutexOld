@@ -40,7 +40,9 @@ def _years_cell(years: tuple[int, ...]) -> str:
     return " ".join(str(year) for year in years)
 
 
-def mapping_integrity_to_csv(report: MappingIntegrityReport) -> str:
+def mapping_integrity_to_csv(
+    report: MappingIntegrityReport, *, revision_probe: str | None = None
+) -> str:
     """Render a :class:`MappingIntegrityReport` as a downloadable three-section CSV report.
 
     Pure over *report* — no I/O, no derivation. The verdict, summary, and per-spot drill-down
@@ -53,6 +55,15 @@ def mapping_integrity_to_csv(report: MappingIntegrityReport) -> str:
     report
         The reconciled mapping-integrity report (from
         :func:`~brutex.data.mapping_integrity.reconcile_mapping_integrity`).
+    revision_probe
+        Optional staleness marker (DEC-CACHE-SERVE-LAST-KNOWN-001 review fold —
+        the CSV twin of the JSON routes' additive ``revision_probe`` field).
+        When set, ONE informational ``# revision_probe: …`` row is prepended
+        through the SAME :class:`FormulaSafeWriter` so a last-known report
+        served during a store outage carries an IN-BAND staleness signal
+        (Golden Rule #1 — a stale serve is never silent, even in a file with
+        no JSON marker surface). ``None`` (the default, every healthy serve)
+        is byte-identical to the pre-fold output — golden-pinned.
 
     Returns
     -------
@@ -62,6 +73,8 @@ def mapping_integrity_to_csv(report: MappingIntegrityReport) -> str:
     buf = io.StringIO()
     writer = FormulaSafeWriter(csv.writer(buf, lineterminator="\n"))
 
+    if revision_probe is not None:
+        writer.writerow([f"# revision_probe: {revision_probe}"])
     writer.writerow(["BruteX — Mapping-Integrity Audit (spot ↔ options)"])
     writer.writerow(
         [
