@@ -350,7 +350,7 @@ def test_crossverify_clause_all_status_vocab() -> None:
     for status, human in cases.items():
         clause = crossverify_clause(CrossverifyTailOutcome(status=status, human=human))
         assert clause == f", cross-verify: {human}"
-    # The strict-exit escalation family is exactly the exit-2 verdicts + failed.
+    # The strict-exit escalation family — named by alert STATUS, not by exit code.
     assert (
         frozenset({"failed", "refused", "withheld_partial", "blocked", "publish_failed", "suspect"})
         == TAIL_ALERT_STATUSES

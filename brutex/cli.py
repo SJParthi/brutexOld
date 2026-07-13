@@ -6243,9 +6243,11 @@ def cmd_pull_all_spot(
     (``report.ok`` False, market-hours deferral excepted) — and STILL-FAILING
     spot windows are exactly that class (they fail the spot gate, the chain
     stops), so they exit 2 by DEFAULT, no ``--strict-exit`` needed. Under
-    ``--strict-exit``, quarantined symbols or an exit-2-family cross-verify
-    verdict ALSO escalate to 2. A tail failure NEVER changes the default exit
-    (the fail-soft decree) — it is printed only.
+    ``--strict-exit``, quarantined symbols or the crossverify alert-status
+    verdict family via ``TAIL_ALERT_STATUSES`` (named by alert STATUS, not by
+    exit code; ``refused`` carries a variable exit code on the direct
+    crossverify surface) ALSO escalate to 2. A tail failure NEVER changes the
+    default exit (the fail-soft decree) — it is printed only.
 
     Every heavy dependency is injected for tests (builders, locks, tail,
     clock); production defaults are the real machinery.
