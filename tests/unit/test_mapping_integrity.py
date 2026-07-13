@@ -474,3 +474,188 @@ def test_whitelist_matches_display_spelling() -> None:
     assert u.reason == REASON_NONE and u.whitelisted is True
     assert report.gating_failures == ()
     assert report.is_green is True
+
+
+# ── REFUTER ROUND 5 (Z5-1 + Q5-1): the cross-owner guard + the attempted-match teeth ──
+
+
+def test_colliding_sibling_coverage_cannot_mask_attempted_zero() -> None:
+    """Z5-1 (pure port of ``z_crosscontam_pure.py``): the cross-owner guard gates RED.
+
+    Two normalize-colliding eligible names ``{AB, A-B}`` (``normalize("A-B") == "AB"``):
+    AB pulled full while A-B carries its OWN attempted-and-ZERO row (raw-keyed) — a
+    genuine silent-vanish. Pre-guard, the forms-union donated AB's full coverage into
+    A-B's fold (``"AB"`` is A-B's primary form) and the verdict flipped GREEN while
+    main read RED. The guard excludes the cross-owned form from A-B's own-evidence
+    fold, so A-B gates ``none`` — exactly main's exact-key verdict — while AB keeps
+    its own coverage.
+    """
+    report = _reconcile(
+        [("NSE", "AB"), ("NSE", "A-B")],
+        {("NSE", "AB"): _EXPECTED},
+        attempted={("NSE", "AB"), ("NSE", "A-B")},
+        key_forms={"AB": ("AB",), "A-B": ("AB", "A-B")},
+    )
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.symbol == "A-B" and u.reason == REASON_NONE
+    assert u.covered_years == () and u.missing_years == _EXPECTED
+    assert len(report.gating_failures) == 1
+    assert report.fully_covered == 1  # AB's own key still resolves its own coverage
+    assert report.not_attempted == 0
+
+
+def test_colliding_sibling_without_own_row_keeps_with_legs_resolution() -> None:
+    """The with-legs arm-(a) law stands: cross-owned forms still RESOLVE coverage.
+
+    With NO own-key attempted row (no raw-keyed cell), the hyphenated arm of a
+    with-legs dual-spelling pair still resolves the WRITER-keyed (primary-form)
+    coverage through the cross-owned form — the guard only refuses the RESCUE of an
+    own-key attempted-and-zero, never the resolution itself.
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJAUTO"), ("NSE", "BAJAJ-AUTO")],
+        {("NSE", "BAJAJAUTO"): _EXPECTED},
+        attempted={("NSE", "BAJAJAUTO")},
+        key_forms={
+            "BAJAJAUTO": ("BAJAJAUTO",),
+            "BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO"),
+        },
+    )
+    assert report.fully_covered == 2
+    assert report.under_pulled == ()
+    assert report.is_green is True
+
+
+def test_key_forms_legacy_raw_attempted_zero_gates_red() -> None:
+    """Q5-1: an attempted row under the NON-primary RAW form only gates RED.
+
+    The #1128 legacy-raw-key era: the attempted-and-ZERO cell sits under the raw
+    spelling ``('NSE', 'BAJAJ-AUTO')``, NOT the primary ``BAJAJAUTO`` — the
+    own-evidence probe must walk ALL own forms (never primary-only), so the
+    silent-vanish still gates ``none``, never a neutral ``not_attempted``.
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {},
+        attempted={("NSE", "BAJAJ-AUTO")},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.symbol == "BAJAJ-AUTO" and u.reason == REASON_NONE
+    assert report.not_attempted == 0
+    assert len(report.gating_failures) == 1
+
+
+def test_raw_era_coverage_with_attempted_row_stays_fully_covered() -> None:
+    """The own-key YEARS probe walks ALL own forms: raw-era coverage disarms the guard.
+
+    A healthy legacy-raw-era lake (full coverage under the RAW spelling, an attempted
+    row under the same raw key) must stay fully covered — the guard fires only on
+    attempted-and-ZERO own years, and the own-years fold must see the raw-keyed era
+    (kills the own-years ``own_forms[:1]`` primary-only truncation, which would arm
+    the guard against a healthy lake).
+    """
+    report = _reconcile(
+        [("NSE", "BAJAJ-AUTO")],
+        {("NSE", "BAJAJ-AUTO"): _EXPECTED},
+        attempted={("NSE", "BAJAJ-AUTO")},
+        key_forms={"BAJAJ-AUTO": ("BAJAJAUTO", "BAJAJ-AUTO")},
+    )
+    assert report.fully_covered == 1
+    assert report.under_pulled == ()
+
+
+def test_cross_owned_attempted_match_walks_all_forms() -> None:
+    """The FULL-fold attempted match walks every form — the MI-6 truncation killer.
+
+    With the guard un-armed (no OWN-key attempted row anywhere), the full-fold
+    attempted match must still walk the whole forms superset: the vanish evidence
+    sits under a cross-owned NON-first form (the sibling's raw key), and BOTH rows of
+    the pair read the loud gating ``none`` (the with-legs both-rows-red loudness) —
+    never a quiet ``not_attempted``. Shape: an operator-aliased ``NIFTY-JR``
+    (``BRUTEX_FNO_INDEX_ALIASES`` — forms alias + normalized + raw) whose normalized
+    form IS the eligible sibling ``NIFTYJR``'s own key.
+    """
+    report = _reconcile(
+        [("NSE", "NIFTY-JR"), ("NSE", "NIFTYJR")],
+        {},
+        attempted={("NSE", "NIFTYJR")},
+        key_forms={
+            "NIFTY-JR": ("NIFTYNXT50", "NIFTYJR", "NIFTY-JR"),
+            "NIFTYJR": ("NIFTYJR",),
+        },
+    )
+    assert report.is_green is False
+    assert [u.reason for u in report.under_pulled] == [REASON_NONE, REASON_NONE]
+    assert report.not_attempted == 0
+    assert len(report.gating_failures) == 2
+
+
+def test_cross_owner_guard_own_attempted_walks_all_own_forms() -> None:
+    """The GUARD's own-evidence probe walks every own form — its truncation killer.
+
+    The raw-keyed attempted row is the NON-first own form (own forms = alias + raw
+    after the normalized form is excluded as the sibling's key), and the colliding
+    sibling's coverage would otherwise resolve the full fold — a primary-only
+    own-attempted probe would miss the row, skip the guard, and read the stolen
+    fully_covered. The guard must fire: attempted-and-zero own evidence gates RED.
+    """
+    report = _reconcile(
+        [("NSE", "NIFTY-JR"), ("NSE", "NIFTYJR")],
+        {("NSE", "NIFTYJR"): _EXPECTED},
+        attempted={("NSE", "NIFTYJR"), ("NSE", "NIFTY-JR")},
+        key_forms={
+            "NIFTY-JR": ("NIFTYNXT50", "NIFTYJR", "NIFTY-JR"),
+            "NIFTYJR": ("NIFTYJR",),
+        },
+    )
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.symbol == "NIFTY-JR" and u.reason == REASON_NONE
+    assert report.fully_covered == 1  # the sibling's own coverage is untouched
+    assert len(report.gating_failures) == 1
+
+
+def test_primary_only_collision_still_guarded() -> None:
+    """Ownership includes the PRIMARY form, not just raw spellings — its own killer.
+
+    Two hyphen/space names (``A-B`` / ``A B``) share the primary form ``AB`` while
+    NEITHER owns it as a raw spelling (no eligible ``AB``): the shared key is still
+    CROSS-OWNED for each (the sibling's primary), so ``A-B``'s raw-keyed
+    attempted-and-zero gates RED instead of stealing the ``AB``-keyed coverage
+    (kills an owners-build mutant that registers only raw spellings). The sibling
+    with NO own-key evidence still resolves the shared coverage (the with-legs law).
+    """
+    report = _reconcile(
+        [("NSE", "A B"), ("NSE", "A-B")],
+        {("NSE", "AB"): _EXPECTED},
+        attempted={("NSE", "A-B")},
+        key_forms={"A B": ("AB", "A B"), "A-B": ("AB", "A-B")},
+    )
+    assert report.is_green is False
+    [u] = report.under_pulled
+    assert u.symbol == "A-B" and u.reason == REASON_NONE
+    assert report.fully_covered == 1  # "A B" still resolves via the shared primary
+    assert len(report.gating_failures) == 1
+
+
+def test_all_forms_cross_owned_degrades_to_exact_raw_key() -> None:
+    """A degenerate map whose EVERY form is cross-owned degrades to the exact raw key.
+
+    ``A-B``'s injected forms tuple lacks its own raw spelling and its only form is the
+    sibling's key — the own-evidence probe falls back to the exact raw key (the
+    ``or (symbol,)`` totality arm), so A-B's raw-keyed attempted-and-zero still gates
+    RED while never-attempted AB reads the neutral ``not_attempted``.
+    """
+    report = _reconcile(
+        [("NSE", "AB"), ("NSE", "A-B")],
+        {},
+        attempted={("NSE", "A-B")},
+        key_forms={"AB": ("AB",), "A-B": ("AB",)},
+    )
+    reasons = {u.symbol: u.reason for u in report.under_pulled}
+    assert reasons == {"A-B": REASON_NONE, "AB": REASON_NOT_ATTEMPTED}
+    assert len(report.gating_failures) == 1
+    assert report.not_attempted == 1

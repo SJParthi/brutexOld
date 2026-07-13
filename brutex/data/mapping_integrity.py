@@ -42,9 +42,14 @@ underlying form (``metadata_pull._resolve_underlying_forms`` →
 eligible set is SPOT-spelled; the dashboard builder therefore injects the *key_forms*
 map (DEC-MAPPING-INTEGRITY-FORM-KEY-001) so the compare crosses the two keyspaces —
 without it a hyphenated/aliased name read ``not_attempted`` forever and its
-attempted-and-zero alarm could never fire. The real M&M silent-vanish
-stays catchable (it is in the attempted set, zero years → ``none`` → red) while a clean
-selective pull reads green (the un-pulled names are ``not_attempted``, never red).
+attempted-and-zero alarm could never fire. The fold carries the CROSS-OWNER guard
+(REFUTER ROUND 5, Z5-1): a form that is itself a DIFFERENT eligible symbol's own key
+(its exact spot spelling or its primary form) may still resolve coverage, but it can
+never rescue a symbol whose OWN keys read attempted-and-zero — so two
+normalize-colliding eligible names can never mask each other's silent-vanish. The
+real M&M silent-vanish stays catchable (it is in the attempted set, zero years →
+``none`` → red) while a clean selective pull reads green (the un-pulled names are
+``not_attempted``, never red).
 
 This module DETECTS; it does not FIX. The reconciliation is one O(eligible) pass over
 O(1) dict/set lookups (no nested scan); inputs are injected so the whole module is 100%
@@ -59,6 +64,10 @@ from datetime import datetime
 from typing import Any, Final
 
 from brutex.data.coverage_ledger import CoverageRecord
+
+#: The empty owner set — the allocation-free default for the cross-owner probe
+#: (REFUTER ROUND 5, Z5-1): a form no eligible symbol owns has no cross-owners.
+_NO_OWNERS: Final[frozenset[str]] = frozenset()
 
 #: An options-eligible spot pulled ZERO expiries — the hard, GATING failure (it has an
 #: options chain on the vendor master but the coverage ledger shows nothing pulled, e.g.
@@ -250,6 +259,24 @@ def reconcile_mapping_integrity(
     DEC-FNO-UNDERLYING-EMPTY-GUARD-001) each degrade to today's exact raw-key compare
     — never a guess, and the default is byte-identical.
 
+    **The cross-owner guard (REFUTER ROUND 5, Z5-1):** a form that is itself a
+    DIFFERENT eligible symbol's own key — its exact spot spelling OR its primary
+    write form (``forms[0]``) — is CROSS-OWNED: coverage under that key may belong
+    to the sibling. Cross-owned forms still participate in the resolution fold (the
+    with-legs dual-spelling law stands), but they can never RESCUE a symbol from its
+    own-key silent-vanish: when any NON-cross-owned form of the symbol has a coverage
+    row (positive own-key attempted evidence) while the non-cross-owned fold holds
+    ZERO covered years, the symbol gates :data:`REASON_NONE` regardless of what the
+    cross-owned forms would donate — two normalize-colliding eligible names
+    (``{AB, A-B}``) can never mask each other's attempted-and-zero. The symbol's own
+    exact spot key always stays in its fold, so the guard's worst case is today's
+    exact-key verdict (main parity), never a masked GREEN. The back-compat
+    ``attempted=None`` blanket is not own-key evidence and never arms the guard.
+    Residual (disclosed, not mechanised): a key owned only via a sibling's
+    NON-primary, NON-raw form (a pre-alias-era normalized key of an ALIASED sibling)
+    is not treated as cross-owned — reaching it needs an alias-flip era on top of a
+    normalize collision, deeper still inside the no-real-master-instance class.
+
     Parameters
     ----------
     eligible_spots
@@ -294,6 +321,19 @@ def reconcile_mapping_integrity(
     # as not-attempted even if a caller passes a narrower ``attempted``.
     attempted_set = frozenset(covered_years) if attempted is None else frozenset(attempted)
 
+    # REFUTER ROUND 5 (Z5-1) — the cross-owner ledger for the forms fold: every
+    # ``(exchange, key)`` that is some eligible symbol's OWN key — its exact spot
+    # spelling or its primary write form (``forms[0]``) — mapped to the symbol(s)
+    # owning it. Derived purely from the injected inputs (the eligible pairs +
+    # *key_forms*), so this data-layer leaf stays dashboard-import-free:
+    # ``primary_fno_underlying(X)`` IS ``key_forms[X][0]`` by the
+    # ``fno_underlying_forms`` construction.
+    owners: dict[tuple[str, str], set[str]] = {}
+    for exchange, symbol in pairs:
+        forms = (key_forms or {}).get(symbol) or (symbol,)
+        for owned in {symbol, forms[0]}:
+            owners.setdefault((exchange, owned), set()).add(symbol)
+
     under: list[UnderPulledSpot] = []
     fully_covered = 0
     not_attempted = 0
@@ -305,8 +345,47 @@ def reconcile_mapping_integrity(
         # DEC-FNO-UNDERLYING-EMPTY-GUARD-001) — each falling back to today's exact raw
         # key, never a guess.
         forms = (key_forms or {}).get(symbol) or (symbol,)
+        # REFUTER ROUND 5 (Z5-1) — the cross-owner guard: a form that is itself a
+        # DIFFERENT eligible symbol's own key (its exact spot spelling OR its primary
+        # form) is CROSS-OWNED — coverage under that key may belong to the sibling.
+        # Cross-owned forms still RESOLVE coverage (the with-legs arm-(a) law stands),
+        # but this symbol's silent-vanish verdict rides its OWN forms; the exact spot
+        # key always stays in (the main-parity floor), so the guard's worst case is
+        # today's exact-key verdict — never a masked GREEN. The trailing
+        # `or (symbol,)` covers the degenerate injected map whose every form is
+        # cross-owned (raw spelling absent) — the own-evidence probe then degrades
+        # to the exact raw key.
+        own_forms = tuple(
+            form
+            for form in forms
+            if form == symbol or owners.get((exchange, form), _NO_OWNERS) <= {symbol}
+        ) or (symbol,)
+        own_years = frozenset(
+            y for form in own_forms for y in covered_years.get((exchange, form), ())
+        )
+        own_attempted = attempted is not None and any(
+            (exchange, form) in attempted_set for form in own_forms
+        )
         years = frozenset(y for form in forms for y in covered_years.get((exchange, form), ()))
-        if not years:
+        if own_attempted and not own_years:
+            # Z5-1: this symbol's OWN keys read attempted-and-ZERO — the gating
+            # silent-vanish — and a normalize-colliding sibling's coverage (a
+            # cross-owned form) may NEVER mask it GREEN. The verdict matches main's
+            # exact-key RED on the colliding shape, never a stolen fully_covered.
+            # ``attempted is None`` (the back-compat blanket) is NOT own-key
+            # evidence, so it never arms the guard — the full fold below keeps the
+            # with-legs resolution byte-identical there.
+            under.append(
+                UnderPulledSpot(
+                    exchange=exchange,
+                    symbol=symbol,
+                    reason=REASON_NONE,
+                    covered_years=(),
+                    missing_years=expected,
+                    whitelisted=symbol in wl,
+                )
+            )
+        elif not years:
             was_attempted = attempted is None or any(
                 (exchange, form) in attempted_set for form in forms
             )

@@ -285,6 +285,72 @@ def test_hyphenated_writer_roundtrip_reads_green(
     assert body["under_pulled"] == []
 
 
+def test_colliding_sibling_cannot_mask_attempted_zero_route(tmp_path: Path) -> None:
+    """REFUTER ROUND 5 port of ``z_crosscontam_route.py`` — the cross-owner guard, route-executed.
+
+    Two normalize-colliding tradable F&O eligibles ``{AB, A-B}`` (EQ spot rows + FUT
+    legs, the refuter's executed store shape): AB pulled full, A-B carries its OWN
+    raw-keyed attempted-and-ZERO row — a genuine silent-vanish. Pre-guard the R2
+    forms-union donated AB's coverage into A-B's fold (``"AB"`` is A-B's primary
+    form) and the panel read GREEN / ``Status,GREEN`` while main read RED — the
+    masking-direction divergence Z5-1 reproduced. The guard restores main's verdict:
+    gating RED naming A-B, ``Status,RED`` on the CSV. The NON-colliding forms-union
+    (DEC-PULL-FORENSIC-WAVE2-001) is asserted UNCHANGED in the same store: the third
+    eligible ``BAJAJ-AUTO`` still resolves its writer-keyed ``BAJAJAUTO`` coverage.
+    """
+
+    def _fut(underlying: str, sec_id: int) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=sec_id,
+            symbol_name=f"{underlying}FUT",
+            display_name=f"{underlying} FUT",
+            instrument=InstrumentType.FUT,
+            segment=Segment.FNO,
+            series="FUT",
+            isin=None,
+            underlying_symbol=underlying,
+            underlying_security_id=None,
+            lot_size=1,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=date(2025, 1, 30),
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+
+    store = InstrumentStore.open(tmp_path / "instruments.duckdb")
+    try:
+        store.upsert_many(
+            [_eq("AB"), _eq("A-B"), _eq("BAJAJ-AUTO"), _fut("AB", 900_101), _fut("A-B", 900_102)],
+            snapshot_date=date(2024, 1, 2),
+            run_id="r-z5",
+            csv_source_sha256="0" * 64,
+        )
+        for year in _coverage_years():
+            store.upsert_coverage(_cov("AB", year))
+            store.upsert_coverage(_cov("BAJAJAUTO", year))  # the non-colliding union arm
+        # A-B's OWN attempted-and-zero row (raw-keyed — the legacy-key-era shape).
+        store.upsert_coverage(_cov("A-B", _coverage_years()[0], expiries=0))
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+
+        body = client.get("/api/v1/universe/mapping-integrity").json()
+
+        # The colliding pair: A-B's silent-vanish gates RED + is NAMED.
+        assert body["is_green"] is False
+        assert body["gating_failures"] == 1
+        [under] = body["under_pulled"]
+        assert under["symbol"] == "A-B" and under["reason"] == "none"
+        # AB keeps its own coverage; the NON-colliding BAJAJ-AUTO union is unchanged.
+        assert body["total_eligible"] == 3 and body["fully_covered"] == 2
+        assert body["not_attempted"] == 0
+        # The CSV download serialises the SAME verdict — RED.
+        csv_text = client.get("/api/v1/universe/mapping-integrity.csv").text
+        assert any(line == "Status,RED" for line in csv_text.splitlines())
+    finally:
+        store.close()
+
+
 def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
     """REFUTER ROUND 1 port of ``attack1_metadata_blank.py`` — the panel stays honest.
 
