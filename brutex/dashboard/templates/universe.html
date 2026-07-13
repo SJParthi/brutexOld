@@ -1100,14 +1100,36 @@ function covStrip(i) {
     + "</div>";
 }
 
+/* Latest-claims-the-paint bounded JSON fetch for the six 15 s integrity
+   loaders below + the 5 s windows line (DEC-O1-GUARANTEE-HARDEN-001): each
+   loader's bare `fetch` carried NO abort bound (a headers-then-stalled-body
+   response leaked an in-flight fetch per tick — hung sockets accumulate on a
+   wedged endpoint) and NO ordering token (two overlapping slow responses
+   painted LAST-LANDED-wins, possibly the STALE one). Every call now rides
+   the SAME gbFetchJson hung-fetch abort bound armed through the BODY read
+   (§11 COMMON — no eighth hand-rolled controller copy) and claims its
+   loader's generation at fetch START: a response landing after a NEWER
+   invocation claimed the generation returns null instead of repainting over
+   the newer paint (the gbPollGen idiom, per-loader). Cadence (the pinned
+   setInterval registrations) + rendered output are byte-identical — fetch
+   mechanics only. */
+const loaderGen = {};
+async function boundedLatestJson(key, url) {
+  const gen = (loaderGen[key] || 0) + 1;
+  loaderGen[key] = gen;
+  const res = await gbFetchJson(url);
+  if (gen !== loaderGen[key]) return null;   // superseded — never repaint over a newer response
+  return res;
+}
+
 async function loadCompleteness() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
      actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
   try {
-    const r = await fetch("/api/v1/universe/completeness");
-    if (!r.ok) return;
-    const map = await r.json();
+    const r = await boundedLatestJson("completeness", "/api/v1/universe/completeness");
+    if (!r || !r.ok) return;
+    const map = r.body;
     const sig = JSON.stringify(map);
     if (sig === covSig) return;   // unchanged — no needless re-render
     COV = map; covSig = sig;
@@ -1123,9 +1145,9 @@ async function loadMappingIntegrity() {
      never pulled yet (no coverage row) is the neutral "not attempted" tally — NEVER red, so a
      clean selective pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). Never throws. */
   try {
-    const r = await fetch("/api/v1/universe/mapping-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const r = await boundedLatestJson("mapping", "/api/v1/universe/mapping-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("mappanel");
     const verdict = document.getElementById("mapverdict");
     const detail = document.getElementById("mapdetail");
@@ -1156,9 +1178,9 @@ async function loadMasterIntegrity() {
      one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
      legs. Reads the snapshot the ingest hook persisted. Never throws — keeps last shown. */
   try {
-    const r = await fetch("/api/v1/universe/master-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const r = await boundedLatestJson("master", "/api/v1/universe/master-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("masterpanel");
     const verdict = document.getElementById("masterverdict");
     const detail = document.getElementById("masterdetail");
@@ -1187,9 +1209,9 @@ async function loadEconomicsIntegrity() {
      mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
      never RED. Reads the persisted snapshot. Never throws — keeps last shown. */
   try {
-    const r = await fetch("/api/v1/universe/economics-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const r = await boundedLatestJson("economics", "/api/v1/universe/economics-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("econpanel");
     const verdict = document.getElementById("econverdict");
     const detail = document.getElementById("econdetail");
@@ -1219,9 +1241,9 @@ async function loadParseSkips() {
      reasons. Built with textContent ONLY (the universe.html CodeQL XSS guard).
      Never throws — keeps the last shown verdict on a transient fetch error. */
   try {
-    const r = await fetch("/api/v1/universe/parse-skips");
-    if (!r.ok) return;
-    const m = await r.json();
+    const r = await boundedLatestJson("parseskips", "/api/v1/universe/parse-skips");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("skippanel");
     const verdict = document.getElementById("skipverdict");
     const detail = document.getElementById("skipdetail");
@@ -1255,9 +1277,9 @@ async function loadLakeUniqueness() {
      textContent ONLY (the universe.html CodeQL XSS guard). Never throws — keeps the
      last shown verdict on a transient fetch error. */
   try {
-    const r = await fetch("/api/v1/universe/lake-uniqueness");
-    if (!r.ok) return;
-    const m = await r.json();
+    const r = await boundedLatestJson("lakeunique", "/api/v1/universe/lake-uniqueness");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("lakepanel");
     const verdict = document.getElementById("lakeverdict");
     const detail = document.getElementById("lakedetail");
@@ -1832,10 +1854,14 @@ async function refreshWindowsLine() {
   try {
     /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
        ?limit=0 keeps the identical counts payload while dropping the
-       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
-    const r = await fetch('/api/v1/coverage/windows?limit=0');
-    if (!r.ok) return;
-    const counts = (await r.json()).counts || {};
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read.
+       Bounded + latest-wins via boundedLatestJson (DEC-O1-GUARANTEE-
+       HARDEN-001): interval-driven, so a stalled body never wedged a chain —
+       but it leaked an in-flight fetch per slow tick, and out-of-order
+       responses could repaint the line with STALE counts. */
+    const r = await boundedLatestJson('windowsline', '/api/v1/coverage/windows?limit=0');
+    if (!r || !r.ok) return;
+    const counts = (r.body || {}).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
     const segParts = [];
     for (const seg of WINDOW_SEGMENTS) {
