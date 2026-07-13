@@ -1778,8 +1778,10 @@ def build_app(
     # The revision-probe TTL memo (DEC-O1-GUARANTEE-HARDEN-001 H2): bounds the
     # two per-poll O(dirs) probe sweeps (oneclick runs listing + the /results
     # sweep_results_revision digest) to ONE sweep per TTL window (default 1 s,
-    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud HERE at build_app, the
-    # house startup-fail-loud idiom (review round 1 MINOR-1); 0 disables).
+    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud HERE at build_app for
+    # non-CLI embedders (review round 1 MINOR-1), and `cmd_dashboard` validates
+    # the SAME env FIRST with the clean `[brutex]` one-liner + EXIT_USER_ERROR,
+    # the loop-watchdog sibling idiom (review round 2); 0 disables).
     # Staleness ≤ TTL, far under the 120 s adaptive-floor norm; a post-TTL
     # poll always re-probes (no permanent-staleness state, pinned). The eager
     # resolve keeps the memo's own lazy first-use path intact (an injected

@@ -407,6 +407,14 @@ def registry_revision(registry_path: Path) -> str | None:
     "unknown, no signal" — the consumer then computes fresh UNCACHED (the
     lake_revision-family outage posture: never a stale illusion).
 
+    HONESTY NOTE (Golden Rule #10, review round 2): both components are
+    default ``include_ino=False`` stat tokens, so an in-place overwrite that
+    leaves a component's ``(mtime_ns, size)`` pair unchanged (an equal-size
+    rewrite landing within one mtime granule) moves neither token — the
+    documented family-wide stat-token residual (the DEC-LAKE-STATS-MANIFEST-001
+    #1614 wording); a cached total can be served stale for that granule until
+    the next stat moves.
+
     Parameters
     ----------
     registry_path
@@ -522,8 +530,10 @@ class RevisionProbeMemo:
     * the TTL is resolved lazily at the FIRST :meth:`get` (junk env fails loud
       there) and latched for the instance's lifetime; the production wiring
       additionally validates the env EAGERLY at ``build_app`` (review round 1
-      MINOR-1 — the house startup-fail-loud idiom), so a junk value refuses at
-      dashboard startup, never as a first-request 500.
+      MINOR-1) AND ``cmd_dashboard`` validates it FIRST with the clean
+      ``[brutex]`` one-liner + ``EXIT_USER_ERROR`` — the loop-watchdog sibling
+      idiom (review round 2) — so a junk value refuses at dashboard startup,
+      never as a first-request 500 nor a raw CLI traceback.
 
     Parameters
     ----------

@@ -864,12 +864,12 @@ class TestRevisionProbeMemo:
         # Junk env: if the loser re-resolved instead of adopting the latch,
         # it would raise ValueError — the adopt arm must never read the env.
         monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
-        results: list[float | BaseException] = []
+        results: list[float | Exception] = []
 
         def _worker() -> None:
             try:
                 results.append(memo._resolve_ttl())
-            except BaseException as exc:
+            except Exception as exc:  # the spy arm — a junk-env re-resolve raises ValueError
                 results.append(exc)
 
         with memo._lock:  # the test IS the winning first-caller
