@@ -478,6 +478,62 @@ def test_resume_persisted_over_capacity_auto_grows_within_wall(tmp_path: Path) -
     assert grows[0]["m_bytes"] > 0
 
 
+def test_record_digest_bloom_capacity_trip_exact_ahead_then_reopen_self_heals(
+    tmp_path: Path,
+) -> None:
+    """The composed mid-run trip state (DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001).
+
+    ``record_digest`` writes the durable L2 exact store BEFORE the L1 Bloom
+    (exact-first), so a ``BloomCapacityExceeded`` from ``bloom.add`` on the trip
+    leaves the exact store ONE digest AHEAD (its own docstring's exact-first
+    ordering). No test covered THIS sequence — the LMDB map-full mirror fault is
+    pinned, the bare-Bloom trip is pinned, the reopen #1714 auto-grow is pinned,
+    but never the composed state. Every arm is analysed redo-safe; this pins it:
+
+    * the trip is a LOUD raise (never a silent corruption);
+    * the counters are uncorrupted — ``records`` sits AFTER ``bloom.add`` so the
+      tripped tuple is not counted, and ``bloom_insertions`` did not advance;
+    * ``seen_digest(tripped)`` is a conclusive Bloom-negative ``False`` (the
+      honest redo-safe read — documented, not "fixed": the tuple IS in the exact
+      store but the Bloom never saw it, so a re-record re-evaluates it once);
+    * a retry ``record_digest(tripped)`` short-circuits on the exact-first probe
+      → returns ``False`` WITHOUT re-raising and WITHOUT a new Bloom insert;
+    * a reopen auto-grows (persisted 4 > configured 3 → ``max(ceil(4×1.25)=5,
+      ceil(3×1.25)=4)=5``) and the rebuild mirrors the exact store into the grown
+      Bloom, so the tripped digest is now deduped and forward progress resumes.
+    """
+    from brutex.orchestrator.bloom import BloomCapacityExceeded
+
+    root = tmp_path / "cache"
+    digests = [combo_digest(m, "NIFTY", "5m", "bull", None, **_REPRO_KW) for m in range(4)]
+    tripped = digests[3]
+    with SweepCache.open(root, bloom_capacity=3) as cache:
+        for digest in digests[:3]:
+            assert cache.record_digest(digest) is True
+        assert cache.snapshot()["bloom_insertions"] == 3
+
+        # The 4th record trips the FAIL_CLOSED Bloom AFTER exact.add committed.
+        with pytest.raises(BloomCapacityExceeded):
+            cache.record_digest(tripped)
+
+        # Counters uncorrupted; the exact store is ONE digest ahead of the Bloom.
+        assert cache.snapshot()["records"] == 3
+        assert cache.snapshot()["bloom_insertions"] == 3
+        assert tripped in cache._exact
+
+        # Bloom-negative is conclusive → redo-safe read; the retry short-circuits.
+        assert cache.seen_digest(tripped) is False
+        assert cache.record_digest(tripped) is False
+        assert cache.snapshot()["bloom_insertions"] == 3
+
+    # Reopen: persisted 4 > configured 3 → auto-grow to 5, rebuild dedups the trip.
+    with SweepCache.open(root, bloom_capacity=3) as resumed:
+        assert resumed._bloom.capacity == 5
+        assert resumed.seen_digest(tripped) is True
+        forward = combo_digest(4, "NIFTY", "5m", "bull", None, **_REPRO_KW)
+        assert resumed.record_digest(forward) is True
+
+
 def test_resumed_over_capacity_records_more_than_one_new_tuple(tmp_path: Path) -> None:
     """C6 CONSEQUENCE: a resumed >1.25×-capacity sweep makes >1 forward progress.
 

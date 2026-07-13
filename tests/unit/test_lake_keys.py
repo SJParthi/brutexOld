@@ -177,6 +177,25 @@ class TestFnoIndexAliasPairs:
         assert pairs["OK"] == "NIFTY"
         assert "A" not in pairs and "B" not in pairs and "" not in pairs
 
+    def test_sourced_map_mirrors_instrument_loader(self) -> None:
+        # DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001: lake_keys + instrument_loader
+        # document these as "the SAME single lever", but each side pinned only
+        # its OWN literal — a one-sided extension silently strips the recovery
+        # rung / pull bridge (honest NO_SPOT on a healthy lake). Cross-import so
+        # a divergence fails HERE (tests may cross-import — the source-side ban
+        # is one-directional; TestMasterDbNameConstantPin precedent).
+        from brutex.dashboard.instrument_loader import _SOURCED_FNO_INDEX_ALIASES
+        from brutex.data.lake_keys import _SOURCED_INDEX_SPOT_ALIASES
+
+        assert _SOURCED_INDEX_SPOT_ALIASES == _SOURCED_FNO_INDEX_ALIASES
+
+    def test_env_var_name_mirrors_instrument_loader(self) -> None:
+        # The two modules read the SAME operator override env; a rename on one
+        # side would silently unhook the override on the other.
+        from brutex.dashboard.instrument_loader import FNO_INDEX_ALIASES_OVERRIDE_ENV
+
+        assert FNO_INDEX_ALIASES_ENV == FNO_INDEX_ALIASES_OVERRIDE_ENV
+
 
 class TestSpotRecoveryCandidates:
     """The FULL F&O→spot drift ladder (moved verbatim from ``greeks_enrich``)."""
