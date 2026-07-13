@@ -30,9 +30,10 @@ crash a browse on one junk directory).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Final
 
 #: The trailing instrument-type token of a future contract symbol.
@@ -68,6 +69,18 @@ EXPIRY_YEAR_MAX: Final[int] = 2059
 #: for a future; an option inserts a STRIKE token (``…-STRIKE-TYPE``) → 5.
 _MIN_FUTURE_TOKENS: Final[int] = 4
 _MIN_OPTION_TOKENS: Final[int] = 5
+
+#: The ONE canonical strike-token grammar (DEC-FNO-STRIKE-TOKEN-ASCII-001): an
+#: ASCII run of digits with at most one optional ``.`` decimal fraction —
+#: ``24000`` / ``24000.5`` and nothing else. ``re.ASCII`` pins ``[0-9]`` to the
+#: ASCII digits (belt-and-braces beside the explicit class) so a junk lake dir
+#: carrying a Unicode/fullwidth-digit, underscore-grouped, signed, whitespace/NBSP-
+#: wrapped or exponent-form token is a REGEX miss (``None``) rather than a
+#: :class:`~decimal.Decimal`-coercible value that would decode IDENTITY-EQUAL to
+#: the genuine contract. Sibling precedents: ``greeks_enrich_pass`` #1536
+#: (``_is_canonical_digits``), ``lake_stats_manifest`` #1614 (``re.ASCII`` month
+#: grammar), ``groww`` errorcode ASCII guard #1752.
+_STRIKE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]+(?:\.[0-9]+)?", re.ASCII)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,17 +169,30 @@ def parse_expiry_token(token: str) -> date | None:
 def parse_strike_token(token: str) -> Decimal | None:
     """Parse a strike token (``24000`` / ``24000.5``) into a positive Decimal, or ``None``.
 
-    A non-numeric token (:class:`~decimal.InvalidOperation`), a non-finite value
-    (``inf`` / ``nan`` round-trip through :class:`~decimal.Decimal` without raising),
-    or a non-positive strike all yield ``None`` — a traded option strike is always a
+    Two rejection layers, each yielding ``None`` (a traded option strike is always a
     finite positive rupee value, so anything else is a foreign / corrupt token the
-    caller skips.
+    caller skips — the module's documented junk→``None`` contract):
+
+    1. The **ASCII-canonical grammar** :data:`_STRIKE_TOKEN_RE`
+       (DEC-FNO-STRIKE-TOKEN-ASCII-001): a token that is not a bare ASCII digit run
+       with at most one ``.`` fraction is a regex miss — this rejects a
+       Unicode/fullwidth-digit (``٢٤٠٠٠`` / ``２４０００``), underscore-grouped
+       (``24_000``), signed (``+24000`` / ``-5``), whitespace/NBSP-wrapped
+       (`` 24000`` / ``24000\xa0``), exponent-form (``1e4``), non-finite
+       (``inf`` / ``nan`` / ``Infinity``) or partial (``24000.`` / ``.5``) token
+       BEFORE it can reach :class:`~decimal.Decimal`, where several of those would
+       coerce (a `` \xa0``-wrapped digit run, a fullwidth digit, ``inf``/``nan``)
+       and decode IDENTITY-EQUAL to the genuine contract.
+    2. The **positivity** check: a regex-canonical ``0`` / ``0.0`` / ``000`` is a
+       finite decimal literal but not a tradable strike.
+
+    A regex-matched token is a guaranteed-finite decimal literal, so
+    :class:`~decimal.Decimal` never raises — there is no coercion-failure branch.
     """
-    try:
-        value = Decimal(token)
-    except InvalidOperation:
+    if _STRIKE_TOKEN_RE.fullmatch(token) is None:
         return None
-    if not value.is_finite() or value <= 0:
+    value = Decimal(token)
+    if value <= 0:
         return None
     return value
 

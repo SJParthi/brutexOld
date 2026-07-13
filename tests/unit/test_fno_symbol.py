@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=none
 """Unit + property + golden tests for :mod:`brutex.data.fno_symbol`.
 
 The canonical F&O contract ``groww_symbol`` parser (DEC-FNO-CANDLE-LAKE-001) — the
@@ -14,6 +15,7 @@ from decimal import Decimal
 
 import pytest
 from brutex.data.fno_symbol import (
+    _STRIKE_TOKEN_RE,
     EXPIRY_DATE_FORMAT,
     EXPIRY_YEAR_MAX,
     EXPIRY_YEAR_MIN,
@@ -26,7 +28,7 @@ from brutex.data.fno_symbol import (
     parse_fno_symbol,
     parse_strike_token,
 )
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 
@@ -132,6 +134,26 @@ class TestParseStrikeToken:
     def test_non_positive_is_none(self, token: str) -> None:
         assert parse_strike_token(token) is None
 
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "٢٤٠٠٠",  # Arabic-Indic digits — Decimal-coercible, NOT ASCII-canonical
+            "２４０００",  # fullwidth digits — Decimal-coercible, NOT ASCII-canonical
+            "24_000",  # underscore-grouped
+            "+24000",  # signed
+            " 24000",  # leading whitespace
+            "24000\xa0",  # trailing NBSP — Decimal strips it, the regex does not
+            "1e4",  # exponent form
+            "24000.",  # trailing dot (no fraction digits)
+            ".5",  # leading dot (no integer digits)
+        ],
+    )
+    def test_non_canonical_token_is_none(self, token: str) -> None:
+        # DEC-FNO-STRIKE-TOKEN-ASCII-001: a Decimal-coercible-but-non-canonical
+        # token is rejected at the ASCII-grammar layer, so it can never decode
+        # IDENTITY-EQUAL to the genuine contract.
+        assert parse_strike_token(token) is None
+
 
 #: Golden decode table — canonical contract symbols → their decoded coordinates.
 _GOLDEN: tuple[tuple[str, tuple[str, str, date, str, Decimal | None, str | None]], ...] = (
@@ -207,6 +229,15 @@ class TestParseFnoSymbolRejections:
     def test_rejected_symbols_return_none(self, symbol: str) -> None:
         assert parse_fno_symbol(symbol) is None
 
+    def test_unicode_strike_symbol_never_aliases_the_real_contract(self) -> None:
+        # DEC-FNO-STRIKE-TOKEN-ASCII-001: a junk lake dir whose strike token is a
+        # Unicode/fullwidth-digit run must NOT decode to the genuine contract's
+        # identity — it is rejected outright (None), never aliased to `…-24000-CE`.
+        genuine = parse_fno_symbol("NSE-NIFTY-30Jun25-24000-CE")
+        assert genuine is not None
+        assert genuine.strike == Decimal("24000")
+        assert parse_fno_symbol("NSE-NIFTY-30Jun25-٢٤٠٠٠-CE") is None
+
 
 class TestFnoSymbolParts:
     """The decoded record + its ``is_option`` convenience flag."""
@@ -265,3 +296,15 @@ class TestParseFnoSymbolProperty:
         assert parts.strike == Decimal(strike)
         assert parts.option_type == opt
         assert parts.instrument_type == opt
+
+    @pytest.mark.property
+    @given(tok=st.text(max_size=12))
+    def test_non_canonical_strike_token_rejects_whole_symbol(self, tok: str) -> None:
+        # DEC-FNO-STRIKE-TOKEN-ASCII-001: any token that misses the ASCII-canonical
+        # strike grammar yields None at the token layer AND rejects the whole option
+        # symbol (never an identity-equal decode). The grammar splits on "-", so
+        # assume the drawn token carries none.
+        assume("-" not in tok)
+        assume(_STRIKE_TOKEN_RE.fullmatch(tok) is None)
+        assert parse_strike_token(tok) is None
+        assert parse_fno_symbol(f"NSE-NIFTY-30Jun25-{tok}-CE") is None
