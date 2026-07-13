@@ -9527,6 +9527,11 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
             source=source,
             broker=broker,  # type: ignore[arg-type]
             audit=audit,
+            # DEC-FILL-WORST-CASE-001 Stage 2: the SAME launch-resolved mode
+            # the spot replay above simulated under also prices the option
+            # legs (Stage 1 resolved it but only the replay consumed it —
+            # the executor/calculator wire landed here).
+            fill_mode=fill_mode,
         )
 
 

@@ -31,6 +31,7 @@ from brutex.costs.types import (
     TradeInput,
     UnsupportedTradeOutcomeError,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
 __all__ = ["compute_trade_cost"]
@@ -120,7 +121,8 @@ def _lookup_lot_size(instrument: str, trade_date: object) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Slippage application (TRACK2_OPTIONS_SPEC §9 — flat 1-tick adverse)
+# Slippage application (TRACK2_OPTIONS_SPEC §9 — flat 1-tick adverse;
+# DEC-FILL-WORST-CASE-001 — the same tick around the worst-case anchor)
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -128,11 +130,32 @@ def _apply_slippage(
     entry_open_paisa: int,
     exit_open_paisa: int,
     side: str,
+    *,
+    fill_mode: FillMode = FillMode.PRECISE,
+    entry_high_paisa: int | None = None,
+    entry_low_paisa: int | None = None,
+    exit_high_paisa: int | None = None,
+    exit_low_paisa: int | None = None,
 ) -> tuple[int, int, int]:
-    """Apply 1-tick adverse slippage per side.
+    """Apply 1-tick adverse slippage per side around the mode's fill anchor.
 
     Long side: buy 1 tick higher, sell 1 tick lower.
     Short side: sell 1 tick lower, buy 1 tick higher (cover).
+
+    The ANCHOR each tick applies to is the fill mode's
+    (DEC-FILL-WORST-CASE-001): under :data:`FillMode.PRECISE` (the default —
+    every legacy call byte-identical) the bar OPEN; under
+    :data:`FillMode.WORST_CASE` the option's own minute-bar ADVERSE EXTREME
+    — a buy anchors on the bar HIGH, a sell on the bar LOW (long: entry
+    HIGH + tick / exit LOW − tick; short mirrored: opening sell at entry
+    LOW − tick, cover at exit HIGH + tick). Keeping the SAME ± tick on top
+    of the extreme preserves the tick discipline: on a flat bar
+    (``high == open``) a bare buy-at-HIGH would be one tick BETTER than
+    today's precise fill — with the tick it is exactly equal, so worst-case
+    is NEVER better than precise. (The worst-case buy therefore deliberately
+    prices one tick OUTSIDE the printed range — the honest adverse floor,
+    not a printable price.) The side's two adverse anchors are REQUIRED
+    under WORST_CASE (fail-loud — never a silent PRECISE degrade).
 
     Returns ``(buy_fill_paisa, sell_fill_paisa, realized_slippage_per_share)``.
 
@@ -144,35 +167,57 @@ def _apply_slippage(
     the DEC-TRACK2-COSTS-SPEC-RECONCILE-001 adverse re-pin, the short
     ENTRY — would otherwise slip to a ₹0.00 sell fill (a "free" sale),
     which is economically impossible — nothing trades below one tick. The
-    floor only affects those degenerate tick-boundary cases; the normal
-    path (prices ≥ 2 ticks) is unchanged.
+    floor only affects those degenerate tick-boundary cases (under
+    WORST_CASE a sub-tick bar LOW lands here too); the normal path (prices
+    ≥ 2 ticks) is unchanged.
 
     ``realized_slippage_per_share`` is the slippage TRULY baked into the
-    post-floor fills (NIT-1): the buy leg's adverse rise from its raw open
-    plus the sell leg's adverse drop to its raw open, both measured against
-    the floored fills. On the normal path (fills ≥ 2 ticks) it equals the
-    nominal ``2 × tick``; when the 1-tick floor fires on the sell leg the
-    realized sell-leg movement is 0, so the per-share value is exactly
-    ``1 × tick`` — never over-stating the slippage that the notionals/PnL
-    actually carry.
+    post-floor fills (NIT-1): the buy leg's adverse rise from its raw
+    anchor plus the sell leg's adverse drop to its raw anchor, both
+    measured against the floored fills. On the normal path (fills ≥ 2
+    ticks) it equals the nominal ``2 × tick``; when the 1-tick floor fires
+    on the sell leg the realized sell-leg movement is 0, so the per-share
+    value is exactly ``1 × tick`` — never over-stating the slippage that
+    the notionals/PnL actually carry. Under WORST_CASE the open→extreme
+    move is fill-ANCHOR semantics carried by the gross P&L, not slippage.
     """
     tick = C.TICK_PAISA
+    worst = fill_mode is FillMode.WORST_CASE
     if side.startswith("long"):
         # buy leg ← entry bar, sell leg ← exit bar.
-        buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+        if worst:
+            if entry_high_paisa is None or exit_low_paisa is None:
+                msg = (
+                    "_apply_slippage: fill_mode=worst_case (long) needs "
+                    "entry_high_paisa + exit_low_paisa — refusing to silently "
+                    "price PRECISE (DEC-FILL-WORST-CASE-001)"
+                )
+                raise ValueError(msg)
+            buy_raw, sell_raw = entry_high_paisa, exit_low_paisa
+        else:
+            buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
+    # RESOLVED (was MINOR-4): the §8 ADVERSE rule is authoritative
+    # (DEC-TRACK2-COSTS-SPEC-RECONCILE-001, supersedes the #963 MINOR-4
+    # pin, which had byte-pinned the favorable ``entry_open + tick`` sell
+    # fill while the spec disagreed with itself): SELL entry at
+    # ``entry_open − 1 tick``, BUY cover at ``exit_open + 1 tick`` —
+    # adverse on both legs (buy higher, sell lower). The §4 pseudocode +
+    # its "# CHECK SIGN" marker were rewritten to agree with §8. This
+    # branch stays production-unreachable under DEC-EXEC-008 (BUY-only).
+    # buy leg (cover) ← exit bar, sell leg ← entry bar. The WORST_CASE
+    # arm mirrors: sell anchors entry LOW, cover anchors exit HIGH.
+    elif worst:
+        if entry_low_paisa is None or exit_high_paisa is None:
+            msg = (
+                "_apply_slippage: fill_mode=worst_case (short) needs "
+                "entry_low_paisa + exit_high_paisa — refusing to silently "
+                "price PRECISE (DEC-FILL-WORST-CASE-001)"
+            )
+            raise ValueError(msg)
+        buy_raw, sell_raw = exit_high_paisa, entry_low_paisa
     else:
-        # RESOLVED (was MINOR-4): the §8 ADVERSE rule is authoritative
-        # (DEC-TRACK2-COSTS-SPEC-RECONCILE-001, supersedes the #963 MINOR-4
-        # pin, which had byte-pinned the favorable ``entry_open + tick`` sell
-        # fill while the spec disagreed with itself): SELL entry at
-        # ``entry_open − 1 tick``, BUY cover at ``exit_open + 1 tick`` —
-        # adverse on both legs (buy higher, sell lower). The §4 pseudocode +
-        # its "# CHECK SIGN" marker were rewritten to agree with §8. This
-        # branch stays production-unreachable under DEC-EXEC-008 (BUY-only).
-        # buy leg (cover) ← exit bar, sell leg ← entry bar.
         buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+    buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     # Floor every fill at one tick — no instrument trades below ₹0.05.
     buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
     # Realized per-share slippage = the adverse movement TRULY baked into the
@@ -253,11 +298,17 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         )
         raise UnsupportedTradeOutcomeError(msg)
 
-    # ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
+    # ── Step 1: apply slippage (1-tick flat adverse, around the fill
+    #    mode's anchor — DEC-FILL-WORST-CASE-001) ──────────────────────────
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         trade.side,
+        fill_mode=trade.fill_mode,
+        entry_high_paisa=trade.entry_bar_high_paisa,
+        entry_low_paisa=trade.entry_bar_low_paisa,
+        exit_high_paisa=trade.exit_bar_high_paisa,
+        exit_low_paisa=trade.exit_bar_low_paisa,
     )
 
     # ── Step 2: lookup lot size ─────────────────────────────────────────

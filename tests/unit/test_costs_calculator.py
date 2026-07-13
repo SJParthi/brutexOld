@@ -36,7 +36,8 @@ from brutex.costs import (
     compute_trade_cost,
     constants,
 )
-from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import _apply_slippage, _round_to_paisa, _round_to_rupee
+from brutex.execution.fill_mode import FillMode
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -1299,3 +1300,201 @@ def test_trade_input_rejects_negative_strike() -> None:
             exit_bar_open_paisa=10_000,
             side="long_call",
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# DEC-FILL-WORST-CASE-001 — the worst-case fill arm (_apply_slippage +
+# TradeInput extremes + compute_trade_cost threading)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestWorstCaseApplySlippage:
+    """The adverse-extreme ± the SAME tick arm, all four legs."""
+
+    def test_worst_case_long_entry_buys_high_exit_sells_low(self) -> None:
+        # long: buy = entry HIGH + tick; sell = exit LOW − tick.
+        buy, sell, slip = _apply_slippage(
+            12_000,
+            15_000,
+            "long_call",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=12_100,
+            entry_low_paisa=11_900,
+            exit_high_paisa=15_100,
+            exit_low_paisa=14_900,
+        )
+        assert (buy, sell, slip) == (12_105, 14_895, 2 * constants.TICK_PAISA)
+
+    def test_worst_case_short_entry_sells_low_exit_buys_high(self) -> None:
+        # short (production-unreachable under DEC-EXEC-008, forward-compat):
+        # opening SELL = entry LOW − tick; cover BUY = exit HIGH + tick.
+        buy, sell, slip = _apply_slippage(
+            12_000,
+            15_000,
+            "short_call",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=12_100,
+            entry_low_paisa=11_900,
+            exit_high_paisa=15_100,
+            exit_low_paisa=14_900,
+        )
+        assert (buy, sell, slip) == (15_105, 11_895, 2 * constants.TICK_PAISA)
+
+    def test_flat_bar_worst_case_equals_precise_never_better(self) -> None:
+        # THE NAMED FLAT-BAR COUNTEREXAMPLE: high == open ⇒ a bare buy-at-HIGH
+        # would fill BELOW today's open + tick; the kept +tick makes the flat
+        # bar EXACTLY equal — worst never beats precise (both legs, both
+        # sides).
+        for side in ("long_call", "short_put"):
+            precise = _apply_slippage(12_000, 15_000, side)
+            worst_flat = _apply_slippage(
+                12_000,
+                15_000,
+                side,
+                fill_mode=FillMode.WORST_CASE,
+                entry_high_paisa=12_000,
+                entry_low_paisa=12_000,
+                exit_high_paisa=15_000,
+                exit_low_paisa=15_000,
+            )
+            assert worst_flat == precise, side
+
+    def test_worst_case_sub_tick_low_floors_never_crashes(self) -> None:
+        # A degenerate sub-tick exit LOW floors the sell at one tick; the
+        # realized slippage reads the floored truth (sell leg moved 0…
+        # here 3−5 < 5 ⇒ floored; |3 − 5| = 2 realized on that leg).
+        buy, sell, slip = _apply_slippage(
+            30,
+            10,
+            "long_put",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=40,
+            entry_low_paisa=25,
+            exit_high_paisa=12,
+            exit_low_paisa=3,
+        )
+        assert (buy, sell) == (45, constants.TICK_PAISA)
+        assert slip == constants.TICK_PAISA + abs(3 - constants.TICK_PAISA)
+
+    def test_worst_case_long_missing_anchors_fail_loud(self) -> None:
+        with pytest.raises(ValueError, match="worst_case .long. needs"):
+            _apply_slippage(12_000, 15_000, "long_call", fill_mode=FillMode.WORST_CASE)
+        with pytest.raises(ValueError, match="entry_high_paisa"):
+            _apply_slippage(
+                12_000,
+                15_000,
+                "long_call",
+                fill_mode=FillMode.WORST_CASE,
+                entry_high_paisa=12_100,  # exit_low missing
+            )
+
+    def test_worst_case_short_missing_anchors_fail_loud(self) -> None:
+        with pytest.raises(ValueError, match="worst_case .short. needs"):
+            _apply_slippage(12_000, 15_000, "short_call", fill_mode=FillMode.WORST_CASE)
+        with pytest.raises(ValueError, match="entry_low_paisa"):
+            _apply_slippage(
+                12_000,
+                15_000,
+                "short_call",
+                fill_mode=FillMode.WORST_CASE,
+                exit_high_paisa=15_100,  # entry_low missing
+            )
+
+    def test_precise_ignores_supplied_extremes(self) -> None:
+        assert _apply_slippage(
+            12_000,
+            15_000,
+            "long_call",
+            entry_high_paisa=99_000,
+            entry_low_paisa=1_000,
+            exit_high_paisa=99_000,
+            exit_low_paisa=1_000,
+        ) == _apply_slippage(12_000, 15_000, "long_call")
+
+
+_WORST_EXTREMES: dict[str, int] = {
+    "entry_bar_high_paisa": 10_100,
+    "entry_bar_low_paisa": 9_900,
+    "exit_bar_high_paisa": 12_100,
+    "exit_bar_low_paisa": 11_900,
+}
+
+
+def _worst_trade(**overrides: object) -> TradeInput:
+    kwargs: dict[str, object] = {
+        "entry_dt_ist": datetime(2026, 5, 15, 10, 0),
+        "exit_dt_ist": datetime(2026, 5, 15, 11, 0),
+        "instrument": "NIFTY",
+        "option_type": "CE",
+        "strike": 2_500_000,
+        "expiry_date": date(2026, 5, 21),
+        "entry_bar_open_paisa": 9_995,
+        "exit_bar_open_paisa": 12_005,
+        "side": "long_call",
+        "fill_mode": FillMode.WORST_CASE,
+        "entry_bar_high_paisa": 10_100,
+        "entry_bar_low_paisa": 9_900,
+        "exit_bar_high_paisa": 12_100,
+        "exit_bar_low_paisa": 11_900,
+    }
+    kwargs.update(overrides)
+    return TradeInput(**kwargs)  # type: ignore[arg-type]
+
+
+class TestWorstCaseTradeInput:
+    def test_legacy_construction_is_precise_with_no_extremes(self) -> None:
+        # The additive-defaulted-field pattern: pre-worst-case constructions
+        # are byte-identical (PRECISE, extremes None).
+        t = _make_trade()
+        assert t.fill_mode is FillMode.PRECISE
+        assert t.entry_bar_high_paisa is None
+        assert t.exit_bar_low_paisa is None
+
+    def test_worst_case_requires_all_four_extremes(self) -> None:
+        with pytest.raises(ValueError, match="missing .'entry_bar_high_paisa'"):
+            _worst_trade(
+                entry_bar_high_paisa=None,
+                entry_bar_low_paisa=None,
+                exit_bar_high_paisa=None,
+                exit_bar_low_paisa=None,
+            )
+        with pytest.raises(ValueError, match="missing .'exit_bar_low_paisa'"):
+            _worst_trade(exit_bar_low_paisa=None)
+
+    def test_junk_fill_mode_string_fails_loud(self) -> None:
+        # A junk string would compare `is FillMode.WORST_CASE` False and
+        # SILENTLY price PRECISE — the trap the runtime guard closes.
+        with pytest.raises(ValueError, match="not a FillMode member"):
+            _worst_trade(fill_mode="worst_case")
+
+    @pytest.mark.parametrize("label", ["entry", "exit"])
+    def test_extreme_ordering_validated_against_open(self, label: str) -> None:
+        with pytest.raises(ValueError, match=f"{label}_bar_high_paisa"):
+            _worst_trade(**{f"{label}_bar_high_paisa": 1})
+        with pytest.raises(ValueError, match=f"{label}_bar_low_paisa"):
+            _worst_trade(**{f"{label}_bar_low_paisa": 99_999_999})
+
+    def test_worst_case_with_extremes_constructs(self) -> None:
+        assert _worst_trade().fill_mode is FillMode.WORST_CASE
+
+
+class TestWorstCaseComputeTradeCost:
+    def test_worst_case_threads_through_compute_trade_cost(self) -> None:
+        # Same trade, PRECISE vs WORST_CASE: fills move to the extremes ±
+        # tick; the worst net can never beat the precise net.
+        precise = compute_trade_cost(_worst_trade(fill_mode=FillMode.PRECISE))
+        worst = compute_trade_cost(_worst_trade())
+        assert (precise.buy_fill_paisa, precise.sell_fill_paisa) == (10_000, 12_000)
+        assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (10_105, 11_895)
+        assert worst.net_pnl_paisa < precise.net_pnl_paisa
+
+    def test_worst_case_flat_bars_byte_identical_breakdown(self) -> None:
+        flat = {
+            "entry_bar_high_paisa": 9_995,
+            "entry_bar_low_paisa": 9_995,
+            "exit_bar_high_paisa": 12_005,
+            "exit_bar_low_paisa": 12_005,
+        }
+        worst = compute_trade_cost(_worst_trade(**flat))
+        precise = compute_trade_cost(_make_trade(entry_dt=datetime(2026, 5, 15, 10, 0)))
+        assert worst == precise

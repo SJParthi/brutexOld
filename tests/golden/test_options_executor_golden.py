@@ -38,6 +38,13 @@ Fixture B — SENSEX BEAR ``atm_plus_1_in_dir`` (long_put), entry ₹200.00 → 
   total = 4000+0+81+0+0+0+700 = 4781;  net = −150100 − 4781 = −154881.
   (Every cell byte-identical to the pre-relocation 2024-05-02 fixture —
   STT rounds to 0 in both regimes; only the dates moved.)
+
+DEC-FILL-WORST-CASE-001: Fixtures A/B use FLAT (limit-locked) bars, so their
+numbers are provably MODE-INVARIANT (worst-case == precise on a flat bar —
+the +tick discipline); they are additionally pinned with an EXPLICIT
+``fill_mode=FillMode.PRECISE`` under the new WORST_CASE executor default and
+must NEVER be regenerated. Fixture W below is the RANGE-bar worst-case
+golden (hand-derived in its own docstring, locked once 2026-07-13).
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from brutex.data.models import OptionBar
+from brutex.execution.fill_mode import FillMode
 from brutex.options.executor import (
     MaterializedTrade,
     OptionBarPair,
@@ -116,7 +124,12 @@ def test_golden_nifty_bull_atm() -> None:
         spot_at_entry=Decimal("25012"),
         expiry_date=_EXPIRY,
     )
-    out = materialize_trade(sig, RULES_BY_NAME["atm"], source=_Source("120.00", "150.00"))
+    out = materialize_trade(
+        sig,
+        RULES_BY_NAME["atm"],
+        source=_Source("120.00", "150.00"),
+        fill_mode=FillMode.PRECISE,  # legacy-mode pin — never regenerate
+    )
     assert isinstance(out, MaterializedTrade)
 
     assert out.leg.option_type == "CE"
@@ -155,7 +168,10 @@ def test_golden_sensex_bear_atm_plus_1() -> None:
         expiry_date=_EXPIRY,
     )
     out = materialize_trade(
-        sig, RULES_BY_NAME["atm_plus_1_in_dir"], source=_Source("200.00", "50.00")
+        sig,
+        RULES_BY_NAME["atm_plus_1_in_dir"],
+        source=_Source("200.00", "50.00"),
+        fill_mode=FillMode.PRECISE,  # legacy-mode pin — never regenerate
     )
     assert isinstance(out, MaterializedTrade)
 
@@ -222,3 +238,119 @@ def test_golden_pre_boundary_unverified_refusal() -> None:
         out = materialize_trade(sig, RULES_BY_NAME[rule], source=_NeverCalledSource())
         assert isinstance(out, RejectedTrade)
         assert out.reason is RejectReason.COST_REGIME_UNVERIFIED
+
+
+def _range_bar(side: str, open_rupees: str, high_rupees: str, low_rupees: str) -> OptionBar:
+    px = Decimal(open_rupees)
+    return OptionBar(
+        timestamp=_ENTRY_TS,
+        open=px,
+        high=Decimal(high_rupees),
+        low=Decimal(low_rupees),
+        close=px,
+        volume=10,
+        open_interest=100,
+        side=side,
+        strike=Decimal("25000"),
+        spot=Decimal("25012"),
+        iv=Decimal("0.15"),
+    )
+
+
+class _RangeSource:
+    """Range-bar source: (open, high, low) per leg — the worst-case anchors."""
+
+    def __init__(self, entry: tuple[str, str, str], exit_: tuple[str, str, str]) -> None:
+        self._entry = entry
+        self._exit = exit_
+
+    def load_pair(self, *, option_type: str, **_kw: object) -> OptionBarPair:
+        return OptionBarPair(
+            entry_bar=_range_bar(option_type, *self._entry),
+            exit_bar=_range_bar(option_type, *self._exit),
+        )
+
+
+def test_golden_worst_case_nifty_bull_atm_range_bars() -> None:
+    """Fixture W — DEC-FILL-WORST-CASE-001 worst-case golden (locked once
+    2026-07-13, hand-derived; the SAME signal as Fixture A over RANGE bars
+    entry ₹120.00 [119.00–121.00] → exit ₹150.00 [149.00–151.00]):
+
+      buy_fill = entry HIGH 12100 + 5 = 12105 (one tick OUTSIDE the printed
+      range — the honest adverse floor); sell_fill = exit LOW 14900 − 5 =
+      14895; n_shares = 25.
+      buy_notional = 302,625;  sell_notional = 372,375;  gross = +69,750.
+      brokerage = 2×2000 = 4,000.
+      STT = round₹(372,375×10,000//1e7 = 372) = 400.
+      exch(NSE 3503) = ⌈302,625×3503⌉ₚ + ⌈372,375×3503⌉ₚ = 106 + 130 = 236.
+      sebi(10) = 0 + 0 = 0;  ipft(NSE 50) = 2 + 2 = 4;
+      stamp(300, buy) = round₹(9) = 0.
+      GST = round₹((4,000+236+0+4)×18% = 763) = 800.
+      total = 4,000+400+236+0+4+0+800 = 5,440;  net = 69,750 − 5,440 = +64,310.
+      slippage = 2 ticks × 25 = 250 (tick discipline — the open→extreme move
+      is fill-anchor semantics carried by gross, not slippage).
+    PRECISE on the SAME range bars anchors the opens ⇒ byte-identical to
+    Fixture A (net +69,310) — both pinned so the two arms can never collapse.
+    """
+    sig = SpotSignal(
+        instrument=OptionsUnderlying.NIFTY,
+        direction=TradeDirection.BULL,
+        entry_ts=_ENTRY_TS,
+        exit_ts=_EXIT_TS,
+        spot_at_entry=Decimal("25012"),
+        expiry_date=_EXPIRY,
+    )
+    source = _RangeSource(("120.00", "121.00", "119.00"), ("150.00", "151.00", "149.00"))
+    # The bare call runs the executor's production WORST_CASE default.
+    out = materialize_trade(sig, RULES_BY_NAME["atm"], source=source)
+    assert isinstance(out, MaterializedTrade)
+    assert out.entry_open_paisa == 12000  # the record keeps OPEN semantics
+    assert out.exit_open_paisa == 15000
+    b = out.breakdown
+    assert b.buy_fill_paisa == 12105
+    assert b.sell_fill_paisa == 14895
+    assert b.buy_notional_paisa == 302_625
+    assert b.sell_notional_paisa == 372_375
+    assert b.gross_pnl_paisa == 69_750
+    assert b.brokerage_paisa == 4000
+    assert b.stt_paisa == 400
+    assert b.exch_paisa == 236
+    assert b.sebi_paisa == 0
+    assert b.ipft_paisa == 4
+    assert b.stamp_paisa == 0
+    assert b.gst_paisa == 800
+    assert b.total_charges_paisa == 5440
+    assert b.net_pnl_paisa == 64_310
+    assert b.slippage_paisa == 250
+
+    precise = materialize_trade(
+        sig, RULES_BY_NAME["atm"], source=source, fill_mode=FillMode.PRECISE
+    )
+    assert isinstance(precise, MaterializedTrade)
+    assert precise.breakdown.net_pnl_paisa == 69_310  # == Fixture A
+    assert out.net_pnl_paisa < precise.net_pnl_paisa  # worst never better
+
+
+def test_golden_flat_bars_worst_case_equals_precise() -> None:
+    """THE NAMED FLAT-BAR REGRESSION (options leg): on flat bars the two
+    modes are byte-identical — the +tick on top of the extreme keeps the
+    worst-case buy at ``open + tick`` (== precise), never the bare ``high``
+    (which would be one tick BETTER than today)."""
+    sig = SpotSignal(
+        instrument=OptionsUnderlying.NIFTY,
+        direction=TradeDirection.BULL,
+        entry_ts=_ENTRY_TS,
+        exit_ts=_EXIT_TS,
+        spot_at_entry=Decimal("25012"),
+        expiry_date=_EXPIRY,
+    )
+    worst = materialize_trade(sig, RULES_BY_NAME["atm"], source=_Source("120.00", "150.00"))
+    precise = materialize_trade(
+        sig,
+        RULES_BY_NAME["atm"],
+        source=_Source("120.00", "150.00"),
+        fill_mode=FillMode.PRECISE,
+    )
+    assert worst == precise
+    assert isinstance(worst, MaterializedTrade)
+    assert worst.breakdown.buy_fill_paisa == 12005  # open + tick, preserved

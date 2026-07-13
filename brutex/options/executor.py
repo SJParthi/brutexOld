@@ -17,10 +17,18 @@ spot at entry. This module *materializes* that abstract signal into a concrete,
    100% unit-testable with a fake; the real lake reader is the CLI's job).
 3. **Price** the round-trip via the already-locked Track-2 cost calculator
    (:func:`brutex.costs.calculator.compute_trade_cost`): 1-tick slippage per
-   side (``TRACK2_OPTIONS_SPEC.md`` §9), STT / exchange / SEBI / IPFT / stamp /
-   GST (``COSTS_VERIFIED.md``), gross + **net** P&L in int64 paisa. No pricing
-   math is re-implemented here — this module is pure composition (CLAUDE.md §11
-   COMMON).
+   side (``TRACK2_OPTIONS_SPEC.md`` §9) around the fill mode's anchor —
+   the bar OPEN under :data:`~brutex.execution.fill_mode.FillMode.PRECISE`,
+   the option's own minute-bar ADVERSE EXTREME under ``WORST_CASE``
+   (DEC-FILL-WORST-CASE-001; this executor is the production config surface,
+   so its default is the shared leaf's worst-case
+   :data:`~brutex.execution.fill_mode.DEFAULT_FILL_MODE` — explicit PRECISE
+   is the byte-identical legacy opt-out) — then STT / exchange / SEBI /
+   IPFT / stamp / GST (``COSTS_VERIFIED.md``), gross + **net** P&L in int64
+   paisa. No pricing math is re-implemented here — this module is pure
+   composition (CLAUDE.md §11 COMMON). The mode moves fill PRICES only:
+   every reject gate (incl. the §7.8 tick floor, judged on the OPENs) is
+   mode-independent.
 
 The implied volatility ``iv`` the rolling endpoint stamps per bar is carried
 through onto each :class:`MaterializedTrade` (``iv_at_entry``) so downstream
@@ -66,6 +74,7 @@ import structlog
 
 from brutex.calendars.nse import IST
 from brutex.data.models import OptionBar
+from brutex.execution.fill_mode import DEFAULT_FILL_MODE, FillMode
 from brutex.money import rupees_to_paisa
 from brutex.options.expiry_calendar import next_monthly_expiry, next_weekly_expiry
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
@@ -447,6 +456,7 @@ def materialize_trade(
     n_lots: int = 1,
     delta_chain: DeltaChain | None = None,
     reject_stale_bars: bool = True,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> MaterializedTrade | RejectedTrade:
     """Materialize + price one option trade for *signal* under *rule*.
 
@@ -471,6 +481,15 @@ def materialize_trade(
         is rejected as :data:`RejectReason.STALE_BAR` — its OHLC is a
         stale/carried price no real order could have filled at. Pass
         ``False`` to opt out (accept zero-volume bars as before).
+        Mode-independent — a fill mode never changes a reject.
+    fill_mode
+        The global :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001). This executor is the production config
+        surface for the options leg, so the default is the shared leaf's
+        :data:`~brutex.execution.fill_mode.DEFAULT_FILL_MODE` (worst-case:
+        buy at the option's own minute-bar HIGH + tick, sell at LOW −
+        tick); an explicit ``FillMode.PRECISE`` is the byte-identical
+        legacy opt-out (golden-pinned).
 
     Returns
     -------
@@ -576,6 +595,20 @@ def materialize_trade(
         broker=broker,
         gst_split=gst_split,
         trade_outcome="NORMAL_CLOSE",
+        fill_mode=fill_mode,
+        # The option's OWN minute-bar extremes travel in BOTH modes (the
+        # input record is complete either way; PRECISE never reads them) —
+        # the WORST_CASE adverse anchors (DEC-FILL-WORST-CASE-001; the
+        # design decision: additive-defaulted TradeInput fields, the exact
+        # FuturesTradeInput mirror, chosen over executor-side pre-selection
+        # so the open fields keep their documented OPEN semantics and the
+        # sub-tick-LOW floor lives in ONE place, _apply_slippage). OptionBar
+        # guarantees low ≤ open ≤ high, so the ordering validation cannot
+        # fire on a real lake bar.
+        entry_bar_high_paisa=rupees_to_paisa(pair.entry_bar.high),
+        entry_bar_low_paisa=rupees_to_paisa(pair.entry_bar.low),
+        exit_bar_high_paisa=rupees_to_paisa(pair.exit_bar.high),
+        exit_bar_low_paisa=rupees_to_paisa(pair.exit_bar.low),
     )
     breakdown = compute_trade_cost(trade_input)
     return MaterializedTrade(
@@ -718,6 +751,7 @@ def run_rule_over_signals(
     n_lots: int = 1,
     delta_chain_provider: DeltaChainProvider | None = None,
     reject_stale_bars: bool = True,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> OptionsRuleResult:
     """Price every *signal* under *rule* and aggregate into an :class:`OptionsRuleResult`.
 
@@ -736,6 +770,9 @@ def run_rule_over_signals(
     reject_stale_bars
         Threaded to :func:`materialize_trade` — default ``True`` rejects
         zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`.
+    fill_mode
+        Threaded to :func:`materialize_trade` (DEC-FILL-WORST-CASE-001;
+        default = the production worst-case).
 
     Returns
     -------
@@ -778,6 +815,7 @@ def run_rule_over_signals(
             n_lots=n_lots,
             delta_chain=chain,
             reject_stale_bars=reject_stale_bars,
+            fill_mode=fill_mode,
         )
         if isinstance(outcome, RejectedTrade):
             if outcome.reason == RejectReason.NO_DATA:
@@ -832,6 +870,7 @@ def execute_options_sim(
     delta_chain_provider: DeltaChainProvider | None = None,
     audit: AuditAppend | None = None,
     reject_stale_bars: bool = True,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> tuple[OptionsRuleResult, ...]:
     """Run the options sim across every *rule* and return one result per rule.
 
@@ -858,6 +897,10 @@ def execute_options_sim(
         Threaded to :func:`materialize_trade` — default ``True`` rejects
         zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`;
         pass ``False`` to opt out at the sim API surface.
+    fill_mode
+        Threaded to every rule's :func:`run_rule_over_signals`
+        (DEC-FILL-WORST-CASE-001; default = the production worst-case —
+        the CLI options-sim passes its launch-resolved mode here).
 
     Returns
     -------
@@ -875,6 +918,7 @@ def execute_options_sim(
             n_lots=n_lots,
             delta_chain_provider=delta_chain_provider,
             reject_stale_bars=reject_stale_bars,
+            fill_mode=fill_mode,
         )
         results.append(result)
         if audit is not None:
