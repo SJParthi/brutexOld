@@ -193,6 +193,30 @@ class TestNewestJournalAge:
         clamped = newest_journal_age(tmp_path, now=1500.0)  # clock skew — never negative
         assert clamped == (0.0, "2026-07-10.json")
 
+    def test_equal_mtime_tie_never_replaces_running_newest(self, tmp_path: Path) -> None:
+        """Order-INDEPENDENT pin of the ``mtime > newest[0]`` FALSE arm.
+
+        ``Path.iterdir()`` order is filesystem-dependent: the distinct-mtime
+        test above covers the false arm only when the NEWER journal happens to
+        iterate first (this box), and missed it on the CI runner where the
+        older name iterated first (the 219->214 branch shortfall, CI run
+        29215723071). Two journals with IDENTICAL mtimes guarantee the
+        second-iterated one fails the strict ``>`` compare in EVERY iteration
+        order — the deterministic branch pin. The winner NAME under a tie is
+        deliberately unasserted (first-iterated wins; order is fs-dependent).
+        """
+        cv = tmp_path / ".crossverify"
+        cv.mkdir()
+        for name in ("2026-07-09.json", "2026-07-10.json"):
+            journal = cv / name
+            journal.write_text("{}", encoding="utf-8")
+            os.utime(journal, (1500.0, 1500.0))
+        entry = newest_journal_age(tmp_path, now=2000.0)
+        assert entry is not None
+        age, name = entry
+        assert age == 500.0
+        assert name in {"2026-07-09.json", "2026-07-10.json"}
+
     def test_now_fn_used_when_now_unset(self, tmp_path: Path) -> None:
         cv = tmp_path / ".crossverify"
         cv.mkdir()
