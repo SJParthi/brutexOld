@@ -1099,9 +1099,28 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
     ``open_interest`` column is read — both the ``.select(...)`` and the empty-schema
     fallback frame gain it (``pl.Int64``) — and the OI-aware resampler carries
     last-of-day OI into the derived ``1day`` partition.
+
+    Price-sanity gate (DEC-DAILY-WINDOW-SANITY-GATE-001, the derived-TF-audit
+    E2-H4 fix): the collected window frame is validated by the SAME COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` the intraday
+    prebuild read (:func:`~brutex.data.timeframe_materialize.make_lake_read_1m`)
+    already runs — pre-gate, a corrupt 1m row (e.g. ``low=0.0``, internally
+    ordered — the legacy pre-#912 class) that the INTRADAY prebuild loudly
+    QUARANTINED was silently LAUNDERED into a derived ``1day`` bar by every
+    window-read daily path (heal-recall 1day re-derive, crossverify
+    day-scoped derive, ledger daily reconcile; live-reproduced: a stored
+    1day ``low=0.0`` with ``errored=0``). The raised
+    :class:`~brutex.data.errors.ResampleInputError` is ALREADY the per-target
+    quarantine class :func:`derive_daily_for_targets` counts as ``errored``,
+    so every daily consumer becomes correct-or-absent with zero wiring
+    changes. The gate no-ops on the height-0 empty-window frames (the clean
+    no-op contract above is untouched); no kill switch — parity with the
+    intraday gate, which has none.
     Raw lake I/O — ``# pragma: no cover``; exercised by the round-trip integration test.
     """
     import polars as pl
+
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     def _read() -> pl.DataFrame:
         base = lake_root / "bars" / exchange / segment / symbol / "1minute"
@@ -1148,13 +1167,22 @@ def make_lake_read_1m_window(  # pragma: no cover — raw lake read, integration
         # IST trading date of each 1-minute bar = (ts_utc + 05:30) date. Intraday
         # bars (09:15–15:30 IST) never cross the UTC midnight, so this is exact.
         ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
-        return (
+        frame = (
             df.rename({"timestamp": "ts_utc"})
             .with_columns(ist_date.alias("_ist_date"))
             .filter((pl.col("_ist_date") >= start) & (pl.col("_ist_date") < end))
             .select(*columns)
             .sort("ts_utc")
         )
+        # DEC-DAILY-WINDOW-SANITY-GATE-001: refuse to feed a price-insane 1m
+        # window to the daily resamplers (the quarantining ResampleInputError
+        # — the exact mirror of make_lake_read_1m's intraday gate).
+        validate_frame_price_sanity(
+            frame,
+            ts_column="ts_utc",
+            context=f"{exchange}/{segment}/{symbol}/1minute (daily window read)",
+        )
+        return frame
 
     return _read
 
