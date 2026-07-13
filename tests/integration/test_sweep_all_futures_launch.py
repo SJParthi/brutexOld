@@ -776,14 +776,16 @@ def test_crashed_parallel_launch_prefix_audit_still_resumes(
 
 
 def test_worst_case_launch_line_records_the_fill_mode(tmp_path: Path) -> None:
-    """NIT-3 (DEC-FILL-WORST-CASE-001 fix round 2): the pre-dispatch
-    SWEEP_LAUNCH context line carries the launch fill mode under the SAME
-    emit-on-non-PRECISE law as canonical_trade_params. Pre-fix the line
-    carried only the roll_schedule, so a parallel-crash-window prefix audit
+    """The SWEEP_LAUNCH fill-mode recording law (DEC-FILL-WORST-CASE-001 —
+    round-2 NIT-3 superseded by FIX ROUND 3): the pre-dispatch launch context
+    line records the fill mode ALWAYS AND EXPLICITLY — including the literal
+    "precise" — matching the SWEEP_START recording law, so a same-generation
+    mixed-mode root is detectable and a parallel-crash-window prefix audit
     (the launch line only — every buffered per-tuple SWEEP_START lost with
-    the parent) made a WORST_CASE launch's generation read PRECISE-legacy;
-    now the truncated prefix reads the TRUE mode. A PRECISE launch stays
-    key-ABSENT (the elision law — its audit bytes are byte-identical)."""
+    the parent) reads the TRUE mode. The round-2 emit-on-non-PRECISE /
+    key-ABSENCE pin legitimately FLIPPED here: PRECISE is now an explicit
+    token on the AUDIT wire (canonical_trade_params / run identity / tuple
+    digests keep the elision law byte-untouched)."""
     import json
 
     from brutex.engine.sweep_verify import recorded_audit_facts
@@ -807,18 +809,22 @@ def test_worst_case_launch_line_records_the_fill_mode(tmp_path: Path) -> None:
     # crash right after dispatch leaves durable — and read the scoped facts:
     # the generation's fill mode survives the crash window.
     audit_path.write_text("".join(lines[: launch_idx + 1]), encoding="utf-8")
-    assert recorded_audit_facts(audit_path)[3] is FillMode.WORST_CASE
+    assert recorded_audit_facts(audit_path)[3] == (FillMode.WORST_CASE,)
 
-    # The PRECISE elision half: a precise launch appends NO fill_mode key.
+    # The explicit-PRECISE half (fix round 3): a precise launch RECORDS the
+    # literal token on both the launch line and every per-tuple SWEEP_START.
     precise_root = tmp_path / "sweeps_precise"
     rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, precise_root, intervals="1minute"))
     assert rc == EXIT_OK
     precise_audit = precise_root / "audit" / "sweep-all.jsonl"
+    recording_actions = set()
     for line in precise_audit.read_text(encoding="utf-8").splitlines():
         entry = json.loads(line)
-        if entry["action"] == "SWEEP_LAUNCH":
-            assert "fill_mode" not in entry["payload"]["params"]
-    assert recorded_audit_facts(precise_audit)[3] is FillMode.PRECISE
+        if entry["action"] in ("SWEEP_LAUNCH", "SWEEP_START"):
+            recording_actions.add(entry["action"])
+            assert entry["payload"]["params"]["fill_mode"] == "precise"
+    assert recording_actions == {"SWEEP_LAUNCH", "SWEEP_START"}
+    assert recorded_audit_facts(precise_audit)[3] == (FillMode.PRECISE,)
 
 
 def test_lossy_audit_over_foreign_generation_sentinels_still_resumes(

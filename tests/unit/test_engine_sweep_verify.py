@@ -355,19 +355,27 @@ class TestRecordedContext:
 
 
 class TestRecordedFillMode:
-    """The SCOPED generation's recorded fill mode — `recorded_audit_facts`' 4th element.
+    """The SCOPED generation's recorded fill-mode SET — `recorded_audit_facts`' 4th element.
 
-    The law: no ``fill_mode`` key on any of the scoped generation's params =
-    PRECISE legacy. FIX-ROUND-2 (refuter-confirmed MAJOR-2, MIGRATION.md
-    #1786): the mode is derived from the SAME matching-entries selection as
-    the context + schedules — the retired ``recorded_fill_mode_from_audit``
-    folded the WHOLE audit, so a mixed standing root (a legacy PRECISE
-    generation + a post-upgrade WORST_CASE generation accreted into ONE
-    ``resume=True`` audit — the sanctioned sweep-daemon cadence) read
-    WORST_CASE for the whole tree and every legacy PRECISE store verified as
-    a FALSE ``grid_mismatch``/corrupt (``checked_stores=0``); PRECISE is
-    recorded by KEY ABSENCE, so the mix was invisible to the
-    inconsistent-modes refusal.
+    FIX-ROUND-3 (refuter-confirmed mixed-mode MAJOR, MIGRATION.md #1786): the
+    element is now a TUPLE — the ordered, deduped SET of modes the scoped
+    generation recorded. Two launches under different fill modes legally
+    share ONE generation triple (distinct run identities + `_tuple_digest`
+    store addresses), and under the WORST_CASE production default the mix is
+    ROUTINE; the round-2 single-mode fold silently resolved it to WORST_CASE
+    (PRECISE was recorded by key ABSENCE) so the PRECISE stores read
+    forever-unverifiable `unattributed_store` warns — or, with the
+    WORST_CASE stores absent/removed, a FALSE `grid_mismatch`/corrupt with
+    `checked_stores=0` and no operator escape. The round-2 "same-generation
+    conflict" refusal was RETIRED (unreachable under the two-member
+    vocabulary AND wrong — the mix is legal). New audit entries record the
+    mode ALWAYS AND EXPLICITLY (including the literal "precise" — the AUDIT
+    wire only; the run-identity params keep the elision law); a LEGACY
+    no-key entry contributes PRECISE; a junk token still refuses. The EMPTY
+    tuple means "nothing recorded" — the CALLER decides (fix-round-3
+    finding 3: the old arm fabricated PRECISE and dropped the --fill-mode
+    flag). FIX-ROUND-2's generation scoping (never a whole-audit fold)
+    stands unchanged.
     """
 
     _CTX: ClassVar[dict[str, str]] = {
@@ -393,8 +401,10 @@ class TestRecordedFillMode:
             payload["params"] = params
         audit.append(action=action, subject="s", payload=payload)
 
-    def test_absent_audit_reads_precise(self, tmp_path: Path) -> None:
-        assert recorded_audit_facts(tmp_path / "nope.jsonl")[3] is FillMode.PRECISE
+    def test_absent_audit_reads_the_empty_set(self, tmp_path: Path) -> None:
+        # FIX-ROUND-3: nothing recorded reads (), NOT a fabricated PRECISE —
+        # the caller (cmd_sweep_verify) honors --fill-mode / plans both modes.
+        assert recorded_audit_facts(tmp_path / "nope.jsonl")[3] == ()
 
     def test_legacy_tree_without_the_key_reads_precise(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
@@ -403,14 +413,14 @@ class TestRecordedFillMode:
             audit.append(action="OTHER", subject="s", payload={"params": {"fill_mode": "junk"}})
             self._append(audit, params=None)
             self._append(audit, params={"sl_paisa": 80})
-        assert recorded_audit_facts(path)[3] is FillMode.PRECISE
+        assert recorded_audit_facts(path)[3] == (FillMode.PRECISE,)
 
     def test_worst_case_tree_reads_the_recorded_mode(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"fill_mode": "worst_case"})
-            self._append(audit, params={"fill_mode": "worst_case"})  # consistent repeats agree
-        assert recorded_audit_facts(path)[3] is FillMode.WORST_CASE
+            self._append(audit, params={"fill_mode": "worst_case"})  # repeats dedupe
+        assert recorded_audit_facts(path)[3] == (FillMode.WORST_CASE,)
 
     def test_junk_token_refuses(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
@@ -419,38 +429,47 @@ class TestRecordedFillMode:
         with pytest.raises(SweepVerifyError, match="not a known fill mode"):
             recorded_audit_facts(path)
 
-    def test_literal_precise_token_refuses_as_tampered(self, tmp_path: Path) -> None:
-        # canonical_trade_params NEVER emits the PRECISE token (the
-        # emit-on-non-PRECISE law) — a literal key is a hand-edited line.
+    def test_explicit_precise_token_reads_precise(self, tmp_path: Path) -> None:
+        # FIX-ROUND-3 flip of the round-2 tamper refusal: the AUDIT wire now
+        # records the mode ALWAYS AND EXPLICITLY (SWEEP_START + SWEEP_LAUNCH
+        # writers emit the literal "precise" too), so the token is a
+        # legitimate recording, never tampering. The MANIFEST wire keeps the
+        # opposite convention (its writer still elides at PRECISE, so ITS
+        # reader still refuses the literal token — each reader refuses what
+        # its own writer never emits).
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"fill_mode": "precise"})
-        with pytest.raises(SweepVerifyError, match="KEY ABSENCE"):
-            recorded_audit_facts(path)
+        assert recorded_audit_facts(path)[3] == (FillMode.PRECISE,)
 
-    def test_inconsistent_modes_within_one_generation_refuse(self, tmp_path: Path) -> None:
-        # A worst_case entry followed by a literal "precise" entry in the
-        # SAME generation: today's two-member vocabulary makes the second
-        # line trip the KEY-ABSENCE tamper refusal (a literal PRECISE token
-        # is never emitted) BEFORE the inconsistency fold — refused either
-        # way, never a picked winner.
+    def test_same_generation_mixed_modes_read_both_ordered(self, tmp_path: Path) -> None:
+        # THE FIX-ROUND-3 READER LAW: a same-generation mixed-mode root is
+        # LEGAL (distinct run identities + store addresses — the mode folds
+        # into both), so the reader answers with the ordered, deduped SET —
+        # never a refusal, never a silently picked winner. Both halves of
+        # the mix: a LEGACY no-key entry (PRECISE by absence) and an
+        # explicit-token pair.
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
+            self._append(audit, params={"sl_paisa": 80})  # legacy → PRECISE
+            self._append(audit, params={"fill_mode": "worst_case"})
+        assert recorded_audit_facts(path)[3] == (FillMode.PRECISE, FillMode.WORST_CASE)
+        explicit = tmp_path / "b.jsonl"
+        with AuditWriter.open(explicit) as audit:
             self._append(audit, params={"fill_mode": "worst_case"})
             self._append(audit, params={"fill_mode": "precise"})
-        with pytest.raises(SweepVerifyError):
-            recorded_audit_facts(path)
+        # First-appearance order — the WORST_CASE launch landed first here.
+        assert recorded_audit_facts(explicit)[3] == (FillMode.WORST_CASE, FillMode.PRECISE)
 
-    def test_inconsistent_modes_refuse_under_a_future_vocabulary(
+    def test_future_vocabulary_multi_mode_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The genuine two-DIFFERENT-recorded-modes raise is structurally
-        # unreachable under today's two-member vocabulary (the ONLY
-        # non-PRECISE member is WORST_CASE; a literal "precise" is refused
-        # earlier as tampered) — it is the DEFENSIVE TOTALITY arm for a
-        # future third mode. Drive it with a three-member fake vocabulary
-        # patched into the module's own FillMode binding; both entries share
-        # ONE context triple, so the conflict is genuinely SAME-generation.
+        # The round-2 "inconsistent recorded fill_mode" refusal is RETIRED
+        # (fix round 3): two DIFFERENT recorded modes in one generation are
+        # a legal mixed-mode root, and the set law generalises to any future
+        # vocabulary — drive it with a three-member fake FillMode patched
+        # into the module's own binding; both entries share ONE context
+        # triple, so the mix is genuinely SAME-generation.
         import enum
 
         from brutex.engine import sweep_verify as sv_mod
@@ -465,8 +484,7 @@ class TestRecordedFillMode:
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"fill_mode": "worst_case"})
             self._append(audit, params={"fill_mode": "pessimal"})
-        with pytest.raises(SweepVerifyError, match="inconsistent recorded fill_mode"):
-            recorded_audit_facts(path)
+        assert recorded_audit_facts(path)[3] == (_FutureMode.WORST_CASE, _FutureMode.PESSIMAL)
 
     def test_cross_generation_mode_difference_is_sanctioned(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -492,10 +510,10 @@ class TestRecordedFillMode:
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0001")
             self._append(audit, params={"fill_mode": "pessimal"}, snapshot="snap0002")
-        assert recorded_audit_facts(path, snapshot="snap0001")[3] is _FutureMode.WORST_CASE
-        assert recorded_audit_facts(path, snapshot="snap0002")[3] is _FutureMode.PESSIMAL
+        assert recorded_audit_facts(path, snapshot="snap0001")[3] == (_FutureMode.WORST_CASE,)
+        assert recorded_audit_facts(path, snapshot="snap0002")[3] == (_FutureMode.PESSIMAL,)
         # Unscoped = the LATEST generation (the append-only law).
-        assert recorded_audit_facts(path)[3] is _FutureMode.PESSIMAL
+        assert recorded_audit_facts(path)[3] == (_FutureMode.PESSIMAL,)
 
     def test_mixed_precise_then_worst_case_generations_read_their_own_modes(
         self, tmp_path: Path
@@ -508,9 +526,9 @@ class TestRecordedFillMode:
         with AuditWriter.open(path) as audit:
             self._append(audit, params={"sl_paisa": 80}, snapshot="snap0001")
             self._append(audit, params={"fill_mode": "worst_case"}, snapshot="snap0002")
-        assert recorded_audit_facts(path, snapshot="snap0001")[3] is FillMode.PRECISE
-        assert recorded_audit_facts(path, snapshot="snap0002")[3] is FillMode.WORST_CASE
-        assert recorded_audit_facts(path)[3] is FillMode.WORST_CASE
+        assert recorded_audit_facts(path, snapshot="snap0001")[3] == (FillMode.PRECISE,)
+        assert recorded_audit_facts(path, snapshot="snap0002")[3] == (FillMode.WORST_CASE,)
+        assert recorded_audit_facts(path)[3] == (FillMode.WORST_CASE,)
 
     def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
         # The verdict-grade read is chain-verified FIRST (round-8 finding 12
@@ -555,23 +573,23 @@ class TestRecordedFillMode:
                 audit=audit,
             )
         audit_path = root / "audit.jsonl"
-        # Scoped facts: each generation reads its OWN recorded mode.
-        _ctx_a, _sched_a, _others_a, mode_a = recorded_audit_facts(
+        # Scoped facts: each generation reads its OWN recorded mode set.
+        _ctx_a, _sched_a, _others_a, modes_a = recorded_audit_facts(
             audit_path, snapshot=grid_a.data_snapshot_hash
         )
-        _ctx_b, _sched_b, _others_b, mode_b = recorded_audit_facts(
+        _ctx_b, _sched_b, _others_b, modes_b = recorded_audit_facts(
             audit_path, snapshot=grid_b.data_snapshot_hash
         )
-        assert mode_a is FillMode.PRECISE
-        assert mode_b is FillMode.WORST_CASE
+        assert modes_a == (FillMode.PRECISE,)
+        assert modes_b == (FillMode.WORST_CASE,)
         # Unscoped = the latest generation (B).
-        assert recorded_audit_facts(audit_path)[3] is FillMode.WORST_CASE
-        # The CLI flow: the verify grid folds the SCOPED generation's mode —
-        # BOTH generations now verify with their stores CHECKED and no
+        assert recorded_audit_facts(audit_path)[3] == (FillMode.WORST_CASE,)
+        # The CLI flow: the verify grid folds the SCOPED generation's mode
+        # set — BOTH generations now verify with their stores CHECKED and no
         # grid_mismatch (the other generation's store is the honest
         # warn-grade `unattributed_store`, never corrupt).
-        for grid, mode in ((grid_a, mode_a), (grid_b, mode_b)):
-            report = verify_identity(root, dc_replace(grid, fill_mode=mode))
+        for grid, modes in ((grid_a, modes_a), (grid_b, modes_b)):
+            report = verify_identity(root, grid, fill_modes=modes)
             codes = {finding.code for finding in report.findings}
             assert "grid_mismatch" not in codes, codes
             assert report.checked_stores == 1
@@ -585,6 +603,110 @@ class TestRecordedFillMode:
         wrong = verify_identity(root, dc_replace(grid_a, fill_mode=FillMode.WORST_CASE))
         assert any(finding.code == "grid_mismatch" for finding in wrong.findings)
         assert wrong.checked_stores == 0
+
+    def test_same_generation_mixed_mode_root_verifies_both_stores_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """THE FIX-ROUND-3 MIXED-MODE REGRESSION (refuter-confirmed, executed
+        repro scenario A): TWO launches under DIFFERENT fill modes share ONE
+        generation triple in one standing root — an explicit-PRECISE sweep
+        (an A/B comparison / a forgotten flag) followed by the WORST_CASE
+        production default over the SAME snapshot/indicator/commit. The mix
+        is LEGAL: the run identities and the `_tuple_digest` store addresses
+        fold the mode and stay distinct. Pre-fix the single-mode fold
+        silently resolved the generation to WORST_CASE — the PRECISE store
+        read a forever-unverifiable `unattributed_store` warn, and (scenario
+        A2) once the WORST_CASE store was removed the tree read a FALSE
+        `grid_mismatch`/corrupt with `checked_stores=0` and no operator
+        escape. Now the recorded mode SET drives union planning: BOTH stores
+        row-verify clean under their OWN modes, `checked_stores == 2`, zero
+        corrupt, zero unattributed.
+        """
+        from brutex.engine.sweep_orchestrator import make_store_for
+
+        root = tmp_path / "results"
+        root.mkdir()
+        grid_p = _grid()  # explicit PRECISE
+        _sweep(root, grid_p)
+        grid_w = _grid(fill_mode=FillMode.WORST_CASE)  # SAME context triple
+        with AuditWriter.open(root / "audit.jsonl", resume=True) as audit:
+            run_sweep_grid(
+                grid_w,
+                bars_for=lambda _i, _t: _trending_bars(),
+                store_for=make_store_for(root, grid_w),
+                dedup=ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6)),
+                audit=audit,
+            )
+        audit_path = root / "audit.jsonl"
+        _ctx, _sched, others, modes = recorded_audit_facts(audit_path)
+        assert others == ()  # ONE generation — the mix is same-generation
+        assert modes == (FillMode.PRECISE, FillMode.WORST_CASE)
+        # The mode-SET verify: both stores attributed + row-verified clean.
+        report = verify_identity(root, grid_p, fill_modes=modes)
+        codes = {finding.code for finding in report.findings}
+        assert report.checked_stores == 2
+        assert "grid_mismatch" not in codes, codes
+        assert "unattributed_store" not in codes, codes
+        assert not report.corrupt, report.findings
+        # The pre-fix single-mode shape pinned still failing (load-bearing
+        # proof): a WORST_CASE-only plan reads the PRECISE store as the
+        # forever-unverifiable unattributed warn.
+        single = verify_identity(root, grid_p, fill_modes=(FillMode.WORST_CASE,))
+        assert single.checked_stores == 1
+        assert "unattributed_store" in {f.code for f in single.findings}
+        # Scenario A2: the operator deletes the WORST_CASE experiment's
+        # store (audit kept) — the remaining tree is 100% healthy PRECISE.
+        # Pre-fix: FALSE grid_mismatch corrupt, checked_stores=0, no escape
+        # (the recorded mode unconditionally overrode the flag). Now: clean.
+        _store_path(root, grid_w).unlink()
+        report2 = verify_identity(root, grid_p, fill_modes=recorded_audit_facts(audit_path)[3])
+        assert report2.checked_stores == 1
+        assert "grid_mismatch" not in {f.code for f in report2.findings}
+        assert not report2.corrupt, report2.findings
+        wrong = verify_identity(root, grid_p, fill_modes=(FillMode.WORST_CASE,))
+        assert wrong.checked_stores == 0
+        assert any(f.code == "grid_mismatch" for f in wrong.findings)
+
+    def test_aborted_worst_case_launch_leaves_precise_store_verifiable(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX-ROUND-3 repro shape (ii): an aborted WORST_CASE launch whose
+        SWEEP_START landed while NO store did (killed pre-flush) shares the
+        PRECISE generation's triple. The aborted mode contributes expected
+        paths with NO stores — `missing_expected_store` INFO lines only,
+        never a finding (verify judges FOUND stores — the pre-round-3
+        semantics preserved); the healthy PRECISE store verifies clean.
+        """
+        root = tmp_path / "results"
+        root.mkdir()
+        grid_p = _grid()
+        _sweep(root, grid_p)
+        audit_path = root / "audit.jsonl"
+        with AuditWriter.open(audit_path, resume=True) as audit:
+            # The aborted launch's durable trace: one SWEEP_START under the
+            # SAME context triple recording worst_case (the always-explicit
+            # audit law), no store ever flushed.
+            audit.append(
+                action="SWEEP_START",
+                subject="sweep:NIFTY:1minute:bull:k=1",
+                payload={
+                    "instrument": "NIFTY",
+                    "data_snapshot_hash": grid_p.data_snapshot_hash,
+                    "indicator_version": grid_p.indicator_version,
+                    "code_commit_sha": grid_p.code_commit_sha,
+                    "params": {"sl_paisa": 80, "fill_mode": "worst_case"},
+                },
+            )
+        _ctx, _sched, _others, modes = recorded_audit_facts(audit_path)
+        assert modes == (FillMode.PRECISE, FillMode.WORST_CASE)
+        report = verify_identity(root, grid_p, fill_modes=modes)
+        assert report.checked_stores == 1
+        assert not report.corrupt, report.findings
+        codes = {f.code for f in report.findings}
+        assert "grid_mismatch" not in codes and "unattributed_store" not in codes
+        # The aborted mode's expected paths surface as honest INFO only.
+        missing = [f for f in report.findings if f.code == "missing_expected_store"]
+        assert missing and all(f.severity == "info" for f in missing)
 
 
 # ── Recorded roll schedules (ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 F16) ──
@@ -745,7 +867,7 @@ class TestRecordedAuditFacts:
             )
 
     def test_absent_audit_returns_none_and_empty(self, tmp_path: Path) -> None:
-        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, (), FillMode.PRECISE)
+        assert recorded_audit_facts(tmp_path / "nope.jsonl") == (None, {}, (), ())
 
     def test_derives_both_facts_matching_the_single_fact_readers(self, tmp_path: Path) -> None:
         path = tmp_path / "a.jsonl"
@@ -930,7 +1052,7 @@ class TestRecordedAuditFacts:
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             audit.append(action="OTHER", subject="s", payload={})
-        assert recorded_audit_facts(path) == (None, {}, (), FillMode.PRECISE)
+        assert recorded_audit_facts(path) == (None, {}, (), ())
 
     def test_sweep_launch_line_supplies_context_and_schedule(self, tmp_path: Path) -> None:
         # Round-7 finding 1: the parent's pre-dispatch SWEEP_LAUNCH line is a
@@ -1850,6 +1972,23 @@ class TestIdentity:
     def test_missing_root_raises(self, tmp_path: Path) -> None:
         with pytest.raises(SweepVerifyError, match="results root not found"):
             verify_identity(tmp_path / "nope", _grid())
+
+    def test_empty_fill_modes_raises(self, tree: Path) -> None:
+        # Fix round 3: an EMPTY set plans nothing — every found store would
+        # false-read unattributed; the no-recorded-modes posture is the
+        # CALLER's honest decision (flag / both modes), never a silent default.
+        with pytest.raises(SweepVerifyError, match="fill_modes must be non-empty"):
+            verify_identity(tree, _grid(), fill_modes=())
+
+    def test_fill_modes_default_matches_the_single_grid_mode(self, tree: Path) -> None:
+        # fill_modes=None ≡ (grid.fill_mode,) — the pre-round-3 derivation;
+        # duplicate members dedupe to the same single-mode plan.
+        default = verify_identity(tree, _grid())
+        explicit = verify_identity(tree, _grid(), fill_modes=(FillMode.PRECISE, FillMode.PRECISE))
+        assert (default.checked_stores, default.findings) == (
+            explicit.checked_stores,
+            explicit.findings,
+        )
 
     def test_clean_tree_is_clean(self, tree: Path) -> None:
         report = verify_identity(tree, _grid())

@@ -7352,18 +7352,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
-                    # DEC-FILL-WORST-CASE-001 (fix round 2, NIT-3): the launch
-                    # context line carries the launch fill mode under the SAME
-                    # emit-on-non-PRECISE law as canonical_trade_params — a
+                    # DEC-FILL-WORST-CASE-001 (fix round 3, superseding the
+                    # round-2 NIT-3 emit-on-non-PRECISE law ON THE AUDIT WIRE
+                    # ONLY): the launch context line records the fill mode
+                    # ALWAYS AND EXPLICITLY — including the literal "precise"
+                    # — matching the SWEEP_START recording law, so a
+                    # same-generation mixed-mode root is detectable and a
                     # parallel-crash-window prefix audit (this line only,
-                    # every buffered SWEEP_START lost) previously read
-                    # PRECISE-legacy for a WORST_CASE launch; a PRECISE launch
-                    # stays key-ABSENT (audit bytes byte-identical).
+                    # every buffered SWEEP_START lost) reads the TRUE mode.
+                    # canonical_trade_params / run identity / tuple digests /
+                    # the cascade manifest keep the elision law untouched.
                     launch_params: dict[str, object] = {
-                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
+                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
+                        "fill_mode": grid.fill_mode.value,
                     }
-                    if grid.fill_mode is not FillMode.PRECISE:
-                        launch_params["fill_mode"] = grid.fill_mode.value
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,
                         subject=f"sweep-all:launch:{fut_instrument}",
@@ -8202,6 +8204,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     fib_anchors: str = "prev_day",
+    fill_mode: str | None = None,
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -8263,7 +8266,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # every explicit flag given, else the LATEST recorded one, and the other
     # generations are an honest warn-grade note below, never a usage refusal.
     try:
-        recorded, recorded_schedules, other_generations, recorded_fill_mode = recorded_audit_facts(
+        recorded, recorded_schedules, other_generations, recorded_fill_modes = recorded_audit_facts(
             out_root / "audit" / "sweep-all.jsonl",
             snapshot=data_snapshot_hash,
             indicator_version=indicator_version,
@@ -8305,8 +8308,40 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         return EXIT_OK if structural.clean else EXIT_VERIFY_FINDINGS
 
     from brutex.engine.sweep_orchestrator import SweepGridConfig, Timeframe
+    from brutex.execution.fill_mode import FillMode
     from brutex.feed.resampler import INTERVAL_SECONDS
     from brutex.strategies.types import FibAnchorKind, Side
+
+    # The verify fill-mode SET (DEC-FILL-WORST-CASE-001 fix round 3): the
+    # RECORDED mode set wins when non-empty (the tree describes itself — a
+    # matched generation always records at least one mode, and a
+    # same-generation mixed-mode root records BOTH; verify_identity plans
+    # the union so each store verifies under its OWN mode). With NOTHING
+    # recorded (audit absent / no generation matching the explicit flags)
+    # the operator's --fill-mode flag is honored — the pre-round-3 arm
+    # fabricated PRECISE and silently dropped the registered flag — and
+    # with no flag either, BOTH modes are planned (the union default: a
+    # healthy WORST_CASE tree with a lost audit must verify clean, and so
+    # must a legacy PRECISE tree).
+    flag_mode = FillMode(fill_mode) if fill_mode is not None else None
+    if recorded_fill_modes:
+        fill_modes = recorded_fill_modes
+        if flag_mode is not None and fill_modes != (flag_mode,):
+            print(
+                f"[brutex] sweep-verify: the audit records fill mode(s) "
+                f"{[m.value for m in fill_modes]} for this generation — the recorded "
+                f"set wins over --fill-mode {flag_mode.value} (the tree describes "
+                "itself; scope another generation via the context flags instead)"
+            )
+    elif flag_mode is not None:
+        fill_modes = (flag_mode,)
+    else:
+        fill_modes = (FillMode.PRECISE, FillMode.WORST_CASE)
+        print(
+            "[brutex] sweep-verify: no recorded fill mode for this generation and "
+            "no --fill-mode flag — planning under BOTH modes (each store verifies "
+            "under the mode whose expected path set contains it)"
+        )
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     if recount:
@@ -8396,17 +8431,17 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "indicator_version": indicator,
         "code_commit_sha": code_sha,
         "top_k": top,
-        # DEC-FILL-WORST-CASE-001 (fix round 2): the verify grid carries the
-        # SCOPED generation's RECORDED fill mode — derived by
-        # recorded_audit_facts from the SAME matching-entries selection as
-        # the context + schedules above, NEVER an independent whole-audit
-        # fold (which condemned a mixed PRECISE+WORST_CASE standing root's
-        # legacy generation as a false grid_mismatch/corrupt). The law stays
-        # the params contract's: no fill_mode key on any scoped params =
-        # PRECISE legacy (an absent audit / unmatched explicit flags read
-        # PRECISE too); re-deriving identities under the wrong mode would
-        # read every store of the other mode's generation as corrupt.
-        "fill_mode": recorded_fill_mode,
+        # DEC-FILL-WORST-CASE-001 (fix round 3): the verify grid anchors on
+        # the resolved mode SET's first member; verify_identity + the
+        # recount loop below plan over the WHOLE set (recorded set wins →
+        # --fill-mode flag → both modes), so each store — including a
+        # same-generation mixed-mode root's — is attributed to and
+        # row-verified under its OWN mode via the mode-folded store
+        # addresses. Re-deriving identities under a wrong single mode read
+        # the other mode's stores as unattributed warns, or — once those
+        # stores were absent — a FALSE grid_mismatch/corrupt (the round-3
+        # refuter's executed repro shapes).
+        "fill_mode": fill_modes[0],
         # DEC-ENGINE-SCOPE-GUARD-001: verifying recorded work, not launching —
         # a legacy out-of-scope tree must stay Tier-1/2 verifiable, so the
         # Layer-1 config invariant is opted out at this ONE forensic rebuild
@@ -8499,6 +8534,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             stage3=stage3,
             vocabulary_trusted=vocabulary_trusted,
             roll_schedule_by_instrument=recorded_schedules or None,
+            # The resolved mode SET (fix round 3): the expected store paths
+            # are the UNION over the modes, so a mixed-mode generation's
+            # stores each verify under their own mode.
+            fill_modes=fill_modes,
         )
     except SweepVerifyError as exc:
         print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
@@ -8660,7 +8699,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             inconclusive_only = True
         else:
-            scratch = (
+            import dataclasses as _dataclasses
+
+            scratch_base = (
                 scratch_root
                 if scratch_root is not None
                 else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
@@ -8670,8 +8711,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # RECORDED (STAGE_3_PASS_START audit payloads — condition B1);
             # operator --stage3-* flags are the audit-less fallback only
             # (condition B8), and a disagreement refuses cells, never silently
-            # prefers either side.
-            stage3_grid = None
+            # prefers either side. Resolved ONCE — mode-independent — then
+            # folded into each recount mode's grid inside the loop below.
+            stage3_ready = False
             cells_note: str | None = None
             cell_evidence = False
             knobs_from_audit = False
@@ -8728,8 +8770,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         "no recorded Stage-3 knobs in the audit and no --stage3-* flags supplied"
                     )
                 if cells_note is None and stage3_kwargs is not None:
-                    import dataclasses as _dataclasses
-
                     from brutex.engine.stage3_wire import (
                         Stage3WireError,
                         ensure_stage3_runtime,
@@ -8739,9 +8779,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         current_versions = ensure_stage3_runtime()
                     except Stage3WireError as exc:
                         cells_note = f"stage3 runtime unavailable: {exc}"
-                        stage3_grid = None
                     else:
-                        stage3_grid = _dataclasses.replace(grid, **stage3_kwargs)
+                        stage3_ready = True
                         versions_ok = stage3_audit.optimizer_versions in (
                             (),
                             (current_versions,),
@@ -8755,9 +8794,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                             )
                 if cells_note is not None:
                     print(f"[brutex] stage3 cells degraded to INCONCLUSIVE: {cells_note}")
-            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
-            audit_path = scratch / "audit.jsonl"
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
             # The shadow re-sweep must stamp EXACTLY like the launcher did
             # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
             # the window-bounded India-VIX stamper into every persisted row,
@@ -8782,129 +8818,158 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 end=_parse_dt(end),
                 catalog_path=catalog,
             )
-            train_hash_ok = True
-            # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
-            # twin): the shadow re-sweep runs the SAME digest path
-            # (run_one_tuple always passes trial_stats_digest → bypass_dedup),
-            # so the grid-sized ComboDedup(OptionDedupIndex(...)) + LMDB
-            # combo-dedup store previously built here were never consulted —
-            # and refused a recount past the MAX_BLOOM_BYTES identity ceiling
-            # (~4.1e9 at the 16 GiB floor) with BloomTooLargeError.
-            # plan_launch_dedup returns the no-alloc raising sink instead.
-            with AuditWriter.open(audit_path) as audit:
-                resweep_summary = run_sweep_grid(
-                    grid,
-                    bars_for=lambda s, i: slices.get((s, i), []),
-                    store_for=make_store_for(scratch, grid),
-                    dedup=plan_launch_dedup(grid, digest_path=True),
-                    audit=audit,
-                    roll_schedule_by_instrument=roll_schedule_by_instrument,
-                    reference_stamper=recount_stamper,
+            # ONE recount per resolved fill mode (DEC-FILL-WORST-CASE-001 fix
+            # round 3): each mode's expected store paths are disjoint (the
+            # mode folds into `_tuple_digest`), so each mode re-sweeps its
+            # OWN grid into its OWN scratch and byte-diffs against its OWN
+            # plan — a same-generation mixed-mode root's stores are each
+            # recounted under the mode that minted them. A single-mode set
+            # (the common case) keeps the pre-round-3 single-shot shape:
+            # same scratch path, same prints, same reports.
+            for verify_mode in fill_modes:
+                mode_grid = (
+                    grid
+                    if verify_mode is grid.fill_mode
+                    else _dataclasses.replace(grid, fill_mode=verify_mode)
                 )
-                # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
-                # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
-                # re-sweep. A byte-diff against an incomplete re-sweep is meaningless,
-                # so the verdict is downgraded to INCONCLUSIVE (never a pass/fail over
-                # a partial sweep) naming the failed-tuple count.
-                if resweep_summary.tuples_failed > 0:
-                    inconclusive_only = True
-                    print(
-                        "[brutex] sweep-verify INCONCLUSIVE: the shadow re-sweep "
-                        f"SKIPPED {resweep_summary.tuples_failed} tuple(s) "
-                        "(SweepComboError) — the recount is partial, so the byte-diff "
-                        "cannot be trusted; re-run after the failing tuple(s) redo",
-                        file=sys.stderr,
-                    )
-                if stage3_grid is not None:
-                    from brutex.engine.stage3_wire import run_stage3_pass
-
-                    pass_report = run_stage3_pass(
-                        stage3_grid,
-                        results_root=scratch,
+                scratch = scratch_base if len(fill_modes) == 1 else scratch_base / verify_mode.value
+                stage3_grid = (
+                    _dataclasses.replace(mode_grid, **stage3_kwargs)
+                    if stage3_ready and stage3_kwargs is not None
+                    else None
+                )
+                mode_note = "" if len(fill_modes) == 1 else f" [fill mode {verify_mode.value}]"
+                print(
+                    f"[brutex] recount: shadow re-sweep into {scratch} "
+                    f"(costs a full sweep){mode_note}"
+                )
+                audit_path = scratch / "audit.jsonl"
+                audit_path.parent.mkdir(parents=True, exist_ok=True)
+                train_hash_ok = True
+                # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
+                # twin): the shadow re-sweep runs the SAME digest path
+                # (run_one_tuple always passes trial_stats_digest → bypass_dedup),
+                # so the grid-sized ComboDedup(OptionDedupIndex(...)) + LMDB
+                # combo-dedup store previously built here were never consulted —
+                # and refused a recount past the MAX_BLOOM_BYTES identity ceiling
+                # (~4.1e9 at the 16 GiB floor) with BloomTooLargeError.
+                # plan_launch_dedup returns the no-alloc raising sink instead.
+                with AuditWriter.open(audit_path) as audit:
+                    resweep_summary = run_sweep_grid(
+                        mode_grid,
                         bars_for=lambda s, i: slices.get((s, i), []),
+                        store_for=make_store_for(scratch, mode_grid),
+                        dedup=plan_launch_dedup(mode_grid, digest_path=True),
                         audit=audit,
-                        exchange=exchange,
-                        segment=segment,
-                        start=start,
-                        end=end,
                         roll_schedule_by_instrument=roll_schedule_by_instrument,
-                        # The SAME recount stamper — stage3 cell stores carry
-                        # the trio too (they ride ranked_combo_to_result_row).
-                        stamper_for=lambda: recount_stamper,
+                        reference_stamper=recount_stamper,
                     )
-                    # Condition B6: the recomputed train hash must match the
-                    # manifest's recorded one — the cell path digests fold it.
-                    if pass_report.train_snapshot_hash != recorded_train_hash:
-                        train_hash_ok = False
+                    # "Resilient: skip + continue" (DEC-ENGINE-TUPLE-SKIP-RESILIENT-001):
+                    # run_sweep_grid now SKIPS a raising tuple and completes a PARTIAL
+                    # re-sweep. A byte-diff against an incomplete re-sweep is meaningless,
+                    # so the verdict is downgraded to INCONCLUSIVE (never a pass/fail over
+                    # a partial sweep) naming the failed-tuple count.
+                    if resweep_summary.tuples_failed > 0:
+                        inconclusive_only = True
                         print(
-                            "[brutex] stage3 cells degraded to INCONCLUSIVE: recount "
-                            f"train hash {pass_report.train_snapshot_hash!r} != "
-                            f"manifest's {recorded_train_hash!r} (condition B6)"
+                            "[brutex] sweep-verify INCONCLUSIVE: the shadow re-sweep "
+                            f"SKIPPED {resweep_summary.tuples_failed} tuple(s) "
+                            "(SweepComboError) — the recount is partial, so the byte-diff "
+                            "cannot be trusted; re-run after the failing tuple(s) redo",
+                            file=sys.stderr,
                         )
-            cell_evidence = (
-                context_match
-                and stage3_grid is not None
-                and cells_note is None
-                and train_hash_ok
-                and knobs_from_audit
-            )
-            try:
-                rec_report = compare_recount(
-                    out_root,
-                    scratch,
-                    plan_expected_stores(
-                        out_root, grid, stage3=stage3 if stage3_grid is not None else None
-                    ),
-                    context_match=context_match,
-                    cell_evidence=cell_evidence,
+                    if stage3_grid is not None:
+                        from brutex.engine.stage3_wire import run_stage3_pass
+
+                        pass_report = run_stage3_pass(
+                            stage3_grid,
+                            results_root=scratch,
+                            bars_for=lambda s, i: slices.get((s, i), []),
+                            audit=audit,
+                            exchange=exchange,
+                            segment=segment,
+                            start=start,
+                            end=end,
+                            roll_schedule_by_instrument=roll_schedule_by_instrument,
+                            # The SAME recount stamper — stage3 cell stores carry
+                            # the trio too (they ride ranked_combo_to_result_row).
+                            stamper_for=lambda: recount_stamper,
+                        )
+                        # Condition B6: the recomputed train hash must match the
+                        # manifest's recorded one — the cell path digests fold it.
+                        if pass_report.train_snapshot_hash != recorded_train_hash:
+                            train_hash_ok = False
+                            print(
+                                "[brutex] stage3 cells degraded to INCONCLUSIVE: recount "
+                                f"train hash {pass_report.train_snapshot_hash!r} != "
+                                f"manifest's {recorded_train_hash!r} (condition B6)"
+                            )
+                cell_evidence = (
+                    context_match
+                    and stage3_grid is not None
+                    and cells_note is None
+                    and train_hash_ok
+                    and knobs_from_audit
                 )
-            except SweepVerifyError as exc:
-                print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
-                return EXIT_USER_ERROR
-            print(rec_report.render())
-            reports.append(rec_report)
-            if any(
-                f.code
-                in ("recount_divergence_inconclusive", "cell_recount_divergence_inconclusive")
-                for f in rec_report.findings
-            ) or (stage3 is not None and stage3.enabled and stage3_grid is None):
-                inconclusive_only = True
-            # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
-            # evidence exists ONLY under a matched context — the plan freezes
-            # the condemnation-time hashes for `brutex sweep-heal`.
-            if emit_heal_plan:
-                if not context_match:
-                    print(
-                        "[brutex] no heal plan emitted: divergence under a context "
-                        "mismatch is INCONCLUSIVE, never heal-grade (C1)"
-                    )
-                elif not rec_report.clean:
-                    from datetime import UTC, datetime
-
-                    from brutex.engine.sweep_heal import build_heal_plan, write_heal_plan
-                    from brutex.engine.sweep_supervisor import grid_identity
-                    from brutex.engine.sweep_verify import RecordedContext
-
-                    heal_plan = build_heal_plan(
-                        rec_report,
-                        plan_expected_stores(out_root, grid),
-                        root=out_root,
-                        grid_identity=grid_identity(grid),
-                        context=RecordedContext(
-                            data_snapshot_hash=snapshot,
-                            indicator_version=indicator,
-                            code_commit_sha=code_sha,
+                try:
+                    rec_report = compare_recount(
+                        out_root,
+                        scratch,
+                        plan_expected_stores(
+                            out_root, mode_grid, stage3=stage3 if stage3_grid is not None else None
                         ),
-                        created_utc=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+                        context_match=context_match,
+                        cell_evidence=cell_evidence,
                     )
-                    plan_path = write_heal_plan(out_root, heal_plan)
-                    print(
-                        f"[brutex] heal plan written: {plan_path} "
-                        f"({len(heal_plan.entries)} condemned tuple(s)) — review, then "
-                        f"`brutex sweep-heal {plan_path}` (dry-run) / `--execute`"
-                    )
-                else:
-                    print("[brutex] no heal plan emitted: recount found no corruption")
+                except SweepVerifyError as exc:
+                    print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+                    return EXIT_USER_ERROR
+                print(rec_report.render())
+                reports.append(rec_report)
+                if any(
+                    f.code
+                    in ("recount_divergence_inconclusive", "cell_recount_divergence_inconclusive")
+                    for f in rec_report.findings
+                ) or (stage3 is not None and stage3.enabled and stage3_grid is None):
+                    inconclusive_only = True
+                # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
+                # evidence exists ONLY under a matched context — the plan freezes
+                # the condemnation-time hashes for `brutex sweep-heal`. Per-mode
+                # plans never clobber: the plan filename folds the grid identity,
+                # which folds the fill mode (elided at PRECISE).
+                if emit_heal_plan:
+                    if not context_match:
+                        print(
+                            "[brutex] no heal plan emitted: divergence under a context "
+                            "mismatch is INCONCLUSIVE, never heal-grade (C1)"
+                        )
+                    elif not rec_report.clean:
+                        from datetime import UTC, datetime
+
+                        from brutex.engine.sweep_heal import build_heal_plan, write_heal_plan
+                        from brutex.engine.sweep_supervisor import grid_identity
+                        from brutex.engine.sweep_verify import RecordedContext
+
+                        heal_plan = build_heal_plan(
+                            rec_report,
+                            plan_expected_stores(out_root, mode_grid),
+                            root=out_root,
+                            grid_identity=grid_identity(mode_grid),
+                            context=RecordedContext(
+                                data_snapshot_hash=snapshot,
+                                indicator_version=indicator,
+                                code_commit_sha=code_sha,
+                            ),
+                            created_utc=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+                        )
+                        plan_path = write_heal_plan(out_root, heal_plan)
+                        print(
+                            f"[brutex] heal plan written: {plan_path} "
+                            f"({len(heal_plan.entries)} condemned tuple(s)) — review, then "
+                            f"`brutex sweep-heal {plan_path}` (dry-run) / `--execute`"
+                        )
+                    else:
+                        print("[brutex] no heal plan emitted: recount found no corruption")
 
     return sweep_verify_exit_code(
         has_findings=any(not report.clean for report in reports),
@@ -10264,6 +10329,10 @@ def _dispatch(argv: list[str] | None) -> int:
             recount=args.recount,
             scratch_root=args.scratch_root,
             allow_context_mismatch=args.allow_context_mismatch,
+            # DEC-FILL-WORST-CASE-001 fix round 3 (finding 3): the registered
+            # --fill-mode flag reaches the verify (it was silently dropped);
+            # the recorded mode set still wins when the audit speaks.
+            fill_mode=args.fill_mode,
             emit_heal_plan=args.emit_heal_plan,
             stage3_enable=args.stage3_enable,
             stage3_top_k=args.stage3_top_k,

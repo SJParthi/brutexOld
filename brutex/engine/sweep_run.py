@@ -1600,7 +1600,18 @@ def run_persisted_sweep(
             "data_snapshot_hash": cfg.data_snapshot_hash,
             "indicator_version": cfg.indicator_version,
             "code_commit_sha": cfg.code_commit_sha,
-            "params": params,
+            # AUDIT WIRE ONLY (DEC-FILL-WORST-CASE-001 fix round 3): the
+            # recorded params carry the fill mode ALWAYS AND EXPLICITLY —
+            # including the literal "precise" — so a same-generation
+            # mixed-mode root is DETECTABLE (two launches under different
+            # modes legally share one context triple; the run identities +
+            # store addresses fold the mode and stay distinct, but under
+            # the round-2 emit-on-non-PRECISE audit law the PRECISE half
+            # was recorded by KEY ABSENCE and the mix silently folded to
+            # WORST_CASE). The run-identity `params` above stays the
+            # elision-law canonical_trade_params dict BYTE-UNTOUCHED — this
+            # copy annotates the audit line only, never the hash inputs.
+            "params": {**params, "fill_mode": cfg.fill_mode.value},
         },
     )
 
