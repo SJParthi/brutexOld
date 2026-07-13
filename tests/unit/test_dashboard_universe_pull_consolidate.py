@@ -20,15 +20,21 @@ from brutex.dashboard.app import _render_universe_html
 
 
 def test_only_one_pull_button_remains() -> None:
-    """Exactly ONE pull button — the selection-aware full pipeline — survives.
+    """ONE pipeline button + ONE spot-all scope button — nothing else.
 
-    The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull
-    historical / Load instruments), the bulk ①②③④ matrix, and the separate "Pull
-    selected" button are all GONE; only ``pullPipelineBtn`` remains.
+    CONSCIOUS RE-PIN (DEC-PULL-SCOPED-ALL-ONECLICK-001): the consolidation law
+    of DEC-UNIVERSE-PULL-CONSOLIDATE-001 becomes "ONE selection-aware full
+    pipeline button + ONE scoped-ALL spot-only button" — the spot-only button
+    is NOT a resurrected per-stage control; it rides the SAME ``/pull-pipeline``
+    launcher with the additive ``scope=spot-only`` token (every rail
+    inherited). The redundant per-stage buttons (Pull spot / Pull expiries +
+    contracts / Pull historical / Load instruments), the bulk ①②③④ matrix, and
+    the separate "Pull selected" button stay GONE.
     """
     html = _render_universe_html()
-    assert 'id="pullPipelineBtn"' in html, "the single pull button must remain"
+    assert 'id="pullPipelineBtn"' in html, "the pipeline pull button must remain"
     assert "Pull · full pipeline" in html, "the consolidated label must be present"
+    assert 'id="pullAllSpotBtn"' in html, "the scoped-ALL spot-only button must be present"
     # Every removed button id is absent (a null getElementById().onclick can't throw).
     for gone in (
         'id="pullbtn"',
@@ -147,6 +153,41 @@ def test_pull_button_is_selection_aware() -> None:
     )
     assert '"/api/v1/universe/pull-pipeline"' in html, (
         "the no-selection branch must post the bare (whole-universe) pipeline route"
+    )
+
+
+def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
+    """The scoped-ALL spot-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001).
+
+    Static markup + a static-URL ``startAndPoll`` onclick ONLY (textContent
+    discipline — no new dynamic sink): the label, the always-visible scope
+    chip (the chip IS the consent), the verify-links row, and the JS wiring to
+    the SAME ``/pull-pipeline`` launcher with ``scope=spot-only``. Deliberately
+    NOT wired to the ``#pipeFrom``/``#pipeTo`` pickers — full-range convergence
+    is the button's promise.
+    """
+    html = _render_universe_html()
+    assert "Pull EVERYTHING — spot only" in html, "the button label is missing"
+    # The always-visible scope chip — the consent text, verbatim.
+    assert (
+        "all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · "
+        "incremental (settled windows skipped) · NO options, NO Greeks · "
+        "cross-verify producer runs after the pull"
+    ) in html, "the scope chip must state the whole contract"
+    # The verify row: the three read-only verification surfaces.
+    assert 'id="pullAllSpotVerify"' in html
+    for href in ('href="/coverage/windows"', 'href="/completeness"', 'href="/coverage"'):
+        assert href in html, f"verify-row link missing: {href}"
+    # JS wiring: the SAME launcher + the additive scope token, single-flighted
+    # through the shared startAndPoll; the date pickers are NOT consulted.
+    assert '"/api/v1/universe/pull-pipeline?scope=spot-only"' in html
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    assert "startAndPoll(" in wiring
+    assert "pipelineDateQuery" not in wiring, (
+        "the spot-only button must NOT thread the date pickers (full-range promise)"
+    )
+    assert "pipelineSelection" not in wiring, (
+        "the spot-only button must NOT scope to row ticks (whole-universe promise)"
     )
 
 

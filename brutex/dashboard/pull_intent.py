@@ -145,9 +145,10 @@ class PullIntent:
     """The durable re-fire payload of one ``/pull-pipeline`` pull — frozen.
 
     Carries the request quadruple VERBATIM (the raw query strings; the route
-    re-derives everything else) plus the crash-loop accounting. A resume always
-    re-fires with ``dry_run=False`` — a dry-run never persists an intent in the
-    first place (:func:`persist_intent_for_launch`).
+    re-derives everything else) plus the OPTIONAL scope token
+    (DEC-PULL-SCOPED-ALL-ONECLICK-001) and the crash-loop accounting. A resume
+    always re-fires with ``dry_run=False`` — a dry-run never persists an intent
+    in the first place (:func:`persist_intent_for_launch`).
     """
 
     #: The ``?symbols=`` selection string (``None`` ⇒ whole universe / ``symbol``).
@@ -162,6 +163,11 @@ class PullIntent:
     restarts: int = 0
     #: UTC ISO timestamp of the ORIGINAL operator launch (forensics only).
     created_at: str = ""
+    #: The ``?scope=`` token (DEC-PULL-SCOPED-ALL-ONECLICK-001) — ``None`` ⇒ the
+    #: full chain (every pre-scope intent file, back-compat). Persisted so a
+    #: crashed spot-only pull resumes SPOT-ONLY, never a silently-widened
+    #: full-scope F&O pull (the optional-field back-compat template).
+    scope: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialise to the JSON payload shape (adds the schema version). Pure."""
@@ -173,6 +179,7 @@ class PullIntent:
             "to_date": self.to_date,
             "restarts": self.restarts,
             "created_at": self.created_at,
+            "scope": self.scope,
         }
 
     @classmethod
@@ -188,7 +195,10 @@ class PullIntent:
         if not isinstance(payload, Mapping):
             return None
         fields: dict[str, str | None] = {}
-        for key in ("symbols", "symbol", "from_date", "to_date"):
+        # ``scope`` is the OPTIONAL fifth request field (DEC-PULL-SCOPED-ALL-
+        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒ the
+        # full chain (back-compat); a non-string value is corrupt like the rest.
+        for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
             raw = payload.get(key)
             if raw is not None and not isinstance(raw, str):
                 return None
@@ -206,6 +216,7 @@ class PullIntent:
             to_date=fields["to_date"],
             restarts=restarts,
             created_at=created_at,
+            scope=fields["scope"],
         )
 
 
@@ -387,6 +398,7 @@ def persist_intent_for_launch(
     from_date: str | None,
     to_date: str | None,
     restarts: int = 0,
+    scope: str | None = None,
 ) -> bool:
     """Persist the launch intent iff this is a REAL pull; return whether written.
 
@@ -414,6 +426,9 @@ def persist_intent_for_launch(
         to_date=to_date,
         restarts=restarts,
         created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        # A non-default scope rides the intent so a crash-resume re-fires the
+        # SAME scope (DEC-PULL-SCOPED-ALL-ONECLICK-001; ``None`` = full).
+        scope=scope,
     )
     return store.write(intent)
 

@@ -90,11 +90,27 @@ def test_from_payload_rejects_non_mapping() -> None:
     assert PullIntent.from_payload(None) is None
 
 
-@pytest.mark.parametrize("field", ["symbols", "symbol", "from_date", "to_date"])
+@pytest.mark.parametrize("field", ["symbols", "symbol", "from_date", "to_date", "scope"])
 def test_from_payload_rejects_non_string_request_field(field: str) -> None:
     payload = _intent().to_payload()
     payload[field] = 42
     assert PullIntent.from_payload(payload) is None
+
+
+def test_scope_round_trips_and_pre_scope_payload_defaults_none() -> None:
+    """DEC-PULL-SCOPED-ALL-ONECLICK-001: a persisted spot-only intent resumes
+    SPOT-ONLY (the scope rides the payload verbatim); a PRE-scope intent file
+    (no ``scope`` key at all — every file written before #1779) parses to
+    ``None`` = the full chain (optional-field back-compat)."""
+    intent = PullIntent(symbols=None, symbol=None, from_date=None, to_date=None, scope="spot-only")
+    parsed = PullIntent.from_payload(intent.to_payload())
+    assert parsed is not None
+    assert parsed.scope == "spot-only"
+    legacy = _intent().to_payload()
+    del legacy["scope"]
+    legacy_parsed = PullIntent.from_payload(legacy)
+    assert legacy_parsed is not None
+    assert legacy_parsed.scope is None
 
 
 def test_from_payload_accepts_none_request_fields() -> None:

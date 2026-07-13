@@ -59,6 +59,7 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.auto_pull_gate import compose_market_closed
 from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
@@ -238,6 +239,17 @@ from brutex.dashboard.pull_jobs import (
     JOB_KIND_SWEEP,
     BackgroundPullJob,
     ProgressHook,
+)
+from brutex.dashboard.pull_scope import (
+    SCOPE_FULL,
+    SCOPE_SPOT_ONLY,
+    CrossverifyTail,
+    CrossverifyTailOutcome,
+    build_spot_only_note,
+    normalize_pull_scope,
+    run_crossverify_tail,
+    spot_only_historical_report,
+    spot_only_metadata_report,
 )
 from brutex.dashboard.rate_bridge_cache import (
     BRIDGE_SOURCE_UNWIRED,
@@ -1215,6 +1227,7 @@ def build_app(
     census_clock: Callable[[], float] | None = None,
     loop_watchdog: LoopWatchdog | None = None,
     crossverify_runner: Callable[[Any], Any] | None = None,
+    crossverify_tail: CrossverifyTail | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -2965,6 +2978,106 @@ def build_app(
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
 
+    def _start_crossverify_producer(config: Any) -> bool:
+        """Start the cross-verify producer job over *config* — the ONE start body.
+
+        DEC-PULL-SCOPED-ALL-ONECLICK-001 (§11 COMMON): shared by the
+        ``POST /api/v1/crossverify/run`` route AND the spot-only pipeline's
+        crossverify TAIL, so the runner selection (the injected
+        ``crossverify_runner`` test seam is observed by BOTH consumers), the
+        job's ``_work`` verdict surfacing, and the lock/market-hours start
+        kwargs can never drift onto two paths. Returns
+        :meth:`BackgroundPullJob.start`'s verdict (``False`` = already
+        running). Lock semantics (the phase-A handoff law): the job starts
+        with ``cross_process_lock=False`` because the runner's own
+        ``default_seams`` lock seam acquires the account→lake→lease trio
+        itself with a bounded wait-retry (run.py step F) — a job-level second
+        acquire would self-conflict; ``market_hours_exempt=True`` because the
+        RUNNER owns the market-hours law at its step E.
+        """
+
+        def _run_producer(cfg: Any) -> Any:  # pragma: no cover — runs on the job thread
+            """The production runner binding (tests inject crossverify_runner)."""
+            from brutex.crossverify.run import default_seams, run_crossverify
+
+            return run_crossverify(cfg, default_seams(cfg, session_rate=_session_rate))
+
+        runner = crossverify_runner if crossverify_runner is not None else _run_producer
+
+        def _work(on_progress: ProgressHook) -> object:
+            """Background body: run the producer; surface the honest verdict.
+
+            A non-zero exit verdict RAISES so the panel reads an honest ✕
+            (the runner itself never raises for data/vendor/publish problems
+            — it folds them into the verdict; the Telegram summary/refusal
+            already fired inside the runner, so no double alert here).
+            """
+            report = runner(config)
+            detail = f": {report.detail}" if report.detail else ""
+            headline = f"crossverify {report.day.isoformat()} — {report.verdict}{detail}"
+            if report.exit_code != 0:
+                raise RuntimeError(headline)
+            return {
+                "note": (
+                    f"{headline} · published {report.published} · "
+                    f"already {report.skipped_already} · withheld {report.withheld} · "
+                    f"nothing {report.nothing}"
+                ),
+                "verdict": report.verdict,
+                "exit_code": report.exit_code,
+            }
+
+        return _crossverify_job.start(
+            _work,
+            total=0,
+            detail=("cross-verify (DRY RUN)" if config.dry_run else "cross-verify → TickVault"),
+            # The runner's default_seams lock seam owns the account→lake→lease
+            # trio (bounded wait-retry) — a job-level acquire would self-conflict.
+            cross_process_lock=False,
+            # The runner owns the market-hours law at its step E (see docstring).
+            market_hours_exempt=True,
+        )
+
+    def _default_crossverify_tail() -> CrossverifyTailOutcome:
+        """The PRODUCTION crossverify tail (DEC-PULL-SCOPED-ALL-ONECLICK-001).
+
+        Fired by the spot-only ``/pull-pipeline`` arm as the launcher's LAST
+        step (report in hand, ledger durable). Resolves the SAME
+        ``BRUTEX_CROSSVERIFY_*`` config surface the route resolves and starts
+        the SAME ``_crossverify_job`` producer via
+        :func:`_start_crossverify_producer` — never a nested inline run on the
+        pipeline job thread (the runner's own bounded-wait lock trio absorbs
+        the pull-flock handoff; ruling 8a). A config/seam construction failure
+        (junk env) is the ONLY production ``not_configured`` path — fail-SOFT,
+        the spot pull is never blocked by a broken verify config (ruling 8).
+        """
+        from brutex.crossverify.config import resolve_crossverify_config
+
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=False)
+        try:
+            config = resolve_crossverify_config(lake_root=lake_root)
+        except ValueError as exc:
+            return CrossverifyTailOutcome(
+                status="not_configured", human=f"not configured (ValueError: {exc})"
+            )
+        if not config.enabled:
+            return CrossverifyTailOutcome(
+                status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
+            )
+        if _start_crossverify_producer(config):
+            return CrossverifyTailOutcome(
+                status="started",
+                human="producer started (poll /api/v1/crossverify/progress)",
+            )
+        return CrossverifyTailOutcome(status="already_running", human="already running")
+
+    # The spot-only pipeline's tail binding: the injectable test seam wins,
+    # PRODUCTION defaults to the REAL producer trigger above (never None —
+    # "not configured" renders only on a genuine construction failure).
+    _crossverify_tail: CrossverifyTail = (
+        crossverify_tail if crossverify_tail is not None else _default_crossverify_tail
+    )
+
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
     # the production default reads THIS app's own single-flight job (`running` is an O(1)
     # lock-guarded bool), so the widget can never read "stalled" after the pull finished;
@@ -3887,6 +4000,7 @@ def build_app(
         to_date: str | None,
         dry_run: bool,
         intent_restarts: int = 0,
+        scope: str | None = None,
     ) -> dict[str, Any]:
         """The ONE-CLICK pull(+movers) pipeline launcher — the ``/pull-pipeline`` body.
 
@@ -3984,6 +4098,11 @@ def build_app(
             # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
             # value is a clean 400 here, never a mid-pull 500 on the job thread.
             strict_gate = strict_gate_enabled()
+            # The pull SCOPE token (DEC-PULL-SCOPED-ALL-ONECLICK-001): absent /
+            # blank ⇒ the byte-identical full chain; "spot-only" swaps the two
+            # F&O phase closures for the no-op reports below; an unknown token
+            # is a clean 400 (a typo must never widen or narrow a vendor pull).
+            scope_token = normalize_pull_scope(scope)
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -4031,6 +4150,7 @@ def build_app(
         registry_path = lake_root / "registry.duckdb"
         reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in targets if inst.security_id not in reference_only_ids]
+        spot_only = scope_token == SCOPE_SPOT_ONLY
         _LOG.info(
             "universe.pull_pipeline.requested",
             targets=len(targets),
@@ -4039,6 +4159,7 @@ def build_app(
             years=years,
             dry_run=dry_run,
             strict_gate=strict_gate,
+            scope=scope_token,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -4071,7 +4192,17 @@ def build_app(
             # (_run_metadata → pull_expiries_contracts), and the sequencer's
             # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
             # set MID-pull can never crash a long run with a per-call ValueError.
-            _market_closed = resolve_market_closed()
+            # The SPOT-ONLY arm additionally composes the Muhurat session belt
+            # (DEC-PULL-SCOPED-ALL-ONECLICK-001 — the trading-day-keyed guard is
+            # structurally blind to a holiday-listed Muhurat session; composed,
+            # the guard module untouched). The full-scope arm keeps the bare
+            # resolve byte-identically (the Muhurat blindness there is the named
+            # follow-up DEC-PIPELINE-MUHURAT-BELT-001).
+            _market_closed = (
+                compose_market_closed(resolve_market_closed())
+                if spot_only
+                else resolve_market_closed()
+            )
 
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
@@ -4551,8 +4682,13 @@ def build_app(
                 try:
                     outcome = run_pipeline_prebuild_guarded(
                         instruments=targets,
+                        # SPOT-ONLY scope rides an EMPTY F&O cascade
+                        # (DEC-PULL-SCOPED-ALL-ONECLICK-001): a lake already
+                        # holding F&O candles is NOT re-derived by a spot-only
+                        # run — the FUTURES/OPTIONS prebuild phases report the
+                        # existing honest empty notes.
                         cascade_or_error=lambda: build_fno_cascade(
-                            list_fno_candle_datasets(lake_root)
+                            () if spot_only else list_fno_candle_datasets(lake_root)
                         ),
                         materialize=_materialize,
                         source="pipeline",
@@ -4631,13 +4767,24 @@ def build_app(
                         session_rate=_session_rate, observer=make_rate_observer(state)
                     ),
                 ):
+                    # SPOT-ONLY scope (DEC-PULL-SCOPED-ALL-ONECLICK-001): swap
+                    # EXACTLY the two F&O phase closures for the no-op report
+                    # builders (they pass the UNCHANGED sequencer gates
+                    # vacuously) and honestly OMIT the futures/options movers
+                    # warmers (an absent segment, never a fabricated 0).
+                    # _run_spot is bound kwarg-for-kwarg IDENTICALLY on both
+                    # arms; the sequencer itself is byte-untouched.
                     report = run_full_pipeline(
                         run_spot=_run_spot,
-                        run_metadata=_run_metadata,
-                        run_historical=_run_historical,
+                        run_metadata=(spot_only_metadata_report if spot_only else _run_metadata),
+                        run_historical=(
+                            (lambda _prior: spot_only_historical_report())
+                            if spot_only
+                            else _run_historical
+                        ),
                         warm_spot_movers=_warm_spot_movers,
-                        warm_futures_movers=_warm_futures_movers,
-                        warm_options_movers=_warm_options_movers,
+                        warm_futures_movers=None if spot_only else _warm_futures_movers,
+                        warm_options_movers=None if spot_only else _warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
                         # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
@@ -4681,7 +4828,25 @@ def build_app(
                     None if hist_report is None else hist_report.greeks_enrich_ok,
                     error=None if hist_report is None else hist_report.greeks_enrich_error,
                 )
-                return report.to_dict()
+                result = report.to_dict()
+                if spot_only:
+                    # The launcher's LAST step (DEC-PULL-SCOPED-ALL-ONECLICK-001
+                    # ruling 8a): fire the crossverify TAIL — the production
+                    # binding START-only triggers the landed _crossverify_job
+                    # producer, whose runner acquires its OWN lock trio on ITS
+                    # worker thread with the bounded wait-retry (never nested
+                    # inside our still-held pull single-flight) — then rewrite
+                    # the note through the ONE surgery law so the finish detail
+                    # (rail 11, 500-char cap) carries the honest spot-only +
+                    # Greeks-not-run + cross-verify text. Fail-soft by fence:
+                    # a broken tail never fails the successful pull.
+                    tail_outcome = run_crossverify_tail(
+                        _crossverify_tail,
+                        dry_run=dry_run,
+                        stopped_after=report.stopped_after,
+                    )
+                    result["note"] = build_spot_only_note(report.note, tail_outcome)
+                return result
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
                 # clean run all un-gate the movers (never blocked forever);
@@ -4725,6 +4890,11 @@ def build_app(
                 from_date=from_date,
                 to_date=to_date,
                 restarts=intent_restarts,
+                # Non-default scope persists so a crash-resume re-fires the SAME
+                # scope — a spot-only pull must never resume as a full-scope F&O
+                # pull (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full, the
+                # optional-field back-compat template).
+                scope=scope_token if scope_token != SCOPE_FULL else None,
             )
             on_finally = pull_intent_store.clear
         started = _pull_job.start(
@@ -4752,6 +4922,9 @@ def build_app(
             "target_source": target_source,  # "selection" / "single" / "universe"
             "years": years,
             "dry_run": dry_run,
+            # ADDITIVE (DEC-PULL-SCOPED-ALL-ONECLICK-001): the normalized scope
+            # token — every pre-existing key above is byte-identical (pinned).
+            "scope": scope_token,
         }
 
     @app.post("/api/v1/universe/pull-pipeline")
@@ -4761,6 +4934,7 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         dry_run: bool = Query(default=False),
+        scope: str | None = Query(default=None),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
 
@@ -4789,6 +4963,7 @@ def build_app(
                     from_date=from_date,
                     to_date=to_date,
                     dry_run=dry_run,
+                    scope=scope,
                 )
             )
         )
@@ -4818,6 +4993,10 @@ def build_app(
                     to_date=intent.to_date,
                     dry_run=False,
                     intent_restarts=intent.restarts,
+                    # A persisted spot-only intent resumes SPOT-ONLY — never a
+                    # silently-widened full-scope F&O pull
+                    # (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full).
+                    scope=intent.scope,
                 )
             except HTTPException as exc:
                 if exc.status_code < _SERVER_ERROR_FLOOR:
@@ -5269,47 +5448,10 @@ def build_app(
             lake_root=str(lake_root),
         )
 
-        def _run_producer(cfg: Any) -> Any:  # pragma: no cover — runs on the job thread
-            """The production runner binding (tests inject crossverify_runner)."""
-            from brutex.crossverify.run import default_seams, run_crossverify
-
-            return run_crossverify(cfg, default_seams(cfg, session_rate=_session_rate))
-
-        runner = crossverify_runner if crossverify_runner is not None else _run_producer
-
-        def _work(on_progress: ProgressHook) -> object:
-            """Background body: run the producer; surface the honest verdict.
-
-            A non-zero exit verdict RAISES so the panel reads an honest ✕
-            (the runner itself never raises for data/vendor/publish problems
-            — it folds them into the verdict; the Telegram summary/refusal
-            already fired inside the runner, so no double alert here).
-            """
-            report = runner(config)
-            detail = f": {report.detail}" if report.detail else ""
-            headline = f"crossverify {report.day.isoformat()} — {report.verdict}{detail}"
-            if report.exit_code != 0:
-                raise RuntimeError(headline)
-            return {
-                "note": (
-                    f"{headline} · published {report.published} · "
-                    f"already {report.skipped_already} · withheld {report.withheld} · "
-                    f"nothing {report.nothing}"
-                ),
-                "verdict": report.verdict,
-                "exit_code": report.exit_code,
-            }
-
-        started = _crossverify_job.start(
-            _work,
-            total=0,
-            detail=("cross-verify (DRY RUN)" if dry_run else "cross-verify → TickVault"),
-            # The runner's default_seams lock seam owns the account→lake→lease
-            # trio (bounded wait-retry) — a job-level acquire would self-conflict.
-            cross_process_lock=False,
-            # The runner owns the market-hours law at its step E (see docstring).
-            market_hours_exempt=True,
-        )
+        # The ONE start body (DEC-PULL-SCOPED-ALL-ONECLICK-001 §11 COMMON):
+        # runner selection + job _work + the lock/market-hours start kwargs
+        # are shared with the spot-only pipeline's crossverify tail.
+        started = _start_crossverify_producer(config)
         return JSONResponse(
             {
                 "started": started,
