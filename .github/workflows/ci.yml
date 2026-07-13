@@ -1809,6 +1809,15 @@ jobs:
           else
             echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
           fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold: the self-arming
+          # post-market auto-pull scheduler (durable armed state + daemon
+          # ticker + the once-per-day fire law). 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+          else
+            echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.

@@ -164,7 +164,11 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     chip (the chip IS the consent), the verify-links row, and the JS wiring to
     the SAME ``/pull-pipeline`` launcher with ``scope=spot-only``. Deliberately
     NOT wired to the ``#pipeFrom``/``#pipeTo`` pickers — full-range convergence
-    is the button's promise.
+    is the button's promise. CONSCIOUS RE-PIN (round-5 fold): the static URL
+    additionally carries ``auto_arm=1`` — the first click ARMS the daily
+    post-market auto-pull scheduler (the self-arming operator semantics); the
+    chip names it and the ``#autoPullChip`` row renders the armed state with
+    the disarm/re-arm toggle (textContent only).
     """
     html = _render_universe_html()
     assert "Pull EVERYTHING — spot only" in html, "the button label is missing"
@@ -172,15 +176,25 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     assert (
         "all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · "
         "incremental (settled windows skipped) · NO options, NO Greeks · "
-        "cross-verify producer runs after the pull"
-    ) in html, "the scope chip must state the whole contract"
+        "cross-verify producer runs after the pull · first click arms the daily auto-pull"
+    ) in html, "the scope chip must state the whole contract incl. the self-arming clause"
     # The verify row: the three read-only verification surfaces.
     assert 'id="pullAllSpotVerify"' in html
     for href in ('href="/coverage/windows"', 'href="/completeness"', 'href="/coverage"'):
         assert href in html, f"verify-row link missing: {href}"
-    # JS wiring: the SAME launcher + the additive scope token, single-flighted
-    # through the shared startAndPoll; the date pickers are NOT consulted.
-    assert '"/api/v1/universe/pull-pipeline?scope=spot-only"' in html
+    # The auto-pull chip row (round-5 fold): armed state + toggle, fed by the
+    # pull-progress payload's additive auto_pull object — textContent only.
+    assert 'id="autoPullChip"' in html
+    assert 'id="autoPullToggleBtn"' in html
+    assert "renderAutoPullChip" in html
+    assert "'/api/v1/universe/pull-all-spot-auto?armed='" in html
+    # JS wiring: the SAME launcher + the additive scope token + the self-arming
+    # auto_arm=1, single-flighted through the shared startAndPoll; the date
+    # pickers are NOT consulted.
+    assert '"/api/v1/universe/pull-pipeline?scope=spot-only&auto_arm=1"' in html
+    assert '"/api/v1/universe/pull-pipeline?scope=spot-only"' not in html, (
+        "the arm-less URL form must not linger beside the self-arming one"
+    )
     wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
     assert "startAndPoll(" in wiring
     assert "pipelineDateQuery" not in wiring, (

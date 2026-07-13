@@ -66,6 +66,7 @@ from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
+from brutex.dashboard.auto_pull_scheduler import AutoLaunchResult, AutoPullScheduler
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
     build_completeness_scoreboard,
@@ -1230,6 +1231,7 @@ def build_app(
     loop_watchdog: LoopWatchdog | None = None,
     crossverify_runner: Callable[[Any], Any] | None = None,
     crossverify_tail: CrossverifyTail | None = None,
+    auto_pull_scheduler: AutoPullScheduler | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1406,6 +1408,20 @@ def build_app(
         existing ``build_app()`` caller is byte-identical. Production binds
         one in ``cli.cmd_dashboard`` behind the fail-loud
         ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
+    auto_pull_scheduler
+        Optional :class:`~brutex.dashboard.auto_pull_scheduler.AutoPullScheduler`
+        (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold — the self-arming
+        post-market daily auto-pull). When given, ``build_app`` binds the
+        scheduler's fire seam to THIS app's own spot-only
+        ``_launch_pipeline`` path (all launcher rails inherited), the
+        ``/pull-pipeline`` route honors ``auto_arm=1`` (the button's
+        first-click-arms-forever semantics), the arm/disarm toggle route +
+        the additive ``auto_pull`` payload keys activate, and the lifespan
+        resumes ticking at boot iff the durable state file says armed.
+        ``None`` (the default) wires NOTHING — zero threads, no new payload
+        keys, ``auto_arm`` refused 503 (the loop_watchdog zero-threads
+        posture); production builds one in ``cli.cmd_dashboard`` for the
+        resolved lake root.
 
     Returns
     -------
@@ -1477,21 +1493,35 @@ def build_app(
     # shutdown cancels the task + joins the monitor BOUNDED. Production binds
     # one in `cli.cmd_dashboard` behind the fail-loud BRUTEX_LOOP_WATCHDOG kill
     # switch (default ON).
-    if loop_watchdog is not None:
+    # The auto-pull scheduler rides the SAME lifespan seam (round-5 fold): its
+    # startup hook resumes ticking iff the durable state file says armed
+    # (a disarmed boot spawns ZERO threads and never auto-fires); shutdown
+    # ends the ticker bounded. `None` for both (every test construction's
+    # default) keeps the app lifespan-free — byte-identical, zero threads.
+    if loop_watchdog is not None or auto_pull_scheduler is not None:
         from contextlib import asynccontextmanager
 
-        watchdog = loop_watchdog  # narrow for the closure (mypy: not None)
+        watchdog = loop_watchdog  # narrow for the closure (mypy: possibly None)
+        scheduler_boot = auto_pull_scheduler
 
         @asynccontextmanager
-        async def _watchdog_lifespan(_app: Any) -> AsyncGenerator[None]:
-            """Start/stop the loop watchdog around the app's serving lifetime."""
-            await watchdog.start_from_running_loop()
+        async def _lifecycle_lifespan(_app: Any) -> AsyncGenerator[None]:
+            """Start/stop the watchdog + auto-pull ticker around serving."""
+            if watchdog is not None:
+                await watchdog.start_from_running_loop()
+            if scheduler_boot is not None:
+                # One small state-file read at startup; armed ⇒ resume ticking
+                # (the boot catch-up fires on an early TICK, never here).
+                scheduler_boot.start_if_armed()
             try:
                 yield
             finally:
-                watchdog.stop()
+                if scheduler_boot is not None:
+                    scheduler_boot.stop()
+                if watchdog is not None:
+                    watchdog.stop()
 
-        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan)
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_lifecycle_lifespan)
     else:
         app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
@@ -4008,8 +4038,21 @@ def build_app(
         dry_run: bool,
         intent_restarts: int = 0,
         scope: str | None = None,
+        auto_arm: bool = False,
     ) -> dict[str, Any]:
         """The ONE-CLICK pull(+movers) pipeline launcher — the ``/pull-pipeline`` body.
+
+        *auto_arm* (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold — the
+        self-arming button semantics: first click = run now if allowed + arm
+        forever) additionally ARMS the wired
+        :class:`~brutex.dashboard.auto_pull_scheduler.AutoPullScheduler`
+        BEFORE the launch attempt, so a market-hours/contention-REFUSED click
+        still arms (the response then says both: ``started: false`` + the
+        armed ``auto_pull`` block). Refused loudly when it cannot mean what
+        it says: 400 on a non-spot-only scope or a ``dry_run`` (a dry-run
+        must never arm the daily REAL pull), 503 when no scheduler is wired.
+        The boot-time resume never passes it (an intent re-fire must not
+        re-arm a deliberately-disarmed scheduler).
 
         Extracted from the route (DEC-PULL-INTENT-RESUME-001) so the SAME
         validated launch path serves BOTH the operator's POST and the boot-time
@@ -4158,6 +4201,38 @@ def build_app(
         reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in targets if inst.security_id not in reference_only_ids]
         spot_only = scope_token == SCOPE_SPOT_ONLY
+        # ── Self-arming daily auto-pull (round-5 fold) ────────────────────
+        # Validate + ARM before the launch attempt: a refused start (market
+        # hours / contention) must still leave the operator armed — the
+        # response confirms both. `armed_scheduler` narrows the Optional once
+        # (auto_arm=True with no scheduler already 503'd).
+        armed_scheduler: AutoPullScheduler | None = None
+        if auto_arm:
+            if scope_token != SCOPE_SPOT_ONLY:
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_arm requires scope=spot-only (the self-arming "
+                    "Pull-EVERYTHING-spot-only button semantics)",
+                )
+            if dry_run:
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_arm requires a real run — a dry-run must never arm "
+                    "the daily auto-pull",
+                )
+            if auto_pull_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="auto-pull scheduler unavailable (not wired for this app) — "
+                    "run the pull without auto_arm",
+                )
+            armed_scheduler = auto_pull_scheduler
+        if armed_scheduler is not None:
+            armed_scheduler.arm()
+        # The run's LAUNCH day (IST) — a post-close run crossing midnight
+        # marks THIS day complete, never the next (the scheduler's
+        # once-per-day guard must not skip the following day's pull).
+        launch_day = now_ist().date()
         _LOG.info(
             "universe.pull_pipeline.requested",
             targets=len(targets),
@@ -4864,6 +4939,24 @@ def build_app(
                         stopped_after=report.stopped_after,
                     )
                     result["note"] = build_spot_only_note(report.note, tail_outcome)
+                    if auto_pull_scheduler is not None and not dry_run:
+                        # The scheduler's completion hook (round-5 fold): EVERY
+                        # real spot-only run — manual click, boot resume, and
+                        # scheduler-fired alike — reports its LAUNCH-day
+                        # verdict, so a successful manual run counts as the
+                        # day's auto pull (no redundant re-fire) while a
+                        # failed one marks nothing. Guarded: the convenience
+                        # scheduler must never fail a finished pull.
+                        try:
+                            auto_pull_scheduler.note_run_complete(
+                                ok=bool(report.ok), run_date=launch_day, source="pipeline"
+                            )
+                        except Exception as note_exc:  # pylint: disable=broad-exception-caught  # never fail the pull
+                            _LOG.warning(
+                                "auto_pull.note_complete_failed",
+                                error=str(note_exc),
+                                error_type=type(note_exc).__name__,
+                            )
                 return result
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
@@ -4903,13 +4996,24 @@ def build_app(
         # orphan-clearing the RUNNING winner's freshly-persisted intent; a
         # second refused click re-installing the first's clobber). The whole
         # span therefore serializes under the store's process-local
-        # launch_mutex. Holding it across start() is SAFE: start() is
-        # non-blocking (market-hours gate / in-process flag / LOCK_NB flock
-        # refusals all return False; on success the worker is spawned and
-        # start() returns) and the worker thread never acquires this mutex
-        # (its on_finally is the plain store.clear). A dry_run enters the
-        # mutex too (harmless ms-scale hold; it persists/restores nothing);
-        # store-less apps skip it — there is no intent state to serialize.
+        # launch_mutex. Holding it across start() is SAFE: start() never
+        # WAITS on a lock (market-hours gate / in-process flag / LOCK_NB
+        # flock refusals all return False; on success the worker is spawned
+        # and start() returns) and the worker thread never acquires this
+        # mutex (its on_finally is the plain store.clear). HONEST hold
+        # envelope (refuter round 5, J-NIT-1): "non-blocking" is about
+        # lock-WAITS, not I/O latency — the held span synchronously does the
+        # intent-file load/persist/restore + two lock-file open() syscalls
+        # (not deadline-wrapped; unbounded on a wedged lake volume), the SSM
+        # credential read (boto3 default timeouts — minutes on a blackholed
+        # AWS route) and the lease enter/refresh (each run_with_deadline-
+        # bounded ≈5 s, ≤~10 s total). So a queued sibling click waits that
+        # span instead of the pre-mutex INSTANT in-process refusal — healthy
+        # ≈ sub-second, latency-only, same fault domain as its own I/O; the
+        # alternative (the G-1/R4-1 intent races) was strictly worse. A
+        # dry_run enters the mutex too (it persists/restores nothing, but
+        # its own start() still pays the same held-span I/O); store-less
+        # apps skip it — there is no intent state to serialize.
         with pull_intent_store.launch_mutex if pull_intent_store is not None else nullcontext():
             if pull_intent_store is not None and not dry_run:
                 # Best-effort write (a failed write is logged, never blocks the
@@ -4966,7 +5070,7 @@ def build_app(
                 restore_intent_after_refused_start(
                     pull_intent_store, prior=prior_intent, dry_run=dry_run, started=started
                 )
-        return {
+        payload: dict[str, Any] = {
             "started": started,
             "targets": len(targets),
             "total": len(targets),  # the JS title reads body.total for the first render
@@ -4978,6 +5082,14 @@ def build_app(
             # token — every pre-existing key above is byte-identical (pinned).
             "scope": scope_token,
         }
+        if spot_only and auto_pull_scheduler is not None:
+            # ADDITIVE, spot-only arm ONLY (round-5 fold — the default/full
+            # payload stays exactly the pinned shape above): the armed state +
+            # last auto outcome + honest next-eligible description, so a
+            # market-hours-refused arming click's response can say BOTH
+            # "started: false" AND "armed — first auto run <when>".
+            payload["auto_pull"] = auto_pull_scheduler.status()
+        return payload
 
     @app.post("/api/v1/universe/pull-pipeline")
     async def api_universe_pull_pipeline(
@@ -4987,8 +5099,13 @@ def build_app(
         to_date: str | None = Query(default=None),
         dry_run: bool = Query(default=False),
         scope: str | None = Query(default=None),
+        auto_arm: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+
+        ``auto_arm=1`` (spot-only scope only — the self-arming button sends
+        it) additionally arms the daily post-market auto-pull scheduler
+        BEFORE the launch attempt; see :func:`_launch_pipeline`.
 
         Thin delegator over :func:`_launch_pipeline` (which carries the full
         semantics docstring): the launch body is shared with the boot-time
@@ -5016,9 +5133,75 @@ def build_app(
                     to_date=to_date,
                     dry_run=dry_run,
                     scope=scope,
+                    auto_arm=auto_arm,
                 )
             )
         )
+
+    if auto_pull_scheduler is not None:
+        _scheduler: AutoPullScheduler = auto_pull_scheduler
+
+        def _auto_spot_launcher() -> AutoLaunchResult:
+            """The scheduler's fire seam — the SAME spot-only launcher the button uses.
+
+            Every rail is inherited by construction (`_launch_pipeline` IS
+            the button's body): market-hours guard, single-flight + flock,
+            durable intent + launch mutex, note surgery, crossverify tail.
+            Never raises for a refusal — a route-shaped rejection
+            (``HTTPException``: a credential 503, a validation 400) and a
+            refused start both map to ``started=False`` with the honest
+            reason, so the scheduler retries on later ticks (a healed
+            credential outage / a finished sweep is picked up the same day).
+            """
+            try:
+                payload = _launch_pipeline(
+                    symbols=None,
+                    symbol=None,
+                    from_date=None,
+                    to_date=None,
+                    dry_run=False,
+                    scope=SCOPE_SPOT_ONLY,
+                )
+            except HTTPException as exc:
+                return AutoLaunchResult(
+                    started=False,
+                    detail=f"launch rejected ({exc.status_code}): {exc.detail}",
+                )
+            if payload.get("started"):
+                return AutoLaunchResult(started=True, detail="spot-only pipeline job started")
+            return AutoLaunchResult(
+                started=False,
+                detail=(
+                    "launch refused — the pull single-flight/job slot is held "
+                    "(a pull or a multi-day dashboard sweep is running)"
+                ),
+            )
+
+        _scheduler.bind_launcher(_auto_spot_launcher)
+
+        @app.post("/api/v1/universe/pull-all-spot-auto")
+        async def api_universe_pull_all_spot_auto(armed: bool = Query()) -> JSONResponse:
+            """POST /api/v1/universe/pull-all-spot-auto — arm/disarm the daily auto-pull.
+
+            The "auto: ON — disarm" chip's toggle (DEC-PULL-SCOPED-ALL-
+            ONECLICK-001 round-5 fold): ``armed=1`` arms (and ensures the
+            ticker) WITHOUT launching anything — the ▶ button's ``auto_arm``
+            is the launch-and-arm path; ``armed=0`` disarms (the durable
+            state persists across restarts either way). Returns the fresh
+            ``auto_pull`` status block. Offloaded (state-file write on the
+            lake volume — the app.py offload doctrine). Registered only when
+            a scheduler is wired; a scheduler-less app has no route (404 —
+            the chip renders "unavailable" from the absent payload key).
+            """
+
+            def _toggle() -> dict[str, Any]:
+                if armed:
+                    _scheduler.arm()
+                else:
+                    _scheduler.disarm()
+                return {"auto_pull": _scheduler.status()}
+
+            return JSONResponse(await _run_lake(_toggle))
 
     if pull_intent_store is not None:
         _intent_store: PullIntentStore = pull_intent_store
@@ -5557,6 +5740,13 @@ def build_app(
         from brutex.data.window_ledger_store import ledger_path
 
         snap = _pull_job.snapshot().to_dict()
+        if auto_pull_scheduler is not None:
+            # ADDITIVE (round-5 fold): the daily auto-pull armed state + last
+            # outcome + honest next-eligible text for the /universe chip. O(1)
+            # memory after the scheduler's first lazy state load (single-writer
+            # in-memory mirror) — offloaded anyway for that one first read.
+            progress_scheduler = auto_pull_scheduler
+            snap["auto_pull"] = await _run_lake(progress_scheduler.status)
         current_phase = str(snap.get("phase", ""))
         store: Any = instrument_store
         lake_root = getattr(store, "path", None)

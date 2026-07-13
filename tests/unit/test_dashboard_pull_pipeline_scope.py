@@ -832,3 +832,305 @@ def test_movers_gated_while_prebuild_runs(
         _wait_for_job(client)
         after = client.get("/api/v1/movers").json()
         assert after.get("gated") is not True
+
+
+# ── the self-arming daily auto-pull (round-5 fold) ───────────────────────────
+#
+# DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold: the ▶ button's auto_arm=1
+# arms the AutoPullScheduler through the SAME launcher, the scheduler's fire
+# seam IS `_launch_pipeline(scope=spot-only)` (all rails inherited by
+# construction), and every real spot-only run reports its completion so a
+# successful manual click counts as the day's auto pull.
+
+from brutex.calendars.auto_pull_gate import AutoGateVerdict  # noqa: E402
+from brutex.calendars.nse import now_ist  # noqa: E402
+from brutex.dashboard.auto_pull_scheduler import (  # noqa: E402
+    AutoPullScheduler,
+    AutoPullState,
+    AutoPullStateStore,
+)
+
+_AUTO_ROUTE = "/api/v1/universe/pull-all-spot-auto"
+
+
+def _wired_scheduler(tmp_path: Path) -> AutoPullScheduler:
+    """A scheduler over the SAME lake root `_make_client` provisions —
+    always-open injected gate (the gate module has its own 100% suite), an
+    hour-scale tick so the ticker thread stays inert during the test."""
+    lake = tmp_path / "lake"
+    lake.mkdir(exist_ok=True)
+    return AutoPullScheduler(
+        AutoPullStateStore(lake),
+        gate=lambda _instant: AutoGateVerdict(allowed=True, reason="ok", detail="ok"),
+        tick_seconds=3600.0,
+    )
+
+
+class TestAutoArmRoute:
+    def test_auto_arm_requires_spot_only_400(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            resp = client.post(_ROUTE, params={"auto_arm": "1", "dry_run": "true"})
+        assert resp.status_code == 400
+        assert "auto_arm requires scope=spot-only" in resp.json()["detail"]
+        assert scheduler.status()["armed"] is False  # a refused arm arms nothing
+
+    def test_auto_arm_dry_run_400(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            resp = client.post(
+                _ROUTE, params={"scope": "spot-only", "auto_arm": "1", "dry_run": "true"}
+            )
+        assert resp.status_code == 400
+        assert "dry-run must never arm" in resp.json()["detail"]
+        assert scheduler.status()["armed"] is False
+
+    def test_auto_arm_without_scheduler_503(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        with _make_client(store, monkeypatch, tmp_path) as client:
+            resp = client.post(_ROUTE, params={"scope": "spot-only", "auto_arm": "1"})
+        assert resp.status_code == 503
+        assert "auto-pull scheduler unavailable" in resp.json()["detail"]
+        assert spines.spot_kwargs == []  # the refusal precedes any launch
+
+    def test_button_click_arms_and_runs_manual_success_marks_the_day(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The operator semantics: first click = run now + arm forever; the
+        successful MANUAL run counts as the day's auto pull (no redundant
+        re-fire), and the armed state is durable on disk."""
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        _calls, tail = _tail_spy()
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(
+            store,
+            monkeypatch,
+            tmp_path,
+            crossverify_tail=tail,
+            auto_pull_scheduler=scheduler,
+        ) as client:
+            resp = client.post(_ROUTE, params={"scope": "spot-only", "auto_arm": "1"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["started"] is True
+            assert body["auto_pull"]["armed"] is True  # the response confirms the arming
+            _wait_for_job(client)
+        today = now_ist().date().isoformat()
+        on_disk = AutoPullStateStore(tmp_path / "lake").load()
+        assert on_disk.armed is True  # durable — survives a dashboard restart
+        assert on_disk.last_success_date == today  # manual success marks the day
+        assert scheduler.tick_once() == "already_succeeded"  # no redundant auto re-fire
+
+    def test_market_hours_refused_click_still_arms(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A 10:00 IST click is start-REFUSED by the inherited guard — but the
+        arming took effect and the response says BOTH."""
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+        monkeypatch.setattr(
+            "brutex.calendars.market_hours.now_ist",
+            lambda: datetime(2024, 1, 2, 10, 0),  # Tue, trading day, in-window
+        )
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            resp = client.post(_ROUTE, params={"scope": "spot-only", "auto_arm": "1"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is False  # the guard refused the immediate run
+        assert body["auto_pull"]["armed"] is True  # …but the arming stands
+        assert AutoPullStateStore(tmp_path / "lake").load().armed is True
+        assert spines.spot_kwargs == []
+
+    def test_default_scope_response_carries_no_auto_pull_key(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Even with a scheduler wired, the default/full payload keeps the
+        pinned pre-fold shape — auto_pull is spot-only-arm additive."""
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            resp = client.post(_ROUTE, params={"dry_run": "true"})
+            assert resp.status_code == 200
+            assert "auto_pull" not in resp.json()
+            _wait_for_job(client)
+
+    def test_toggle_route_disarms_and_rearms_durably(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            armed = client.post(_AUTO_ROUTE, params={"armed": "1"})
+            assert armed.status_code == 200
+            assert armed.json()["auto_pull"]["armed"] is True
+            assert AutoPullStateStore(tmp_path / "lake").load().armed is True
+            disarmed = client.post(_AUTO_ROUTE, params={"armed": "0"})
+            assert disarmed.status_code == 200
+            assert disarmed.json()["auto_pull"]["armed"] is False
+            assert AutoPullStateStore(tmp_path / "lake").load().armed is False
+        assert scheduler.tick_once() == "disarmed"  # disarm stops firing
+
+    def test_toggle_route_absent_without_scheduler(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        with _make_client(store, monkeypatch, tmp_path) as client:
+            resp = client.post(_AUTO_ROUTE, params={"armed": "1"})
+        assert resp.status_code == 404  # the route registers only when wired
+
+    def test_pull_progress_carries_auto_pull_when_wired(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _pin_creds_present(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            snap = client.get("/api/v1/universe/pull-progress").json()
+        assert snap["auto_pull"]["armed"] is False
+        assert "next_eligible" in snap["auto_pull"]
+        with _make_client(store, monkeypatch, tmp_path) as client:
+            bare = client.get("/api/v1/universe/pull-progress").json()
+        assert "auto_pull" not in bare  # scheduler-less apps stay byte-identical
+
+    def test_scheduler_fire_rides_the_real_launcher_and_success_marks(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The fire seam IS `_launch_pipeline(scope=spot-only)`: a tick launches
+        the REAL job (spot spine runs, F&O spines never), completion marks
+        success, and the next tick is the once-per-day no-op."""
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        _calls, tail = _tail_spy()
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(
+            store,
+            monkeypatch,
+            tmp_path,
+            crossverify_tail=tail,
+            auto_pull_scheduler=scheduler,
+        ) as client:
+            scheduler.arm()
+            assert scheduler.tick_once() == "fired"
+            _wait_for_job(client)
+            assert scheduler.tick_once() == "already_succeeded"
+        assert len(spines.spot_kwargs) == 1  # the real spot spine ran exactly once
+        assert spines.metadata_calls == 0  # spot-only: the F&O spines never ran
+        assert spines.historical_calls == 0
+        today = now_ist().date().isoformat()
+        on_disk = AutoPullStateStore(tmp_path / "lake").load()
+        assert on_disk.last_attempt_date == today
+        assert on_disk.last_success_date == today
+
+    def test_scheduler_fire_while_job_busy_is_refused_retry(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The sweep/pull coexistence law: a held job slot refuses the fire —
+        the scheduler defers and retries (no attempt burned), and the retry
+        after release fires."""
+        _pin_creds_present(monkeypatch)
+        release = threading.Event()
+        entered = threading.Event()
+
+        def blocking_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+            entered.set()
+            assert release.wait(timeout=15.0)
+            return _fake_spot(*args, **kwargs)
+
+        monkeypatch.setattr(app_module, "pull_all_spot", blocking_spot)
+        monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+        monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+        _calls, tail = _tail_spy()
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(
+            store,
+            monkeypatch,
+            tmp_path,
+            crossverify_tail=tail,
+            auto_pull_scheduler=scheduler,
+        ) as client:
+            scheduler.arm()
+            try:
+                first = client.post(_ROUTE, params={"scope": "spot-only"})
+                assert first.json()["started"] is True
+                assert entered.wait(timeout=15.0)
+                # The job slot is held mid-run — the tick's launch is refused,
+                # NOT an attempt (retried on later ticks: the deferral catch-up).
+                assert scheduler.tick_once() == "refused_retry"
+                assert AutoPullStateStore(tmp_path / "lake").load().last_attempt_date is None
+            finally:
+                release.set()
+            _wait_for_job(client)
+            # The manual run completed ok → the day is marked done; the
+            # post-release tick needs no redundant re-fire.
+            assert scheduler.tick_once() == "already_succeeded"
+
+    def test_stopped_pipeline_marks_no_success(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A spot-gate-stopped run reports ok=False → last_success_date stays
+        unset (the scheduler retries on the next eligible day)."""
+        _pin_creds_present(monkeypatch)
+
+        def failing_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+            return BulkSpotReport(
+                dry_run=kwargs["dry_run"],
+                start_date="2020-01-01",
+                end_date="2026-07-12",
+                symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=0, no_data=0)],
+                still_failed_windows=5,
+            )
+
+        monkeypatch.setattr(app_module, "pull_all_spot", failing_spot)
+        monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+        monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+        _calls, tail = _tail_spy()
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(
+            store,
+            monkeypatch,
+            tmp_path,
+            crossverify_tail=tail,
+            auto_pull_scheduler=scheduler,
+        ) as client:
+            scheduler.arm()
+            resp = client.post(_ROUTE, params={"scope": "spot-only"})
+            assert resp.status_code == 200
+            _wait_for_job(client)
+        assert AutoPullStateStore(tmp_path / "lake").load().last_success_date is None
+
+    def test_boot_lifespan_resumes_armed_ticker(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """BOOT CATCH-UP wiring: a durably-armed state file + a fresh app ⇒ the
+        lifespan resumes the ticker (thread alive inside the context, stopped
+        after); a disarmed boot spawns nothing."""
+        _pin_creds_present(monkeypatch)
+        lake = tmp_path / "lake"
+        lake.mkdir(exist_ok=True)
+        AutoPullStateStore(lake).save(AutoPullState(armed=True, armed_at="2026-07-13T18:00:00"))
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler):
+            names = [t.name for t in threading.enumerate()]
+            assert "brutex-auto-pull-scheduler" in names
+        disarmed_scheduler = _wired_scheduler(tmp_path)
+        disarmed_scheduler.disarm()
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=disarmed_scheduler):
+            names = [t.name for t in threading.enumerate()]
+            assert "brutex-auto-pull-scheduler" not in names

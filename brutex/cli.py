@@ -3676,6 +3676,35 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    # Self-arming post-market auto-pull scheduler (DEC-PULL-SCOPED-ALL-
+    # ONECLICK-001 round-5 fold): built for THIS lake root so the ▶ Pull
+    # EVERYTHING (spot only) button's first click arms a durable daily
+    # ticker (state sidecar `.pull_all_spot_auto.json`; the boot lifespan
+    # resumes it when armed). The tick-cadence env parse is DELIBERATELY
+    # outside the best-effort guard (junk BRUTEX_AUTO_PULL_TICK_S aborts
+    # startup with a clean one-liner — the loop_watchdog pattern; a typo
+    # must never silently change the cadence), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds —
+    # the button then runs without the auto-arm surface).
+    from brutex.dashboard.auto_pull_scheduler import (
+        AutoPullScheduler,
+        AutoPullStateStore,
+        resolve_tick_seconds,
+    )
+
+    try:
+        auto_pull_tick_s = resolve_tick_seconds()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    auto_pull_scheduler: Any = None
+    try:
+        auto_pull_scheduler = AutoPullScheduler(
+            AutoPullStateStore(_resolve_lake_root(lake_root)),
+            tick_seconds=auto_pull_tick_s,
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+        _log.warning("auto_pull.build_failed", error=str(exc))
     # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
     # G5): default ON behind the fail-loud BRUTEX_LOOP_WATCHDOG kill switch —
     # the env parse is DELIBERATELY outside the best-effort guard (a junk value
@@ -3706,6 +3735,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
         loop_watchdog=loop_watchdog,
+        auto_pull_scheduler=auto_pull_scheduler,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs

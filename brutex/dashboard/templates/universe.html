@@ -533,11 +533,11 @@
          pulls stay on the full-pipeline button above. Static HTML +
          startAndPoll only — no dynamic markup (textContent discipline). -->
     <button class="pull-everything-btn" id="pullAllSpotBtn"
-            title="ONE click — pull the ENTIRE spot universe (all indices + all ~750 stocks), 1-minute, 2020-01-01 → previous day, auto-incremental (already-pulled windows are skipped). NO options, NO Greeks — the F&amp;O phases are skipped by design; the derived-timeframe pre-build + spot movers warm still run, then the TickVault cross-verify producer starts. Re-click is always safe.">
+            title="ONE click — pull the ENTIRE spot universe (all indices + all ~750 stocks), 1-minute, 2020-01-01 → previous day, auto-incremental (already-pulled windows are skipped). NO options, NO Greeks — the F&amp;O phases are skipped by design; the derived-timeframe pre-build + spot movers warm still run, then the TickVault cross-verify producer starts. The FIRST click also ARMS the daily post-market auto-pull (runs itself every trading day after the settle time while this dashboard is up — disarm via the auto chip below). Re-click is always safe.">
       <span class="pe-icon">▶</span>
       <span class="pe-text">
         <b id="pullAllSpotLabel">Pull EVERYTHING — spot only</b>
-        <span class="pe-sub">all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · incremental (settled windows skipped) · NO options, NO Greeks · cross-verify producer runs after the pull</span>
+        <span class="pe-sub">all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · incremental (settled windows skipped) · NO options, NO Greeks · cross-verify producer runs after the pull · first click arms the daily auto-pull</span>
       </span>
     </button>
     <div class="hsub" id="pullAllSpotVerify" style="margin-top:4px; font-size:12px;">
@@ -545,6 +545,16 @@
       <a href="/coverage/windows" style="color:var(--blue)">fetch windows (FAILED tab)</a> ·
       <a href="/completeness" style="color:var(--blue)">completeness</a> ·
       <a href="/coverage" style="color:var(--blue)">coverage</a>
+    </div>
+    <!-- The daily auto-pull chip (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5
+         fold): armed state + last outcome + honest next-eligible text from
+         the pull-progress payload's additive auto_pull object, plus the
+         disarm/re-arm toggle. textContent ONLY — never innerHTML. -->
+    <div class="hsub" id="autoPullRow" style="margin-top:4px; font-size:12px;">
+      <span id="autoPullChip">auto: …</span>
+      <button id="autoPullToggleBtn" type="button"
+              style="margin-left:8px; font-size:11px; display:none;"
+              title="Toggle the daily post-market auto-pull (the armed state persists across dashboard restarts)."></button>
     </div>
   </div>
 
@@ -1618,15 +1628,61 @@ if (PIPELINE_BTN) {
    /pull-pipeline launcher with the additive scope=spot-only token. Deliberately
    ignores the row ticks AND the #pipeFrom/#pipeTo pickers — the whole-universe
    full-range convergence IS this button's promise; scoped/dated pulls stay on
-   the full-pipeline button above. Static URL string only (no user input). */
+   the full-pipeline button above. Static URL string only (no user input).
+   auto_arm=1 (round-5 fold): the first click ARMS the daily post-market
+   auto-pull scheduler — one click, fully automatic daily thereafter; a
+   market-hours-refused click still arms (the chip below says so). */
 const PULL_ALL_SPOT_BTN = document.getElementById("pullAllSpotBtn");
 if (PULL_ALL_SPOT_BTN) {
   PULL_ALL_SPOT_BTN.onclick = () => {
     startAndPoll(
-      "/api/v1/universe/pull-pipeline?scope=spot-only",
+      "/api/v1/universe/pull-pipeline?scope=spot-only&auto_arm=1",
       "pull everything (spot only)");
+    refreshAutoPullChip();  // the arming took effect even on a refused start
   };
 }
+/* ── The daily auto-pull chip (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold).
+   Renders the additive auto_pull object from /pull-progress (also updated
+   live by pollProgress below) + the disarm/re-arm toggle. textContent ONLY —
+   never innerHTML (the CodeQL XSS guard); an absent/malformed payload reads
+   an honest "unavailable", never a fabricated armed state. ── */
+function renderAutoPullChip(ap) {
+  const chip = document.getElementById('autoPullChip');
+  const btn = document.getElementById('autoPullToggleBtn');
+  if (!chip || !btn) return;
+  if (!ap || typeof ap !== 'object') {
+    chip.textContent = 'auto: unavailable (no scheduler wired for this dashboard)';
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = '';
+  if (ap.armed) {
+    chip.textContent = 'auto: ON — ' + (ap.next_eligible || 'armed');
+    btn.textContent = 'disarm';
+  } else {
+    chip.textContent = 'auto: OFF — the ▶ button click arms the daily post-market auto-pull';
+    btn.textContent = 'arm';
+  }
+  btn.onclick = async () => {
+    try {
+      const r = await fetch('/api/v1/universe/pull-all-spot-auto?armed=' + (ap.armed ? '0' : '1'),
+                            { method: 'POST' });
+      const body = await r.json();
+      if (r.ok && body && typeof body === 'object') renderAutoPullChip(body.auto_pull);
+    } catch (e) { /* the next pull-progress poll / page load re-renders the chip */ }
+  };
+}
+async function refreshAutoPullChip() {
+  /* One-shot seed (page load + after an arming click) — the LIVE updates ride
+     the existing pollProgress chain while a pull is watched. */
+  try {
+    const r = await fetch('/api/v1/universe/pull-progress');
+    if (!r.ok) return;              // keep the last rendered state — never a fake
+    const s = await r.json();
+    if (s && typeof s === 'object') renderAutoPullChip(s.auto_pull);
+  } catch (e) { /* chip keeps its last state; the poller self-recovers */ }
+}
+refreshAutoPullChip();
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
    tick several rows → the ONE ▶ Pull · full pipeline button scopes its pull to them.
@@ -2271,6 +2327,7 @@ async function pollProgress(label) {
       : (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
+    renderAutoPullChip(s.auto_pull);   // round-5 fold: the daily auto-pull chip rides the same poll
     if (s.state === 'running') {
       updateStallChip(s);  // stalled-suspect ⇒ amber chip; a recovery clears it (DEC-PULL-STALL-CHIP-001)
       // Per-expiry sub-unit note (DEC-PULL-HEADER-SUBUNIT-001) — '' when the label
