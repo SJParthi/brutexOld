@@ -261,7 +261,8 @@ def test_worst_case_params_add_exactly_the_one_key() -> None:
     # The emit-on-non-PRECISE law: WORST_CASE params == PRECISE params plus
     # exactly {"fill_mode": "worst_case"} — nothing else moves.
     wc = _worst_case_params()
-    assert wc.pop("fill_mode") == "worst_case"
+    popped_mode = wc.pop("fill_mode")
+    assert popped_mode == "worst_case"
     assert wc == _PARAMS
 
 

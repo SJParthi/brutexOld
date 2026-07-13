@@ -1484,10 +1484,7 @@ def _worst_trade(**overrides: object) -> TradeInput:
         "exit_bar_open_paisa": 12_005,
         "side": "long_call",
         "fill_mode": FillMode.WORST_CASE,
-        "entry_bar_high_paisa": 10_100,
-        "entry_bar_low_paisa": 9_900,
-        "exit_bar_high_paisa": 12_100,
-        "exit_bar_low_paisa": 11_900,
+        **_WORST_EXTREMES,
     }
     kwargs.update(overrides)
     return TradeInput(**kwargs)  # type: ignore[arg-type]

@@ -405,10 +405,12 @@ class TestKernelSeamFeatureDetection:
 
     def test_kernel_accepts_worst_case_probe_matrix(self) -> None:
         class _New:
-            def simulate_masks(self, masks: object, *, worst_case: bool = False) -> None: ...
+            def simulate_masks(self, masks: object, *, worst_case: bool = False) -> None:
+                raise NotImplementedError  # signature probe only — never invoked
 
         class _Old:
-            def simulate_masks(self, masks: object, tp_first: bool = False) -> None: ...
+            def simulate_masks(self, masks: object, tp_first: bool = False) -> None:
+                raise NotImplementedError  # signature probe only — never invoked
 
         class _NoAttr:
             pass
@@ -456,5 +458,6 @@ class TestRunIdentityEmitLaw:
     def test_worst_case_adds_exactly_the_one_key(self) -> None:
         worst = canonical_trade_params(**self._KW, fill_mode=FillMode.WORST_CASE)
         precise = canonical_trade_params(**self._KW)
-        assert worst.pop("fill_mode") == "worst_case"
+        popped_mode = worst.pop("fill_mode")
+        assert popped_mode == "worst_case"
         assert worst == precise
