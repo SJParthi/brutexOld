@@ -18,6 +18,7 @@ OI-only drift read "fresh".
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -54,12 +55,17 @@ def _bar(ts: datetime, px: float, *, vol: int = 100, oi: int | None = None) -> C
     )
 
 
-def _session(day: tuple[int, int, int], *, n: int = 15, oi=None) -> list[CandleBar]:
+def _session(
+    day: tuple[int, int, int],
+    *,
+    n: int = 15,
+    oi: int | Callable[[int], int | None] | None = None,
+) -> list[CandleBar]:
     y, mo, d = day
     bars: list[CandleBar] = []
     for i in range(n):
         mins = 9 * 60 + 15 + i
-        this_oi = oi(i) if callable(oi) else oi
+        this_oi: int | None = oi(i) if callable(oi) else oi
         bars.append(
             _bar(_ist(y, mo, d, mins // 60, mins % 60), 100.0 + i * 0.05, vol=100 + i, oi=this_oi)
         )
@@ -85,7 +91,9 @@ def _materialize(lake: Path, *, segment: str, symbol: str, kind: PrebuildKind) -
     )
 
 
-def _verdicts(lake: Path, *, segment: str, symbol: str, intervals: list[str]):
+def _verdicts(
+    lake: Path, *, segment: str, symbol: str, intervals: list[str]
+) -> dict[tuple[str, str], str]:
     return tf_autoderive.lake_derived_freshness_verdicts(
         lake, exchange="NSE", segment=segment, symbols=[symbol], intervals=intervals
     )
@@ -188,6 +196,61 @@ class TestDailyArm:
         assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
             ("NIFTY", "5minute"): "fresh",
             ("NIFTY", "1day"): "fresh",
+        }
+
+
+class TestOiAwareIntradayCompare:
+    """The intraday compare is OI-aware (pre-fix it projected OHLCV-6 only)."""
+
+    def test_fno_intraday_oi_drift_only_reads_stale(self, tmp_path: Path) -> None:
+        """An OI-only drift on the stored FNO 5minute (OHLCV untouched) now
+        reads stale — kills the OI-blind mutant (fails at merge base)."""
+        lake = tmp_path / "lake"
+        sym = "NSE-NIFTY-27Jun24-FUT"
+        _seed(lake, segment="FNO", symbol=sym, bars=_session((2024, 6, 12), oi=lambda i: 1000 + i))
+        _materialize(lake, segment="FNO", symbol=sym, kind=PrebuildKind.FUTURES)
+        assert _verdicts(lake, segment="FNO", symbol=sym, intervals=["5minute"]) == {
+            (sym, "5minute"): "fresh"
+        }
+        p5 = _partition(lake, "FNO", sym, "5minute")
+        pl.read_parquet(p5).with_columns(
+            pl.lit(999_999).cast(pl.Int64).alias("open_interest")
+        ).write_parquet(p5)
+        assert _verdicts(lake, segment="FNO", symbol=sym, intervals=["5minute"]) == {
+            (sym, "5minute"): "stale"
+        }
+
+    def test_legacy_fabricated_zero_oi_transient_stale_then_fresh(self, tmp_path: Path) -> None:
+        """The disclosed ≤1-nightly transient: a legacy pre-DEC-DERIVED-OI-
+        NULL-HONEST-001 partition (null OI fabricated as 0) reads stale under
+        the OI-aware compare — and the next full re-derive (which the #1791
+        writer_convention stamp bump forces on that SAME nightly) rewrites
+        the honest nulls and reads fresh again."""
+        lake = tmp_path / "lake"
+        sym = "NSE-NIFTY-27Jun24-FUT"
+        oi_pattern: dict[int, int | None] = {i: (1000 + i if i < 5 else None) for i in range(15)}
+        _seed(
+            lake,
+            segment="FNO",
+            symbol=sym,
+            bars=_session((2024, 6, 12), oi=lambda i: oi_pattern[i]),
+        )
+        _materialize(lake, segment="FNO", symbol=sym, kind=PrebuildKind.FUTURES)
+        assert _verdicts(lake, segment="FNO", symbol=sym, intervals=["5minute"]) == {
+            (sym, "5minute"): "fresh"
+        }
+        # Rewrite the derived 5m as the LEGACY fabricated-0 bytes.
+        p5 = _partition(lake, "FNO", sym, "5minute")
+        pl.read_parquet(p5).with_columns(
+            pl.col("open_interest").fill_null(0).alias("open_interest")
+        ).write_parquet(p5)
+        assert _verdicts(lake, segment="FNO", symbol=sym, intervals=["5minute"]) == {
+            (sym, "5minute"): "stale"
+        }
+        # The re-derive (latest-wins) restores the honest nulls → fresh.
+        _materialize(lake, segment="FNO", symbol=sym, kind=PrebuildKind.FUTURES)
+        assert _verdicts(lake, segment="FNO", symbol=sym, intervals=["5minute"]) == {
+            (sym, "5minute"): "fresh"
         }
 
 
