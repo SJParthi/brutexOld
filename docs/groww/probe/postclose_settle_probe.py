@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Post-close settle probe — WHEN does Groww settle TODAY's 1-minute day?
 
-``DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001`` (MIGRATION.md #1756; companion of
-DEC-PULL-TODAY-COMPLETENESS-GATE-001 #1755). The vendor's end-of-day settlement
+``DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001`` (MIGRATION.md #1775; companion of
+DEC-PULL-TODAY-COMPLETENESS-GATE-001 #1774). The vendor's end-of-day settlement
 time is UNDOCUMENTED (the vendor docs are silent; MIGRATION.md #837 is the only
 empirical record of the 6-element forming shape). This probe measures it: run it
 at 15:35 / 15:45 / 16:00 / 16:30 / 17:30 IST on >= 5 regular trading days

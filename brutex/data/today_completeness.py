@@ -1,6 +1,6 @@
 """Pre-settle TODAY minute-completeness gate — the pure classifier + guarded wiring.
 
-DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1755). The Groww vendor serves
+DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1774). The Groww vendor serves
 the CURRENT trading day's intraday series in a FORMING shape until its end-of-day
 settlement lands (MIGRATION.md #837, DEC-GROWW-FORMING-BAR-PARSE-001: 6-element
 rows — no ``open_interest`` slot, ``volume`` typically ``None`` — vs the settled
@@ -49,12 +49,12 @@ Per-class criteria (the binding table — DEC-PULL-TODAY-COMPLETENESS-GATE-001):
   settled all-zero-volume cash day would false-demote (near-impossible — a
   settled cash candle exists because trades happened), costing one bounded
   streak-exempt same-evening deferral, never a loss or a SKIP. The mirror
-  false NEGATIVE (MIGRATION.md #1755 (b), round-2/3 review): a
+  false NEGATIVE (MIGRATION.md #1774 (b), round-2/3 review): a
   PROGRESSIVELY-settling mixed CASH day (some minutes settled ``volume > 0``,
   some forming ``volume == 0``) PASSES this all-bars rule and keep-first
   freezes the forming minutes — a disclosed residual, conditional on
   UNVERIFIED per-minute CASH settlement behavior, probe-measurable via the
-  #1756 probe's per-CASH ``raw_null_volume``/``rows_len6`` fields (an ANY-bar
+  #1775 probe's per-CASH ``raw_null_volume``/``rows_len6`` fields (an ANY-bar
   CASH rule was deliberately not chosen — it would false-demote every
   illiquid microcap with one quiet minute).
 * ``FUT`` — shape mandatory: INCOMPLETE iff ANY today bar has
@@ -175,7 +175,7 @@ TODAY_INCOMPLETE_EVENT: Final[str] = "ingest.window.today_incomplete"
 #: ``FAILED`` rows carrying :data:`TODAY_INCOMPLETE` (one per demoted window).
 #: A true-total pull-END flush would need a post-drain seam at all four arm
 #: sites — deliberately not built (this event is a heads-up, the ledger is the
-#: count; disclosed in MIGRATION.md #1755 item (8), round-1 R3-MINOR-1).
+#: count; disclosed in MIGRATION.md #1774 item (8), round-1 R3-MINOR-1).
 TODAY_INCOMPLETE_SUPPRESSED_EVENT: Final[str] = "ingest.window.today_incomplete_suppressed"
 
 #: FUT observe-only count shortfall INFO (never a demotion — ``demoted=False``).
@@ -496,7 +496,7 @@ def observe_today_completeness(
     flush carries flush-time counts (observation #cap+1) — a FLOOR on the
     pull's final demotion total, never the total itself. The true per-pull
     count lives in the window ledger's ``FAILED`` + :data:`TODAY_INCOMPLETE`
-    rows (see the event's own doc-comment; MIGRATION.md #1755 item (8)).
+    rows (see the event's own doc-comment; MIGRATION.md #1774 item (8)).
 
     *raw_count* is the window's UN-filtered vendor bar count (``len(raw_bars)``)
     — needed to route the raw-EMPTY shape to the EMPTY machinery instead of a

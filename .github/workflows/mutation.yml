@@ -345,7 +345,7 @@ jobs:
           #    still-settling vendor rows into the keep-first lake FOREVER or
           #    demote-loops healthy post-close pulls) joined per
           #    DEC-PULL-TODAY-COMPLETENESS-GATE-001 round-1 review (R2-M3,
-          #    MIGRATION.md #1755): the classifier is a pure criteria table
+          #    MIGRATION.md #1774): the classifier is a pure criteria table
           #    whose membership/boundary mutants (covers-today equality, the
           #    per-class any-vs-all folds, the streak-exempt reason token) are
           #    exactly the class the ledger's hand-applied mutant kills

@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1755 —
+_Last updated: 2026-07-12 (DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1774 —
 the pre-settle TODAY minute-completeness gate: a post-close pull's covers-today
 window WITHHOLDS today's still-settling bars from the keep-first lake (the #837
 forming shape would freeze forever) and defers streak-EXEMPT re-pullable FAILED
@@ -31,9 +31,9 @@ pinned); armed at ALL FOUR production pulls incl. the bulk `pull_all_spot`
 behind the fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch resolved once per
 pull; non-today windows byte-identical (pinned); + the companion read-only
 post-close settle probe measuring the UNDOCUMENTED vendor EOD settle time
-(DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, #1756). ENGINE UNCHANGED —
+(DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, #1775). ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; pull-INTEGRITY only; the per-item record lives in the
-§1 Active-branch blurb + MIGRATION.md #1755 — this header carries the one-line
+§1 Active-branch blurb + MIGRATION.md #1774 — this header carries the one-line
 summary, never the story.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
@@ -2352,11 +2352,12 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/pull-today-completeness-gate` (**DEC-PULL-TODAY-COMPLETENESS-GATE-001 +
-  DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, MIGRATION.md #1755–#1756** — renumbered
-  #1751–#1752 → #1755–#1756 at the 2026-07-13 merge-reconcile (main's #1488
-  wave took #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 + #1752
-  for DEC-GROWW-ERRORCODE-ASCII-GUARD-001; the sibling producer holds
-  #1757–#1759) — the
+  DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, MIGRATION.md #1774–#1775** — renumbered
+  #1751–#1752 → #1755–#1756 → #1774–#1775 (the first hop at the 2026-07-13
+  merge-reconcile — main's #1488 wave took #1751 for
+  DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 + #1752 for
+  DEC-GROWW-ERRORCODE-ASCII-GUARD-001; the second per the coordinator's
+  fresh authoritative reservation map, live ceiling #1773) — the
   pre-settle TODAY minute-completeness gate + the post-close settle probe.
   (1) NEW pure classifier `brutex/data/today_completeness.py` (the
   partial_window_detect/observe_all_filtered template) consulted in BOTH ingest
@@ -2375,7 +2376,7 @@ hostile-review pass._
   whose window no longer covers today is inert and the settled bars LAND —
   PROVIDED the vendor has settled by that first non-covers-today re-pull, which
   is exactly why the nightly must schedule after the probe-measured settle
-  time + margin (the #1756 runbook); convergence + zero-conflict lifecycle
+  time + margin (the #1775 runbook); convergence + zero-conflict lifecycle
   integration-pinned against a real lake with the gate-off keep-first-freeze
   counterfactual). (2) Criteria table:
   INDEX_SPOT = distinct-minute count == `session.duration_minutes` (375
@@ -2406,8 +2407,8 @@ hostile-review pass._
   mixed CASH day passes the all-bars zero-volume rule and keep-first freezes
   its forming minutes — a disclosed residual, conditional on unverified
   per-minute CASH settlement behavior, probe-measurable via the per-CASH
-  `raw_null_volume`/`rows_len6` fields (#1755 (b)); a `nightly_summary`
-  deferral line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1756 probe
+  `raw_null_volume`/`rows_len6` fields (#1774 (b)); a `nightly_summary`
+  deferral line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1775 probe
   (`docs/groww/probe/postclose_settle_probe.py` + runbook): the doctor-kit
   mint-BLOCKED read-only SSM paced client probes NIFTY/BANKNIFTY/SENSEX + 10
   seed-fixed F&O-eligible CASH stocks + the front-month NIFTY FUT at
@@ -6040,14 +6041,14 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/pull-today-completeness-gate`
   (DEC-PULL-TODAY-COMPLETENESS-GATE-001 + DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001,
-  MIGRATION.md #1755–#1756 — the pre-settle TODAY minute-completeness gate:
+  MIGRATION.md #1774–#1775 — the pre-settle TODAY minute-completeness gate:
   covers-today windows withhold today's still-settling bars from the keep-first
   lake and defer streak-EXEMPT re-pullable FAILED (`TODAY_INCOMPLETE`) until the
   per-class criteria pass; armed at all four production pulls behind the
   fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch; + the read-only post-close
   settle probe under docs/groww/probe/; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1755–#1756 for the full blurb)
+  MIGRATION.md #1774–#1775 for the full blurb)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on

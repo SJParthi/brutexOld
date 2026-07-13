@@ -662,7 +662,7 @@ class TestModuleConstants:
 class TestMutationWorkflowWiring:
     """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
 
-    Round-1 review (R2-M3, MIGRATION.md #1755): the classifier is a pure
+    Round-1 review (R2-M3, MIGRATION.md #1774): the classifier is a pure
     criteria table whose membership/boundary mutants (the covers-today
     equality, the per-class any-vs-all folds, the streak-exempt reason
     token) are exactly the class the hand-applied ledger mutants proved

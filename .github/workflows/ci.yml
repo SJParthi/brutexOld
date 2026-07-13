@@ -1758,7 +1758,7 @@ jobs:
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
           fi
-          # DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1755): the
+          # DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1774): the
           # pre-settle TODAY minute-completeness gate — the pure classifier +
           # guarded observe wiring both ingest tails consult before sink.append
           # + ledger.record. 100% line+branch standalone from the start.
