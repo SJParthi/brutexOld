@@ -93,10 +93,11 @@ def _grid() -> Any:
         data_snapshot_hash="snap-redteam",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the R45 diffcheck's naive
-        # reference is PRECISE-only in Stage 1 — a WORST_CASE grid disables
-        # the diffcheck (one loud WARN), so this redteam plant must run the
-        # PRECISE arm to have a diffcheck to break.
+        # PIN (DEC-FILL-WORST-CASE-001): the R45 diffcheck runs a REAL naive
+        # arm for BOTH fill modes (the Stage-1 WORST_CASE disable bridge was
+        # removed — diffcheck is never fill-mode-disabled). PRECISE is pinned
+        # here only to keep this redteam plant's expected values deterministic
+        # against the pre-worst-case fixtures.
         fill_mode=FillMode.PRECISE,
     )
 
