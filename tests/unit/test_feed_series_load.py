@@ -964,3 +964,233 @@ class TestLoaderCutCursorAgreement:
             assert cursor_key == min(
                 ordinal for ordinal in res.roll_schedule if ordinal >= ist_day.toordinal()
             )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# DEC-SERIES-LOAD-GRID-HONEST-001 — the predictor models the resampler's
+# ACTUAL 09:15-anchored grid (Muhurat/off-open sessions no longer refused)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestMuhuratGridHonest:
+    """The E1 B-S2 confirmed defect (derived-TF audit, DEC-DERIVED-TF-AUDIT-001).
+
+    The pre-fix helper anchored the intraday grid at the SESSION open — but
+    the resampler's grid is ``09:15 IST + k·tf`` on the bar's IST date
+    (DEC-RESAMPLE-ANCHOR-002), so on any session whose open offset from
+    09:15 is not a TF multiple the stored labels PRECEDE the open (Muhurat
+    2024-11-01 @30m stores 17:45/18:15/18:45, never 18:00/18:30) and a
+    healthy lake drew a loud false "EMPTY — re-pull" refusal.
+    ``test_fragment_a_*`` / ``test_end_to_end_*`` fail at the merge base.
+    """
+
+    def test_fragment_a_no_off_grid_label_claimed(self) -> None:
+        # E1 Fragment A: Muhurat 2024-11-01 (18:00→19:00 IST), 30minute,
+        # window [18:00 → 18:10]. The session-open model predicted an 18:00
+        # label (True → refusal); the real grid holds 17:45/18:15/18:45 —
+        # nothing inside the fragment → False (skip, not refuse).
+        assert not series_load._expected_bar_time_in_window(
+            interval="30minute",
+            seg_start=_ist(2024, 11, 1, 18, 0),
+            seg_end=_ist(2024, 11, 1, 18, 10),
+        )
+
+    def test_fragment_b_sliver_holding_the_stored_label_counts(self) -> None:
+        # E1 Fragment B (the mirror): [17:45 → 17:59] HOLDS the stored 17:45
+        # bucket (aggregating 18:00–18:14 bars) — the pre-fix model said the
+        # sliver could not hold bars. Skip flips to read: strictly LESS
+        # refusal on healthy data, never more.
+        assert series_load._expected_bar_time_in_window(
+            interval="30minute",
+            seg_start=_ist(2024, 11, 1, 17, 45),
+            seg_end=_ist(2024, 11, 1, 17, 59),
+        )
+
+    def test_muhurat_2025_1345_open_4minute_arm(self) -> None:
+        # 2025-10-21 opens 13:45 (offset 270 from 09:15; 270 % 4 == 2), so
+        # the first 4minute label is 13:43 — expectable in a window holding
+        # it, not in the sliver just before it.
+        assert series_load._expected_bar_time_in_window(
+            interval="4minute",
+            seg_start=_ist(2025, 10, 21, 13, 43),
+            seg_end=_ist(2025, 10, 21, 13, 44),
+        )
+        assert not series_load._expected_bar_time_in_window(
+            interval="4minute",
+            seg_start=_ist(2025, 10, 21, 13, 41),
+            seg_end=_ist(2025, 10, 21, 13, 42),
+        )
+
+    def test_regular_session_parity_with_the_session_open_model(self) -> None:
+        """On every 09:15-open session the two grids COINCIDE — the new
+        helper equals the pre-fix session-open model verbatim (the oracle
+        below is the pre-DEC-SERIES-LOAD-GRID-HONEST-001 arm, inlined) over
+        an exhaustive window sweep on a regular trading day."""
+        from datetime import timedelta
+
+        open_dt = _ist(2025, 6, 26, 9, 15)
+        close_dt = _ist(2025, 6, 26, 15, 30)
+
+        def _old_model(step: timedelta, seg_start: datetime, seg_end: datetime) -> bool:
+            if seg_end < seg_start:
+                return False
+            if seg_end >= open_dt and seg_start < close_dt:
+                if seg_start <= open_dt:
+                    first_label = open_dt
+                else:
+                    first_label = open_dt + -((open_dt - seg_start) // step) * step
+                return first_label <= seg_end and first_label < close_dt
+            return False
+
+        start_offsets_min = [-360, -30, -1, 0, 1, 7, 59, 60, 239, 240, 241, 374, 375, 376, 500]
+        durations = [
+            timedelta(0),
+            timedelta(seconds=30),
+            timedelta(minutes=3),
+            timedelta(minutes=30),
+            timedelta(minutes=300),
+        ]
+        from brutex.data.timeframes import LAKE_INTERVAL_LABELS
+
+        for tf_minutes in (1, 2, 5, 30, 60, 240):
+            step = timedelta(minutes=tf_minutes)
+            interval = LAKE_INTERVAL_LABELS[tf_minutes]  # "1minute" … "1hour", "4hour"
+            for start_offset in start_offsets_min:
+                for duration in durations:
+                    seg_start = open_dt + timedelta(minutes=start_offset)
+                    seg_end = seg_start + duration
+                    got = series_load._expected_bar_time_in_window(
+                        interval=interval,
+                        seg_start=seg_start,
+                        seg_end=seg_end,
+                    )
+                    want = _old_model(step, seg_start, seg_end)
+                    assert got == want, (tf_minutes, start_offset, duration)
+
+    def test_mirror_pin_predictor_equals_the_real_resampler_labels(self) -> None:
+        """The DEC-DAILY-OPEN-PREDICATE-ALIGN-001 pattern: over full-session
+        1m frames (regular + BOTH Muhurat shapes) the predictor's expectable
+        verdict ≡ 'the REAL resample_1m_to_tf emitted a label inside the
+        window' — the two laws can never drift apart silently."""
+        from datetime import timedelta
+
+        import polars as pl
+        from brutex.calendars.nse import get_session_checked
+        from brutex.data.tf_resampler import resample_1m_to_tf
+
+        sessions = [date(2025, 6, 26), date(2024, 11, 1), date(2025, 10, 21)]
+        tfs = [("2minute", 2), ("30minute", 30), ("1hour", 60)]
+        for day in sessions:
+            session = get_session_checked(day)
+            assert session is not None
+            open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
+            close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
+            n_minutes = int((close_dt - open_dt) // timedelta(minutes=1))
+            frame = pl.DataFrame(
+                {
+                    "ts_utc": [
+                        (open_dt + timedelta(minutes=i)).astimezone(UTC) for i in range(n_minutes)
+                    ],
+                    "open": [100.0] * n_minutes,
+                    "high": [100.5] * n_minutes,
+                    "low": [99.5] * n_minutes,
+                    "close": [100.1] * n_minutes,
+                    "volume": [10] * n_minutes,
+                }
+            )
+            for interval, tf_minutes in tfs:
+                labels = [
+                    ts.astimezone(IST) if ts.tzinfo else ts.replace(tzinfo=UTC).astimezone(IST)
+                    for ts in resample_1m_to_tf(frame, tf_minutes).get_column("ts_utc").to_list()
+                ]
+                probe = open_dt - timedelta(minutes=40)
+                stop = close_dt + timedelta(minutes=20)
+                while probe <= stop:
+                    seg_start, seg_end = probe, probe + timedelta(minutes=10)
+                    got = series_load._expected_bar_time_in_window(
+                        interval=interval, seg_start=seg_start, seg_end=seg_end
+                    )
+                    want = any(seg_start <= label <= seg_end for label in labels)
+                    assert got == want, (day, interval, probe)
+                    probe += timedelta(minutes=7)
+
+    def test_end_to_end_healthy_muhurat_lake_serves_not_refuses(
+        self, lake: Path, tmp_path: Path
+    ) -> None:
+        """The E1 B-S2 end-to-end repro mechanized: a real lake built ONLY
+        with production writers (vendor 1minute via the sink, derived
+        30minute via the real prebuild), the series alias, an injected
+        one-segment resolution. Pre-fix the [18:00→18:10] fragment RAISED
+        the loud 'EMPTY — re-pull' FuturesSeriesError on this HEALTHY lake;
+        post-fix it skips with one WARN, the whole day serves all three
+        off-open buckets, and the Fragment-B sliver serves the stored 17:45
+        bucket."""
+        from brutex.data.timeframe_materialize import (
+            PrebuildKind,
+            materialize_lake_timeframes,
+        )
+
+        contract = "NSE-NIFTY-28Nov24-FUT"
+        with Catalog.open(tmp_path / "cat.duckdb") as cat:
+            bars = [
+                _bar(
+                    _ist(2024, 11, 1, 18, 0)
+                    + i * (_ist(2024, 11, 1, 18, 1) - _ist(2024, 11, 1, 18, 0)),
+                    100.0 + i * 0.05,
+                )
+                for i in range(60)
+            ]
+            _seed(lake, cat, symbol=contract, bars=bars)
+            materialize_lake_timeframes(
+                lake_root=lake,
+                exchange="NSE",
+                segment="FNO",
+                symbol=contract,
+                kind=PrebuildKind.FUTURES,
+                tfs=("30m",),
+                include_daily=False,
+                incremental=False,
+            )
+            resolution = FuturesSeriesResolution(
+                segments=(
+                    FuturesSeriesSegment(
+                        contract, date(2024, 11, 28), date(2024, 10, 25), date(2024, 11, 28)
+                    ),
+                ),
+                roll_schedule=(date(2024, 11, 28).toordinal(),),
+                contract_symbols=(contract,),
+                unparsed_dirs=(),
+                cross_checks=(),
+                head_clamped=False,
+                tail_unowned_days=0,
+            )
+
+            def _window(start: datetime, end: datetime) -> list[CandleBar]:
+                return load_sweep_slice(
+                    cat=cat,
+                    lake_root=lake,
+                    exchange="NSE",
+                    segment="FNO",
+                    symbol=_ALIAS,
+                    interval="30minute",
+                    start=start,
+                    end=end,
+                    resolution=resolution,
+                )
+
+            # Whole day: the three off-open buckets serve (the healthy lake).
+            whole_day = _window(_ist(2024, 11, 1, 0, 0), _ist(2024, 11, 1, 23, 59))
+            got_labels = [b.timestamp.astimezone(IST).strftime("%H:%M") for b in whole_day]
+            assert got_labels == ["17:45", "18:15", "18:45"]
+
+            # Fragment A [18:00 → 18:10]: pre-fix a FuturesSeriesError on a
+            # HEALTHY lake (wrong remediation — a re-pull cannot move fixed
+            # grid labels); post-fix ONE boundary WARN + empty.
+            with capture_logs() as logs:
+                out = _window(_ist(2024, 11, 1, 18, 0), _ist(2024, 11, 1, 18, 10))
+            assert out == []
+            assert len(_skip_warns(logs)) == 1
+
+            # Fragment B [17:45 → 17:59]: serves the stored 17:45 bucket.
+            fragment_b = _window(_ist(2024, 11, 1, 17, 45), _ist(2024, 11, 1, 17, 59))
+            assert [b.timestamp.astimezone(IST).strftime("%H:%M") for b in fragment_b] == ["17:45"]

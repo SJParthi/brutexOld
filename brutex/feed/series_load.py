@@ -113,8 +113,19 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     Judged per IST date against the REAL NSE session calendar
     (:func:`brutex.calendars.nse.get_session_checked` — muhurat + special
     weekend sessions included): an intraday interval labels its bars on the
-    resampler's fixed-arithmetic TF bucket grid ``session open + k·tf`` inside
-    ``[session open, session close)`` (DEC-RESAMPLE-ANCHOR-002), while the
+    resampler's ACTUAL fixed-arithmetic grid — ``09:15 IST + k·tf`` on the
+    bar's IST date (DEC-RESAMPLE-ANCHOR-002; DEC-SERIES-LOAD-GRID-HONEST-001
+    corrected this helper's model, which anchored the grid at the SESSION
+    OPEN: on any session whose open offset from 09:15 is not a TF multiple —
+    every Muhurat evening for non-divisor TFs (a 30m grid on an 18:00 open
+    stores 17:45/18:15/18:45, never 18:00/18:30), the 2025 13:45 open @4m —
+    the predicted labels did not exist on disk, so a healthy lake drew the
+    loud false 'EMPTY — re-pull' refusal (Fragment A) while the mirror
+    sliver holding the real off-open label was skipped (Fragment B); the
+    grids coincide on every regular/special-weekend 09:15-open session, so
+    those are byte-identical — parity-pinned). A grid label ``t`` is
+    expectable iff ``k ≥ 0``, ``seg_start ≤ t ≤ seg_end``, and the bucket
+    OVERLAPS the session (``t < close`` and ``t + tf > open``), while the
     derived FNO ``1day`` bar is stamped at its session date's midnight IST —
     but that bar SUMMARISES the whole session and is written by the
     POST-session pipeline prebuild, so an in-window midnight stamp
@@ -140,7 +151,12 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
     session yet cannot hold a bar) genuinely cannot hold bars, so an empty
     read there is NOT a data defect (review round-1 findings 2/16/22 +
     round-3 finding 7 — the false "re-pull" refusal on a legitimate
-    roll-boundary window).
+    roll-boundary window). On a session whose open is NOT on the 09:15 grid
+    the first in-session bucket's label PRECEDES the open (the stored 17:45
+    @30m / 17:15 @60m / 17:59 @2m Muhurat labels; 13:43 @4m for the 2025
+    13:45 open — the B-S1 table) — such a label IS expectable when in-window
+    (the Fragment-B mirror flips skip→read: strictly LESS refusal on healthy
+    data, never more).
 
     HONEST abstain: an out-of-coverage date (2027+ weekday) raises
     ``HolidayDataUnavailableError`` — this helper then returns ``True`` so the
@@ -192,22 +208,32 @@ def _expected_bar_time_in_window(*, interval: str, seg_start: datetime, seg_end:
             else:
                 open_dt = datetime.combine(day, session.open_time_ist, tzinfo=IST)
                 close_dt = datetime.combine(day, session.close_time_ist, tzinfo=IST)
-                # Bar labels live on the TF bucket grid ``open + k·tf`` inside
-                # [open, close) — bare session OVERLAP over-claims for coarse
-                # TFs and for a sub-minute start (15:29:30 sits past the last
-                # 1minute label 15:29; review round-3 finding 7): find the
-                # FIRST grid label at/after seg_start and require it inside
-                # both the fragment and the session.
-                if seg_end >= open_dt and seg_start < close_dt:
-                    if seg_start <= open_dt:
-                        first_label = open_dt
-                    else:
-                        # Exact ceil-division on timedeltas (no float drift):
-                        # floor((open − seg_start)/step) is −ceil((seg_start −
-                        # open)/step) for the negative numerator.
-                        first_label = open_dt + -((open_dt - seg_start) // step) * step
-                    if first_label <= seg_end and first_label < close_dt:
-                        return True
+                # Bar labels live on the resampler's ACTUAL fixed grid —
+                # ``09:15 IST + k·tf`` on the bar's IST date, k ≥ 0
+                # (DEC-RESAMPLE-ANCHOR-002 arithmetic; the pre-
+                # DEC-SERIES-LOAD-GRID-HONEST-001 model anchored at the
+                # SESSION open, which diverges on any open whose offset from
+                # 09:15 is not a TF multiple — every Muhurat evening on a
+                # non-divisor TF). Expectable iff a grid label t satisfies
+                # seg_start ≤ t ≤ seg_end AND the bucket [t, t+tf) OVERLAPS
+                # the session (t < close and t + tf > open — the resampler
+                # only ever labels buckets that hold in-session bars). Find
+                # the SMALLEST such t in closed form:
+                anchor = datetime.combine(day, time(9, 15), tzinfo=IST)
+                # (a) the first grid label whose bucket overlaps the session:
+                #     smallest t = anchor + k·step with t > open − step,
+                #     via floor-division on timedeltas (exact, no float
+                #     drift; floor(y/step) + 1 is the strictly-greater grid
+                #     rank for any y).
+                k_overlap = (open_dt - step - anchor) // step + 1
+                # (b) the first grid label at/after the fragment start:
+                #     ceil((x − anchor)/step) as −floor((anchor − x)/step).
+                x = max(seg_start, anchor)
+                k_window = -((anchor - x) // step)
+                k = max(k_overlap, k_window, 0)  # k ≥ 0: labels start at 09:15
+                first_label = anchor + k * step
+                if first_label <= seg_end and first_label < close_dt:
+                    return True
         day += timedelta(days=1)
     return False
 
@@ -476,8 +502,13 @@ def load_sweep_slice(
             raise FuturesSeriesError(
                 f"stored partition {seg.contract_symbol!r} / {interval!r} is EMPTY "
                 f"over its owned window [{seg.own_start.isoformat()} → "
-                f"{seg.own_end.isoformat()}] — re-pull the contract / run the "
-                f"pipeline prebuild (dashboard ▶ Pull · full pipeline){hint}"
+                f"{seg.own_end.isoformat()}] although the window holds at least "
+                f"one expectable bar instant on the resampler's fixed 09:15-IST "
+                f"bucket grid — stored data is MISSING: re-pull the contract, "
+                f"then run the pipeline prebuild (dashboard ▶ Pull · full "
+                f"pipeline; DEC-SERIES-LOAD-GRID-HONEST-001 — a re-pull/prebuild "
+                f"never MOVES grid labels, so this refusal only fires for a "
+                f"genuine gap, never for an off-open Muhurat label){hint}"
             )
         if bars and seg_bars[0].timestamp <= bars[-1].timestamp:
             raise FuturesSeriesError(
