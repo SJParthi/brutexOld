@@ -321,126 +321,138 @@ def _merge_step_run() -> str:
     return str(merge_step.get("run", ""))
 
 
-def test_ci_workflow_triggers_on_merge_group() -> None:
-    """DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): every branch-protection
-    required context is produced by ci.yml (21 static job names + the ci-ok
-    dynamic name), so ci.yml MUST carry the ``merge_group`` trigger — without
-    it no required check can ever report on a merge-queue ref and every
-    queued PR deadlocks until the queue times it out."""
-    data = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    # PyYAML parses a bare `on:` key as boolean True.
-    triggers = data.get(True, data.get("on", {}))
-    assert "merge_group" in triggers, (
-        "ci.yml lost its merge_group trigger — required checks can never "
-        "report on merge-queue refs, deadlocking every queued PR "
-        "(regression of DEC-MERGE-QUEUE-001)"
-    )
+class TestMergeQueueReadiness:
+    """DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): merge-queue readiness pins.
+
+    Every branch-protection required context is produced by ci.yml, so the
+    queue wiring (merge_group trigger + the ci-ok required-context name on
+    queue refs) and the queue-aware auto-merge (enqueue-first with the
+    pre-queue direct fallback; blocked-tolerance only under a live-detected
+    merge_queue rule) are pinned here against silent regression.
+    """
+
+    def test_ci_workflow_triggers_on_merge_group(self) -> None:
+        """DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): every branch-protection
+        required context is produced by ci.yml (21 static job names + the ci-ok
+        dynamic name), so ci.yml MUST carry the ``merge_group`` trigger — without
+        it no required check can ever report on a merge-queue ref and every
+        queued PR deadlocks until the queue times it out."""
+        data = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+        # PyYAML parses a bare `on:` key as boolean True.
+        triggers = data.get(True, data.get("on", {}))
+        assert "merge_group" in triggers, (
+            "ci.yml lost its merge_group trigger — required checks can never "
+            "report on merge-queue refs, deadlocking every queued PR "
+            "(regression of DEC-MERGE-QUEUE-001)"
+        )
 
 
-def test_ci_ok_mints_required_context_on_merge_group() -> None:
-    """DEC-MERGE-QUEUE-001: the required context "CI OK (aggregate gate)" is
-    the ci-ok job's DYNAMIC name. It must be minted on ``merge_group`` events
-    too (the queue evaluates required checks against its own speculative
-    merge commit) — while staying withheld from push/dispatch runs, so the
-    DEC-CI-OK-PR-ONLY-NAME-001 non-PR shadowing hole stays closed."""
-    jobs = _load_jobs(CI_YML)
-    name = str(jobs["ci-ok"]["name"])
-    assert "'CI OK (aggregate gate)'" in name, (
-        "ci-ok no longer mints the required context name at all"
-    )
-    assert "github.event_name == 'merge_group'" in name, (
-        "ci-ok's name expression no longer covers merge_group — the required "
-        "aggregate context would never report on a queue ref (queue deadlock; "
-        "regression of DEC-MERGE-QUEUE-001)"
-    )
-    assert "github.event_name == 'pull_request'" in name, (
-        "ci-ok's name expression lost the pull_request producer — the "
-        "required context would stop reporting on PR heads"
-    )
-    assert "'CI OK (non-PR aggregate)'" in name, (
-        "ci-ok's non-PR fallback name is gone — push/dispatch runs would "
-        "mint (and could shadow) the required context again (regression of "
-        "DEC-CI-OK-PR-ONLY-NAME-001)"
-    )
+    def test_ci_ok_mints_required_context_on_merge_group(self) -> None:
+        """DEC-MERGE-QUEUE-001: the required context "CI OK (aggregate gate)" is
+        the ci-ok job's DYNAMIC name. It must be minted on ``merge_group`` events
+        too (the queue evaluates required checks against its own speculative
+        merge commit) — while staying withheld from push/dispatch runs, so the
+        DEC-CI-OK-PR-ONLY-NAME-001 non-PR shadowing hole stays closed."""
+        jobs = _load_jobs(CI_YML)
+        name = str(jobs["ci-ok"]["name"])
+        assert "'CI OK (aggregate gate)'" in name, (
+            "ci-ok no longer mints the required context name at all"
+        )
+        assert "github.event_name == 'merge_group'" in name, (
+            "ci-ok's name expression no longer covers merge_group — the required "
+            "aggregate context would never report on a queue ref (queue deadlock; "
+            "regression of DEC-MERGE-QUEUE-001)"
+        )
+        assert "github.event_name == 'pull_request'" in name, (
+            "ci-ok's name expression lost the pull_request producer — the "
+            "required context would stop reporting on PR heads"
+        )
+        assert "'CI OK (non-PR aggregate)'" in name, (
+            "ci-ok's non-PR fallback name is gone — push/dispatch runs would "
+            "mint (and could shadow) the required context again (regression of "
+            "DEC-CI-OK-PR-ONLY-NAME-001)"
+        )
 
 
-def test_merge_step_attempts_enqueue_before_direct_fallback() -> None:
-    """DEC-MERGE-QUEUE-001: the merge step must FIRST attempt to enable
-    auto-merge (``gh pr merge --auto --squash`` = the GraphQL
-    enablePullRequestAutoMerge mutation — the enqueue API on a
-    merge-queue-ruled base) and keep the pre-queue direct squash-merge as
-    the FALLBACK, so the workflow is correct both before AND after the
-    merge-queue ruleset flips."""
-    run = _merge_step_run()
-    assert "--auto" in run, (
-        "the merge step lost the enable-auto-merge (enqueue) attempt — with "
-        "a merge queue ruling main, direct merges are refused and every "
-        "green PR strands (regression of DEC-MERGE-QUEUE-001)"
-    )
-    assert "enablePullRequestAutoMerge" in run, (
-        "the merge step no longer documents the enqueue mechanism — the "
-        "--auto attempt lost its rationale trail"
-    )
-    # The fallback direct merge (with branch deletion) must still exist and
-    # come AFTER the enqueue attempt.
-    assert "--delete-branch" in run, (
-        "the direct squash-merge fallback is gone — on a queue-less repo "
-        "(today's world) nothing would merge at all"
-    )
-    assert run.index("--auto") < run.index("--delete-branch"), (
-        "the enqueue attempt no longer precedes the direct-merge fallback — "
-        "a queue-ruled base would eat a doomed direct merge first"
-    )
+    def test_merge_step_attempts_enqueue_before_direct_fallback(self) -> None:
+        """DEC-MERGE-QUEUE-001: the merge step must FIRST attempt to enable
+        auto-merge (``gh pr merge --auto --squash`` = the GraphQL
+        enablePullRequestAutoMerge mutation — the enqueue API on a
+        merge-queue-ruled base) and keep the pre-queue direct squash-merge as
+        the FALLBACK, so the workflow is correct both before AND after the
+        merge-queue ruleset flips."""
+        run = _merge_step_run()
+        assert "--auto" in run, (
+            "the merge step lost the enable-auto-merge (enqueue) attempt — with "
+            "a merge queue ruling main, direct merges are refused and every "
+            "green PR strands (regression of DEC-MERGE-QUEUE-001)"
+        )
+        assert "enablePullRequestAutoMerge" in run, (
+            "the merge step no longer documents the enqueue mechanism — the "
+            "--auto attempt lost its rationale trail"
+        )
+        # The fallback direct merge (with branch deletion) must still exist and
+        # come AFTER the enqueue attempt.
+        assert "--delete-branch" in run, (
+            "the direct squash-merge fallback is gone — on a queue-less repo "
+            "(today's world) nothing would merge at all"
+        )
+        assert run.index("--auto") < run.index("--delete-branch"), (
+            "the enqueue attempt no longer precedes the direct-merge fallback — "
+            "a queue-ruled base would eat a doomed direct merge first"
+        )
 
 
-def test_blocked_state_tolerated_only_under_live_queue_rule() -> None:
-    """DEC-MERGE-QUEUE-001: ``mergeable_state=blocked`` is the queue-normal
-    state of a fully-green PR (a queue refuses direct merges), so the
-    mergeable-check may tolerate it — but ONLY when a ``merge_queue`` rule
-    is live-detected on main via the rules-for-branch endpoint. Queue-less
-    ``blocked`` (and dirty/behind/unknown always) must refuse exactly as
-    before (fail-closed on a probe failure)."""
-    jobs = _load_jobs(AUTO_MERGE_YML)
-    steps = jobs["auto-merge"]["steps"]
-    m_step = next(
-        s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "mergeable-check"
-    )
-    run = str(m_step.get("run", ""))
-    # The denylist case pattern itself is untouched (the sibling test
-    # test_auto_merge_refusal_list_includes_unknown pins the literal too).
-    assert "dirty|behind|blocked|unknown)" in run, (
-        "the mergeable_state denylist pattern is gone from mergeable-check"
-    )
-    # The tolerance is nested INSIDE the blocked arm and gated on the live probe.
-    assert '"${state}" == "blocked"' in run, (
-        "the queue tolerance is no longer scoped to the blocked state only — "
-        "dirty/behind/unknown could ride it (unsafe widening)"
-    )
-    assert "rules/branches/main" in run and "merge_queue" in run, (
-        "the blocked-tolerance lost its live merge_queue rule probe — either "
-        "queue-less blocked PRs merge-attempt again (unsafe) or queue-ruled "
-        "green PRs strand (regression of DEC-MERGE-QUEUE-001)"
-    )
+    def test_blocked_state_tolerated_only_under_live_queue_rule(self) -> None:
+        """DEC-MERGE-QUEUE-001: ``mergeable_state=blocked`` is the queue-normal
+        state of a fully-green PR (a queue refuses direct merges), so the
+        mergeable-check may tolerate it — but ONLY when a ``merge_queue`` rule
+        is live-detected on main via the rules-for-branch endpoint. Queue-less
+        ``blocked`` (and dirty/behind/unknown always) must refuse exactly as
+        before (fail-closed on a probe failure)."""
+        jobs = _load_jobs(AUTO_MERGE_YML)
+        steps = jobs["auto-merge"]["steps"]
+        m_step = next(
+            s for s in steps if isinstance(s, dict) and str(s.get("id", "")) == "mergeable-check"
+        )
+        run = str(m_step.get("run", ""))
+        # The denylist case pattern itself is untouched (the sibling test
+        # test_auto_merge_refusal_list_includes_unknown pins the literal too).
+        assert "dirty|behind|blocked|unknown)" in run, (
+            "the mergeable_state denylist pattern is gone from mergeable-check"
+        )
+        # The tolerance is nested INSIDE the blocked arm and gated on the live probe.
+        assert '"${state}" == "blocked"' in run, (
+            "the queue tolerance is no longer scoped to the blocked state only — "
+            "dirty/behind/unknown could ride it (unsafe widening)"
+        )
+        assert "rules/branches/main" in run and "merge_queue" in run, (
+            "the blocked-tolerance lost its live merge_queue rule probe — either "
+            "queue-less blocked PRs merge-attempt again (unsafe) or queue-ruled "
+            "green PRs strand (regression of DEC-MERGE-QUEUE-001)"
+        )
 
 
-def test_merge_group_trigger_is_exactly_where_required_contexts_live() -> None:
-    """DEC-MERGE-QUEUE-001: ``merge_group`` belongs ONLY on workflows that
-    produce a branch-protection required context — today exactly ci.yml.
-    Adding it elsewhere burns queue-lap minutes for checks the queue never
-    waits on; and a required context moving OUT of ci.yml would need its new
-    home wired too (this pin forces that conversation)."""
-    workflows_dir = REPO_ROOT / ".github" / "workflows"
-    with_trigger = set()
-    for wf in sorted(workflows_dir.glob("*.yml")):
-        data = yaml.safe_load(wf.read_text(encoding="utf-8"))
-        triggers = data.get(True, data.get("on", {})) if isinstance(data, dict) else {}
-        if isinstance(triggers, dict) and "merge_group" in triggers:
-            with_trigger.add(wf.name)
-    assert with_trigger == {"ci.yml"}, (
-        f"merge_group triggers found on {sorted(with_trigger)!r} — expected "
-        "exactly {'ci.yml'} (the one workflow producing every required "
-        "context; DEC-MERGE-QUEUE-001)"
-    )
+    def test_merge_group_trigger_is_exactly_where_required_contexts_live(self) -> None:
+        """DEC-MERGE-QUEUE-001: ``merge_group`` belongs ONLY on workflows that
+        produce a branch-protection required context — today exactly ci.yml.
+        Adding it elsewhere burns queue-lap minutes for checks the queue never
+        waits on; and a required context moving OUT of ci.yml would need its new
+        home wired too (this pin forces that conversation)."""
+        workflows_dir = REPO_ROOT / ".github" / "workflows"
+        with_trigger = set()
+        for wf in sorted(workflows_dir.glob("*.yml")):
+            data = yaml.safe_load(wf.read_text(encoding="utf-8"))
+            triggers = data.get(True, data.get("on", {})) if isinstance(data, dict) else {}
+            if isinstance(triggers, dict) and "merge_group" in triggers:
+                with_trigger.add(wf.name)
+        assert with_trigger == {"ci.yml"}, (
+            f"merge_group triggers found on {sorted(with_trigger)!r} — expected "
+            "exactly {'ci.yml'} (the one workflow producing every required "
+            "context; DEC-MERGE-QUEUE-001)"
+        )
+
+
 
 
 def test_strict_clean_ratchet_is_recorded_on_both_surfaces() -> None:
