@@ -1037,8 +1037,16 @@ def _stored_day_is_fresh(
     """VERIFY-EQUALITY freshness: the stored day frame IS the resample of the base.
 
     DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1 folded. Fresh ⇔ the stored
-    UNCUT day frame equals — column-for-column, dtype-exact, row-for-row — the
-    in-memory :func:`~brutex.data.tf_resampler.resample_1m_to_tf` of the UNCUT
+    UNCUT day frame equals — value-exact, column-name+order-exact, row-for-row;
+    dtype-INSENSITIVE under polars ``.equals`` (REFUTER ROUND 7 H1-1: 1.42.1
+    compares Float64 ≡ Float32 / Int64 ≡ Int32 EQUAL when the values are equal,
+    so a hand-recast value-identical partition serves as fresh — behaviorally
+    safe because VALUE-exactness is the load-bearing property: any pun that
+    compares equal serves exactly the reference-resample values, precision loss
+    compares UNEQUAL ⇒ stale ⇒ fallback, and no real writer emits a drifted
+    schema; drift-pinned so a future polars ``.equals`` semantics change fails
+    loudly) — the in-memory
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` of the UNCUT
     1-minute *base_day* frame. That is the SAME resampler the fallback path
     (:func:`_read_session_bars`) runs AND the same one the prebuild ran to WRITE
     the stored partition (one implementation — Golden Rule #11), so a genuinely

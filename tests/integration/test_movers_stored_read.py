@@ -605,6 +605,67 @@ class TestDualExchangeStaleWarns:
         ]
 
 
+# ── dtype-INSENSITIVE `.equals` semantics pin (REFUTER ROUND 7 H1-1) ──
+
+
+class TestDtypeInsensitiveEqualsPin:
+    def test_dtype_recast_stored_partition_serves_fresh_zero_warns(self, tmp_path: Path) -> None:
+        """h1_a2_dtype_drift.py port: the documented ``.equals`` semantics pin.
+
+        polars ``DataFrame.equals`` is dtype-INSENSITIVE (1.42.1: Float64 ≡
+        Float32 / Int64 ≡ Int32 when the VALUES are equal), so a stored TF
+        partition hand-recast to narrower dtypes with IDENTICAL values reads
+        FRESH — served ``from_stored`` with ZERO stale warns, value-equal to the
+        ``prefer_resample`` reference (value-exactness is the load-bearing
+        property; no real writer emits a drifted schema — writer schema fixed;
+        precision-LOSING casts compare unequal ⇒ stale ⇒ fallback). If a future
+        polars bump flips ``.equals`` to dtype-sensitive, this pin fails and
+        forces a conscious docs + behavior decision instead of silent drift.
+        """
+        import polars as pl
+
+        from brutex.dashboard.movers_snapshot import _read_intraday_bars, _StoredStaleWarnState
+
+        _seed_spot(tmp_path, "NIFTY", 20000)
+        _materialize_spot(tmp_path, "NIFTY")
+        stored_file = tmp_path / "bars/NSE/INDEX/NIFTY/5minute/2024/06.parquet"
+        frame = pl.read_parquet(stored_file)
+        frame.with_columns(
+            pl.col("close").cast(pl.Float32), pl.col("volume").cast(pl.Int32)
+        ).write_parquet(stored_file)
+
+        state = _StoredStaleWarnState()
+        with structlog.testing.capture_logs() as logs:
+            served, from_stored = _read_intraday_bars(
+                tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol="NIFTY",
+                interval="5minute",
+                day=_DAY,
+                minutes=5,
+                cutoff_min=None,
+                stale_warn_state=state,
+            )
+        reference, _ = _read_intraday_bars(
+            tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="5minute",
+            day=_DAY,
+            minutes=5,
+            cutoff_min=None,
+            prefer_resample=True,
+        )
+        assert from_stored is True  # dtype pun with equal values reads FRESH
+        assert served, "the recast partition must still serve bars"
+        assert [(b.close, b.volume) for b in served] == [
+            (b.close, b.volume) for b in reference
+        ]  # value-exactness: the served values ARE the reference-resample values
+        assert not [e for e in logs if e["event"].startswith("movers.stored_stale")]
+
+
 # ── month-edge: prior-UTC-month-filed bucket labels (REFUTER ROUND 2 B2) ──
 
 #: Monday, a real NSE trading day, the 1st of an IST month — the ONLY day
