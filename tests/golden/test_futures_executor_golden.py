@@ -6,6 +6,12 @@ never a drifting copy); the SHORT arm is pinned to its own hand-derived
 adverse-both-sides table (deliberately NOT the calculator's ``# CHECK SIGN``
 short branch); and one full accept-path trade is pinned to hand-recomputed
 paisa, field for field.
+
+DEC-FILL-WORST-CASE-001: the pre-worst-case goldens below are pinned with an
+EXPLICIT ``fill_mode=FillMode.PRECISE`` — the byte-identical legacy opt-out
+under the new WORST_CASE executor default. NEVER REGENERATE these numbers;
+the companion ``TestWorstCaseGolden`` locks the worst-case law's own
+hand-recomputed constants (locked once, audit comments in-line).
 """
 
 from __future__ import annotations
@@ -13,11 +19,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 from brutex.costs.calculator import _apply_slippage
 from brutex.costs.futures_costs import apply_futures_fill
 from brutex.data.models import CandleBar
+from brutex.execution.fill_mode import FillMode
 from brutex.futures.executor import (
     FuturesBarWindow,
     FuturesSignal,
@@ -118,6 +126,7 @@ class TestAcceptPathGolden:
             ),
             resolver=_Resolver(),
             source=_Source(window=_golden_window()),
+            fill_mode=FillMode.PRECISE,  # legacy-mode pin — never regenerate
         )
         assert isinstance(out, MaterializedFuturesTrade)
         golden = {
@@ -143,7 +152,9 @@ class TestAcceptPathGolden:
         assert out.leg.expiry_date == date(2025, 1, 30)
 
     def test_rerun_is_bit_identical(self) -> None:
-        # Golden Rule #4 / R16: same inputs → the same trade, bit for bit.
+        # Golden Rule #4 / R16: same inputs → the same trade, bit for bit
+        # (runs the executor's worst-case DEFAULT — determinism is
+        # mode-independent).
         signal = FuturesSignal(
             instrument="NIFTY", direction=TradeDirection.BULL, entry_ts=_ENTRY, exit_ts=_EXIT
         )
@@ -151,3 +162,99 @@ class TestAcceptPathGolden:
         first = materialize_futures_trade(signal, resolver=_Resolver(), source=source)
         second = materialize_futures_trade(signal, resolver=_Resolver(), source=source)
         assert first == second
+
+
+class TestWorstCaseGolden:
+    """DEC-FILL-WORST-CASE-001 — worst-case goldens, locked once (audit below)."""
+
+    #: WORST_CASE fill grid golden (locked 2026-07-13, hand-derived):
+    #: (entry_open, entry_high, entry_low, exit_open, exit_high, exit_low) →
+    #: (buy, sell, slip) for a LONG — buy = entry_high + 5 (no floor case
+    #: reaches it since high ≥ open ≥ 5 ⇒ buy ≥ 10); sell = max(exit_low − 5,
+    #: 5); slip = |buy − entry_high| + |exit_low − sell|.
+    _LONG_GRID: ClassVar[dict[tuple[int, int, int, int, int, int], tuple[int, int, int]]] = {
+        (5, 5, 5, 5, 5, 5): (10, 5, 5),  # flat 1-tick bars: floor + flat law
+        (100, 110, 90, 100, 110, 90): (115, 85, 10),
+        (2_200_000, 2_201_000, 2_199_000, 2_210_000, 2_211_000, 2_209_000): (
+            2_201_005,
+            2_208_995,
+            10,
+        ),
+        (123_455, 123_455, 123_400, 987_655, 987_700, 987_655): (
+            123_460,
+            987_650,
+            10,
+        ),  # flat-at-open extremes on the adverse side ⇒ equals PRECISE
+    }
+
+    def test_worst_case_fill_grid_golden(self) -> None:
+        for (eo, eh, el, xo, xh, xl), expected in self._LONG_GRID.items():
+            assert (
+                apply_futures_fill(
+                    eo,
+                    xo,
+                    side="long",
+                    fill_mode=FillMode.WORST_CASE,
+                    entry_high_paisa=eh,
+                    entry_low_paisa=el,
+                    exit_high_paisa=xh,
+                    exit_low_paisa=xl,
+                )
+                == expected
+            ), (eo, xo)
+
+    def test_worst_case_full_trade_golden_field_for_field(self) -> None:
+        # Hand-recomputed WORST_CASE accept path over the SAME _golden_window
+        # (locked once — the precise twin above must NEVER move):
+        #   entry bar 22,000.00 [21,990.00 – 22,010.00]
+        #   exit bar 22,100.00 [22,095.00 – 22,110.00]
+        #   buy = entry HIGH 2,201,000 + 5 = 2,201,005
+        #   sell = exit LOW 2,209,500 − 5 = 2,209,495
+        #   gross = (2,209,495 − 2,201,005) × 75 = 8,490 × 75 = 636,750
+        #   net == gross (cost-free index)
+        #   MAE/MFE vs the WORST entry fill 2,201,005 over the 3-bar path
+        #   (path max high 2,211,000; min low 2,199,000):
+        #   mfe = (2,211,000 − 2,201,005) × 75 = 9,995 × 75 = 749,625
+        #   mae = (2,201,005 − 2,199,000) × 75 = 2,005 × 75 = 150,375
+        out = materialize_futures_trade(
+            FuturesSignal(
+                instrument="NIFTY",
+                direction=TradeDirection.BULL,
+                entry_ts=_ENTRY,
+                exit_ts=_EXIT,
+            ),
+            resolver=_Resolver(),
+            source=_Source(window=_golden_window()),
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert isinstance(out, MaterializedFuturesTrade)
+        golden = {
+            "entry_open_paisa": 2_200_000,
+            "exit_open_paisa": 2_210_000,
+            "buy_fill_paisa": 2_201_005,
+            "sell_fill_paisa": 2_209_495,
+            "gross_pnl_paisa": 636_750,
+            "total_charges_paisa": 0,
+            "net_pnl_paisa": 636_750,
+            "mae_paisa": 150_375,
+            "mfe_paisa": 749_625,
+            "cost_free": True,
+        }
+        for field_name, expected in golden.items():
+            assert getattr(out, field_name) == expected, field_name
+
+    def test_worst_case_default_matches_explicit(self) -> None:
+        # The bare executor call IS the worst-case golden (production default).
+        signal = FuturesSignal(
+            instrument="NIFTY", direction=TradeDirection.BULL, entry_ts=_ENTRY, exit_ts=_EXIT
+        )
+        bare = materialize_futures_trade(
+            signal, resolver=_Resolver(), source=_Source(window=_golden_window())
+        )
+        explicit = materialize_futures_trade(
+            signal,
+            resolver=_Resolver(),
+            source=_Source(window=_golden_window()),
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert bare == explicit
