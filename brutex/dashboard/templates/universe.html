@@ -1110,16 +1110,30 @@ function covStrip(i) {
    (§11 COMMON — no eighth hand-rolled controller copy) and claims its
    loader's generation at fetch START: a response landing after a NEWER
    invocation claimed the generation returns null instead of repainting over
-   the newer paint (the gbPollGen idiom, per-loader). Cadence (the pinned
-   setInterval registrations) + rendered output are byte-identical — fetch
-   mechanics only. */
+   the newer paint (the gbPollGen idiom, per-loader). MERGE-RECONCILE fold
+   (DEC-DASHBOARD-READPATH-WEDGE-001 #1763, landed on main in flight): the
+   client belt's per-loader NO-OVERLAP guard is folded in — a tick whose
+   prior fetch is still running is SKIPPED (never stacked), so a wedged
+   endpoint holds at most ONE in-flight connection per loader; main's
+   interim inline `guardedPollJson` AbortController copy is superseded by
+   this gbFetchJson-delegating helper carrying the same two guards (the
+   generation check stays as the belt for the throw→finally release path).
+   Cadence (the pinned setInterval registrations) + rendered output are
+   byte-identical — fetch mechanics only. */
 const loaderGen = {};
+const loaderInflight = Object.create(null);
 async function boundedLatestJson(key, url) {
+  if (loaderInflight[key]) return null;   // no-overlap: a prior tick's fetch is still running (#1763)
   const gen = (loaderGen[key] || 0) + 1;
   loaderGen[key] = gen;
-  const res = await gbFetchJson(url);
-  if (gen !== loaderGen[key]) return null;   // superseded — never repaint over a newer response
-  return res;
+  loaderInflight[key] = true;
+  try {
+    const res = await gbFetchJson(url);
+    if (gen !== loaderGen[key]) return null;   // superseded — never repaint over a newer response
+    return res;
+  } finally {
+    loaderInflight[key] = false;
+  }
 }
 
 async function loadCompleteness() {
@@ -1803,6 +1817,12 @@ const FEED_STALE_RED_MS = 15000;
 const FEED_BACKOFF_BASE_MS = 3000;
 const FEED_BACKOFF_MAX_MS = 30000;
 const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND body) — mirrors the widget's
+/* DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): served at the six 15 s
+   side-panel loaders + the 5 s windows line by `boundedLatestJson` above —
+   the merge-reconcile folded the belt's no-overlap guard into that ONE
+   gbFetchJson-delegating helper (same 10 s abort armed through the body
+   read), superseding the interim inline `guardedPollJson` AbortController
+   copy that landed with #1763. */
 /* Monotonic client clock (immune to NTP/wall-clock jumps). Suspend caveat
    (Golden Rule #10, refuter-confirmed): on some browser/OS combinations
    performance.now() may NOT advance while the machine is suspended

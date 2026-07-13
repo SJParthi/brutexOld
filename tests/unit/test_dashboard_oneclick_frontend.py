@@ -19,8 +19,10 @@ node.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -134,6 +136,56 @@ class TestPollDiscipline:
     def test_abort_timer_armed_through_the_body_read(self) -> None:
         js = _js(_POLL)
         assert "return r.json(); // abort timer still armed through the body read" in js
+
+    def test_counted_failure_schedules_through_the_backoff_law(self) -> None:
+        """The createPoller catch arm reschedules via ``bxBackoffDelayMs`` —
+        the CORE pin the retired v29 in-place-poller pins map onto
+        (DEC-DASHBOARD-POLL-HYGIENE-002 → DEC-FRONTEND-LATENCY-HARDENING-001
+        supersession): every counted failure lands on the capped-backoff
+        schedule, never a bare fixed retry and never a give-up."""
+        js = _js(_POLL)
+        assert "schedule(bxBackoffDelayMs(pollFailures, o));" in js
+        # …and the success arm restores the normal cadence.
+        assert "schedule(pollMs);" in js
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_backoff_ladder_node_golden(self) -> None:
+        """Node-executed golden for the PURE backoff law (the shipped file).
+
+        The capped-failure-backoff defect class (DEC-DASHBOARD-POLL-HYGIENE-002's
+        v29 pins, retired at the #1720 supersession) stays covered HERE at the
+        shared core: 0 failures → the normal cadence, the 600 ms quick-retry
+        envelope (QUICK_RETRIES=2), then 3 s→30 s capped doubling, and a FINITE
+        delay far past the cap — NEVER a give-up.
+        """
+        script = (
+            f"const P = require({json.dumps(str(_POLL))});"
+            "const ladder = [0,1,2,3,4,5,6,7,8,20,1000].map("
+            "  (f) => P.backoffDelayMs(f));"
+            "console.log(JSON.stringify(ladder));"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            ["node", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        ladder = json.loads(proc.stdout)
+        assert ladder == [
+            3000,  # 0 failures → the normal POLL_MS cadence
+            600,  # quick retry 1
+            600,  # quick retry 2 (QUICK_RETRIES = 2)
+            3000,  # BACKOFF_BASE_MS · 2^0
+            6000,
+            12000,
+            24000,
+            30000,  # capped at BACKOFF_MAX_MS…
+            30000,
+            30000,  # …and stays capped
+            30000,  # finite far past the cap — never a give-up
+        ]
 
 
 class TestOneclickWidgetLayer:
