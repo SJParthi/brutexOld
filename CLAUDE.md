@@ -34,7 +34,9 @@ journal deadman) + the /universe dashboard button riding the SAME runner
 (cross_process_lock=False — the runner's own lock trio; market-hours law
 runner-owned at step E). Correct-or-absent: a short/settling file is
 WITHHELD + CRITICAL-alerted, never wrong bytes; Muhurat days skip entirely
-(no files, both sides no-op); INDEX `no_today_bars` = BLOCKED exit 2. HONEST
+(no files, both sides no-op); a missing index day = exit 2 (the real gate
+reads `count_short`; the INDEX-`no_today_bars`→BLOCKED arm is defensive
+totality — the post-#1503 integration-moment fold in #1776). HONEST
 envelope: vendor same-day availability UNVERIFIED (the operator's 5-day
 settle probe decides `--at`); BSE_EQ/BSE_FNO structural-only; GREEKS N/A
 (the options-only stage on an options-excluding pull); movers warm =
@@ -2406,7 +2408,7 @@ hostile-review pass._
   post-close chain: priority pull (ALL spot with EXPLICIT `to_date=day` + scoped metadata + `expiry>=day`
   NIFTY/BANKNIFTY futures — options EXCLUDED per the tonight-scope addendum; ONE SessionRateController spans the
   legs) → the sibling #1774 completeness gate behind a narrow FAIL-CLOSED Protocol (module absent ⇒ refused exit 1,
-  never publish-ungated; the per-class branch-on-REASON table — INDEX `no_today_bars` = BLOCKED exit 2, settling
+  never publish-ungated; the per-class branch-on-REASON table — a missing index day = exit 2 (real-gate token `count_short`; INDEX `no_today_bars` = BLOCKED stays the defensive-totality arm — the post-#1503 integration-moment fold: `export_symbol` now passes the STRICT covering `window_end = day + 1` the real #1774 law demands, the fake twin mirrors it, and `TestRealGateBinding` pins the REAL no-fallback binding end-to-end), settling
   FUT / short index = bounded settle-retry then withheld-final) → the day-scoped never-stamping derive (#1778:
   month-bounded 19 TFs + ±1d-padded 1day on the heal-recall template; the partial-derive-never-stamps invariant BY
   CONSTRUCTION; double-derive-on-nightly disclosed, no new nightly cost) → the pinned CSV byte contract (UTF-8
@@ -6241,7 +6243,8 @@ hostile-review pass._
   REQUIRED probe-decided, trading-day-aware journal deadman) + the /universe
   dashboard button on a dedicated BackgroundPullJob riding the SAME runner;
   correct-or-absent (withheld + CRITICAL, never wrong bytes; Muhurat days
-  skip entirely; INDEX `no_today_bars` = BLOCKED); GREEKS N/A (options-only
+  skip entirely; missing index day = exit 2 — real-gate `count_short`,
+  the INDEX `no_today_bars` BLOCKED arm defensive); GREEKS N/A (options-only
   stage, options-excluding pull); BSE_EQ/BSE_FNO structural-only;
   SENSEX-futures ingest + true preemption = named follow-up DECs; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
