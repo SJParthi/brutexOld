@@ -2474,8 +2474,8 @@ hostile-review pass._
   negative-volume / inconsistent-OHLC / NaN-price base previously escaped
   the daily law's `CandleBar` build as an uncaught
   ValueError/`decimal.InvalidOperation`; the base frame is now
-  VALUE-SCREENED before the law runs — ONE vectorized pass over exactly
-  the `CandleBar` refusal plane via the COMMON `price_violation_expr` +
+  VALUE-SCREENED before the law runs — ONE vectorized pass over the
+  `CandleBar` PER-ROW refusal plane via the COMMON `price_violation_expr` +
   negative/non-finite volume & OI probes, an unprobeable hostile column
   dtype fail-closing via a narrow `PolarsError` clause; disclosed
   corrupt-lake-only narrowing: a value-corrupt base that previously
@@ -2486,7 +2486,18 @@ hostile-review pass._
   ALSO out-of-range — the cross the mask never vets — escaped an uncaught
   `ValueError`/`OverflowError`; the extraction now rides its own narrow
   `datetime_out_of_range_errors()` guard with the `"<out-of-range ts_utc>"`
-  placeholder, still the typed `stale` + WARN), never an uncaught
+  placeholder, still the typed `stale` + WARN) + the refuter-round-7
+  AGGREGATE volume-sum bound (the round-4 screen vetted the PER-ROW plane
+  only while the daily law SUMS per-minute volume per session — a polars
+  Int64 `.sum()` wraps mod 2**64 SILENTLY, so three hand-planted
+  per-row-clean `2**62` volumes, each below the parser's per-VALUE int64
+  cap, summed NEGATIVE and the `CandleBar` refusal ValueError escaped the
+  gate uncaught on BOTH daily laws; the whole-frame Float64 volume sum is
+  now bounded at `float(2**63)` before the law runs — a conservative
+  superset of every per-session sum — reading the same typed `stale` +
+  WARN with the `"<volume sum overflows int64>"` marker; the M2/M3
+  WRITE-path wrap residual stands with its reachability honesty corrected
+  — the parser caps each value, never the aggregate), never an uncaught
   raise out of the sweep-preflight gate on the daily arm's STAMP/VALUE
   corruption plane — the ONE disclosed residual is a wrong-dtype/null-ts
   1-minute-base COLUMN fault, which raises identically on the pre-existing
@@ -2520,7 +2531,8 @@ hostile-review pass._
   the 1m-sweep-skips/prebuild-absorbs inconsistent worlds, pinned verbatim ·
   R2 DEC-DERIVED-SERVE-FRESHNESS-001 — movers/db serve drifted stored bytes the
   gate flags · R3 DEC-PREBUILD-DEDUP-CONVERGE-001 · R4 DEC-MUHURAT-TF-ANCHOR-001 ·
-  R5 DEC-RESAMPLE-VOLUME-GUARD-001 (the polars-upgrade canary) ·
+  R5 DEC-RESAMPLE-VOLUME-GUARD-001 (the polars-upgrade canary; WRITE-path
+  wrap only since the round-7 gate-consumer bound) ·
   R6 DEC-BADTICK-EXTREMES-002 · R7 DEC-SESSION-EXEMPT-RESAMPLE-001); the
   `tf_resampler` "buckets can never straddle sessions" prose corrected to the
   precise in-session law + the B-S1 table (doc-only, formula untouched). HONEST:

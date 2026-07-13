@@ -10,7 +10,7 @@ that will FLIP it — the flip is that future PR's fails-before evidence.
 | R2 test_stale_stored_served_defect_pin | movers stored-first serves drifted derived bytes the gate flags (E2-H5a) | DEC-DERIVED-SERVE-FRESHNESS-001 |
 | R3 test_dup_ts_three_posture_defect_pin | dup-ts: engine keep-first vs prebuild quarantine vs compare-reader dedup (E2-H6) | DEC-PREBUILD-DEDUP-CONVERGE-001 |
 | R4 test_muhurat_off_session_labels_stored_defect_pin | Muhurat off-session bucket labels stored verbatim (E1 B-S1) | DEC-MUHURAT-TF-ANCHOR-001 |
-| R5 test_volume_overflow_defect_pin | silent Int64 volume wrap (E1 M2/M3 — unreachable: ~2.5e16 vol/min) | DEC-RESAMPLE-VOLUME-GUARD-001 |
+| R5 test_volume_overflow_defect_pin | silent Int64 volume wrap on the WRITE path (E1 M2/M3; the freshness-GATE consumer fail-closes since refuter round 7 — the aggregate volume-sum bound) | DEC-RESAMPLE-VOLUME-GUARD-001 |
 | R6 test_bad_tick_close_only_rule_defect_pin | close-only bad-tick rule passes a corrupt extreme | DEC-BADTICK-EXTREMES-002 |
 | R7 test_pre_open_prior_date_label_defect_pin | a pre-09:15 bar labels on the PRIOR IST date's grid (E1 P2 — dormant, ingest-filtered) | DEC-SESSION-EXEMPT-RESAMPLE-001 |
 """
@@ -284,11 +284,16 @@ def test_volume_overflow_defect_pin() -> None:
     """R5 (E1 M2/M3): polars .sum() on Int64 wraps mod 2^64 SILENTLY —
     2·2^62 lands at Int64-min, 4·2^62 wraps to ZERO (stored silently); a
     NEGATIVE wrap reaching the daily CandleBar conversion raises an UNTYPED
-    ValueError (rides the generic per-symbol quarantine, not
-    ResampleInputError). Practically unreachable (a 375-min bucket
-    overflows only at ~2.5e16 volume/min; every production volume is
-    parse-capped at int64); pinned on polars 1.42.1 — this test doubles as
-    the polars-upgrade canary. Fix = DEC-RESAMPLE-VOLUME-GUARD-001."""
+    ValueError (on the PREBUILD write path it rides the generic per-symbol
+    quarantine, not ResampleInputError). The parse path caps EACH value at
+    int64 (`candle_fields.to_int`), NOT the aggregate — so under the
+    hand-planted threat model the wrap IS reachable (two ~2^62 volumes
+    suffice), and it crashed the un-guarded sweep-preflight FRESHNESS gate
+    until refuter round 7 bounded the aggregate volume sum in
+    `compare_daily_freshness` (`TestCorruptBaseAggregateVolume`); what this
+    pin captures is the RESIDUAL polars wrap + the write-path posture,
+    pinned on polars 1.42.1 — this test doubles as the polars-upgrade
+    canary. Fix for the wrap itself = DEC-RESAMPLE-VOLUME-GUARD-001."""
     from brutex.data.spot_daily_resample import resample_1m_to_daily
     from brutex.data.tf_resampler import resample_1m_to_tf
 

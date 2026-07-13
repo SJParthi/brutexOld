@@ -768,8 +768,9 @@ class TestCorruptBaseValue:
     the identical base — the #1594 isolation-escape class, falsifying the
     #1793 "never an uncaught raise out of the sweep-preflight gate"
     absolute. The base frame is now VALUE-SCREENED (one vectorized pass
-    over exactly the ``CandleBar`` refusal plane) BEFORE the daily law
-    runs, reading the typed "stale" verdict + ONE
+    over the PER-ROW ``CandleBar`` refusal plane; the AGGREGATE plane
+    joined in refuter round 7 — ``TestCorruptBaseAggregateVolume``)
+    BEFORE the daily law runs, reading the typed "stale" verdict + ONE
     ``derived_1day_corrupt_base`` WARN."""
 
     def _base(
@@ -1015,6 +1016,129 @@ class TestCorruptBaseValueOutOfRangeStampCross:
             pl.lit(-1_000_000).cast(pl.Int64).alias("volume"),
         )
         pl.concat([poison, df]).write_parquet(p1m)
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }
+
+
+class TestCorruptBaseAggregateVolume:
+    """Refuter round 7 (seat 1, MAJOR): the round-4 value-screen vets the
+    PER-ROW plane only, but the daily law SUMS per-minute volume per session
+    and hands the AGGREGATE to ``CandleBar`` — and a polars Int64 ``.sum()``
+    wraps mod 2**64 SILENTLY (``test_volume_overflow_defect_pin``), so an
+    all-positive, individually-finite, screen-passing volume set (three
+    hand-planted ``2**62`` minutes) summed to a NEGATIVE daily volume, whose
+    ``CandleBar`` refusal ``ValueError`` (EXCLUDED from the law span's
+    escape set by the #1594 consumption law) previously ESCAPED
+    ``lake_derived_freshness_verdicts`` (the exact ``cli.py``
+    sweep-preflight call) as an uncaught raise while the polars-only
+    intraday twin (both sides wrap identically, ``.equals``) stayed
+    graceful — falsifying the round-4 "exactly the refusal plane" claim on
+    the aggregate plane. The whole-frame Float64 volume sum is now bounded
+    at ``float(2**63)`` BEFORE the law runs (a conservative superset of
+    every per-session sum: per-row negatives are flagged first, so every
+    contribution is >= 0), reading the typed ``"stale"`` + ONE
+    ``derived_1day_corrupt_base`` WARN with the
+    ``"<volume sum overflows int64>"`` marker."""
+
+    def _base(self, vols: list[int], *, oi: list[int] | None = None) -> pl.DataFrame:
+        n = len(vols)
+        frame = pl.DataFrame(
+            {
+                "ts_utc": [
+                    datetime(2024, 6, 12, 3, 45, tzinfo=UTC) + timedelta(minutes=i)
+                    for i in range(n)
+                ],
+                "open": [100.0] * n,
+                "high": [100.5] * n,
+                "low": [99.5] * n,
+                "close": [100.1] * n,
+                "volume": pl.Series(vols, dtype=pl.Int64),
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+        if oi is not None:
+            frame = frame.with_columns(pl.Series("open_interest", oi, dtype=pl.Int64))
+        return frame
+
+    def _stored(self, *, oi: int | None = None) -> pl.DataFrame:
+        frame = pl.DataFrame(
+            {
+                "ts_utc": [datetime(2024, 6, 11, 18, 30, tzinfo=UTC)],
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+        if oi is not None:
+            frame = frame.with_columns(pl.lit(oi).cast(pl.Int64).alias("open_interest"))
+        return frame
+
+    def test_volume_sum_wrap_base_reads_stale_with_one_warn(self) -> None:
+        """The refuter's executed repro shape: three per-row-valid ``2**62``
+        volumes whose daily sum wraps to ``-4611686018427387904`` — pre-fix
+        an ESCAPED ``ValueError: CandleBar.volume must be non-negative`` out
+        of the daily law's validating bar build."""
+        base = self._base([2**62, 2**62, 2**62])
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["log_level"] == "warning"
+        assert event["source"] == "NIFTY/1day"
+        assert event["side"] == "1minute-base"
+        assert event["corrupt_rows"] == 3
+        assert event["first_offender"] == "<volume sum overflows int64>"
+
+    def test_volume_sum_wrap_fno_law_reads_stale(self) -> None:
+        """The FNO route (``resample_1m_to_fno_daily``) fail-closes on the
+        identical aggregate wrap — the refuter confirmed the escape on BOTH
+        the spot and the futures daily laws."""
+        base = self._base([2**62, 2**62, 2**62], oi=[1000, 1000, 1000])
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(oi=1000), segment="FNO", source="NIFTY-FUT/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["first_offender"] == "<volume sum overflows int64>"
+
+    def test_large_but_legit_volume_sum_stays_below_the_bound(self) -> None:
+        """A huge-but-int64-safe sum (``3 * 2**61 < 2**63``) is NOT flagged —
+        the law runs and the compare reads the ordinary drift ``"stale"``
+        with ZERO corrupt-base WARN (kills a bound-lowering mutant)."""
+        base = self._base([2**61, 2**61, 2**61])
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                base, self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"  # ordinary value drift vs the stored fixture
+        assert [e for e in logs if e["event"] == "derived_1day_corrupt_base"] == []
+
+    def test_volume_sum_wrap_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's executed end-to-end repro verbatim: a real lake whose
+        1-minute BASE month file is hand-poisoned with three ``2**62``
+        volumes (each per-row valid — the round-4 screen passes all of
+        them); the exact cli sweep-preflight call
+        (``lake_derived_freshness_verdicts``) must return the typed verdict
+        on BOTH arms — never an uncaught ``ValueError`` traceback out of the
+        daily arm while the intraday twin reads "stale" gracefully."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1m = _partition(lake, "INDEX", "NIFTY", "1minute")
+        df = pl.read_parquet(p1m)
+        df.with_columns(
+            pl.Series(
+                "volume",
+                [2**62, 2**62, 2**62, *df.get_column("volume").to_list()[3:]],
+                dtype=pl.Int64,
+            )
+        ).write_parquet(p1m)
         assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
             ("NIFTY", "5minute"): "stale",
             ("NIFTY", "1day"): "stale",

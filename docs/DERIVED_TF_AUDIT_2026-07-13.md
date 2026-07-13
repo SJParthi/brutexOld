@@ -122,7 +122,7 @@ the anchoring test, and reachability honesty.
 | H5(a) | Serve-time staleness: movers stored-first (`movers_snapshot.py:1081-1103`) + `/db query_candles` serve drifted/corrupt derived bytes with no check | `[gate] verdicts: 'stale'` / `[movers] from_stored=True, served closes=[100.3, 999.99, 100.8]` / `[/db] closes: [100.3, 999.99, 100.8]` | **RESIDUAL** → DEC-DERIVED-SERVE-FRESHNESS-001 (an O(1) derive-stamp/1m stat-token compare before a stored-first serve — never a re-derive per poll) | `test_stale_stored_served_defect_pin` | The display half of H5; compounds H2 + H6 (a frozen/poisoned derived partition serves silently between prebuilds). |
 | H6 | Dup-ts three-posture divergence: engine keep-first+WARN (`catalog.py:576-592`) vs prebuild quarantine (`tf_resampler.py:142-166` via `make_lake_read_1m`) vs compare-reader silent dedup (`tf_autoderive.py:74-79`) | `served bars=15 (16 physical)` + WARN / `ResampleInputError: ts_utc must be STRICTLY increasing` / `dedups the same poison silently: rows=15` | **RESIDUAL** (each posture documented + loud; the DEFECT is the divergence) → DEC-PREBUILD-DEDUP-CONVERGE-001 | `test_dup_ts_three_posture_defect_pin` | Until L2/L3 heal runs, a 1m sweep advances while every derived-TF consumer is frozen at the last good derive; the posture call needs the H5(a) companion. |
 | B-S1 | Muhurat off-session bucket labels are STORED (writer side): 17:45 @30m / 17:15 @60m/@240m / 17:59 @2m on the 18:00 open; 13:43 @4m on the 2025 13:45 open | `STORED timestamp=2024-11-01 17:45 IST … oi=50014` (real-writer parquet) | **RESIDUAL** (docstring corrected here — the "never straddle sessions" prose; the labels stand) → DEC-MUHURAT-TF-ANCHOR-001 (an anchor change = a coordinated DEC across resampler + `_stored_serves_cutoff` + `resolve_asof_cutoff` + a lake-wide re-derive — never a drive-by) | `test_muhurat_off_session_labels_stored_defect_pin` | Same-IST-date always holds → month routing unaffected; the labels precede the session open, not the calendar day. |
-| M2/M3 | Silent Int64 volume wraparound in `.sum()` (`tf_resampler.py:274`); a negative wrap raises an UNTYPED ValueError from `CandleBar` | `2·2⁶² → −9223372036854775808`; `4·2⁶² → 0` (stored silently); `ValueError: CandleBar.volume must be non-negative` | **RESIDUAL** (latent/unreachable) → DEC-RESAMPLE-VOLUME-GUARD-001 | `test_volume_overflow_defect_pin` (doubles as the polars-upgrade canary) | A 375-min bucket overflows only at ~2.5e16 volume/min; every production volume is parse-capped at int64 (`candle_fields.to_int`). |
+| M2/M3 | Silent Int64 volume wraparound in `.sum()` (`tf_resampler.py:274`); a negative wrap raises an UNTYPED ValueError from `CandleBar` | `2·2⁶² → −9223372036854775808`; `4·2⁶² → 0` (stored silently); `ValueError: CandleBar.volume must be non-negative` | **PARTIALLY FIXED** — the freshness-GATE consumer fail-closes since refuter round 7 (#1793: the `compare_daily_freshness` aggregate volume-sum bound — pre-fix a hand-planted per-row-clean 2⁶²-volume base CRASHED the un-guarded `cli.py` sweep-preflight with the uncaught ValueError, on BOTH daily laws, while the intraday twin stayed graceful); the WRITE-path wrap itself stays **RESIDUAL** → DEC-RESAMPLE-VOLUME-GUARD-001 | `test_volume_overflow_defect_pin` (the polars-upgrade canary) + `TestCorruptBaseAggregateVolume` (fails pre-round-7) | REACHABILITY CORRECTED (round 7): `candle_fields.to_int` caps EACH value at int64, NOT the aggregate — two parser-accepted ~2⁶² volumes overflow a daily sum, so under the hand-planted threat model the gate's rounds-1–5 guards adopt the class IS reachable; the ~2.5e16 vol/min figure bounds only the parser-written case. |
 | P1/P2 | Pre-09:15 / sub-minute latents: a whole-minute 00:05 IST bar labels the PRIOR IST date (P2, formula parity both sides); a SUB-minute pre-open stamp truncates-not-floors (P1, `tf_resampler.py:258` `.dt.total_minutes()`) | `00:05 IST @30m → label 2024-01-01 23:45 IST` | **RESIDUAL** (dormant — regular ingest session-filters these bars; session-exempt symbols would hit it) → DEC-SESSION-EXEMPT-RESAMPLE-001 (P1 documented here only — no pin: sub-minute stamps cannot enter the lake) | `test_pre_open_prior_date_label_defect_pin` + the oracle pre-open leg | Unreachable today: lake 1m stamps are whole-minute and pre-open is ingest-filtered. |
 
 ## §5 Harness map + re-run procedure
@@ -246,6 +246,26 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   consumption law licenses the full set) with the `"<out-of-range ts_utc>"`
   placeholder, so `base_corrupt` still reads the typed `stale` + the one
   `derived_1day_corrupt_base` WARN.
+- The value-screen also bounds the AGGREGATE plane (refuter round 7 — the
+  round-4 "exactly the refusal plane" completeness claim was FALSE on it):
+  the daily law SUMS per-minute volume per session and hands the AGGREGATE
+  to `CandleBar`, and a polars Int64 `.sum()` wraps mod 2**64 silently, so
+  an all-positive, per-row-screen-passing volume set (three hand-planted
+  2**62 minutes) summed NEGATIVE and the `CandleBar` refusal ValueError
+  (excluded from the law span's escape set by the #1594 consumption law)
+  escaped the sweep-preflight gate uncaught — executed on BOTH the spot and
+  FNO daily laws — while the intraday twin (both sides wrap identically,
+  `.equals`) stayed graceful. The whole-frame Float64 volume sum is now
+  bounded at `float(2**63)` before the law runs (a CONSERVATIVE superset of
+  every per-session sum — per-row negatives are flagged first, so every
+  contribution is ≥ 0; the `>=` boundary rounds the one
+  exactly-at-int64-max sum INTO the fail-closed refusal) → `stale` + the
+  one `derived_1day_corrupt_base` WARN with the
+  `"<volume sum overflows int64>"` marker. The WRITE-path wrap (the silent
+  positive-wrap store / the prebuild's quarantined negative wrap) stays the
+  R5-pinned residual → DEC-RESAMPLE-VOLUME-GUARD-001, its reachability
+  honesty corrected in the §4 M2/M3 row (the parser caps each VALUE at
+  int64, never the aggregate).
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that

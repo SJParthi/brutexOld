@@ -38,6 +38,16 @@ if TYPE_CHECKING:
 
 _LOG = structlog.get_logger(__name__)
 
+# The daily law hands ``CandleBar`` the per-session AGGREGATE volume, and a
+# polars Int64 ``.sum()`` wraps mod 2**64 SILENTLY (refuter round 7; pinned
+# by ``test_volume_overflow_defect_pin``) — so any TRUE volume sum at or past
+# int64-max marks a corrupt/hand-planted base. ``float(2**63)`` is exact (a
+# power of two), and the whole-frame Float64 sum's relative error (~n·2**-52)
+# sits orders of magnitude below the margin at this magnitude, so the bound
+# can neither miss an overflowing sum nor flag a realistic one (a real
+# symbol's TOTAL stored volume is ~10 orders of magnitude below it).
+_VOLUME_SUM_INT64_BOUND = float(2**63)
+
 __all__ = [
     "compare_daily_freshness",
     "compare_derived_freshness",
@@ -190,8 +200,9 @@ def compare_daily_freshness(
     BEFORE the law runs: price sanity via the COMMON
     :func:`~brutex.data.price_sanity.price_violation_expr` (null /
     non-positive / broken-ordering prices) + negative / non-finite
-    volume & ``open_interest`` (exactly the refusal plane of the law's
-    ``CandleBar`` build) — reading the typed ``"stale"`` verdict + ONE
+    volume & ``open_interest`` (the PER-ROW refusal plane of the law's
+    ``CandleBar`` build; the AGGREGATE plane is bounded separately —
+    refuter round 7 below) — reading the typed ``"stale"`` verdict + ONE
     ``derived_1day_corrupt_base`` WARN; a column dtype so hostile the probe
     expressions themselves raise (a hand-planted Utf8/List numeric column —
     ``polars.exceptions.PolarsError``, a NARROW span whose sole failure
@@ -203,7 +214,32 @@ def compare_daily_freshness(
     column) previously escaped that extraction as an uncaught
     ``ValueError``/``OverflowError``, and now reads the
     ``"<out-of-range ts_utc>"`` placeholder with the same typed ``"stale"``
-    + WARN. Disclosed narrowing (corrupt-lake-only): the screen judges
+    + WARN.
+
+    The screen ALSO bounds the law's AGGREGATE refusal plane (refuter
+    round 7): the daily law SUMS per-minute volume per session and hands
+    the AGGREGATE to ``CandleBar``, and a polars Int64 ``.sum()`` wraps
+    mod 2**64 SILENTLY — so an all-positive, individually-finite,
+    per-row-clean volume set (three hand-planted ``2**62`` minutes)
+    summed to a NEGATIVE daily volume, whose ``CandleBar`` refusal
+    ``ValueError`` (EXCLUDED from the law span's escape set by the #1594
+    consumption law) previously ESCAPED the sweep-preflight gate as an
+    uncaught raise, while the polars-only intraday twin (BOTH sides wrap
+    identically under ``.equals``) stayed graceful — the exact
+    daily-escapes / intraday-graceful asymmetry rounds 1-5 closed on
+    every other hand-planted class. The whole-frame Float64 volume sum
+    is now bounded at :data:`_VOLUME_SUM_INT64_BOUND` BEFORE the law
+    runs — a CONSERVATIVE superset of every per-session sum (per-row
+    negatives are flagged above, so every contribution is >= 0 and any
+    overflowing session forces the whole-frame sum past the bound) —
+    reading the SAME typed ``"stale"`` + corrupt-base WARN with the
+    ``"<volume sum overflows int64>"`` marker. Disclosed
+    corrupt-lake-only narrowing: a legit lake's TOTAL volume sits ~10
+    orders of magnitude below the bound, and the ``>=`` boundary at
+    ``float(2**63)`` rounds the one exactly-at-int64-max sum INTO the
+    refusal (fail-closed, never a crash).
+
+    Disclosed narrowing (corrupt-lake-only): the screen judges
     the WHOLE base frame (including rows past the ``before`` bound), and a
     value-corrupt base that previously happened to compare ``"fresh"``
     (the corruption laundered into BOTH sides) or drift-``"stale"`` now
@@ -297,7 +333,8 @@ def compare_daily_freshness(
     # NaN price → Decimal("NaN") comparison decimal.InvalidOperation)
     # previously ESCAPED lake_derived_freshness_verdicts uncaught while the
     # polars-only intraday twin stayed graceful. ONE vectorized pass over
-    # exactly the CandleBar refusal plane; an unprobeable column dtype (the
+    # the CandleBar refusal plane — the PER-ROW mask here plus the round-7
+    # AGGREGATE volume-sum bound below; an unprobeable column dtype (the
     # probe expressions themselves raise PolarsError — a NARROW span whose
     # sole failure mode is that hostile dtype) fail-closes the same way.
     numeric_columns = [*PRICE_SANITY_COLUMNS, "volume"]
@@ -338,6 +375,30 @@ def compare_daily_freshness(
                 first_offender = "<out-of-range ts_utc>"
         else:
             first_offender = ""
+            # Refuter round 7 (seat 1, MAJOR): the per-row mask above vets
+            # the law's PER-ROW refusal plane only — the daily law SUMS
+            # per-minute volume per session and hands the AGGREGATE to
+            # CandleBar, and a polars Int64 .sum() wraps mod 2**64 SILENTLY
+            # (test_volume_overflow_defect_pin), so an all-positive,
+            # individually-finite volume set (three hand-planted 2**62
+            # minutes) summed to a NEGATIVE daily volume — the CandleBar
+            # refusal ValueError, EXCLUDED from the escape set below —
+            # previously ESCAPED the sweep-preflight gate uncaught while
+            # the polars-only intraday twin (both sides wrap identically,
+            # `.equals`) stayed graceful. Bound the AGGREGATE here: the
+            # whole-frame Float64 sum is a CONSERVATIVE superset of every
+            # per-session sum (per-row negatives were flagged above, so
+            # every contribution is >= 0 — any session overflowing int64
+            # forces the whole-frame sum past the bound too); `>=` at the
+            # exact float(2**63) rounds the one at-int64-max legit sum
+            # INTO the refusal — the documented corrupt-lake-only
+            # narrowing (a real symbol's total volume sits ~10 orders of
+            # magnitude below the bound).
+            volume_sum = df_1m.get_column("volume").cast(pl.Float64, strict=False).sum()
+            if isinstance(volume_sum, float) and volume_sum >= _VOLUME_SUM_INT64_BOUND:
+                base_corrupt = True
+                corrupt_rows = df_1m.height
+                first_offender = "<volume sum overflows int64>"
     except pl.exceptions.PolarsError:
         base_corrupt = True
         corrupt_rows = df_1m.height
@@ -351,9 +412,10 @@ def compare_daily_freshness(
             first_offender=first_offender,
             detail=(
                 "1-minute base carries value-corrupt row(s) (non-positive/"
-                "non-finite/misordered OHLC, or negative/non-finite volume/OI "
-                "— a corrupt/hand-planted partition) — verdict 'stale' "
-                "fail-closed; heal or re-pull the 1-minute base"
+                "non-finite/misordered OHLC, negative/non-finite volume/OI, "
+                "or a volume sum overflowing int64 — a corrupt/hand-planted "
+                "partition) — verdict 'stale' fail-closed; heal or re-pull "
+                "the 1-minute base"
             ),
         )
         return "stale"
@@ -378,9 +440,12 @@ def compare_daily_freshness(
         # consumption law: this try spans the whole daily law, where a
         # ValueError is the genuine-code-bug class that must keep
         # propagating — the corrupt-VALUE shapes that could legitimately
-        # raise it, e.g. the R5 negative-volume-wrap CandleBar refusal, are
-        # screened out by the round-4 base value screen ABOVE, so a
-        # ValueError reaching this span is no longer attributable to a
+        # raise it are screened out ABOVE: the round-4 per-row base value
+        # screen plus the round-7 aggregate volume-sum bound (the R5
+        # negative-volume-wrap CandleBar refusal — a per-row-clean base
+        # whose per-session Int64 volume sum wraps negative — is exactly
+        # what the aggregate bound closes), so a ValueError reaching this
+        # span is no longer attributable to a
         # corrupt partition) folds the shape into the same typed
         # fail-closed refusal. Loud: ONE WARN per partition.
         _LOG.warning(
