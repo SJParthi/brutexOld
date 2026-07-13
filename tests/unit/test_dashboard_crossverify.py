@@ -51,6 +51,8 @@ def _report(**overrides: object) -> CrossverifyReport:
         verdict="published",
         published=3,
         skipped_already=1,
+        publish_strict=3,
+        publish_observe=0,
         withheld=0,
         blocked=0,
         nothing=2,
@@ -307,6 +309,16 @@ class TestUniversePanel:
         """Tonight-scope addendum item 3: the options-only Greeks stage has
         nothing to enrich on this options-excluding pull — said in-template."""
         assert "GREEKS N/A" in _tpl()
+
+    def test_panel_wording_is_spot_only(self) -> None:
+        """DEC-CROSSVERIFY-SPOT-ONLY-001: the panel comment + the Run button
+        tooltip carry the amended spot-only contract — the stale
+        "spot + NIFTY/BANKNIFTY futures" wording class is guarded."""
+        text = _tpl()
+        start = text.index("Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001)")
+        block = text[start : text.index('id="cvstatus"', start)]
+        assert block.count("futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001") == 2
+        assert "NIFTY/BANKNIFTY futures" not in block
 
 
 class _InlineScriptExtractor(HTMLParser):

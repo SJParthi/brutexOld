@@ -639,19 +639,20 @@
   </div>
 
   <!-- Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001): the daily TickVault
-       cross-verification run — post-close priority pull (all spot + NIFTY/BANKNIFTY
-       futures, NO options), completeness gate, day-scoped prebuild, pinned CSV
+       cross-verification run — post-close priority pull (spot only — all indices
+       + all stocks; futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001),
+       completeness gate, day-scoped prebuild, pinned CSV
        export, idempotent S3 publish. Same runner as `brutex crossverify run`; the
        run takes the pull locks itself with a bounded wait, so a concurrent pull
        defers it honestly. GREEKS N/A: the Greeks stage is options-only and this
-       pull excludes options — nothing to enrich. Status is written via textContent
-       ONLY (CodeQL XSS guard). -->
+       spot-only pull excludes ALL F&O — nothing to enrich. Status is written via
+       textContent ONLY (CodeQL XSS guard). -->
   <div id="crossverifyPanel" role="status" aria-live="polite"
        style="margin:12px 0;padding:10px 14px;border-radius:10px;
               border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
     <b>Cross-verify → TickVault (daily CSV → S3)</b>
     <button id="crossverifyBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
-            title="Pull today's spot + NIFTY/BANKNIFTY futures (options excluded), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
+            title="Pull today's spot universe (spot only — all indices + all stocks; futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
       ▶ Run cross-verify
     </button>
     <label style="margin-left:8px;color:var(--muted);">

@@ -29,6 +29,7 @@ from tests.golden._crossverify_harness import (
     FIXTURES_DIR,
     GOLDEN_SYMBOLS,
     S3_KEYS_FIXTURE,
+    STRUCTURAL_FUT_SYMBOLS,
     build_golden_lake,
     golden_exports,
     golden_key_lines,
@@ -40,7 +41,8 @@ REGEN_ENV = "BRUTEX_REGEN_CROSSVERIFY_GOLDEN"
 
 def main() -> None:
     """Build + freeze the golden CSVs, refusing to clobber an existing oracle."""
-    fixture_paths = [FIXTURES_DIR / f"{symbol}.csv" for symbol in GOLDEN_SYMBOLS]
+    all_symbols = GOLDEN_SYMBOLS + STRUCTURAL_FUT_SYMBOLS
+    fixture_paths = [FIXTURES_DIR / f"{symbol}.csv" for symbol in all_symbols]
     fixture_paths.append(S3_KEYS_FIXTURE)
     existing = [p for p in fixture_paths if p.exists()]
     if existing and os.environ.get(REGEN_ENV) != "1":
@@ -55,7 +57,9 @@ def main() -> None:
         build_golden_lake(lake)
         exports = golden_exports(lake)
         FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-        for symbol in GOLDEN_SYMBOLS:
+        # SPOT publish goldens + the STRUCTURAL FUT renderer goldens (#1788 —
+        # the FUT bytes are export-chain pins only; never producer-published).
+        for symbol in all_symbols:
             export = exports[symbol]
             if export.disposition != "publish" or export.csv_bytes is None:
                 raise SystemExit(
@@ -65,7 +69,7 @@ def main() -> None:
             (FIXTURES_DIR / f"{symbol}.csv").write_bytes(export.csv_bytes)
             print(f"wrote {symbol}.csv ({export.row_count} rows)")
         S3_KEYS_FIXTURE.write_text(golden_key_lines(exports), encoding="utf-8")
-        print(f"wrote {S3_KEYS_FIXTURE.name}")
+        print(f"wrote {S3_KEYS_FIXTURE.name} (spot-only keys — #1788)")
 
 
 if __name__ == "__main__":
