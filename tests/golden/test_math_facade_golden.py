@@ -75,6 +75,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "resolve_near_month",
         "seconds_of_day",
         "spec_canonical_bytes",
+        "stage1a_bar_bits_batch",
         "total_conditions",
         "version",
         "weekday_from_ordinal",

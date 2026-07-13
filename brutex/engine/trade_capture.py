@@ -87,12 +87,15 @@ __all__ = [
 ]
 
 #: Exit reasons whose EXIT bar the walker folds in full (level fills at
-#: ``AT_LEVEL`` + the end-of-data close happen WITHIN the exit bar's range);
-#: ``signal`` / ``forced_1520`` fill at the exit bar's OPEN, so only the open
-#: is folded — the 1m path mirrors the walker convention exactly
+#: ``AT_LEVEL`` + the end-of-data close + the session-boundary ``session_gap``
+#: close happen WITHIN the exit bar's range — a ``session_gap`` fill is the
+#: CLOSE of a fully-folded bar, mechanically identical to ``end_of_data``,
+#: DEC-TRADESIM-OPEN-SESSION-GUARD-001); ``signal`` / ``forced_1520`` fill at
+#: the exit bar's OPEN, so only the open is folded — the 1m path mirrors the
+#: walker convention exactly
 #: (:func:`brutex.engine.minute_path.trade_excursions_1m`).
 _FULL_RANGE_EXIT_REASONS: Final[frozenset[str]] = frozenset(
-    {"stop_loss", "take_profit", "end_of_data"}
+    {"stop_loss", "take_profit", "end_of_data", "session_gap"}
 )
 
 #: The parity-tooth field names, in report order (recomputed vs stored row).

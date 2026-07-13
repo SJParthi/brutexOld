@@ -177,6 +177,32 @@ def _fib_anchor_history(
     return bars
 
 
+def _lockbox_intraday_history() -> list[CandleBar]:
+    """Twelve real trading days whose ±500-paisa legs close IN-day.
+
+    Fixture repair for DEC-TRADESIM-OPEN-SESSION-GUARD-001: the original
+    ``_fib_anchor_history()`` shape (flat interiors, each 5-bar day a
+    session-tail hole) closed its SL/TP trades ONLY via cross-session fills
+    against each NEXT day's first bar — the exact overnight-gap fills the
+    open-position session guard now closes at the prior day's last stored
+    bar (every trade 0-pnl → flat complement equity → an undefined train
+    Sharpe). Alternating up/down days with in-day ±6-point ranges give the
+    lockbox split REAL in-day trade variance on BOTH sides of the window.
+    """
+    bars: list[CandleBar] = []
+    for n, day in enumerate(_FIB_TRADING_DAYS):
+        base_px = 10_000 + 25 * n
+        base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+        up_day = n % 2 == 0
+        for i in range(6):
+            o = base_px + i
+            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            bars.append(
+                _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
+            )
+    return bars
+
+
 def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
     return CandleBar(
         timestamp=ts_ist.astimezone(UTC),
@@ -678,10 +704,12 @@ class TestLockboxTrainingSplit:
         from brutex.metrics.cpcv import sharpe_of_returns
         from brutex.metrics.lockbox import resolve_lockbox_window
 
-        bars = _fib_anchor_history()
-        # SL/TP legs so trades CLOSE throughout the 12-day history (with no
-        # legs the single mask-0 position holds to end_of_data and the
-        # complement equity is flat — the fallback case tested separately).
+        bars = _lockbox_intraday_history()
+        # SL/TP legs so trades CLOSE IN-day throughout the 12-day history
+        # (with no legs the single mask-0 position holds to end_of_data and
+        # the complement equity is flat — the fallback case tested
+        # separately; the in-day ranges are the DEC-TRADESIM-OPEN-SESSION-
+        # GUARD-001 fixture repair — see _lockbox_intraday_history).
         cand = self._build(bars, sl_paisa=500, tp_paisa=500)
 
         # Independent recompute of the exact reconstruction chain.
@@ -1080,6 +1108,10 @@ def _manual_report() -> cw.CascadeWireReport:
                 # hand-built serializer fixture: the leaderboard dsr stamp
                 # below is not cross-validated against the flag.
                 provisional=True,
+                # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: a MEASURED stage-3
+                # rate here vs the default-None rejected verdict below, so
+                # the serializer is value-pinned for BOTH states.
+                cpcv_pass_rate=0.875,
             ),
             CandidateVerdict(
                 candidate_id=_rid(2),
@@ -2310,3 +2342,53 @@ class TestManifestWindowDt:
     def test_aware_endpoint_offset_preserved(self) -> None:
         parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
         assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+class TestCpcvRateSerialisation:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the additive per-verdict rate key."""
+
+    def test_cpcv_pass_rate_serialises_both_states(self) -> None:
+        # Additive at REPORT_VERSION 1 (the pool_pbo/provisional precedent):
+        # the RAW full-precision fraction on the measured verdict, JSON null
+        # on the never-measured one — and the version does NOT bump.
+        payload = cw.wire_report_to_dict(_manual_report())
+        assert payload["version"] == cw.REPORT_VERSION
+        verdicts = payload["groups"][0]["report"]["verdicts"]  # type: ignore[index]
+        assert verdicts[0]["cpcv_pass_rate"] == 0.875
+        assert verdicts[1]["cpcv_pass_rate"] is None
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"cpcv_pass_rate":0.875' in raw
+        assert b'"cpcv_pass_rate":null' in raw
+
+
+class TestWriteReportAtomic:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: write_report is tmp→fsync→replace."""
+
+    def test_bytes_identical_and_no_temp_residue(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+        # The atomic_write_simple temp file never survives a clean write.
+        residue = [p.name for p in path.parent.iterdir() if p.name != path.name]
+        assert residue == []
+
+    def test_lands_via_os_replace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import atomic_io
+
+        calls: list[tuple[str, str]] = []
+        real_replace = atomic_io.os.replace
+
+        def _spy(src: str | Path, dst: str | Path) -> None:
+            calls.append((str(src), str(dst)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(atomic_io.os, "replace", _spy)
+        path = cw.write_report(tmp_path, _manual_report())
+        # Exactly ONE atomic rename, landing the final report path — a
+        # concurrent /results read can never see a torn half-write.
+        assert [dst for _, dst in calls] == [str(path)]
+
+    def test_overwrite_replaces_previous_report(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        first = path.read_bytes()
+        cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == first  # deterministic bytes, atomically re-landed

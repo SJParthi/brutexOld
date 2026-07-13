@@ -2010,6 +2010,118 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaunchAgents dir (default ~/Library/LaunchAgents)",
     )
 
+    # ── crossverify (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) ──
+    # The daily TickVault cross-verification producer: post-close priority
+    # pull → completeness gate → day-scoped prebuild → CSV export → idempotent
+    # S3 publish, all through the 100%-tested brutex.crossverify runner.
+    crossverify = sub.add_parser(
+        "crossverify",
+        help=(
+            "Daily TickVault cross-verify producer (pull → gate → prebuild → "
+            "CSV export → S3 publish) + launchd scheduling "
+            "(DEC-CROSSVERIFY-PRODUCER-001)"
+        ),
+    )
+    crossverify_sub = crossverify.add_subparsers(dest="crossverify_command", required=True)
+
+    cv_run = crossverify_sub.add_parser(
+        "run",
+        help=(
+            "Run the producer once (launchd/cron entry point). Exit 0 on "
+            "published/staged/skips, 1 on lock refusal / gate absent / junk "
+            "config, 2 on halts/blocked/withheld/publish-failed (cron-red)"
+        ),
+    )
+    cv_run.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_run.add_argument(
+        "--day",
+        default=None,
+        help="Export day YYYY-MM-DD (default: today IST — the post-close run's day)",
+    )
+    cv_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Render in memory ONLY — no locks, no pulls, no derives, no staging, no S3",
+    )
+    cv_run.add_argument(
+        "--skip-pull",
+        action="store_true",
+        dest="skip_pull",
+        help="Export/stage/publish from the EXISTING lake only (no vendor calls)",
+    )
+    cv_run.add_argument(
+        "--no-publish",
+        action="store_true",
+        dest="no_publish",
+        help="Render + stage only — the bring-up mode (no S3 puts)",
+    )
+
+    cv_install = crossverify_sub.add_parser(
+        "install",
+        help=(
+            "One-time launchd bootstrap (macOS): write + load the LaunchAgent "
+            "and VERIFY launchctl lists it. --at is REQUIRED (probe-decided "
+            "operator config — no default fire time ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--at",
+        default=None,
+        help=(
+            "Local fire time HH:MM — REQUIRED; choose it from the 5-day "
+            "post-close settle probe (no default ships)"
+        ),
+    )
+    cv_install.add_argument(
+        "--label",
+        default="com.brutex.crossverify",
+        help="launchd label (default com.brutex.crossverify)",
+    )
+    cv_install.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+    cv_install.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Baked into the plist EnvironmentVariables when set",
+    )
+
+    cv_uninstall = crossverify_sub.add_parser(
+        "uninstall", help="Unload + remove the LaunchAgent, verifying it is no longer listed"
+    )
+    cv_uninstall.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_uninstall.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
+    cv_status = crossverify_sub.add_parser(
+        "status",
+        help=(
+            "Schedule presence, launchctl listing, newest publish journal, "
+            "trading-day-aware dead-man verdict — honest lines even when "
+            "nothing ran"
+        ),
+    )
+    cv_status.add_argument("--lake-root", type=Path, default=None, help="Lake root")
+    cv_status.add_argument("--label", default="com.brutex.crossverify", help="launchd label")
+    cv_status.add_argument(
+        "--plist-dir",
+        type=Path,
+        default=None,
+        dest="plist_dir",
+        help="LaunchAgents dir (default ~/Library/LaunchAgents)",
+    )
+
     return parser
 
 
@@ -3508,6 +3620,28 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         pull_intent_store = PullIntentStore(_resolve_lake_root(lake_root))
     except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
         _log.warning("pull_intent.build_failed", error=str(exc))
+    # Event-loop liveness watchdog (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+    # G5): default ON behind the fail-loud BRUTEX_LOOP_WATCHDOG kill switch —
+    # the env parse is DELIBERATELY outside the best-effort guard (a junk value
+    # aborts startup with a clean one-liner, the resolve_* house convention:
+    # a typo must never SILENTLY disable the watchdog), while the construction
+    # itself is best-effort (a fault logs and the dashboard still binds).
+    from brutex.observability.loop_watchdog import LoopWatchdog, resolve_loop_watchdog_enabled
+
+    try:
+        loop_watchdog_enabled = resolve_loop_watchdog_enabled()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    loop_watchdog: Any = None
+    if loop_watchdog_enabled:
+        try:
+            from brutex.notifications.sweep_alerts import SweepAlerter
+            from brutex.observability.metrics import get_registry
+
+            loop_watchdog = LoopWatchdog(alerter=SweepAlerter(), registry=get_registry())
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
+            _log.warning("loop_watchdog.build_failed", error=str(exc))
     app = build_app(
         state,
         instrument_store=store,
@@ -3515,6 +3649,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         liveproof=liveproof,
         allowed_hosts=allowed_hosts,
         pull_intent_store=pull_intent_store,
+        loop_watchdog=loop_watchdog,
     )
     # Auto-run the CHEAP preflight stages in the holder's background daemon
     # thread — the operator starts BruteX as always and the health proof runs
@@ -5050,6 +5185,17 @@ def cmd_fetch(
         # path. The pull OWNS their lifetime + MUST drain them in the `finally` below BEFORE
         # `end_pull_ledger` (settle-after-durable), so every queued window is processed +
         # ledger-recorded first.
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE, fail-loud on junk at pull start (the
+        # existing loud CLI failure), never mid-run — and BEFORE the
+        # thread-owning write consumer / fetch pipeline are built, mirroring
+        # the dashboard sites (round-1 R3-MAJOR-1 uniformity hoist; the CLI's
+        # threads are daemons + one-shot, so this is hygiene, not a live
+        # leak). ``--dry-run`` / ``--inspect`` short-circuit to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` pattern).
+        from brutex.data.today_completeness import resolve_today_completeness_enabled
+
+        today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -5103,6 +5249,9 @@ def cmd_fetch(
                     # land on the window's first day) leaves it OFF so it never false-reds
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001).
                     detect_completeness_gaps=not dry_run,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=today_gate,
                     observed_holidays=observed_holidays,
                     storm_breaker=storm_breaker,
                     # Learned-floor clamp + in-pull depth learner
@@ -5974,6 +6123,182 @@ def cmd_nightly_status(
             SweepAlerter().nightly_deadman(
                 detail=report.deadman.detail,
                 newest_run_age_seconds=report.deadman.newest_run_age_seconds,
+            )
+    return EXIT_OK
+
+
+# ────────────────────────────────────────────────────────────────────────
+# crossverify (DEC-CROSSVERIFY-PRODUCER-001) — thin, fully-covered shims
+# over the 100%-tested brutex.crossverify modules (the cmd_nightly template).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_crossverify_run(
+    *,
+    lake_root: Path | None,
+    day: str | None,
+    dry_run: bool,
+    skip_pull: bool,
+    no_publish: bool,
+) -> int:
+    """Run the cross-verify producer once (the launchd/cron entry point).
+
+    Thin by design: fail-loud config resolve → :func:`default_seams` →
+    :func:`run_crossverify` → the report's own exit code. The runner NEVER
+    raises for a data/vendor/publish problem (halts fold into the ``suspect``
+    verdict, exit 2) and owns the market-hours START gate at its step E — an
+    in-window vendor-calling invocation returns the honest
+    ``deferred_market_hours`` verdict with a clean EXIT_OK (the ``cmd_fetch``
+    deferral posture, DEC-GROWW-MARKET-HOURS-GUARD-001; ``--dry-run`` /
+    ``--skip-pull`` make no vendor calls and are exempt); this shim NEVER
+    passes any exemption. Exit law (DEC-CROSSVERIFY-PRODUCER-001 §4):
+    0 published/staged_only/nothing/skips/disabled/deferred · 1 junk config /
+    lock refusal / gate-module-absent · 2 halts/blocked/withheld-final/
+    publish-failed/deadline-suspect/calendar-abstain (cron-red).
+    """
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify run")
+    parsed_day: date | None = None
+    if day is not None:
+        try:
+            parsed_day = date.fromisoformat(day)
+        except ValueError:
+            print(f"[brutex] --day must be YYYY-MM-DD, got {day!r}", file=sys.stderr)
+            return EXIT_USER_ERROR
+    from brutex.crossverify.config import resolve_crossverify_config
+    from brutex.crossverify.run import default_seams, run_crossverify
+
+    try:
+        config = resolve_crossverify_config(
+            lake_root=resolved,
+            day=parsed_day,
+            dry_run=dry_run,
+            skip_pull=skip_pull,
+            no_publish=no_publish,
+        )
+        # Seam build resolves the market-hours env ONCE, fail-loud
+        # (resolve_market_closed) — junk env exits EXIT_USER_ERROR here,
+        # before any lock/vendor work (the DEC-RAM-BUDGETS-001 convention).
+        seams = default_seams(config)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    report = run_crossverify(config, seams)
+    detail = f": {report.detail}" if report.detail else ""
+    print(f"[brutex] crossverify {report.day.isoformat()} — {report.verdict}{detail}")
+    print(
+        f"[brutex]   published {report.published} · already {report.skipped_already} · "
+        f"recovered-prior {report.recovered_prior} · withheld {report.withheld} · "
+        f"blocked {report.blocked} · nothing {report.nothing} · "
+        f"excluded {report.excluded} · publish-failed {report.publish_failed} · "
+        f"derived {report.derived} ({report.derive_failed} failed)"
+    )
+    return report.exit_code
+
+
+def cmd_crossverify_install(
+    *,
+    at: str | None,
+    label: str,
+    plist_dir: Path | None,
+    lake_root: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+    platform: str | None = None,
+) -> int:
+    """One-time launchd bootstrap — ``--at`` REQUIRED (probe-decided config)."""
+    from brutex.crossverify.schedule import (
+        AT_REQUIRED_MESSAGE,
+        CROSSVERIFY_CRON_GUIDANCE,
+        install_crossverify,
+    )
+    from brutex.nightly.schedule import parse_at, pmset_wake_command
+
+    plat = sys.platform if platform is None else platform
+    if plat != "darwin":
+        print(
+            "[brutex] crossverify install targets macOS launchd; on Linux schedule via cron:",
+            file=sys.stderr,
+        )
+        print(f"[brutex]   {CROSSVERIFY_CRON_GUIDANCE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if at is None or not at.strip():
+        print(f"[brutex] {AT_REQUIRED_MESSAGE}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    try:
+        hour, minute = parse_at(at)
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    outcome = install_crossverify(
+        at=at,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        lake_root=lake_root,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    print(
+        "[brutex] REQUIRED for on-time fires: launchd does NOT wake a sleeping "
+        "Mac — run this scheduled wake yourself (one-time, sudo — BruteX never "
+        f"runs pmset): {pmset_wake_command(hour, minute)}"
+    )
+    return EXIT_OK
+
+
+def cmd_crossverify_uninstall(
+    *,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """Unload + remove the producer's LaunchAgent, verifying it is unlisted."""
+    from brutex.crossverify.schedule import uninstall_crossverify
+
+    outcome = uninstall_crossverify(
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    if not outcome.ok:
+        print(f"[brutex] {outcome.detail}", file=sys.stderr)
+        return EXIT_INTERNAL_ERROR
+    print(f"[brutex] {outcome.detail}")
+    return EXIT_OK
+
+
+def cmd_crossverify_status(
+    *,
+    lake_root: Path | None,
+    label: str,
+    plist_dir: Path | None,
+    runner: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
+) -> int:
+    """The morning command — honest producer status even when nothing ran."""
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="crossverify status")
+    from brutex.crossverify.schedule import status
+
+    report = status(
+        lake_root=resolved,
+        plist_dir=plist_dir if plist_dir is not None else _default_plist_dir(),
+        runner=runner if runner is not None else _launchctl_runner,
+        label=label,
+    )
+    for line in report.lines():
+        print(f"[brutex] {line}")
+    if report.deadman.verdict == "MISSED":
+        # The row-20 posture (the nightly-status precedent): a Mac asleep at
+        # the trigger starts NO process, so only the surface that NOTICES the
+        # silence can alert. Best-effort — a disabled Telegram is a silent
+        # no-op; a raise never breaks the read-only status command.
+        with contextlib.suppress(Exception):
+            from brutex.notifications.sweep_alerts import SweepAlerter
+
+            SweepAlerter().crossverify_refused(
+                run_id="deadman", reason=f"DEAD-MAN: {report.deadman.detail}"
             )
     return EXIT_OK
 
@@ -7205,6 +7530,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # manifest records stage-3 enablement + the refined-cell list.
         cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
 
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
+        # into the results-depth adapter below (None when the cascade had no
+        # specs — the depth pass then writes the honest not_validated/no_report
+        # entries; no disk re-read, so a stale on-disk report can never leak in).
+        cascade_report = None
+
         if cascade_specs:
             # Freeze the per-leaderboard trial statistics into the manifest
             # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
@@ -7300,6 +7631,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     interval="1minute",
                 )(_RESULTS_DEPTH_VIX_SYMBOL),
                 margin_entry_date=_parse_dt(start).date(),
+                cascade_report=cascade_report,
             )
         else:
             print(
@@ -9377,6 +9709,7 @@ def _run_results_depth_adapter(
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
     pass_runner: Callable[..., Any] | None = None,
+    cascade_report: Any | None = None,
 ) -> bool:
     """The fenced run-end results-depth invocation (DEC-SWEEP-RESULTS-DEPTH-001).
 
@@ -9395,14 +9728,37 @@ def _run_results_depth_adapter(
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
+
+    ``cascade_report`` is the IN-MEMORY :class:`CascadeWireReport` the sweep's
+    Stage-4 cascade just produced (DEC-RESULTS-CASCADE-VERDICT-JOIN-001), or
+    ``None`` when the cascade was skipped. It is flattened HERE — inside the
+    fence — via the ONE :func:`brutex.engine.cascade_join.build_cascade_join`
+    law; a :class:`~brutex.engine.cascade_join.CascadeJoinError` is a
+    production-unreachable belt (our own serialization feeds it) that logs
+    ``cli.results_depth.cascade_join_failed`` and threads ``None`` — the pass
+    still runs, the sweep never fails.
     """
     import structlog
 
+    from brutex.engine.cascade_join import CascadeJoinError, build_cascade_join
+    from brutex.engine.cascade_wire import wire_report_to_dict
     from brutex.engine.margin_history import margin_roi_payload
     from brutex.engine.results_depth_pass import run_results_depth_pass
     from brutex.ranking.phrases import reason_payload
 
     runner = run_results_depth_pass if pass_runner is None else pass_runner
+
+    cascade_join = None
+    if cascade_report is not None:
+        try:
+            cascade_join = build_cascade_join(wire_report_to_dict(cascade_report))
+        except CascadeJoinError as exc:
+            structlog.get_logger("brutex.cli").warning(
+                "cli.results_depth.cascade_join_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                note="depth pass runs without the cascade join — entries read not_validated",
+            )
 
     def _margin_roi(candidate: Any) -> dict[str, object]:
         # lots=1 here is a margin-SIZING hypothetical for the refusal-only
@@ -9429,6 +9785,7 @@ def _run_results_depth_adapter(
             vix_bars=vix_bars,
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
+            cascade_join=cascade_join,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -9871,6 +10228,29 @@ def _dispatch(argv: list[str] | None) -> int:
         return cmd_nightly_status(
             lake_root=args.lake_root,
             results_root=args.results_root,
+            label=args.label,
+            plist_dir=args.plist_dir,
+        )
+    if args.command == "crossverify":
+        if args.crossverify_command == "run":
+            return cmd_crossverify_run(
+                lake_root=args.lake_root,
+                day=args.day,
+                dry_run=args.dry_run,
+                skip_pull=args.skip_pull,
+                no_publish=args.no_publish,
+            )
+        if args.crossverify_command == "install":
+            return cmd_crossverify_install(
+                at=args.at,
+                label=args.label,
+                plist_dir=args.plist_dir,
+                lake_root=args.lake_root,
+            )
+        if args.crossverify_command == "uninstall":
+            return cmd_crossverify_uninstall(label=args.label, plist_dir=args.plist_dir)
+        return cmd_crossverify_status(
+            lake_root=args.lake_root,
             label=args.label,
             plist_dir=args.plist_dir,
         )

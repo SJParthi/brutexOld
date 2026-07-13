@@ -152,6 +152,35 @@ Set by `.claude/settings.json` in every Claude Code session.
 
 ---
 
+## 8. Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001 / DEC-CROSSVERIFY-S3-WRITE-POSTURE-001)
+
+All parsed FAIL-LOUD once at run start by
+`brutex.crossverify.config.resolve_crossverify_config` — a set-but-junk
+value exits `EXIT_USER_ERROR` (CLI) / HTTP 400 (dashboard), never a silent
+coercion. Switches accept `1/on/true/yes` · `0/off/false/no` (unset/blank =
+the default).
+
+| Env var | Default | Allowed | Module |
+|---|---|---|---|
+| `BRUTEX_CROSSVERIFY` | on | switch — `0` disables the producer (a scheduled fire exits 0 `disabled`) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_PUBLISH` | on | switch — `0` = render+stage only (bring-up mode, no S3 puts) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_S3_BUCKET` | `tv-prod-cold` | bucket name (no leading/trailing `/`) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_S3_PREFIX` | `crossverify/groww` | key prefix (no leading/trailing `/`) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_AWS_REGION` | `ap-south-1` | AWS region | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_PULL_LOOKBACK_DAYS` | `7` | int >= 0 — the priority pull's from-date lookback | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_LOCK_WAIT_S` | `2700.0` | finite float >= 0 — the bounded pull-lock wait budget (45 min) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_LOCK_RETRY_S` | `60.0` | finite float >= 0.1 — the lock re-attempt cadence | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_DEADLINE_S` | `14400.0` | finite float >= 1 — the 4 h hard wall (breach = `suspect`, exit 2) | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_SETTLE_RETRY_ROUNDS` | `1` | int >= 0 — bounded settle-retry rounds for short/settling files | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_SETTLE_RETRY_DELAY_S` | `600.0` | finite float >= 0 — the per-round settle sleep | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` | `5` | int >= 0 — prior-day pending-journal recovery-scan lookback | `brutex.crossverify.config` |
+
+**Setup runbook:** see `docs/runbooks/crossverify-producer.md` (IAM grant,
+`pip install -e ".[crossverify]"`, the probe-decided `--at`, install +
+launchctl verification, recovery playbook, dead-man).
+
+---
+
 ## Quick smoke test
 
 After setting env vars:
@@ -178,4 +207,5 @@ typos).
 * DEC-PORTS-001 — port config layout
 * DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — live vendor contract
 * DEC-AWS-ONLY-CREDS-001 (MIGRATION #1065) — §5 AWS-SSM-only credential contract
+* DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION #1776) + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) — §8 `BRUTEX_CROSSVERIFY_*` surface
 * DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the current vendor)

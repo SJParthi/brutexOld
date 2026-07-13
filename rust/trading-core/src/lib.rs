@@ -39,6 +39,7 @@ pub mod evaluator;
 pub mod greeks;
 pub mod indicators;
 pub mod spec;
+pub mod stage1a_batch;
 
 pub use evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 pub use greeks::{GreeksOut, black76_price, greeks};
