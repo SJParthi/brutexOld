@@ -1142,7 +1142,10 @@ sweep via `cmd_sweep_all` on the daemon key-list precedent, the three
 unattended escape flags structurally absent AND dispatch-hard-refused —
 STRICTER than the daemon, which refuses only `--allow-out-of-scope`), under a
 NEW nightly flock + acquire-and-HELD pull locks (the LAKE pull lock held
-through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical;
+through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical
+[the lake-lock-held-through-the-sweep-leg clause SUPERSEDED by
+DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — released after
+PULL+PREBUILD, FREE during the sweep leg];
 holder-note honesty on refusals — a pull refused mid-nightly reads
 "(holder: nightly:<id>)"), with the R42 break law (first failing link stops;
 later links BLOCKED-because-<link>; tripwires — link-transition, DURABLE-audit

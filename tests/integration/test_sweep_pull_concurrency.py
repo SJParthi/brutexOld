@@ -309,6 +309,11 @@ def test_pull_mid_compute_leaves_sweep_results_byte_identical(
     )
     assert rc == EXIT_OK
     assert _result_tree(poisoned_results) != control_tree
+    # ...and the sweep_runs SIBLING differs too (the extra preloaded bars move
+    # data_snapshot_hash → a different run_id keys the run-dir + sidecar
+    # paths), so the treatment_runs == control_runs equality above is
+    # INDEPENDENTLY proven non-vacuous — not just the sweeps tree.
+    assert _result_tree(tmp_path / "poisoned" / "sweep_runs") != control_runs
 
 
 def test_sweep_preload_still_refused_while_pull_holds_the_lake_lock(

@@ -460,19 +460,22 @@ def _sweep_shaped_job(tmp_path: Path) -> BackgroundPullJob:
 
 
 def test_sweep_job_lock_free_worker_takes_the_g10_preload_guard(tmp_path: Path) -> None:
-    """THE self-conflict regression (fails before) — the investigation's Repro B
-    as a permanent test.
+    """The POST-fix lock-free composition pin — an always-green BELT, honestly
+    NOT a fails-before regression (``cross_process_lock=False`` is hardcoded
+    here, so this test passes on the pre-fix tree too; the genuine fails-before
+    coverage lives in the route kwargs pin —
+    ``test_dashboard_sweep_run_route.py::test_route_starts_job_with_cross_process_lock_false``
+    — plus the nightly hold-span pin and the nightly e2e pins).
 
-    DEC-SWEEP-LOCK-PULL-CONCURRENCY-001: a job composed exactly like the
-    ``/api/v1/sweep/run`` route (``job_kind=SWEEP``, and — since the fix —
-    ``cross_process_lock=False``) whose worker performs ``cmd_sweep_all``'s
-    verbatim preload step: the REAL G10 ``lake_read_guard`` ``LOCK_SH`` on the
-    job's OWN lake. The guard must ACQUIRE (no ``LakeBusyError``) and the job
-    must finish DONE. BEFORE the fix the route left ``cross_process_lock`` at
-    the default ``True``: the job's whole-run ``LOCK_EX`` on the same file made
-    the SH acquire raise ``LakeBusyError`` (flock is per open file description)
-    — every dashboard sweep died at preload with ``state='error'`` since G10
-    landed (commit 3f32b3e).
+    DEC-SWEEP-LOCK-PULL-CONCURRENCY-001: a job composed exactly like the FIXED
+    ``/api/v1/sweep/run`` route (``job_kind=SWEEP``, ``cross_process_lock=False``)
+    whose worker performs ``cmd_sweep_all``'s verbatim preload step — the REAL
+    G10 ``lake_read_guard`` ``LOCK_SH`` on the job's OWN lake — must ACQUIRE
+    (no ``LakeBusyError``) and finish DONE. The PRE-fix composition (the
+    route's old default ``True``, whose whole-run ``LOCK_EX`` denied the SH
+    acquire — flock is per open file description — killing every dashboard
+    sweep at preload since G10 landed, commit 3f32b3e) is pinned by the
+    INVERSE test below, ``test_sweep_job_with_job_level_ex_lock_self_conflicts_g10``.
     """
     from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
     from brutex.engine.sweep_singleflight import lake_read_guard

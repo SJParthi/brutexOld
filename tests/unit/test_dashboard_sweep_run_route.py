@@ -294,8 +294,13 @@ def test_route_starts_job_with_cross_process_lock_false(
     resp = client.post("/api/v1/sweep/run")
     assert resp.status_code == 200
     assert resp.json()["started"] is True
-    assert captured_kwargs["cross_process_lock"] is False  # THE pin
-    assert captured_kwargs["job_kind"] == JOB_KIND_SWEEP
+    # `.get(...)` deliberately: on the pre-fix route the kwarg is ABSENT, so
+    # the pin fails as a clean `None is not False` assertion (not an opaque
+    # KeyError). The route's start() call is SYNCHRONOUS inside the handler —
+    # `started: True` in the response proves the (spied) call already ran, so
+    # there is nothing to wait for here.
+    assert captured_kwargs.get("cross_process_lock") is False  # THE pin
+    assert captured_kwargs.get("job_kind") == JOB_KIND_SWEEP
     assert _wait_for_job(client)["state"] == "done"
 
 
