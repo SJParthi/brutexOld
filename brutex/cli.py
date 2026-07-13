@@ -366,20 +366,11 @@ def _add_sweep_grid_args(
             "'prev_day,rolling_weekly,weekly_static' to test all three (×3 grid)"
         ),
     )
+    # DEC-FILL-WORST-CASE-001: the adverse-max floor (worst_case, the default)
+    # vs the legacy exact fills; the flag wins over $BRUTEX_FILL_MODE and the
+    # mode enters every run identity (emit-on-non-precise, no collisions).
     parser.add_argument(
-        "--fill-mode",
-        default=None,
-        dest="fill_mode",
-        choices=("worst_case", "precise"),
-        help=(
-            "Global fill mode (DEC-FILL-WORST-CASE-001): worst_case (the "
-            "default — every fill at the bar's worst price under the "
-            "adverse-max law, the anti-illusion floor) or precise (the "
-            "legacy exact fills). The flag wins over $BRUTEX_FILL_MODE; "
-            "unset resolves the env then the worst_case default. The mode "
-            "enters every run identity (emit-on-non-precise), so the two "
-            "modes never collide in one results tree"
-        ),
+        "--fill-mode", default=None, choices=("worst_case", "precise"), help="worst_case|precise"
     )
     parser.add_argument(
         "--conditions",
