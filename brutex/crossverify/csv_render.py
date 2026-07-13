@@ -10,7 +10,10 @@ post-snap stored values, canonical-2dp for legacy pre-snap noise floats;
 NEVER ``f"{v:.2f}"`` on the raw float, the ``bxFixed2`` IEEE half-boundary
 bug class). ``oi`` renders the EMPTY string for spot and the stored int for
 futures (``0`` renders ``0``); a NULL-OI futures row REFUSES — a partial day
-is a withheld file, never an empty cell in a published futures file.
+is a withheld file, never an empty cell in a published futures file. The
+futures ``oi`` laws are STRUCTURAL since DEC-CROSSVERIFY-SPOT-ONLY-001
+(MIGRATION.md #1788 — the producer is spot-only); retained + golden-pinned
+for the contract's possible re-expansion.
 
 The renderer writes through :class:`~brutex.dashboard._csv_utils.FormulaSafeWriter`
 (the COMMON guard is structurally present) AND pre-validates every cell with
