@@ -35,6 +35,27 @@ post-close settle probe measuring the UNDOCUMENTED vendor EOD settle time
 NIFTY/BANKNIFTY/SENSEX; pull-INTEGRITY only; the per-item record lives in the
 §1 Active-branch blurb + MIGRATION.md #1774 — this header carries the one-line
 summary, never the story.)
+Earlier: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 —
+the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
+bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+`scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
+at all three rollup scan sites (count · failed · pending) — so the
+offline-runner pending-forever shape can never refuse a merge (the ONE
+residual — a manually-CANCELLED bench run's `bless-baseline` check — is
+named in #1753, documented not broadened per the operator only-m4pro
+constraint) and
+auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
+while a FAILED m4pro is surfaced as a WARN-only line that never affects the
+exit code AT THIS GATE (auto-merge's own untouched ci-check still refuses a
+FAILED/CANCELLED m4pro — pre-existing; the PENDING shape is non-blocking
+end-to-end) and every REQUIRED check still blocks fully (redteam-pinned incl.
+the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
+fails-before-proven against the baseline script). The check is genuinely
+NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
+bench regression is caught POST-merge on the self-hosted runner, never a
+merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1753.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -2421,6 +2442,56 @@ hostile-review pass._
   `today_completeness.py` 100% line+branch standalone on a NEW ci.yml gate;
   every touched gated module re-measured 100.00%; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 errors.)
+  Earlier: `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753** —
+  the pre-merge gate treats the non-required self-hosted
+  `m4pro-absolute-throughput` check as NON-BLOCKING: `scripts/ci/pre-merge-check.sh`
+  gains a HARDCODED (deliberately NOT env-overridable — broadening the set
+  requires a code change + a new DEC) `NONBLOCKING_CHECK_NAMES` constant
+  UNIONED with the caller's `IGNORE_CHECK_NAMES` at all three rollup scan
+  sites (count · failed · pending), so the offline-runner pending-forever
+  shape can never refuse a merge AND auto-merge.yml's
+  caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
+  the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
+  that never affects the exit code — the round-3 claim-scoping: that
+  tolerance is THIS gate's verdict only, since on the auto-merge path the
+  workflow's own EARLIER ci-check `failing` scan (deliberately untouched —
+  outside this change's file-set) still refuses a FAILED/CANCELLED/
+  TIMED_OUT m4pro, while the PENDING shape (the motivating incident) is
+  non-blocking end-to-end because a queued check carries no conclusion for
+  that scan to match; the sibling `bench-m4pro.yml`
+  `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
+  RESIDUAL — operator authorization covers exactly
+  `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
+  evidence 29172994876 + 29189211057: it cannot block in the offline-runner
+  scenario — its needs-downstream check-run is never instantiated while
+  m4pro sits QUEUED, and a completed feature-branch run marks it SKIPPED —
+  so the ONE reachable re-block shape is an operator manually CANCELLING a
+  stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
+  full record lives in #1753's HONEST envelope); every REQUIRED check still
+  blocks —
+  redteam-pinned (NEW `TestM4proNonblocking`, 9 tests — incl. the round-4
+  TIMED_OUT warn-path pin `test_timed_out_m4pro_warns_but_does_not_block`
+  (the one round-4 cosmetic NIT, closed mutant-verified) and the round-1
+  review fold's source pin that the hardcoded set is EXACTLY
+  {m4pro-absolute-throughput} with the env-default override idiom absent,
+  round-3-HARDENED with the line-start assignment census + the append
+  refusal + the exact-passthrough census (both evasion mutants — an append
+  after the literal; a second line-start env-defaulted assignment —
+  verified passing the round-1 pin and failing the hardened one) —
+  fails-before-proven 5/7 on the 7 behavior tests against the baseline
+  script incl. THE pending-m4pro case; the
+  pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
+  pins guard the unchanged fail-closed posture; the excluded entry never
+  inflates the EXPECTED_MIN_CHECKS floor). SAFE because the check is
+  genuinely NON-required (not in ci.yml's `ci-ok` needs AND absent from
+  branch-protection-drift.yml's 22-member required-contexts set — the
+  round-1 review corrected the overstated "aggregate gate only" wording in
+  the script comment + ledger to this two-way evidence; MIGRATION.md #382
+  DEC-M4PRO-PR-TRIGGER-001 + #1534 DEC-BENCH-ABS-BASELINE-001 — a bench
+  regression is caught POST-merge on the self-hosted runner, never a merge
+  blocker, unchanged here). CI-gate script + redteam tests + docs only;
+  ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no scope/vocab/rate change.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -6049,6 +6120,24 @@ hostile-review pass._
   settle probe under docs/groww/probe/; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1774–#1775 for the full blurb)
+  Earlier: `claude/premerge-m4pro-nonblock`
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 — the pre-merge gate
+  treats the non-required self-hosted `m4pro-absolute-throughput` check as
+  NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+  `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
+  `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
+  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks
+  at this gate (auto-merge's own untouched ci-check still refuses a
+  FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
+  end-to-end);
+  the offline-runner pending-forever shape can never refuse a merge (the
+  manual-cancel `bless-baseline` residual is named in #1753 — documented,
+  not broadened, per the operator only-m4pro constraint);
+  every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
+  safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
+  caught post-merge on the self-hosted runner); CI-gate script + redteam
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
