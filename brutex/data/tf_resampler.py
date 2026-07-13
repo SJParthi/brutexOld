@@ -34,12 +34,27 @@ no OI), the output is byte-identical to before — no OI column is added.
 
 ## Anchor
 
-All buckets anchored at 09:15 IST (session open) by FIXED ARITHMETIC
-(DEC-RESAMPLE-ANCHOR-002): ``bucket = session_open + floor((ts -
-session_open)/tf)*tf``, where ``session_open`` is the bar's IST date at
-09:15. The grid depends only on calendar time — a missing 09:15 bar can
-NEVER shift it (the prior first-bar anchoring could). A 5m bar at
-09:15:00 IST covers [09:15:00, 09:20:00).
+All buckets anchored at 09:15 IST by FIXED ARITHMETIC
+(DEC-RESAMPLE-ANCHOR-002): ``bucket = anchor + floor((ts -
+anchor)/tf)*tf``, where ``anchor`` is the bar's IST date at 09:15 — the
+REGULAR session open, deliberately NOT the day's actual session open. The
+grid depends only on calendar time — a missing 09:15 bar can NEVER shift
+it (the prior first-bar anchoring could). A 5m bar at 09:15:00 IST covers
+[09:15:00, 09:20:00).
+
+Anchor honesty (DEC-DERIVED-TF-AUDIT-001, correcting this section's former
+"buckets can never straddle sessions" prose): every IN-SESSION bar's label
+shares the bar's IST trading date (no NSE session opens before 09:15), but
+on a session whose open OFFSET from 09:15 is not a TF multiple the first
+in-session label PRECEDES the session open — the B-S1 table: a Muhurat
+18:00 open (offset 525) stores 17:45 @30m, 17:15 @60m and @240m, 17:59
+@2m; the 2025 13:45 open (offset 270) stores 13:43 @4m. These labels are
+stored verbatim (behavior-capture-pinned; an anchor change is the
+coordinated follow-up DEC-MUHURAT-TF-ANCHOR-001). A PRE-09:15 bar —
+ingest-session-filtered in production, so dormant — floors to a NEGATIVE
+bucket rank and can label the PRIOR IST date (00:05 IST @30m →
+23:45 IST of the previous day; the P2 capture,
+DEC-SESSION-EXEMPT-RESAMPLE-001 is the follow-up).
 
 For daily TF: one bar per trading day, covering [session_open,
 session_close), labeled at the 09:15 IST session open.
@@ -241,17 +256,22 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
     # spot output stays byte-identical to the OHLCV-6 (purely additive).
     has_oi = OPEN_INTEREST_COLUMN in df_1m.columns
 
-    # FIXED-ARITHMETIC session anchor (DEC-RESAMPLE-ANCHOR-002, hardening
+    # FIXED-ARITHMETIC 09:15 anchor (DEC-RESAMPLE-ANCHOR-002, hardening
     # DEC-RESAMPLE-ANCHOR-001): each row's bucket label is its IST date's
-    # 09:15 session open plus floor-of-elapsed-minutes-over-tf whole buckets.
+    # 09:15 anchor plus floor-of-elapsed-minutes-over-tf whole buckets.
     # Pure column math — the grid depends ONLY on the calendar TIME, never on
     # which bars happen to exist. The prior ``group_by_dynamic(start_by=
     # "datapoint")`` anchored each session's grid to its FIRST BAR, so a
     # vendor gap at the 09:15 open silently shifted the WHOLE day's grid for
     # every timeframe (the hazard the 2026-06-11 4-agent review flagged).
-    # Buckets can never straddle sessions: every label shares the bar's IST
-    # trading date by construction. IST is a fixed +05:30 (no DST), so the
-    # arithmetic needs no calendar module for Track 1's intraday TFs.
+    # Every IN-SESSION bar's label shares the bar's IST trading date (no NSE
+    # session opens before 09:15) — but on a session whose open offset from
+    # 09:15 is not a TF multiple the first label PRECEDES the open (Muhurat
+    # 18:00 open: 17:45 @30m, 17:15 @60m/@240m, 17:59 @2m; the 2025 13:45
+    # open: 13:43 @4m — the DEC-DERIVED-TF-AUDIT-001 B-S1 table; the former
+    # "buckets can never straddle sessions" prose overclaimed). IST is a
+    # fixed +05:30 (no DST), so the arithmetic needs no calendar module for
+    # Track 1's intraday TFs.
     ist = pl.col("ts_utc") + pl.duration(hours=5, minutes=30)
     session_open_ist = ist.dt.truncate("1d") + pl.duration(hours=9, minutes=15)
 

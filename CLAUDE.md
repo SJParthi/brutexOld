@@ -18,7 +18,35 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+_Last updated: 2026-07-13 (DEC-DERIVED-TF-AUDIT-001 +
+DEC-DERIVED-OI-NULL-HONEST-001 + DEC-DAILY-WINDOW-SANITY-GATE-001 +
+DEC-DERIVED-1DAY-FRESHNESS-001 + DEC-SERIES-LOAD-GRID-HONEST-001 +
+DEC-OHLC-CLAMP-BOUNDED-001, MIGRATION.md #1790–#1795 — the derived-timeframe
+correctness AUDIT + boundary-fix pack: the resampling MATH proven EXACT
+against an independent from-scratch oracle (161,183 buckets / 967,098 fields,
+ZERO core mismatches; Rust/FFI parity 400/400 on the frozen fixture; OI
+strict-last settled 1,670/1,670) while five BOUNDARY leaks are FIXED —
+derived-intraday OI null-preserving (never a fabricated 0) + the
+`writer_convention` derive-stamp heal (one full re-derive per symbol on the
+next prebuild, disclosed); the price-sanity gate on the daily 1m window read
+(heal-recall / crossverify / ledger daily paths become correct-or-absent);
+the derived-`1day` freshness VALUE arm + the OI-aware compare + the doctor
+all-symbols census; `series_load` predicting on the resampler's ACTUAL
+09:15-IST grid (the false loud "EMPTY — re-pull" refusal on a healthy Muhurat
+lake is dead; regular sessions byte-identical, parity-pinned); and the
+magnitude-BOUNDED parse-time OHLC clamp (a clamp that would manufacture a
+>4× extreme REFUSES the row — counted + WARN-named; `BRUTEX_OHLC_CLAMP_REFUSE`
+default-ON). Every deferred defect ships a committed behavior-capture pin +
+a NAMED follow-up DEC; the residual band LEADS with the bad-tick
+prebuild/derive asymmetry (DEC-PREBUILD-BAD-TICK-001) + serve-time staleness
+(DEC-DERIVED-SERVE-FRESHNESS-001) — the inconsistent-worlds defect stays
+open, so the derived-TF proof is scoped to "given the stored 1-minute base".
+Full report: `docs/DERIVED_TF_AUDIT_2026-07-13.md`. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); no lake-schema/scope/vocab/rate
+change; the one stored-byte delta = derived-OI 0→null on re-derive,
+sanctioned; the per-item record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1790–#1795 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
 one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
@@ -2400,7 +2428,77 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+- **Active branch:** `claude/derived-tf-audit` (**DEC-DERIVED-TF-AUDIT-001 +
+  DEC-DERIVED-OI-NULL-HONEST-001 + DEC-DAILY-WINDOW-SANITY-GATE-001 +
+  DEC-DERIVED-1DAY-FRESHNESS-001 + DEC-SERIES-LOAD-GRID-HONEST-001 +
+  DEC-OHLC-CLAMP-BOUNDED-001, MIGRATION.md #1790–#1795** — the derived-timeframe
+  correctness AUDIT + boundary-fix pack (`docs/DERIVED_TF_AUDIT_2026-07-13.md` is the
+  full report). VERDICT: MATH CORRECT / BOUNDARIES LEAK — the resampling core
+  (09:15-IST fixed grid · OHLCV aggregation · strict-last OI · midnight-IST daily
+  re-stamp · forming-session cutoffs · UTC month/year straddles · the
+  write→derive→store chain) is EXACT against an independent from-scratch oracle
+  (223 frames · 161,183 bucket / 967,098 field comparisons · ZERO
+  OHLC/label/presence mismatches; OI strict-last settled 1,670/1,670 — the
+  "last non-null" paraphrase REFUTED) and bit-identical Rust↔FFI (native
+  trading-core 166/0 · wheel 400/400 + 22/0 · fno-math 584/0 on the sha256-pinned
+  frozen fixtures, byte-untouched). FIVE boundary fixes: (#1791) the
+  derived-intraday writer stops fabricating `open_interest=0` for null-OI buckets
+  (ONE argument at the ONE writer — `frame_to_candle_bars(frame,
+  absent_open_interest=None)`; the shared default NOT flipped; spot flips too) +
+  the `DeriveStamp.writer_convention` heal lever (missing→0 never skips ⇒ exactly
+  ONE full re-derive per symbol on the next prebuild rewrites every legacy
+  partition under the honest convention — crash-convergent, no runbook step;
+  disclosed: a derived-TF FUTURES sweep re-keys `data_snapshot_hash` after the
+  re-derive, the #1743 post-deploy story); (#1792) `make_lake_read_1m_window`
+  gains the SAME COMMON price-sanity gate its intraday twin has — the corrupt
+  `low=0.0` row the intraday prebuild quarantined was silently LAUNDERED into a
+  derived 1day by the heal-recall/crossverify/ledger daily paths (the raised
+  `ResampleInputError` is already the counted quarantine class — zero wiring
+  changes, correct-or-absent); (#1793) the derived-`1day` freshness VALUE arm
+  (`compare_daily_freshness` — segment-routed daily law, bounded by the stored
+  partition's OWN last date so it can never entangle with the grounded-deferral
+  cutoff; intersecting dates only, orphan rows observe-only WARN) keyed
+  `(symbol, "1day")` in `lake_derived_freshness_verdicts` (sweep preflight picks
+  it up with ZERO changes), the intraday compare made OI-AWARE (legacy OI=0
+  partitions read stale ≤1 nightly, healed by the #1791 stamp bump the SAME
+  nightly), and the doctor's first-symbol PASS illusion killed (all-symbols
+  census, capped 20 + true count); (#1794) `series_load._expected_bar_time_in_window`
+  re-anchored on the resampler's ACTUAL 09:15 grid (k ≥ 0 +
+  bucket-overlaps-session) — a healthy Muhurat lake no longer draws the false
+  loud "EMPTY — re-pull" `FuturesSeriesError` (E1's end-to-end repro mechanized;
+  regular sessions byte-identical, exhaustively parity-pinned; the MIRROR PIN
+  proves predictor ≡ the real emitted-label set over regular + both Muhurat
+  shapes); (#1795) the parse-time OHLC clamp is magnitude-BOUNDED — a clamp MOVE
+  past strict 4× (`BAD_TICK_MAX_RATIO` imported, never re-minted) takes the
+  partial-absent graceful skip (counted, ONE `groww.parse.ohlc_clamp_refused`
+  WARN per window with the repr()'d first offender) instead of storing a
+  fabricated ×10 extreme that passed EVERY screen into the 1m sweep + every
+  derived bucket + the 1day PDH; the clamp-MOVE (not result-RANGE) test keeps the
+  legitimate deep-OTM wide-range 1-tick fix byte-identical (killer-tested);
+  kill switch `BRUTEX_OHLC_CLAMP_REFUSE` default-ON, off = legacy byte-identical
+  (pinned), junk fails loud at parse-window start. PERMANENT NETS: six new
+  independent-oracle legs (Muhurat/evening + 13:45 pools · pre-09:15 P2 parity ·
+  weekend-gap multi-day · the FNO STORED-lake OI leg (fails at merge-base) ·
+  the as-of cut leg · the strict-last discrimination pin) + SEVEN residual
+  behavior-capture pins in `tests/integration/test_derived_tf_defect_pins.py`,
+  each naming its follow-up DEC (R1 DEC-PREBUILD-BAD-TICK-001 — THE TOP residual,
+  the 1m-sweep-skips/prebuild-absorbs inconsistent worlds, pinned verbatim ·
+  R2 DEC-DERIVED-SERVE-FRESHNESS-001 — movers/db serve drifted stored bytes the
+  gate flags · R3 DEC-PREBUILD-DEDUP-CONVERGE-001 · R4 DEC-MUHURAT-TF-ANCHOR-001 ·
+  R5 DEC-RESAMPLE-VOLUME-GUARD-001 (the polars-upgrade canary) ·
+  R6 DEC-BADTICK-EXTREMES-002 · R7 DEC-SESSION-EXEMPT-RESAMPLE-001); the
+  `tf_resampler` "buckets can never straddle sessions" prose corrected to the
+  precise in-session law + the B-S1 table (doc-only, formula untouched). HONEST:
+  with R1 + R2 both residual the derived-TF proof is scoped to *given the stored
+  1-minute base*. Every fix's regression test fails at merge-base
+  (fix-reversion evidence); frozen sweep goldens + `vocab_golden_vectors.json`
+  byte-untouched and green; every touched gated module re-measured 100.00%
+  line+branch on its ci.yml-exact gate (candle_fields · groww.parser ·
+  timeframe_materialize · tf_autoderive · doctor · series_load). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); F&O lake REFERENCE_ONLY;
+  no lake-schema/scope/vocab/rate change; the one stored-byte delta =
+  derived-OI 0→null on re-derive, sanctioned.)
+  Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
   renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
@@ -6229,7 +6327,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/crossverify-producer`
+- **Active feature branch:** `claude/derived-tf-audit`
+  (DEC-DERIVED-TF-AUDIT-001 + DEC-DERIVED-OI-NULL-HONEST-001 +
+  DEC-DAILY-WINDOW-SANITY-GATE-001 + DEC-DERIVED-1DAY-FRESHNESS-001 +
+  DEC-SERIES-LOAD-GRID-HONEST-001 + DEC-OHLC-CLAMP-BOUNDED-001, MIGRATION.md
+  #1790–#1795 — the derived-timeframe correctness AUDIT + boundary-fix pack:
+  the resampling math proven EXACT against an independent oracle (161,183
+  buckets / 967,098 fields, zero core mismatches; Rust/FFI parity 400/400)
+  while five boundary leaks are fixed — derived-intraday OI null-preserving +
+  the writer_convention stamp heal; the price-sanity gate on the daily 1m
+  window read; the derived-1day freshness VALUE arm + OI-aware compare +
+  doctor all-symbols; series_load predicting on the resampler's ACTUAL
+  09:15-IST grid; the magnitude-bounded parse-time OHLC clamp
+  (BRUTEX_OHLC_CLAMP_REFUSE, default ON). Residuals pinned + named
+  (DEC-PREBUILD-BAD-TICK-001 + DEC-DERIVED-SERVE-FRESHNESS-001 lead the
+  band); full report docs/DERIVED_TF_AUDIT_2026-07-13.md; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1790–#1795 for the full blurb)
+  Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
   TickVault cross-verification producer: NEW `brutex/crossverify/` package
