@@ -393,7 +393,9 @@ def grid_identity(grid: SweepGridConfig) -> str:
     str
         The 64-char lowercase BLAKE3 hex digest of the grid identity.
     """
-    canonical = json.dumps(_grid_descriptor(grid), sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        _grid_descriptor(grid), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
     return blake3.blake3(canonical.encode("utf-8")).hexdigest()
 
 

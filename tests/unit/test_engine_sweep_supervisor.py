@@ -180,6 +180,25 @@ class TestIdentity:
     def test_grid_identity_differs_with_top_k(self) -> None:
         assert grid_identity(_grid(top_k=5)) != grid_identity(_grid(top_k=9))
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_grid_identity_rejects_non_finite_gate_float(self, bad: float) -> None:
+        """DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001: grid_identity joins the
+        ``allow_nan=False`` canonical-JSON parity — a non-finite gate float can
+        never mint a non-RFC ``NaN``/``Infinity`` token into the sweep_id/run_id.
+
+        The hardened ``OverfitGateConfig`` constructor refuses this at build time,
+        so it is bypassed via ``object.__setattr__`` (a frozen+slots existing
+        field) to prove the identity site is defended INDEPENDENTLY of the config
+        guard — defence in depth.
+        """
+        from brutex.ranking import OverfitGateConfig
+
+        cfg = OverfitGateConfig(dsr_min=0.95)
+        object.__setattr__(cfg, "weight", bad)
+        grid = _grid(overfit=cfg)
+        with pytest.raises(ValueError):
+            grid_identity(grid)
+
     def test_tuple_cache_key_is_32_bytes(self) -> None:
         grid = _grid()
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
