@@ -159,12 +159,32 @@ def _safe_segment(partition_key: str) -> str:
     """Map a ``|``-joined series key to one filesystem-safe path segment.
 
     Rejects path-traversal / separator characters so a vendor-supplied series
-    coordinate can never escape the options table directory.
+    coordinate can never escape the options table directory, and refuses any key
+    whose escape would not round-trip UNIQUELY (DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001).
+
+    ``|`` escapes to ``__`` (two chars), so two DISTINCT series keys could otherwise
+    map to the SAME segment and share one ``options/<segment>/`` directory + its
+    ``(side, timestamp)`` keep-first keyspace: e.g. ``"A|B"`` and ``"A__B"`` both
+    become ``"A__B"``. A bare ``__`` refusal is provably INSUFFICIENT — ``"A_|B"``
+    (``A`` + ``_`` + ``__`` + ``B`` → ``"A___B"``) and ``"A|_B"`` (``A`` + ``__`` +
+    ``_`` + ``B`` → ``"A___B"``) collide with neither containing ``__``. Refusing all
+    THREE substrings ``{"__", "_|", "|_"}`` makes the escape INJECTIVE on the
+    accepted domain: every output underscore-run is then either exactly one (a
+    literal ``_``) or an even ``2k`` (``k`` consecutive pipes), so odd runs ``>= 3``
+    are unreachable and the decode is unique (brute-forced over ``{A, _, |}`` to
+    length 6: 281 accepted keys, 0 collisions). Latent-only — the pipe-joined
+    ``write(partition_key=…)`` producer was deleted, so no production caller reaches
+    this today, but the escape is now correct on its own.
     """
     if not partition_key:
         raise OptionWriterError("partition_key must be non-empty")
     if "/" in partition_key or "\\" in partition_key or ".." in partition_key:
         raise OptionWriterError(f"unsafe partition_key {partition_key!r}")
+    if _SAFE in partition_key or "_|" in partition_key or "|_" in partition_key:
+        raise OptionWriterError(
+            f"ambiguous partition_key {partition_key!r} — '|' escapes to '__', so a key "
+            f"containing '__' or an underscore adjacent to '|' cannot round-trip uniquely"
+        )
     return partition_key.replace(_UNSAFE, _SAFE)
 
 

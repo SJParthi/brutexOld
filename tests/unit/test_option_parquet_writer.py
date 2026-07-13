@@ -433,6 +433,15 @@ class TestPathSafety:
         with pytest.raises(OptionWriterError, match="unsafe"):
             _writer(tmp_path).write(partition_key=bad, coordinate=_COORD, bars=[_bar()])
 
+    @pytest.mark.parametrize("bad", ["A__B", "A_|B", "A|_B"])
+    def test_ambiguous_partition_key_refused(self, tmp_path: Path, bad: str) -> None:
+        # DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001: '|' escapes to '__', so a key
+        # carrying '__', '_|' or '|_' cannot round-trip uniquely and is refused
+        # (each parametrised value trips exactly one `or` arm). Nothing is written.
+        with pytest.raises(OptionWriterError, match="ambiguous"):
+            _writer(tmp_path).write(partition_key=bad, coordinate=_COORD, bars=[_bar()])
+        assert not (tmp_path / "options").exists()
+
     def test_lake_root_property(self, tmp_path: Path) -> None:
         assert _writer(tmp_path).lake_root == tmp_path
 
