@@ -176,3 +176,53 @@ def test_peer_running_pull_defers_resume_then_completion_clears_the_intent(
         time.sleep(0.05)
         assert next_boot.get("/api/v1/universe/pull-progress").json()["state"] == "idle"
         assert intent_store.banner.snapshot() is None
+
+
+def test_spot_only_intent_resumes_spot_only_never_widened(
+    store: InstrumentStore, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B M1 (DEC-PULL-SCOPED-ALL-ONECLICK-001): a persisted SPOT-ONLY intent
+    resumes SPOT-ONLY — the two F&O spines are NEVER called on the resumed
+    run (a crash-resume must never silently widen into a full F&O pull), the
+    finish detail carries the spot-only surgery note, and the intent clears."""
+    _pin_creds_present(monkeypatch)
+    fno_calls: list[str] = []
+
+    def _spy_metadata(*args: Any, **kwargs: Any) -> Any:
+        fno_calls.append("metadata")  # pragma: no cover — must never run
+        return _fake_metadata(*args, **kwargs)
+
+    def _spy_historical(*args: Any, **kwargs: Any) -> Any:
+        fno_calls.append("historical")  # pragma: no cover — must never run
+        return _fake_historical(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _spy_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _spy_historical)
+
+    from brutex.dashboard.pull_scope import CrossverifyTailOutcome
+
+    def _tail() -> CrossverifyTailOutcome:
+        return CrossverifyTailOutcome(
+            status="started", human="producer started (poll /api/v1/crossverify/progress)"
+        )
+
+    # The durable spot-only survivor (whole universe — symbols None).
+    intent_store.write(
+        PullIntent(symbols=None, symbol=None, from_date=None, to_date=None, scope="spot-only")
+    )
+    app = build_app(
+        DashboardState(),
+        instrument_store=store,
+        pull_intent_store=intent_store,
+        crossverify_tail=_tail,
+    )
+    with TestClient(app) as client:
+        client.app.state.brutex_resume_pipeline()  # type: ignore[attr-defined]
+        snap = _wait_for_job(client)
+        assert snap["state"] == "done"
+        assert fno_calls == []  # NEVER widened into the F&O phases
+        assert snap["detail"].startswith("spot-only pipeline complete — ")
+        assert ", F&O skipped by design (spot-only scope)" in snap["detail"]
+        assert "Greeks: not run — no options in this pull" in snap["detail"]
+        _wait_for(lambda: not intent_store.path.exists())
