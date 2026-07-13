@@ -1142,7 +1142,7 @@ class TestEvaluatorFillModeThreading:
 
         bars = _trending_bars(3)
         bar_bits = build_bar_bits(bars)
-        metrics: dict[FillMode, object] = {}
+        metrics: dict[FillMode, ResultMetrics] = {}
         for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
             evaluate = stage3_mod._make_evaluator(
                 bars=bars,
