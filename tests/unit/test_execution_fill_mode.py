@@ -71,9 +71,7 @@ class TestResolveFillMode:
             resolve_fill_mode({FILL_MODE_ENV: "junk"})
         assert "'junk'" in str(excinfo.value)
 
-    def test_default_env_source_is_os_environ(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_env_source_is_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(FILL_MODE_ENV, "precise")
         assert resolve_fill_mode() is FillMode.PRECISE
         monkeypatch.delenv(FILL_MODE_ENV)
