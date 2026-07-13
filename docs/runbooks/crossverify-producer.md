@@ -122,8 +122,14 @@ symbols has exactly those symbols re-gated from the (since-healed) lake —
 re-export → stage → publish the now-complete ones, journal `withheld` map
 rewritten to the honest remainder; already-published keys are NEVER re-put
 (journal idempotency), the gate binds fail-closed first (gate absent ⇒ the
-re-gate skips with one WARN), and each re-gated symbol pays one
-month-partition read (O(one month of 1-minute bars) per symbol·day) →
+re-gate skips with one WARN), a transient store fault in the re-gate's own
+target enumeration skips the scan FAIL-OPEN with one
+`crossverify.regate_scan_failed` WARN (the main day never sinks; the next
+run re-finds the withheld maps), and each re-gated symbol pays one
+month-partition read (O(one month of 1-minute bars) per symbol·day).
+Attribution honesty: a prior PENDING key published by the re-gate pass
+rather than the recovery scan counts as `regated`, not `recovered_prior` —
+attribution only, both roads end published →
 session gate (non-trading + **Muhurat days skip
 entirely — no files, both sides no-op**) → fail-closed completeness-gate
 presence → bounded pull-lock wait (45 min default; a peer pull holding the
@@ -194,9 +200,14 @@ pull excludes ALL F&O (futures AND options — #1788); nothing to enrich.
   state to unwind — the `.crossverify/` journal + staging sidecars are
   inert, S3 objects stay as-is.
 - Last-run surface: the runner persists `<lake>/.crossverify/last_run.json`
-  at every MATERIAL run end (summary verdicts + refusals; never dry-runs,
-  never the honest skips — a weekend skip cannot clobber Friday's failure
-  record). `GET /api/v1/crossverify/progress` serves it as the additive
+  at every MATERIAL run end (summary verdicts + refusals; never dry-runs).
+  The honest skips follow the material-actions-only law: a TRUE no-op skip
+  writes nothing and emits no summary — a weekend skip cannot clobber
+  Friday's failure record — but a skip-day run that re-gated or recovered
+  prior days' keys (real S3 objects shipped) DOES write the record AND emit
+  the one Telegram summary (WARN, the catch-up tier): nothing ships
+  invisibly, and the record it may overwrite was resolved by that very
+  re-gate. `GET /api/v1/crossverify/progress` serves it as the additive
   `last_run` field and the `/universe` panel renders it on page load
   (✓/✕ + day + verdict + publish-failed count + capped failing keys +
   detail), so a finished failure survives page reloads AND dashboard

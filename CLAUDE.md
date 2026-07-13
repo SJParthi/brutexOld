@@ -2499,11 +2499,25 @@ hostile-review pass._
   `publish_failed` verdict gains the real "N key(s) still failing after retries (first: …)" detail (was empty).
   HONEST LIMITS (named): only WITHHELD symbols re-gate — an honest-`nothing` zero-bar day backfilled later, or a
   withheld day OLDER than catchup_days, still needs the manual `--day` re-run; each re-gated symbol pays one
-  month-partition read (O(one month of 1-minute bars) per symbol·day); a weekend re-gate is log+journal-visible
-  but summary/last_run-silent (skip-verdict parity, deliberate); the last-run record is a VIEW — the per-day
-  journal stays the durable truth. TESTS: `TestWithheldRegate` (17) + `TestLastRunRecord` (7) on run.py (100.00%
-  line+branch), `TestScanWithheldJournals` + `TestLastRunRecordStore` on journal.py (100.00%), the summary/CLI
-  token + severity pins, `TestLastRunSurface` (5, incl. across-a-rebuilt-app) + the panel textContent pin, and
+  month-partition read (O(one month of 1-minute bars) per symbol·day); a pending key published by the D2 pass
+  rather than the recovery scan counts `regated`, not `recovered_prior` (attribution only — both → published);
+  the last-run record is a VIEW — the per-day journal stays the durable truth. POLISH ROUND folded (same branch,
+  pre-open — both hostile reviews SHIP; their non-blocking items as ONE commit): a MATERIAL skip-day run
+  (regated/recovered_prior > 0 — a weekend/Muhurat/deferred fire that shipped real S3 objects) now emits the ONE
+  Telegram summary (WARN — the catch-up tier; the three skip verdicts gain markers + join the WARN set) AND
+  writes the last-run record (material-actions-only writes win — the Friday record a weekend re-gate overwrites
+  was resolved by that very re-gate; a TRUE no-op skip stays silent, Friday's failure record survives —
+  supersedes the initial summary/last_run-silent parity); the D2 target enumeration is guarded FAIL-OPEN (NEW
+  `_store_read_errors()` — the `spot_drift` house mirror; a transient store fault ⇒ one
+  `crossverify.regate_scan_failed` WARN + whole-scan skip, the main day never sinks; a genuine bug still
+  propagates); the two journal scans' oldest-boundary (offset == lookback IN, lookback+1 OUT) is mutation-pinned
+  (both `range(lookback_days - 1, …)` mutants verified killed); the peer-converged re-gate arm pinned SILENT (no
+  save, no INFO). TESTS: `TestWithheldRegate` (17) + `TestLastRunRecord` (7) + `TestSkipDayMaterialVisibility`
+  (6) + `TestRegateEnumerationGuard` (4 tests / 6 cases) on run.py (100.00%
+  line+branch), `TestScanWithheldJournals` + `TestLastRunRecordStore` + the 4 boundary pins on journal.py
+  (100.00%), the summary/CLI
+  token + severity pins (incl. the material-skip WARN/marker trio), `TestLastRunSurface` (5, incl.
+  across-a-rebuilt-app) + the panel textContent pin, and
   the REAL-gate integration e2e (day D truncated-BANKNIFTY withheld exit 2 → lake healed via the production sink
   → the NEXT trading day's run publishes D with regated==1, withheld cleared, staging gone, zero re-puts, the
   last-run record flipping withheld_partial → published) — ci.yml UNTOUCHED (every new test in an already-gated
@@ -6429,7 +6443,13 @@ hostile-review pass._
   the persistent last-run failure surface (`<lake>/.crossverify/last_run.json`
   → the additive `last_run` progress field → the /universe panel renders it
   on load; the retryable-exhaustion publish_failed verdict gains a real
-  failing-keys detail); stacked on PR #1515's `claude/crossverify-spot-only`
+  failing-keys detail); POLISH ROUND folded — a MATERIAL skip-day run
+  (regated/recovered > 0) summarises (WARN catch-up tier) + writes the
+  last-run record (a true no-op skip stays silent — Friday's failure record
+  survives), the D2 enumeration is guarded FAIL-OPEN
+  (`crossverify.regate_scan_failed` — the main day never sinks), and the
+  journal scans' oldest-boundary is mutation-pinned; stacked on PR #1515's
+  `claude/crossverify-spot-only`
   head; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
   branch line — see §1 + MIGRATION.md #1789 for the full blurb)
   Earlier: `claude/crossverify-spot-only`

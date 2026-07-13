@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -365,6 +365,26 @@ class TestScanPendingJournals:
         journal.save(tmp_path)
         assert scan_pending_journals(tmp_path, today=_DAY, lookback_days=0) == []
 
+    def test_oldest_boundary_offset_equals_lookback_is_scanned(self, tmp_path: Path) -> None:
+        # Mutation teeth (R2 MINOR): the window law is EXACTLY
+        # ``today − lookback_days … today − 1`` — the range-start mutant
+        # ``range(lookback_days - 1, 0, -1)`` silently drops the OLDEST day
+        # and survived the pre-existing suite (offsets 1/3/9 only).
+        boundary = _DAY - timedelta(days=5)
+        journal = DayJournal(day=boundary, run_id="cv", entries={})
+        journal.mark_staged("k", "s", 1)
+        journal.save(tmp_path)
+        scanned = scan_pending_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day for j in scanned] == [boundary]
+
+    def test_offset_lookback_plus_one_is_outside_the_window(self, tmp_path: Path) -> None:
+        # The other edge of the same boundary: one day OLDER than the window
+        # is never scanned (a widening mutant dies here).
+        journal = DayJournal(day=_DAY - timedelta(days=6), run_id="cv", entries={})
+        journal.mark_staged("k", "s", 1)
+        journal.save(tmp_path)
+        assert scan_pending_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
 
 class TestScanWithheldJournals:
     """The auto-re-gate scan (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
@@ -408,6 +428,19 @@ class TestScanWithheldJournals:
         self._seed(tmp_path, _DAY.replace(day=8), {"M&M": "read_error"})
         scanned = scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5)
         assert [j.day.day for j in scanned] == [8]
+
+    def test_oldest_boundary_offset_equals_lookback_is_scanned(self, tmp_path: Path) -> None:
+        # Mutation teeth (R2 MINOR): the ``scan_pending_journals`` boundary
+        # pin's withheld twin — ``range(lookback_days - 1, 0, -1)`` drops
+        # exactly the oldest re-gatable day.
+        boundary = _DAY - timedelta(days=5)
+        self._seed(tmp_path, boundary, {"RELIANCE": "volume_all_zero"})
+        scanned = scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day for j in scanned] == [boundary]
+
+    def test_offset_lookback_plus_one_is_outside_the_window(self, tmp_path: Path) -> None:
+        self._seed(tmp_path, _DAY - timedelta(days=6), {"RELIANCE": "volume_all_zero"})
+        assert scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5) == []
 
 
 class TestLastRunRecordStore:

@@ -118,6 +118,23 @@ class TestCrossverifySummary:
         assert event.severity == TelegramSeverity.WARN
 
     @pytest.mark.parametrize(
+        "verdict", ["skipped_non_trading", "skipped_muhurat", "deferred_market_hours"]
+    )
+    def test_material_skip_day_summaries_are_warn_with_catchup_marker(self, verdict: str) -> None:
+        # The polish-round R1 law: the runner emits a skip-verdict summary
+        # ONLY when a weekend/holiday/deferred run re-gated or recovered
+        # prior days' keys (real objects shipped) — the catch-up WARN tier,
+        # never the unknown-verdict CRITICAL and never the clean-day INFO.
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID, report=_report(verdict=verdict, published=0, regated=2)
+        )
+        [event] = notifier.published
+        assert event.severity == TelegramSeverity.WARN
+        assert "catch\\-up shipped" in event.message  # MarkdownV2-escaped marker
+        assert "re\\-gated 2" in event.message
+
+    @pytest.mark.parametrize(
         ("verdict", "marker"),
         [
             ("blocked", "⛔ BLOCKED"),

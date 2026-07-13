@@ -122,9 +122,34 @@ _SUMMARY_VERDICTS: frozenset[str] = frozenset(
 
 #: Verdicts that persist the durable ``last_run.json`` record (the summary
 #: verdicts + ``refused``) — every MATERIAL outcome. The honest skip
-#: verdicts (non-trading / Muhurat / deferred / disabled) deliberately do
-#: NOT write it: a weekend skip must never clobber Friday's failure record.
+#: verdicts (non-trading / Muhurat / deferred / disabled) do NOT write it
+#: UNLESS the run did material catch-up work (``regated``/``recovered_prior``
+#: > 0 — the R1 "nothing ships invisibly" law): a true no-op weekend skip
+#: must never clobber Friday's failure record, while a weekend re-gate that
+#: published real S3 objects records + summarises — the record it may
+#: overwrite was resolved by that very re-gate (material-actions-only
+#: writes win; documented in the runbook §3).
 _LAST_RUN_VERDICTS: frozenset[str] = _SUMMARY_VERDICTS | frozenset({"refused"})
+
+
+def _store_read_errors() -> tuple[type[Exception], ...]:
+    """The CONFIRMED error classes escaping the store-backed target
+    enumeration (mirrors ``spot_drift._master_read_errors`` — the house
+    degrade set): :class:`~brutex.data.errors.CatalogError` (the domain
+    error ``InstrumentStore.open`` wraps every open failure into),
+    ``OSError`` (the pre-guard ``mkdir``), plus ``duckdb.Error`` (raw reads)
+    when duckdb is importable — absent, the store's own ``open`` raises
+    ``CatalogError`` first, so the tuple is complete without it.
+    """
+    from brutex.data.errors import CatalogError
+
+    errors: list[type[Exception]] = [CatalogError, OSError]
+    try:
+        import duckdb
+    except ImportError:
+        return tuple(errors)
+    errors.append(duckdb.Error)
+    return tuple(errors)
 
 
 def _log_regate_day(
@@ -314,8 +339,19 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         """Emit the exactly-once summary for post-gate verdicts (best-effort)
         and persist the durable last-run record (the dashboard's reload-proof
         failure surface — a finished failure no longer vanishes with the
-        in-memory job state)."""
-        if not config.dry_run and report.verdict in _LAST_RUN_VERDICTS:
+        in-memory job state).
+
+        MATERIAL-SKIP override (the R1 "nothing ships invisibly" law): a
+        skip-verdict run that re-gated or recovered prior days' keys
+        published REAL S3 objects, so it summarises (WARN — the alerter's
+        catch-up tier) AND writes the last-run record like any material run;
+        a ``refused`` run stays summary-free (``crossverify_refused`` is its
+        alert) and a true no-op skip stays silent.
+        """
+        material_skip = report.verdict not in _LAST_RUN_VERDICTS and (
+            report.regated > 0 or report.recovered_prior > 0
+        )
+        if not config.dry_run and (report.verdict in _LAST_RUN_VERDICTS or material_skip):
             try:
                 write_last_run(
                     config.lake_root,
@@ -349,7 +385,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-        if report.verdict in _SUMMARY_VERDICTS:
+        if report.verdict in _SUMMARY_VERDICTS or material_skip:
             try:
                 seams.alerter.crossverify_summary(run_id=run_id, report=report)
             except Exception as exc:  # fire-and-forget — an alert never kills a run
@@ -427,10 +463,17 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
         HONEST envelope: each re-gated symbol pays one month-partition read
         (the ``export_symbol`` read law — O(one month of 1-minute bars) per
         (symbol, day)); the scan is O(catchup_days) journal probes + ONE
-        target enumeration (lazy, first re-gated day only). Only WITHHELD
-        symbols re-gate — a day whose symbol read honest ``nothing`` (zero
-        bars) is never in the withheld map, so a later-backfilled zero-bar
-        day still needs the manual ``--day`` re-run (named limit).
+        target enumeration (lazy, first re-gated day only; a transient store
+        fault there skips the scan FAIL-OPEN with one
+        ``crossverify.regate_scan_failed`` WARN — the main day never sinks).
+        Only WITHHELD symbols re-gate — a day whose symbol read honest
+        ``nothing`` (zero bars) is never in the withheld map, so a
+        later-backfilled zero-bar day still needs the manual ``--day``
+        re-run (named limit). Attribution: a prior PENDING key that reaches
+        S3 via THIS pass's publish (rather than the step-D recovery scan —
+        e.g. a day carrying both pending keys and withheld symbols) counts
+        as ``regated``, not ``recovered_prior`` — attribution only, both
+        roads end published (harmless, named in MIGRATION.md #1789).
         """
         days = scan_withheld_journals(
             config.lake_root, today=config.day, lookback_days=config.catchup_days
@@ -476,7 +519,27 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                 )
                 continue
             if identities is None:
-                targets, _excluded = seams.enumerate_targets(prior.day)
+                try:
+                    targets, _excluded = seams.enumerate_targets(prior.day)
+                except _store_read_errors() as exc:
+                    # FAIL-OPEN for the main day (R1 hardening): a transient
+                    # store/catalog fault in the re-gate's OWN enumeration
+                    # must never sink today's work — skip the whole re-gate
+                    # scan this run (the withheld maps stay untouched; the
+                    # next run's scan re-finds them). A non-store exception
+                    # is a genuine code bug and still propagates.
+                    _LOG.warning(
+                        "crossverify.regate_scan_failed",
+                        run_id=run_id,
+                        prior_day=prior.day.isoformat(),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        note=(
+                            "target enumeration failed — withheld re-gate "
+                            "skipped this run; the main day continues"
+                        ),
+                    )
+                    return None
                 identities = {identity.canonical_symbol: identity for identity in targets}
             try:
                 with partition_write_lock(
@@ -750,7 +813,13 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             )
         if log_event is not None:
             _LOG.info(log_event, run_id=run_id, day=config.day.isoformat())
-        return _report(verdict, 0, detail=detail)
+        report = _report(verdict, 0, detail=detail)
+        if state.regated > 0 or state.recovered_prior > 0:
+            # MATERIAL skip-day run (a weekend/holiday re-gate or recovery
+            # published real S3 objects) — ride _finish so the summary +
+            # last-run record fire; a true no-op skip stays silent below.
+            return _finish(report)
+        return report
 
     # ── B: day + session gate (never fabricates a session) ────────────────
     from brutex.calendars.nse import HolidayDataUnavailableError, SessionType

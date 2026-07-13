@@ -1004,7 +1004,11 @@ class SweepAlerter:
         DEC-CROSSVERIFY-WITHHELD-REGATE-001); WARN for the benign anomalies
         (``nothing_to_do`` / ``staged_only`` / a ``published`` run that ALSO
         recovered prior days' pending keys or auto-re-gated prior withheld
-        days — worth a look, not a page);
+        days — worth a look, not a page — and the MATERIAL skip-day runs:
+        the runner emits a skip-verdict summary ONLY when a
+        weekend/holiday/deferred run re-gated or recovered prior days' keys,
+        i.e. real objects shipped — the same catch-up tier, never CRITICAL
+        and never the clean-day INFO);
         CRITICAL for ``blocked`` / ``withheld_partial`` / ``publish_failed``
         / ``suspect`` AND for any UNKNOWN future verdict (never a silent
         INFO on an unrecognised state). PER-RUN dedupe key
@@ -1034,6 +1038,11 @@ class SweepAlerter:
             "withheld_partial": "⚠️ WITHHELD (partial)",
             "publish_failed": "❌ PUBLISH FAILED",
             "suspect": "🛑 SUSPECT",
+            # The material skip-day verdicts — reachable ONLY when the run
+            # re-gated / recovered prior days' keys (the runner's law).
+            "skipped_non_trading": "⏭ non-trading day — prior-day catch-up shipped",
+            "skipped_muhurat": "⏭ Muhurat day — prior-day catch-up shipped",
+            "deferred_market_hours": "⏭ deferred (market hours) — prior-day catch-up shipped",
         }
         marker = markers.get(verdict, f"❌ {verdict}")
         counts = (
@@ -1061,7 +1070,14 @@ class SweepAlerter:
             and regated == 0
         ):
             severity = TelegramSeverity.INFO
-        elif verdict in {"published", "staged_only", "nothing_to_do"}:
+        elif verdict in {
+            "published",
+            "staged_only",
+            "nothing_to_do",
+            "skipped_non_trading",
+            "skipped_muhurat",
+            "deferred_market_hours",
+        }:
             severity = TelegramSeverity.WARN
         else:
             severity = TelegramSeverity.CRITICAL

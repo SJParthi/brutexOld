@@ -40,11 +40,12 @@ from brutex.crossverify.run import (
     _default_alerter,
     _default_emit_pull_halt,
     _settle_retry_affected,
+    _store_read_errors,
     default_seams,
     run_crossverify,
 )
 from brutex.crossverify.s3_publish import S3BackendUnavailable, publish_staged
-from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
+from brutex.data.errors import CatalogError, LakeWriteHalt, MarketHoursHalt
 from brutex.data.models import CandleBar
 from brutex.data.partition_lock import partition_lock_path
 
@@ -1399,11 +1400,18 @@ class TestWithheldRegate:
                 peer_acted.append(1)
 
         h = _harness(tmp_path, reader=_day_reader, on_prior_session=_peer_wipes_withheld)
-        report = h.run()
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
         assert peer_acted == [1]
         assert report.regated == 0
         assert all(prior_day.isoformat() not in key for _b, key, _c in h.client.puts)
         assert report.verdict == "published"
+        # R2 NIT pin: convergence is SILENT — no spurious journal save (the
+        # peer's run_id stands, never overwritten) and no regate_day INFO.
+        converged = load_journal(tmp_path, prior_day)
+        assert converged is not None
+        assert converged.run_id == "cv-prior"
+        assert all(e["event"] != "crossverify.regate_day" for e in logs)
 
     def test_boto3_missing_at_regate_publish_exit_2(self, tmp_path: Path) -> None:
         _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
@@ -1608,6 +1616,166 @@ class TestLastRunRecord:
         assert record["regated"] == 1
         assert record["day"] == _DAY.isoformat()
         _ = prior_day
+
+
+class TestSkipDayMaterialVisibility:
+    """R1 MINOR (polish round): a SKIP-verdict run that shipped REAL objects
+    (a weekend/holiday/deferred run's re-gate or recovery) must not ship
+    invisibly — it emits the one summary AND writes the last-run record; a
+    true no-op skip stays silent, so Friday's failure record survives it."""
+
+    def test_weekend_regate_emits_summary_and_last_run(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 2, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader, session=None)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_non_trading", 0)
+        assert report.regated == 1
+        assert [s.verdict for s in h.alerter.summaries] == ["skipped_non_trading"]
+        assert h.alerter.summaries[0].regated == 1
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "skipped_non_trading"
+        assert record["exit_code"] == 0
+        assert record["regated"] == 1
+        assert record["day"] == _DAY.isoformat()  # the RUN's day, not the re-gated prior day
+        _ = prior_day
+
+    def test_weekend_recovery_emits_summary_and_last_run(self, tmp_path: Path) -> None:
+        # recovered_prior rides the SAME invisibility class as regated.
+        _stage_prior_pending(tmp_path, 2, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path, session=None)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_non_trading", 0)
+        assert report.recovered_prior == 1
+        assert [s.verdict for s in h.alerter.summaries] == ["skipped_non_trading"]
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["recovered_prior"] == 1
+
+    def test_true_noop_weekend_stays_silent_no_record(self, tmp_path: Path) -> None:
+        h = _harness(tmp_path, session=None)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_non_trading", 0)
+        assert h.alerter.summaries == []
+        assert load_last_run(tmp_path) is None
+        assert not last_run_path(tmp_path).exists()
+
+    def test_material_muhurat_skip_summarises(self, tmp_path: Path) -> None:
+        _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader, session=_MUHURAT)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_muhurat", 0)
+        assert report.regated == 1
+        assert [s.verdict for s in h.alerter.summaries] == ["skipped_muhurat"]
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "skipped_muhurat"
+
+    def test_material_deferral_emits_summary_and_record(self, tmp_path: Path) -> None:
+        _stage_prior_pending(tmp_path, 1, "IDX_I/NIFTY.csv")
+        h = _harness(tmp_path, market_hours_blocked=True)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("deferred_market_hours", 0)
+        assert report.recovered_prior == 1
+        assert [s.verdict for s in h.alerter.summaries] == ["deferred_market_hours"]
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "deferred_market_hours"
+
+    def test_weekend_regate_overwrites_fridays_failure_record_coherently(
+        self, tmp_path: Path
+    ) -> None:
+        # The chosen last-run law: MATERIAL-actions-only writes win. Friday's
+        # withheld_partial is recorded; Saturday's re-gate RESOLVES that very
+        # withhold and publishes — the new record (skip verdict + regated
+        # count) replaces Friday's coherently: the failure it named no longer
+        # exists. (The no-op-skip protection is the sibling
+        # test_honest_skip_never_clobbers_a_failure_record.)
+        classifier = ScriptedClassifier(
+            by_class={"index_spot": FakeVerdict(incomplete=True, reason="count_short")}
+        )
+        report1 = _harness(tmp_path, classifier=classifier).run()
+        assert (report1.verdict, report1.exit_code) == ("withheld_partial", 2)
+        h2 = _harness(
+            tmp_path,
+            reader=_day_reader,  # healed — the default all-complete classifier
+            prior_sessions={_SATURDAY: None, _DAY: _SESSION},
+            day=_SATURDAY,
+        )
+        report2 = h2.run()
+        assert (report2.verdict, report2.exit_code) == ("skipped_non_trading", 0)
+        assert report2.regated == 1
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "skipped_non_trading"  # Friday's failure resolved
+        assert record["day"] == _SATURDAY.isoformat()
+        assert record["regated"] == 1
+        healed = load_journal(tmp_path, _DAY)
+        assert healed is not None
+        assert healed.withheld == {}  # the recorded failure genuinely no longer exists
+
+
+class TestRegateEnumerationGuard:
+    """R1 NIT hardening: the D2 target enumeration is guarded FAIL-OPEN — a
+    transient store/catalog fault skips the re-gate scan with one WARN and
+    the MAIN day continues; a genuine code bug still propagates."""
+
+    @staticmethod
+    def _prior_day_failing_seams(h: _Harness, exc: Exception) -> CrossverifySeams:
+        real = h.seams.enumerate_targets
+
+        def _enum(day: date) -> tuple[list[CanonicalIdentity], int]:
+            if day != _DAY:  # only the D2 prior-day enumeration faults
+                raise exc
+            return real(day)
+
+        return replace(h.seams, enumerate_targets=_enum)
+
+    @pytest.mark.parametrize(
+        "exc_factory",
+        [
+            lambda: CatalogError("instruments.duckdb wedged"),
+            lambda: OSError("lake volume stalled"),
+            lambda: __import__("duckdb").Error("connection dropped"),
+        ],
+        ids=["catalog", "oserror", "duckdb"],
+    )
+    def test_store_fault_skips_regate_main_day_continues(
+        self, tmp_path: Path, exc_factory: Callable[[], Exception]
+    ) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader)
+        seams = self._prior_day_failing_seams(h, exc_factory())
+        with structlog.testing.capture_logs() as logs:
+            report = run_crossverify(h.config, seams)
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.published == 3  # today's own work never sank
+        assert report.regated == 0
+        events = [e for e in logs if e["event"] == "crossverify.regate_scan_failed"]
+        assert len(events) == 1
+        assert events[0]["prior_day"] == prior_day.isoformat()
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"RELIANCE": "volume_all_zero"}  # next run re-finds
+
+    def test_genuine_bug_still_propagates(self, tmp_path: Path) -> None:
+        _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader)
+        seams = self._prior_day_failing_seams(h, ValueError("a genuine defect"))
+        with pytest.raises(ValueError, match="a genuine defect"):
+            run_crossverify(h.config, seams)
+
+    def test_store_read_errors_tuple_with_duckdb(self) -> None:
+        duckdb = pytest.importorskip("duckdb")
+        assert _store_read_errors() == (CatalogError, OSError, duckdb.Error)
+
+    def test_store_read_errors_tuple_without_duckdb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The spot_drift._master_read_errors precedent: without duckdb the
+        # store's own open raises CatalogError first — the tuple is complete.
+        import sys
+
+        monkeypatch.setitem(sys.modules, "duckdb", None)
+        assert _store_read_errors() == (CatalogError, OSError)
 
 
 class TestDayJournalLockSerialization:
