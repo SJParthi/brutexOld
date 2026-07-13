@@ -136,8 +136,12 @@ help) — never an automatic re-pull storm.
   shared trigger); it acquires its OWN lock trio with a bounded wait-retry —
   it may idle up to one 60 s retry while the pull job's finally releases the
   flock (bounded by the runner's 45-min budget).
-- `--strict-exit` (CLI) escalates an exit-2-family verdict
-  (`refused`/`withheld_partial`/`blocked`/`publish_failed`/`suspect`/`failed`)
+- `--strict-exit` (CLI) escalates an alert-status-family verdict
+  (`refused`/`withheld_partial`/`blocked`/`publish_failed`/`suspect`/`failed`
+  — the `TAIL_ALERT_STATUSES` set; named by alert STATUS, not by exit code:
+  `refused` carries a variable exit code on the direct `brutex crossverify
+  run` surface, 1 on a lock refusal, so it is not uniformly exit-2 —
+  escalating it here is the conservative choice)
   to exit 2; the default prints it and stays 0.
 
 ## 7. First-run expectation + known shapes
