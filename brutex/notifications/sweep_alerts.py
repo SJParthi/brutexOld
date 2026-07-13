@@ -405,6 +405,12 @@ class CrossverifyReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
+    def regated(self) -> int | None:
+        """Prior days' previously-WITHHELD symbols published by the auto-re-gate
+        (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
     def derived(self) -> int | None:
         """Coordinates whose day-scoped derive succeeded."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -994,9 +1000,15 @@ class SweepAlerter:
 
         DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776). Severity law:
         INFO iff every admitted file published cleanly (``published`` with
-        ``recovered_prior == 0``); WARN for the benign anomalies
+        ``recovered_prior == 0`` AND ``regated == 0`` —
+        DEC-CROSSVERIFY-WITHHELD-REGATE-001); WARN for the benign anomalies
         (``nothing_to_do`` / ``staged_only`` / a ``published`` run that ALSO
-        recovered prior days' pending keys — worth a look, not a page);
+        recovered prior days' pending keys or auto-re-gated prior withheld
+        days — worth a look, not a page — and the MATERIAL skip-day runs:
+        the runner emits a skip-verdict summary ONLY when a
+        weekend/holiday/deferred run re-gated or recovered prior days' keys,
+        i.e. real objects shipped — the same catch-up tier, never CRITICAL
+        and never the clean-day INFO);
         CRITICAL for ``blocked`` / ``withheld_partial`` / ``publish_failed``
         / ``suspect`` AND for any UNKNOWN future verdict (never a silent
         INFO on an unrecognised state). PER-RUN dedupe key
@@ -1017,6 +1029,7 @@ class SweepAlerter:
         """
         verdict = report.verdict
         recovered = report.recovered_prior
+        regated = report.regated
         markers = {
             "published": "✅ published",
             "staged_only": "📦 staged only",
@@ -1025,12 +1038,18 @@ class SweepAlerter:
             "withheld_partial": "⚠️ WITHHELD (partial)",
             "publish_failed": "❌ PUBLISH FAILED",
             "suspect": "🛑 SUSPECT",
+            # The material skip-day verdicts — reachable ONLY when the run
+            # re-gated / recovered prior days' keys (the runner's law).
+            "skipped_non_trading": "⏭ non-trading day — prior-day catch-up shipped",
+            "skipped_muhurat": "⏭ Muhurat day — prior-day catch-up shipped",
+            "deferred_market_hours": "⏭ deferred (market hours) — prior-day catch-up shipped",
         }
         marker = markers.get(verdict, f"❌ {verdict}")
         counts = (
             f"published {_count_or_question(report.published)} · "
             f"already {_count_or_question(report.skipped_already)} · "
             f"recovered-prior {_count_or_question(recovered)} · "
+            f"re-gated {_count_or_question(regated)} · "
             f"strict-published {_count_or_question(report.publish_strict)} · "
             f"observe-published {_count_or_question(report.publish_observe)} · "
             f"withheld {_count_or_question(report.withheld)} · "
@@ -1043,9 +1062,22 @@ class SweepAlerter:
         body = f"🔁 Cross-verify {report.day.isoformat()} {run_id} — {marker}.\n{counts}"
         if report.detail:
             body += f"\n{report.detail}"
-        if verdict == "published" and recovered is not None and recovered == 0:
+        if (
+            verdict == "published"
+            and recovered is not None
+            and recovered == 0
+            and regated is not None
+            and regated == 0
+        ):
             severity = TelegramSeverity.INFO
-        elif verdict in {"published", "staged_only", "nothing_to_do"}:
+        elif verdict in {
+            "published",
+            "staged_only",
+            "nothing_to_do",
+            "skipped_non_trading",
+            "skipped_muhurat",
+            "deferred_market_hours",
+        }:
             severity = TelegramSeverity.WARN
         else:
             severity = TelegramSeverity.CRITICAL

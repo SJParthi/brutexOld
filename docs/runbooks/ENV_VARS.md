@@ -173,7 +173,7 @@ the default).
 | `BRUTEX_CROSSVERIFY_DEADLINE_S` | `14400.0` | finite float >= 1 — the 4 h hard wall (breach = `suspect`, exit 2) | `brutex.crossverify.config` |
 | `BRUTEX_CROSSVERIFY_SETTLE_RETRY_ROUNDS` | `1` | int >= 0 — bounded settle-retry rounds for short/incomplete INDEX files (spot-only since #1788) | `brutex.crossverify.config` |
 | `BRUTEX_CROSSVERIFY_SETTLE_RETRY_DELAY_S` | `600.0` | finite float >= 0 — the per-round settle sleep | `brutex.crossverify.config` |
-| `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` | `5` | int >= 0 — prior-day pending-journal recovery-scan lookback | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` | `5` | int >= 0 — prior-day catchup lookback: the pending-journal recovery scan AND the withheld-day auto-re-gate scan (DEC-CROSSVERIFY-WITHHELD-REGATE-001) share this ONE window | `brutex.crossverify.config` |
 
 **Setup runbook:** see `docs/runbooks/crossverify-producer.md` (IAM grant,
 `pip install -e ".[crossverify]"`, the probe-decided `--at`, install +

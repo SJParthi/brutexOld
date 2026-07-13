@@ -115,7 +115,22 @@ recovery scan (BEFORE the session gate, deliberately: a weekend/holiday run
 still republishes a prior trading day's pending staged keys — recovery is
 lock-free and vendor-free; a fully-recovered day's staging dir is cleaned,
 a still-failing day's is kept and the skip verdict upgrades honestly to
-`publish_failed` exit 2) → session gate (non-trading + **Muhurat days skip
+`publish_failed` exit 2) → **withheld-day AUTO-RE-GATE**
+(DEC-CROSSVERIFY-WITHHELD-REGATE-001; also before the session gate): every
+prior day inside the catchup window whose journal still names WITHHELD
+symbols has exactly those symbols re-gated from the (since-healed) lake —
+re-export → stage → publish the now-complete ones, journal `withheld` map
+rewritten to the honest remainder; already-published keys are NEVER re-put
+(journal idempotency), the gate binds fail-closed first (gate absent ⇒ the
+re-gate skips with one WARN), a transient store fault in the re-gate's own
+target enumeration skips the scan FAIL-OPEN with one
+`crossverify.regate_scan_failed` WARN (the main day never sinks; the next
+run re-finds the withheld maps), and each re-gated symbol pays one
+month-partition read (O(one month of 1-minute bars) per symbol·day).
+Attribution honesty: a prior PENDING key published by the re-gate pass
+rather than the recovery scan counts as `regated`, not `recovered_prior` —
+attribution only, both roads end published →
+session gate (non-trading + **Muhurat days skip
 entirely — no files, both sides no-op**) → fail-closed completeness-gate
 presence → bounded pull-lock wait (45 min default; a peer pull holding the
 locks past the budget DEFERS the day with a CRITICAL `crossverify_refused`
@@ -168,7 +183,7 @@ pull excludes ALL F&O (futures AND options — #1788); nothing to enrich.
 |---|---|---|
 | `publish_failed` exit 2, keys named | S3 throttle exhausted retries, or the grant is broken (`aborted_nonretryable`) | Fix the grant/backend; the NEXT run's recovery scan re-publishes the FROZEN staged bytes (no re-render, no re-gate) — or re-run manually |
 | `refused … locks still held` | A pull/backfill held the lake locks past the 45-min wait | Nothing lost — the day deferred; re-run after the peer finishes (`brutex crossverify run --day YYYY-MM-DD`) |
-| `withheld_partial` exit 2 | The gate withheld incomplete files (short/zero-bar TRIO index — the gate reads a zero-bar index `count_short` / forming last bar on ANY index / all-zero-volume stock / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
+| `withheld_partial` exit 2 | The gate withheld incomplete files (short/zero-bar TRIO index — the gate reads a zero-bar index `count_short` / forming last bar on ANY index / all-zero-volume stock / render refusal) | TickVault sees honest absence. Once the lake heals (the nightly re-pull), the NEXT daily run within `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` (default 5) AUTO-RE-GATES + publishes the day — zero manual steps (DEC-CROSSVERIFY-WITHHELD-REGATE-001, which closes the follow-up #1776 named DEC-CROSSVERIFY-BACKFILL-001). Only an OLDER-than-catchup day, or a day whose symbol read honest `nothing` (zero bars — never in the withheld map), still needs the manual `--day YYYY-MM-DD` re-run |
 | `blocked` exit 2 | Production-dead defensive arm (a zero-bar trio index reads `withheld_partial` via `count_short`, never this) — fires only if a FUTURE gate emitted `no_today_bars` for a trio index | Investigate the gate/pull; re-run the day once healed |
 | `refused … gate module absent` | The sibling completeness gate (#1774) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
 | Corrupt journal WARN | `.crossverify/<day>.json` unreadable (junk JSON, invalid UTF-8, a directory) | Self-heals: the run re-renders + re-puts identical bytes (convergent); a corrupt PRIOR-day journal never blocks later runs |
@@ -184,6 +199,20 @@ pull excludes ALL F&O (futures AND options — #1788); nothing to enrich.
   `brutex crossverify uninstall` removes the LaunchAgent. No lake/schema
   state to unwind — the `.crossverify/` journal + staging sidecars are
   inert, S3 objects stay as-is.
+- Last-run surface: the runner persists `<lake>/.crossverify/last_run.json`
+  at every MATERIAL run end (summary verdicts + refusals; never dry-runs).
+  The honest skips follow the material-actions-only law: a TRUE no-op skip
+  writes nothing and emits no summary — a weekend skip cannot clobber
+  Friday's failure record — but a skip-day run that re-gated or recovered
+  prior days' keys (real S3 objects shipped) DOES write the record AND emit
+  the one Telegram summary (WARN, the catch-up tier): nothing ships
+  invisibly, and the record it may overwrite was resolved by that very
+  re-gate. `GET /api/v1/crossverify/progress` serves it as the additive
+  `last_run` field and the `/universe` panel renders it on page load
+  (✓/✕ + day + verdict + publish-failed count + capped failing keys +
+  detail), so a finished failure survives page reloads AND dashboard
+  restarts. The per-day journal stays the authoritative record — this file
+  is a view convenience (corrupt/absent ⇒ `null`, never load-bearing).
 - Status + dead-man: `brutex crossverify status` (plist presence, launchctl
   listing, newest journal, trading-day-aware dead-man verdict; MISSED fires
   a best-effort CRITICAL push). Honest limit: a dead box is silent on-box
