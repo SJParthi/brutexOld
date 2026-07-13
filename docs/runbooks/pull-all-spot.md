@@ -65,9 +65,16 @@ after the first click.
   survives dashboard restarts; the boot lifespan resumes ticking when armed
   (and if today's window is open and today's pull has not yet succeeded, an
   early tick catches up). A corrupt/unreadable state file reads DISARMED
-  with one WARN — never a crash, for EVERY corruption shape (junk JSON,
-  wrong shape, invalid UTF-8, a nesting bomb, an oversized file — the
-  round-6 N-1 hardening; the same template hardens `.pull_intent.json`).
+  with one WARN — never a crash and never a HANG, for EVERY corruption
+  shape, inode-TYPE shapes included (junk JSON, wrong shape, invalid UTF-8,
+  a nesting bomb, an oversized file — the round-6 N-1 hardening — plus a
+  non-regular inode planted at the path: a FIFO / device symlink / socket /
+  directory, which pre-round-7 blocked the read forever and silently wedged
+  dashboard boot; the round-7 P-1 re-hardening reads both sidecars through
+  the shared `O_NONBLOCK` + `S_ISREG` regular-file-only loader, with the
+  16 MiB cap checked on the `fstat` of the SAME open descriptor — the
+  round-6 stat→read TOCTOU window is closed by the fstat-on-fd cap. The
+  same loader hardens `.pull_intent.json`).
 - **One dashboard process per lake** (round-6 M-3 disclosure): the
   once-per-day law is per DASHBOARD PROCESS — two armed dashboards over ONE
   lake each hold their own in-memory mirror of the state file, so both may

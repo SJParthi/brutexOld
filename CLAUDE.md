@@ -35,12 +35,16 @@ widened; since the round-5 fold the button SELF-ARMS the daily post-market
 auto-pull (NEW `dashboard/auto_pull_scheduler.py` — first click = run now +
 arm forever; the same gate + launcher reused, once-per-day law, durable
 `.pull_all_spot_auto.json`, disarm chip; the CLI `--auto` + cron lane is the
-headless alternative); since the round-6 fold the durable state loads are
-corruption-hardened (never crash the boot — the #1776 M1 template) and the
+headless alternative); since the round-6/round-7 folds the durable state
+loads are corruption-hardened for EVERY shape, non-regular inodes included
+(never crash OR hang the boot — the round-6 #1776 M1 decode fold + the
+round-7 #1614 `O_NONBLOCK`+`S_ISREG` regular-file-only loader with the
+fstat-on-fd size cap) and the
 combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + ▶ Pull
 F&O (the NEW manual `scope=fno-only` mirror — spot no-op by note surgery,
 metadata/historical/Greeks real, F&O-only prebuild + warm; tail + scheduler
-stay Spot-exclusive, pinned). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+stay Spot-exclusive, ALL FOUR ruled exclusivities negative-pinned since
+round 7). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
 summary, never the story.)
@@ -2560,7 +2564,9 @@ hostile-review pass._
   (bytes read + decode INSIDE the corruption-tolerant path; UnicodeDecodeError
   / RecursionError / OverflowError folded; a 16 MiB size cap checked
   PRE-read) — every corruption shape reads DISARMED / no-intent with ONE
-  WARN; F/B-proven through the REAL `build_app` lifespan boot (invalid-UTF-8 ·
+  WARN [COMPLETED at the round-7 fold for the non-regular-inode shapes the
+  M1 template cannot see — see the ROUND-7 FOLD below]; F/B-proven through
+  the REAL `build_app` lifespan boot (invalid-UTF-8 ·
   nesting-bomb · oversized each CRASHED the boot at the pre-fix head in a
   scratch worktree; a corrupt intent file 500'd the pull click — all clean
   post-fix); [M-2] `cmd_dashboard` eagerly validates
@@ -2591,9 +2597,33 @@ hostile-review pass._
   pipeline" button is REMOVED — universe.html carries exactly TWO pull
   buttons, ▶ Pull Spot (auto-arming, relabeled) + ▶ Pull F&O (manual,
   selection- + date-aware, `scope=fno-only`); `setBulkDisabled` covers both.
+  ROUND-7 FOLD — refuter round 7 (P: 1 MAJOR + 1 NIT · Q: 1 MINOR + 2 NITs ·
+  R: CLEAN e2e): [P-1 MAJOR] the round-6 hardening's plain `read_bytes` HUNG
+  FOREVER on a NON-REGULAR inode (FIFO / `/dev/zero` symlink / socket /
+  directory) planted at either sidecar — no exception, so the boot belt
+  never fired: executed at the pre-fix head, the REAL lifespan boot wedged
+  SILENTLY (strictly worse than the N-1 crash) and a REAL pull click's
+  request thread wedged in the held-mutex intent snapshot; FIXED on the
+  #1614 round-6 loader template — ONE shared `pull_intent.read_sidecar_bytes`
+  (`O_RDONLY|O_NONBLOCK` open → `S_ISREG` on the fd's `fstat` → the 16 MiB
+  cap on the SAME fstat — CLOSING the round-6 stat→read TOCTOU, P-2 —
+  → bounded read → owned-flag close-in-finally) serves BOTH stores; a
+  non-regular inode folds into the SAME corruption arm naming the shape, a
+  dangling symlink reads ABSENT, F/B-proven in bounded subprocesses (boot +
+  click HANG at 68d18dea; clean disarmed/recovered at head) + SIGALRM
+  hang-watchdog regressions at store/boot/click level; [Q-1 MINOR] the two
+  round-6 ruled exclusivities that lacked teeth are now negative-pinned —
+  an fno-only run never clobbers `/api/v1/universe/pull-verdict` (a prior
+  red banner survives byte-equal) and never marks the day's spot auto-pull
+  (`last_success_date`/`last_attempt_date` stay unset under an ARMED wired
+  scheduler) — refuter Q's surviving mutants M-Q6/M-Q8 re-applied + verified
+  KILLED; [Q-2/Q-3] the #1779 Files-line recount (7 new + 12 touched;
+  gated_prebuild + pipeline_prebuild named) + the doubled universe.html
+  comment word.
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; `pull_scope.py` (99/24) + `auto_pull_gate.py`
-  (80/28) + `auto_pull_scheduler.py` (257/54) + `pull_intent.py` (227/46)
+  (80/28) + `auto_pull_scheduler.py` (253/56, round-7 re-measure) +
+  `pull_intent.py` (253/56, round-7 re-measure)
   100.00% line+branch on their ci.yml gates (+ `gated_prebuild.py` 134/24 ·
   `pipeline_prebuild.py` 193/54 re-measured 100.00%); touched
   app.py/cli.py/pipeline_binding.py lines covered; ruff/ruff-format clean,
@@ -6455,15 +6485,22 @@ hostile-review pass._
   ticks; a successful manual click counts as the day's pull; disarm chip +
   toggle route; boot resumes ticking iff durably armed; zero threads
   otherwise; the CLI `--auto` + cron lane stays the headless alternative);
-  since the round-6 fold the durable state loads (`.pull_all_spot_auto.json`
-  + `.pull_intent.json`) are corruption-hardened on the #1776 M1 template
-  (size cap + decode-inside-tolerant-path — a corrupt file never crashes the
-  boot or 500s a click, F/B-proven through the real lifespan) and the
+  since the round-6 + round-7 folds the durable state loads
+  (`.pull_all_spot_auto.json` + `.pull_intent.json`) are corruption-hardened
+  for EVERY shape, non-regular inodes included — the round-6 #1776 M1 decode
+  fold (a corrupt file never crashes the boot or 500s a click) completed by
+  the round-7 P-1 re-hardening on the #1614 `O_NONBLOCK`+`S_ISREG`
+  regular-file-only loader (a planted FIFO / device symlink no longer HANGS
+  the boot or the click; the 16 MiB cap moved onto the fd's `fstat`, closing
+  the stat→read TOCTOU — both hangs F/B-proven at the pre-fix head in
+  bounded subprocesses) — and the
   combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + the NEW
   manual ▶ Pull F&O (`scope=fno-only` — the exact spot-only mirror: spot
   phase = honest no-op with note surgery, metadata/historical/Greeks real,
   F&O-only prebuild + futures/options warm; the crossverify tail + the
-  scheduler stay Spot-EXCLUSIVE, pinned; the bare route stays the
+  scheduler stay Spot-EXCLUSIVE, pinned — since the round-7 fold the
+  verdict-clobber + never-marks-the-day exclusivities are negative-pinned
+  too, refuter Q's surviving mutants killed; the bare route stays the
   full-chain API default byte-identical; the headless binding refuses
   fno-only — `pull-fno` CLI twin is the named follow-up);
   ENGINE UNCHANGED —
