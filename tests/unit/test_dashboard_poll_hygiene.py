@@ -185,14 +185,18 @@ def test_universe_visibilitychange_fires_the_catch_up_pollers() -> None:
     ):
         assert call in js, f"universe.html: catch-up call {call!r} is missing"
     # The catch-up rides the EXISTING pull-progress visibilitychange listener —
-    # this change adds NO new listener. universe.html carries exactly TWO
+    # this change adds NO new listener. universe.html carries exactly THREE
     # listeners total: the pull-progress one (which folds these catch-ups,
     # marked by the DEC-DASHBOARD-POLL-HYGIENE-001 comment) + the independent
     # greeks-backfill gb-poller listener that landed on main via
-    # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9).
-    assert js.count("addEventListener('visibilitychange'") == 2, (
-        "universe.html must carry exactly the pull-progress + gb-poller "
-        "visibilitychange listeners — the poll-hygiene catch-ups add no new one"
+    # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9) + the cross-verify cv-poller
+    # listener (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776 — an
+    # intent-preserved pin update: each independent job WATCHER owns exactly
+    # one listener; the poll-hygiene CATCH-UPS still add none of their own).
+    assert js.count("addEventListener('visibilitychange'") == 3, (
+        "universe.html must carry exactly the pull-progress + gb-poller + "
+        "cv-poller visibilitychange listeners — the poll-hygiene catch-ups "
+        "add no new one"
     )
     # And the folded integrity catch-ups live INSIDE the pull-progress listener
     # (before the gb-poller listener), not in a listener of their own.

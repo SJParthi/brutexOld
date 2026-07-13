@@ -237,6 +237,29 @@ class TestAlerts:
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
 
+    def test_loop_stalled(self) -> None:
+        """loop_stalled (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): the
+        pull_halted twin — PHASE_BLOCKED CRITICAL, observe-only wording, fired
+        by the LoopWatchdog's CRITICAL edge (its state machine owns the real
+        coalescing; the dedupe_key is identification only at the 0.0-window
+        kind)."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).loop_stalled(stalled_s=36.4, threshold_s=30.0)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "loop-stalled"
+        assert escape_markdown_v2("event loop STALLED") in ev.message
+        assert escape_markdown_v2("36.4") in ev.message
+        assert "30" in ev.message
+        assert escape_markdown_v2("observes only") in ev.message
+
+    def test_loop_stalled_disabled_notifier_is_silent_noop(self) -> None:
+        """Telegram disabled (no notifier resolves) → False, never a raise —
+        the best-effort law the watchdog's alert lane depends on."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert alerter.loop_stalled(stalled_s=31.0, threshold_s=30.0) is False
+
     def test_vendor_down(self) -> None:
         """vendor_down (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, WAIT-worded, deduped."""
         fake = FakeNotifier()

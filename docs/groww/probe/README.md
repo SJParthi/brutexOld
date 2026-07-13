@@ -32,3 +32,14 @@ The transcript must resolve the six hard-gates (ADR-0009 §4):
 
 Until a transcript lands here, every Groww fact marked UNVERIFIED in ADR-0009
 stays UNVERIFIED and is not encoded as fact in adapter code (Golden Rule #1).
+
+## Post-close settle probe (DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001)
+
+`postclose_settle_probe.py` + `POSTCLOSE_SETTLE_RUNBOOK.md` measure WHEN Groww
+settles TODAY's 1-minute day (the #837 forming shape → settled 7-element rows) —
+the evidence base for the pre-settle TODAY gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001,
+MIGRATION.md #1774/#1775). Transcripts land here as
+`postclose-<YYYY-MM-DD>-<HHMM>.jsonl` + the tee'd `.txt` tables. Unlike the Phase-0
+script above it reads its credentials + the shared read-only token from AWS SSM
+(the doctor-kit client — mint physically blocked, fully paced), never probe-local
+env vars.

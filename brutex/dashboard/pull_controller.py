@@ -120,6 +120,7 @@ from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.errors import MarketHoursHalt
 from brutex.data.parquet_writer import fold_max_close_delta
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -1794,6 +1795,20 @@ def pull_all_spot(
         # as "the overnight pull died mid-run". Never raises (an unwritable journal
         # must never break a pull — the swallow lives inside the journal module).
         record_pull_start(lake_root, pull_id=pid, dry_run=dry_run)
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): the env kill switch is resolved ONCE per pull, fail-loud on
+        # junk at pull start (the ``resolve_market_closed`` posture, never
+        # mid-run) and BEFORE any thread-owning resource is built — a junk env
+        # must fail CLEAN, never orphan the fetch pipeline / write consumer /
+        # volume keepalive their draining ``finally`` has not yet armed (the
+        # round-1 R3-MAJOR-1 leak repro). A dry-run short-circuits to ``False``
+        # WITHOUT touching the env (the ``detect_completeness_gaps`` gating
+        # pattern — the synthetic adapter's first-day-only bars would false-red
+        # a today-covering window). NOTE: this bulk spot phase never armed
+        # ``detect_completeness_gaps`` (the #1031 demotions stay dead here —
+        # the named follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001); the TODAY
+        # gate rides its OWN parameter and IS wired here.
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
@@ -2126,6 +2141,9 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
@@ -2994,6 +3012,15 @@ def pull_candles(
         inherited_pull_id_scope(pull_id) as pid,
         open_ingest_audit(lake_root, enabled=not dry_run) as ingest_audit,
     ):
+        # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-
+        # GATE-001): resolved ONCE per pull, fail-loud on junk at pull start (the
+        # ``resolve_market_closed`` posture, never mid-run) and BEFORE any
+        # thread-owning resource is built — a junk env must fail CLEAN, never
+        # orphan the fetch pipeline / write consumer their draining ``finally``
+        # has not yet armed (the round-1 R3-MAJOR-1 leak repro). A dry-run
+        # short-circuits to ``False`` WITHOUT touching the env (the
+        # ``detect_completeness_gaps`` gating pattern).
+        _today_gate = (not dry_run) and resolve_today_completeness_enabled()
         # The coverage reconcile band-aids are RETIRED (DEC-WINDOW-LEDGER-001,
         # Stage d) — the ledger's per-window record + the cold-start
         # `reconcile_ledger_with_lake` below are the sole skip source (the
@@ -3185,6 +3212,9 @@ def pull_candles(
                     # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
                     # false-red on the synthetic adapter's first-day-only bars.
                     detect_completeness_gaps=True,
+                    # Pre-settle TODAY minute-completeness gate
+                    # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                    today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,

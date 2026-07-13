@@ -12,7 +12,11 @@
 
 [package]
 name = "trading-core"
-version = "0.3.1"
+# 0.3.1 → 0.3.2: DEC-STAGE1A-RUST-BATCH-001 — the ADDITIVE batch Stage-1A
+# bar-bits kernel (`stage1a_batch` + the `stage1a_bar_bits_batch` pyfunction).
+# The bump moves `_indicator_version()` and re-keys every new run_id (the
+# sanctioned #1548 precedent — bump on ANY change, even with no math delta).
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)"
