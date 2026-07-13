@@ -3368,8 +3368,13 @@ jobs:
   # cargo Rust wheel builds (fno-math + trading-core, each with a 3x
   # network-retry loop) — the flaky, contention-sensitive setup phases
   # — NOT sweep compute. The sweep-compute leg has its own hard in-test
-  # ceiling `seconds_first < 300.0`
-  # (tests/integration/test_sweep_full_chain_rehearsal.py:255), which
+  # ceiling `seconds_first < 300.0` (`_RUNTIME_CEILING_S` in
+  # tests/integration/test_sweep_full_chain_rehearsal.py — the STRICT
+  # tier, asserted whenever the process is NOT coverage-traced, i.e.
+  # exactly THIS job; the coverage-traced unit job asserts the
+  # documented 3x instrumentation allowance instead, since under
+  # whole-package `--cov=brutex --cov-branch` tracing the same pass
+  # measures the tracer, ~45x — 315.4 s vs ~7 s, run 29269883269), which
   # the 21 tests PASSED on #1462 — so the sweep ran in under 5 min even
   # during the contended run, and this timeout raise CANNOT mask a
   # sweep regression (a real slowdown trips that 300s assertion and
