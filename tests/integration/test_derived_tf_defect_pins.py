@@ -322,19 +322,47 @@ def test_volume_overflow_defect_pin() -> None:
     assert not isinstance(exc.value, ResampleInputError)
 
 
-def test_bad_tick_close_only_rule_defect_pin() -> None:
+def test_bad_tick_close_only_rule_defect_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """R6: the bad-tick rule judges the CLOSE only — a bar with a sane close
     and a corrupt ×10 HIGH passes ``is_bad_tick`` (the clamp-untriggered
     corrupt-extreme class; the DEC-OHLC-CLAMP-BOUNDED-001 parse-time refusal
-    covers only the clamp-TRIGGERED subset). Fix =
-    DEC-BADTICK-EXTREMES-002 (judge the extremes too)."""
+    covers only the clamp-TRIGGERED subset). BOTH layers pinned (review
+    round 1, R2-NIT-1): the pure rule AND the caller-visible end-to-end
+    consequence — the fabricated-extreme bar is SERVED to the 1m sweep with
+    its corrupt high through the real engine mouth — so the
+    DEC-BADTICK-EXTREMES-002 fix flips this pin WHEREVER it lands (a widened
+    ``is_bad_tick`` signature OR an extremes-judging caller/sibling)."""
     from brutex.data.bad_tick import is_bad_tick
 
-    # prev in-session close 100.4; this bar: sane close 100.45 (passes) even
-    # though its (unjudged) high is 1005.0 — the rule sees closes only.
+    # Layer 1 — the pure rule: prev in-session close 100.4; this bar's close
+    # 100.45 passes even though its (unjudged) high is 1005.0.
     assert is_bad_tick(100.4, 100.45) is False
     # Control: the x10 CLOSE itself is caught.
     assert is_bad_tick(100.4, 1001.0) is True
+
+    # Layer 2 — the caller-visible consequence, end-to-end: bar #7 carries a
+    # sane close (100.45) but a corrupt x10 HIGH (1005.0), internally ordered
+    # (open/close within [low, high] — passes price-sanity AND never triggers
+    # the parse clamp). The engine mouth serves ALL 15 bars, the corrupt
+    # extreme included.
+    monkeypatch.delenv("BRUTEX_BAD_TICK_SCREEN", raising=False)
+    lake = tmp_path / "lake"
+    bars: list[CandleBar] = []
+    for i in range(15):
+        mins = 9 * 60 + 15 + i
+        ts = _ist(2024, 6, 12, mins // 60, mins % 60)
+        px = 100.0 + i * 0.05
+        high = 1005.0 if i == 7 else px + 0.5
+        bars.append(_bar(ts, px, high, px - 0.5, px + 0.1, vol=100 + i))
+    _write_1m(lake, bars)
+    from brutex.data.price_sanity import count_price_violations
+
+    assert count_price_violations(_stored(lake, "1minute").rename({"timestamp": "ts_utc"})) == 0
+    served = _engine_read(lake, "1minute")
+    assert len(served) == 15  # nothing skipped — the screen tests CLOSE only
+    assert max(float(b.high) for b in served) == 1005.0  # the extreme is SERVED
 
 
 def test_pre_open_prior_date_label_defect_pin() -> None:

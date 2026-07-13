@@ -508,3 +508,31 @@ class TestEpochTimestampVerdictPerWindow:
         verdicts = self._verdicts(logs)
         assert len(verdicts) == 1
         assert verdicts[0]["epoch_rows"] == 1
+
+
+class TestBoundedClampRefusalBehavior:
+    """DEC-OHLC-CLAMP-BOUNDED-001 — the BEHAVIORAL fails-at-merge-base pin.
+
+    Deliberately imports NO new symbol (unlike its sibling suite
+    ``test_candle_fields_clamp_refuse.py``, which fails collection at the
+    merge base on the new API imports), so at the merge base this test fails
+    for the DEFECT reason itself: the E2-H3 payload parsed 15 bars with the
+    corrupt ×10 open legitimized into a stored fabricated ``high=1000.55``
+    (review round 1, R1-NIT-1)."""
+
+    def test_scaled_corrupt_open_is_refused_never_stored(self) -> None:
+        rows: list[list[object]] = []
+        for i in range(15):
+            mins = 9 * 60 + 15 + i
+            ts = f"2024-06-12T{mins // 60:02d}:{mins % 60:02d}:00"
+            px = 100.0 + i * 0.05
+            if i == 7:  # the corrupt x10 OPEN beside a sane high/low/close
+                rows.append([ts, 1000.55, px + 0.5, px - 0.5, px + 0.1, 107, None])
+            else:
+                rows.append([ts, px, px + 0.5, px - 0.5, px + 0.1, 100 + i, None])
+        bars = parser.parse_candle_rows({"candles": rows})
+        # At the merge base: 15 bars, bars[7].high == Decimal("1000.55") (the
+        # fabricated extreme, stored). Post-fix: the row is REFUSED — a
+        # graceful counted skip, never stored.
+        assert len(bars) == 14
+        assert all(float(b.high) < 200.0 for b in bars)

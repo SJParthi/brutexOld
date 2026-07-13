@@ -329,3 +329,71 @@ class TestSweepPreflightIntegration:
         assert report.ok is False
         assert report.stale == (("NIFTY", "1day"),)
         assert "prebuild" in report.remediation()
+
+
+class TestOutOfRangeStoredStamp:
+    """R4-M1 (review round 1): an out-of-datetime-range STORED 1day stamp must
+    yield the typed fail-closed "stale" verdict — never an uncaught
+    OverflowError/ValueError/PanicException escaping the sweep-preflight gate
+    (the #1594 rounds-12–18 isolation-escape class; the COMMON
+    ``datetime_out_of_range_errors()`` set is the guard)."""
+
+    def _df_1m(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": [
+                    datetime(2024, 6, 12, 3, 45, tzinfo=UTC) + timedelta(minutes=i)
+                    for i in range(5)
+                ],
+                "open": [100.0] * 5,
+                "high": [100.5] * 5,
+                "low": [99.5] * 5,
+                "close": [100.1] * 5,
+                "volume": [10] * 5,
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+
+    def _stored(self, ts: datetime) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": [ts],
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+
+    def test_year_9999_evening_stamp_overflows_astimezone_reads_stale(self) -> None:
+        # +05:30 pushes past datetime.max inside _ist_date_of.
+        stored = self._stored(datetime(9999, 12, 31, 20, 0, tzinfo=UTC))
+        assert (
+            tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == "stale"
+        )
+
+    def test_year_9999_last_date_overflows_the_before_derivation_reads_stale(self) -> None:
+        # Survives _ist_date_of (9999-12-31 IST) but `last + timedelta(days=1)`
+        # overflows date.max.
+        stored = self._stored(datetime(9999, 12, 31, 0, 0, tzinfo=UTC))
+        assert (
+            tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == "stale"
+        )
+
+    def test_beyond_datetime_max_i64_stamp_panic_reads_stale(self) -> None:
+        # A hand-planted 2**62-microsecond stamp (~146,000 AD): polars
+        # .to_list() PANICS (pyo3 PanicException, a BaseException) — the
+        # third member of the COMMON set.
+        stored = pl.DataFrame(
+            {
+                "ts_utc": pl.Series([2**62], dtype=pl.Int64),
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").cast(pl.Datetime("us", "UTC")))
+        assert (
+            tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == "stale"
+        )

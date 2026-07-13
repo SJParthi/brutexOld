@@ -128,15 +128,53 @@ def compare_daily_freshness(
       latest-wins cannot delete an orphan, so a stale verdict would be an
       un-remediable refusal loop.
 
+    A stored stamp OUTSIDE the Python ``datetime`` range (a hand-planted /
+    corrupt i64 — e.g. a year-9999 instant whose +05:30 shift passes
+    ``datetime.max``, or a ``2**62``-µs value that PANICS the polars
+    conversion) reads the SAME typed ``"stale"`` verdict fail-closed — never
+    an uncaught raise escaping the sweep-preflight gate (the COMMON
+    :func:`~brutex.data.errors.datetime_out_of_range_errors` set, whose
+    consumption law this wrap satisfies: the guarded code's sole Python-side
+    failure mode IS the stored-timestamp conversion; the #1594 rounds-12–18
+    isolation-escape convention).
+
+    HONEST cost (Golden Rule #10): the per-date compare below is a
+    NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
+    per TRADING DAY per symbol (a full-history partition is hundreds-to-low-
+    thousands of rows, never the minutes-scale intraday frames), run once per
+    symbol at SWEEP LAUNCH (not a poll); the 1-minute base read is shared
+    with the intraday arm.
+
     Returns ``"fresh"`` / ``"stale"``; *source* labels the orphan WARN.
     """
     from datetime import timedelta
 
+    from brutex.data.errors import datetime_out_of_range_errors
+
     if df_stored_1day.height == 0:
         return "fresh"  # nothing stored to drift (callers key only stored partitions)
 
-    last_stored = max(_ist_date_of(ts) for ts in df_stored_1day.get_column("ts_utc").to_list())
-    before = last_stored + timedelta(days=1)
+    try:
+        last_stored = max(_ist_date_of(ts) for ts in df_stored_1day.get_column("ts_utc").to_list())
+        before = last_stored + timedelta(days=1)
+    except datetime_out_of_range_errors():
+        # R4-M1 (review round 1): an out-of-range STORED stamp is an
+        # unreadable-instant partition — refuse the launch with the typed
+        # verdict (fail-closed), never a raw OverflowError / ValueError /
+        # PanicException out of the preflight gate. The reduction above
+        # materialises EVERY stored stamp (`.to_list()` + the +05:30 shift),
+        # so a per-row conversion in the compare loop below can never hit a
+        # value this guard did not already vet. Loud: ONE WARN per partition.
+        _LOG.warning(
+            "derived_1day_out_of_range_stamp",
+            source=source or "1day",
+            detail=(
+                "stored 1day stamp outside the Python datetime range (a corrupt/"
+                "hand-planted i64) — verdict 'stale' fail-closed; heal-recall or "
+                "re-derive the partition"
+            ),
+        )
+        return "stale"
     if segment == "FNO":
         from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
 
@@ -259,9 +297,14 @@ def lake_derived_freshness_verdicts(
     * a symbol with NO stored ``1minute`` base is never keyed — the verdict is
       unknowable without the base (abstain, mirroring the doctor's skip).
 
-    The per-pair 1-minute frame is read ONCE per symbol. O(stored bars) per
-    launch — a deliberate one-time preflight cost against consuming a stale
-    derived table into run identity.
+    The per-pair 1-minute frame is read ONCE per symbol (shared by the
+    intraday AND 1day arms). O(stored bars) per launch — a deliberate
+    one-time preflight cost against consuming a stale derived table into run
+    identity. The ``1day`` arm's compare is a NON-vectorized per-row Python
+    loop (O(stored 1day rows) ≈ one row per trading day per symbol —
+    hundreds-to-low-thousands of rows, dwarfed by the intraday frames'
+    vectorized ``equals``; see :func:`compare_daily_freshness`'s honest-cost
+    note); sweep-LAUNCH only, never a poll.
     """
     from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
     from brutex.data.timeframes import parse_label

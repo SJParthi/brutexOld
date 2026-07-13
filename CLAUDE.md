@@ -2448,8 +2448,10 @@ hostile-review pass._
   the `DeriveStamp.writer_convention` heal lever (missing→0 never skips ⇒ exactly
   ONE full re-derive per symbol on the next prebuild rewrites every legacy
   partition under the honest convention — crash-convergent, no runbook step;
-  disclosed: a derived-TF FUTURES sweep re-keys `data_snapshot_hash` after the
-  re-derive, the #1743 post-deploy story); (#1792) `make_lake_read_1m_window`
+  disclosed: a derived-TF FUTURES or SPOT-index sweep re-keys
+  `data_snapshot_hash` after the one-time re-derive — bar field 7 folds OI,
+  so the WHOLE derived-intraday engine surface re-keys, the #1743
+  post-deploy story); (#1792) `make_lake_read_1m_window`
   gains the SAME COMMON price-sanity gate its intraday twin has — the corrupt
   `low=0.0` row the intraday prebuild quarantined was silently LAUNDERED into a
   derived 1day by the heal-recall/crossverify/ledger daily paths (the raised
@@ -2460,8 +2462,9 @@ hostile-review pass._
   cutoff; intersecting dates only, orphan rows observe-only WARN) keyed
   `(symbol, "1day")` in `lake_derived_freshness_verdicts` (sweep preflight picks
   it up with ZERO changes), the intraday compare made OI-AWARE (legacy OI=0
-  partitions read stale ≤1 nightly, healed by the #1791 stamp bump the SAME
-  nightly), and the doctor's first-symbol PASS illusion killed (all-symbols
+  partitions — SPOT engine lakes included — read stale ≤1 nightly with the
+  sweep-all gate fail-closed refusing meanwhile, healed by the #1791 stamp
+  bump the SAME nightly), and the doctor's first-symbol PASS illusion killed (all-symbols
   census, capped 20 + true count); (#1794) `series_load._expected_bar_time_in_window`
   re-anchored on the resampler's ACTUAL 09:15 grid (k ≥ 0 +
   bucket-overlaps-session) — a healthy Muhurat lake no longer draws the false

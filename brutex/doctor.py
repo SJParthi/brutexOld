@@ -372,9 +372,15 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     masked every later stale one (the first-symbol PASS illusion the
     derived-TF audit flagged).
 
-    HONEST cost (Golden Rule #10): O(symbols × stored bars) per invocation
-    — the doctor is an on-demand diagnostic, honesty > speed. The derived
-    ``1day`` VALUE arm rides the sweep-preflight gate
+    HONEST cost (Golden Rule #10): O(symbols × stored bars) per invocation —
+    a QUANTIFIED jump from the pre-census O(1 symbol) shape: on a
+    ~750-underlying full-history lake this moves from ~seconds (one symbol's
+    read + re-derives) to potentially MANY MINUTES (~750 full 1-minute reads
+    + a re-derive of every stored intraday TF per symbol). The doctor is an
+    on-demand CLI diagnostic (never a dashboard route or poll), so a
+    long-running ``brutex doctor`` on a full lake is the census working, not
+    a hang; honesty > speed. The derived ``1day`` VALUE arm rides the
+    sweep-preflight gate
     (:func:`brutex.data.tf_autoderive.lake_derived_freshness_verdicts`),
     deliberately not duplicated here.
 

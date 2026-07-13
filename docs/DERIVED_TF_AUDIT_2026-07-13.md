@@ -166,11 +166,18 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   options tree, disclosed); until it runs, existing lakes still serve OI=0 on
   derived intraday F&O partitions.
 - Legacy OI=0 partitions read `stale` under the OI-aware compare for at most
-  one nightly (the stamp bump rewrites them the SAME nightly).
-- A derived-TF FUTURES sweep re-keys `data_snapshot_hash` after the OI
-  re-derive (bar field 7 — the #1743 post-deploy re-key story; sanctioned,
-  not corruption). The frozen sweep goldens are fixture-driven and reproduce
-  byte-for-byte (re-run as proof in this PR).
+  one nightly (the stamp bump rewrites them the SAME nightly) — SPOT engine
+  lakes INCLUDED, not only F&O (real spot 1m bases carry an all-null OI
+  column, so `sweep-all` on an un-re-prebuilt legacy spot lake fail-closed
+  refuses until the one-time re-derive; review-round-1 R1-MINOR-1).
+- A derived-TF FUTURES **or SPOT-index (NIFTY/BANKNIFTY/SENSEX)** sweep
+  re-keys `data_snapshot_hash` after the one-time OI re-derive — bar field 7
+  folds `open_interest`, so the WHOLE derived-intraday engine surface
+  re-keys, not only futures (the #1743 post-deploy re-key story; sanctioned,
+  not corruption; review-round-1 R3-M1). The frozen sweep goldens are
+  fixture-driven (in-memory bars — they never read a stored derived-intraday
+  partition) and reproduce byte-for-byte: consistent with, not a refutation
+  of, the lake-side re-key.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that
