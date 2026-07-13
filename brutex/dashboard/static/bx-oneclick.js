@@ -17,7 +17,11 @@
  *     ("live run r-…" / "completed run r-… · manifest") is textContent-set;
  *   - the timeline is a RING BUFFER capped at 5,000 records (F-B2), loudly
  *     labeled; the search input filters the RING only (honest O(ring)
- *     client cost — window-scoped, NOT O(1)-total);
+ *     client cost — window-scoped, NOT O(1)-total) and is 200 ms debounced;
+ *     the DOM render is additionally capped at the newest 500 rows with the
+ *     truncation NAMED on a visible count line, and an unchanged
+ *     (ring, filter) window skips the rebuild entirely
+ *     (DEC-O1-GUARANTEE-HARDEN-001);
  *   - one-shot fetches route failure through BXUI.errorCard with a Retry
  *     button — fetch rejection AND non-ok AND malformed body all land there,
  *     never a false-empty grid; "Loading…" is never a terminal state (F-M4);
@@ -402,6 +406,63 @@ function bxFunnelWriteAllowed(source, sweepRunning) {
   return !sweepRunning; // manifest fills only when idle (C-M2)
 }
 
+/** Timeline DOM render cap (DEC-O1-GUARANTEE-HARDEN-001 — bounded per-tick
+ *  DOM work: the ring may hold 5,000 records but a render never rebuilds
+ *  more than the NEWEST 500 rows; the truncation is NAMED on a visible
+ *  count line — the anti-illusion law, the BXScreener
+ *  bxRenderCount/bxCapNote idiom). */
+var BX_TIMELINE_RENDER_CAP = 500;
+
+/**
+ * The newest-`cap` window of the filtered timeline rows (pure — rows are
+ * oldest first, so the slice keeps the TAIL: the truncation drops the
+ * OLDEST rows, never the live tail).
+ *
+ * @param {object[]} rows - the filtered ring rows (oldest first).
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @returns {object[]} the rows to render (same array when within cap).
+ */
+function bxTimelineRenderRows(rows, cap) {
+  if (!Array.isArray(rows)) {
+    return [];
+  }
+  if (rows.length <= cap) {
+    return rows;
+  }
+  return rows.slice(rows.length - cap);
+}
+
+/**
+ * The visible count line naming a render-cap truncation (pure; "" when
+ * nothing was cut — every cap is NAMED, never a silent shrink).
+ *
+ * @param {number} shown - rows actually rendered.
+ * @param {number} total - rows surviving the ring filter.
+ * @returns {string} the honest note or "".
+ */
+function bxTimelineCapNote(shown, total) {
+  if (shown >= total) {
+    return "";
+  }
+  return "showing newest " + shown + " of " + total + " events (render cap)";
+}
+
+/**
+ * Cheap skip-render token for the timeline (pure): the DOM needs a rebuild
+ * ONLY when the ring content changed (the mutation counter moved) or the
+ * filter text changed — an unchanged (mutations, filter) pair means the
+ * rendered rows are already exact, so renderTimeline can skip the O(rows)
+ * teardown+rebuild (pre-fix, a live sweep's events tick rebuilt up to
+ * 5,000 text nodes every ~3 s even when every record was a window dup).
+ *
+ * @param {number} mutations - the monotonic ring-mutation counter.
+ * @param {string} filterText - the search box value ("" when absent).
+ * @returns {string} the compare token.
+ */
+function bxTimelineRenderToken(mutations, filterText) {
+  return String(mutations) + "\u001f" + String(filterText == null ? "" : filterText);
+}
+
 /**
  * The funnel provenance label (pure; textContent-rendered beside the
  * funnel so two sources can never interleave silently).
@@ -473,7 +534,12 @@ function bxFunnelProvenance(source, runId) {
     // BX_TIMELINE_RING_CAP — never whole-history (Breaker B #5).
     ringSeen: {},
     eventsCursor: -1, // -1 = tail-anchored first page
-    earlierCursor: 0 // forward cursor for the "load earlier" pager
+    earlierCursor: 0, // forward cursor for the "load earlier" pager
+    // Monotonic ring-content counter + the last-rendered token: together
+    // they let renderTimeline skip the O(rows) DOM rebuild when the
+    // (ring, filter) window is unchanged (DEC-O1-GUARANTEE-HARDEN-001).
+    ringMutations: 0,
+    lastTimelineToken: null
   };
 
   function byId(id) {
@@ -1116,8 +1182,10 @@ function bxFunnelProvenance(source, runId) {
 
   function ringAdd(records) {
     // Window-scoped dedup + bounded seen set — the ONE pure core
-    // (bxRingAdd) owns the gate + the trimmed-key eviction.
-    bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
+    // (bxRingAdd) owns the gate + the trimmed-key eviction. Only ADMITTED
+    // records move the mutation counter: a dup-only page leaves the window
+    // unchanged, so the next renderTimeline skips the DOM rebuild.
+    state.ringMutations += bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
     if (state.ring.length >= BX_TIMELINE_RING_CAP) {
       setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL); // loud, honest cap label
     }
@@ -1130,11 +1198,27 @@ function bxFunnelProvenance(source, runId) {
     }
     var search = byId("ocTimelineSearch");
     var q = search ? search.value : "";
+    // Skip-render token (DEC-O1-GUARANTEE-HARDEN-001): an unchanged
+    // (ring-mutations, filter) pair means the rendered DOM is already
+    // exact — no teardown+rebuild of up to 5,000 nodes per events tick.
+    var token = bxTimelineRenderToken(state.ringMutations, q);
+    if (token === state.lastTimelineToken) {
+      return;
+    }
+    state.lastTimelineToken = token;
     var rows = bxRingFilter(state.ring, q, "");
+    var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP);
     window.BXUI.clear(host);
+    var capNote = bxTimelineCapNote(visible.length, rows.length);
+    if (capNote) {
+      // The cap drops the OLDEST rows, so the NAMED truncation line sits at
+      // the top of the list where the cut happened (anti-illusion law —
+      // every cap is named; ONE text node, textContent only).
+      host.appendChild(window.BXUI.el("div", "oc-event-cap", capNote));
+    }
     // Newest last (log order); each record is ONE text node (F-M2).
-    for (var i = 0; i < rows.length; i++) {
-      host.appendChild(window.BXUI.el("div", "oc-event-line", bxEventLineText(rows[i])));
+    for (var i = 0; i < visible.length; i++) {
+      host.appendChild(window.BXUI.el("div", "oc-event-line", bxEventLineText(visible[i])));
     }
   }
 
@@ -1194,6 +1278,7 @@ function bxFunnelProvenance(source, runId) {
         }
         if (take.length) {
           state.ring = take.concat(state.ring);
+          state.ringMutations += take.length; // content changed — next render is real
         }
         if (typeof page.next_offset === "number") {
           state.earlierCursor = page.next_offset;
@@ -1263,7 +1348,14 @@ function bxFunnelProvenance(source, runId) {
     }
     var searchBox = byId("ocTimelineSearch");
     if (searchBox) {
-      searchBox.addEventListener("input", renderTimeline); // ring-scoped filter only
+      // ring-scoped filter only, ~200 ms trailing-edge debounced (the #1720
+      // screener/results house idiom): a typing burst coalesces into ONE
+      // filter+render instead of a full O(rows) rebuild per keystroke.
+      var searchDebounceTimer = null;
+      searchBox.addEventListener("input", function () {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(renderTimeline, 200);
+      });
     }
     var runSelect = byId("ocRunSelect");
     if (runSelect) {
@@ -1388,10 +1480,14 @@ function bxFunnelProvenance(source, runId) {
   window.BXOneclick = {
     TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
     VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     ringPush: bxRingPush,
     ringAdd: bxRingAdd,
     ringFilter: bxRingFilter,
+    timelineRenderRows: bxTimelineRenderRows,
+    timelineCapNote: bxTimelineCapNote,
+    timelineRenderToken: bxTimelineRenderToken,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
     funnelProvenance: bxFunnelProvenance,
@@ -1412,6 +1508,7 @@ function bxFunnelProvenance(source, runId) {
       state.ringSeen = {};
       state.eventsCursor = -1;
       state.earlierCursor = 0;
+      state.lastTimelineToken = null; // ring content reset — force the next render
       renderTimeline();
       loadRunScoped();
     }
@@ -1430,10 +1527,14 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     BX_TIMELINE_RING_CAP: BX_TIMELINE_RING_CAP,
     BX_TIMELINE_RING_LABEL: BX_TIMELINE_RING_LABEL,
+    BX_TIMELINE_RENDER_CAP: BX_TIMELINE_RENDER_CAP,
     BX_VIX_BAND_NOT_STAMPED: BX_VIX_BAND_NOT_STAMPED,
     bxRingPush: bxRingPush,
     bxRingAdd: bxRingAdd,
     bxRingFilter: bxRingFilter,
+    bxTimelineRenderRows: bxTimelineRenderRows,
+    bxTimelineCapNote: bxTimelineCapNote,
+    bxTimelineRenderToken: bxTimelineRenderToken,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
     bxFunnelProvenance: bxFunnelProvenance,

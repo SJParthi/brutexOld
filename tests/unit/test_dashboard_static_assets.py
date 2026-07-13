@@ -112,6 +112,7 @@ def test_bx_ui_exposes_the_shared_api() -> None:
         "esc",
         "num",
         "fetchWithTimeout",
+        "fetchTextBounded",  # body-armed poll-tick bound (DEC-O1-GUARANTEE-HARDEN-001)
         "skeleton",
         "stateCard",
         "errorCard",
