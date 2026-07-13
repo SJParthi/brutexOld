@@ -271,6 +271,7 @@ class AutoPullStateStore:
         return True
 
     def _warn_corrupt(self, detail: str) -> None:
+        """WARN once per store instance that the sidecar is corrupt (→ disarmed)."""
         if self._corrupt_warned:
             return
         self._corrupt_warned = True
@@ -363,12 +364,17 @@ class AutoPullScheduler:
         return self._state
 
     def _update_state_locked(self, **changes: Any) -> AutoPullState:
+        """Apply ``changes`` to the state, persist it, and return the new value.
+
+        Caller must hold ``_state_lock`` (the ``_locked`` suffix law).
+        """
         updated = replace(self._state_locked(), **changes)
         self._state = updated
         self._store.save(updated)
         return updated
 
     def _state_now(self) -> AutoPullState:
+        """A lock-taking snapshot of the current durable state."""
         with self._state_lock:
             return self._state_locked()
 
@@ -598,6 +604,11 @@ class AutoPullScheduler:
     # ── log dedup (per day × reason) ─────────────────────────────────────────
 
     def _log_once(self, today: date, event: str, reason: str, detail: str) -> None:
+        """Emit ``event`` at most once per (day, event, reason) — tick-noise dedup.
+
+        ``auto_pull.refused_retry`` / ``auto_pull.tick_error`` log at WARNING,
+        everything else at INFO; the memo resets at each IST day change.
+        """
         with self._state_lock:
             if self._log_memo_day != today:
                 self._log_memo_day = today

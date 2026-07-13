@@ -5286,6 +5286,7 @@ def build_app(
             """
 
             def _toggle() -> dict[str, Any]:
+                """Arm/disarm on the worker thread; return the fresh status block."""
                 if armed:
                     _scheduler.arm()
                 else:

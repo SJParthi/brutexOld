@@ -187,9 +187,11 @@ def test_banner_starts_unset_and_set_clear_roundtrip() -> None:
     assert banner.snapshot() is None
     banner.set(level="critical", message="boom")
     assert banner.snapshot() == {"level": "critical", "message": "boom"}
-    assert banner.clear() is True, "a REAL clear reports the payload it dropped"
+    cleared = banner.clear()
+    assert cleared is True, "a REAL clear reports the payload it dropped"
     assert banner.snapshot() is None
-    assert banner.clear() is False, "an idempotent no-op clear reports nothing dropped"
+    cleared_again = banner.clear()
+    assert cleared_again is False, "an idempotent no-op clear reports nothing dropped"
     assert banner.snapshot() is None
 
 
@@ -687,7 +689,8 @@ def test_refused_start_restores_the_prior_intent_verbatim(tmp_path: Path) -> Non
     # the window resumes the RUNNING pull's scope, never the refused click's.
     store = PullIntentStore(tmp_path)
     prior = _intent(scope="spot-only", restarts=1)
-    assert store.write(prior) is True
+    prior_written = store.write(prior)
+    assert prior_written is True
     # The refused click's persist (the clobber the pre-start ordering leaves).
     persist_intent_for_launch(
         store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
@@ -744,7 +747,8 @@ def test_dry_run_restores_nothing(tmp_path: Path) -> None:
     # there is nothing to undo, and a pre-existing REAL intent must survive.
     store = PullIntentStore(tmp_path)
     prior = _intent()
-    assert store.write(prior) is True
+    prior_written = store.write(prior)
+    assert prior_written is True
     restored = restore_intent_after_refused_start(store, prior=None, dry_run=True, started=False)
     assert restored is False
     assert store.load() == prior
@@ -758,7 +762,8 @@ def test_refused_start_restore_write_failure_degrades_false(
     # never a raise into the launch path.
     store = PullIntentStore(tmp_path)
     prior = _intent(scope="spot-only")
-    assert store.write(prior) is True
+    prior_written = store.write(prior)
+    assert prior_written is True
     persist_intent_for_launch(
         store, dry_run=False, symbols=None, symbol=None, from_date=None, to_date=None
     )

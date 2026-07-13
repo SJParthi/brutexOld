@@ -186,7 +186,8 @@ class TestStateStore:
             last_attempt_date="2026-07-13",
             last_success_date="2026-07-12",
         )
-        assert store.save(state) is True
+        saved = store.save(state)
+        assert saved is True
         assert AutoPullStateStore(tmp_path).load() == state
         payload = json.loads(store.path.read_text(encoding="utf-8"))
         assert payload["schema"] == AUTO_PULL_STATE_SCHEMA
@@ -206,7 +207,8 @@ class TestStateStore:
         store.path.write_text("junk", encoding="utf-8")
         with capture_logs() as logs:
             store.load()  # WARN 1
-            assert store.save(AutoPullState(armed=True)) is True
+            saved = store.save(AutoPullState(armed=True))
+            assert saved is True
             assert store.load().armed is True  # clean → resets the flag
             store.path.write_text("junk again", encoding="utf-8")
             store.load()  # WARN 2 — a NEW corruption sighting warns again
@@ -373,7 +375,8 @@ class TestStateStore:
         blocked.write_text("file where the lake root should be", encoding="utf-8")
         store = AutoPullStateStore(blocked)
         with capture_logs() as logs:
-            assert store.save(AutoPullState(armed=True)) is False
+            saved = store.save(AutoPullState(armed=True))
+            assert saved is False
         failed = [entry for entry in logs if entry["event"] == "auto_pull.state_write_failed"]
         assert len(failed) == 1
         assert failed[0]["log_level"] == "warning"
