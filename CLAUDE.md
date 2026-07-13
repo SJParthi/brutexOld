@@ -18,7 +18,15 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
+_Last updated: 2026-07-13 (DEC-FNO-STRIKE-TOKEN-ASCII-001 +
+DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001, MIGRATION.md #1785–#1786 — the
+uniqueness-audit evidence pack: the strike-token ASCII pre-screen (a Unicode
+strike no longer aliases the genuine contract) + grid-identity allow_nan parity
++ the injective option-series escape + 7 evidence-test surfaces; BYTE-NEUTRAL for
+finite grids (frozen digests reproduce unmodified); ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #1785–#1786 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
 `claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
 merge event off main tip 3f32b3ef (merged forward over main through 81052345 on 2026-07-13): #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
 #1699 + DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
@@ -2410,7 +2418,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
+- **Active branch:** `claude/uniqueness-evidence-pack`
+  (**DEC-FNO-STRIKE-TOKEN-ASCII-001 + DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001,
+  MIGRATION.md #1785–#1786** — the uniqueness/dedup/run-identity/lake-write
+  deep-verification EVIDENCE PACK (5-area, 22-agent phase-1 audit: the cores are
+  SOUND — zero BLOCKER/MAJOR; this lands the MINOR/NIT remainder + the evidence
+  gaps). (1) [D1, #1785] the canonical F&O strike-token grammar gains an
+  ASCII-canonical `re.ASCII` fullmatch pre-screen BEFORE `Decimal`, so a junk lake
+  dir carrying a Unicode/fullwidth-digit / underscore-grouped / signed / NBSP-wrapped
+  / exponent-form strike no longer decodes IDENTITY-EQUAL to the genuine contract
+  (executed repro `NSE-NIFTY-30Jun25-٢٤٠٠٠-CE` ≡ `…-24000-CE` at pre-fix HEAD —
+  KILLED; the now-dead `InvalidOperation`/`is_finite` arms removed for branch
+  honesty; the sibling-fix chain #1536/#1614/#1752). (2) [EG1] `grid_identity`
+  joins the `allow_nan=False` canonical-JSON parity + `OverfitGateConfig` refuses a
+  non-finite `weight` — BYTE-NEUTRAL for finite grids (the frozen goldens
+  `e55de617…`/`f9f118e0…`/`5b020e892247deac` + the sweep-run/runcore goldens
+  reproduce UNMODIFIED, captured; production-unreachable today, defence in depth).
+  (3) [D3] `_safe_segment` made INJECTIVE — refuses `{"__","_|","|_"}` partition
+  keys (the audit's bare-`__` refusal is provably INSUFFICIENT: `"A_|B"`/`"A|_B"`
+  both → `"A___B"`, executed counterexample; brute-force 281 accepted / 0
+  collisions), so two series keys can never collide onto one options
+  `(side,timestamp)` keyspace (latent-only — the pipe-joined `write(partition_key=…)`
+  producer was deleted). (4) [EG3] NEW
+  `tests/property/test_option_writer_merge_property.py` — the options merge-law
+  Hypothesis twin of the bars property (#1139): unique keys · keep-first · CE+PE
+  same-minute both survive · Σadded == distinct · full replay = 0-added
+  byte-identical no-op · split-order invariance (+ the safe-segment injectivity
+  property). (5) [EG2] the composed `record_digest` Bloom-trip-after-`exact.add`
+  state pinned (loud raise · uncorrupted counters · redo-safe retry/seen · reopen
+  #1714 auto-grow 3→5 dedups the tripped digest). (6) [EG4] the
+  `lake_keys` ↔ `instrument_loader` alias-map + override-env-name cross-import
+  equality pins. (7) [EG5] bxsnap2 slice-header arms: separator-free keys provably
+  cannot alias; the crafted `|`-key preimage alias pinned as the DOCUMENTED limit
+  (production-unreachable; the reject-guard on identity-critical `snapshot_hash.py`
+  = named follow-up `DEC-SNAPSHOT-SLICE-KEY-GUARD-001`). EVIDENCE: PR body carries
+  the claim→evidence table (executed benches, Hypothesis statistics, frozen-digest
+  reproductions, stashed-fix fails-before captures); NO new bench — the options
+  merge is HONESTLY O(month-rows) (an O(1) bench would violate Rule #10); the
+  phase-1 "flock untested" claim is REFUTED (MIGRATION #887). DEFERRED with reasons:
+  [D2] dirty-worktree `code_commit_sha` (Rule-4 POLICY + cli.py pragma ripple —
+  follow-up `DEC-RUN-IDENTITY-DIRTY-WORKTREE-001` candidate); [D4] `combo_digest`
+  nested non-str-key validation (hot dedup path + frozen-digest re-proof burden,
+  production-unreachable NIT). Touched modules 100% line+branch on their exact
+  ci.yml gates; ruff/ruff-format clean, `mypy --strict` clean, pyright 0 new.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+  the per-item record lives in MIGRATION.md #1785–#1786.)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
   vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
   3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
   DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
@@ -6255,7 +6308,17 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/quad-dashboard-lakeinv-universe-docs`
+- **Active feature branch:** `claude/uniqueness-evidence-pack`
+  (DEC-FNO-STRIKE-TOKEN-ASCII-001 + DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001,
+  MIGRATION.md #1785–#1786 — the uniqueness/dedup/run-identity/lake-write
+  deep-verification evidence pack: the strike-token ASCII pre-screen (a Unicode
+  strike no longer aliases the genuine contract) + grid-identity `allow_nan`
+  parity + the injective option-series escape + 7 evidence-test surfaces
+  (options merge-law Hypothesis twin, composed bloom-trip pin, alias-map mirror
+  pins, bxsnap2 slice-header arms); honest deferrals D2/D4/EG5-source; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1785–#1786 for the full blurb)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs`
   (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
   #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
   DEC-DASHBOARD-READ-SCREEN-001 #1759 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 ·
