@@ -823,3 +823,124 @@ class TestCascadeJoinThreading:
             entry["cascade"] == {"status": "not_validated", "reason": "not_in_cascade_pool"}
             for entry in loaded.entries
         )
+
+
+# ── WORST_CASE capture chain (DEC-FILL-WORST-CASE-001 fix round 3) ────────────
+
+
+def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    """The `test_engine_sweep_run` worst-case RANKING fixture, verbatim.
+
+    Rises 1.0 with a 0.5 dip every 4th bar under a tight ±0.05 pad — strong
+    enough that combos rank + persist under the WORST_CASE adverse-max floor,
+    with SL/TP trigger timing diverging HARD between the modes (the
+    observable the parity tooth keys on).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 1.0 if m % 4 else price - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            hi = max(price, close) + 0.05
+            lo = min(price, close) - 0.05
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestWorstCaseCaptureChain:
+    """FIX-ROUND-3 killing test (finding 5, MIGRATION.md #1786): the fill-mode
+    CAPTURE chain — `results_depth_pass._process_tuple` threads
+    `fill_mode=grid.fill_mode` into `capture_combo`, whose re-sim binds
+    `policy=FillPolicy(fill_mode=fill_mode)`. Severing EITHER seam makes the
+    parity tooth re-simulate the WORST_CASE store under the PRECISE library
+    default — every combo fails parity and `combos_captured` drops to 0
+    (the mutant class the round-1/round-2 refuters kept confirming: no test
+    ran the pass over a WORST_CASE tree with a persisted finalist).
+    """
+
+    def test_worst_case_pass_captures_under_the_run_mode(self, tmp_path: Path) -> None:
+        bars = _worst_case_ranking_bars()
+        grid = _grid(fill_mode=FillMode.WORST_CASE, stop_losses=[200], take_profits=[100])
+        root = tmp_path / "sweeps"
+        root.mkdir()
+        _run_sweep(root, grid, bars)
+        report = run_results_depth_pass(
+            out_root=root,
+            grid=grid,
+            bars_for=lambda _instrument, _tf: bars,
+            minute_bars_for=lambda _i: bars,
+        )
+        # The chain is EXERCISED, not vacuously green: finalists persisted,
+        # every one captured, ZERO parity failures — under a severed seam
+        # (PRECISE re-sim of a WORST_CASE store) this reads captured=0.
+        assert report.combos_captured >= 1
+        assert report.combos_parity_failed == 0
+
+        # Anti-vacuity: the two modes genuinely CAPTURE different values on
+        # this store — the direct capture_combo under the run's own mode
+        # reproduces the row (parity_ok, trades exposed, adverse-extreme
+        # entry fill), while the PRECISE library default FAILS parity (the
+        # exact behaviour a severed kwarg silently produces).
+        from brutex.engine.combo_mask import mask_to_entry_signals
+        from brutex.engine.stage1a import build_bar_bits
+        from brutex.engine.trade_capture import capture_combo
+        from brutex.engine.trade_sim import FillPolicy, simulate_trades
+
+        (tuple_,) = iter_sweep_tuples(grid)
+        rows = ResultsStore.load(tuple_store_path(root, tuple_, grid)).rows()
+        assert rows
+        row = rows[0]
+        bar_bits = build_bar_bits(bars)
+        captures = {
+            mode: capture_combo(
+                row,
+                bars=bars,
+                bar_bits=bar_bits,
+                tf_minutes=1,
+                sl_paisa=200,
+                tp_paisa=100,
+                minute_index=None,
+                stamper=None,
+                fill_mode=mode,
+            )
+            for mode in (FillMode.WORST_CASE, FillMode.PRECISE)
+        }
+        assert captures[FillMode.WORST_CASE].parity_ok is True
+        assert captures[FillMode.PRECISE].parity_ok is False
+        wc_trades = captures[FillMode.WORST_CASE].trades
+        assert wc_trades and not captures[FillMode.PRECISE].trades
+        # The captured VALUE differs between modes: the worst-case entry
+        # fills at the entry bar's adverse extreme (BUY HIGH), the precise
+        # re-sim of the same mask at its OPEN — first-fill inequality proven
+        # against the walker's own detail stream under each mode.
+        fills = {}
+        for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
+            detail_sink: list[object] = []
+            simulate_trades(
+                bars,
+                mask_to_entry_signals(bar_bits, row.mask_bits),
+                direction=Side.BUY,
+                tf_minutes=1,
+                stop_loss_paisa=200,
+                take_profit_paisa=100,
+                policy=FillPolicy(fill_mode=mode),
+                detail_sink=detail_sink,  # type: ignore[arg-type]
+            )
+            assert detail_sink
+            fills[mode] = detail_sink[0].entry_fill_paisa  # type: ignore[attr-defined]
+        assert fills[FillMode.WORST_CASE] != fills[FillMode.PRECISE]
+        assert wc_trades[0].entry_px == Decimal(fills[FillMode.WORST_CASE]) / 100
