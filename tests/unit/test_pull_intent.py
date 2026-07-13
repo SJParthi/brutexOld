@@ -13,6 +13,10 @@ plus the REAL ``fcntl.flock`` probe against a tmp lake root.
 from __future__ import annotations
 
 import json
+import os
+import signal
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -39,6 +43,30 @@ from brutex.dashboard.pull_intent import (
     run_legacy_resume,
     synthesize_legacy_intent,
 )
+from structlog.testing import capture_logs
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-7 P-1 defect is a read that blocks
+    FOREVER (a FIFO read waits for a writer; ``/dev/zero`` yields infinite
+    zeros), so a plain regression would HANG rather than fail; the
+    ``SIGALRM`` handler interrupts the blocked syscall and fails the test
+    instead (the #1614 round-6 watchdog idiom).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"intent load blocked > {seconds}s (non-regular-inode hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _intent(**overrides: Any) -> PullIntent:
@@ -239,10 +267,120 @@ def test_load_missing_is_none(tmp_path: Path) -> None:
     assert PullIntentStore(tmp_path).load() is None
 
 
-def test_load_unreadable_is_none_and_never_raises(tmp_path: Path) -> None:
+def test_load_directory_is_none_and_never_raises(tmp_path: Path) -> None:
+    """A DIRECTORY at the intent path is a non-regular inode → the corrupt-arm
+    ``None`` naming the shape (pre-round-7 it folded via the read's OSError —
+    same answer); the best-effort delete cannot unlink a directory, which the
+    swallowed ``pull_intent.clear_failed`` already covers."""
     store = PullIntentStore(tmp_path)
-    store.path.mkdir()  # the intent path is a DIRECTORY → read_text raises OSError
-    assert store.load() is None
+    store.path.mkdir()
+    with capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert store.path.is_dir()  # unlink cannot remove it — logged, never raised
+
+
+def test_load_fifo_is_none_deleted_no_hang(tmp_path: Path) -> None:
+    """[F/B — refuter round 7 P-1] a FIFO planted at the intent path reads as
+    corrupt (``None`` + one WARN naming the shape) and is DELETED (healed),
+    WITHOUT blocking. Fails-before (executed at 68d18dea in a bounded
+    subprocess): the plain ``read_bytes`` blocked FOREVER — the launcher's
+    held-mutex ``prior_intent = store.load()`` snapshot wedged a REAL
+    /pull-pipeline click's request thread with no exception to catch."""
+    store = PullIntentStore(tmp_path)
+    os.mkfifo(store.path)
+    with _hang_watchdog(), capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert "not a regular file" in str(corrupt[0]["detail"])
+    assert not store.path.exists(), "the planted FIFO is unlinked — the path heals"
+
+
+def test_load_devzero_symlink_is_none_unlinks_link_only(tmp_path: Path) -> None:
+    """[F/B — refuter round 7 P-1] a symlink to ``/dev/zero`` (infinite-read
+    character device) reads as corrupt without reading forever; the
+    best-effort delete removes the LINK, never its target."""
+    store = PullIntentStore(tmp_path)
+    store.path.symlink_to("/dev/zero")
+    with _hang_watchdog(), capture_logs() as logs:
+        assert store.load() is None
+    corrupt = [entry for entry in logs if entry["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert not store.path.is_symlink(), "the LINK is unlinked"
+    assert Path("/dev/zero").exists(), "the target is untouched"
+
+
+def test_load_dangling_symlink_is_absent_no_warn(tmp_path: Path) -> None:
+    """A DANGLING symlink opens ``FileNotFoundError`` → the normal absent
+    ``None`` (no corruption WARN, nothing deleted — nothing readable ever
+    existed behind it)."""
+    store = PullIntentStore(tmp_path)
+    store.path.symlink_to(tmp_path / "nowhere.json")
+    with capture_logs() as logs:
+        assert store.load() is None
+    assert [entry for entry in logs if entry["event"] == "pull_intent.corrupt"] == []
+    assert [entry for entry in logs if entry["event"] == "pull_intent.read_failed"] == []
+
+
+def test_load_open_denied_is_read_failed_none_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission-denied ``os.open`` (the ``read_error`` arm) keeps the
+    pre-round-7 posture: ``pull_intent.read_failed`` + ``None``, the file
+    KEPT (it may become readable again). Deterministic via a monkeypatched
+    ``os.open`` — a real ``chmod 0`` file does not deny a root-run CI user
+    (the #1614 ``test_shard_read_error`` idiom)."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    real_open = os.open
+
+    def _boom(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(os.fspath(path)) == store.path:
+            raise PermissionError("read denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _boom)
+    with capture_logs() as logs:
+        assert store.load() is None
+    failed = [entry for entry in logs if entry["event"] == "pull_intent.read_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "PermissionError"
+    monkeypatch.undo()
+    assert store.path.exists(), "a read_error keeps the file — never deleted"
+
+
+def test_load_failure_after_open_is_read_failed_and_closes_the_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``OSError`` AFTER a successful ``os.open`` (fstat / fdopen / read on
+    the OPEN descriptor) maps to the same ``read_error`` arm via the second
+    handler of the owned-flag split, and the still-owned descriptor is closed
+    exactly once (the #1614 fd-ownership discipline, mirrored)."""
+    store = PullIntentStore(tmp_path)
+    store.write(_intent())
+    closed: list[int] = []
+    real_close = os.close
+
+    def _close_spy(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def _fstat_boom(fd: int) -> os.stat_result:
+        raise PermissionError("fstat denied")
+
+    monkeypatch.setattr(os, "close", _close_spy)
+    monkeypatch.setattr(os, "fstat", _fstat_boom)
+    with capture_logs() as logs:
+        assert store.load() is None
+    monkeypatch.undo()
+    failed = [entry for entry in logs if entry["event"] == "pull_intent.read_failed"]
+    assert len(failed) == 1
+    assert len(closed) == 1  # owned-flag: closed exactly once, never leaked
 
 
 def test_load_corrupt_json_is_none_and_deleted(tmp_path: Path) -> None:

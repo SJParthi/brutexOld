@@ -15,9 +15,12 @@ never a network call.
 from __future__ import annotations
 
 import importlib
+import os
+import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -167,6 +170,29 @@ class _Spines:
         monkeypatch.setattr(app_module, "pull_all_spot", spot)
         monkeypatch.setattr(app_module, "pull_expiries_contracts", metadata)
         monkeypatch.setattr(app_module, "pull_historical_for_underlyings", historical)
+
+
+@contextmanager
+def _boot_hang_watchdog(seconds: int = 10) -> Generator[None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-7 P-1 defect is a boot / click that
+    blocks FOREVER (a FIFO read waits for a writer — no exception for any
+    belt to catch), so a plain regression would HANG rather than fail; the
+    ``SIGALRM`` handler interrupts the blocked syscall and fails the test
+    instead (the #1614 round-6 watchdog idiom).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"boot/click blocked > {seconds}s (non-regular-inode hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _wait_for_job(client: TestClient, *, timeout: float = 15.0) -> dict[str, Any]:
@@ -1493,3 +1519,141 @@ class TestAutoArmRoute:
         failed = [e for e in logs if e["event"] == "auto_pull.boot_start_failed"]
         assert len(failed) == 1
         assert failed[0]["error_type"] == "RuntimeError"
+
+    def test_boot_lifespan_survives_fifo_state_file(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """[F/B — refuter round 7 P-1, the REAL build_app lifespan] a FIFO
+        (non-regular inode) planted at ``.pull_all_spot_auto.json`` boots
+        CLEAN and DISARMED with ONE ``auto_pull.state_corrupt`` WARN naming
+        the shape. Fails-before (executed at 68d18dea in a bounded
+        subprocess): the boot hook's plain ``read_bytes`` blocked FOREVER
+        waiting for a FIFO writer — NO exception, so the round-6 belt never
+        fired and uvicorn never reached "Application startup complete" (a
+        SILENT, permanent boot hang, strictly worse than the N-1 crash);
+        the SIGALRM watchdog turns a regression back into that hang into a
+        loud failure."""
+        from brutex.dashboard.auto_pull_scheduler import AUTO_PULL_STATE_FILENAME
+
+        _pin_creds_present(monkeypatch)
+        lake = tmp_path / "lake"
+        lake.mkdir(exist_ok=True)
+        os.mkfifo(lake / AUTO_PULL_STATE_FILENAME)
+        scheduler = _wired_scheduler(tmp_path)
+        with (
+            _boot_hang_watchdog(),
+            capture_logs() as logs,
+            _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client,
+        ):
+            names = [t.name for t in threading.enumerate()]
+            assert "brutex-auto-pull-scheduler" not in names  # disarmed: zero threads
+            snap = client.get("/api/v1/universe/pull-progress").json()
+            assert snap["auto_pull"]["armed"] is False
+        corrupt = [e for e in logs if e["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert "not a regular file" in str(corrupt[0]["detail"])
+
+    def test_scope_fno_only_never_marks_the_days_auto_pull(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """[the round-6 ruling's MISSING teeth — refuter round 7 Q-1, mutant
+        M-Q8 killer] a SUCCESSFUL real fno-only run must NEVER count as the
+        day's spot auto-pull: with an ARMED wired scheduler,
+        ``note_run_complete`` does not fire on the fno-only arm — the on-disk
+        ``last_success_date`` / ``last_attempt_date`` stay unset, so the
+        scheduler still owes today's SPOT pull (under the mutant the armed
+        once-per-day guard would read ``already_succeeded`` and silently skip
+        the day's spot data — the exact freshness gap the ruling forbids)."""
+        _pin_creds_present(monkeypatch)
+        spines = _Spines()
+        spines.wire(monkeypatch)
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler) as client:
+            scheduler.arm()
+            resp = client.post(_ROUTE, params={"scope": "fno-only"})
+            assert resp.status_code == 200
+            snap = _wait_for_job(client)
+        assert snap["state"] == "done"
+        assert "F&O-only pipeline complete" in snap["detail"]  # the run WAS a success
+        assert spines.metadata_calls == 1
+        on_disk = AutoPullStateStore(tmp_path / "lake").load()
+        assert on_disk.armed is True  # the F&O run never touched the arming either
+        assert on_disk.last_success_date is None  # today's SPOT pull is still owed
+        assert on_disk.last_attempt_date is None
+        assert scheduler.status()["last_success_date"] is None
+
+
+def test_scope_fno_only_never_clobbers_pull_verdict(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[the round-6 ruling's MISSING teeth — refuter round 7 Q-1, mutant M-Q6
+    killer] the fno-only arm's DESIGNED no-op spot report must never clobber
+    ``/api/v1/universe/pull-verdict``: a prior REAL spot-only run's RED
+    ``transient_residual`` banner survives a completed fno-only run
+    byte-for-byte (under the mutant the no-op's vacuous "clean" verdict would
+    mask the red banner — the B H1 honesty class)."""
+
+    def failing_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        return BulkSpotReport(
+            dry_run=kwargs["dry_run"],
+            start_date="2020-01-01",
+            end_date="2026-07-12",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=0, no_data=0)],
+            still_failed_windows=5,
+        )
+
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", failing_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert client.post(_ROUTE, params={"scope": "spot-only"}).status_code == 200
+        _wait_for_job(client)
+        before = client.get("/api/v1/universe/pull-verdict").json()
+        assert before["present"] is True
+        assert before["kind"] == "transient_residual"  # the REAL red banner
+        assert client.post(_ROUTE, params={"scope": "fno-only"}).status_code == 200
+        snap = _wait_for_job(client)
+        after = client.get("/api/v1/universe/pull-verdict").json()
+    assert snap["state"] == "done"
+    assert "F&O-only pipeline complete" in snap["detail"]  # the fno run DID finish
+    assert after == before  # byte-equal: the no-op spot verdict never lands
+
+
+def test_click_with_fifo_intent_file_recovers(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[F/B — refuter round 7 P-1, the REAL click path] a FIFO planted at
+    ``.pull_intent.json`` no longer wedges a REAL spot-only /pull-pipeline
+    click: the launcher's held-mutex ``prior_intent = store.load()`` snapshot
+    reads it as corrupt (one ``pull_intent.corrupt`` WARN naming the shape),
+    unlinks it, and the pull runs to completion with a fresh regular intent
+    lifecycle. Fails-before (executed at 68d18dea in a bounded subprocess):
+    the POST never returned — the request thread blocked forever inside the
+    held mutex."""
+    from brutex.dashboard.pull_intent import PullIntentStore
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    lake = tmp_path / "lake"
+    lake.mkdir(exist_ok=True)
+    intent_store = PullIntentStore(lake)
+    os.mkfifo(intent_store.path)
+    with (
+        capture_logs() as logs,
+        _make_client(store, monkeypatch, tmp_path, pull_intent_store=intent_store) as client,
+    ):
+        with _boot_hang_watchdog():
+            # The pre-fix hang site: the POST's held-mutex intent snapshot.
+            resp = client.post(_ROUTE, params={"scope": "spot-only"})
+        assert resp.status_code == 200
+        assert resp.json()["started"] is True
+        snap = _wait_for_job(client)
+    assert snap["state"] == "done"
+    corrupt = [e for e in logs if e["event"] == "pull_intent.corrupt"]
+    assert len(corrupt) == 1
+    assert corrupt[0]["shape"] == "not_regular"
+    assert not intent_store.path.exists()  # cleared by the finished run's on_finally
+    assert len(spines.spot_kwargs) == 1  # the click genuinely pulled

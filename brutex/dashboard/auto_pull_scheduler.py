@@ -22,10 +22,14 @@ Durable state: ONE atomic JSON sidecar ``<lake_root>/.pull_all_spot_auto.json``
 (:data:`AUTO_PULL_STATE_FILENAME`, schema :data:`AUTO_PULL_STATE_SCHEMA`)
 written via the COMMON :func:`~brutex.data.atomic_io.atomic_write_simple`.
 A corrupt / unreadable file reads as DISARMED with ONE
-``auto_pull.state_corrupt`` WARN — the dashboard never crashes on it (EVERY
-corruption shape: junk JSON, wrong shape, invalid UTF-8, a nesting bomb, an
-oversized file — the refuter-round-6 N-1 hardening; see
-:meth:`AutoPullStateStore.load`).
+``auto_pull.state_corrupt`` WARN — the dashboard never crashes OR hangs on it
+(EVERY corruption shape, inode-TYPE shapes included: junk JSON, wrong shape,
+invalid UTF-8, a nesting bomb, an oversized file — the refuter-round-6 N-1
+hardening — plus a non-regular inode planted at the path, a FIFO /
+``/dev/zero`` symlink / socket / directory, which pre-round-7 blocked the
+read syscall FOREVER and silently wedged dashboard boot; the round-7 P-1
+re-hardening on the #1614 round-6 ``O_NONBLOCK`` + ``S_ISREG`` loader
+template — see :meth:`AutoPullStateStore.load`).
 SINGLE-WRITER design: only this dashboard process's scheduler + arming routes
 write the file (the CLI never touches it), so the scheduler holds an
 in-memory mirror after the first load and every read is O(1) memory — no
@@ -75,6 +79,7 @@ from brutex.calendars.auto_pull_gate import (
     resolve_settle_time,
 )
 from brutex.calendars.nse import now_ist
+from brutex.dashboard.pull_intent import read_sidecar_bytes
 from brutex.data.atomic_io import atomic_write_simple
 
 _LOG = structlog.get_logger("brutex.dashboard.auto_pull_scheduler")
@@ -105,8 +110,10 @@ AUTO_PULL_STATE_SCHEMA: Final[int] = 1
 #: plenty (the gate is day+settle-granular); env-overridable, fail-loud.
 DEFAULT_TICK_SECONDS: Final[float] = 60.0
 
-#: Size cap on the state file, checked BEFORE the read (refuter round 6 N-1 —
-#: the crossverify ``MAX_JOURNAL_BYTES`` / ``SweepCheckpointStore`` precedent):
+#: Size cap on the state file, checked on the ``fstat`` of the OPEN descriptor
+#: (refuter round 6 N-1 introduced the cap — the crossverify
+#: ``MAX_JOURNAL_BYTES`` / ``SweepCheckpointStore`` precedent for the value;
+#: round 7 P-1/P-2 moved it onto the fd, closing the stat→read swap window):
 #: a real state file is ~200 bytes, so 16 MiB is ~80,000× headroom; a planted
 #: multi-GB file at the path reads DISARMED + one WARN instead of being read
 #: whole (where a ``MemoryError`` would crash boot).
@@ -197,33 +204,39 @@ class AutoPullStateStore:
     def load(self) -> AutoPullState:
         """Read the persisted state; corrupt/unreadable ⇒ DISARMED — never raises.
 
-        The read is BYTES + decode INSIDE the corruption-tolerant path (the
-        crossverify #1776 round-2 M1 template, refuter round 6 N-1): an
-        invalid-UTF-8 byte (``UnicodeDecodeError`` — a ``ValueError`` subclass
-        raised by the DECODE, not the read), a nesting-bomb payload
+        The read rides the shared regular-file-only loader
+        :func:`~brutex.dashboard.pull_intent.read_sidecar_bytes` (the #1614
+        round-6 template — refuter round 7 P-1,
+        DEC-PULL-SCOPED-ALL-ONECLICK-001: the round-6 N-1 hardening's plain
+        ``read_bytes`` HUNG forever on a non-regular inode, and the boot
+        lifespan's ``start_if_armed`` state load made a planted FIFO /
+        ``/dev/zero`` symlink a SILENT, permanent dashboard boot hang no
+        exception belt could catch — executed at the pre-fix head):
+        ``O_NONBLOCK`` open + ``S_ISREG`` on the descriptor folds a FIFO /
+        device / socket / directory into the same DISARMED-plus-one-WARN
+        answer, naming the inode shape, and the :data:`MAX_STATE_BYTES` cap
+        is checked on the SAME ``fstat`` (the stat→read TOCTOU window
+        closed — round-7 P-2). The decode stays INSIDE the
+        corruption-tolerant path (refuter round 6 N-1): an invalid-UTF-8
+        byte (``UnicodeDecodeError`` — a ``ValueError`` subclass raised by
+        the DECODE, not the read), a nesting-bomb payload
         (``RecursionError``) and an out-of-range numeric (``OverflowError``)
-        all fold into the same DISARMED-plus-one-WARN answer as junk JSON —
-        pre-fix the first two ESCAPED and a bit-rotted state file crashed
-        dashboard boot persistently (uvicorn "Application startup failed" on
-        every restart). An oversized file (> :data:`MAX_STATE_BYTES`) is
-        refused BEFORE the read.
+        all fold into the same answer as junk JSON — pre-fix those two
+        ESCAPED and a bit-rotted state file crashed dashboard boot
+        persistently (uvicorn "Application startup failed" on every restart).
         """
-        try:
-            size = self._path.stat().st_size
-            if size > MAX_STATE_BYTES:
-                self._warn_corrupt(f"oversized ({size} bytes > the {MAX_STATE_BYTES} B cap)")
-                return AutoPullState()
-            raw = self._path.read_bytes()
-        except FileNotFoundError:
-            # The normal never-armed answer — not a corruption (covers a file
-            # racing away between the stat and the read too).
+        result = read_sidecar_bytes(self._path, max_bytes=MAX_STATE_BYTES)
+        if result.shape == "absent":
+            # The normal never-armed answer — not a corruption (covers a
+            # dangling symlink and a file racing away too).
             self._corrupt_warned = False
             return AutoPullState()
-        except OSError as exc:
-            self._warn_corrupt(f"unreadable ({type(exc).__name__}: {exc})")
+        if result.raw is None:
+            # not_regular / oversized / read_error — the detail names it.
+            self._warn_corrupt(result.detail)
             return AutoPullState()
         try:
-            state = _state_from_payload(json.loads(raw.decode("utf-8")))
+            state = _state_from_payload(json.loads(result.raw.decode("utf-8")))
         except (ValueError, RecursionError, OverflowError) as exc:
             # ValueError covers junk JSON, the wrong-shape refusals of
             # _state_from_payload AND UnicodeDecodeError (its subclass).

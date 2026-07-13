@@ -22,7 +22,11 @@ Pinned semantics (the round-5 laws):
 from __future__ import annotations
 
 import json
+import os
+import signal
 import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any
@@ -48,6 +52,29 @@ _OPEN = datetime(2026, 7, 13, 18, 0)
 _BEFORE_SETTLE = datetime(2026, 7, 13, 12, 0)
 _SUNDAY = datetime(2026, 7, 12, 18, 0)
 _NEXT_DAY_OPEN = datetime(2026, 7, 14, 18, 0)
+
+
+@contextmanager
+def _hang_watchdog(seconds: int = 5) -> Generator[None]:
+    """Turn an indefinite block inside the body into a LOUD failure.
+
+    The fails-before shape of the round-7 P-1 defect is a read that blocks
+    FOREVER (a FIFO read waits for a writer; a ``/dev/zero`` read yields
+    infinite zeros), so a plain regression test would HANG rather than fail;
+    the ``SIGALRM`` handler raising interrupts the blocked syscall and fails
+    the test instead (the #1614 round-6 watchdog idiom).
+    """
+
+    def _alarm(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"state load blocked > {seconds}s (non-regular-inode hang)")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _allowed_gate(_instant: datetime) -> AutoGateVerdict:
@@ -218,14 +245,83 @@ class TestStateStore:
         assert state.last_attempt_date is None
         assert state.last_success_date is None
 
-    def test_unreadable_file_disarmed_warn(self, tmp_path: Path) -> None:
+    def test_directory_at_path_disarmed_warn(self, tmp_path: Path) -> None:
+        """A DIRECTORY planted at the state path is a non-regular inode: the
+        round-7 ``S_ISREG`` gate folds it into DISARMED + the ONE WARN naming
+        the inode shape (pre-round-7 it happened to fold via the read's
+        ``IsADirectoryError`` — same answer, now the honest shape name)."""
         store = AutoPullStateStore(tmp_path)
-        store.path.mkdir()  # a DIRECTORY at the path → OSError on read_bytes
+        store.path.mkdir()
         with capture_logs() as logs:
             assert store.load() == AutoPullState()
         corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
         assert len(corrupt) == 1
-        assert "unreadable" in str(corrupt[0]["detail"])
+        assert "not a regular file" in str(corrupt[0]["detail"])
+
+    def test_fifo_state_disarmed_one_warn_no_hang(self, tmp_path: Path) -> None:
+        """[F/B — refuter round 7 P-1] a FIFO planted at the state path reads
+        DISARMED + ONE WARN naming the shape, WITHOUT blocking. Fails-before
+        (executed at 68d18dea in a bounded subprocess): the plain
+        ``read_bytes`` blocked FOREVER waiting for a writer — no exception,
+        so the boot lifespan's ``start_if_armed`` belt could not catch it and
+        the REAL dashboard boot wedged silently until the sidecar was
+        hand-removed; the SIGALRM watchdog turns a regression back into that
+        hang into a loud failure."""
+        store = AutoPullStateStore(tmp_path)
+        os.mkfifo(store.path)
+        with _hang_watchdog(), capture_logs() as logs:
+            assert store.load() == AutoPullState()
+            assert store.load() == AutoPullState()  # once-flag holds
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert "not a regular file" in str(corrupt[0]["detail"])
+
+    def test_devzero_symlink_state_disarmed_no_hang(self, tmp_path: Path) -> None:
+        """[F/B — refuter round 7 P-1] a symlink to ``/dev/zero`` (a character
+        device serving INFINITE zeros — the unbounded-read member of the
+        non-regular-inode class) reads DISARMED + one WARN instead of reading
+        forever; the ``S_ISREG`` check is on the OPENED target's ``fstat``."""
+        store = AutoPullStateStore(tmp_path)
+        store.path.symlink_to("/dev/zero")
+        with _hang_watchdog(), capture_logs() as logs:
+            assert store.load() == AutoPullState()
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert "not a regular file" in str(corrupt[0]["detail"])
+
+    def test_dangling_symlink_state_is_absent_no_warn(self, tmp_path: Path) -> None:
+        """A DANGLING symlink opens ``FileNotFoundError`` → the normal
+        never-armed ABSENT answer (no corruption WARN — nothing readable ever
+        existed behind it), and the once-flag resets like any absent read."""
+        store = AutoPullStateStore(tmp_path)
+        store.path.symlink_to(tmp_path / "nowhere.json")
+        with capture_logs() as logs:
+            assert store.load() == AutoPullState()
+        assert [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"] == []
+
+    def test_open_denied_disarmed_unreadable_warn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permission-denied ``os.open`` (the ``read_error`` arm) reads
+        DISARMED + one WARN carrying the OS error. Deterministic via a
+        monkeypatched ``os.open`` (a real ``chmod 0`` file does not deny a
+        root-run CI user, so the syscall fault is injected — the #1614
+        ``test_shard_read_error`` idiom)."""
+        store = AutoPullStateStore(tmp_path)
+        store.path.write_text("{}", encoding="utf-8")
+        real_open = os.open
+
+        def _boom(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(os.fspath(path)) == store.path:
+                raise PermissionError("read denied")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", _boom)
+        with capture_logs() as logs:
+            assert store.load() == AutoPullState()
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert "unreadable (PermissionError" in str(corrupt[0]["detail"])
 
     def test_invalid_utf8_disarmed_one_warn(self, tmp_path: Path) -> None:
         """[F/B — refuter round 6 N-1 CASE1] a bit-rotted state file (ONE bad

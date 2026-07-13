@@ -49,7 +49,14 @@ the pipeline's own — derived-TF partitions written + movers warmed — never a
 :data:`MAX_AUTO_RESTARTS` times by construction; the over-cap intent is KEPT on
 disk for forensics (only a later real pull's clean finish clears it). Every
 helper here is best-effort at the boot boundary: a corrupt / unreadable intent
-is logged + treated as absent (+ deleted best-effort), never a boot crash.
+is logged + treated as absent (+ deleted best-effort), never a boot crash —
+and never a HANG either: :func:`read_sidecar_bytes` (the shared #1614-round-6
+regular-file-only loader this store AND the auto-pull scheduler's state store
+read through) opens ``O_NONBLOCK`` + ``S_ISREG``-checks the descriptor, so a
+non-regular inode (FIFO / device symlink / socket / directory) planted at the
+sidecar folds into the same corrupt-file answer instead of blocking the read
+syscall forever (refuter round 7 P-1), and the 16 MiB cap is checked on the
+``fstat`` of the SAME open descriptor (no stat→read swap window — P-2).
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from stat import S_ISREG, filemode
 from typing import Any, Final
 
 import structlog
@@ -81,11 +89,13 @@ __all__ = [
     "PullIntentStore",
     "ResumeAction",
     "ResumeBanner",
+    "SidecarReadResult",
     "clear_banner_after_start",
     "emit_restart_cap_alert",
     "persist_intent_for_launch",
     "probe_pull_singleflight",
     "pull_intent_resume_active",
+    "read_sidecar_bytes",
     "resolve_pull_intent_resume",
     "restart_cap_message",
     "restore_intent_after_refused_start",
@@ -123,11 +133,94 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
 
-#: Size cap on the intent file, checked BEFORE the read (refuter round 6 N-1,
-#: DEC-PULL-SCOPED-ALL-ONECLICK-001 — the crossverify #1776 ``MAX_JOURNAL_BYTES``
-#: precedent): a real intent is ~250 bytes; a planted multi-GB file reads as
-#: corrupt instead of being read whole.
+#: Size cap on the intent file, checked on the ``fstat`` of the OPEN descriptor
+#: (refuter round 6 N-1 introduced the cap on a separate pre-read ``stat``;
+#: refuter round 7 P-1/P-2 moved it onto the fd — the crossverify #1776
+#: ``MAX_JOURNAL_BYTES`` precedent for the value): a real intent is ~250 bytes;
+#: a planted multi-GB file reads as corrupt instead of being read whole, and
+#: the fstat-on-fd cap leaves no stat→read swap window.
 MAX_INTENT_BYTES: Final[int] = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarReadResult:
+    """One bounded, regular-file-only sidecar read's outcome (round-7 P-1).
+
+    ``shape`` is exactly one of ``"ok"`` (``raw`` carries the bytes) ·
+    ``"absent"`` · ``"not_regular"`` · ``"oversized"`` · ``"read_error"``;
+    ``raw`` is ``None`` on every non-``ok`` shape. ``detail`` is the
+    fully-formed human clause for the caller's ONE WARN (names the inode
+    shape / the size / the OS error); ``error_type`` carries the exception
+    class name on ``read_error`` only.
+    """
+
+    shape: str
+    raw: bytes | None = None
+    detail: str = ""
+    error_type: str | None = None
+
+
+def read_sidecar_bytes(path: Path, *, max_bytes: int) -> SidecarReadResult:
+    """Read a small JSON sidecar's bytes — regular-file-only, fd-capped, never raises.
+
+    The DEC-LAKE-STATS-MANIFEST-001 round-6 loader template (refuter round 7
+    P-1, DEC-PULL-SCOPED-ALL-ONECLICK-001): ``os.open(path, O_RDONLY |
+    O_NONBLOCK)`` — a plain ``open``/``read_bytes`` on a FIFO blocks for a
+    writer FOREVER and on a ``/dev/zero`` symlink reads infinite zeros, so a
+    non-regular inode planted at the sidecar path hung the dashboard BOOT
+    (the scheduler's ``start_if_armed`` state load) and the pull click's
+    held-mutex intent snapshot with no exception for any belt to catch —
+    then ``S_ISREG`` on ``os.fstat(fd)`` (a FIFO/device/socket/directory
+    folds into ``not_regular``; ``O_NONBLOCK`` makes the FIFO open itself
+    return immediately), the size cap checked on the SAME ``fstat`` (the
+    round-6 stat→read TOCTOU window — refuter round 7 P-2 — is CLOSED: the
+    capped size and the read come from ONE opened inode, so an out-of-band
+    swap can never feed a bigger file past the cap), and a bounded
+    ``read(max_bytes)`` from the descriptor. fd ownership mirrors the #1614
+    loader exactly: ``owned`` is True while THIS frame must close it;
+    ``os.fdopen`` transfers ownership to the reader (closed by the ``with``),
+    so no path double-closes or leaks the descriptor.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        # Absent — including a dangling symlink and a file racing away.
+        return SidecarReadResult(shape="absent")
+    except OSError as exc:
+        return SidecarReadResult(
+            shape="read_error",
+            detail=f"unreadable ({type(exc).__name__}: {exc})",
+            error_type=type(exc).__name__,
+        )
+    owned = True
+    try:
+        st = os.fstat(fd)
+        if not S_ISREG(st.st_mode):
+            return SidecarReadResult(
+                shape="not_regular",
+                detail=f"not a regular file ({filemode(st.st_mode)})",
+            )
+        if st.st_size > max_bytes:
+            return SidecarReadResult(
+                shape="oversized",
+                detail=f"oversized ({st.st_size} bytes > the {max_bytes} B cap)",
+            )
+        with os.fdopen(fd, "rb") as handle:
+            # The file object now owns (and closes) the descriptor.
+            owned = False
+            raw = handle.read(max_bytes)
+    except OSError as exc:
+        # A failure on the OPEN descriptor (fstat / fdopen / read) — the
+        # FileNotFoundError→absent mapping applies only to ``os.open`` itself.
+        return SidecarReadResult(
+            shape="read_error",
+            detail=f"unreadable ({type(exc).__name__}: {exc})",
+            error_type=type(exc).__name__,
+        )
+    finally:
+        if owned:
+            os.close(fd)
+    return SidecarReadResult(shape="ok", raw=raw)
 
 
 def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
@@ -375,40 +468,52 @@ class PullIntentStore:
         best-effort (it can never become readable again and must not re-trip
         every boot), and reads as absent — a boot can never crash here.
 
-        Hardened per the crossverify #1776 round-2 M1 template (refuter round
-        6 N-1's inherited note, DEC-PULL-SCOPED-ALL-ONECLICK-001): the read is
-        BYTES with the decode INSIDE the corruption-tolerant path, so an
-        invalid-UTF-8 byte (``UnicodeDecodeError`` escapes a ``read_text``
-        wrapped only for ``OSError``), a nesting-bomb payload
+        Hardened on the #1614 round-6 loader template via the shared
+        :func:`read_sidecar_bytes` (refuter round 7 P-1,
+        DEC-PULL-SCOPED-ALL-ONECLICK-001 — supersedes the round-6 N-1
+        crossverify-#1776-M1 read, whose plain ``read_bytes`` HUNG forever on
+        a non-regular inode: executed, a FIFO / ``/dev/zero`` symlink planted
+        at the intent path wedged the launcher's held-mutex ``prior_intent =
+        store.load()`` snapshot — a REAL pull-click request thread — with no
+        exception for any belt to catch): the open is ``O_NONBLOCK`` +
+        ``S_ISREG``-checked on the descriptor (a FIFO / device / socket /
+        directory folds into the corrupt-file answer, naming the shape), the
+        16 MiB cap (:data:`MAX_INTENT_BYTES`) is checked on the SAME
+        ``fstat`` (the stat→read TOCTOU window closed — round-7 P-2), and the
+        decode stays INSIDE the corruption-tolerant path so an invalid-UTF-8
+        byte (``UnicodeDecodeError``), a nesting-bomb payload
         (``RecursionError``) and an out-of-range numeric (``OverflowError``)
-        all fold into the corrupt-file answer — pre-fix the launcher's
-        ``prior_intent = store.load()`` snapshot (held-mutex, round-4 fold)
-        500'd a REAL pull click on a bit-rotted intent file. An oversized
-        file (> :data:`MAX_INTENT_BYTES`) is refused BEFORE the read.
+        all fold into the corrupt-file answer too.
         """
-        try:
-            size = self._path.stat().st_size
-            oversized = size > MAX_INTENT_BYTES
-            raw = b"" if oversized else self._path.read_bytes()
-        except FileNotFoundError:
-            # Absent — including a file racing away between stat and read.
+        result = read_sidecar_bytes(self._path, max_bytes=MAX_INTENT_BYTES)
+        if result.shape == "absent":
             return None
-        except OSError as exc:
+        if result.shape == "read_error":
             _LOG.warning(
                 "pull_intent.read_failed",
                 path=str(self._path),
-                error=str(exc),
-                error_type=type(exc).__name__,
+                error=result.detail,
+                error_type=result.error_type,
             )
             return None
         try:
-            payload: object = None if oversized else json.loads(raw.decode("utf-8"))
+            payload: object = None if result.raw is None else json.loads(result.raw.decode("utf-8"))
         except (ValueError, RecursionError, OverflowError):
             # ValueError covers junk JSON AND UnicodeDecodeError (its subclass).
             payload = None
         intent = PullIntent.from_payload(payload)
         if intent is None:
-            _LOG.warning("pull_intent.corrupt", path=str(self._path), oversized=oversized)
+            # The deletion below HEALS a planted non-regular inode too:
+            # ``clear()`` unlinks a FIFO / a symlink (the LINK, never its
+            # target) fine; a directory's unlink fails into the logged
+            # best-effort ``pull_intent.clear_failed``.
+            _LOG.warning(
+                "pull_intent.corrupt",
+                path=str(self._path),
+                oversized=result.shape == "oversized",
+                shape=result.shape if result.shape != "ok" else "undecodable",
+                detail=result.detail,
+            )
             self.clear()
             return None
         return intent
