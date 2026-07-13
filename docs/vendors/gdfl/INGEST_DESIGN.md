@@ -66,7 +66,7 @@ REFERENCE_ONLY). Every decision below was judge-decided across the two panels;
 | R12 | Clean 1-per-second series | **Read-time VIEW, never stored** (pure `collapse_to_1s`): state fields (LTP/quotes/OI) = LAST row of the second (max seq); `ltq_1s` = Σ ltq over the second's PAYLOAD-DISTINCT rows; + `prints`, `snap_count`; absent seconds ABSENT — never forward-filled | A snapshot is end-of-second STATE (last-wins); LTQ is FLOW (summing conserves traded quantity); a future materialized 1s track calls the SAME pure function. |
 | R13 | 1m derivation | Bar exists **iff ≥ 1 trade-print row (LTQ > 0)** in the minute; OHLC = first/max/min/last print LTP in `(ts, seq)` order; `volume` = Σ LTQ over payload-distinct prints, stamped `volume_basis="sum_ltq_undercount"`; `open_interest` = LAST observed OI in the minute across ALL rows (all-NULL minute ⇒ NULL, NO cross-minute carry); quote-only/idle minutes ABSENT; minute-start labels on the session's REAL-open grid (09:15 on a regular day; the Muhurat open on a Muhurat day — §6.2) | Quote-only rows carry a STALE repeated LTP — an all-quote minute would fabricate a flat bar through the measured 698 s idle gaps (Golden Rule #1). The sibling's fold-ALL-rows default REJECTED (§11 A5); its never-overcount duplicate collapse ACCEPTED at the derive layer (§11 A6). |
 | R14 | Provenance isolation of derived 1m (highest stakes) | **Symbol-SUFFIX namespace under the true `bars/NSE/FNO/`**: canonical resolved contract + trailing `-G1S` token — `NSE-SIEMENS-31Jul25-8500-CE-G1S`, `NSE-OIL-29Jul25-FUT-G1S` | Grammar-verified: a last token ∉ {FUT, CE, PE} makes `parse_fno_symbol` return `None`, so EVERY parse-derived surface skips or honestly-buckets it by default. The `G1S-` PREFIX is REFUTED (it parses as exchange="G1S" and would JOIN the real chain); a new `FNO1S` segment is REJECTED (widens the most load-bearing frozenset + must chase every `exclude_segments={FNO}` site); `-G1S` over `-GDFL` because GDFL also serves native MINUTE bars — a future direct-1m ingest needs its own tag. §6.3. |
-| R15 | Derived bars: catalog + ledger + TFs | Catalog **YES** (via `ParquetBarSink` — `get_bars`/`/db` pager work); derive records its OWN ledger windows under `market="gdfl-derive-1m"` per (G1S symbol, day); 19 TFs + 1day via the derive command looping each resolved `-G1S` symbol over the single-partition seam DIRECTLY — `materialize_lake_timeframes(lake_root=…, exchange="NSE", segment="FNO", symbol=<…-G1S>, kind=<OPTIONS\|FUTURES>, include_daily=True)` per symbol (the seam is SINGLE-symbol with a REQUIRED `kind: PrebuildKind`; kind parsed from the canonical contract behind the suffix — CE/PE ⇒ OPTIONS, FUT ⇒ FUTURES; §6.4) | A derive-only run must move a freshness token or every `/db` view stays stale; the master-driven prebuild loop is untouched (G1S symbols are deliberately not master rows). |
+| R15 | Derived bars: catalog + ledger + TFs | Catalog **YES** (via `ParquetBarSink` — `get_bars`/`/db` pager work); derive records its OWN ledger windows under `market="gdfl-derive-1m"` per (G1S symbol, day) — derive-window status law: a legitimately zero-bar derive over a RESOLVED symbol records **SUCCESS with `bars_appended=0`**, never EMPTY (§5.2 G3; edge row 43); 19 TFs + 1day via the derive command looping each resolved `-G1S` symbol over the single-partition seam DIRECTLY — `materialize_lake_timeframes(lake_root=…, exchange="NSE", segment="FNO", symbol=<…-G1S>, kind=<OPTIONS\|FUTURES>, include_daily=True)` per symbol (the seam is SINGLE-symbol with a REQUIRED `kind: PrebuildKind`; kind parsed from the canonical contract behind the suffix — CE/PE ⇒ OPTIONS, FUT ⇒ FUTURES; §6.4) | A derive-only run must move a freshness token or every `/db` view stays stale; the master-driven prebuild loop is untouched (G1S symbols are deliberately not master rows). |
 | R16 | /db surfacing | New `list_snap1s_datasets` + `query_snap1s_rows` mirroring the expired-options pager (DuckDB, keep-first `QUALIFY` on `(timestamp, seq)`, LIMIT/OFFSET, generation-keyed count memo); optional `?view=1s` serves the R12 collapse; one db.html left-panel row; derived `-G1S` bars ride the EXISTING F&O candle machinery | The proven `options/` read pattern; honest O-envelope: O(page) render over an O(files) footer count once per generation (the pre-stats-manifest posture). |
 | R17 | Audit | One hash-chained JSONL line per source file via `open_ingest_audit(lake_root, name="gdfl-ingest")` (a DEDICATED chain file `<lake>/audit/gdfl-ingest.jsonl`, the `spot-ingest`/`fno-ingest` convention; writer default actor); actions `GDFL_SNAP1S_INGEST`/`_REFUSED`/`_REPLACE`/`_SUPERSET`; subject `<source>/<exchange>/<segment>/<raw_ticker>/<date>` (no `\|`); payload = full counters + `source_sha256` + partition `raw_hash` + resolution outcome; derive appends `GDFL_DERIVE_1M`; one batch-end rollup | Golden Rule #8; the chain-name-is-the-discriminator convention is the repo's real mechanism (a mechanical correction of both panels' actor spellings — §11 A15). |
 | R18 | Raw-truth home (CSV v1) | The operator's ORIGINAL CSV is the raw artifact (retention obligation stated); its `sha256` + verbatim basename + counters live in the append-only source manifest **`.manifest/snap1s_sources.jsonl`** (flocked) + the audit payload; OPTIONAL `--archive-raw` = content-addressed verbatim copy under `<lake_root>/snap1s/.raw/<source>/<ist_date>/<sha256>.csv`; `snap1s/` parquet is a PURE deterministic function of the CSV bytes (delete-tree + re-ingest ⇒ byte-identical, golden-gated) | The sibling's two-tier raw-journal SPOOL is REDUNDANT for CSV ingest — the vendor CSV itself is tier-0; the WS raw-journal tier belongs to the future capture leg (§9.5). Manifest home: NOT the `schema_meta` K/V (hundreds of per-file rows misuse the instrument master's config seam), NOT a per-dataset JSON alone (the sha-identity law needs ONE append-only ledger). |
@@ -611,6 +611,30 @@ One source file = one window: `market="gdfl-snap1s"`,
   the window to `run_skipped_audit`'s market-BLIND rotation
   (`brutex/data/window_ledger_store.py:1827-1876`), where a *Groww* pull would
   re-open a window no Groww planner can ever re-pull — permanent churn (G3).
+  The SAME G3 law binds BOTH gdfl markets (refuter round 2): on the Phase-2
+  derive ledger (`market="gdfl-derive-1m"`, R15/§6.4) a legitimately
+  zero-bar derive over a RESOLVED symbol — an index file (§9.1 limit 2), or
+  an all-quote-only illiquid option day (§6.2's quote-only-minute ⇒ ABSENT
+  law) — records **SUCCESS with `bars_appended=0`**, deliberately NEVER
+  EMPTY: EMPTY's bounded-streak/SKIPPED semantics answer a VENDOR-retry
+  question ("will the vendor ever serve data?"), while a derive is a
+  deterministic LOCAL transform whose zero-bar outcome is definitive and
+  correct — SUCCESS is the truthful terminal, resets the streak, and is
+  structurally invisible to the rotation (`audit_reopen_skipped` selects
+  `status == SKIPPED` rows only, `brutex/data/window_ledger.py:1111-1151`).
+  Feasible with ZERO ledger change, in-tree-verified: `record` has NO
+  directly-supplied-status parameter — the status always classifies
+  internally via `classify_window_status(raw_bars, error_type)`
+  (`brutex/data/window_ledger.py:665-682`, the classify call at `:814`) —
+  but `raw_bars` and `bars_appended` are INDEPENDENT inputs (the stored row
+  carries `bars=bars_appended` verbatim, `:948`), so the derive recorder
+  passes `raw_bars=<consumed clean-1s input rows>` — ≥ 1 wherever a derive
+  window exists, because a derive window is planned only for a (G1S symbol,
+  day) whose resolved raw partition holds stored rows (R11 writes raw
+  partitions only on stored>0) — and `bars_appended=<derived 1m bars>`; the
+  classifier then yields SUCCESS naturally. Net: raw `empty_file` ⇒ FAILED;
+  derive zero-bar ⇒ SUCCESS-with-0 — EMPTY is unreachable on EITHER gdfl
+  market by construction. Edge row 43 pins it.
 - **checkpoint**: mid-batch throttled delta flush via the SAME
   `make_live_ledger_flush` + single-flight `make_locked_flush`
   (`brutex/data/window_ledger_store.py:1644`, `:1710`); batch-end
@@ -835,6 +859,10 @@ blocks keep-first cross-vendor mixing.
   are deliberately not master rows (no universe pollution).
 - **Derive ledger windows** under `market="gdfl-derive-1m"` per (G1S symbol,
   day) — the freshness + resume/idempotence visibility argument of R15.
+  Status law: a legitimately zero-bar derive over a RESOLVED symbol (an
+  index file, an all-quote-only day) records **SUCCESS with
+  `bars_appended=0`** — never EMPTY on either gdfl market (§5.2 G3; edge
+  row 43).
 - **Movers**: contract-parse fails ⇒ skipped-and-counted (the movers
   unparsable law) — GDFL bars can never enter movers rankings by accident;
   surfacing them there would be a deliberate later decision.
@@ -953,6 +981,7 @@ U = UNVERIFIED, D = design-derived.
 | 40 | D: licensing repo pin (L13) | no tracked file under any gdfl data path; fixtures synthetic-only | `tests/unit/test_gdfl_no_raw_data_pin.py` |
 | 41 | D: mutation | new modules join the weekly per-module zero-survivor mutmut loop | `mutation.yml` wiring pin (the house pattern) |
 | 42 | M(calendar): evening-Muhurat session DERIVE (refuter round 1) | the 1m grid anchors at the session's REAL open, close-exclusive `[session.open, session.close)` (§6.2) — an evening-Muhurat file derives REAL bars with ZERO `post_grid_trades`; the coarser-TF fold inherits the lake-wide 09:15-anchored `resample_1m_to_tf` behavior (disclosed, §6.2) | `test_snap1s_derive.py::test_muhurat_session_derives_on_real_session_grid` — evening 18:00–19:00 fixture ⇒ real 1m bars, no post-grid drops; a regular-day fixture stays byte-identical to the fixed-grid law |
+| 43 | D: legitimately zero-bar derive — index file / all-quote-only day (refuter round 2) | the derive window records **SUCCESS with `bars_appended=0`** (`raw_bars` = consumed clean-1s rows ≥ 1), NEVER EMPTY — the market-blind skipped-audit rotation can never adopt a `gdfl-derive-1m` window (§5.2 G3, the row-38 twin) | `test_snap1s_derive.py::test_zero_bar_derive_records_success_never_empty` — an index-file fixture derives 0 bars ⇒ ledger row SUCCESS/`bars=0`/streak reset; asserts status is not EMPTY and `audit_reopen_skipped` never selects it |
 
 ---
 
@@ -969,7 +998,11 @@ U = UNVERIFIED, D = design-derived.
 2. **L1 only.** Singular bid/ask; no depth, no order book, no trade-by-trade
    tape; a market-depth WS subscription is NOT assumed to exist. Index-class
    symbols have no trade prints (~1/s broadcast ceiling) — an index file
-   derives ZERO 1m bars under §6.2, which is correct, not a bug.
+   derives ZERO 1m bars under §6.2, which is correct, not a bug; its derive
+   window records SUCCESS with `bars_appended=0` per the §5.2 derive-window
+   status law, never EMPTY — the derive-ledger EMPTY→SKIPPED exposure to the
+   market-blind skipped-audit rotation this register would otherwise have to
+   carry is CLOSED by that law (refuter round 2; edge row 43).
 3. **Derived-bar fidelity.** OHLC bounds only OBSERVED prints — intra-gap
    extremes are invisible (derived H/L are bounds of observed prints, not
    exchange-true extremes); `volume = Σ LTQ` undercounts under change-only

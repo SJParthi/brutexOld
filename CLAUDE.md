@@ -28,7 +28,7 @@ byte-identity re-ingest law), the CSV parse taxonomy + ticker AMBIGUITY law
 read-time 1s collapse + LTQ>0-only 1m derivation into provenance-isolated
 `-G1S` symbols under bars/ (the suffix fails the right-anchored F&O grammar,
 so every parse-derived surface skips or honestly-buckets it), /db surfaces
-mirroring the expired-options pager, a 42-row edge matrix + the
+mirroring the expired-options pager, a 43-row edge matrix + the
 honest-limits/UNVERIFIED register, and the two-panel reconciliation appendix;
 raw GDFL data NEVER committed + `snap1s/` and the derived `*-G1S` bar dirs
 EXCLUDED from off-box backup until the licensing read (a named
@@ -2463,7 +2463,7 @@ hostile-review pass._
   `materialize_lake_timeframes(..., kind=)` loop (the seam is single-symbol
   with a REQUIRED `kind: PrebuildKind`); /db
   discovery + pager mirroring the expired-options pattern with a
-  generation-keyed count memo; a 42-row edge matrix naming a planned test per
+  generation-keyed count memo; a 43-row edge matrix naming a planned test per
   measured/UNVERIFIED case; honest limits (NO API backfill — GDFL tick-class
   history is days-scale, the 01-Jul-2025 samples are vendor DUMPS and dump
   availability ≠ API depth; L1-only; derived-bar fidelity stamped; emission
@@ -2486,7 +2486,14 @@ hostile-review pass._
   — an evening-Muhurat dump now derives REAL bars, regular days unchanged;
   the coarser-TF 09:15-anchored fold inheritance disclosed) + the re-dump
   prefix law renamed the ordered ROW-prefix extend (parquet-baseline;
-  byte-prefix only under `--archive-raw`). DOCS-ONLY — zero brutex/rust/test/CI source
+  byte-prefix only under `--archive-raw`). REFUTER ROUND 2 folded (3-refuter
+  panel, MIGRATION.md #1781): the derive-ledger zero-bar status law — a
+  legitimately zero-bar derive over a RESOLVED symbol (index file /
+  all-quote-only day) records SUCCESS with `bars_appended=0`, never EMPTY,
+  so the market-blind skipped-audit rotation can never adopt a
+  `gdfl-derive-1m` window (§5.2 G3; NEW edge row 43, matrix 42→43; zero
+  ledger change — `record()`'s independent `raw_bars`/`bars_appended`
+  inputs carry it). DOCS-ONLY — zero brutex/rust/test/CI source
   change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
   REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
@@ -6327,7 +6334,7 @@ hostile-review pass._
   re-ingest law) + the CSV parse taxonomy + the ticker ambiguity law (raw
   archival never blocked by resolution) + provenance-isolated `-G1S` derived
   1m bars under bars/ + /db read surfaces mirroring the options pager + the
-  42-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
+  43-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
   committed; `snap1s/` + `*-G1S` bars excluded from off-box backup until the
   licensing read — a named DEC-BACKUP-OFFBOX-001 divergence); DOCS-ONLY —
   zero source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
