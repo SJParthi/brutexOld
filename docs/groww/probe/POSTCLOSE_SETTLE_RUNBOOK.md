@@ -1,7 +1,7 @@
 # Post-close settle probe — measuring Groww's EOD settlement time
 
-**Decision:** DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001 (MIGRATION.md #1752; companion of
-DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1751).
+**Decision:** DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001 (MIGRATION.md #1756; companion of
+DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1755).
 
 ## The open question
 
@@ -10,7 +10,7 @@ Groww's end-of-day settlement time is **UNDOCUMENTED**. The vendor docs
 snapshot) are silent on when the CURRENT trading day's 1-minute series stops being the
 FORMING shape MIGRATION.md #837 (DEC-GROWW-FORMING-BAR-PARSE-001) recorded empirically:
 6-element rows (no `open_interest` slot, `volume` typically `None`) "until the vendor's
-end-of-day settlement fills them in". The pre-settle TODAY gate (#1751) defers a
+end-of-day settlement fills them in". The pre-settle TODAY gate (#1755) defers a
 covers-today window until the fetched day passes its per-class completeness criteria —
 but NOBODY has measured **when** those criteria start passing after the 15:30 close.
 This probe measures exactly that, per instrument class (INDEX / CASH / FUT), so the
@@ -112,7 +112,7 @@ Per slot, the summary counts records passing each check:
 the measured settle time.** Schedule the nightly pull at/after that slot **plus
 margin** (the 01:30 IST nightly is safely past any plausible answer; a same-evening
 post-close pull should not start before the measured slot). Until the matrix exists,
-nothing about the settle time is claimed (Golden Rule #1) — the #1751 gate simply
+nothing about the settle time is claimed (Golden Rule #1) — the #1755 gate simply
 defers a still-forming day and re-pulls.
 
 ## Failure modes
@@ -129,7 +129,7 @@ defers a still-forming day and re-pulls.
   `BRUTEX_MARKET_HOURS_GUARD=0` for a deliberate override) / bad args /
   `growwapi` missing / SSM unreachable / no read-only token — nothing was
   probed; fix the environment and re-run.
-* **Operational note for the GATE (not the probe):** the #1751 TODAY gate is
+* **Operational note for the GATE (not the probe):** the #1755 TODAY gate is
   day-scoped — an evening pull must not be left spanning IST midnight against a
   still-unsettled day (a post-midnight round no longer covers day D, goes
   gate-inert for it, and keep-first would freeze a still-forming day D). The
@@ -139,7 +139,7 @@ defers a still-forming day and re-pulls.
 ## Operator heuristics — reading a day's table
 
 * **Normal (pre-settle):** `rows_len6 > 0`, null volume/OI on FNO, possibly a short
-  count at 15:35 that fills by a later slot — the expected forming shape; the #1751
+  count at 15:35 that fills by a later slot — the expected forming shape; the #1755
   gate is deferring exactly this.
 * **Vendor problem:** a LATE slot (17:30) still failing `count_ok`/`last_bar_ok` on
   the INDICES across multiple days — the vendor is not serving the full day at all;
@@ -150,7 +150,7 @@ defers a still-forming day and re-pulls.
 
 ## Pre-fix lake remediation (already-stored partial days)
 
-The #1751 gate protects pulls going FORWARD. A partial day stored under an
+The #1755 gate protects pulls going FORWARD. A partial day stored under an
 already-settled PRE-fix window is permanent under keep-first and is neither detected
 nor repaired by the gate. Manual remediation:
 

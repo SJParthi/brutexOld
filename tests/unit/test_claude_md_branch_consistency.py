@@ -189,13 +189,16 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # sharded-matrix / wedge-proofed-loop rationale comments in mutation.yml
     # and the 3-field pair-format note in the wiring pin's docstring cite
     # THAT decision's entry, not this one.
+    # 1685 = DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (Slice 0 of the Rust sweep-core
+    # conversion): its recorded compute.py pair-scope decision comment above
+    # the mutmut pair list cites THAT decision's entry, not this one.
     # 1750 = DEC-RANKING-MUTATION-ZERO-SURVIVOR-001 (2026-07-11): the pass-1
     # runner-list rationale comment (tests/unit/test_ranking_gate_reasons.py
     # MUST stay in the runner) cites THAT decision's entry, not this one.
-    # 1751 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
+    # 1755 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
     # data/today_completeness.py pair's rationale comment cites THAT
     # decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1750, 1751}),
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1755}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

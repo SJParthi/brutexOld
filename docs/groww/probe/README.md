@@ -38,7 +38,7 @@ stays UNVERIFIED and is not encoded as fact in adapter code (Golden Rule #1).
 `postclose_settle_probe.py` + `POSTCLOSE_SETTLE_RUNBOOK.md` measure WHEN Groww
 settles TODAY's 1-minute day (the #837 forming shape → settled 7-element rows) —
 the evidence base for the pre-settle TODAY gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001,
-MIGRATION.md #1751/#1752). Transcripts land here as
+MIGRATION.md #1755/#1756). Transcripts land here as
 `postclose-<YYYY-MM-DD>-<HHMM>.jsonl` + the tee'd `.txt` tables. Unlike the Phase-0
 script above it reads its credentials + the shared read-only token from AWS SSM
 (the doctor-kit client — mint physically blocked, fully paced), never probe-local
