@@ -958,6 +958,62 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # ── pull-all-spot (DEC-PULL-SCOPED-ALL-ONECLICK-001) — the scoped-ALL
+    #    spot pull: whole universe, spot-only, over the headless pipeline ──
+    pull_all_spot = sub.add_parser(
+        "pull-all-spot",
+        help=(
+            "Pull the whole SPOT universe (indices + ~750 stocks, 1-minute, "
+            "2020→prev day, incremental) then prebuild + cross-verify tail. "
+            "Deliberately NO --start/--end: full-range convergence is the "
+            "promise; date-scoped pulls stay on `brutex fetch`"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--lake-root",
+        type=Path,
+        default=None,
+        help="Lake root dir (default: $BRUTEX_LAKE_ROOT or ~/.brutex/lake)",
+    )
+    pull_all_spot.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "UNATTENDED (cron/launchd) mode: pull only on an NSE trading day, "
+            "only after the post-close settle time (default 17:30 IST — "
+            "conservative, UNMEASURED; BRUTEX_PULL_ALL_SETTLE_IST overrides), "
+            "never on a Muhurat day; every deferral prints one line and exits 0 "
+            "(cron-green)"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Offline synthetic pass (no Groww creds, no locks, no cross-verify "
+            "tail) — proves the chain shape only"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--settle-ist",
+        type=str,
+        default=None,
+        help=(
+            "One-shot HH:MM override of BRUTEX_PULL_ALL_SETTLE_IST for this "
+            "invocation (strict, fail-loud, structurally >= 15:35)"
+        ),
+    )
+    pull_all_spot.add_argument(
+        "--strict-exit",
+        action="store_true",
+        help=(
+            "Exit 2 when the pull left residuals (still-failing windows, "
+            "quarantined symbols) or the cross-verify tail's verdict is in the "
+            "exit-2 family — default keeps residuals + tail failures exit 0 "
+            "(printed, re-attempted next run)"
+        ),
+    )
+
     # ── enrich-greeks (DEC-CLI-GREEKS-ENRICH-001) — bulk Greeks re-enrich ──
     enrich = sub.add_parser(
         "enrich-greeks",
@@ -6128,6 +6184,248 @@ def cmd_nightly_status(
 
 
 # ────────────────────────────────────────────────────────────────────────
+# pull-all-spot (DEC-PULL-SCOPED-ALL-ONECLICK-001) — the scoped-ALL spot
+# pull over the headless pipeline binding (NOT cmd_fetch, which drives the
+# lower-level spot ingest spine over the 3 indices only).
+# ────────────────────────────────────────────────────────────────────────
+
+
+def cmd_pull_all_spot(
+    *,
+    lake_root: Path | None,
+    auto: bool = False,
+    dry_run: bool = False,
+    settle_ist: str | None = None,
+    strict_exit: bool = False,
+    now: Callable[[], Any] | None = None,
+    pipeline_builder: Callable[..., Any] | None = None,
+    pipeline_executor: Callable[[Any], Any] | None = None,
+    lock_factory: Callable[..., Any] | None = None,
+    lease_factory: Callable[[Path], Any] | None = None,
+    crossverify_tail: Callable[[], Any] | None = None,
+) -> int:
+    """``brutex pull-all-spot`` — the one-command scoped-ALL SPOT pull.
+
+    DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): every admitted
+    index + stock, 1-minute, 2020-01-01 → previous day, auto-incremental via
+    the durable window ledger (settled windows are skipped — re-runs converge),
+    chained spot → prebuild → crossverify tail THROUGH the unchanged
+    ``run_full_pipeline`` (the ``build_headless_pipeline(scope="spot-only")``
+    binding — no F&O metadata, no F&O candles, no Greeks; movers are NOT
+    warmed headlessly — the dashboard's caches re-key on their next poll via
+    the ledger revision token, and the stdout says so). Mid-pull ledger
+    checkpointing is INTERNAL to ``pull_all_spot`` (the throttled
+    ``make_live_ledger_flush`` per processed window), so a crash/interrupt
+    keeps every settled window durable — verified by the e2e checkpoint test.
+
+    ``--auto`` (cron/launchd): the :mod:`brutex.calendars.auto_pull_gate`
+    verdict runs BEFORE any lock/vendor work — non-trading day / Muhurat day /
+    before the post-close settle time each print one ``deferred:`` line and
+    exit 0 (cron-green). A manual (non ``--auto``) run skips the gate — the
+    click IS the authorization; the untouched market-hours guard still
+    defers/halts in-window either way.
+
+    CROSSVERIFY TAIL (fail-soft, ruling 8b): ``run_crossverify`` is invoked
+    strictly AFTER the pull single-flight/lease with-block exits (the runner
+    acquires the SAME account→lake→lease trio itself — nesting would be
+    guaranteed contention), sharing this run's ONE ``SessionRateController``.
+    A junk ``BRUTEX_CROSSVERIFY_*`` env reads ``not configured`` and never
+    blocks the pull; ``BRUTEX_CROSSVERIFY=off`` reads ``disabled``.
+
+    Exit law: 0 = clean OR residuals OR ANY deferral (auto gate, contention
+    under ``--auto``, market-hours); 1 = junk flags/env, missing lake /
+    instrument master, manual contention refusal; 2 = the chain stopped/halted
+    (``report.ok`` False, market-hours deferral excepted) — and, under
+    ``--strict-exit``, residuals (still-failing windows / quarantined symbols)
+    or an exit-2-family cross-verify verdict. A tail failure NEVER changes the
+    default exit (the fail-soft decree) — it is printed only.
+
+    Every heavy dependency is injected for tests (builders, locks, tail,
+    clock); production defaults are the real machinery.
+    """
+    import structlog
+
+    from brutex.calendars.auto_pull_gate import (
+        PULL_ALL_SETTLE_ENV,
+        auto_pull_allowed,
+        resolve_settle_time,
+    )
+    from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS
+    from brutex.dashboard.pull_scope import (
+        SCOPE_SPOT_ONLY,
+        TAIL_ALERT_STATUSES,
+        CrossverifyTailOutcome,
+        run_crossverify_tail,
+    )
+
+    log = structlog.get_logger("brutex.cli")
+    resolved = _resolve_lake_root(lake_root)
+    _require_lake_dir(resolved, command="pull-all-spot")
+    # EAGER validation — junk flags/env fail loud BEFORE any lock/vendor work
+    # (the DEC-RAM-BUDGETS-001 convention). The --settle-ist one-shot override
+    # rides the SAME strict resolver as the env knob.
+    env_map: Mapping[str, str] = os.environ
+    if settle_ist is not None:
+        env_map = {**os.environ, PULL_ALL_SETTLE_ENV: settle_ist}
+    try:
+        resolve_settle_time(env_map)
+        if not dry_run:
+            from brutex.calendars.market_hours import resolve_market_closed
+
+            # Probe only — the binding re-resolves; junk env is a clean exit 1.
+            resolve_market_closed()
+    except ValueError as exc:
+        raise CliUserError(str(exc)) from exc
+
+    if auto:
+        verdict = auto_pull_allowed(now=None if now is None else now(), env=env_map)
+        if not verdict.allowed:
+            print(f"[brutex] pull-all-spot deferred: {verdict.detail}")
+            log.info("pull_all_spot.auto_deferred", reason=verdict.reason)
+            return EXIT_OK
+
+    from brutex.adapters.groww.pull_singleflight import (
+        PullAlreadyRunningError,
+        pull_lease_guard,
+        pull_singleflight_lock,
+    )
+    from brutex.dashboard.pull_controller import SessionRateController
+    from brutex.data.errors import LakeWriteHalt, MarketHoursHalt
+    from brutex.nightly.pipeline_binding import (
+        NightlyCapabilityError,
+        build_headless_pipeline,
+        execute_headless_pipeline,
+    )
+    from brutex.observability.power_keepawake import keep_awake
+    from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
+
+    locks = pull_singleflight_lock if lock_factory is None else lock_factory
+    lease = pull_lease_guard if lease_factory is None else lease_factory
+    builder = build_headless_pipeline if pipeline_builder is None else pipeline_builder
+    executor = execute_headless_pipeline if pipeline_executor is None else pipeline_executor
+    # ONE SessionRateController spans the pull AND the crossverify tail — one
+    # account rate budget (§2 Rule 6), never a second ceiling.
+    session_rate = SessionRateController()
+
+    with contextlib.ExitStack() as stack:
+        if not dry_run:
+            # The nightly rail stack: lake single-flight (holder-noted) + the
+            # cross-host lease. A --dry-run is lock-free (zero vendor calls,
+            # zero real lake writes — the cmd_fetch posture).
+            try:
+                stack.enter_context(locks(resolved, holder_note=f"pull-all-spot:{os.getpid()}"))
+                stack.enter_context(lease(resolved))
+            except PullAlreadyRunningError as exc:
+                print(
+                    f"[brutex] pull-all-spot refused: a pull is already running — {exc}",
+                    file=sys.stderr,
+                )
+                log.warning("pull_all_spot.refused_contention", error=str(exc))
+                # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
+                return EXIT_OK if auto else EXIT_USER_ERROR
+        stack.enter_context(keep_awake("brutex pull all spot"))
+        try:
+            hp = builder(
+                lake_root=resolved,
+                dry_run=dry_run,
+                scope=SCOPE_SPOT_ONLY,
+                session_rate=session_rate,
+            )
+        except NightlyCapabilityError as exc:
+            raise CliUserError(str(exc)) from exc
+        try:
+            report = executor(hp)
+        except MarketHoursHalt as exc:
+            # Mid-run market-hours halt (the #1692 cmd_fetch posture): the
+            # durable ledger keeps PLANNED/FAILED windows resumable — a
+            # deferral, never a failure.
+            print(
+                f"[brutex] pull-all-spot deferred: {exc} — committed windows persisted; "
+                "resume on the next out-of-hours run"
+            )
+            log.warning("pull_all_spot.deferred_market_hours", error=str(exc))
+            return EXIT_OK
+        except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError) as exc:
+            # Pull-wide HALT: CRITICAL Telegram then a loud nonzero exit (the
+            # cmd_fetch #888 pattern).
+            _emit_pull_halt_alert(exc)
+            print(f"[brutex] pull-all-spot HALTED: {exc}", file=sys.stderr)
+            return EXIT_INTERNAL_ERROR
+        finally:
+            hp.close()
+
+    # The whole-chain market-hours deferral (the sequencer's own belts).
+    if report.stopped_after == PHASE_MARKET_HOURS:
+        print(f"[brutex] pull-all-spot deferred: {report.note}")
+        log.info("pull_all_spot.deferred_market_hours", note=report.note)
+        return EXIT_OK
+
+    def _production_tail() -> CrossverifyTailOutcome:
+        """The REAL crossverify run — strictly AFTER the flock/lease release."""
+        from brutex.crossverify.config import resolve_crossverify_config
+        from brutex.crossverify.run import default_seams, run_crossverify
+
+        try:
+            config = resolve_crossverify_config(lake_root=resolved)
+            if not config.enabled:
+                return CrossverifyTailOutcome(
+                    status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
+                )
+            seams = default_seams(config, session_rate=session_rate)
+        except ValueError as exc:
+            # Genuine construction failure (junk BRUTEX_CROSSVERIFY_* env /
+            # market-hours env at the seam build) — the ONLY production
+            # "not configured" path (ruling 8); fail-SOFT, the pull stands.
+            return CrossverifyTailOutcome(
+                status="not_configured", human=f"not configured (ValueError: {exc})"
+            )
+        cv = run_crossverify(config, seams)
+        return CrossverifyTailOutcome(
+            status=cv.verdict,
+            human=(
+                f"{cv.verdict} (published {cv.published} · withheld {cv.withheld} · "
+                f"failed {cv.publish_failed})"
+            ),
+        )
+
+    tail = run_crossverify_tail(
+        _production_tail if crossverify_tail is None else crossverify_tail,
+        dry_run=dry_run,
+        stopped_after=report.stopped_after,
+    )
+
+    # ── stdout summary (C §4 shape; "?" for defensively-None fields) ──
+    spot = report.spot
+    kind = spot.verdict.kind if spot is not None else "?"
+    completed = str(spot.total_completed) if spot is not None else "?"
+    still_failed = spot.still_failed_windows if spot is not None else 0
+    skipped = str(spot.windows_skipped) if spot is not None else "?"
+    built = "?" if report.prebuild_built is None else str(report.prebuild_built)
+    bars = "?" if report.prebuild_total_bars is None else str(report.prebuild_total_bars)
+    headline = "spot-only pipeline complete" if report.ok else report.note
+    print(f"[brutex] pull-all-spot: {headline}")
+    print(
+        f"[brutex]   spot:      {kind} — {completed} pair(s) fetched, "
+        f"{still_failed} window(s) FAILED (will retry), "
+        f"{skipped} window(s) skipped (already present)"
+    )
+    print(f"[brutex]   quarantined: {report.quarantined_count}")
+    print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+    print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
+    print("[brutex]   greeks:    not run — no options in this pull")
+    print(f"[brutex]   cross-verify: {tail.human}")
+    print("[brutex]   verify:    dashboard /coverage/windows (FAILED tab), /completeness")
+
+    if not report.ok:
+        return EXIT_INTERNAL_ERROR
+    if strict_exit and (
+        still_failed > 0 or report.quarantined_count > 0 or tail.status in TAIL_ALERT_STATUSES
+    ):
+        return EXIT_INTERNAL_ERROR
+    return EXIT_OK
+
+
+# ────────────────────────────────────────────────────────────────────────
 # crossverify (DEC-CROSSVERIFY-PRODUCER-001) — thin, fully-covered shims
 # over the 100%-tested brutex.crossverify modules (the cmd_nightly template).
 # ────────────────────────────────────────────────────────────────────────
@@ -9947,6 +10245,14 @@ def _dispatch(argv: list[str] | None) -> int:
             until_clean=args.until_clean,
             until_clean_rounds=args.until_clean_rounds,
             max_retry_minutes=args.max_retry_minutes,
+        )
+    if args.command == "pull-all-spot":
+        return cmd_pull_all_spot(
+            lake_root=args.lake_root,
+            auto=args.auto,
+            dry_run=args.dry_run,
+            settle_ist=args.settle_ist,
+            strict_exit=args.strict_exit,
         )
     if args.command == "enrich-greeks":
         return cmd_enrich_greeks(

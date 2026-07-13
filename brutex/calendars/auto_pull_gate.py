@@ -263,9 +263,11 @@ def compose_market_closed(
     """
     if base is None:
         return None
-    tick = now_ist if clock is None else clock
 
     def _composed() -> bool:
+        # ``now_ist`` resolved at CALL time (module-global lookup) so the live
+        # clock stays current and tests can freeze it after composition.
+        tick = now_ist if clock is None else clock
         return base() or muhurat_session_active(tick())
 
     return _composed

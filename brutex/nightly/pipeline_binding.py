@@ -128,12 +128,23 @@ def build_headless_pipeline(
     store_opener: Callable[[Path], InstrumentStore] | None = None,
     session_rate: SessionRateController | None = None,
     now: Callable[[], datetime] = _utcnow,
+    scope: str = "full",
 ) -> HeadlessPipeline:
     """Bind the four pipeline phases headlessly (each item mirrors app.py).
 
     Parameters mirror the dashboard route's load-bearing inputs; every heavy
     dependency is injected or imported call-time (the cli.py house pattern).
     ``store_opener`` defaults to :meth:`InstrumentStore.open`.
+
+    *scope* (DEC-PULL-SCOPED-ALL-ONECLICK-001): the SAME token vocabulary the
+    ``/pull-pipeline`` launcher accepts (``brutex.dashboard.pull_scope``).
+    ``"full"`` (the default) is byte-identical to the pre-scope binding;
+    ``"spot-only"`` swaps the two F&O phase closures for the no-op report
+    builders (the sequencer gates pass vacuously — the sequencer itself is
+    untouched), feeds the prebuild an EMPTY F&O cascade, and composes the
+    Muhurat mid-run belt over the resolved market-hours predicate
+    (``compose_market_closed`` — the guard module is untouched; a dry-run's
+    ``None`` composes to ``None``).
 
     Raises
     ------
@@ -143,9 +154,11 @@ def build_headless_pipeline(
         instruments once, then re-run").
     ValueError
         A junk ``BRUTEX_PIPELINE_STRICT_GATE`` value (fail-loud, resolved ONCE
-        at build — the pre-chain refusal), or junk ISO dates.
+        at build — the pre-chain refusal), junk ISO dates, or an unknown
+        *scope* token.
     """
     from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
+    from brutex.calendars.auto_pull_gate import compose_market_closed
     from brutex.calendars.market_hours import resolve_market_closed
     from brutex.dashboard.composite_pull import pull_historical_for_underlyings
     from brutex.dashboard.fno_cascade import build_fno_cascade
@@ -160,6 +173,12 @@ def build_headless_pipeline(
         pull_all_spot,
         resolve_fetch_intervals,
     )
+    from brutex.dashboard.pull_scope import (
+        SCOPE_SPOT_ONLY,
+        normalize_pull_scope,
+        spot_only_historical_report,
+        spot_only_metadata_report,
+    )
     from brutex.dashboard.universe_pull import select_pull_instruments
     from brutex.data.instrument_store import DEFAULT_DB_NAME, InstrumentStore
     from brutex.data.lake_footprint import make_disk_guard, record_lake_footprint
@@ -167,6 +186,7 @@ def build_headless_pipeline(
     from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 
     strict_gate = strict_gate_enabled(env)  # fail-loud, once at build
+    spot_only = normalize_pull_scope(scope) == SCOPE_SPOT_ONLY  # fail-loud, once
 
     db_path = lake_root / DEFAULT_DB_NAME
     if not db_path.exists():
@@ -207,6 +227,14 @@ def build_headless_pipeline(
     # env set mid-pull can never crash the long nightly run). A dry-run threads ``None``
     # (no vendor calls to gate), so nightly dry-run tests are byte-identical.
     _market_closed = None if dry_run else resolve_market_closed(env=env)
+
+    # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): the launcher-level Muhurat
+    # mid-run belt composed OVER the resolved predicate — the trading-day-keyed
+    # guard is structurally blind to a holiday-listed Muhurat session. A
+    # dry-run's ``None`` composes to ``None`` (byte-identical). The full-scope
+    # arm keeps the bare resolve (DEC-PIPELINE-MUHURAT-BELT-001 follow-up).
+    if spot_only:
+        _market_closed = compose_market_closed(_market_closed)
 
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to
@@ -278,6 +306,8 @@ def build_headless_pipeline(
         # The app.py:3662-3718 closure mirrored: the per-target _materialize
         # closure (NEVER materialize_lake_timeframes passed raw), one cutoff
         # resolved per run so a midnight-IST straddle derives one 1day set.
+        # SPOT-ONLY rides an EMPTY F&O cascade (a lake already holding F&O
+        # candles is NOT re-derived by a spot-only run).
         from brutex.calendars.nse import IST
         from brutex.dashboard.db_view import list_fno_candle_datasets
 
@@ -297,7 +327,9 @@ def build_headless_pipeline(
 
         outcome = run_pipeline_prebuild_guarded(
             instruments=targets,
-            cascade_or_error=lambda: build_fno_cascade(list_fno_candle_datasets(lake_root)),
+            cascade_or_error=lambda: build_fno_cascade(
+                () if spot_only else list_fno_candle_datasets(lake_root)
+            ),
             materialize=_materialize,
             source="nightly",
             exclude_symbols=exclude_symbols,
@@ -318,11 +350,17 @@ def build_headless_pipeline(
         years=years,
         dry_run=dry_run,
         strict_gate=strict_gate,
+        scope="spot-only" if spot_only else "full",
     )
     return HeadlessPipeline(
         run_spot=_run_spot,
-        run_metadata=_run_metadata,
-        run_historical=_run_historical,
+        # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): EXACTLY the two F&O
+        # phase closures swap for the pull_scope no-op builders — the spot
+        # closure + prebuild binding are shared verbatim between the arms.
+        run_metadata=spot_only_metadata_report if spot_only else _run_metadata,
+        run_historical=(
+            (lambda _prior: spot_only_historical_report()) if spot_only else _run_historical
+        ),
         run_prebuild=_run_prebuild,
         strict_gate=strict_gate,
         targets=len(targets),
