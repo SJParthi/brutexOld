@@ -466,6 +466,11 @@ jobs:
               # on main, feature-detected LIVE from the rules-for-branch
               # endpoint (readable with the default token, no admin scope; a
               # probe failure reads 0 rules → refuse as before, fail-closed).
+              # Honest limit (MIGRATION.md #1784): the probe reads the RULESETS
+              # endpoint, so only a RULESET-configured merge queue is visible —
+              # a classic branch-protection-checkbox queue stays invisible and
+              # `blocked` keeps refusing (fail-closed; the shipped flip path IS
+              # the ruleset, so this is by design).
               # Red checks still cannot reach here — the ci-check step above
               # refuses ANY failing/incomplete run — and the rollup-gate
               # below still re-checks the complete live rollup. dirty /
