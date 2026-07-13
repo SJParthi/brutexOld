@@ -12,8 +12,10 @@ reject. 100% line+branch on the new ``db_view`` registry functions.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any, TypeVar, cast
 
 import pytest
 from brutex.dashboard.db_view import (
@@ -265,3 +267,153 @@ def test_list_registry_contracts_paged_total_is_filtered(tmp_path: Path) -> None
     # Filtered by underlying → filtered total.
     nifty = list_registry_contracts(path, underlying="NIFTY", limit=10, offset=0)
     assert nifty["total"] == 3  # NIFTY has 3 legs (CE+PE+FUT), BANKNIFTY excluded
+
+
+# ── H1 count cache (DEC-O1-GUARANTEE-HARDEN-001) ────────────────────────────
+
+
+_T = TypeVar("_T")
+
+
+class _CountingCache:
+    """A minimal :class:`CandleCountCache` recording computes per (key, generation)."""
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, int], Any] = {}
+        self.computes: list[str] = []
+
+    def get_or_compute(self, key: str, *, generation: int, compute: Callable[[], _T]) -> _T:
+        slot = (key, generation)
+        if slot not in self.store:
+            self.computes.append(key)
+            self.store[slot] = compute()
+        return cast("_T", self.store[slot])
+
+
+def test_registry_count_key_kind_and_filters_are_unambiguous() -> None:
+    """`repr`-folded filters — a literal ``|`` inside a filter never collides keys."""
+    from brutex.dashboard.db_view import registry_count_key
+
+    hostile = registry_count_key("exp", exch="A|B")
+    split = registry_count_key("exp", exch="A", underlying="B")
+    assert hostile != split
+    assert registry_count_key("exp") != registry_count_key("con")
+    assert registry_count_key("con", expiry_date="2020-01-30") != registry_count_key(
+        "con", expiry_date="2020-02-27"
+    )
+
+
+def test_list_registry_expiries_count_cached_once_per_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeat/paging clicks within one generation pay ONE filtered COUNT."""
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)
+    counts = [0]
+    real = RegistryStore.count_expiries
+
+    def _spy(self: RegistryStore, **kwargs: object) -> int:
+        counts[0] += 1
+        return real(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(RegistryStore, "count_expiries", _spy)
+    cache = _CountingCache()
+    pages = [
+        list_registry_expiries(path, limit=1, offset=n, count_cache=cache, generation=7)
+        for n in range(3)
+    ]
+    assert counts[0] == 1  # one COUNT for three paging clicks
+    assert [p["total"] for p in pages] == [3, 3, 3]
+    # A generation bump (the registry content token moved) recounts exactly once.
+    list_registry_expiries(path, limit=1, offset=0, count_cache=cache, generation=8)
+    assert counts[0] == 2
+
+
+def test_list_registry_contracts_count_cached_once_per_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)
+    counts = [0]
+    real = RegistryStore.count_contracts
+
+    def _spy(self: RegistryStore, **kwargs: object) -> int:
+        counts[0] += 1
+        return real(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(RegistryStore, "count_contracts", _spy)
+    cache = _CountingCache()
+    for offset in range(3):
+        page = list_registry_contracts(
+            path,
+            underlying="NIFTY",
+            expiry_date=_EXP_A.isoformat(),
+            limit=1,
+            offset=offset,
+            count_cache=cache,
+            generation=3,
+        )
+        assert page["total"] == 2  # the CE+PE pair on _EXP_A
+    assert counts[0] == 1
+    # A DIFFERENT filter is a different key — counted independently, once.
+    other = list_registry_contracts(
+        path, underlying="BANKNIFTY", limit=5, offset=0, count_cache=cache, generation=3
+    )
+    assert other["total"] == 1
+    assert counts[0] == 2
+
+
+def test_registry_pagers_cached_payload_equals_legacy(tmp_path: Path) -> None:
+    """`count_cache=None` (legacy) and the cached path serve IDENTICAL payloads."""
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)
+    cache = _CountingCache()
+    legacy_exp = list_registry_expiries(path, underlying="NIFTY", limit=2, offset=1)
+    cached_exp = list_registry_expiries(
+        path, underlying="NIFTY", limit=2, offset=1, count_cache=cache, generation=1
+    )
+    assert cached_exp == legacy_exp
+    legacy_con = list_registry_contracts(path, exch="NSE", limit=3, offset=0)
+    cached_con = list_registry_contracts(
+        path, exch="NSE", limit=3, offset=0, count_cache=cache, generation=1
+    )
+    assert cached_con == legacy_con
+
+
+def test_registry_counts_cached_once_and_copy_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nav-badge counts dict is read once per generation and served as a COPY."""
+    path = tmp_path / REGISTRY_DB_NAME
+    _seed_registry(path)
+    opens = [0]
+    real_open = RegistryStore.open.__func__  # type: ignore[attr-defined]
+
+    def _spy(cls: type[RegistryStore], p: Path, **kwargs: object) -> RegistryStore:
+        opens[0] += 1
+        return real_open(cls, p, **kwargs)  # type: ignore[arg-type,no-any-return]
+
+    monkeypatch.setattr(RegistryStore, "open", classmethod(_spy))
+    cache = _CountingCache()
+    first = registry_counts(path, count_cache=cache, generation=5)
+    second = registry_counts(path, count_cache=cache, generation=5)
+    assert opens[0] == 1  # ONE store open + count pair per generation
+    assert first == second == {"expiries": 3, "contracts": 4, "exists": True, "note": None}
+    # The served dict is a COPY — a caller mutation never poisons the memo.
+    first["expiries"] = 999
+    assert registry_counts(path, count_cache=cache, generation=5)["expiries"] == 3
+
+
+def test_registry_counts_missing_file_never_touches_the_cache(tmp_path: Path) -> None:
+    cache = _CountingCache()
+    payload = registry_counts(tmp_path / REGISTRY_DB_NAME, count_cache=cache, generation=1)
+    assert payload["exists"] is False
+    assert cache.computes == []
+
+
+def test_registry_pagers_missing_file_never_touch_the_cache(tmp_path: Path) -> None:
+    cache = _CountingCache()
+    exp = list_registry_expiries(tmp_path / REGISTRY_DB_NAME, count_cache=cache, generation=1)
+    con = list_registry_contracts(tmp_path / REGISTRY_DB_NAME, count_cache=cache, generation=1)
+    assert exp["total"] == 0 and con["total"] == 0
+    assert cache.computes == []
