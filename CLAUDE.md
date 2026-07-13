@@ -2451,7 +2451,15 @@ hostile-review pass._
   the 3 spot triples. ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX; no
   vocab/rate/lake-schema change; `universe.py` 100% line+branch on its
   ci.yml gate + the whole-engine gate green; ruff/ruff-format clean, `mypy
-  --strict` clean, pyright 0 new.)
+  --strict` clean, pyright 0 new. HOSTILE-REVIEW ROUND folded (verdict
+  SHIP×2 — 2 MINOR + 3 NIT, per-item record in MIGRATION.md #1790): the
+  stale lowercase-alias case-hint clause DROPPED (never "did you mean" a
+  symbol that is itself refused — `nse-nifty-fut` now takes the generic
+  spot-only refusal, its test flipped to pin that); ADR-0016 §6 gains the
+  appended SUPERSEDED-IN-PART note; the ADR-0012/ADR-0016/spec launch-DEC
+  ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
+  `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
+  the blake3 formula on this branch, cite kept.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte

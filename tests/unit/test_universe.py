@@ -1213,17 +1213,20 @@ class TestClassifyEngineSweepTarget:
         assert verdict.allowed is False
         assert f"did you mean {symbol.upper()!r}?" in verdict.reason
 
-    def test_lower_cased_futures_alias_gets_the_case_hint(self) -> None:
-        # Review round-2 finding 3: the docstring promises EVERY lower-cased
-        # in-scope symbol a did-you-mean hint — the futures alias became
-        # in-scope at launch, so `nse-nifty-fut` must earn the case pointer
-        # (hint-never-admit), not the generic out-of-scope refusal.
+    def test_lower_cased_futures_alias_gets_the_generic_refusal(self) -> None:
+        # DEC-ENGINE-SPOT-ONLY-001 review round: the alias is no longer
+        # in-scope, so the case hint may not point a lower-cased
+        # `nse-nifty-fut` at a symbol that would itself be refused (the
+        # retired-shape branch's own "never 'did you mean' a refused symbol"
+        # principle) — it takes the generic spot-only refusal instead.
         verdict = classify_engine_sweep_target(
             exchange="NSE", segment="FNO", symbol="nse-nifty-fut"
         )
         assert verdict.allowed is False
         assert verdict.tier == "refused"
-        assert "did you mean 'NSE-NIFTY-FUT'?" in verdict.reason
+        assert "did you mean" not in verdict.reason
+        assert "outside the brute-force engine scope" in verdict.reason
+        assert "DEC-ENGINE-SPOT-ONLY-001" in verdict.reason
 
     def test_lower_cased_unknown_symbol_gets_the_generic_refusal(self) -> None:
         verdict = classify_engine_sweep_target(exchange="NSE", segment="INDEX", symbol="reliance")

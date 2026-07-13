@@ -55,7 +55,7 @@ full sweep until Phase 9.5 pilot passes.
 - **NIFTY-futures track (reconciles the line above — ADR-0012 / CLAUDE.md §2
   Rule 3 engine-scope amendment, operator-authorized 2026-06-29; LAUNCHED by
   DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
-  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523):** the brute-force
+  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702):** the brute-force
   ENGINE additionally runs on **NIFTY futures** (signal-only, like spot) for the
   dedicated dynamic-strategy track — addressed by the ONE pinned series alias
   `NSE-NIFTY-FUT`, roll-resolved at launch into the per-contract
