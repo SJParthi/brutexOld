@@ -2479,7 +2479,14 @@ hostile-review pass._
   negative/non-finite volume & OI probes, an unprobeable hostile column
   dtype fail-closing via a narrow `PolarsError` clause; disclosed
   corrupt-lake-only narrowing: a value-corrupt base that previously
-  laundered into a `fresh` compare now reads `stale`), never an uncaught
+  laundered into a `fresh` compare now reads `stale`) + the refuter-round-5
+  diagnostic-line guard (a REGRESSION in the round-4 fix: the screen's OWN
+  `first_offender` extraction materialised the offending row's stamp under
+  a `PolarsError`-only clause, so a value-corrupt row whose `ts_utc` is
+  ALSO out-of-range — the cross the mask never vets — escaped an uncaught
+  `ValueError`/`OverflowError`; the extraction now rides its own narrow
+  `datetime_out_of_range_errors()` guard with the `"<out-of-range ts_utc>"`
+  placeholder, still the typed `stale` + WARN), never an uncaught
   raise out of the sweep-preflight gate on the daily arm's STAMP/VALUE
   corruption plane — the ONE disclosed residual is a wrong-dtype/null-ts
   1-minute-base COLUMN fault, which raises identically on the pre-existing

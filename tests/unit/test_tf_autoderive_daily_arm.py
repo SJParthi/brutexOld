@@ -921,3 +921,101 @@ class TestCorruptBaseValue:
             ("NIFTY", "5minute"): "stale",
             ("NIFTY", "1day"): "stale",
         }
+
+
+class TestCorruptBaseValueOutOfRangeStampCross:
+    """Refuter round 5 (seat 1, MAJOR — a regression in the round-4 fix): the
+    base value-screen's OWN diagnostic line materialised the offending row's
+    stamp (``repr(corrupt.get_column("ts_utc")[0])``) under a guard that
+    caught ``PolarsError`` only, so a hand-planted base row that is BOTH
+    value-corrupt (negative volume → the mask flags it, ``base_corrupt=True``)
+    AND carries an out-of-range i64 ``ts_utc`` (``2**62`` µs) forced the
+    i64→``datetime`` conversion on exactly the row whose stamp cannot be
+    materialised — ``builtins.ValueError: year 148108 is out of range``, a
+    subclass of NEITHER ``PolarsError`` nor any outer guard — ESCAPING
+    ``lake_derived_freshness_verdicts`` (the exact ``cli.py`` sweep-preflight
+    call) uncaught while the polars-only intraday twin read ``"stale"``
+    gracefully on the IDENTICAL base. The value screen never reads ``ts_utc``
+    (its refusal plane is prices/volume/OI), so the CROSS was untested: the
+    branch pinned out-of-range stamps WITH valid values and value-corrupt rows
+    WITH in-range stamps, never both on one row. The extraction now rides its
+    own NARROW ``datetime_out_of_range_errors()`` guard (its sole failure mode
+    is the stored-stamp conversion — the #1594 consumption law) with the
+    ``"<out-of-range ts_utc>"`` placeholder, so ``base_corrupt`` still reads
+    the typed ``"stale"`` + ONE ``derived_1day_corrupt_base`` WARN."""
+
+    def _stored(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": [datetime(2024, 6, 11, 18, 30, tzinfo=UTC)],
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+
+    def _cross_base(self) -> pl.DataFrame:
+        """Five clean rows + ONE row that is value-corrupt (volume=-5) AND
+        carries the out-of-range ``2**62``-µs stamp — the refuter's executed
+        repro shape verbatim."""
+        return (
+            pl.DataFrame(
+                {
+                    "ts_utc": pl.Series(
+                        [
+                            int(
+                                datetime(2024, 6, 12, 3, 45 + i, tzinfo=UTC).timestamp() * 1_000_000
+                            )
+                            for i in range(5)
+                        ]
+                        + [2**62],
+                        dtype=pl.Int64,
+                    ),
+                    "open": [100.0] * 6,
+                    "high": [100.5] * 6,
+                    "low": [99.5] * 6,
+                    "close": [100.1] * 6,
+                    "volume": pl.Series([10] * 5 + [-5], dtype=pl.Int64),
+                }
+            )
+            .with_columns(pl.col("ts_utc").cast(pl.Datetime("us", "UTC")))
+            .sort("ts_utc")
+        )
+
+    def test_cross_corrupt_base_direct_compare_reads_stale(self) -> None:
+        """Pre-fix an ESCAPED ``builtins.ValueError: year 148108 is out of
+        range`` out of the round-4 ``first_offender`` extraction; now the
+        typed verdict + the placeholder offender (never a raise)."""
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                self._cross_base(), self._stored(), segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_base"]
+        assert event["log_level"] == "warning"
+        assert event["corrupt_rows"] == 1
+        assert event["first_offender"] == "<out-of-range ts_utc>"
+
+    def test_cross_corrupt_base_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's executed end-to-end repro verbatim: a real lake whose
+        1-minute BASE month file is hand-poisoned with ONE row carrying BOTH a
+        negative volume AND the out-of-range ``2**62``-µs stamp; the exact cli
+        sweep-preflight call (``lake_derived_freshness_verdicts``) must return
+        the typed verdict on BOTH arms — never an uncaught ``ValueError``
+        traceback out of the daily arm's diagnostic line."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1m = _partition(lake, "INDEX", "NIFTY", "1minute")
+        df = pl.read_parquet(p1m)
+        poison = df.head(1).with_columns(
+            pl.lit(2**62).cast(pl.Int64).cast(pl.Datetime("us", "UTC")).alias("timestamp"),
+            pl.lit(-1_000_000).cast(pl.Int64).alias("volume"),
+        )
+        pl.concat([poison, df]).write_parquet(p1m)
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }

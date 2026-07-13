@@ -231,6 +231,21 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   probed value plane (e.g. an Int64 `ts_utc`) keep the documented
   propagation envelope (the adjudicated round-4 MINOR — the pre-existing
   intraday twin raises identically on that class).
+- The base value-screen's OWN diagnostic can no longer reopen the escape it
+  closes (refuter round 5 — a regression in the round-4 fix): extracting the
+  first offending instant (`repr(corrupt.get_column("ts_utc")[0])`)
+  materialises that row's stamp, so a hand-planted row that is BOTH
+  value-corrupt (negative volume → flagged) AND carries an out-of-range i64
+  `ts_utc` (`2**62` µs — a cross the screen's price/volume/OI mask never
+  vets) previously raised `builtins.ValueError`/`OverflowError` out of the
+  diagnostic line — a member of NEITHER the narrow `PolarsError` clause nor
+  any outer guard — escaping the sweep-preflight gate uncaught while the
+  polars-only intraday twin read `stale` gracefully on the identical base.
+  The extraction now rides its own NARROW `datetime_out_of_range_errors()`
+  guard (its sole failure mode is the stored-stamp conversion — the #1594
+  consumption law licenses the full set) with the `"<out-of-range ts_utc>"`
+  placeholder, so `base_corrupt` still reads the typed `stale` + the one
+  `derived_1day_corrupt_base` WARN.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that

@@ -196,7 +196,14 @@ def compare_daily_freshness(
     expressions themselves raise (a hand-planted Utf8/List numeric column —
     ``polars.exceptions.PolarsError``, a NARROW span whose sole failure
     mode is that hostile dtype, the #1594 consumption law) fail-closes the
-    same way. Disclosed narrowing (corrupt-lake-only): the screen judges
+    same way. The screen's OWN diagnostic (the ``repr()``'d offending
+    instant) rides the FULL out-of-range set too (refuter round 5): a
+    value-corrupt row whose ``ts_utc`` is ALSO out-of-range (the
+    hand-planted cross the mask never vets — its refusal plane reads no ts
+    column) previously escaped that extraction as an uncaught
+    ``ValueError``/``OverflowError``, and now reads the
+    ``"<out-of-range ts_utc>"`` placeholder with the same typed ``"stale"``
+    + WARN. Disclosed narrowing (corrupt-lake-only): the screen judges
     the WHOLE base frame (including rows past the ``before`` bound), and a
     value-corrupt base that previously happened to compare ``"fresh"``
     (the corruption laundered into BOTH sides) or drift-``"stale"`` now
@@ -310,7 +317,27 @@ def compare_daily_freshness(
         corrupt = df_1m.filter(mask)
         base_corrupt = corrupt.height > 0
         corrupt_rows = corrupt.height
-        first_offender = repr(corrupt.get_column("ts_utc")[0]) if base_corrupt else ""
+        if base_corrupt:
+            # Refuter round 5 (seat 1, MAJOR — a regression in the round-4
+            # fix): materialising the offending row's instant converts its
+            # stored stamp to a Python datetime, so a value-corrupt row whose
+            # ts_utc is ALSO out-of-range (negative volume + a 2**62-µs
+            # stamp — a cross the value screen never vets: its refusal plane
+            # reads no ts column) previously raised
+            # builtins.ValueError/OverflowError out of THIS diagnostic line —
+            # a member of NEITHER the PolarsError clause below nor any outer
+            # guard — reopening through the sweep-preflight gate the exact
+            # escape the screen exists to close, while the polars-only
+            # intraday twin stayed graceful. NARROW try on the one extraction
+            # whose sole failure mode is the stored-stamp conversion (the
+            # #1594 consumption law licenses the FULL set here); the
+            # placeholder keeps the typed "stale" + WARN.
+            try:
+                first_offender = repr(corrupt.get_column("ts_utc")[0])
+            except datetime_out_of_range_errors():
+                first_offender = "<out-of-range ts_utc>"
+        else:
+            first_offender = ""
     except pl.exceptions.PolarsError:
         base_corrupt = True
         corrupt_rows = df_1m.height
