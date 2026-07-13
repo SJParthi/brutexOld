@@ -178,6 +178,15 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   fixture-driven (in-memory bars — they never read a stored derived-intraday
   partition) and reproduce byte-for-byte: consistent with, not a refutation
   of, the lake-side re-key.
+- Out-of-datetime-range i64 stamps in the DAILY freshness arm fail-closed to
+  `stale` + one WARN on BOTH sides: the stored-1day reduction (review-round-1
+  R4-M1, full `datetime_out_of_range_errors()` set) AND — since refuter
+  round 1, whose executed repro escaped a PanicException from a corrupt
+  1-MINUTE base through `lake_derived_freshness_verdicts` — the base
+  re-derivation (the `datetime_out_of_range_escape_errors()` set; ValueError
+  deliberately excluded per the #1594 consumption law, since the resample
+  spans arbitrary derive code). The intraday twin is polars-only (`.equals`)
+  and was verified graceful on the same corrupt base — no guard needed there.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that

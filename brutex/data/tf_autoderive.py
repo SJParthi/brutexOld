@@ -128,15 +128,25 @@ def compare_daily_freshness(
       latest-wins cannot delete an orphan, so a stale verdict would be an
       un-remediable refusal loop.
 
-    A stored stamp OUTSIDE the Python ``datetime`` range (a hand-planted /
-    corrupt i64 — e.g. a year-9999 instant whose +05:30 shift passes
-    ``datetime.max``, or a ``2**62``-µs value that PANICS the polars
-    conversion) reads the SAME typed ``"stale"`` verdict fail-closed — never
-    an uncaught raise escaping the sweep-preflight gate (the COMMON
-    :func:`~brutex.data.errors.datetime_out_of_range_errors` set, whose
-    consumption law this wrap satisfies: the guarded code's sole Python-side
-    failure mode IS the stored-timestamp conversion; the #1594 rounds-12–18
-    isolation-escape convention).
+    A stamp OUTSIDE the Python ``datetime`` range on EITHER side (a
+    hand-planted / corrupt i64 — e.g. a year-9999 instant whose +05:30 shift
+    passes ``datetime.max``, a ``2**62``-µs value that PANICS the polars
+    conversion, or a far-past NEGATIVE i64 in the 1-MINUTE BASE) reads the
+    SAME typed ``"stale"`` verdict fail-closed — never an uncaught raise
+    escaping the sweep-preflight gate (the #1594 rounds-12–18
+    isolation-escape convention). TWO arms per the COMMON sets' consumption
+    law: the STORED-1day reduction rides the FULL
+    :func:`~brutex.data.errors.datetime_out_of_range_errors` set (its sole
+    Python-side failure mode is the stored-timestamp conversion); the
+    1-minute-base RE-DERIVATION (the daily law + the expected-bar stamp
+    build — refuter round 1: it previously ran OUTSIDE the guard and a
+    corrupt base escaped as an uncaught ``PanicException``, while the
+    polars-only intraday twin degraded gracefully) rides the
+    ValueError-EXCLUDING
+    :func:`~brutex.data.errors.datetime_out_of_range_escape_errors` set,
+    because the law call spans arbitrary code where a ``ValueError`` can be
+    a genuine bug (e.g. the R5 negative-volume-wrap ``CandleBar`` refusal)
+    that must keep propagating.
 
     HONEST cost (Golden Rule #10): the per-date compare below is a
     NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
@@ -149,7 +159,10 @@ def compare_daily_freshness(
     """
     from datetime import timedelta
 
-    from brutex.data.errors import datetime_out_of_range_errors
+    from brutex.data.errors import (
+        datetime_out_of_range_errors,
+        datetime_out_of_range_escape_errors,
+    )
 
     if df_stored_1day.height == 0:
         return "fresh"  # nothing stored to drift (callers key only stored partitions)
@@ -168,6 +181,7 @@ def compare_daily_freshness(
         _LOG.warning(
             "derived_1day_out_of_range_stamp",
             source=source or "1day",
+            side="stored-1day",
             detail=(
                 "stored 1day stamp outside the Python datetime range (a corrupt/"
                 "hand-planted i64) — verdict 'stale' fail-closed; heal-recall or "
@@ -175,14 +189,39 @@ def compare_daily_freshness(
             ),
         )
         return "stale"
-    if segment == "FNO":
-        from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
+    try:
+        if segment == "FNO":
+            from brutex.data.fno_daily_resample import resample_1m_to_fno_daily
 
-        bars = resample_1m_to_fno_daily(df_1m, before=before)
-    else:
-        from brutex.data.spot_daily_resample import resample_1m_to_daily
+            bars = resample_1m_to_fno_daily(df_1m, before=before)
+        else:
+            from brutex.data.spot_daily_resample import resample_1m_to_daily
 
-        bars = resample_1m_to_daily(df_1m, before=before)
+            bars = resample_1m_to_daily(df_1m, before=before)
+        expected_by_date = {_ist_date_of(bar.timestamp): bar for bar in bars}
+    except datetime_out_of_range_escape_errors():
+        # Refuter round 1 (seat 1, MAJOR): a corrupt out-of-range 1-MINUTE
+        # BASE stamp (far-past negative i64 — the #1594 hand-planted class)
+        # previously reached the daily law's Python-datetime conversion
+        # OUTSIDE the guard and ESCAPED as an uncaught PanicException through
+        # the sweep-preflight gate, while the polars-only intraday twin read
+        # "stale" gracefully on the SAME base. The ESCAPE set (OverflowError
+        # + PanicException — ValueError deliberately EXCLUDED per the
+        # consumption law: this try spans the whole daily law, where a
+        # ValueError can be a genuine code bug such as the R5
+        # negative-volume-wrap CandleBar refusal) folds the shape into the
+        # same typed fail-closed refusal. Loud: ONE WARN per partition.
+        _LOG.warning(
+            "derived_1day_out_of_range_stamp",
+            source=source or "1day",
+            side="1minute-base",
+            detail=(
+                "1-minute base stamp outside the Python datetime range (a corrupt/"
+                "hand-planted i64) — verdict 'stale' fail-closed; heal / re-pull "
+                "the 1-minute base"
+            ),
+        )
+        return "stale"
 
     from datetime import UTC
 
@@ -190,7 +229,6 @@ def compare_daily_freshness(
         """Normalize a stamp to an aware-UTC instant (naive = UTC by contract)."""
         return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
 
-    expected_by_date = {_ist_date_of(bar.timestamp): bar for bar in bars}
     has_oi = "open_interest" in df_stored_1day.columns
     orphans: list[str] = []
     verdict = "fresh"

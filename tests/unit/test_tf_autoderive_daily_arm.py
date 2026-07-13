@@ -397,3 +397,89 @@ class TestOutOfRangeStoredStamp:
         assert (
             tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == "stale"
         )
+
+
+class TestOutOfRangeBaseStamp:
+    """Refuter round 1 (seat 1, MAJOR): the R4-M1 guard covered only the
+    STORED-1day reduction — a corrupt out-of-range 1-MINUTE BASE stamp (a
+    far-past negative i64, the #1594 hand-planted class) reached the daily
+    law's re-derivation OUTSIDE the try and escaped as an uncaught
+    PanicException through ``lake_derived_freshness_verdicts`` at the
+    sweep-all gate (the intraday twin — polars-only — degrades gracefully on
+    the SAME base). The re-derivation now rides the ValueError-EXCLUDING
+    ``datetime_out_of_range_escape_errors()`` set (the consumption law: the
+    law call spans arbitrary code where a ValueError can be a genuine bug —
+    e.g. the R5 negative-volume-wrap class, which must keep propagating)."""
+
+    def _valid_stored_1day(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": [datetime(2024, 6, 11, 18, 30, tzinfo=UTC)],
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+
+    def _corrupt_base(self) -> pl.DataFrame:
+        """A clean session frame + ONE far-past -(2**62)-µs hand-planted row."""
+        clean = pl.DataFrame(
+            {
+                "ts_utc": pl.Series(
+                    [
+                        int(datetime(2024, 6, 12, 3, 45 + i, tzinfo=UTC).timestamp() * 1_000_000)
+                        for i in range(5)
+                    ]
+                    + [-(2**62)],
+                    dtype=pl.Int64,
+                ),
+                "open": [100.0] * 6,
+                "high": [100.5] * 6,
+                "low": [99.5] * 6,
+                "close": [100.1] * 6,
+                "volume": [10] * 6,
+            }
+        ).with_columns(pl.col("ts_utc").cast(pl.Datetime("us", "UTC")))
+        return clean.sort("ts_utc")
+
+    def test_corrupt_base_direct_compare_reads_stale(self) -> None:
+        """Repro B2: pre-fix an ESCAPED PanicException; now the typed verdict."""
+        assert (
+            tf_autoderive.compare_daily_freshness(
+                self._corrupt_base(), self._valid_stored_1day(), segment="INDEX"
+            )
+            == "stale"
+        )
+
+    def test_corrupt_base_fno_law_reads_stale(self) -> None:
+        """The FNO-routed law arm takes the same guard."""
+        stored = self._valid_stored_1day().with_columns(
+            pl.lit(1004).cast(pl.Int64).alias("open_interest")
+        )
+        base = self._corrupt_base().with_columns(pl.lit(1000).cast(pl.Int64).alias("open_interest"))
+        assert tf_autoderive.compare_daily_freshness(base, stored, segment="FNO") == "stale"
+
+    def test_corrupt_base_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's /tmp/repro_gate.py shape: an on-disk lake whose
+        1-minute BASE month file is hand-poisoned with the out-of-range row;
+        the exact cli sweep-preflight call (lake_derived_freshness_verdicts)
+        must return the typed verdict, never a raw Rust-panic traceback."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1m = _partition(lake, "INDEX", "NIFTY", "1minute")
+        df = pl.read_parquet(p1m)
+        poison = df.head(1).with_columns(
+            pl.lit(-(2**62)).cast(pl.Int64).cast(pl.Datetime("us", "UTC")).alias("timestamp")
+        )
+        pl.concat([poison, df]).write_parquet(p1m)
+        verdicts = _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"])
+        # Fail-closed: the corrupt base refuses the launch on BOTH arms — the
+        # intraday twin was already graceful (polars-only compare), the daily
+        # arm now matches it instead of panicking.
+        assert verdicts == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }
