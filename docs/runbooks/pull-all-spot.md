@@ -30,14 +30,12 @@ WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
 
 - pull options — and the pull itself never pulls futures metadata/candles
   either (the note says `F&O skipped by design (spot-only scope)` — never a
-  fake "0 expiries"). HONEST tail scope (refuter-round-3 F-D1): the
-  cross-verify tail (default ON; `BRUTEX_CROSSVERIFY=off` disables it) runs
-  the #1776 producer, whose OWN pull leg currently fetches NIFTY/BANKNIFTY
-  FUTURES candles + their F&O metadata under its own DEC
-  (DEC-CROSSVERIFY-PRODUCER-001 — that leg's scope is the producer's,
-  not this command's). PR #1515 (the crossverify spot-only trim, in flight —
-  branch `claude/crossverify-spot-only` on origin, remote-verified 2026-07-13)
-  removes that leg — once it lands the whole chain is spot-only;
+  fake "0 expiries"). Tail scope (the refuter-round-3 F-D1 caveat, since
+  CLOSED): the cross-verify tail (default ON; `BRUTEX_CROSSVERIFY=off`
+  disables it) runs the #1776 producer, whose pull leg is now SPOT-ONLY
+  too — PR #1515 (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788, landed
+  2026-07-13) deleted the producer's NIFTY/BANKNIFTY futures metadata +
+  candle legs, so the WHOLE chain (pull + tail) is spot-only;
 - run Greeks enrichment (the note says
   `Greeks: not run — no options in this pull`);
 - accept a date range (`--start`/`--end` deliberately do not exist — full-range
@@ -184,10 +182,12 @@ data.
 ## 4. Verification loop (after every run)
 
 1. The finish note / stdout `spot:` line — `N window(s) FAILED (will retry)`
-   must match the **/coverage/windows** FAILED tab count. Pre-#1515 you may
-   ALSO see `groww-future` (FUT) windows there — those are written by the
-   cross-verify tail's #1776 producer pull leg (see §1's honest tail note),
-   not by this command's spot pull.
+   must match the **/coverage/windows** FAILED tab count. (Historical note:
+   before PR #1515 landed — DEC-CROSSVERIFY-SPOT-ONLY-001, #1788 — the
+   cross-verify tail's producer pull leg could ALSO write `groww-future`
+   (FUT) windows there; that leg is deleted, so a fresh run's ledger rows
+   are spot-only end-to-end. Rows from pre-#1515 runs may persist in an old
+   ledger.)
 2. **/completeness** — spot coverage per symbol (a late-listed symbol reads
    honest `partial`).
 3. **/coverage** — the per-symbol rollup. The dashboard button's finish detail
