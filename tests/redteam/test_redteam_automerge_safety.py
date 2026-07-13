@@ -321,6 +321,38 @@ def _merge_step_run() -> str:
     return str(merge_step.get("run", ""))
 
 
+def _merge_step_executable_commands() -> list[str]:
+    """Logical EXECUTABLE commands of the Squash-merge ``run:`` block.
+
+    Shell comment lines (first non-whitespace char ``#``) are stripped FIRST:
+    the block's rationale comments quote the very tokens the behavioral pins
+    match (``--auto``, ``enablePullRequestAutoMerge``, ``--delete-branch``),
+    so asserting against the RAW block text was TAUTOLOGICAL — a mutant that
+    deleted BOTH executable ``gh pr merge`` commands while keeping the
+    comments passed every assertion, including the ordering one (it compared
+    two COMMENT positions). Backslash-continued lines are then folded into
+    ONE logical command each, so a flag on a continuation line attributes to
+    the command that carries it.
+    """
+    commands: list[str] = []
+    pending: list[str] = []
+    for raw_line in _merge_step_run().splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("#"):
+            continue  # shell comment — never executable
+        if not stripped and not pending:
+            continue  # blank line between commands
+        if stripped.endswith("\\"):
+            pending.append(stripped[:-1].strip())
+            continue
+        pending.append(stripped)
+        commands.append(" ".join(pending))
+        pending = []
+    if pending:  # a dangling continuation — keep it visible rather than drop it
+        commands.append(" ".join(pending))
+    return commands
+
+
 class TestMergeQueueReadiness:
     """DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): merge-queue readiness pins.
 
@@ -378,26 +410,49 @@ class TestMergeQueueReadiness:
         enablePullRequestAutoMerge mutation — the enqueue API on a
         merge-queue-ruled base) and keep the pre-queue direct squash-merge as
         the FALLBACK, so the workflow is correct both before AND after the
-        merge-queue ruleset flips."""
-        run = _merge_step_run()
-        assert "--auto" in run, (
-            "the merge step lost the enable-auto-merge (enqueue) attempt — with "
-            "a merge queue ruling main, direct merges are refused and every "
-            "green PR strands (regression of DEC-MERGE-QUEUE-001)"
+        merge-queue ruleset flips.
+
+        The behavioral asserts run over the block's EXECUTABLE commands only
+        (comments stripped, continuations folded via
+        ``_merge_step_executable_commands``) — the block's rationale comments
+        quote the same flags, so raw-text matching was a tautology
+        (mutant-proven: deleting BOTH ``gh pr merge`` commands while keeping
+        the comments passed the old pins, ordering assert included).
+        """
+        commands = _merge_step_executable_commands()
+        enqueue_at = [
+            i for i, cmd in enumerate(commands) if "gh pr merge" in cmd and "--auto" in cmd
+        ]
+        assert enqueue_at, (
+            "the merge step lost the executable enable-auto-merge (enqueue) "
+            "attempt (`gh pr merge ... --auto`) — with a merge queue ruling "
+            "main, direct merges are refused and every green PR strands "
+            "(regression of DEC-MERGE-QUEUE-001)"
         )
-        assert "enablePullRequestAutoMerge" in run, (
+        # The fallback direct merge (with branch deletion) must still exist as
+        # an executable command and come AFTER the enqueue attempt.
+        fallback_at = [
+            i for i, cmd in enumerate(commands) if "gh pr merge" in cmd and "--delete-branch" in cmd
+        ]
+        assert fallback_at, (
+            "the executable direct squash-merge fallback (`gh pr merge ... "
+            "--delete-branch`) is gone — on a queue-less repo (today's world) "
+            "nothing would merge at all"
+        )
+        assert min(enqueue_at) < min(fallback_at), (
+            "the enqueue attempt no longer precedes the direct-merge fallback "
+            "in the EXECUTABLE command sequence — a queue-ruled base would eat "
+            "a doomed direct merge first"
+        )
+        # DOCUMENTATION-COMMENT pin ONLY — deliberately SEPARATE from the
+        # behavioral asserts above (the token lives in a rationale COMMENT of
+        # the run block, never in executable code, so this must never
+        # masquerade as a behavioral pin): the block keeps naming the GraphQL
+        # mutation so the --auto attempt keeps its enqueue-mechanism trail.
+        assert "enablePullRequestAutoMerge" in _merge_step_run(), (
             "the merge step no longer documents the enqueue mechanism — the "
-            "--auto attempt lost its rationale trail"
-        )
-        # The fallback direct merge (with branch deletion) must still exist and
-        # come AFTER the enqueue attempt.
-        assert "--delete-branch" in run, (
-            "the direct squash-merge fallback is gone — on a queue-less repo "
-            "(today's world) nothing would merge at all"
-        )
-        assert run.index("--auto") < run.index("--delete-branch"), (
-            "the enqueue attempt no longer precedes the direct-merge fallback — "
-            "a queue-ruled base would eat a doomed direct merge first"
+            "--auto attempt lost its rationale trail (documentation-comment "
+            "pin, not a behavioral one)"
         )
 
     def test_blocked_state_tolerated_only_under_live_queue_rule(self) -> None:
