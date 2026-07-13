@@ -1,7 +1,8 @@
 # GDFL extract/ingest — pointer to the sibling design deliverable
 
 > **Decision (this archive):** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780).
-> This page is deliberately a POINTER, not a design.
+> **Posture:** SUMMARIZE-ONLY (`README.md`) — this page reproduces no vendor
+> prose or data. This page is deliberately a POINTER, not a design.
 
 ## The three delivery modes, one line each
 
@@ -21,8 +22,8 @@
 GDFL's 1-second L1 snapshot records are quote/trade snapshots, not OHLCV bars —
 they do not fit the engine's bar lake schema (`bars/<exch>/<segment>/...` holds
 OHLCV+OI candles on the 2-decimal tick grid). Any GDFL ingest therefore lands in a
-**NEW tick-class store beside `bars/`** (its own schema, partitioning and dedup
-law), NEVER in the engine's bars lake, never in run identity, and never in the
+**NEW 1-second-snapshot-class store beside `bars/`** (its own schema, partitioning
+and dedup law), NEVER in the engine's bars lake, never in run identity, and never in the
 52→60-condition vocabulary — the BruteX engine surface stays
 NIFTY/BANKNIFTY/SENSEX (+ the ADR-0012 futures track) unchanged.
 

@@ -22,9 +22,10 @@
 | GlobalDatafeeds-ws | 0.0.1 | 2024-10-14 | — | — | **EMPTY placeholder** — no code in sdist OR wheel (verified) |
 
 Also in the simple index: `restgfdl-py` — **zero releases** (`/pypi/restgfdl-py/json`
-→ HTTP 404), a name-only registration. `gfdl`, `gfdlfremake`, `gfdlnb`,
-`gfdlvitals`, `gdflib` are UNRELATED (NOAA-GFDL/other; verified by author
-metadata).
+→ HTTP 404), a name-only registration. `gfdl` (LANL's "Gradient Free Deep
+Learning" — its PyPI project URLs point at `github.com/lanl/GFDL`) plus
+`gfdlfremake`, `gfdlnb`, `gfdlvitals`, `gdflib` (NOAA-GFDL/other) are ALL
+UNRELATED; verified by author/project metadata.
 
 Authors: `Global Datafeeds <developer@globaldatafeeds.in>` (wsgfdl-py, gfdl-rest,
 GFDLWS, ws-gfdl, GlobalDatafeeds-ws); `Surendran M <surendran.m@globaldatafeeds.in>`

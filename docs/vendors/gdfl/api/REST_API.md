@@ -41,7 +41,7 @@
   (`../VERDICT.md` honest limits).
 
 ## Endpoint catalogue
-*(source: vendor REST reference captured from PyPI gfdl-rest@1.0.3, summarized; the vendor's numbered function list has 28 entries — 27 API functions plus a closing "Parameters" table section; the shipped SDK exposes matching classes for each function)*
+*(source: vendor REST reference captured from PyPI gfdl-rest@1.0.3, summarized; the vendor's numbered function list has 28 entries — 27 API functions plus a closing "Parameters" table section. The shipped SDK exposes matching classes for MOST functions, but the two 27-member sets are NOT identical: `GetHistoryAfterMarket` is reference-documented with NO `gfdl_rest` class (grep: absent from the package), while `GetInstrumentsOnSearch` ships as a class + reference body section but is absent from the numbered list)*
 
 ### Quotes + snapshots
 

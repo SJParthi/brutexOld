@@ -11,9 +11,10 @@
 `TICK`) — irregular within-second cadence, not a fixed one-row-per-second grid, and
 not sub-second exchange tick-by-tick — and that 1-second class is the CEILING for
 Indian retail data, not a compromise. No 1-second OHLC bar periodicity exists
-anywhere in the API. The 1-second-class history window is days-scale, so a
-2022→now 1-second-class BACKFILL is NOT available from GDFL; forward capture from
-subscription day is the only 1-second-class path.**
+anywhere in the API. The 1-second-class history window is days-scale (per the
+UNCONFIRMED official snippet — and never years-scale under ANY reading of the
+in-SDK evidence, §4), so a 2022→now 1-second-class BACKFILL is NOT available from
+GDFL; forward capture from subscription day is the only 1-second-class path.**
 
 Terminology note (operator-directed): we call this data **"1-second L1 snapshot
 data"** throughout. Each record is a Level-1 quote/trade snapshot (last trade price,
@@ -98,10 +99,14 @@ raw rows NOT committed):
   7-vs-5 divergence shows these are per-account entitlements, not global constants
   (SDK-VERIFIED that the samples say this; the meaning needs a live probe).
 - OFFICIAL-SNIPPET-UNCONFIRMED (site egress-blocked; search snippets only):
-  1-second-class ("tick") history ≈ 7 days, 1-minute ≈ 3 months, EOD since 2010.
-  Consistent with `MaxTicks: 7` read as days, but UNCONFIRMED.
-- Even under the most generous reading, every source agrees the 1-second-class
-  window is **days-scale**, not years-scale.
+  1-second-class (the vendor's `TICK` class) history ≈ 7 days, 1-minute ≈
+  3 months, EOD since 2010. Consistent with `MaxTicks: 7` read as days, but
+  UNCONFIRMED.
+- What each source actually supports: the units-unknown `GetLimitation` samples
+  bound the window to a SMALL-INTEGER count (7 / 5) of SOME unit — at most
+  months-scale under any plausible reading, **never years-scale**; only the
+  UNCONFIRMED official snippet pins it at ≈7 DAYS. Every reading rules out a
+  multi-year backfill.
 
 ## Evidence table
 
@@ -125,8 +130,9 @@ raw rows NOT committed):
 ## Implications for BruteX
 
 A 2022→now 1-second-class backfill from GDFL is **impossible**: the finest history
-class is days-deep, so historical parity with a 1-second-class live record cannot be
-reconstructed after the fact. The ONLY way to own a long 1-second L1 snapshot
+class is days-deep (exact figure unconfirmed; at most months-deep under ANY reading
+of §4 — never 2022-deep), so historical parity with a 1-second-class live record
+cannot be reconstructed after the fact. The ONLY way to own a long 1-second L1 snapshot
 series is to **capture it forward** from subscription day (live `SubscribeRealtime`
 recording, or the vendor's own history pulled within its days-scale window as a
 gap-filler). That capture leg — if ever built — stays OUT of the BruteX engine per

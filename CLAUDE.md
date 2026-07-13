@@ -25,7 +25,8 @@ SNAPSHOT data (its vendor API enum token is TICK — irregular within-second
 cadence, NOT a fixed one-row-per-second grid, NOT sub-second exchange
 tick-by-tick; the 1-second class is the CEILING for Indian retail data per the
 prior verified 2026-07-09 tick-feed research), NO 1-second OHLC bar periodicity
-exists anywhere in the API, and the days-scale snapshot-history window makes a
+exists anywhere in the API, and the days-scale (unconfirmed figure — never
+years-scale on any reading) snapshot-history window makes a
 2022→now 1-second-class BACKFILL impossible — forward capture only. Every fact
 evidence-tiered; ZERO verbatim vendor prose / vendor source trees / raw sample
 data committed (the coordinator's summarize-only licensing ruling — PyPI
@@ -2402,7 +2403,8 @@ hostile-review pass._
   NOT sub-second exchange tick-by-tick; the 1-second class is the CEILING for
   Indian retail data (prior verified 2026-07-09 tick-feed research), NO 1-second
   OHLC bar periodicity exists (`GetHistory` enum = TICK/MINUTE/HOUR/DAY/WEEK/
-  MONTH), and the days-scale snapshot-history window ⇒ a 2022→now 1-second-class
+  MONTH), and the days-scale (unconfirmed figure — never years-scale)
+  snapshot-history window ⇒ a 2022→now 1-second-class
   BACKFILL is impossible — forward capture from subscription day only. Every
   fact carries an evidence tier (SDK-VERIFIED · RAW-SAMPLE-MEASURED ·
   PRIOR-VERIFIED-NOTE · OFFICIAL-SNIPPET-UNCONFIRMED · UNVERIFIED · NOT STATED
@@ -6160,7 +6162,8 @@ hostile-review pass._
   `docs/vendors/gdfl/`: GDFL's finest history granularity is 1-second L1
   SNAPSHOT data (vendor enum TICK — irregular cadence, not a fixed 1-second
   grid, not sub-second tick-by-tick; the ceiling for Indian retail data), NO
-  1-second OHLC bar periodicity exists, days-scale snapshot history ⇒ backfill
+  1-second OHLC bar periodicity exists, days-scale (unconfirmed figure — never
+  years-scale) snapshot history ⇒ backfill
   impossible / forward capture only; evidence-tiered, zero verbatim vendor
   prose/source/data committed (summarize-only licensing ruling; pinned PyPI
   SHA256 re-fetch digests); the ingest design is split out under
