@@ -6202,6 +6202,7 @@ def cmd_crossverify_run(
     print(
         f"[brutex]   published {report.published} · already {report.skipped_already} · "
         f"recovered-prior {report.recovered_prior} · "
+        f"re-gated {report.regated} · "
         f"strict-published {report.publish_strict} · "
         f"observe-published {report.publish_observe} · withheld {report.withheld} · "
         f"blocked {report.blocked} · nothing {report.nothing} · "

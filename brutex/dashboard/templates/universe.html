@@ -2639,12 +2639,35 @@ async function pollCrossverify() {
     cvTimer = setTimeout(pollCrossverify, cvDelayMs());
   }
 }
+/* Render the DURABLE last-run record (the reload-proof failure surface —
+   DEC-CROSSVERIFY-WITHHELD-REGATE-001): a finished failure no longer
+   vanishes on a page reload / dashboard restart. textContent-only via
+   cvStatus; returns true iff a record was rendered. */
+function cvRenderLastRun(lr) {
+  if (!lr || typeof lr !== 'object' || typeof lr.verdict !== 'string') return false;
+  const ok = lr.exit_code === 0;
+  let line = (ok ? '✓ ' : '✕ ') + 'last run: ' + (lr.day || '?') + ' · ' + lr.verdict;
+  if (typeof lr.publish_failed === 'number' && lr.publish_failed > 0) {
+    line += ' · publish-failed ' + lr.publish_failed;
+  }
+  if (typeof lr.withheld === 'number' && lr.withheld > 0) line += ' · withheld ' + lr.withheld;
+  if (typeof lr.regated === 'number' && lr.regated > 0) line += ' · re-gated ' + lr.regated;
+  if (Array.isArray(lr.failed_keys) && lr.failed_keys.length > 0) {
+    line += ' · failing: ' + lr.failed_keys.join(', ');
+  }
+  if (lr.detail) line += ' · ' + lr.detail;
+  cvStatus(line);
+  return true;
+}
 async function cvAttachIfRunning() {
   try {
     const res = await gbFetchJson('/api/v1/crossverify/progress');
     if (!res.ok) return false;
     const s = res.body;
-    if (!s || s.state !== 'running') return false;
+    if (!s || s.state !== 'running') {
+      if (s) cvRenderLastRun(s.last_run);   // reload-proof: show the last outcome
+      return false;
+    }
     cvStatus('running · attaching to the live progress feed…');
     cvBeginWatch();
     return true;

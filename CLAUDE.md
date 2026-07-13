@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1790 —
+_Last updated: 2026-07-13 (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 —
 the O(1)-guarantee verification + hardening pass: `docs/O1_GUARANTEE_AUDIT.md`
 becomes the AUTHORITATIVE honest per-path complexity classification (51 rows —
 the six Golden-Rule-#5 engine hot paths · the DB/lake dashboard reads · the
@@ -39,8 +39,50 @@ DISCLOSED staleness window, kill switch `BRUTEX_REVISION_PROBE_TTL_S=0`)
 + EIGHT bench gates close the audit's missing-gate findings. READ-side
 dashboard + tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
 no lake/schema/scope/vocab/rate change; the per-item record lives in the
-§1 Active-branch blurb + MIGRATION.md #1790 — this header carries the
+§1 Active-branch blurb + MIGRATION.md #1791 — this header carries the
 one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 —
+the brute-force ENGINE is SPOT-ONLY by operator directive: the ADR-0012 /
+DEC-NIFTY-DYNAMIC-STRATEGY-001 NIFTY-futures engine authorization + the
+DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface are CONSCIOUSLY
+SUPERSEDED (engine surface {3 spot} ∪ {NSE-NIFTY-FUT} → {3 spot});
+`is_engine_sweep_symbol` admits EXACTLY NIFTY/BANKNIFTY/SENSEX and every
+production sweep entry refuses `NSE-NIFTY-FUT` loudly citing the DEC +
+"the engine is spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY" —
+BEFORE any futures-series resolution or lake I/O; the futures resolver /
+alias-aware loader / Stage-1A roll machinery / symbol_id 4 are RETAINED as
+lake tooling below the gate (reachable only via the loud audit-stamped
+--allow-out-of-scope research escape or recorded-work forensics); Groww
+PULL/lake scope UNTOUCHED — futures ingest stays REFERENCE_ONLY; the
+per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1790 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md
+#1789 — the cross-verify WITHHELD-day AUTO-RE-GATE folded into the daily
+run's catchup: every prior day inside `catchup_days` whose journal still
+names withheld symbols is re-gated from the since-healed lake (re-export →
+stage → publish the now-complete ones; the journal `withheld` map rewritten
+to the honest remainder; already-published keys NEVER re-put — journal
+idempotency; fail-closed gate-first; per-day LEAF journal flocks; runs
+BEFORE the session gate so weekend fires re-gate a healed Friday) — closing
+the runbook's "manual --day re-run" remediation for the heal-within-catchup
+case and CLOSING the #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001
+(id retired unused — the operator's separate historical whole-range S3
+backfill idea was STOOD DOWN by ruling 2026-07-13: current-day-only S3
+push); PLUS the persistent last-run failure surface — the runner persists
+`<lake>/.crossverify/last_run.json` for every MATERIAL verdict (never
+dry-runs, never the honest skips), `GET /api/v1/crossverify/progress`
+serves it as the additive `last_run` field (threadpool, never a 500) and
+the /universe panel renders it on load, so a finished failure survives
+page reloads AND dashboard restarts; the retryable-exhaustion
+`publish_failed` verdict gains a REAL detail (failing count + capped key
+sample); the summary/CLI lines gain the `re-gated N` token (INFO now
+requires recovered==0 AND regated==0). HONEST: only WITHHELD symbols
+re-gate — an honest-`nothing` zero-bar day backfilled later, or a day
+older than catchup_days, still needs `--day`; one month-partition read
+per re-gated symbol·day. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env; the per-item
+record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1789 —
+this header carries the pointer, never the story.)
 Earlier: 2026-07-13 (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md
 #1788 — the cross-verify export contract AMENDED to SPOT-ONLY over the
 WHOLE spot universe (operator ruling 2026-07-13): the NIFTY/BANKNIFTY
@@ -2461,7 +2503,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/o1-guarantee-harden` (**DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1790** —
+- **Active branch:** `claude/o1-guarantee-harden` (**DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791** —
   the O(1)-guarantee verification + hardening pass. THE RECORD: NEW `docs/O1_GUARANTEE_AUDIT.md` — the
   authoritative honest per-path complexity classification (51 rows: the six Golden-Rule-#5 engine hot paths ·
   the DB/lake dashboard read paths · the frontend), every row carrying its honest class
@@ -2522,6 +2564,110 @@ hostile-review pass._
   touched files (0 new); pyright 0 new vs the origin/main baseline; `node --check` clean. READ-side dashboard +
   tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/engine-spot-only` (**DEC-ENGINE-SPOT-ONLY-001,
+  MIGRATION.md #1790** — the brute-force ENGINE is SPOT-ONLY (operator
+  directive 2026-07-13, "wipe off the future, only spots alone"): the
+  NIFTY-futures series alias `NSE-NIFTY-FUT` is RETIRED from engine sweep
+  scope — a CONSCIOUS, ledgered supersession of the engine-scope clause of
+  DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012 and the launch surface of
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 (#1700–#1710), never a silent scope
+  change (Golden Rule #3). `brutex/universe.py::is_engine_sweep_symbol`
+  admits EXACTLY the 3 spot indexes; `classify_engine_sweep_target` refuses
+  the alias on EVERY coordinate (the `EngineSweepVerdict.tier` Literal drops
+  `"nifty_future"` STRUCTURALLY); every production sweep entry — `brutex
+  sweep`/`sweep-all`/the daemon/`sweep-verify --recount` via
+  `check_sweep_scope`, the dashboard sweep route (400, no override by
+  design), the dashboard launch button (`probe_futures_alias` reads honestly
+  unavailable citing the DEC), and programmatic `SweepGridConfig`
+  construction (Layer-1 ValueError) — refuses LOUDLY citing
+  DEC-ENGINE-SPOT-ONLY-001 + "the engine is spot-only; NSE-NIFTY-FUT remains
+  lake/REFERENCE_ONLY", BEFORE any futures-series resolution or lake I/O
+  (spy-pinned). RATIONALE: the 3 spot indices carry no traded volume, so the
+  VWAP bits 52/53 permanently abstain on every remaining engine instrument —
+  removing the one volume-bearing engine instrument makes that unconditional
+  (coordinates with the #1787 volume-bits work). RETAINED below the gate
+  (tested internals + lake tooling, NOT deleted): `futures_series.py`,
+  `series_load.py`, the Stage-1A roll-reset machinery, the
+  instrument⟺roll_schedule invariant, the cascade `roll_schedules` carriage,
+  and `_SYMBOL_ID_TABLE` row 4 (append-only law) — reachable ONLY via the
+  pre-existing loud, audit-stamped `--allow-out-of-scope` CLI research
+  escape or recorded-work forensics; the frozen futures goldens drive
+  `run_persisted_sweep` below the gate and pass UNMODIFIED (run identity
+  untouched). Groww PULL/lake scope UNTOUCHED — futures ingest + the F&O
+  lake stay REFERENCE_ONLY. Fails-before-proven regression
+  (`TestSpotOnlyScopeRefusal` — the pre-flip source RAN the sweep) + the
+  `is_engine_sweep_symbol` truth table + the isolation property collapse to
+  the 3 spot triples. ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX; no
+  vocab/rate/lake-schema change; `universe.py` 100% line+branch on its
+  ci.yml gate + the whole-engine gate green; ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new. HOSTILE-REVIEW ROUND folded (verdict
+  SHIP×2 — 2 MINOR + 3 NIT, per-item record in MIGRATION.md #1790): the
+  stale lowercase-alias case-hint clause DROPPED (never "did you mean" a
+  symbol that is itself refused — `nse-nifty-fut` now takes the generic
+  spot-only refusal, its test flipped to pin that); ADR-0016 §6 gains the
+  appended SUPERSEDED-IN-PART note; the ADR-0012/ADR-0016/spec launch-DEC
+  ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
+  `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
+  the blake3 formula on this branch, cite kept.)
+  Earlier: `claude/crossverify-backfill` (**DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789** —
+  the withheld-day AUTO-RE-GATE + the persistent last-run surface, stacked on PR #1515's
+  `claude/crossverify-spot-only` head (the PR opens after #1515 lands). OPERATOR SCOPE RULING 2026-07-13: the
+  originally-briefed HISTORICAL whole-range S3 backfill (2020→today walk) was STOOD DOWN before any code landed —
+  current-day-only S3 push stands; the "2020→today" ask concerned the LOCAL pull. Delivered: (1) step D2 in
+  `run.py` (`_regate_withheld_scan` + NEW `journal.scan_withheld_journals`) — every prior day inside
+  `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` (default 5; the ONE shared catchup window) whose journal still names WITHHELD
+  symbols has exactly those symbols re-gated from the since-healed lake: re-export → stage → publish the
+  now-complete ones under that day's LEAF journal flock (re-loaded under the lock — a peer's re-gate converges),
+  the journal `withheld` map rewritten to the honest remainder (still-withheld = reason UPDATED; honest `nothing`
+  = dropped + INFO, never a fabricated file; no-longer-enumerable = kept verbatim + WARN); already-published keys
+  are NEVER re-put (the `mark_staged` sha idempotency law + `publish_staged`'s pending-only puts — e2e-pinned
+  zero second PUTs); FAIL-CLOSED gate-first (gate absent ⇒ the whole scan skips with one WARN); runs BEFORE the
+  session gate (weekend fires re-gate a healed Friday — the step-D parity law); whole-run failure classes mirror
+  steps D/K/M (S3BackendUnavailable ⇒ publish_failed exit 2 · staging LakeWriteHalt ⇒ emit_pull_halt + suspect ·
+  nonretryable S3 ⇒ the scan aborts, later days left for the next run; a step-D recovery abort skips D2
+  entirely); defensive totality on calendar-abstain/non-trading/Muhurat prior days; ONE lazy `enumerate_targets`
+  per run. `CrossverifyReport` gains the additive put-level `regated` (counts toward the `published` verdict —
+  the recovered_prior twin); the Telegram summary + CLI lines gain `re-gated N` (INFO requires recovered==0 AND
+  regated==0; regated=None reads "?" never INFO); one `crossverify.regate_day` INFO per day. CLOSES the
+  #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001 (id RETIRED UNUSED — the runbook bound that name to exactly
+  this auto-re-gate; "backfill" now denotes the separately-stood-down historical push). (2) the PERSISTENT
+  last-run failure surface: `_finish` writes `<lake>/.crossverify/last_run.json` (atomic, best-effort — a failed
+  VIEW write never kills a run) for every MATERIAL verdict (summary verdicts + refused; NEVER dry-runs, NEVER the
+  honest skips — a weekend skip cannot clobber Friday's failure record, pinned) carrying the full report counts +
+  the NEW capped cross-pass `failed_keys` sample + detail; `journal.load_last_run` rides the load_journal
+  corruption-tolerance contract (absent/corrupt/oversized ⇒ None + one WARN); `GET /api/v1/crossverify/progress`
+  serves the additive `last_run` field (never-raises root resolve + `run_in_threadpool` — one O(1) sidecar read
+  per poll off the event loop; null never a 500) and the /universe panel's NEW `cvRenderLastRun` renders ✓/✕ +
+  day + verdict + counts + failing keys + detail on load, textContent-only — a finished failure survives page
+  reloads AND dashboard restarts (pinned across a REBUILT app instance); the retryable-exhaustion
+  `publish_failed` verdict gains the real "N key(s) still failing after retries (first: …)" detail (was empty).
+  HONEST LIMITS (named): only WITHHELD symbols re-gate — an honest-`nothing` zero-bar day backfilled later, or a
+  withheld day OLDER than catchup_days, still needs the manual `--day` re-run; each re-gated symbol pays one
+  month-partition read (O(one month of 1-minute bars) per symbol·day); a pending key published by the D2 pass
+  rather than the recovery scan counts `regated`, not `recovered_prior` (attribution only — both → published);
+  the last-run record is a VIEW — the per-day journal stays the durable truth. POLISH ROUND folded (same branch,
+  pre-open — both hostile reviews SHIP; their non-blocking items as ONE commit): a MATERIAL skip-day run
+  (regated/recovered_prior > 0 — a weekend/Muhurat/deferred fire that shipped real S3 objects) now emits the ONE
+  Telegram summary (WARN — the catch-up tier; the three skip verdicts gain markers + join the WARN set) AND
+  writes the last-run record (material-actions-only writes win — the Friday record a weekend re-gate overwrites
+  was resolved by that very re-gate; a TRUE no-op skip stays silent, Friday's failure record survives —
+  supersedes the initial summary/last_run-silent parity); the D2 target enumeration is guarded FAIL-OPEN (NEW
+  `_store_read_errors()` — the `spot_drift` house mirror; a transient store fault ⇒ one
+  `crossverify.regate_scan_failed` WARN + whole-scan skip, the main day never sinks; a genuine bug still
+  propagates); the two journal scans' oldest-boundary (offset == lookback IN, lookback+1 OUT) is mutation-pinned
+  (both `range(lookback_days - 1, …)` mutants verified killed); the peer-converged re-gate arm pinned SILENT (no
+  save, no INFO). TESTS: `TestWithheldRegate` (17) + `TestLastRunRecord` (7) + `TestSkipDayMaterialVisibility`
+  (6) + `TestRegateEnumerationGuard` (4 tests / 6 cases) on run.py (100.00%
+  line+branch), `TestScanWithheldJournals` + `TestLastRunRecordStore` + the 4 boundary pins on journal.py
+  (100.00%), the summary/CLI
+  token + severity pins (incl. the material-skip WARN/marker trio), `TestLastRunSurface` (5, incl.
+  across-a-rebuilt-app) + the panel textContent pin, and
+  the REAL-gate integration e2e (day D truncated-BANKNIFTY withheld exit 2 → lake healed via the production sink
+  → the NEXT trading day's run publishes D with regated==1, withheld cleared, staging gone, zero re-puts, the
+  last-run record flipping withheld_partial → published) — ci.yml UNTOUCHED (every new test in an already-gated
+  file). GATES: whole-package `brutex.crossverify` 100.00% line+branch; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; zero
+  new routes, zero new env vars.)
   Earlier: `claude/crossverify-spot-only` (**DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788** —
   the cross-verify export contract AMENDED to SPOT-ONLY over the WHOLE spot universe (operator ruling
   2026-07-13; supersedes-in-part #1776's "ALL spot + NIFTY/BANKNIFTY futures" tonight-scope clause):
@@ -2593,7 +2739,7 @@ hostile-review pass._
   full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
   #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
   `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard [MECHANISM
-  SUPERSEDED at the 2026-07-13 #1790 merge-reconcile: the belt's no-overlap guard is folded
+  SUPERSEDED at the 2026-07-13 #1791 merge-reconcile: the belt's no-overlap guard is folded
   into `boundedLatestJson` — the gbFetchJson-delegating helper carrying the same body-armed
   abort — and the interim inline `guardedPollJson` copy was deleted; the belt's INTENT stands])
   · **#1441** docs
@@ -6165,7 +6311,11 @@ hostile-review pass._
 
    **Engine-scope amendment (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012,
    2026-06-29, MIGRATION.md entry #1006; companion clause owned by PR-1
-   DEC-VOCAB-U128-CODEGEN-001 #1010):** the operator has AUTHORIZED the
+   DEC-VOCAB-U128-CODEGEN-001 #1010) — the ENGINE-FUTURES AUTHORIZATION in
+   this block is RETIRED by DEC-ENGINE-SPOT-ONLY-001 (2026-07-13,
+   MIGRATION.md #1790 — see the retirement note at the end of this block;
+   the history below is kept verbatim per the supersession convention):**
+   the operator had AUTHORIZED the
    brute-force ENGINE to ALSO run on **NIFTY futures** for the dedicated
    dynamic-strategy track (a session-anchored intraday VWAP is feasible on
    futures because they carry traded volume, unlike a spot index per
@@ -6197,6 +6347,24 @@ hostile-review pass._
    reset at every roll (D11 — no level ever crosses the basis gap). The
    engine sweep surface is EXACTLY {the 3 spot index triples} ∪
    {NSE/FNO/NSE-NIFTY-FUT}.**
+
+   **RETIREMENT (DEC-ENGINE-SPOT-ONLY-001, 2026-07-13, MIGRATION.md
+   #1790):** the operator has DIRECTED the engine back to SPOT-ONLY ("wipe
+   off the future, only spots alone") — this CONSCIOUSLY SUPERSEDES the
+   engine-futures authorization above and the PR-5 launch surface: the
+   engine sweep surface is EXACTLY the 3 spot index triples
+   (NIFTY/BANKNIFTY/SENSEX), `is_engine_sweep_symbol` refuses
+   `NSE-NIFTY-FUT`, and every production sweep entry refuses it loudly
+   citing the DEC + the remediation ("the engine is spot-only;
+   NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"). NIFTY futures REJOIN the
+   REFERENCE_ONLY surface (lake ingest + the F&O candle lake untouched);
+   the 60-condition vocabulary itself is UNCHANGED (data-independent —
+   the volume-bearing VWAP bits 52/53 now permanently abstain on every
+   engine instrument, since no spot index carries volume); the futures
+   resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
+   are RETAINED as tested lake-tooling internals below the scope gate,
+   reachable only via the loud, audit-stamped `--allow-out-of-scope` CLI
+   research escape or recorded-work forensics.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
@@ -6260,8 +6428,9 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:760` after spec growth moved it from :743
-   (earlier :654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:770` after spec growth moved it from :760
+   (earlier :743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
+   :760→:770 with the DEC-ENGINE-SPOT-ONLY-001 scope-retirement note) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
@@ -6434,7 +6603,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/o1-guarantee-harden`
-  (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1790 — the O(1)-guarantee
+  (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 — the O(1)-guarantee
   verification + hardening pass: NEW `docs/O1_GUARANTEE_AUDIT.md` is the
   authoritative honest per-path complexity classification (51 rows across
   the engine hot paths / DB-lake reads / frontend; no bare-O(1) claim where
@@ -6452,6 +6621,38 @@ hostile-review pass._
   kill switch) + eight bench gates; READ-side dashboard + tests + docs
   only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; matches §1's Active branch line)
+  Earlier: `claude/engine-spot-only`
+  (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 — the brute-force ENGINE is
+  SPOT-ONLY: `NSE-NIFTY-FUT` RETIRED from engine sweep scope, every
+  production sweep entry refuses it loudly citing the DEC + "the engine is
+  spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"; consciously
+  supersedes the ADR-0012 engine-futures authorization + the
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface; futures machinery
+  retained below the gate as lake/REFERENCE_ONLY tooling; Groww pull/lake
+  scope untouched; ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1790 for the
+  full blurb)
+  Earlier: `claude/crossverify-backfill`
+  (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789 — the cross-verify
+  WITHHELD-day AUTO-RE-GATE folded into the daily run's catchup (step D2:
+  prior days' gate-withheld symbols re-gated from the since-healed lake —
+  re-export → stage → publish the now-complete ones, journal withheld map
+  rewritten, published keys never re-put, fail-closed gate-first, per-day
+  LEAF journal flocks, runs before the session gate; closes the #1776-named
+  follow-up DEC-CROSSVERIFY-BACKFILL-001 — id retired unused, the historical
+  whole-range S3 backfill was STOOD DOWN by operator ruling 2026-07-13) +
+  the persistent last-run failure surface (`<lake>/.crossverify/last_run.json`
+  → the additive `last_run` progress field → the /universe panel renders it
+  on load; the retryable-exhaustion publish_failed verdict gains a real
+  failing-keys detail); POLISH ROUND folded — a MATERIAL skip-day run
+  (regated/recovered > 0) summarises (WARN catch-up tier) + writes the
+  last-run record (a true no-op skip stays silent — Friday's failure record
+  survives), the D2 enumeration is guarded FAIL-OPEN
+  (`crossverify.regate_scan_failed` — the main day never sinks), and the
+  journal scans' oldest-boundary is mutation-pinned; stacked on PR #1515's
+  `claude/crossverify-spot-only`
+  head; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1789 for the full blurb)
   Earlier: `claude/crossverify-spot-only`
   (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788 — the cross-verify
   export contract AMENDED to SPOT-ONLY over the WHOLE spot universe
@@ -7054,7 +7255,7 @@ bruteX/
 | F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:595-608` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
-| NIFTY-futures ENGINE series alias | **`NSE-NIFTY-FUT`** (symbol_id 4) — the ONE pinned ADR-0012 futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolved at launch by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the engine hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
+| NIFTY-futures series alias (LAKE tooling — NO LONGER an ENGINE series, DEC-ENGINE-SPOT-ONLY-001 #1790) | **`NSE-NIFTY-FUT`** (symbol_id 4, append-only registry row) — the ONE pinned futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolvable by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the Stage-1A machinery hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias. **ENGINE-RETIRED (DEC-ENGINE-SPOT-ONLY-001):** `is_engine_sweep_symbol` refuses it — the alias + resolver + loader survive ONLY as lake/REFERENCE_ONLY tooling below the scope gate (reachable via the loud `--allow-out-of-scope` research escape or recorded-work forensics), never a default engine series | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |
