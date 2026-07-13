@@ -18,8 +18,9 @@ Pinned here (each verified ABSENT from the existing movers suites first):
 * integer-exact "Top Value" RANKING beyond ``2**53`` paisa (two symbols whose
   turnovers float64-COLLAPSE to the same double must still order by the exact
   int — the ``test_surface_trial_results`` teeth applied to ``/movers``);
-* the exact ``0.005`` %CHNG half-boundary surviving to the wire full-precision
-  (a premature server-side 2dp rounding would serve ``0.01`` / ``0.00``);
+* the exact ``±0.005`` %CHNG half-boundaries (positive AND negative twins)
+  surviving to the wire full-precision (a premature server-side 2dp rounding
+  would serve ``0.01`` / ``0.00`` / ``-0.01``);
 * as-of SUFFIX-INDEPENDENCE — mutating every bar AFTER the resolved cutoff
   leaves the served rows byte-identical (no look-ahead through the cut), on the
   1-minute identity cut, a non-anchor coarse-TF cut AND a #1601
@@ -35,8 +36,10 @@ Pinned here (each verified ABSENT from the existing movers suites first):
   suppressed summary, every row still stamped — the shipped cap test drives
   ``_NoncontiguousWarnState`` directly, never the loop);
 * the ``min_volume == volume`` EQUALITY boundary (``>=`` — the floor keeps the
-  exactly-at-floor row) at ROUTE level on all three tabs (the shipped floor
-  pins never test equality);
+  exactly-at-floor row) at ROUTE level on all three tabs (the shipped
+  ROUTE-level floor pins use strictly-above/below values; only the isolated
+  ``value_meets_volume_floor`` unit predicate pins equality, never the route
+  wiring);
 * default-``date`` and explicit-same-date polls share ONE candidate-cache
   entry (the date is canonicalised BEFORE keying — a dual-entry regression
   would recompute and see un-signalled writes);
@@ -59,6 +62,7 @@ Skipped when ``fastapi`` / ``duckdb`` / ``polars`` / ``pyarrow`` are absent.
 
 from __future__ import annotations
 
+import zlib
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -139,7 +143,8 @@ def _write(
 def _idx(symbol: str) -> Instrument:
     return Instrument(
         exch_id=Exchange.NSE,
-        security_id=abs(hash(symbol)) % 100_000,
+        # Deterministic id — zlib.crc32 is PYTHONHASHSEED-independent (hash() is not).
+        security_id=zlib.crc32(symbol.encode()) % 100_000,
         symbol_name=symbol,
         display_name=symbol,
         instrument=InstrumentType.IDX,
@@ -274,6 +279,35 @@ class TestValueWireExactness:
         assert Fraction(row["pct_change"]) == Fraction(20001 - 20000, 20000) * 100
         assert Fraction(row["pct_change"]) == Fraction(1, 200)
         assert Decimal(row["pct_change"]) == Decimal("0.005")
+
+    def test_pct_change_exact_negative_half_boundary_survives_to_wire(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # The NEGATIVE twin of the +0.005 pin (symmetry coverage): prev close
+        # 20000 → ltp 19999 is EXACTLY −0.005% = Fraction(-1, 200). The wire
+        # pct_change stays full-precision AND negative — a premature 2dp
+        # money-rounding would serve "-0.01" / "0.00", and a sign-dropping
+        # abs() pathway would serve the positive twin's value.
+        _write(
+            tmp_path,
+            symbol="PCTN",
+            interval="1day",
+            bars=[
+                _day_bar(day=date(2024, 6, 12), close="20000", volume=5),
+                _day_bar(day=_DAY, close="19999", volume=5),
+            ],
+        )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "1day", "date": _DAY.isoformat()},
+        ).json()
+        (row,) = [r for r in body["price_losers"] if r["symbol"] == "PCTN"]
+        # The independent oracle: (19999 − 20000) / 20000 × 100 as an exact rational.
+        assert Fraction(row["pct_change"]) == Fraction(19999 - 20000, 20000) * 100
+        assert Fraction(row["pct_change"]) == Fraction(-1, 200)
+        assert Decimal(row["pct_change"]) == Decimal("-0.005")
+        assert row["pct_change"].startswith("-")  # the sign survives on the wire
 
 
 # ── as-of suffix independence (audit worker B, LAW 3) ──────────────────────
@@ -489,11 +523,13 @@ class TestOiOnlyContiguitySplit:
             )
         (row,) = payload["price_gainers"]
         # Served values untouched: %CHNG off the CONTIGUOUS Fri close, OI% off
-        # the Thu-recovered baseline — both hand-recomputed.
-        assert row["pct_change"] == str(
-            (Decimal("20100.00") - Decimal("20000.00")) / Decimal("20000.00") * 100
-        )
-        assert row["oi_chg_pct"] == str((Decimal(1100) - Decimal(1000)) / Decimal(1000) * 100)
+        # the Thu-recovered baseline — both hand-recomputed as EXACT rationals
+        # (the PCTB idiom — genuinely independent of production's Decimal
+        # operand order, never a re-derivation with the same operators).
+        assert Fraction(row["pct_change"]) == Fraction(20100 - 20000, 20000) * 100
+        assert Fraction(row["pct_change"]) == Fraction(1, 2)
+        assert Fraction(row["oi_chg_pct"]) == Fraction(1100 - 1000, 1000) * 100
+        assert Fraction(row["oi_chg_pct"]) == Fraction(10, 1)
         # ONLY the OI twin is stamped; the close pair is ABSENT (contiguous).
         assert "prev_close_session" not in row
         assert "prev_close_contiguous" not in row
@@ -557,9 +593,12 @@ class TestNoncontiguousWarnCapEndToEnd:
 class TestMinVolumeEqualBoundary:
     """DEC-MOVERS-MIN-VOLUME-001 — the ``>=`` law AT the boundary, on the wire.
 
-    The shipped floor pins use strictly-above/below floors; these pin the
-    EQUALITY case (``volume == min_volume`` stays IN; ``+1`` drops it) at
-    route level on all three tabs, so a route-side off-by-one (``>``) fails.
+    The shipped ROUTE-level floor pins use strictly-above/below values; only
+    the isolated ``value_meets_volume_floor`` unit predicate
+    (``tests/unit/test_movers_snapshot.py``) pins equality, never the route
+    wiring — these pin the EQUALITY case (``volume == min_volume`` stays IN;
+    ``+1`` drops it) at route level on all three tabs, so a route-side
+    off-by-one (``>``) fails.
     """
 
     def test_spot_floor_equal_keeps_row(self, store: InstrumentStore, tmp_path: Path) -> None:
