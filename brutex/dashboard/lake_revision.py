@@ -501,6 +501,15 @@ class RevisionProbeMemo:
       seen at most ``ttl`` seconds late (default 1 s, far under the 120 s
       adaptive-floor norm); a poll AFTER the TTL always re-probes, so there is
       no permanent-staleness state (clock-injected test-pinned).
+    * within one TTL window a consumer that ALSO reads fresh (un-memoised)
+      revision signals can transiently mix generations — e.g. the /results
+      leaderboard keys its sweep-scan cache on THIS memo's (≤TTL-stale)
+      ``sweep_results_revision`` while its cascade/composite revisions are
+      probed fresh per poll, so for ≤TTL after a new sweep lands the payload
+      can join a stale scan generation with a fresh cascade join (review
+      round 1 MINOR-2). Graceful by construction — the cascade join is
+      per-item-tolerant (an unmatched verdict is excluded, never a crash) —
+      and it self-heals at the next TTL expiry.
     * a probe result the *cacheable* predicate rejects (default: ``None`` — the
       probe-outage verdict) is NEVER memoised and evicts any prior entry, so an
       outage/recovery verdict is re-derived per call exactly as before.
@@ -511,7 +520,10 @@ class RevisionProbeMemo:
     * entries are keyed by caller-supplied server-derived keys (a handful per
       app — never client-typed), so the dict is bounded by construction.
     * the TTL is resolved lazily at the FIRST :meth:`get` (junk env fails loud
-      there, the documented contract) and latched for the instance's lifetime.
+      there) and latched for the instance's lifetime; the production wiring
+      additionally validates the env EAGERLY at ``build_app`` (review round 1
+      MINOR-1 — the house startup-fail-loud idiom), so a junk value refuses at
+      dashboard startup, never as a first-request 500.
 
     Parameters
     ----------
@@ -529,18 +541,26 @@ class RevisionProbeMemo:
         ttl_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._ttl_override = ttl_s
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: dict[str, tuple[float, object]] = {}
         self._resolved_ttl: float | None = ttl_s
 
     def _resolve_ttl(self) -> float:
-        """Latch the TTL — the injected override, else the fail-loud env resolve."""
+        """Latch the TTL — the injected override, else the fail-loud env resolve.
+
+        The lazy resolve+latch runs under ``self._lock`` (double-checked), so
+        two racing first-callers latch exactly ONE resolved value (review
+        round 1 — the prior unlocked write was benign under CPython but a
+        race nonetheless; the fast path stays lock-free once latched).
+        """
         resolved = self._resolved_ttl
         if resolved is None:
-            resolved = resolve_revision_probe_ttl()
-            self._resolved_ttl = resolved
+            with self._lock:
+                resolved = self._resolved_ttl
+                if resolved is None:
+                    resolved = resolve_revision_probe_ttl()
+                    self._resolved_ttl = resolved
         return resolved
 
     def get(

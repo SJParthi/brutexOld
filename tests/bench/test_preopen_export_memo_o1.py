@@ -29,7 +29,12 @@ import pytest
 pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("duckdb", reason="the preopen reads need duckdb")
 pytest.importorskip("polars", reason="the lake seed writes real Parquet")
-pytest.importorskip("openpyxl", reason="the export renders a real workbook")
+# NO openpyxl importorskip (review round 1, MAJOR-B): the export renders via
+# the repo's own hand-rolled `preopen_report.render_xlsx` (deliberately zero
+# third-party workbook deps) and the reused unit harness imports no openpyxl —
+# the former skip was spurious and would have silently disabled this gate on
+# the ci.yml bench job, which installs no openpyxl (verified: this file passes
+# with openpyxl absent).
 
 from pathlib import Path
 

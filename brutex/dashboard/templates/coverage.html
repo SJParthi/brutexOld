@@ -264,24 +264,13 @@ function statError(statEl, kpis, msg) {
 }
 function failMsg(e) { return e && e.timeout ? "timed out · retrying" : "offline · retrying"; }
 
-/* Bounded text fetch via the ONE shared BXUI.fetchTextBounded (§11 COMMON —
-   DEC-O1-GUARANTEE-HARDEN-001, the fetch_windows/completeness #1720 bound):
-   the abort timer stays ARMED through the BODY read, so a
-   headers-then-stalled-body response aborts too — under BXPoll's
-   one-in-flight scheduling an unresolved tick would never reschedule (the
-   frozen-tab class). timeoutMs is the seam's own bound (BXPoll passes
-   FETCH_TIMEOUT_MS); BXUI defaults an absent bound to the sibling pages'
-   12 s. The poller starts at DOMContentLoaded, by which the deferred
-   bx-ui.js has executed — the no-BXUI arm (a missing bx-ui.js) degrades to
-   the legacy unbounded-body shape rather than going fetchless. */
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
 function fetchTextBounded(url, timeoutMs) {
   if (window.BXUI && BXUI.fetchTextBounded) {
     return BXUI.fetchTextBounded(url, timeoutMs);
   }
   return fetch(url).then(function (r) {
-    return r.text().then(function (txt) {
-      return { ok: r.ok, status: r.status, text: txt };
-    });
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
   });
 }
 

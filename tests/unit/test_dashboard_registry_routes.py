@@ -319,11 +319,8 @@ def test_registry_write_moves_the_token_and_recounts(
     """A registry WRITE (new expiry) is seen on the next click — never stale."""
     _seed_registry(tmp_path)
     assert client.get("/api/v1/db/registry/expiries").json()["total"] == 1
-    reg = RegistryStore.open(tmp_path / "registry.duckdb")
-    try:
+    with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
         reg.upsert_expiry("NSE", "NIFTY", date(2020, 2, 27), run_id="r2", fetched_at=_NOW)
-    finally:
-        reg.close()
     fresh = client.get("/api/v1/db/registry/expiries").json()
     assert fresh["total"] == 2
     assert fresh["counts"]["expiries"] == 2
@@ -333,10 +330,10 @@ def test_registry_probe_outage_serves_uncached_legacy(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A ``registry_revision`` outage (None) computes fresh UNCACHED per click."""
-    import brutex.dashboard.app as app_module
-
     _seed_registry(tmp_path)
-    monkeypatch.setattr(app_module, "registry_revision", lambda path: None)
+    # String-target setattr — avoids re-importing brutex.dashboard.app with
+    # BOTH `import` and `from … import` styles (CodeQL py/import-and-import-from).
+    monkeypatch.setattr("brutex.dashboard.app.registry_revision", lambda path: None)
     calls = _count_spies(monkeypatch)
     for _ in range(2):
         page = client.get("/api/v1/db/registry/expiries").json()

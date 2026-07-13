@@ -7756,16 +7756,13 @@ def registry_counts(
         """Open the store read-only and count both tables (the legacy body)."""
         from brutex.data.registry_store import RegistryStore
 
-        store = RegistryStore.open(registry_path)
-        try:
+        with RegistryStore.open(registry_path) as store:
             return {
                 "expiries": store.count_expiries(),
                 "contracts": store.count_contracts(),
                 "exists": True,
                 "note": None,
             }
-        finally:
-            store.close()
 
     if count_cache is None:
         return _read()

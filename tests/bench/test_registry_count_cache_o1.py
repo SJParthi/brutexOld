@@ -11,14 +11,19 @@ memoised per registry CONTENT (the #867 ``candle_count_key`` idiom over the
   triggers EXACTLY ONE store ``COUNT(*)`` — a per-click recount regression
   fails on the spy count, no wall clock involved;
 * WALL-CLOCK: the cached repeat-click latency is flat vs the contracts-table
-  depth (10× more legs < 8× shared-CI ceiling, tightened on the M4-Pro strict
-  tier via :func:`ratio_ceiling` — DuckDB I/O noise matches the sibling
-  ``test_registry_pagination_o1.py`` gate).
+  depth (10× more legs < 8× shared-CI ceiling via :func:`ratio_ceiling`;
+  honest tier note — this file is NOT in bench-m4pro.yml's curated strict
+  list, so the 1.1× strict ceiling is dormant here unless the file joins that
+  list — the shared 8× ceiling is the operative gate. DuckDB I/O noise
+  matches the sibling ``test_registry_pagination_o1.py`` gate).
 
 HONEST envelope (Golden Rule #10): O(1)-on-repeat — the FIRST count per
 registry revision still runs the real filtered ``COUNT(*)``, and the page
-DATA query stays a per-click ``LIMIT``/``OFFSET`` SELECT (O(page), gated by
-the sibling bench). Never a bare-O(1) claim.
+DATA query stays a per-click ``LIMIT``/``OFFSET`` SELECT — O(page) in RESULT
+size only: under the covering ``ORDER BY`` DuckDB still SCANS the filtered
+rows into a top-(offset+limit) heap, so scan TIME is O(filtered rows),
+bounded per underlying (the same caveat the candle pager's D1 row spells
+out; gated by the sibling bench). Never a bare-O(1)/bare-O(page) claim.
 """
 
 from __future__ import annotations
@@ -50,8 +55,7 @@ _NOW = datetime(2026, 6, 14, 9, 15, tzinfo=UTC)
 
 def _build(path: Path, legs: int) -> None:
     """Seed a registry with *legs* NIFTY contract legs across 1 expiry."""
-    store = RegistryStore.open(path)
-    try:
+    with RegistryStore.open(path) as store:
         exp = date(2020, 1, 30)
         store.upsert_expiry("NSE", "NIFTY", exp, run_id="r1", fetched_at=_NOW)
         for i in range(legs):
@@ -65,8 +69,6 @@ def _build(path: Path, legs: int) -> None:
                 run_id="r1",
                 fetched_at=_NOW,
             )
-    finally:
-        store.close()
 
 
 def _click(path: Path, cache: MoversSnapshotCache, *, offset: int = 0) -> dict[str, object]:
@@ -140,9 +142,11 @@ class TestRegistryCachedClickLatencyIsFlat:
     def test_cached_click_ratio_below_8x(self, tmp_path: Path) -> None:
         """Repeat-click latency at 2000 vs 200 legs stays flat (< 8×).
 
-        The cached click is the O(page) DATA query + an O(1) memo hit — the
-        pre-H1 per-click filtered ``COUNT(*)`` growth term is gone. DuckDB
-        I/O noise matches the sibling pagination gate's 8× shared ceiling.
+        The cached click is the DATA query (O(page) result; the ORDER BY
+        scan is O(filtered rows) — bounded per underlying, the D1-class
+        caveat) + an O(1) memo hit — the pre-H1 per-click filtered
+        ``COUNT(*)`` growth term is gone. DuckDB I/O noise matches the
+        sibling pagination gate's 8× shared ceiling.
         """
 
         def _time(path: Path, legs: int) -> float:

@@ -210,3 +210,37 @@ class TestOneclickRunsProbeMemo:
             assert client.get("/api/v1/oneclick/runs").json()["status"] == "awaiting"
             assert client.get("/api/v1/oneclick/runs").json()["status"] == "awaiting"
             assert probe_spy["probe"] == 2  # never cached — absent != memoisable
+
+
+class TestBuildAppEagerTtlValidation:
+    """Review round 1 MINOR-1 — junk env refuses at build_app, not first request.
+
+    The house env-kill-switch idiom (BRUTEX_LOOP_WATCHDOG / market-hours /
+    today-gate) fails loud at STARTUP; the memo previously deferred junk to a
+    first-request 500 on the two wired routes. ``build_app`` now resolves the
+    TTL eagerly when it constructs the default memo (an INJECTED memo still
+    validates itself lazily — its own contract, unchanged).
+    """
+
+    def test_junk_env_refuses_at_build_app(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        with pytest.raises(ValueError, match="BRUTEX_REVISION_PROBE_TTL_S"):
+            build_app(DashboardState(), instrument_store=store)
+
+    def test_valid_env_builds_and_serves(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "2.5")
+        with TestClient(build_app(DashboardState(), instrument_store=store)) as client:
+            assert client.get("/api/v1/oneclick/runs").status_code == 200
+
+    def test_injected_memo_skips_the_eager_resolve(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An injected memo owns its own TTL — build_app must not read the env."""
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        memo = RevisionProbeMemo(ttl_s=60.0, clock=_FakeClock())
+        with _client(store, memo) as client:  # junk env untouched — no raise
+            assert client.get("/api/v1/oneclick/runs").status_code == 200

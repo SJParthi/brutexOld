@@ -623,21 +623,55 @@ class TestTimelineRenderBounds:
     def test_render_cap_constant_and_capped_walk(self) -> None:
         js = _js("bx-oneclick.js")
         assert "var BX_TIMELINE_RENDER_CAP = 500;" in js
-        assert "var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP);" in js
+        assert (
+            "var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP, state.renderOffset);"
+            in js
+        )
         # The truncation is NAMED on a visible line (textContent via BXUI.el).
-        assert "bxTimelineCapNote(visible.length, rows.length)" in js
+        assert "bxTimelineCapNote(visible.length, rows.length, state.renderOffset)" in js
         assert 'window.BXUI.el("div", "oc-event-cap", capNote)' in js
 
     def test_skip_render_token_gates_the_rebuild(self) -> None:
         js = _js("bx-oneclick.js")
-        assert "var token = bxTimelineRenderToken(state.ringMutations, q);" in js
+        # The token folds the viewport offset (review round 1 MAJOR-A) so a
+        # "load earlier" viewport move genuinely re-renders.
+        assert (
+            "var token = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);" in js
+        )
         assert "if (token === state.lastTimelineToken) {" in js
         # Only ADMITTED records move the counter — a dup-only events page
         # leaves the window unchanged so the next render skips.
-        assert "state.ringMutations += bxRingAdd(" in js
+        assert "var admitted = bxRingAdd(state.ring, state.ringSeen, records," in js
+        assert "state.ringMutations += admitted;" in js
         # loadEarlier's prepends move it too; selectRun forces the next render.
         assert "state.ringMutations += take.length;" in js
         assert "state.lastTimelineToken = null; // ring content reset" in js
+
+    def test_viewport_pager_wiring_source_pins(self) -> None:
+        """Review round 1 MAJOR-A — the slidable-viewport DOM wiring.
+
+        The newest-500 render cap previously DEFEATED the wired "load
+        earlier" pager: prepended older records were never rendered once the
+        filtered rows exceeded the cap. The wiring pins: (a) a loadEarlier
+        click slides the viewport onto the OLDEST window; (b) a live events
+        tick grows a parked viewport's tail distance by the admissions
+        (never yanked back to newest); (c) a run change AND a filter change
+        reset the viewport to the live newest window.
+        """
+        js = _js("bx-oneclick.js")
+        # (a) the click slides onto the oldest window (front-anchored offset).
+        assert "state.renderOffset = bxTimelineEarlierOffset(" in js
+        # (b) a live tick content-anchors a parked viewport.
+        assert "state.renderOffset = bxTimelineTickOffset(state.renderOffset, admitted);" in js
+        # (c) run + filter changes re-anchor on the newest window.
+        assert "state.renderOffset = 0; // a run change re-anchors on the newest window" in js
+        assert "state.renderOffset = 0; // a filter change re-anchors on the newest window" in js
+        # The rendered window clamps to the renderable range before the
+        # stored token folds the EFFECTIVE offset.
+        assert (
+            "state.renderOffset = bxTimelineClampOffset(rows.length, BX_TIMELINE_RENDER_CAP, "
+            "state.renderOffset);" in js
+        )
 
     def test_search_input_is_debounced(self) -> None:
         js = _js("bx-oneclick.js")
@@ -695,6 +729,89 @@ class TestTimelineRenderBounds:
             "tokenMovesOnFilter": True,
             "noJoinCollision": True,
             "nullFilterIsEmpty": True,
+        }
+
+    @pytest.mark.skipif(_NODE is None, reason="node not installed")
+    def test_timeline_viewport_pager_node_golden(self) -> None:
+        """Review round 1 MAJOR-A repro, EXECUTED over the REAL shipped file.
+
+        Pre-fix, the newest-500 render slice silently DEFEATED the wired
+        "load earlier" pager: with >500 filtered rows, every prepended older
+        record was invisible. The golden drives the exact viewport
+        composition the widget wires (bxRingAdd admissions →
+        bxTimelineTickOffset · loadEarlier prepend → bxTimelineEarlierOffset
+        · clamp → bxTimelineRenderRows/bxTimelineCapNote) and pins:
+        (a) a ring grown past 500 by three loadEarlier clicks renders the
+            OLDEST loaded event;
+        (b) a live events tick while the viewport is parked does NOT
+            re-anchor it back to newest (same window content; token moves);
+        (c) a filter-change reset (offset 0) re-anchors on the newest row.
+        """
+        script = (
+            f"const O = require({json.dumps(str(_STATIC / 'bx-oneclick.js'))});\n"
+            "const cap = O.BX_TIMELINE_RENDER_CAP;\n"
+            "function ev(n) { return { ts_utc: 't' + n, kind: 'k', payload: { n: n } }; }\n"
+            "let ring = []; const seen = {}; let offset = 0;\n"
+            "// the initial tail pages: events 700..999 (the newest 300)\n"
+            "let recs = []; for (let n = 700; n < 1000; n++) { recs.push(ev(n)); }\n"
+            "offset = O.bxTimelineTickOffset(offset, O.bxRingAdd(ring, seen, recs, 5000));\n"
+            "function win() {\n"
+            "  const rows = O.bxRingFilter(ring, '', '');\n"
+            "  offset = O.bxTimelineClampOffset(rows.length, cap, offset);\n"
+            "  return { rows: rows, vis: O.bxTimelineRenderRows(rows, cap, offset) };\n"
+            "}\n"
+            "function earlier(lo, hi) { // the widget's prepend + slide, verbatim shape\n"
+            "  const take = [];\n"
+            "  for (let n = lo; n < hi; n++) {\n"
+            "    const r = ev(n); const k = O.bxEventLineText(r);\n"
+            "    if (!seen[k]) { seen[k] = true; take.push(r); }\n"
+            "  }\n"
+            "  ring = take.concat(ring);\n"
+            "  offset = O.bxTimelineEarlierOffset(O.bxRingFilter(ring, '', '').length, cap);\n"
+            "}\n"
+            "earlier(500, 700); earlier(300, 500); earlier(100, 300); // three clicks\n"
+            "const w3 = win();\n"
+            "const tokParked = O.bxTimelineRenderToken(9, '', offset);\n"
+            "// a live tick while parked: 3 new events admitted at the tail\n"
+            "offset = O.bxTimelineTickOffset(\n"
+            "  offset, O.bxRingAdd(ring, seen, [ev(1000), ev(1001), ev(1002)], 5000));\n"
+            "const w4 = win();\n"
+            "const out = {\n"
+            "  ringLen: ring.length,\n"
+            "  oldestLoadedRendered: w3.vis[0].payload.n,\n"
+            "  parkedFirst: w4.vis[0].payload.n,\n"
+            "  parkedLast: w4.vis[w4.vis.length - 1].payload.n,\n"
+            "  parkedNote: O.bxTimelineCapNote(w4.vis.length, w4.rows.length, offset),\n"
+            "  // the token moves on a viewport slide (the skip-render fold)\n"
+            "  tokenMovesOnOffset: tokParked !== O.bxTimelineRenderToken(9, '', 0),\n"
+            "  // (c) the filter-change reset re-anchors on the newest row\n"
+            "  resetNewest: O.bxTimelineRenderRows(w4.rows, cap, 0)[cap - 1].payload.n,\n"
+            "  resetNote: O.bxTimelineCapNote(cap, w4.rows.length, 0),\n"
+            "};\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            [str(_NODE), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out == {
+            "ringLen": 903,
+            # (a) the OLDEST loaded event (100) IS rendered after 3 clicks —
+            # pre-fix the newest-500 slice rendered 500..999 and hid it.
+            "oldestLoadedRendered": 100,
+            # (b) the parked window content is UNCHANGED across the tick
+            # (100..599) — never yanked back to the newest window.
+            "parkedFirst": 100,
+            "parkedLast": 599,
+            "parkedNote": "showing events 1–500 of 903 (render cap 500)",
+            "tokenMovesOnOffset": True,
+            "resetNewest": 1002,  # (c) offset 0 renders the live tail again
+            "resetNote": "showing newest 500 of 903 events (render cap)",
         }
 
 

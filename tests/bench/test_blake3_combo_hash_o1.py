@@ -19,8 +19,11 @@ fixed-width canonical payload, so its per-call latency must be:
 A regression that introduced per-call growth (e.g. an unbounded cache keyed by
 payload) would blow the ratio and fail the gate.
 
-Mirrors the ``_o1_tiers`` two-tier pattern: robust ``< 5×`` on shared CI,
-decreed ``1.1×`` on the M4-Pro strict tier.
+Mirrors the ``_o1_tiers`` two-tier pattern via :func:`ratio_ceiling` —
+robust ``< 5×`` on shared CI. Honest tier note: this file is NOT in
+bench-m4pro.yml's curated strict list, so the decreed 1.1× M4-Pro strict
+ceiling is DORMANT here unless the file joins that list; the shared robust
+ceiling is the operative gate.
 """
 
 from __future__ import annotations

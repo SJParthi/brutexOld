@@ -11,10 +11,16 @@ startup into minutes.
 
 The gate: rebuild wall time at 100k persisted digests must stay within a
 LINEAR factor of the 10k rebuild — ``total(100k) < total(10k) × 20`` (the 10×
-digest ratio with 2× noise headroom; measured 2026-07-13 sandbox: 61.0 ms →
-78.0 ms = 1.28×, the fixed LMDB-open + Bloom-init overhead dominating the
-small store). A quadratic regression reads ≥ 50× here even with that fixed
-overhead diluting it — far above the ceiling. Plus the correctness tooth: a
+digest ratio with 2× noise headroom). Honest ceiling calibration (review
+round 1, measured 3× 2026-07-13 sandbox): the ratio SPANS ~1.3× on a cold
+process (one-time import/LMDB overhead inflates ``t_small`` — 57.0 ms →
+76.4 ms) up to **9.17×** on a warm process (7.9 ms → 72.9 ms — approaching
+the true 10× linear term), so a tightened 8× ceiling would FALSE-FAIL warm
+runs; 20× stands as the deliberate LINEARITY-ONLY pin. What it catches: a
+quadratic regression reads ≥ 50–100× here even with the fixed overhead
+diluting it — far above the ceiling; what it deliberately does NOT catch: a
+mild superlinear (O(n log n) ≈ 12×) can slip under 20× — disclosed, the
+quadratic class is this gate's teeth. Plus the correctness tooth: a
 persisted digest is SEEN after the reopen (the Bloom genuinely rebuilt —
 a Bloom false-negative would re-run the recorded combo).
 
@@ -57,12 +63,9 @@ def _digest(i: int) -> bytes:
 def _seed_exact(root: Path, n: int) -> None:
     """Persist *n* digests as the durable L2 ground truth a resume reloads."""
     root.mkdir(parents=True)
-    exact = LmdbMembership.open(root / "exact")
-    try:
+    with LmdbMembership.open(root / "exact") as exact:
         added = exact.add_many(_digest(i) for i in range(n))
         assert added == n
-    finally:
-        exact.close()
 
 
 def _time_rebuild(root: Path, n: int) -> float:

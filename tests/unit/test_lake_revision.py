@@ -842,3 +842,96 @@ class TestRevisionProbeMemo:
         monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
         memo.get("k", _probe)  # latched 0 — pass-through, junk never re-parsed
         assert calls[0] == 2
+
+    def test_resolve_ttl_double_checked_lock_loser_adopts_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round 1 (R1 NIT-3 / R4 NIT-2) — the locked double-check arm.
+
+        Two racing first-callers must latch exactly ONE value: the lock
+        LOSER re-reads ``_resolved_ttl`` under the lock, finds the winner's
+        latch, and must NOT re-resolve the env. Deterministic race: the test
+        holds the memo lock, lets a worker thread block on it, latches the
+        value while holding, then releases — the worker takes the
+        already-latched inner arm (a re-resolve would read the junk env and
+        raise).
+        """
+        import threading
+
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        memo = RevisionProbeMemo()
+        # Junk env: if the loser re-resolved instead of adopting the latch,
+        # it would raise ValueError — the adopt arm must never read the env.
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        results: list[float | BaseException] = []
+
+        def _worker() -> None:
+            try:
+                results.append(memo._resolve_ttl())
+            except BaseException as exc:
+                results.append(exc)
+
+        with memo._lock:  # the test IS the winning first-caller
+            t = threading.Thread(target=_worker)
+            t.start()
+            # Give the worker time to pass the outer None check and block on
+            # the lock; then latch the winner's value while still holding it.
+            import time as _time
+
+            _time.sleep(0.05)
+            memo._resolved_ttl = 5.0
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert results == [5.0]  # adopted the latch — never re-resolved junk
+
+    def test_production_default_composition_absent_env_memoises_at_1s(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full production default end-to-end (review round 1 NIT-2).
+
+        Production wires ``RevisionProbeMemo()`` with NO env override — the
+        conftest hermeticity belt sets the env to ``"0"`` suite-wide, so no
+        other test ever exercises the composed default path: an ABSENT env
+        must resolve to the 1.0 s default AND actually memoise (clock-injected
+        — polls inside 1 s pay one probe, a poll at 1 s re-probes).
+        """
+        from brutex.dashboard.lake_revision import (
+            DEFAULT_REVISION_PROBE_TTL_S,
+            RevisionProbeMemo,
+        )
+
+        monkeypatch.delenv("BRUTEX_REVISION_PROBE_TTL_S", raising=False)
+        clock_now = [0.0]
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return f"token-{calls[0]}"
+
+        memo = RevisionProbeMemo(clock=lambda: clock_now[0])  # the production shape
+        assert [memo.get("k", _probe) for _ in range(4)] == ["token-1"] * 4
+        assert calls[0] == 1  # the absent-env default genuinely memoises
+        assert DEFAULT_REVISION_PROBE_TTL_S == 1.0
+        clock_now[0] = 0.999
+        assert memo.get("k", _probe) == "token-1"  # still inside the 1 s window
+        clock_now[0] = 1.0
+        assert memo.get("k", _probe) == "token-2"  # the default TTL re-probes
+        assert calls[0] == 2
+
+
+class TestConftestHermeticityBelt:
+    """Review round 1 (R4 NIT-1) — the suite-wide TTL=0 belt is pinned.
+
+    tests/conftest.py ``setdefault``s ``BRUTEX_REVISION_PROBE_TTL_S=0`` so the
+    memo is a pass-through suite-wide (the #1692/#1774 wall-clock hermeticity
+    precedent) — dropping that line would reintroduce a real-clock 1 s TTL
+    into every /results + oneclick-runs invalidation test (timing flakes).
+    The memo's OWN tests stay armed via explicit ``ttl_s=``/``clock=``
+    injection, so the belt hides no wiring bug.
+    """
+
+    def test_conftest_sets_the_ttl_zero_belt(self) -> None:
+        conftest = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+        assert "from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV" in conftest
+        assert 'os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")' in conftest

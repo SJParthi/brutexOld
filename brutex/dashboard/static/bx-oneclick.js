@@ -414,53 +414,135 @@ function bxFunnelWriteAllowed(source, sweepRunning) {
 var BX_TIMELINE_RENDER_CAP = 500;
 
 /**
- * The newest-`cap` window of the filtered timeline rows (pure — rows are
- * oldest first, so the slice keeps the TAIL: the truncation drops the
- * OLDEST rows, never the live tail).
+ * Clamp a timeline render offset (the viewport's distance from the ring
+ * TAIL, in filtered rows) into the renderable range `[0, max(0, total -
+ * cap)]` (pure — junk/negative/fractional folds to a safe integer).
+ *
+ * @param {number} total - rows surviving the ring filter.
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @param {number} offset - the requested distance from the tail.
+ * @returns {number} the effective (renderable) offset.
+ */
+function bxTimelineClampOffset(total, cap, offset) {
+  var n = typeof offset === "number" && isFinite(offset) ? Math.floor(offset) : 0;
+  if (n < 0) {
+    n = 0;
+  }
+  var max = total > cap ? total - cap : 0;
+  return n > max ? max : n;
+}
+
+/**
+ * The viewport offset that anchors the render window on the OLDEST rows
+ * after a "load earlier" click (pure — review round 1 MAJOR-A): everything
+ * newer than the oldest cap-window is skipped, so the earlier records the
+ * click just fetched are actually RENDERED instead of hidden behind the
+ * newest-500 slice.
+ *
+ * @param {number} total - rows surviving the ring filter.
+ * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @returns {number} the front-anchored offset.
+ */
+function bxTimelineEarlierOffset(total, cap) {
+  return total > cap ? total - cap : 0;
+}
+
+/**
+ * Advance a viewport offset across an events tick that ADMITTED `admitted`
+ * new records at the ring tail (pure — review round 1 MAJOR-A): a parked
+ * viewport (offset > 0 — the reader is browsing earlier events) grows its
+ * tail distance by the admissions so the SAME rows stay on screen — a live
+ * tick can never yank the reader back toward the newest window; a
+ * tail-anchored viewport (offset 0) stays live on the newest rows.
+ *
+ * @param {number} offset - the current viewport offset.
+ * @param {number} admitted - records the tick admitted at the tail.
+ * @returns {number} the content-anchored offset.
+ */
+function bxTimelineTickOffset(offset, admitted) {
+  var off = typeof offset === "number" && offset > 0 ? Math.floor(offset) : 0;
+  if (off <= 0) {
+    return 0;
+  }
+  var n = typeof admitted === "number" && admitted > 0 ? Math.floor(admitted) : 0;
+  return off + n;
+}
+
+/**
+ * The rendered cap-window of the filtered timeline rows (pure — rows are
+ * oldest first). With offset 0 (the default) the slice keeps the TAIL —
+ * the truncation drops the OLDEST rows, never the live tail; a positive
+ * offset slides the viewport toward OLDER rows ("load earlier", review
+ * round 1 MAJOR-A) — offset = distance from the tail, clamped renderable.
  *
  * @param {object[]} rows - the filtered ring rows (oldest first).
  * @param {number} cap - the render cap (BX_TIMELINE_RENDER_CAP).
+ * @param {number} [offset] - viewport distance from the tail (default 0).
  * @returns {object[]} the rows to render (same array when within cap).
  */
-function bxTimelineRenderRows(rows, cap) {
+function bxTimelineRenderRows(rows, cap, offset) {
   if (!Array.isArray(rows)) {
     return [];
   }
   if (rows.length <= cap) {
     return rows;
   }
-  return rows.slice(rows.length - cap);
+  var off = bxTimelineClampOffset(rows.length, cap, offset);
+  return rows.slice(rows.length - cap - off, rows.length - off);
 }
 
 /**
  * The visible count line naming a render-cap truncation (pure; "" when
- * nothing was cut — every cap is NAMED, never a silent shrink).
+ * nothing was cut — every cap is NAMED, never a silent shrink). A parked
+ * viewport (offset > 0) names the exact window it shows — "showing events
+ * X–Y of N (render cap S)" — so the reader always knows WHERE in the
+ * history they are (review round 1 MAJOR-A honesty half).
  *
  * @param {number} shown - rows actually rendered.
  * @param {number} total - rows surviving the ring filter.
+ * @param {number} [offset] - the effective (clamped) viewport offset.
  * @returns {string} the honest note or "".
  */
-function bxTimelineCapNote(shown, total) {
+function bxTimelineCapNote(shown, total, offset) {
   if (shown >= total) {
     return "";
   }
-  return "showing newest " + shown + " of " + total + " events (render cap)";
+  var off = typeof offset === "number" && offset > 0 ? Math.floor(offset) : 0;
+  if (off <= 0) {
+    return "showing newest " + shown + " of " + total + " events (render cap)";
+  }
+  var end = total - off;
+  var start = end - shown + 1;
+  return (
+    "showing events " + start + "–" + end + " of " + total +
+    " (render cap " + shown + ")"
+  );
 }
 
 /**
  * Cheap skip-render token for the timeline (pure): the DOM needs a rebuild
- * ONLY when the ring content changed (the mutation counter moved) or the
- * filter text changed — an unchanged (mutations, filter) pair means the
- * rendered rows are already exact, so renderTimeline can skip the O(rows)
+ * ONLY when the ring content changed (the mutation counter moved), the
+ * filter text changed, or the viewport offset moved — an unchanged triple
+ * means the rendered rows are already exact, so renderTimeline can skip the O(rows)
  * teardown+rebuild (pre-fix, a live sweep's events tick rebuilt up to
  * 5,000 text nodes every ~3 s even when every record was a window dup).
+ * Folding the viewport OFFSET into the token (review round 1 MAJOR-A)
+ * means a "load earlier" viewport move genuinely re-renders while a
+ * no-change tick still skips — the triple is (mutations, filter, offset).
  *
  * @param {number} mutations - the monotonic ring-mutation counter.
  * @param {string} filterText - the search box value ("" when absent).
+ * @param {number} [offset] - the viewport offset (default 0).
  * @returns {string} the compare token.
  */
-function bxTimelineRenderToken(mutations, filterText) {
-  return String(mutations) + "\u001f" + String(filterText == null ? "" : filterText);
+function bxTimelineRenderToken(mutations, filterText, offset) {
+  return (
+    String(mutations) +
+    "\u001f" +
+    String(filterText == null ? "" : filterText) +
+    "\u001f" +
+    String(offset == null ? 0 : offset)
+  );
 }
 
 /**
@@ -539,7 +621,14 @@ function bxFunnelProvenance(source, runId) {
     // they let renderTimeline skip the O(rows) DOM rebuild when the
     // (ring, filter) window is unchanged (DEC-O1-GUARANTEE-HARDEN-001).
     ringMutations: 0,
-    lastTimelineToken: null
+    lastTimelineToken: null,
+    // Viewport offset (distance from the ring TAIL, in filtered rows —
+    // review round 1 MAJOR-A): 0 = live newest window; a "load earlier"
+    // click parks it on the oldest window; a live tick grows it by the
+    // admissions so parked content never yanks back toward newest; a
+    // run/filter change resets it to 0.
+    renderOffset: 0,
+    lastFilterText: ""
   };
 
   function byId(id) {
@@ -1185,7 +1274,12 @@ function bxFunnelProvenance(source, runId) {
     // (bxRingAdd) owns the gate + the trimmed-key eviction. Only ADMITTED
     // records move the mutation counter: a dup-only page leaves the window
     // unchanged, so the next renderTimeline skips the DOM rebuild.
-    state.ringMutations += bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
+    var admitted = bxRingAdd(state.ring, state.ringSeen, records, BX_TIMELINE_RING_CAP);
+    state.ringMutations += admitted;
+    // A parked viewport keeps its CONTENT anchored across the live tick
+    // (review round 1 MAJOR-A): the tail distance grows by the admissions,
+    // so new events can never yank a "load earlier" reader back to newest.
+    state.renderOffset = bxTimelineTickOffset(state.renderOffset, admitted);
     if (state.ring.length >= BX_TIMELINE_RING_CAP) {
       setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL); // loud, honest cap label
     }
@@ -1198,22 +1292,31 @@ function bxFunnelProvenance(source, runId) {
     }
     var search = byId("ocTimelineSearch");
     var q = search ? search.value : "";
+    if (q !== state.lastFilterText) {
+      state.lastFilterText = q;
+      state.renderOffset = 0; // a filter change re-anchors on the newest window
+    }
     // Skip-render token (DEC-O1-GUARANTEE-HARDEN-001): an unchanged
-    // (ring-mutations, filter) pair means the rendered DOM is already
-    // exact — no teardown+rebuild of up to 5,000 nodes per events tick.
-    var token = bxTimelineRenderToken(state.ringMutations, q);
+    // (ring-mutations, filter, viewport-offset) triple means the rendered
+    // DOM is already exact — no teardown+rebuild of up to 5,000 nodes per
+    // events tick (review round 1 MAJOR-A folds the offset in).
+    var token = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);
     if (token === state.lastTimelineToken) {
       return;
     }
-    state.lastTimelineToken = token;
     var rows = bxRingFilter(state.ring, q, "");
-    var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP);
+    // Clamp to the renderable range, then store the token folding the
+    // EFFECTIVE offset — the value the DOM actually reflects.
+    state.renderOffset = bxTimelineClampOffset(rows.length, BX_TIMELINE_RENDER_CAP, state.renderOffset);
+    state.lastTimelineToken = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);
+    var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP, state.renderOffset);
     window.BXUI.clear(host);
-    var capNote = bxTimelineCapNote(visible.length, rows.length);
+    var capNote = bxTimelineCapNote(visible.length, rows.length, state.renderOffset);
     if (capNote) {
-      // The cap drops the OLDEST rows, so the NAMED truncation line sits at
-      // the top of the list where the cut happened (anti-illusion law —
-      // every cap is named; ONE text node, textContent only).
+      // The NAMED truncation line sits at the top of the list; a parked
+      // viewport names the exact window ("showing events X–Y of N") so the
+      // reader always knows WHERE in the history they are (anti-illusion
+      // law — every cap is named; ONE text node, textContent only).
       host.appendChild(window.BXUI.el("div", "oc-event-cap", capNote));
     }
     // Newest last (log order); each record is ONE text node (F-M2).
@@ -1286,6 +1389,17 @@ function bxFunnelProvenance(source, runId) {
         if (state.ring.length >= BX_TIMELINE_RING_CAP) {
           setText("ocTimelineLabel", BX_TIMELINE_RING_LABEL);
         }
+        // Slide the viewport onto the OLDEST window so the earlier records
+        // this click fetched are actually RENDERED (review round 1 MAJOR-A:
+        // the newest-500 slice otherwise silently hid every prepended
+        // record whenever the filtered rows already exceeded the cap — a
+        // wired-but-useless pager).
+        var search = byId("ocTimelineSearch");
+        var q = search ? search.value : "";
+        state.renderOffset = bxTimelineEarlierOffset(
+          bxRingFilter(state.ring, q, "").length,
+          BX_TIMELINE_RENDER_CAP
+        );
         renderTimeline();
       })
       .catch(function () {
@@ -1488,6 +1602,9 @@ function bxFunnelProvenance(source, runId) {
     timelineRenderRows: bxTimelineRenderRows,
     timelineCapNote: bxTimelineCapNote,
     timelineRenderToken: bxTimelineRenderToken,
+    timelineClampOffset: bxTimelineClampOffset,
+    timelineEarlierOffset: bxTimelineEarlierOffset,
+    timelineTickOffset: bxTimelineTickOffset,
     eventLineText: bxEventLineText,
     funnelWriteAllowed: bxFunnelWriteAllowed,
     funnelProvenance: bxFunnelProvenance,
@@ -1508,6 +1625,7 @@ function bxFunnelProvenance(source, runId) {
       state.ringSeen = {};
       state.eventsCursor = -1;
       state.earlierCursor = 0;
+      state.renderOffset = 0; // a run change re-anchors on the newest window
       state.lastTimelineToken = null; // ring content reset — force the next render
       renderTimeline();
       loadRunScoped();
@@ -1535,6 +1653,9 @@ if (typeof module !== "undefined" && module.exports) {
     bxTimelineRenderRows: bxTimelineRenderRows,
     bxTimelineCapNote: bxTimelineCapNote,
     bxTimelineRenderToken: bxTimelineRenderToken,
+    bxTimelineClampOffset: bxTimelineClampOffset,
+    bxTimelineEarlierOffset: bxTimelineEarlierOffset,
+    bxTimelineTickOffset: bxTimelineTickOffset,
     bxEventLineText: bxEventLineText,
     bxFunnelWriteAllowed: bxFunnelWriteAllowed,
     bxFunnelProvenance: bxFunnelProvenance,

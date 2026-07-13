@@ -150,6 +150,7 @@ from brutex.dashboard.lake_revision import (
     cascade_report_revision,
     lake_revision,
     registry_revision,
+    resolve_revision_probe_ttl,
     sweep_results_revision,
 )
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
@@ -1777,11 +1778,16 @@ def build_app(
     # The revision-probe TTL memo (DEC-O1-GUARANTEE-HARDEN-001 H2): bounds the
     # two per-poll O(dirs) probe sweeps (oneclick runs listing + the /results
     # sweep_results_revision digest) to ONE sweep per TTL window (default 1 s,
-    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud at first use; 0
-    # disables). Staleness ≤ TTL, far under the 120 s adaptive-floor norm; a
-    # post-TTL poll always re-probes (no permanent-staleness state, pinned).
+    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud HERE at build_app, the
+    # house startup-fail-loud idiom (review round 1 MINOR-1); 0 disables).
+    # Staleness ≤ TTL, far under the 120 s adaptive-floor norm; a post-TTL
+    # poll always re-probes (no permanent-staleness state, pinned). The eager
+    # resolve keeps the memo's own lazy first-use path intact (an injected
+    # memo validates itself).
     _revision_probe_memo = (
-        RevisionProbeMemo() if revision_probe_memo is None else revision_probe_memo
+        RevisionProbeMemo(ttl_s=resolve_revision_probe_ttl())
+        if revision_probe_memo is None
+        else revision_probe_memo
     )
     # The /coverage/windows counts + page-row caches (DEC-COVERAGE-WINDOWS-O1-001 +
     # DEC-WINDOWS-MIDPULL-FLOOR-001): the `GROUP BY market, status` bucketed counts
