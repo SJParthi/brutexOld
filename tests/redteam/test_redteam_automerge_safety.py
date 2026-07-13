@@ -346,7 +346,6 @@ class TestMergeQueueReadiness:
             "(regression of DEC-MERGE-QUEUE-001)"
         )
 
-
     def test_ci_ok_mints_required_context_on_merge_group(self) -> None:
         """DEC-MERGE-QUEUE-001: the required context "CI OK (aggregate gate)" is
         the ci-ok job's DYNAMIC name. It must be minted on ``merge_group`` events
@@ -372,7 +371,6 @@ class TestMergeQueueReadiness:
             "mint (and could shadow) the required context again (regression of "
             "DEC-CI-OK-PR-ONLY-NAME-001)"
         )
-
 
     def test_merge_step_attempts_enqueue_before_direct_fallback(self) -> None:
         """DEC-MERGE-QUEUE-001: the merge step must FIRST attempt to enable
@@ -401,7 +399,6 @@ class TestMergeQueueReadiness:
             "the enqueue attempt no longer precedes the direct-merge fallback — "
             "a queue-ruled base would eat a doomed direct merge first"
         )
-
 
     def test_blocked_state_tolerated_only_under_live_queue_rule(self) -> None:
         """DEC-MERGE-QUEUE-001: ``mergeable_state=blocked`` is the queue-normal
@@ -432,7 +429,6 @@ class TestMergeQueueReadiness:
             "green PRs strand (regression of DEC-MERGE-QUEUE-001)"
         )
 
-
     def test_merge_group_trigger_is_exactly_where_required_contexts_live(self) -> None:
         """DEC-MERGE-QUEUE-001: ``merge_group`` belongs ONLY on workflows that
         produce a branch-protection required context — today exactly ci.yml.
@@ -451,8 +447,6 @@ class TestMergeQueueReadiness:
             "exactly {'ci.yml'} (the one workflow producing every required "
             "context; DEC-MERGE-QUEUE-001)"
         )
-
-
 
 
 def test_strict_clean_ratchet_is_recorded_on_both_surfaces() -> None:
