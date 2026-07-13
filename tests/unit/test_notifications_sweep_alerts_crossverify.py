@@ -55,6 +55,7 @@ class _Report:
     nothing: int | None
     publish_failed: int | None
     recovered_prior: int | None
+    regated: int | None
     derived: int | None
     derive_failed: int | None
     detail: str
@@ -73,6 +74,7 @@ def _report(**overrides: object) -> _Report:
         nothing=10,
         publish_failed=0,
         recovered_prior=0,
+        regated=0,
         derived=750,
         derive_failed=0,
         detail="",
@@ -198,6 +200,30 @@ class TestCrossverifySummary:
         [event] = notifier.published
         assert "published ?" in event.message
         assert "derived ? \\(? failed\\)" in event.message
+
+    def test_published_with_regated_is_warn(self) -> None:
+        # An auto-re-gated prior day is worth a look, not a page — WARN
+        # (DEC-CROSSVERIFY-WITHHELD-REGATE-001, the recovered-prior law).
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID, report=_report(regated=2)
+        )
+        assert notifier.published[0].severity == TelegramSeverity.WARN
+        assert "re\\-gated 2" in notifier.published[0].message  # MarkdownV2-escaped
+
+    def test_regated_count_always_surfaces_in_the_counts_line(self) -> None:
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(run_id=RUN_ID, report=_report())
+        assert "re\\-gated 0" in notifier.published[0].message  # MarkdownV2-escaped
+
+    def test_published_with_unknown_regated_is_warn_not_info(self) -> None:
+        # regated=None is an UNKNOWN — the INFO arm requires a REAL 0.
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID, report=_report(regated=None)
+        )
+        assert notifier.published[0].severity == TelegramSeverity.WARN
+        assert "re\\-gated ?" in notifier.published[0].message
 
     def test_published_with_unknown_recovered_is_warn_not_info(self) -> None:
         # recovered_prior=None is an UNKNOWN — the INFO arm requires a REAL 0.
@@ -330,6 +356,7 @@ class TestProducerBindingEndToEnd:
             excluded=0,
             publish_failed=0,
             recovered_prior=0,
+            regated=0,
             derived=1,
             derive_failed=0,
             movers_warm="revision-propagated (headless)",

@@ -11,14 +11,19 @@ from brutex.crossverify.canonical import canonical_identity
 from brutex.crossverify.journal import (
     CROSSVERIFY_DIRNAME,
     JOURNAL_VERSION,
+    MAX_JOURNAL_BYTES,
     DayJournal,
     JournalEntry,
     journal_path,
+    last_run_path,
     load_journal,
+    load_last_run,
     scan_pending_journals,
+    scan_withheld_journals,
     staging_dir,
     staging_path,
     staging_path_for_key,
+    write_last_run,
 )
 
 if TYPE_CHECKING:
@@ -359,3 +364,111 @@ class TestScanPendingJournals:
         journal.mark_staged("k", "s", 1)
         journal.save(tmp_path)
         assert scan_pending_journals(tmp_path, today=_DAY, lookback_days=0) == []
+
+
+class TestScanWithheldJournals:
+    """The auto-re-gate scan (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
+
+    @staticmethod
+    def _seed(lake: Path, day: date, withheld: dict[str, str]) -> None:
+        journal = DayJournal(day=day, run_id="cv", entries={})
+        journal.withheld = dict(withheld)
+        journal.save(lake)
+
+    def test_empty_lake_scans_nothing(self, tmp_path: Path) -> None:
+        assert scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
+    def test_withheld_priors_found_oldest_first(self, tmp_path: Path) -> None:
+        self._seed(tmp_path, _DAY.replace(day=9), {"RELIANCE": "volume_all_zero"})
+        self._seed(tmp_path, _DAY.replace(day=7), {"NIFTY": "count_short"})
+        scanned = scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day.day for j in scanned] == [7, 9]  # oldest first
+        assert scanned[0].withheld == {"NIFTY": "count_short"}
+
+    def test_clean_and_pending_only_priors_skipped(self, tmp_path: Path) -> None:
+        # A day with an EMPTY withheld map never re-gates — even when it
+        # still holds PENDING keys (that is the recovery scan's job).
+        clean = DayJournal(day=_DAY.replace(day=9), run_id="cv", entries={})
+        clean.mark_staged("p/IDX_I/NIFTY.csv", "s", 1)
+        clean.save(tmp_path)
+        assert scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
+    def test_todays_journal_not_scanned(self, tmp_path: Path) -> None:
+        self._seed(tmp_path, _DAY, {"RELIANCE": "volume_all_zero"})
+        assert scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
+    def test_outside_window_not_scanned(self, tmp_path: Path) -> None:
+        self._seed(tmp_path, _DAY.replace(day=1), {"RELIANCE": "volume_all_zero"})
+        assert scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5) == []
+
+    def test_corrupt_prior_skipped_never_raises(self, tmp_path: Path) -> None:
+        path = journal_path(tmp_path, _DAY.replace(day=9))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{corrupt", encoding="utf-8")
+        self._seed(tmp_path, _DAY.replace(day=8), {"M&M": "read_error"})
+        scanned = scan_withheld_journals(tmp_path, today=_DAY, lookback_days=5)
+        assert [j.day.day for j in scanned] == [8]
+
+
+class TestLastRunRecordStore:
+    """The durable last-run view sidecar (write/load + corruption tolerance)."""
+
+    def test_path_law(self, tmp_path: Path) -> None:
+        assert last_run_path(tmp_path) == tmp_path / CROSSVERIFY_DIRNAME / "last_run.json"
+
+    def test_roundtrip(self, tmp_path: Path) -> None:
+        record: dict[str, object] = {
+            "version": JOURNAL_VERSION,
+            "day": "2026-07-10",
+            "verdict": "publish_failed",
+            "exit_code": 2,
+            "failed_keys": ["crossverify/groww/2026-07-10/IDX_I/NIFTY.csv"],
+        }
+        write_last_run(tmp_path, record)
+        assert load_last_run(tmp_path) == record
+
+    def test_overwrite_is_atomic_last_writer_wins(self, tmp_path: Path) -> None:
+        write_last_run(tmp_path, {"version": JOURNAL_VERSION, "verdict": "published"})
+        write_last_run(tmp_path, {"version": JOURNAL_VERSION, "verdict": "refused"})
+        loaded = load_last_run(tmp_path)
+        assert loaded is not None and loaded["verdict"] == "refused"
+
+    def test_absent_reads_none(self, tmp_path: Path) -> None:
+        assert load_last_run(tmp_path) is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"{corrupt",
+            b"\xff\xfe{",
+            b"[1, 2, 3]",  # valid JSON, not a dict
+            b'{"version": 99}',  # unknown future version
+            b"[" * 200_000 + b"]" * 200_000,  # the RecursionError escape
+        ],
+    )
+    def test_corrupt_reads_none_with_one_warn(self, tmp_path: Path, body: bytes) -> None:
+        import structlog.testing
+
+        path = last_run_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        with structlog.testing.capture_logs() as logs:
+            assert load_last_run(tmp_path) is None
+        assert any(e["event"] == "crossverify.last_run_corrupt" for e in logs)
+
+    def test_directory_at_path_reads_none(self, tmp_path: Path) -> None:
+        last_run_path(tmp_path).mkdir(parents=True)
+        assert load_last_run(tmp_path) is None
+
+    def test_oversized_refused_before_the_read(self, tmp_path: Path) -> None:
+        import structlog.testing
+
+        path = last_run_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b" " * (MAX_JOURNAL_BYTES + 1))
+        with structlog.testing.capture_logs() as logs:
+            assert load_last_run(tmp_path) is None
+        assert any(
+            e["event"] == "crossverify.last_run_corrupt" and e["error_type"] == "OversizedRecord"
+            for e in logs
+        )

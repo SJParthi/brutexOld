@@ -24,7 +24,9 @@ from brutex.crossverify.gate_seam import CompletenessGateUnavailable
 from brutex.crossverify.journal import (
     DayJournal,
     journal_path,
+    last_run_path,
     load_journal,
+    load_last_run,
     staging_dir,
     staging_path,
     staging_path_for_key,
@@ -71,6 +73,16 @@ _MUHURAT = TradingSession(
 )
 
 
+def _session_on(day: date) -> TradingSession:
+    """A REGULAR session on *day* (prior-day re-gate tests)."""
+    return TradingSession(
+        date=day,
+        session_type=SessionType.REGULAR,
+        open_time_ist=time(9, 15),
+        close_time_ist=time(15, 30),
+    )
+
+
 def _identity(segment: str, symbol: str, exch: str = "NSE") -> CanonicalIdentity:
     identity = canonical_identity(exchange=exch, segment=segment, lake_symbol=symbol)
     assert identity is not None
@@ -106,6 +118,18 @@ def _reader(*, exchange: str, segment: str, symbol: str, day: date) -> list[Cand
     _ = day
     identity = _identity(segment, symbol, exchange)
     return [_bar(identity)]
+
+
+def _day_bar(identity: CanonicalIdentity, day: date) -> CandleBar:
+    """One 09:15-IST bar ON *day* (the re-gate re-export must render in-session)."""
+    return replace(
+        _bar(identity), timestamp=datetime(day.year, day.month, day.day, 3, 45, tzinfo=UTC)
+    )
+
+
+def _day_reader(*, exchange: str, segment: str, symbol: str, day: date) -> list[CandleBar]:
+    """A day-faithful reader — byte-identical to ``_reader`` for ``_DAY`` calls."""
+    return [_day_bar(_identity(segment, symbol, exchange), day)]
 
 
 class _Clock:
@@ -176,6 +200,9 @@ def _harness(
     market_hours_blocked: bool = False,
     on_settle_retry: Callable[[], None] | None = None,
     reader: DayFrameReader | None = None,
+    prior_sessions: dict[date, TradingSession | None] | None = None,
+    prior_session_raises: frozenset[date] = frozenset(),
+    on_prior_session: Callable[[date], None] | None = None,
     **config_kw: Any,
 ) -> _Harness:
     client = FakeS3Client()
@@ -187,7 +214,15 @@ def _harness(
     the_classifier = classifier if classifier is not None else ScriptedClassifier()
 
     def _session_for(day: date) -> TradingSession | None:
-        assert day == _DAY
+        if day != _DAY:
+            # Prior-day calls come ONLY from the step-D2 withheld re-gate.
+            if on_prior_session is not None:
+                on_prior_session(day)
+            if day in prior_session_raises:
+                raise HolidayDataUnavailableError("prior-day coverage absent")
+            if prior_sessions is not None and day in prior_sessions:
+                return prior_sessions[day]
+            return _session_on(day)
         if session_raises:
             raise HolidayDataUnavailableError("2027 coverage absent")
         return session
@@ -1153,6 +1188,428 @@ class TestDeferralRecoveryHonesty:
         assert report.recovered_prior == 1
 
 
+def _seed_withheld_journal(
+    lake: Path,
+    offset_days: int,
+    withheld: dict[str, str],
+    *,
+    published_tails: tuple[str, ...] = (),
+) -> date:
+    """Seed a PRIOR-day journal carrying a withheld map (+ optionally some
+    already-PUBLISHED entries — the never-re-put pin's bait). Returns the day."""
+    prior_day = _DAY - timedelta(days=offset_days)
+    journal = DayJournal(day=prior_day, run_id="cv-prior")
+    for tail in published_tails:
+        key = f"crossverify/groww/{prior_day.isoformat()}/{tail}"
+        journal.mark_staged(key, "0" * 64, 10)
+        journal.mark_published(key)
+    journal.withheld = dict(withheld)
+    journal.save(lake)
+    return prior_day
+
+
+class TestWithheldRegate:
+    """Step D2 — the withheld-day AUTO-RE-GATE (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
+
+    def test_healed_prior_day_auto_publishes_without_manual_day(self, tmp_path: Path) -> None:
+        # Day D withheld RELIANCE → the lake healed → the NEXT daily run
+        # publishes D's RELIANCE with ZERO manual --day intervention; the
+        # already-published NIFTY key is NEVER re-put.
+        prior_day = _seed_withheld_journal(
+            tmp_path, 2, {"RELIANCE": "volume_all_zero"}, published_tails=("IDX_I/NIFTY.csv",)
+        )
+        h = _harness(tmp_path, reader=_day_reader)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.regated == 1
+        prior_key = f"crossverify/groww/{prior_day.isoformat()}/NSE_EQ/RELIANCE.csv"
+        assert prior_key in h.client.objects
+        published_key = f"crossverify/groww/{prior_day.isoformat()}/IDX_I/NIFTY.csv"
+        assert all(key != published_key for _b, key, _c in h.client.puts)  # never re-put
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {}
+        assert journal.entries[prior_key].published is True
+        assert journal.entries[published_key].published is True  # untouched
+        assert not staging_dir(tmp_path, prior_day).exists()  # step-N cleanup
+        # Today's own chain still ran in full (3 targets published).
+        assert report.published == 3
+
+    def test_regated_day_counts_toward_published_verdict(self, tmp_path: Path) -> None:
+        # A run whose ONLY material output is the re-gate still reads the
+        # honest `published` verdict (the recovered_prior law's twin): TODAY
+        # reads honest nothing per symbol (a day-keyed classifier), while the
+        # PRIOR day's re-gate publishes.
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+
+        class _DayKeyed:
+            def __call__(
+                self,
+                *,
+                bars_today: Any,
+                clamp_today: date,
+                window_end: date,
+                instrument_class: str,
+            ) -> FakeVerdict:
+                _ = (bars_today, window_end, instrument_class)
+                if clamp_today == _DAY:
+                    return FakeVerdict(incomplete=False, reason="no_today_bars")
+                return FakeVerdict()  # the healed prior day reads complete
+
+        h = _harness(
+            tmp_path,
+            reader=_day_reader,
+            targets=[_RELIANCE],
+            classifier=_DayKeyed(),  # type: ignore[arg-type]
+        )
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.regated == 1
+        assert report.published == 0  # today itself published nothing
+        assert f"crossverify/groww/{prior_day.isoformat()}/NSE_EQ/RELIANCE.csv" in h.client.objects
+
+    def test_weekend_run_still_regates_before_the_session_gate(self, tmp_path: Path) -> None:
+        # The step-D parity law: D2 runs BEFORE the session gate, so a
+        # weekend fire re-gates a healed Friday.
+        prior_day = _seed_withheld_journal(tmp_path, 2, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader, session=None)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("skipped_non_trading", 0)
+        assert report.regated == 1
+        assert f"crossverify/groww/{prior_day.isoformat()}/NSE_EQ/RELIANCE.csv" in h.client.objects
+
+    def test_still_withheld_updates_reason_zero_puts(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"M&M": "read_error"})
+        classifier = ScriptedClassifier(
+            by_class={
+                "cash_spot": FakeVerdict(incomplete=True, reason="volume_all_zero"),
+            }
+        )
+        h = _harness(tmp_path, reader=_day_reader, classifier=classifier)
+        report = h.run()
+        assert report.regated == 0
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"M&M": "volume_all_zero"}  # reason UPDATED
+        assert all(prior_day.isoformat() not in key for _b, key, _c in h.client.puts)
+        # Today's own cash symbols read the same withheld verdict — exit 2.
+        assert (report.verdict, report.exit_code) == ("withheld_partial", 2)
+
+    def test_regate_now_nothing_drops_the_stale_record(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"M&M": "volume_all_zero"})
+        classifier = ScriptedClassifier(
+            by_class={"cash_spot": FakeVerdict(incomplete=False, reason="no_today_bars")}
+        )
+        h = _harness(tmp_path, reader=_day_reader, classifier=classifier)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.regated == 0
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {}  # the honest-nothing record is dropped
+        assert any(e["event"] == "crossverify.regate_now_nothing" for e in logs)
+        assert report.exit_code == 0  # nothing never withholds
+
+    def test_unknown_symbol_stays_on_the_honest_record(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"GHOST": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.regated == 0
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"GHOST": "volume_all_zero"}  # kept verbatim
+        assert any(e["event"] == "crossverify.regate_symbol_unknown" for e in logs)
+        assert report.verdict == "published"  # today unaffected
+
+    def test_gate_absent_skips_regate_fail_closed(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader, gate_absent=True)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("refused", 1)  # today's step C
+        assert h.client.puts == []  # NOTHING published ungated
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"RELIANCE": "volume_all_zero"}
+        assert any(e["event"] == "crossverify.regate_gate_unavailable" for e in logs)
+
+    def test_prior_day_calendar_abstain_skips_that_day(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader, prior_session_raises=frozenset({prior_day}))
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.regated == 0
+        assert any(e["event"] == "crossverify.regate_session_unavailable" for e in logs)
+        assert report.verdict == "published"  # the run itself is unharmed
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"RELIANCE": "volume_all_zero"}  # next run re-finds
+
+    def test_non_trading_and_muhurat_prior_days_never_regate(self, tmp_path: Path) -> None:
+        # Defensive totality: a withheld map can only be WRITTEN by a run
+        # that passed the session gate — a journal claiming one on a
+        # non-session day is foreign state, skipped loudly.
+        day_none = _seed_withheld_journal(tmp_path, 3, {"RELIANCE": "volume_all_zero"})
+        day_muhurat = _seed_withheld_journal(tmp_path, 2, {"M&M": "volume_all_zero"})
+        muhurat = replace(_MUHURAT, date=day_muhurat)
+        h = _harness(
+            tmp_path,
+            reader=_day_reader,
+            prior_sessions={day_none: None, day_muhurat: muhurat},
+        )
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.regated == 0
+        skips = [e for e in logs if e["event"] == "crossverify.regate_day_not_regatable"]
+        assert {e["prior_day"] for e in skips} == {
+            day_none.isoformat(),
+            day_muhurat.isoformat(),
+        }
+        assert report.verdict == "published"
+
+    def test_contended_prior_day_lock_skips_regate_run_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_PARTITION_LOCK_TIMEOUT_S", "0.05")
+        prior_day = _seed_withheld_journal(tmp_path, 2, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader)
+        with _hold_day_lock(tmp_path, prior_day), structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert report.regated == 0
+        assert any(e["event"] == "crossverify.regate_day_contended" for e in logs)
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.withheld == {"RELIANCE": "volume_all_zero"}  # untouched
+
+    def test_peer_regated_between_scan_and_lock_converges(self, tmp_path: Path) -> None:
+        # The reload-under-the-lock law (the step-D stale-scan arm's twin):
+        # a peer empties the withheld map between OUR scan and OUR acquire —
+        # the re-load sees nothing to do and skips (zero exports, zero puts).
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        peer_acted: list[int] = []
+
+        def _peer_wipes_withheld(day: date) -> None:
+            if not peer_acted and day == prior_day:
+                peer = load_journal(tmp_path, prior_day)
+                assert peer is not None
+                peer.withheld = {}
+                peer.save(tmp_path)
+                peer_acted.append(1)
+
+        h = _harness(tmp_path, reader=_day_reader, on_prior_session=_peer_wipes_withheld)
+        report = h.run()
+        assert peer_acted == [1]
+        assert report.regated == 0
+        assert all(prior_day.isoformat() not in key for _b, key, _c in h.client.puts)
+        assert report.verdict == "published"
+
+    def test_boto3_missing_at_regate_publish_exit_2(self, tmp_path: Path) -> None:
+        _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+
+        def _factory() -> Any:
+            raise S3BackendUnavailable("boto3 missing")
+
+        h = _harness(tmp_path, reader=_day_reader, s3_factory=_factory)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert "boto3 missing" in report.detail
+
+    def test_nonretryable_abort_stops_the_regate_scan(self, tmp_path: Path) -> None:
+        oldest = _seed_withheld_journal(tmp_path, 3, {"RELIANCE": "volume_all_zero"})
+        newest = _seed_withheld_journal(tmp_path, 1, {"M&M": "volume_all_zero"})
+        bad_key = f"crossverify/groww/{oldest.isoformat()}/NSE_EQ/RELIANCE.csv"
+        client = FakeS3Client(nonretryable=frozenset({bad_key}))
+        h = _harness(tmp_path, reader=_day_reader, s3_factory=lambda: client)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert report.regated == 0
+        assert any(e["event"] == "crossverify.regate_aborted_nonretryable" for e in logs)
+        # The NEWER withheld day was never touched — left for the next run.
+        newer = load_journal(tmp_path, newest)
+        assert newer is not None
+        assert newer.withheld == {"M&M": "volume_all_zero"}
+        assert all(newest.isoformat() not in key for _b, key, _c in client.puts)
+
+    def test_transient_exhaustion_counts_failed_with_named_detail(self, tmp_path: Path) -> None:
+        # The retryable-exhaustion publish_failed verdict now carries a REAL
+        # detail: the true failing count + the capped key sample.
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        key = f"crossverify/groww/{prior_day.isoformat()}/NSE_EQ/RELIANCE.csv"
+        client = FakeS3Client(fail_times={key: 99})
+        h = _harness(tmp_path, reader=_day_reader, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert "1 key(s) still failing after retries" in report.detail
+        assert key in report.detail
+        # The staged bytes stay pending for the next run (never lost).
+        journal = load_journal(tmp_path, prior_day)
+        assert journal is not None
+        assert journal.pending_keys() == (key,)
+
+    def test_dry_run_and_publish_off_never_regate(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        modes: tuple[dict[str, Any], ...] = ({"dry_run": True}, {"publish": False})
+        for kw in modes:
+            h = _harness(tmp_path, reader=_day_reader, **kw)
+            report = h.run()
+            assert report.regated == 0
+            assert h.client.puts == []
+            journal = load_journal(tmp_path, prior_day)
+            assert journal is not None
+            assert journal.withheld == {"RELIANCE": "volume_all_zero"}
+
+    def test_regate_staging_halt_is_suspect(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+
+        def _halt(dest: Path, writer: Any) -> None:
+            raise LakeWriteHalt("disk_full")
+
+        monkeypatch.setattr("brutex.data.atomic_io.atomic_write_via", _halt)
+        h = _harness(tmp_path, reader=_day_reader)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("suspect", 2)
+        assert "re-gate staging halt" in report.detail
+        assert len(h.halts) == 1  # the specific pull-halt alert fired
+
+    def test_regate_skipped_after_nonretryable_recovery_abort(self, tmp_path: Path) -> None:
+        # The step-D abort law extends to D2: a broken grant discovered by
+        # the recovery scan fails every later publish identically.
+        pending_key = _stage_prior_pending(tmp_path, 3, "IDX_I/NIFTY.csv")
+        withheld_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        client = FakeS3Client(nonretryable=frozenset({pending_key}))
+        h = _harness(tmp_path, reader=_day_reader, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert report.regated == 0
+        assert all(withheld_day.isoformat() not in key for _b, key, _c in client.puts)
+
+    def test_two_withheld_days_regate_with_one_lazy_enumeration(self, tmp_path: Path) -> None:
+        # The lazy identity map is built ONCE (first re-gated day) and shared.
+        older = _seed_withheld_journal(tmp_path, 3, {"RELIANCE": "volume_all_zero"})
+        newer = _seed_withheld_journal(tmp_path, 1, {"M&M": "read_error"})
+        h = _harness(tmp_path, reader=_day_reader)
+        report = h.run()
+        assert report.regated == 2
+        assert f"crossverify/groww/{older.isoformat()}/NSE_EQ/RELIANCE.csv" in h.client.objects
+        assert f"crossverify/groww/{newer.isoformat()}/NSE_EQ/M&M.csv" in h.client.objects
+        assert report.verdict == "published"
+
+    def test_failed_key_sample_is_capped(self) -> None:
+        # The _RunState fold law: the sample never exceeds FAILED_KEYS_CAP
+        # (the true count always rides publish_failed).
+        from brutex.crossverify.run import _RunState
+        from brutex.crossverify.s3_publish import FAILED_KEYS_CAP
+
+        state = _RunState()
+        state.note_failed_keys(tuple(f"k{i}" for i in range(FAILED_KEYS_CAP)))
+        state.note_failed_keys(("overflow",))
+        assert len(state.failed_keys) == FAILED_KEYS_CAP
+        assert "overflow" not in state.failed_keys
+
+
+_SATURDAY = _DAY + timedelta(days=1)  # 2026-07-11 — the day after _DAY
+
+
+class TestLastRunRecord:
+    """The durable last-run record — the reload-proof failure surface."""
+
+    def test_published_run_writes_the_record(self, tmp_path: Path) -> None:
+        h = _harness(tmp_path)
+        report = h.run()
+        assert report.verdict == "published"
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "published"
+        assert record["exit_code"] == 0
+        assert record["day"] == _DAY.isoformat()
+        assert record["published"] == 3
+        assert record["failed_keys"] == []
+        assert record["run_id"] == report.run_id
+
+    def test_failed_run_records_counts_and_capped_failed_keys(self, tmp_path: Path) -> None:
+        key = f"crossverify/groww/{_DAY.isoformat()}/IDX_I/NIFTY.csv"
+        client = FakeS3Client(fail_times={key: 99})
+        h = _harness(tmp_path, s3_factory=lambda: client)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "publish_failed"
+        assert record["exit_code"] == 2
+        assert record["publish_failed"] == 1
+        assert record["failed_keys"] == [key]
+        detail = record["detail"]
+        assert isinstance(detail, str) and "still failing after retries" in detail
+
+    def test_refusal_writes_the_record(self, tmp_path: Path) -> None:
+        h = _harness(tmp_path, gate_absent=True)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("refused", 1)
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "refused"
+        assert record["exit_code"] == 1
+
+    def test_honest_skip_never_clobbers_a_failure_record(self, tmp_path: Path) -> None:
+        # Run 1 (trading day): withheld_partial exit 2 → recorded. Run 2
+        # (the Saturday after): skipped_non_trading — the failure record
+        # SURVIVES the skip (a weekend must not mask Friday's failure).
+        classifier = ScriptedClassifier(
+            by_class={"index_spot": FakeVerdict(incomplete=True, reason="count_short")}
+        )
+        report1 = _harness(tmp_path, classifier=classifier).run()
+        assert (report1.verdict, report1.exit_code) == ("withheld_partial", 2)
+        h2 = _harness(
+            tmp_path,
+            reader=_day_reader,
+            classifier=classifier,  # still short — the re-gate keeps withholding
+            prior_sessions={_SATURDAY: None, _DAY: _SESSION},
+            day=_SATURDAY,
+        )
+        report2 = h2.run()
+        assert (report2.verdict, report2.exit_code) == ("skipped_non_trading", 0)
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["verdict"] == "withheld_partial"  # run 1's record survives
+        assert record["day"] == _DAY.isoformat()
+
+    def test_dry_run_never_writes_the_record(self, tmp_path: Path) -> None:
+        h = _harness(tmp_path, dry_run=True)
+        report = h.run()
+        assert report.verdict == "staged_only"
+        assert load_last_run(tmp_path) is None
+        assert not last_run_path(tmp_path).exists()
+
+    def test_record_write_failure_never_kills_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(lake_root: Path, record: dict[str, Any]) -> None:
+            raise OSError("sidecar volume wedged")
+
+        monkeypatch.setattr("brutex.crossverify.run.write_last_run", _boom)
+        h = _harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.verdict == "published"  # the VIEW write is never load-bearing
+        assert any(e["event"] == "crossverify.last_run_write_failed" for e in logs)
+
+    def test_regated_count_lands_in_the_record(self, tmp_path: Path) -> None:
+        prior_day = _seed_withheld_journal(tmp_path, 1, {"RELIANCE": "volume_all_zero"})
+        h = _harness(tmp_path, reader=_day_reader)
+        report = h.run()
+        assert report.regated == 1
+        record = load_last_run(tmp_path)
+        assert record is not None
+        assert record["regated"] == 1
+        assert record["day"] == _DAY.isoformat()
+        _ = prior_day
+
+
 class TestDayJournalLockSerialization:
     """Round-2 S2a: the per-day journal+staging+publish critical sections
     ride the COMMON cross-process ``partition_write_lock`` on the day's
@@ -1547,6 +2004,7 @@ def _harness_report_stub() -> CrossverifyReport:
         excluded=0,
         publish_failed=0,
         recovered_prior=0,
+        regated=0,
         derived=0,
         derive_failed=0,
         movers_warm=MOVERS_WARM_NOTE,
