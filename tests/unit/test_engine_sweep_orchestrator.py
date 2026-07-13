@@ -200,6 +200,13 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="must not contain Side.HOLD"):
             _grid(directions=[Side.BUY, Side.HOLD])
 
+    def test_junk_fill_mode_string_rejected(self) -> None:
+        # NIT-4 (DEC-FILL-WORST-CASE-001 fix round 2): a junk string would
+        # compare `is FillMode.PRECISE` False in every identity fold and
+        # silently re-key the grid — refused loud at the grid boundary.
+        with pytest.raises(ValueError, match="SweepGridConfig.fill_mode .* not a FillMode member"):
+            _grid(fill_mode="worst_case")
+
     # ── Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001) ──
 
     @pytest.mark.parametrize("symbol", ["INDIAVIX", "RELIANCE", "BANKNIFTY-FUT-2026-07-30"])

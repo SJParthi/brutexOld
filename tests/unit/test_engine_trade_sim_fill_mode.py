@@ -88,6 +88,17 @@ class TestDefaultPolicyIsPrecise:
         assert DEFAULT_FILL_POLICY.fill_mode is FillMode.PRECISE
         assert FillPolicy().fill_mode is FillMode.PRECISE
 
+    def test_junk_fill_mode_string_fails_loud(self) -> None:
+        # NIT-4 (fix round 2): a junk string would compare
+        # `is FillMode.WORST_CASE` False at every fill site and SILENTLY
+        # walk PRECISE — the config-boundary guard refuses it up front.
+        with pytest.raises(ValueError, match="not a FillMode member"):
+            FillPolicy(fill_mode="worst_case")  # type: ignore[arg-type]
+
+    def test_both_real_members_construct(self) -> None:
+        assert FillPolicy(fill_mode=FillMode.WORST_CASE).fill_mode is FillMode.WORST_CASE
+        assert FillPolicy(fill_mode=FillMode.PRECISE).fill_mode is FillMode.PRECISE
+
 
 class TestNamedRegressionGapThroughLevel:
     """(a) gap-through-level: the adverse-max clamp, both directions."""

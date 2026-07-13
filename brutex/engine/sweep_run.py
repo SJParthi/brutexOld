@@ -89,7 +89,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast, runtime_checkable
 
 import structlog
 
@@ -592,6 +592,17 @@ class SweepRunConfig:
         for name in ("instrument", "tf", "mode"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
+        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a junk fill_mode string
+        # would compare `is FillMode.PRECISE` False everywhere downstream and
+        # silently mint a WORST_CASE-keyed identity while the walker prices
+        # whatever the string is not — fail LOUD at the config boundary (the
+        # FuturesTradeInput isinstance-guard precedent; the cast defeats
+        # mypy's annotation-trusting "unreachable" narrowing).
+        if not isinstance(cast("object", self.fill_mode), FillMode):
+            raise ValueError(
+                f"SweepRunConfig.fill_mode {self.fill_mode!r} is not a FillMode member; "
+                f"allowed: {sorted(m.value for m in FillMode)}"
+            )
         # Instrument ⟺ schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
         # the futures alias REQUIRES a schedule, everything else FORBIDS one —
         # presence is a pure function of the identity field, never a caller mood.

@@ -423,6 +423,13 @@ class TestSweepRunConfig:
         with pytest.raises(ValueError, match="min_hits must be >= 0"):
             _make_config(min_hits=-1)
 
+    def test_junk_fill_mode_string_rejected(self) -> None:
+        # NIT-4 (DEC-FILL-WORST-CASE-001 fix round 2): a junk string would
+        # compare `is FillMode.PRECISE` False downstream and silently mint a
+        # worst-case-keyed identity — refused loud at the config boundary.
+        with pytest.raises(ValueError, match="SweepRunConfig.fill_mode .* not a FillMode member"):
+            _make_config(fill_mode="worst_case")
+
     def test_proximity_is_carried(self) -> None:
         prox = ProximityParams(pivot_proximity_bps=25)
         cfg = _make_config(proximity=prox)

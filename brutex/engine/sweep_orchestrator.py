@@ -77,7 +77,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import blake3
 import structlog
@@ -307,6 +307,18 @@ class SweepGridConfig:
     fill_mode: FillMode = FillMode.WORST_CASE
 
     def __post_init__(self) -> None:
+        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a junk fill_mode string
+        # would compare `is FillMode.PRECISE` False in every identity fold and
+        # silently re-key the grid as if worst-case while each tuple's
+        # SweepRunConfig later rejects (or worse, a future consumer prices
+        # PRECISE) — fail LOUD at the grid boundary (the FuturesTradeInput
+        # isinstance-guard precedent; the cast defeats mypy's
+        # annotation-trusting "unreachable" narrowing).
+        if not isinstance(cast("object", self.fill_mode), FillMode):
+            raise ValueError(
+                f"SweepGridConfig.fill_mode {self.fill_mode!r} is not a FillMode member; "
+                f"allowed: {sorted(m.value for m in FillMode)}"
+            )
         # Order-preserving de-dup of every axis (set semantics, deterministic
         # order) so a repeated axis value never yields a duplicate tuple.
         object.__setattr__(self, "instruments", _dedup_seq(self.instruments))

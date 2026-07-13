@@ -775,6 +775,52 @@ def test_crashed_parallel_launch_prefix_audit_still_resumes(
     assert rc == EXIT_OK
 
 
+def test_worst_case_launch_line_records_the_fill_mode(tmp_path: Path) -> None:
+    """NIT-3 (DEC-FILL-WORST-CASE-001 fix round 2): the pre-dispatch
+    SWEEP_LAUNCH context line carries the launch fill mode under the SAME
+    emit-on-non-PRECISE law as canonical_trade_params. Pre-fix the line
+    carried only the roll_schedule, so a parallel-crash-window prefix audit
+    (the launch line only — every buffered per-tuple SWEEP_START lost with
+    the parent) made a WORST_CASE launch's generation read PRECISE-legacy;
+    now the truncated prefix reads the TRUE mode. A PRECISE launch stays
+    key-ABSENT (the elision law — its audit bytes are byte-identical)."""
+    import json
+
+    from brutex.engine.sweep_verify import recorded_audit_facts
+    from brutex.execution.fill_mode import FillMode
+
+    lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+    results_root = tmp_path / "sweeps"
+    rc = cmd_sweep_all(
+        **_kwargs(
+            lake_root, catalog_path, results_root, intervals="1minute", fill_mode="worst_case"
+        )
+    )
+    assert rc == EXIT_OK
+    audit_path = results_root / "audit" / "sweep-all.jsonl"
+    lines = audit_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    actions = [json.loads(line)["action"] for line in lines]
+    launch_idx = actions.index("SWEEP_LAUNCH")
+    launch = json.loads(lines[launch_idx])
+    assert launch["payload"]["params"]["fill_mode"] == "worst_case"
+    # Truncate to the strict pre-dispatch prefix — exactly what a parent
+    # crash right after dispatch leaves durable — and read the scoped facts:
+    # the generation's fill mode survives the crash window.
+    audit_path.write_text("".join(lines[: launch_idx + 1]), encoding="utf-8")
+    assert recorded_audit_facts(audit_path)[3] is FillMode.WORST_CASE
+
+    # The PRECISE elision half: a precise launch appends NO fill_mode key.
+    precise_root = tmp_path / "sweeps_precise"
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, precise_root, intervals="1minute"))
+    assert rc == EXIT_OK
+    precise_audit = precise_root / "audit" / "sweep-all.jsonl"
+    for line in precise_audit.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        if entry["action"] == "SWEEP_LAUNCH":
+            assert "fill_mode" not in entry["payload"]["params"]
+    assert recorded_audit_facts(precise_audit)[3] is FillMode.PRECISE
+
+
 def test_lossy_audit_over_foreign_generation_sentinels_still_resumes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

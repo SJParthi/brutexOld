@@ -7352,6 +7352,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
+                    # DEC-FILL-WORST-CASE-001 (fix round 2, NIT-3): the launch
+                    # context line carries the launch fill mode under the SAME
+                    # emit-on-non-PRECISE law as canonical_trade_params — a
+                    # parallel-crash-window prefix audit (this line only,
+                    # every buffered SWEEP_START lost) previously read
+                    # PRECISE-legacy for a WORST_CASE launch; a PRECISE launch
+                    # stays key-ABSENT (audit bytes byte-identical).
+                    launch_params: dict[str, object] = {
+                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
+                    }
+                    if grid.fill_mode is not FillMode.PRECISE:
+                        launch_params["fill_mode"] = grid.fill_mode.value
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,
                         subject=f"sweep-all:launch:{fut_instrument}",
@@ -7360,9 +7372,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             "data_snapshot_hash": grid.data_snapshot_hash,
                             "indicator_version": grid.indicator_version,
                             "code_commit_sha": grid.code_commit_sha,
-                            "params": {
-                                "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
-                            },
+                            "params": launch_params,
                         },
                     )
             dedup = plan_launch_dedup(grid, digest_path=True)

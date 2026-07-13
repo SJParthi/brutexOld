@@ -97,7 +97,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
@@ -202,6 +202,21 @@ class FillPolicy:
     same_bar: SameBarTie = SameBarTie.SL_FIRST
     fill_mode: FillMode = FillMode.PRECISE
 
+    def __post_init__(self) -> None:
+        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a static type is NOT a
+        # runtime guard — a junk fill_mode string would compare
+        # `is FillMode.WORST_CASE` False at every fill site and SILENTLY walk
+        # PRECISE (the exact silent-fallback trap the fail-loud resolver
+        # exists to prevent). The cast defeats mypy's annotation-trusting
+        # narrowing so the guard is not "unreachable" (the FuturesTradeInput
+        # precedent).
+        if not isinstance(cast("object", self.fill_mode), FillMode):
+            msg = (
+                f"FillPolicy.fill_mode {self.fill_mode!r} is not a FillMode member; "
+                f"allowed: {sorted(m.value for m in FillMode)}"
+            )
+            raise ValueError(msg)
+
 
 #: The conservative default fill policy (AT_LEVEL SL/TP + pessimistic same-bar,
 #: PRECISE legacy fill prices — the library-level byte-identical default).
@@ -263,12 +278,17 @@ class TradeDetail:
     exit_reason
         Why the position closed — one of :data:`EXIT_REASONS`.
     entry_fill_paisa
-        The exact entry fill price (int64 paisa) — the entry bar's OPEN.
+        The exact entry fill price (int64 paisa) — under
+        :data:`~brutex.execution.fill_mode.FillMode.PRECISE` the entry bar's
+        OPEN; under ``WORST_CASE`` the entry bar's adverse extreme (HIGH for
+        BUY, LOW for SELL — the DEC-FILL-WORST-CASE-001 adverse-max law).
     exit_fill_paisa
-        The exact exit fill price (int64 paisa) — the level / open / close the
-        trade actually filled at. Invariant (by :meth:`TradeSimWalker._close`'s
-        P&L arithmetic): ``pnl_paisa == exit − entry`` for BUY and
-        ``entry − exit`` for SELL.
+        The exact exit fill price (int64 paisa) — the price the trade
+        actually filled at under the walk's fill mode (PRECISE: the level /
+        open / close the event's locked rule names; WORST_CASE: the
+        adverse-max counterpart). Invariant (by
+        :meth:`TradeSimWalker._close`'s P&L arithmetic): ``pnl_paisa ==
+        exit − entry`` for BUY and ``entry − exit`` for SELL.
     """
 
     trade: ClosedTrade

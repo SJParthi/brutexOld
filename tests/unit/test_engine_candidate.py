@@ -194,3 +194,41 @@ class TestValidateCandidate:
         monkeypatch.setattr(robustness_mod, "build_bar_bits", _spy_for("cpcv"))
         validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
         assert seen == {"oos": (None, False), "cpcv": (None, False)}
+
+    def test_policy_threads_into_both_composed_re_simulations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NIT-2 (DEC-FILL-WORST-CASE-001 fix round 2): validate_candidate was
+        # fill-mode-blind — no way to validate a candidate under the SAME
+        # mode its sweep ran. Spy on BOTH composed re-simulations (the OOS
+        # holdout AND the CPCV return-series producer) via the candidate
+        # module's own bindings and prove the policy reaches each; a severed
+        # pass-through fails this pin.
+        from brutex.engine import candidate as candidate_mod
+        from brutex.engine.robustness import combo_returns as real_returns
+        from brutex.engine.trade_sim import FillPolicy
+        from brutex.engine.validation import validate_out_of_sample as real_oos
+        from brutex.execution.fill_mode import FillMode
+
+        bars = _multiday(4, bars_per_day=5)
+        policy = FillPolicy(fill_mode=FillMode.WORST_CASE)
+        seen: dict[str, object] = {}
+
+        def _oos_spy(*args: Any, **kwargs: Any) -> Any:
+            seen["oos"] = kwargs.get("policy")
+            return real_oos(*args, **kwargs)
+
+        def _returns_spy(*args: Any, **kwargs: Any) -> Any:
+            seen["cpcv"] = kwargs.get("policy")
+            return real_returns(*args, **kwargs)
+
+        monkeypatch.setattr(candidate_mod, "validate_out_of_sample", _oos_spy)
+        monkeypatch.setattr(candidate_mod, "combo_returns", _returns_spy)
+        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, policy=policy)
+        assert seen == {"oos": policy, "cpcv": policy}
+        # The default call stays the library-PRECISE legacy path.
+        seen.clear()
+        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
+        from brutex.engine.trade_sim import DEFAULT_FILL_POLICY
+
+        assert seen == {"oos": DEFAULT_FILL_POLICY, "cpcv": DEFAULT_FILL_POLICY}
