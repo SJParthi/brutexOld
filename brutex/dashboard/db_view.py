@@ -124,6 +124,7 @@ from brutex.data.partition import (
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
+from brutex.data.today_completeness import TODAY_INCOMPLETE
 from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY_TERMINAL_THRESHOLD,
@@ -5414,6 +5415,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
+    * ``FAILED`` carrying :data:`~brutex.data.today_completeness.TODAY_INCOMPLETE`
+      (DEC-PULL-TODAY-COMPLETENESS-GATE-001) → ``"today's session not yet
+      settled by vendor (will re-pull)"`` — the pre-settle TODAY gate's
+      streak-exempt deferral, honest that the vendor simply has not settled
+      today yet (not an error, not a data hole).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -5432,6 +5438,13 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
+    if status == "FAILED" and last_error == TODAY_INCOMPLETE:
+        # DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
+        # because the vendor has not settled TODAY's session yet — the honest
+        # wording (a streak-EXEMPT, time-transient deferral; a SKIPPED settle
+        # carrying this tag is structurally unreachable but covered by
+        # DEMOTED_SETTLE_REASONS membership above, defensively).
+        return "today's session not yet settled by vendor (will re-pull)"
     if status == "FAILED":
         return "FAILED (will re-pull)"
     return status

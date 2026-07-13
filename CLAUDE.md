@@ -44,6 +44,44 @@ DEC-CROSSVERIFY-PREEMPT-002 (true preemption — job-cancel dependency).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; the per-item record lives ONLY in the §1 Active-branch blurb +
 MIGRATION.md #1776 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1774 —
+the pre-settle TODAY minute-completeness gate: a post-close pull's covers-today
+window WITHHOLDS today's still-settling bars from the keep-first lake (the #837
+forming shape would freeze forever) and defers streak-EXEMPT re-pullable FAILED
+(`TODAY_INCOMPLETE` — never bumps toward SKIPPED; heals at the next nightly
+PROVIDED the vendor has settled by then — the probe-measured settle time +
+margin grounds that schedule)
+until the per-class criteria pass (INDEX count+close-edge · CASH/FUT/CE-PE
+shape checks; FUT count observe-only; legit vendor-empty NEVER demotes —
+pinned); armed at ALL FOUR production pulls incl. the bulk `pull_all_spot`
+behind the fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch resolved once per
+pull; non-today windows byte-identical (pinned); + the companion read-only
+post-close settle probe measuring the UNDOCUMENTED vendor EOD settle time
+(DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, #1775). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; pull-INTEGRITY only; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1774 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 —
+the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
+bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+`scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
+at all three rollup scan sites (count · failed · pending) — so the
+offline-runner pending-forever shape can never refuse a merge (the ONE
+residual — a manually-CANCELLED bench run's `bless-baseline` check — is
+named in #1753, documented not broadened per the operator only-m4pro
+constraint) and
+auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
+while a FAILED m4pro is surfaced as a WARN-only line that never affects the
+exit code AT THIS GATE (auto-merge's own untouched ci-check still refuses a
+FAILED/CANCELLED m4pro — pre-existing; the PENDING shape is non-blocking
+end-to-end) and every REQUIRED check still blocks fully (redteam-pinned incl.
+the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
+fails-before-proven against the baseline script). The check is genuinely
+NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
+bench regression is caught POST-merge on the self-hosted runner, never a
+merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1753.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -2451,6 +2489,126 @@ hostile-review pass._
   IAM runbook) · P4 the step-M provenance killing test pin. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
+  Earlier: `claude/pull-today-completeness-gate` (**DEC-PULL-TODAY-COMPLETENESS-GATE-001 +
+  DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, MIGRATION.md #1774–#1775** — renumbered
+  #1751–#1752 → #1755–#1756 → #1774–#1775 (the first hop at the 2026-07-13
+  merge-reconcile — main's #1488 wave took #1751 for
+  DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 + #1752 for
+  DEC-GROWW-ERRORCODE-ASCII-GUARD-001; the second per the coordinator's
+  fresh authoritative reservation map, live ceiling #1773) — the
+  pre-settle TODAY minute-completeness gate + the post-close settle probe.
+  (1) NEW pure classifier `brutex/data/today_completeness.py` (the
+  partial_window_detect/observe_all_filtered template) consulted in BOTH ingest
+  tails after `drop_bars_after` and BEFORE `sink.append` + `ledger.record`: on a
+  covers-today window (STRICT `window_end == clamp_today + 1 day`, `clamp_today`
+  stamped on the frozen `_RawWindow`/`_OptionRawWindow` payloads from the SAME
+  instant `clamp_window_end` used — midnight-coherent, the tail never reads a
+  clock) that FAILS the per-class criteria, today's IST-dated bars are WITHHELD
+  from the append (the write guard — keep-first would freeze the #837
+  still-settling `volume=0`/`open_interest=None` rows FOREVER; prior-date
+  history still lands) and the window demotes via the #1031 channel under the
+  NEW streak-EXEMPT `TODAY_INCOMPLETE` reason
+  (`window_ledger.STREAK_EXEMPT_DEGRADED_REASONS` — the streak never bumps, a
+  SKIPPED settle is structurally unreachable + belt-guarded, both membership
+  mutants hand-killed; the tombstone protection inherited free; the next pull
+  whose window no longer covers today is inert and the settled bars LAND —
+  PROVIDED the vendor has settled by that first non-covers-today re-pull, which
+  is exactly why the nightly must schedule after the probe-measured settle
+  time + margin (the #1775 runbook); convergence + zero-conflict lifecycle
+  integration-pinned against a real lake with the gate-off keep-first-freeze
+  counterfactual). (2) Criteria table:
+  INDEX_SPOT = distinct-minute count == `session.duration_minutes` (375
+  regular/Budget-weekend, 60 Muhurat) AND `session_last_bar_complete`;
+  CASH_SPOT = all-zero-volume shape only (no count demand — the #1031 illiquid
+  lesson; an honest heuristic extension of the FNO shape law); FUT = ANY-bar
+  OI-null / all-zero-volume mandatory + count OBSERVE-ONLY
+  (`today_count_short` INFO, far-month sparsity is legit); OPTION = OI-null
+  only; FNO zero-today-bars ABSTAINS; raw==0 stays the EMPTY channel (the
+  legit-vendor-empty pin, both spines) with `today_empty` visibility;
+  out-of-coverage (≥2027) abstains; non-trading today passes vacuously.
+  (3) Armed at ALL FOUR production sites — incl. the bulk `pull_all_spot` phase
+  `detect_completeness_gaps` never reached (that hole stays observed, named
+  follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001) — via its OWN spine param
+  `today_completeness_gate`, each site resolving the fail-loud
+  `BRUTEX_TODAY_COMPLETENESS_GATE` env ONCE per pull (dry-run/inspect ⇒ False
+  without touching the env; junk fails loud at pull start); all four
+  wiring-spied. Events capped 20/pull + one suppressed summary; the wrapper is
+  fail-open (`today_gate_error` — a crashed diagnostic never demote-loops a
+  pull); `db_view.window_status_label` reads the honest "today's session not
+  yet settled by vendor (will re-pull)"; conftest gains the
+  `TODAY_COMPLETENESS_GATE_ENV` setdefault hermeticity belt (the #1692
+  wall-clock philosophy). HONEST: the gate judges what THIS fetch returned
+  (pre-fix stored partial days need the runbook remediation — mechanised audit
+  = DEC-LAKE-AUDIT-SETTLING-ROWS-001); the shape checks are parsed-bar
+  INFERENCE of the destroyed 6-element row (false positives cost one bounded
+  streak-exempt deferral, measured by the probe); a PROGRESSIVELY-settling
+  mixed CASH day passes the all-bars zero-volume rule and keep-first freezes
+  its forming minutes — a disclosed residual, conditional on unverified
+  per-minute CASH settlement behavior, probe-measurable via the per-CASH
+  `raw_null_volume`/`rows_len6` fields (#1774 (b)); a `nightly_summary`
+  deferral line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1775 probe
+  (`docs/groww/probe/postclose_settle_probe.py` + runbook): the doctor-kit
+  mint-BLOCKED read-only SSM paced client probes NIFTY/BANKNIFTY/SENSEX + 10
+  seed-fixed F&O-eligible CASH stocks + the front-month NIFTY FUT at
+  15:35/15:45/16:00/16:30/17:30 IST, recording the LITERAL 6-vs-7 raw row
+  shapes the parse destroys + count/close-edge/FUT-field checks into
+  timestamped JSONL + human transcripts, with `--summarize` building the
+  slot × check settle matrix; zero lake writes/settles; NOT run here (no creds
+  in the build env — nothing about the settle time claimed). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+  `today_completeness.py` 100% line+branch standalone on a NEW ci.yml gate;
+  every touched gated module re-measured 100.00%; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 errors.)
+  Earlier: `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753** —
+  the pre-merge gate treats the non-required self-hosted
+  `m4pro-absolute-throughput` check as NON-BLOCKING: `scripts/ci/pre-merge-check.sh`
+  gains a HARDCODED (deliberately NOT env-overridable — broadening the set
+  requires a code change + a new DEC) `NONBLOCKING_CHECK_NAMES` constant
+  UNIONED with the caller's `IGNORE_CHECK_NAMES` at all three rollup scan
+  sites (count · failed · pending), so the offline-runner pending-forever
+  shape can never refuse a merge AND auto-merge.yml's
+  caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
+  the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
+  that never affects the exit code — the round-3 claim-scoping: that
+  tolerance is THIS gate's verdict only, since on the auto-merge path the
+  workflow's own EARLIER ci-check `failing` scan (deliberately untouched —
+  outside this change's file-set) still refuses a FAILED/CANCELLED/
+  TIMED_OUT m4pro, while the PENDING shape (the motivating incident) is
+  non-blocking end-to-end because a queued check carries no conclusion for
+  that scan to match; the sibling `bench-m4pro.yml`
+  `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
+  RESIDUAL — operator authorization covers exactly
+  `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
+  evidence 29172994876 + 29189211057: it cannot block in the offline-runner
+  scenario — its needs-downstream check-run is never instantiated while
+  m4pro sits QUEUED, and a completed feature-branch run marks it SKIPPED —
+  so the ONE reachable re-block shape is an operator manually CANCELLING a
+  stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
+  full record lives in #1753's HONEST envelope); every REQUIRED check still
+  blocks —
+  redteam-pinned (NEW `TestM4proNonblocking`, 9 tests — incl. the round-4
+  TIMED_OUT warn-path pin `test_timed_out_m4pro_warns_but_does_not_block`
+  (the one round-4 cosmetic NIT, closed mutant-verified) and the round-1
+  review fold's source pin that the hardcoded set is EXACTLY
+  {m4pro-absolute-throughput} with the env-default override idiom absent,
+  round-3-HARDENED with the line-start assignment census + the append
+  refusal + the exact-passthrough census (both evasion mutants — an append
+  after the literal; a second line-start env-defaulted assignment —
+  verified passing the round-1 pin and failing the hardened one) —
+  fails-before-proven 5/7 on the 7 behavior tests against the baseline
+  script incl. THE pending-m4pro case; the
+  pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
+  pins guard the unchanged fail-closed posture; the excluded entry never
+  inflates the EXPECTED_MIN_CHECKS floor). SAFE because the check is
+  genuinely NON-required (not in ci.yml's `ci-ok` needs AND absent from
+  branch-protection-drift.yml's 22-member required-contexts set — the
+  round-1 review corrected the overstated "aggregate gate only" wording in
+  the script comment + ledger to this two-way evidence; MIGRATION.md #382
+  DEC-M4PRO-PR-TRIGGER-001 + #1534 DEC-BENCH-ABS-BASELINE-001 — a bench
+  regression is caught POST-merge on the self-hosted runner, never a merge
+  blocker, unchanged here). CI-gate script + redteam tests + docs only;
+  ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no scope/vocab/rate change.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -6087,6 +6245,34 @@ hostile-review pass._
   stage, options-excluding pull); BSE_EQ/BSE_FNO structural-only;
   SENSEX-futures ingest + true preemption = named follow-up DECs; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/pull-today-completeness-gate`
+  (DEC-PULL-TODAY-COMPLETENESS-GATE-001 + DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001,
+  MIGRATION.md #1774–#1775 — the pre-settle TODAY minute-completeness gate:
+  covers-today windows withhold today's still-settling bars from the keep-first
+  lake and defer streak-EXEMPT re-pullable FAILED (`TODAY_INCOMPLETE`) until the
+  per-class criteria pass; armed at all four production pulls behind the
+  fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch; + the read-only post-close
+  settle probe under docs/groww/probe/; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1774–#1775 for the full blurb)
+  Earlier: `claude/premerge-m4pro-nonblock`
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 — the pre-merge gate
+  treats the non-required self-hosted `m4pro-absolute-throughput` check as
+  NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+  `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
+  `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
+  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks
+  at this gate (auto-merge's own untouched ci-check still refuses a
+  FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
+  end-to-end);
+  the offline-runner pending-forever shape can never refuse a merge (the
+  manual-cancel `bless-baseline` residual is named in #1753 — documented,
+  not broadened, per the operator only-m4pro constraint);
+  every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
+  safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
+  caught post-merge on the self-hosted runner); CI-gate script + redteam
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on

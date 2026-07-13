@@ -1785,6 +1785,15 @@ jobs:
           else
             echo "(brutex.data.session test file not present yet — gate inactive)"
           fi
+          # DEC-PULL-TODAY-COMPLETENESS-GATE-001 (MIGRATION.md #1774): the
+          # pre-settle TODAY minute-completeness gate — the pure classifier +
+          # guarded observe wiring both ingest tails consult before sink.append
+          # + ledger.record. 100% line+branch standalone from the start.
+          if compgen -G "tests/unit/test_today_completeness.py" > /dev/null; then
+            pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py
+          else
+            echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
