@@ -33,6 +33,16 @@ lake tooling below the gate (reachable only via the loud audit-stamped
 PULL/lake scope UNTOUCHED — futures ingest stays REFERENCE_ONLY; the
 per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
 #1790 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
+`claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
+merge event off main tip 3f32b3ef (merged forward over main through 81052345 on 2026-07-13): #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
+#1699 + DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+#1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001 #1764.
+The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
+each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
 Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
@@ -2460,6 +2470,22 @@ hostile-review pass._
   ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
   `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
   the blake3 formula on this branch, cite kept.)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
+  vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
+  3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · **#1450** DEC-LAKE-INVARIANTS-PREINDEX-001 #1762
+  (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
+  full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
+  #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
+  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard) · **#1441** docs
+  club DEC-EAP-FEEDBACK-INDEX-001 #1764 (+ the Zerodha 10y feasibility record + the market
+  one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
+  `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
+  taken #1712/#1715 (DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001). READ-side
+  dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
+  MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
@@ -6323,6 +6349,14 @@ hostile-review pass._
   scope untouched; ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line — see §1 + MIGRATION.md #1790 for the
   full blurb)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs`
+  (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
+  #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 ·
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+  #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
+  #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
   Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
