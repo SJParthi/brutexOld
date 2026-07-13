@@ -1,6 +1,6 @@
 """The additive ``log_stem`` param on the nightly plist renderer/installer.
 
-DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757): the cross-verify producer
+DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the cross-verify producer
 reuses the ONE launchd render/install law with its own log stem instead of
 minting a second copy — so ``render_launchd_plist`` (and the delegating
 ``install``) gained an ADDITIVE, DEFAULTED ``log_stem`` (+ ``next_step``)

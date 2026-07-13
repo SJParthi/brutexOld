@@ -13,7 +13,7 @@ alerter (the exactly-once summary pin). The pull leg is exercised in
 leg's call shapes are spy-pinned in ``tests/unit/test_crossverify_pull_leg.py``).
 
 GATE HONESTY: the sibling completeness-gate module
-(``brutex.data.today_completeness``, MIGRATION.md #1755) has not merged into
+(``brutex.data.today_completeness``, MIGRATION.md #1774) has not merged into
 this tree — ``default_seams``' fail-closed binding would honestly REFUSE — so
 the classifier seam is swapped to the contract-faithful fake twin
 (``tests.fakes.fake_completeness_gate.faithful_classify``) EXCEPT when the

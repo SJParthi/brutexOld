@@ -1,8 +1,8 @@
 # Cross-verify producer — operator runbook
 
-> DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757) ·
-> DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1758) ·
-> DEC-CROSSVERIFY-DAY-DERIVE-001 (#1759)
+> DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) ·
+> DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) ·
+> DEC-CROSSVERIFY-DAY-DERIVE-001 (#1778)
 >
 > The daily TickVault cross-verification producer: post-close priority pull
 > (ALL spot + NIFTY/BANKNIFTY futures — options EXCLUDED) → completeness
@@ -15,7 +15,7 @@
 
 ## 0. One-time install checklist (in order)
 
-1. **IAM grant (BruteX's FIRST AWS write surface — #1758).** Attach this
+1. **IAM grant (BruteX's FIRST AWS write surface — #1777).** Attach this
    policy to the producer box's AWS principal (the boto3 default credential
    chain resolves it — env / shared credentials file / instance profile).
    `s3:PutObject` on the `crossverify/*` prefix ONLY — NO Get/Head/List/
@@ -47,7 +47,7 @@
 
    Missing boto3 → `S3BackendUnavailable` naming this exact command.
 
-3. **Run the 5-day post-close settle probe** (sibling #1756,
+3. **Run the 5-day post-close settle probe** (sibling #1775,
    `docs/groww/probe/postclose_settle_probe.py`) and choose the fire time:
    the earliest time the probe shows 5/5 settled days, **plus a 15-minute
    margin**. NO default time ships anywhere (Golden Rule #1) — vendor
@@ -64,7 +64,7 @@
 
 5. **Install the LaunchAgent (macOS; `--at` REQUIRED):**
 
-   > **HARD GATE — do NOT install until the completeness-gate PR (#1755,
+   > **HARD GATE — do NOT install until the completeness-gate PR (#1774,
    > `brutex/data/today_completeness.py`) has landed.** The producer is
    > FAIL-CLOSED without it: every scheduled fire exits 1 `refused … gate
    > module absent` and pages CRITICAL — a paging loop, not a producer.
@@ -116,7 +116,7 @@ locks past the budget DEFERS the day with a CRITICAL `crossverify_refused`
 scoped metadata, `expiry>=day` NIFTY/BANKNIFTY futures) → per-symbol
 completeness gate + export decisions (INDEX missing its day = BLOCKED exit
 2; a settling future / short index gets ONE bounded settle-retry) →
-day-scoped derive (#1759; never blocks the export) → stage + journal →
+day-scoped derive (#1778; never blocks the export) → stage + journal →
 **locks released** → publish frozen staged bytes → exactly ONE Telegram
 summary.
 
@@ -138,7 +138,7 @@ pull excludes options; nothing to enrich.
 | `refused … locks still held` | A pull/backfill held the lake locks past the 45-min wait | Nothing lost — the day deferred; re-run after the peer finishes (`brutex crossverify run --day YYYY-MM-DD`) |
 | `withheld_partial` exit 2 | The gate withheld incomplete files (settling OI / short index / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
 | `blocked` exit 2 | A brute-force INDEX has NO bars for the day — a pull failure | Investigate the pull (vendor outage / halt); re-run the day once healed |
-| `refused … gate module absent` | The sibling completeness gate (#1755) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
+| `refused … gate module absent` | The sibling completeness gate (#1774) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
 | Corrupt journal WARN | `.crossverify/<day>.json` unreadable (junk JSON, invalid UTF-8, a directory) | Self-heals: the run re-renders + re-puts identical bytes (convergent); a corrupt PRIOR-day journal never blocks later runs |
 | `crossverify.staging_orphaned` WARN | A staging dir exists for a day whose journal is wiped/corrupt — invisible to the pending scan | Bytes are left in place; `brutex crossverify run --day YYYY-MM-DD` re-runs that day idempotently |
 | `crossverify.staged_bytes_corrupt` WARN | A staged file's bytes no longer match the journal's recorded sha256/size (bit rot / tamper) | Never published; stays pending. A same-day re-run re-renders + heals; a prior day needs `--day YYYY-MM-DD` |

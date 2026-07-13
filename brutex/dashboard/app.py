@@ -2949,7 +2949,7 @@ def build_app(
     )
 
     # The cross-verify producer job (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md
-    # #1757) — a THIRD BackgroundPullJob so its progress feed never collides
+    # #1776) — a THIRD BackgroundPullJob so its progress feed never collides
     # with a pull's or the backfill's. Its route ALWAYS starts it with
     # ``cross_process_lock=False``: the runner's own ``default_seams`` lock
     # seam takes the account→lake→lease trio itself (bounded wait-retry,
@@ -5203,7 +5203,7 @@ def build_app(
     ) -> JSONResponse:
         """POST /api/v1/crossverify/run — start the daily TickVault cross-verify producer.
 
-        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757): the SAME
+        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the SAME
         :func:`brutex.crossverify.run.run_crossverify` runner the CLI
         ``brutex crossverify run`` dispatches to, sharing THIS app's
         ``SessionRateController`` (one account rate budget — §2 Rule 6),

@@ -947,7 +947,7 @@ jobs:
           # backup_repo_corrupt) + the module-level emit_backup_failed_alert
           # are covered by the sibling test_notifications_sweep_alerts_backup
           # suite added to the invocation.
-          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757): the two
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the two
           # cross-verify alert methods (crossverify_summary /
           # crossverify_refused) + the module-level emit helpers are covered
           # by the sibling test_notifications_sweep_alerts_crossverify suite
@@ -957,9 +957,9 @@ jobs:
           else
             echo "(brutex.notifications.sweep_alerts test file not present yet — gate inactive)"
           fi
-          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757) +
-          # DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1758) +
-          # DEC-CROSSVERIFY-DAY-DERIVE-001 (#1759): the daily TickVault
+          # DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) +
+          # DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) +
+          # DEC-CROSSVERIFY-DAY-DERIVE-001 (#1778): the daily TickVault
           # cross-verify producer — every brutex/crossverify module ships at
           # 100% line+branch STANDALONE under its dedicated unit file (the
           # real boto3 client build is the ONE sanctioned pragma; FakeS3Client

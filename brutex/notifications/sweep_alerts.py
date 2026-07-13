@@ -341,7 +341,7 @@ class GreeksBackfillReportLike(Protocol):
 class CrossverifyReportLike(Protocol):
     """The report slice the cross-verify summary alert reads.
 
-    Structural (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1757) — matches
+    Structural (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) — matches
     ``brutex.crossverify.run.CrossverifyReport`` without importing the
     producer package (the :class:`GreeksBackfillReportLike` precedent; this
     module stays wheel-free at import time). Counts are typed ``int | None``
@@ -982,7 +982,7 @@ class SweepAlerter:
     def crossverify_summary(self, *, run_id: str, report: CrossverifyReportLike) -> bool:
         """The exactly-once cross-verify producer end-of-run summary.
 
-        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757). Severity law:
+        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776). Severity law:
         INFO iff every admitted file published cleanly (``published`` with
         ``recovered_prior == 0``); WARN for the benign anomalies
         (``nothing_to_do`` / ``staged_only`` / a ``published`` run that ALSO
@@ -1875,7 +1875,7 @@ def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> Non
 def emit_crossverify_summary_alert(*, run_id: str, report: CrossverifyReportLike) -> bool:
     """Best-effort cross-verify end-of-run summary push; NEVER raises.
 
-    DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1757) — the producer twin of
+    DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) — the producer twin of
     :func:`emit_pull_halt_alert` (same blanket-guard structure): the
     fire-and-forget contract is STRUCTURAL, so even a future import-time or
     construction failure here is swallowed + logged and can never change the

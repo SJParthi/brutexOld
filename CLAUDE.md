@@ -20,9 +20,9 @@
 
 _Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
-MIGRATION.md #1757–#1759 — the daily TickVault cross-verification PRODUCER:
+MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
 one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
-futures, NO options) → completeness gate (FAIL-CLOSED on the sibling #1755
+futures, NO options) → completeness gate (FAIL-CLOSED on the sibling #1774
 module) → day-scoped never-stamping prebuild → the pinned per-symbol CSV
 byte contract → idempotent journal-keyed S3 publish to
 `tv-prod-cold/crossverify/*` (PutObject-ONLY — BruteX's FIRST sanctioned AWS
@@ -43,7 +43,7 @@ DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (BSE-FNO probe-gated) +
 DEC-CROSSVERIFY-PREEMPT-002 (true preemption — job-cancel dependency).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change; the per-item record lives ONLY in the §1 Active-branch blurb +
-MIGRATION.md #1757 — this header carries the pointer, never the story.)
+MIGRATION.md #1776 — this header carries the pointer, never the story.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -2361,15 +2361,15 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
-  DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1757–#1759** — the daily
+  DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
   renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
   run step-machine · launchd schedule, each 100% line+branch on its own ci.yml stanza) executing ONE zero-touch
   post-close chain: priority pull (ALL spot with EXPLICIT `to_date=day` + scoped metadata + `expiry>=day`
   NIFTY/BANKNIFTY futures — options EXCLUDED per the tonight-scope addendum; ONE SessionRateController spans the
-  legs) → the sibling #1755 completeness gate behind a narrow FAIL-CLOSED Protocol (module absent ⇒ refused exit 1,
+  legs) → the sibling #1774 completeness gate behind a narrow FAIL-CLOSED Protocol (module absent ⇒ refused exit 1,
   never publish-ungated; the per-class branch-on-REASON table — INDEX `no_today_bars` = BLOCKED exit 2, settling
-  FUT / short index = bounded settle-retry then withheld-final) → the day-scoped never-stamping derive (#1759:
+  FUT / short index = bounded settle-retry then withheld-final) → the day-scoped never-stamping derive (#1778:
   month-bounded 19 TFs + ±1d-padded 1day on the heal-recall template; the partial-derive-never-stamps invariant BY
   CONSTRUCTION; double-derive-on-nightly disclosed, no new nightly cost) → the pinned CSV byte contract (UTF-8
   no-BOM · LF+trailing newline · no-quote-ever · 2dp ROUND_HALF_UP via `round_money` · `oi` empty-for-spot /
@@ -2397,13 +2397,13 @@ hostile-review pass._
   holder past the budget defers the day — CRITICAL refused; TRUE preemption = named follow-up
   DEC-CROSSVERIFY-PREEMPT-002 on the job-cancel mechanism); SENSEX-futures ingest = named follow-up
   DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 gated on a Groww BSE-FNO availability probe; the FIRST-AWS-WRITE posture
-  (#1758) is PutObject-only on `tv-prod-cold/crossverify/*` — the SSM read-only pledge UNCHANGED, boto3 via the
+  (#1777) is PutObject-only on `tv-prod-cold/crossverify/*` — the SSM read-only pledge UNCHANGED, boto3 via the
   NEW optional `crossverify` extra CI never installs, no real S3 put in CI (operator acceptance step). Integration
   proof: a real-ParquetBarSink lake through the FULL `run_crossverify` over `default_seams` (real locks/reader/
   export/journal/prebuild; FakeS3 + recording alerter injected) — published bytes byte-verified vs the committed
   goldens, idempotent re-run 0 puts, truncated-index withheld exit 2, crash-mid-publish next-run convergence, the
   derive leg proven by the independent `lake_derived_freshness_verdicts` oracle. ROUND-1 HOSTILE-REVIEW FIX PACK
-  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1757): the F1 BLOCKER (the futures
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1776): the F1 BLOCKER (the futures
   candle leg passed ISO STRINGS to `pull_contract_candles`, whose real signature types `date | None` — every real
   futures pull would have TypeError'd; both legs now pass strings to the spot chain / `date` objects to the candle
   chain, typed-stub contract tests + an `inspect.signature` drift pin on BOTH real chains), the corrupt-stored-row
@@ -2415,7 +2415,7 @@ hostile-review pass._
   `publish_failed` exit 2), repr()'d vendor-derived log fields (#907), the step-boundary-deadline / box-IST /
   IAM-guardrail / legacy-bar runbook honesty notes, and the intentional double-CRITICAL-on-halt comment.
   ROUND-2 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the per-finding record lives in MIGRATION.md
-  #1757): the two refuter-confirmed MAJORs killed with stash-verified fail-before tests — (M1) `load_journal`
+  #1776): the two refuter-confirmed MAJORs killed with stash-verified fail-before tests — (M1) `load_journal`
   reads bytes+decode INSIDE the corruption-tolerant path (an invalid-UTF-8 / directory-shaped journal loads
   None + one WARN; pre-fix it raised uncaught and ONE bit-rotted prior-day journal wedged EVERY later run via
   the recovery scan) and (M2) `publish_staged` VERIFIES each staged file against the journal's recorded
@@ -2428,10 +2428,10 @@ hostile-review pass._
   1; flock-held probes + a two-thread convergence test), the S2b `staging_orphaned` WARN (wiped/corrupt-journal
   staging named + left in place), the S3e recovery abort law (nonretryable stops the prior-day scan), the S3a
   `MAX_WINDOW_DAYS=3660` config bound, the S3b `nothing_to_do`-writes-its-journal deadman honesty correction
-  (schedule.py/runbook/#1757 + an in-test pin), the S3d eager market-hours-env 400 on the dashboard route (CLI
+  (schedule.py/runbook/#1776 + an in-test pin), the S3d eager market-hours-env 400 on the dashboard route (CLI
   parity; dry-run exempt), and the S4 `covers_today` defense-in-depth belt (`gate_contract_violation` withheld,
   never a publish on a lying "complete"). ROUND-3 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the
-  per-finding record lives in MIGRATION.md #1757): the refuter-confirmed X1 MAJOR killed — step M RE-LOADS
+  per-finding record lives in MIGRATION.md #1776): the refuter-confirmed X1 MAJOR killed — step M RE-LOADS
   today's journal UNDER the day flock (the step-D law applied to today), so a K_A,K_B,M_A,M_B same-day
   interleave CONVERGES (zero puts, the peer's published entries counted skipped_already;
   `crossverify.publish_converged`) instead of the stale in-memory journal reading the peer-cleaned staging as
@@ -2442,11 +2442,11 @@ hostile-review pass._
   fail-before-verified), the gate binding folding `AttributeError` into the fail-closed refusal NAMING the
   missing attribute + the per-symbol `gate_signature_drift` withhold on a classify `TypeError` (never a
   mid-run crash), the sha256-operand killing test (same-length different-bytes tamper; the operand-drop
-  mutant applied + verified killed by exactly the new test), and the PR-body/#1757 stale-count + deadman-claim
+  mutant applied + verified killed by exactly the new test), and the PR-body/#1776 stale-count + deadman-claim
   honesty refresh (whole-crossverify 1257 stmts / 320 branches / 0 missed; 414 package tests). ROUND-4 POLISH
-  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1757): P1 the mid-day/pre-open
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1776): P1 the mid-day/pre-open
   honesty split (a mid-day fire is the SILENT `deferred_market_hours` exit 0, a pre-open fire is the
-  withhold-CRITICAL — runbook + schedule.py docstring + #1757 aligned) · P2 the gate-seam enum-VALUE-drift fold
+  withhold-CRITICAL — runbook + schedule.py docstring + #1776 aligned) · P2 the gate-seam enum-VALUE-drift fold
   into the typed withhold path · P3 `NoCredentialsError` classified nonretryable (whole-publish abort naming the
   IAM runbook) · P4 the step-M provenance killing test pin. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
@@ -6071,7 +6071,7 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
-  DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1757–#1759 — the daily
+  DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
   TickVault cross-verification producer: NEW `brutex/crossverify/` package
   running the zero-touch post-close chain (priority pull [ALL spot +
   NIFTY/BANKNIFTY futures, NO options] → fail-closed completeness gate →

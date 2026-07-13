@@ -1318,7 +1318,7 @@ class TestJournalSaveCadence:
 
 class TestDefaultAlerter:
     def test_missing_helper_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Phase B LANDED the real sweep_alerts helpers (MIGRATION.md #1757),
+        # Phase B LANDED the real sweep_alerts helpers (MIGRATION.md #1776),
         # so the pre-merge absence this adapter tolerates is now SIMULATED by
         # deleting them — the WARN-and-False degrade must survive a future
         # rename/removal exactly as it survived the phase-A gap.
