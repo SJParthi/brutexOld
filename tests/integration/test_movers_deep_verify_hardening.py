@@ -99,10 +99,23 @@ fixture keeps ALL adjacent in-session closes within the (1/4x, 4x) band — or
 uses single-bar sessions (first-bar exempt) — so all 19 tests pass
 identically with and without the bad-tick arm (round-2 merge-verified against
 the #1462 head; round 3 rebased this branch directly onto the merged main).
-With #1462 landed, the DELIBERATELY-NOT-PINNED in-flight list above shrinks
-to exactly PRs #1511 + #1358. (R3a evidence note: the in-flight
-movers-adjacent PRs #1500 / #1399 / #1434 were merge-checked green against
-this file without being fence-relevant.)
+The DURABLE design rules — not any PR inventory — are the contract this
+file relies on: (a) every fixture keeps all adjacent in-session closes
+inside the (1/4x, 4x) merged-screen band or uses single-bar sessions, and
+(b) no test pins stored-partition freshness territory (the DELIBERATELY
+NOT PINNED class above) — so a semantics-preserving change on either
+front has no fixture-level reason to break these 19 tests, while a merge
+that genuinely breaks the movers read path fails them LOUDLY (the fence
+working as designed). Any in-flight-PR compatibility assessment is a
+dated SNAPSHOT of the then-open PR set: in-flight sets drift, and each
+such assessment must be re-verified at each merge, never read as a
+standing guarantee. Snapshot 2026-07-13 (R4c, on the post-#1462 rebase):
+the then-open relevant PRs were #1511 + #1358 (the not-pinned freshness
+owners) and #1399 — which carries a ``bar_screen`` API rework
+(DEC-BADTICK-HEAD-SEED-001) whose merge will need a main-side screen-call
+reconcile; until then a naive merge breaks main's own screen call site
+and these route-level pins fail loudly alongside main's own suites —
+intended fence behavior, not a defect of this file.
 
 Skipped when ``fastapi`` / ``duckdb`` / ``polars`` / ``pyarrow`` are absent.
 """
