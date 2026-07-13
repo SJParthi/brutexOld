@@ -4296,3 +4296,74 @@ class TestSharedLedgerSeam:
                 now=_NOW,
             )
         assert captured and captured[-1] is first
+
+
+def test_pull_contract_candles_arms_today_gate(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001 F&O arm site: a LIVE phase resolves the
+    env kill switch ONCE and threads the flag into ``run_groww_option_ingest``."""
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+    flags: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, today_completeness_gate: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        flags.append(today_completeness_gate)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert flags
+    assert all(flag is True for flag in flags)
+
+
+def test_pull_contract_candles_dry_run_threads_today_gate_false(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry-run threads ``False`` WITHOUT touching the env (junk env never crashes
+    a dry-run — the resolve is short-circuited away; belt: the F&O dry-run client
+    returns EMPTY payloads, so the gate could never fire offline anyway)."""
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+    flags: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, today_completeness_gate: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        flags.append(today_completeness_gate)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert flags
+    assert all(flag is False for flag in flags)

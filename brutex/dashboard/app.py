@@ -1214,6 +1214,7 @@ def build_app(
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
     loop_watchdog: LoopWatchdog | None = None,
+    crossverify_runner: Callable[[Any], Any] | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -2944,6 +2945,23 @@ def build_app(
     _greeks_backfill_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         account_key_resolver=lambda: None,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
+
+    # The cross-verify producer job (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md
+    # #1776) — a THIRD BackgroundPullJob so its progress feed never collides
+    # with a pull's or the backfill's. Its route ALWAYS starts it with
+    # ``cross_process_lock=False``: the runner's own ``default_seams`` lock
+    # seam takes the account→lake→lease trio itself (bounded wait-retry,
+    # honest refusal), and a job-level second acquire of the SAME flock file
+    # would self-conflict (flock is per open file description). The IN-process
+    # single-flight (a second click) still applies. ``on_run_end`` clears the
+    # shared session CallMeter exactly like ``_pull_job`` — the crossverify
+    # pull leg is a REAL vendor pull through the SAME SessionRateController
+    # (DEC-RATE-METER-LIFECYCLE-001 posture, same disclosed blast radius).
+    _crossverify_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_session_rate.clear_meter,
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
     )
 
@@ -4900,6 +4918,7 @@ def build_app(
         # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
         # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
         def _resolve_targets() -> tuple[list[Instrument], str]:
+            """Resolve the retry selection on the threadpool worker (DuckDB reads)."""
             return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
@@ -5174,6 +5193,147 @@ def build_app(
         — O(1) per poll, ZERO lake reads (DEC-GREEKS-BULK-REENRICH-001).
         """
         return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
+
+    @app.post("/api/v1/crossverify/run")
+    async def api_crossverify_run(
+        dry_run: bool = Query(default=False),
+        skip_pull: bool = Query(default=False),
+        no_publish: bool = Query(default=False),
+        day: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/crossverify/run — start the daily TickVault cross-verify producer.
+
+        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the SAME
+        :func:`brutex.crossverify.run.run_crossverify` runner the CLI
+        ``brutex crossverify run`` dispatches to, sharing THIS app's
+        ``SessionRateController`` (one account rate budget — §2 Rule 6),
+        launched on a dedicated background job (returns at once; poll
+        ``/api/v1/crossverify/progress``). Config junk
+        (``BRUTEX_CROSSVERIFY_*`` AND — for vendor-calling runs — the
+        market-hours guard env the runner's seams resolve) is validated
+        EAGERLY → 400, never a job-thread error (the greeks-backfill
+        posture; the CLI's eager ``default_seams`` validation, mirrored).
+
+        Lock semantics (the phase-A handoff law): the job starts with
+        ``cross_process_lock=False`` because the runner's own
+        ``default_seams`` lock seam acquires the account→lake→lease trio
+        itself with a bounded wait-retry + honest refusal — a job-level
+        second acquire of the same flock would self-conflict. Market-hours
+        semantics: ``market_hours_exempt=True`` at the JOB gate because the
+        RUNNER owns the market-hours law at its step E (the SAME
+        ``guard_active_default``; a vendor-calling in-window run returns the
+        honest ``deferred_market_hours`` verdict, exit 0, while ``dry_run`` /
+        ``skip_pull`` runs make no vendor calls and are legitimately allowed
+        in-window — the job-level all-or-nothing gate cannot express that
+        split). GREEKS N/A for this trigger: the Greeks stage is
+        options-only, and this pull is options-EXCLUDING (spot + NIFTY/
+        BANKNIFTY futures), so there is nothing to enrich — pull → prebuild →
+        movers-revision run with no Greeks stage (tonight-scope addendum
+        item 3).
+        """
+        parsed_day: date | None = None
+        if day is not None:
+            try:
+                parsed_day = date.fromisoformat(day)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"day must be YYYY-MM-DD, got {day!r}"
+                ) from exc
+        from brutex.crossverify.config import resolve_crossverify_config
+
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        try:
+            config = resolve_crossverify_config(
+                lake_root=lake_root,
+                day=parsed_day,
+                dry_run=dry_run,
+                skip_pull=skip_pull,
+                no_publish=no_publish,
+            )
+            if not dry_run:
+                # Eager fail-loud VALIDATION only (junk market-hours env →
+                # 400 here, the CLI parity) — the runner's default_seams
+                # re-resolves the predicate at bind; a dry-run threads None
+                # (no vendor calls to gate), mirroring the seam's own gate.
+                from brutex.calendars.market_hours import resolve_market_closed
+
+                resolve_market_closed()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _LOG.info(
+            "crossverify.requested",
+            day=config.day.isoformat(),
+            dry_run=dry_run,
+            skip_pull=skip_pull,
+            no_publish=no_publish,
+            lake_root=str(lake_root),
+        )
+
+        def _run_producer(cfg: Any) -> Any:  # pragma: no cover — runs on the job thread
+            """The production runner binding (tests inject crossverify_runner)."""
+            from brutex.crossverify.run import default_seams, run_crossverify
+
+            return run_crossverify(cfg, default_seams(cfg, session_rate=_session_rate))
+
+        runner = crossverify_runner if crossverify_runner is not None else _run_producer
+
+        def _work(on_progress: ProgressHook) -> object:
+            """Background body: run the producer; surface the honest verdict.
+
+            A non-zero exit verdict RAISES so the panel reads an honest ✕
+            (the runner itself never raises for data/vendor/publish problems
+            — it folds them into the verdict; the Telegram summary/refusal
+            already fired inside the runner, so no double alert here).
+            """
+            report = runner(config)
+            detail = f": {report.detail}" if report.detail else ""
+            headline = f"crossverify {report.day.isoformat()} — {report.verdict}{detail}"
+            if report.exit_code != 0:
+                raise RuntimeError(headline)
+            return {
+                "note": (
+                    f"{headline} · published {report.published} · "
+                    f"already {report.skipped_already} · withheld {report.withheld} · "
+                    f"nothing {report.nothing}"
+                ),
+                "verdict": report.verdict,
+                "exit_code": report.exit_code,
+            }
+
+        started = _crossverify_job.start(
+            _work,
+            total=0,
+            detail=("cross-verify (DRY RUN)" if dry_run else "cross-verify → TickVault"),
+            # The runner's default_seams lock seam owns the account→lake→lease
+            # trio (bounded wait-retry) — a job-level acquire would self-conflict.
+            cross_process_lock=False,
+            # The runner owns the market-hours law at its step E (see docstring).
+            market_hours_exempt=True,
+        )
+        return JSONResponse(
+            {
+                "started": started,
+                "dry_run": dry_run,
+                "skip_pull": skip_pull,
+                "no_publish": no_publish,
+                "day": config.day.isoformat(),
+                "note": (
+                    "runs the same runner as `brutex crossverify run`; the run "
+                    "takes the pull locks itself (bounded wait — a concurrent "
+                    "pull defers it honestly); poll /api/v1/crossverify/progress"
+                ),
+            }
+        )
+
+    @app.get("/api/v1/crossverify/progress")
+    async def api_crossverify_progress() -> JSONResponse:
+        """GET /api/v1/crossverify/progress — the O(1) producer job snapshot.
+
+        The dedicated job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
+        (state / current / detail / percent …) — O(1) per poll, ZERO lake
+        reads (DEC-CROSSVERIFY-PRODUCER-001).
+        """
+        return JSONResponse(_crossverify_job.snapshot().to_dict())
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
