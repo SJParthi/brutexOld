@@ -191,6 +191,24 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     )
 
 
+def test_set_bulk_disabled_covers_both_pull_buttons() -> None:
+    """[refuter-r1 r2 NIT-5] ``setBulkDisabled`` disables BOTH pull buttons —
+    the full pipeline button AND the scoped-ALL spot-only button — so the
+    wedged-POST comments' "an in-page re-click is impossible" invariant is
+    genuinely true: during any in-flight watch neither button can wipe the
+    live watch UI with a re-click."""
+    html = _render_universe_html()
+    body = html.split("function setBulkDisabled", 1)[1].split("}", 1)[0]
+    assert "PIPELINE_BTN.disabled = on" in body, "the full pipeline button must be disabled"
+    assert "PULL_ALL_SPOT_BTN.disabled = on" in body, (
+        "the spot-only button must join the in-flight disable (the no-in-page-re-click invariant)"
+    )
+    # The const is declared before use and the invariant comments reason from
+    # BOTH buttons now (the stale "the ONE pipeline button" wording is gone).
+    assert 'const PULL_ALL_SPOT_BTN = document.getElementById("pullAllSpotBtn")' in html
+    assert "disables the ONE pipeline button" not in html
+
+
 def test_auto_load_fires_only_on_empty_master() -> None:
     """Instruments auto-load on page open, but ONLY when the master is empty.
 

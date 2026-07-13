@@ -185,6 +185,38 @@ def test_junk_market_hours_env_exits_user_error(
         cmd_pull_all_spot(lake_root=lake)
 
 
+def test_junk_strict_gate_env_exits_user_error_before_lock(
+    lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[refuter-r1 r2 MINOR-3, spy] junk ``BRUTEX_PIPELINE_STRICT_GATE`` is a
+    clean exit-1 refusal naming the knob, validated EAGERLY before any
+    flock/builder work (the cmd_nightly precedent) — previously an uncaught
+    raw ValueError traceback out of the held flock."""
+    monkeypatch.setenv("BRUTEX_PIPELINE_STRICT_GATE", "garbage")
+    locks: list[str] = []
+    builds: list[str] = []
+
+    def lock_factory(*_a: Any, **_k: Any) -> Any:
+        locks.append("lock")  # pragma: no cover — must never run
+        return contextlib.nullcontext()
+
+    def builder(**_kwargs: Any) -> Any:
+        builds.append("build")  # pragma: no cover — must never run
+        raise AssertionError("unreachable")
+
+    with pytest.raises(CliUserError, match="BRUTEX_PIPELINE_STRICT_GATE"):
+        cmd_pull_all_spot(lake_root=lake, lock_factory=lock_factory, pipeline_builder=builder)
+    assert locks == []
+    assert builds == []
+    # The eager law covers dry-run too (the binding resolves it either way).
+    with pytest.raises(CliUserError, match="BRUTEX_PIPELINE_STRICT_GATE"):
+        cmd_pull_all_spot(lake_root=lake, dry_run=True, pipeline_builder=builder)
+    # And through main(): the standard one-liner + exit 1, never a traceback.
+    code = main(["pull-all-spot", "--lake-root", str(lake)])
+    assert code == EXIT_USER_ERROR
+    assert "BRUTEX_PIPELINE_STRICT_GATE" in capsys.readouterr().err
+
+
 def test_capability_refusal_is_user_error(lake: Path) -> None:
     from brutex.nightly.pipeline_binding import NightlyCapabilityError
 
@@ -263,13 +295,20 @@ def test_manual_market_hours_midrun_deferral_exit_ok(
     lake: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The #1692 cmd_fetch precedent: a mid-run MarketHoursHalt is a deferral
-    (ledger drained/resumable inside the spine) — exit 0, never a red cron."""
+    (ledger drained/resumable inside the spine) — exit 0, never a red cron.
+    The resume hint is the BOTH-ARMS wording (refuter-r1 r2 MINOR-1: the
+    composed spot-only belt also halts during an EVENING Muhurat session,
+    where "the next out-of-hours run" was self-contradictory)."""
     h = _Harness(executor_raises=MarketHoursHalt())
     code = h.run(lake)
     assert code == EXIT_OK
     out = capsys.readouterr().out
     assert "pull-all-spot deferred:" in out
-    assert "resume on the next out-of-hours run" in out
+    assert (
+        "resume once the market-session protection window clears "
+        "(NSE hours 08:45-15:35 IST or a Muhurat session)" in out
+    )
+    assert "resume on the next out-of-hours run" not in out  # the false claim is gone
     assert h.hp.closed == 1  # the store is closed even on the halt path
     assert h.tail_calls == []
 
@@ -289,6 +328,37 @@ def test_sequencer_market_hours_deferral_exit_ok(
     assert code == EXIT_OK
     assert "pull-all-spot deferred:" in capsys.readouterr().out
     assert h.tail_calls == []  # the tail never fires on a deferred chain
+
+
+def test_sequencer_market_hours_deferral_spot_only_wording(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[refuter-r1 r2 MINOR-1 — the CLI mirror] the REAL sequencer deferral
+    note (``_market_hours_stop_note`` verbatim) prints spot-only-aware: the
+    bare "inside 08:45-15:35" clock claim (FALSE during an evening Muhurat
+    deferral) becomes the both-arms wording, the generic three-phase list
+    reads spot-only, and the self-contradictory resume advice is gone."""
+    from brutex.dashboard.pipeline_pull import _market_hours_stop_note
+
+    report = PipelinePullReport(
+        spot=None,
+        metadata=None,
+        historical=None,
+        stopped_after="market_hours",
+        note=_market_hours_stop_note(),  # the REAL wording, never re-derived
+    )
+    h = _Harness(report=report)
+    assert h.run(lake) == EXIT_OK
+    out = capsys.readouterr().out
+    assert (
+        "market-session protection window active "
+        "(NSE hours 08:45-15:35 IST or a Muhurat session)" in out
+    )
+    assert "inside NSE market-hours window (08:45-15:35 IST)" not in out
+    assert "F&O not applicable — spot-only scope" in out
+    assert "spot / metadata / historical skipped" not in out
+    assert "resume once the protection window clears" in out
+    assert "resume on the next out-of-hours run" not in out
 
 
 def test_cli_lakewritehalt_alerts_once_and_exits_nonzero(
@@ -552,6 +622,39 @@ def test_stdout_defensive_none_fields_render_question_marks(
     report = _report(prebuild_built=None, prebuild_total_bars=None)
     assert _Harness(report=report).run(lake) == EXIT_OK
     assert "prebuild:  ? symbol(s), ? bars" in capsys.readouterr().out
+
+
+def test_stdout_ok_headline_carries_note_warning_clauses(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[refuter-r1 r2 MINOR-2 — the EXACT reproduced shape] an ok=True run
+    whose note announces "window ledger reload FAILED" AND "prebuild CRASHED"
+    must print BOTH clauses (the headline is now the surged note, never a
+    bare "spot-only pipeline complete" that drops them), and the prebuild
+    line reads CRASHED — never a bland "? symbol(s), ? bars"."""
+    report = _report(
+        note=(
+            "window ledger reload FAILED — running full re-verify pull (no skip); "
+            "pipeline complete — spot clean (7 pair(s)), metadata 0 expiries + "
+            "0 contracts, historical 0 bars over 0 contract(s)"
+            ", prebuild CRASHED (OSError)"
+        ),
+        prebuild_built=None,
+        prebuild_total_bars=None,
+        prebuild_crashed="OSError",
+    )
+    assert report.ok is True  # the reproduced shape: warnings do NOT flip ok
+    assert _Harness(report=report).run(lake) == EXIT_OK  # exit unchanged by design
+    out = capsys.readouterr().out
+    assert "window ledger reload FAILED — running full re-verify pull (no skip);" in out
+    assert "prebuild CRASHED (OSError)" in out
+    # The headline still leads with the spot-only wording after the prefix.
+    assert "spot-only pipeline complete — " in out
+    assert ", F&O skipped by design (spot-only scope)" in out  # surgery applied
+    assert "0 expiries" not in out  # [neg — B H1 holds on the CLI headline too]
+    # The dedicated prebuild line names the crash, not a bland unknown.
+    assert "[brutex]   prebuild:  CRASHED (OSError)" in out
+    assert "? symbol(s), ? bars" not in out
 
 
 def test_stdout_unknown_spot_renders_question_mark_failed_count(

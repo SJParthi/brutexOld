@@ -160,6 +160,7 @@ class _Chain:
         from_date: str | None = _FROM,
         to_date: str | None = _TO,
         now: datetime = _NOW,
+        real_prebuild: bool = False,
     ) -> None:
         self.lake_root = lake_root
         self.instruments = instruments
@@ -170,6 +171,7 @@ class _Chain:
         self.now = now
         self.prebuild_exclusions: list[frozenset[str]] = []
         self.warm_calls = 0
+        self.real_prebuild = real_prebuild
 
     def _run_spot(self) -> Any:
         return pull_all_spot(
@@ -185,9 +187,52 @@ class _Chain:
 
     def _run_prebuild(self, exclude_symbols: frozenset[str]) -> PrebuildOutcome:
         self.prebuild_exclusions.append(exclude_symbols)
+        if self.real_prebuild:
+            return self._run_real_prebuild(exclude_symbols)
         built = len(self.instruments) - len(exclude_symbols)
         return PrebuildOutcome(
             symbols_built=built, total_bars=7, failed=(), failed_count=0, ok=True
+        )
+
+    def _run_real_prebuild(self, exclude_symbols: frozenset[str]) -> PrebuildOutcome:
+        """The REAL prebuild — the binding's ``_run_prebuild`` closure mirrored
+        (pipeline_binding.py: per-target ``_materialize`` over the REAL
+        ``materialize_lake_timeframes``, one cutoff per run, spot-only's EMPTY
+        F&O cascade; workers=1 + no disk guard — the sequential injected path)."""
+        from brutex.calendars.nse import IST
+        from brutex.dashboard.fno_cascade import build_fno_cascade
+        from brutex.dashboard.pipeline_prebuild import (
+            PrebuildTarget,
+            run_pipeline_prebuild_guarded,
+        )
+        from brutex.data.timeframe_materialize import (
+            MaterializeResult,
+            materialize_lake_timeframes,
+        )
+
+        prebuild_cutoff = self.now.astimezone(IST).date()
+
+        def _materialize(target: PrebuildTarget) -> MaterializeResult:
+            return materialize_lake_timeframes(
+                lake_root=self.lake_root,
+                exchange=target.exchange,
+                segment=target.segment,
+                symbol=target.symbol,
+                kind=target.kind,
+                include_daily=True,
+                daily_before=prebuild_cutoff,
+                dense_symbol=target.dense,
+            )
+
+        return run_pipeline_prebuild_guarded(
+            instruments=self.instruments,
+            cascade_or_error=lambda: build_fno_cascade(()),
+            materialize=_materialize,
+            source="pipeline",
+            exclude_symbols=exclude_symbols,
+            lake_root=self.lake_root,
+            workers=1,
+            daily_before=prebuild_cutoff,
         )
 
     def _warm_spot(self) -> MoversWarmResult:
@@ -269,6 +314,100 @@ def test_e2e_vendor_empty_stock_settles_empty(tmp_path: Path) -> None:
     assert report.quarantined_count == 0
     assert report.spot is not None
     assert report.spot.total_no_data >= 1
+
+
+def test_e2e_vendor_empty_stock_real_prebuild_withholds_movers_warm(tmp_path: Path) -> None:
+    """[refuter-r1 r3 F-1 — the REAL-prebuild pin of the INHERITED behavior]
+    a clean vendor-EMPTY stock (settled SKIPPED, zero stored bars — the
+    honest pull outcome, NOT quarantined) fails the REAL
+    ``materialize_lake_timeframes`` (nothing to derive), so
+    ``PrebuildOutcome.ok`` reads False and the sequencer's #1145/#1221 warm
+    gate WITHHOLDS the spot movers warm for the WHOLE run. The shipped e2e
+    for this scenario fakes the prebuild (always-ok) — this test executes the
+    real one, pinning the interaction the fixture-only suite never reached.
+    INHERITED pipeline law, deliberately NOT changed on this branch (the spot
+    report does not expose the vendor-empty set cleanly — its per-symbol
+    ``no_data`` conflates a vendor-empty with an already-settled incremental
+    re-run); the residual + follow-up DEC is ledgered in MIGRATION #1779.
+    The note stays HONEST: the failure is NAMED, the warm clause is ABSENT
+    (never fabricated), the healthy symbol's timeframes ARE built."""
+    adapter = _RecordingAdapter(empty_symbols=frozenset({"RELIANCE"}))
+    chain = _Chain(tmp_path / "lake", [_nifty(), _reliance()], adapter=adapter, real_prebuild=True)
+    report, note = chain.run()
+    assert report.stopped_after is None  # the chain itself completes
+    assert report.quarantined_count == 0  # vendor-empty is NOT a quarantine
+    assert chain.prebuild_exclusions == [frozenset()]  # …so NOT excluded either
+    # The REAL prebuild: the healthy symbol builds, the empty one FAILS.
+    assert report.prebuild_failed == ("RELIANCE",)
+    assert report.prebuild_built == 1
+    assert report.prebuild_total_bars is not None and report.prebuild_total_bars > 0
+    nifty_1day = tmp_path / "lake" / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day"
+    assert nifty_1day.is_dir()  # the healthy symbol's derived TFs are on disk
+    # The load-bearing consequence: the movers warm is WITHHELD run-wide.
+    assert chain.warm_calls == 0
+    assert report.segment_movers_warmed == {}
+    assert "prebuild failures: RELIANCE" in note  # named, never hidden
+    assert "snapshot(s) warmed" not in note  # the warm clause is honestly absent
+
+
+def test_vendor_empty_materialize_remediation_names_both_causes(tmp_path: Path) -> None:
+    """[refuter-r1 r3 F-2] the ``materialize_lake_timeframes`` no-stored-bars
+    refusal names BOTH candidate causes — "pull the spot first" was the WRONG
+    remediation when the spot WAS pulled and the vendor cleanly returned
+    nothing (there is nothing to pull)."""
+    from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_timeframes
+
+    with pytest.raises(ValueError) as exc:
+        materialize_lake_timeframes(
+            lake_root=tmp_path / "lake",
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+        )
+    msg = str(exc.value)
+    assert "no stored 1minute bars for NSE/CASH/RELIANCE" in msg
+    assert "if the 1-minute spot was never pulled, pull it first" in msg
+    assert "vendor cleanly returned no data" in msg
+    assert "no action needed" in msg
+
+
+def test_e2e_evening_muhurat_deferral_note_wording_and_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[refuter-r1 r2 MINOR-1 — the reproduced evening instant] frozen
+    2024-11-01 18:30 IST (inside the listed 18:00-19:00 evening session) the
+    composed belt defers the whole chain, and the surged note no longer
+    claims "inside NSE market-hours window (08:45-15:35 IST)" (FALSE at
+    18:30) nor "resume on the next out-of-hours run" (self-contradictory) —
+    while the ``auto_pull_gate.muhurat_belt_halt`` WARN attributes the halt
+    in the logs. The 2025 AFTERNOON twin above stays green unchanged."""
+    from structlog.testing import capture_logs
+
+    frozen = datetime(2024, 11, 1, 18, 30)  # inside the 18:00-19:00 session
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+    bare = resolve_market_closed()
+    assert bare() is False  # 18:30 is genuinely OUT of the 08:45-15:35 window
+    composed = compose_market_closed(bare)
+    chain = _Chain(tmp_path / "lake", [_nifty()], market_closed=composed)
+    with capture_logs() as logs:
+        report, note = chain.run()
+    assert report.stopped_after == "market_hours"
+    assert chain.adapter.fetches == []  # ZERO vendor calls during the session
+    assert (
+        "market-session protection window active "
+        "(NSE hours 08:45-15:35 IST or a Muhurat session)" in note
+    )
+    assert "inside NSE market-hours window (08:45-15:35 IST)" not in note  # the false claim
+    assert "F&O not applicable — spot-only scope" in note
+    assert "resume on the next out-of-hours run" not in note
+    assert "resume once the protection window clears" in note
+    belt = [e for e in logs if e["event"] == "auto_pull_gate.muhurat_belt_halt"]
+    assert len(belt) == 1  # machine attribution — the logs stop misattributing
+    assert belt[0]["instant"] == frozen.isoformat()
 
 
 def test_e2e_hyphen_and_ampersand_symbols_pull_spot(tmp_path: Path) -> None:

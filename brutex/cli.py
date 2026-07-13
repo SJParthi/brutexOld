@@ -6257,11 +6257,14 @@ def cmd_pull_all_spot(
         auto_pull_allowed,
         resolve_settle_time,
     )
-    from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS
+    from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS, strict_gate_enabled
     from brutex.dashboard.pull_scope import (
         SCOPE_SPOT_ONLY,
+        SPOT_ONLY_SESSION_RESUME_HINT,
         TAIL_ALERT_STATUSES,
         CrossverifyTailOutcome,
+        build_spot_only_note,
+        rewrite_market_hours_note,
         run_crossverify_tail,
     )
 
@@ -6276,6 +6279,11 @@ def cmd_pull_all_spot(
         env_map = {**os.environ, PULL_ALL_SETTLE_ENV: settle_ist}
     try:
         resolve_settle_time(env_map)
+        # Probe only — the binding re-resolves (the cmd_nightly precedent,
+        # cli.py `strict_gate_enabled()` in its pre-chain fail-loud try):
+        # junk BRUTEX_PIPELINE_STRICT_GATE previously escaped as a raw
+        # traceback from inside the held flock (refuter round 1, r2 MINOR-3).
+        strict_gate_enabled()
         if not dry_run:
             from brutex.calendars.market_hours import resolve_market_closed
 
@@ -6351,10 +6359,14 @@ def cmd_pull_all_spot(
             except MarketHoursHalt as exc:
                 # Mid-run market-hours halt (the #1692 cmd_fetch posture): the
                 # durable ledger keeps PLANNED/FAILED windows resumable — a
-                # deferral, never a failure.
+                # deferral, never a failure. The resume hint is the BOTH-ARMS
+                # wording (refuter round 1, r2 MINOR-1): on the spot-only
+                # composed belt the halt can also mean an EVENING Muhurat
+                # session, where "the next out-of-hours run" is
+                # self-contradictory.
                 print(
                     f"[brutex] pull-all-spot deferred: {exc} — committed windows persisted; "
-                    "resume on the next out-of-hours run"
+                    f"{SPOT_ONLY_SESSION_RESUME_HINT}"
                 )
                 log.warning("pull_all_spot.deferred_market_hours", error=str(exc))
                 return EXIT_OK
@@ -6371,9 +6383,14 @@ def cmd_pull_all_spot(
         # exited); keep_awake is still HELD across the crossverify tail below.
 
         # The whole-chain market-hours deferral (the sequencer's own belts).
+        # The note rides the spot-only surgery (refuter round 1, r2 MINOR-1):
+        # the sequencer's ONE deferral note hard-claims "inside 08:45-15:35
+        # IST", which is FALSE when the composed belt fired during an evening
+        # Muhurat session — the rewrite is the honest both-arms wording.
         if report.stopped_after == PHASE_MARKET_HOURS:
-            print(f"[brutex] pull-all-spot deferred: {report.note}")
-            log.info("pull_all_spot.deferred_market_hours", note=report.note)
+            deferral_note = rewrite_market_hours_note(report.note)
+            print(f"[brutex] pull-all-spot deferred: {deferral_note}")
+            log.info("pull_all_spot.deferred_market_hours", note=deferral_note)
             return EXIT_OK
 
         def _production_tail() -> CrossverifyTailOutcome:
@@ -6429,7 +6446,15 @@ def cmd_pull_all_spot(
         skipped = str(spot.windows_skipped) if spot is not None else "?"
         built = "?" if report.prebuild_built is None else str(report.prebuild_built)
         bars = "?" if report.prebuild_total_bars is None else str(report.prebuild_total_bars)
-        headline = "spot-only pipeline complete" if report.ok else report.note
+        # The headline is ALWAYS the note through the ONE spot-only surgery law
+        # (refuter round 1, r2 MINOR-2): an ok=True note can carry LOUD warning
+        # clauses — the DEC-WINDOW-LEDGER-RESCUE-001 "window ledger reload
+        # FAILED" prefix, ", prebuild CRASHED (ErrorType)", the strict-gate
+        # skip, the vendor-conflict clause — and the bare "spot-only pipeline
+        # complete" headline silently DROPPED them on the surface a cron
+        # operator actually reads. The surgery keeps the clean-run headline
+        # starting with the same words ("spot-only pipeline complete — …").
+        headline = build_spot_only_note(report.note, tail)
         print(f"[brutex] pull-all-spot: {headline}")
         print(
             f"[brutex]   spot:      {kind} — {completed} pair(s) fetched, "
@@ -6437,7 +6462,12 @@ def cmd_pull_all_spot(
             f"{skipped} window(s) skipped (already present)"
         )
         print(f"[brutex]   quarantined: {report.quarantined_count}")
-        print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+        if report.prebuild_crashed is not None:
+            # A crashed prebuild must never masquerade as a bland unknown
+            # "? symbol(s), ? bars" (refuter round 1, r2 MINOR-2).
+            print(f"[brutex]   prebuild:  CRASHED ({report.prebuild_crashed})")
+        else:
+            print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
         print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
         print("[brutex]   greeks:    not run — no options in this pull")
         print(f"[brutex]   cross-verify: {tail.human}")

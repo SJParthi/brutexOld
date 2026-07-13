@@ -30,6 +30,7 @@ from brutex.dashboard.pull_scope import (
     build_spot_only_note,
     crossverify_clause,
     normalize_pull_scope,
+    rewrite_market_hours_note,
     run_crossverify_tail,
     spot_only_historical_report,
     spot_only_metadata_report,
@@ -128,6 +129,23 @@ def test_noop_reports_carry_scope_note_and_empty_tuples() -> None:
     assert hist.tradable == ()
     assert hist.metadata is None
     assert hist.historical is None
+
+
+def test_noop_reports_echo_dry_run_flag() -> None:
+    """[refuter-r1 r2 NIT-6] the no-op builders thread the LAUNCH's dry_run —
+    a dry-run payload's nested sub-reports never read ``dry_run: false``;
+    the zero-arg default stays False (back-compat)."""
+    assert spot_only_metadata_report(dry_run=True).dry_run is True
+    assert spot_only_historical_report(dry_run=True).dry_run is True
+    assert spot_only_metadata_report(dry_run=False).dry_run is False
+    assert spot_only_historical_report(dry_run=False).dry_run is False
+    # The dry_run flag changes NOTHING else (the designed-no-op invariant),
+    # and the gates still pass on the dry-run shape.
+    assert metadata_phase_ok(spot_only_metadata_report(dry_run=True)) is True
+    assert historical_phase_ok(spot_only_historical_report(dry_run=True)) is True
+    wet, dry = spot_only_metadata_report(), spot_only_metadata_report(dry_run=True)
+    assert wet.note == dry.note
+    assert wet.years == dry.years
 
 
 # ── note surgery goldens + negative pins ─────────────────────────────────
@@ -240,6 +258,55 @@ def test_stopped_note_appends_without_surgery_or_warn() -> None:
         f"{plain}, {GREEKS_NOT_RUN_NOTE}, cross-verify: skipped (pipeline stopped: spot)"
     )
     assert not [e for e in logs2 if e["event"] == "pull_scope.note_surgery_miss"]
+
+
+def test_rewrite_market_hours_note_real_wording_both_arms() -> None:
+    """[refuter-r1 r2 MINOR-1] the REAL ``_market_hours_stop_note`` wording
+    (imported, never re-derived) is rewritten to the honest BOTH-ARMS text:
+    the bare "inside 08:45-15:35" clock claim (FALSE during an evening
+    Muhurat deferral) is gone, the generic three-phase list reads spot-only
+    (r1 NIT-A), and the self-contradictory resume advice is replaced."""
+    from brutex.dashboard.pipeline_pull import _market_hours_stop_note
+
+    rewritten = rewrite_market_hours_note(_market_hours_stop_note())
+    assert (
+        "market-session protection window active "
+        "(NSE hours 08:45-15:35 IST or a Muhurat session)" in rewritten
+    )
+    assert "inside NSE market-hours window (08:45-15:35 IST)" not in rewritten
+    assert "F&O not applicable — spot-only scope" in rewritten
+    assert "spot / metadata / historical skipped" not in rewritten
+    assert "resume once the protection window clears" in rewritten
+    assert "resume on the next out-of-hours run" not in rewritten
+    assert rewritten.startswith("deferred — ")
+    # Idempotent: a second pass changes nothing (no anchor in the replacements).
+    assert rewrite_market_hours_note(rewritten) == rewritten
+
+
+def test_rewrite_market_hours_note_drifted_passthrough() -> None:
+    """A drifted sequencer wording passes through UNCHANGED — the clause is
+    diagnostic, never load-bearing (the ``_STOP_FNO_CLAUSE`` posture)."""
+    drifted = "deferred — the market gate wording moved; resume later"
+    assert rewrite_market_hours_note(drifted) == drifted
+
+
+def test_build_spot_only_note_applies_market_hours_rewrite() -> None:
+    """[refuter-r1 r2 MINOR-1 — the dashboard finish-detail arm] the surgery
+    law folds the market-hours rewrite in, with the honest clauses appended
+    and NO surgery-miss WARN (the deferral note carries no F&O anchors)."""
+    from brutex.dashboard.pipeline_pull import _market_hours_stop_note
+
+    tail = CrossverifyTailOutcome(
+        status="skipped_pipeline_stopped", human="skipped (pipeline stopped: market_hours)"
+    )
+    with capture_logs() as logs:
+        note = build_spot_only_note(_market_hours_stop_note(), tail)
+    assert "market-session protection window active" in note
+    assert "inside NSE market-hours window (08:45-15:35 IST)" not in note
+    assert note.endswith(
+        f", {GREEKS_NOT_RUN_NOTE}, cross-verify: skipped (pipeline stopped: market_hours)"
+    )
+    assert not [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
 
 
 def test_greeks_clause_on_every_variant() -> None:

@@ -36,12 +36,14 @@ __all__ = [
     "SCOPE_SPOT_ONLY",
     "SPOT_ONLY_HISTORICAL_NOTE",
     "SPOT_ONLY_METADATA_NOTE",
+    "SPOT_ONLY_SESSION_RESUME_HINT",
     "TAIL_ALERT_STATUSES",
     "CrossverifyTail",
     "CrossverifyTailOutcome",
     "build_spot_only_note",
     "crossverify_clause",
     "normalize_pull_scope",
+    "rewrite_market_hours_note",
     "run_crossverify_tail",
     "spot_only_historical_report",
     "spot_only_metadata_report",
@@ -89,16 +91,20 @@ SPOT_ONLY_HISTORICAL_NOTE: Final[str] = (
 )
 
 
-def spot_only_metadata_report() -> MetadataPullReport:
+def spot_only_metadata_report(dry_run: bool = False) -> MetadataPullReport:
     """The all-zeros METADATA no-op the spot-only arm binds as ``run_metadata``.
 
     Zero failures + zero deferrals pass the REAL
     :func:`~brutex.dashboard.pipeline_pull.metadata_phase_ok` gate vacuously;
     ``years=()`` / ``underlyings=()`` are the machine tell-apart from a real
     empty enumeration (which always carries the requested year grid — B H1).
+    *dry_run* mirrors the LAUNCH's flag (refuter-r1-round r2 NIT-6: a dry-run
+    payload's nested sub-report must never read ``dry_run: false`` inside an
+    overall ``dry_run: true`` job result); the report is a designed no-op
+    either way — the flag changes NOTHING but the echoed field.
     """
     return MetadataPullReport(
-        dry_run=False,
+        dry_run=dry_run,
         years=(),
         underlyings=(),
         expiry_cells=0,
@@ -113,17 +119,18 @@ def spot_only_metadata_report() -> MetadataPullReport:
     )
 
 
-def spot_only_historical_report() -> CompositePullReport:
+def spot_only_historical_report(dry_run: bool = False) -> CompositePullReport:
     """The HISTORICAL no-op the spot-only arm binds as ``run_historical``.
 
     ``historical=None`` is the documented no-op arm of
     :func:`~brutex.dashboard.pipeline_pull.historical_phase_ok` ("a zero-call
     no-op, NOT a failure" — it returns ``True``), and ``metadata=None`` skips
     the inner gate — so the completed-chain path (prebuild + movers) fires
-    with ZERO F&O vendor calls, structurally.
+    with ZERO F&O vendor calls, structurally. *dry_run* mirrors the LAUNCH's
+    flag (refuter-r1-round r2 NIT-6 — see :func:`spot_only_metadata_report`).
     """
     return CompositePullReport(
-        dry_run=False,
+        dry_run=dry_run,
         requested=(),
         tradable=(),
         skipped_reference_only=(),
@@ -173,6 +180,71 @@ _FULL_PREFIX: Final[str] = "pipeline complete — "
 
 #: The spot-only replacement prefix.
 _SPOT_ONLY_PREFIX: Final[str] = "spot-only pipeline complete — "
+
+# ── market-hours deferral honesty (refuter round 1, r2 MINOR-1 + r1 NIT-A) ───
+#
+# ``pipeline_pull._market_hours_stop_note`` renders EXACTLY ONE deferral note
+# for a truthy ``market_closed`` — but the SPOT-ONLY predicate is the COMPOSED
+# belt (market hours OR a Muhurat session), so during an EVENING Muhurat
+# session (executed repro: frozen 2024-11-01 18:30 IST) the note's bare clock
+# claim "inside NSE market-hours window (08:45-15:35 IST)" is FALSE, and
+# "resume on the next out-of-hours run" is self-contradictory (18:30 IS
+# out-of-hours by that window). The stop INSTANT is not available to the
+# surgery (the note is a finished string), so the replacement is the honest
+# BOTH-ARMS wording. Exact-string coupled to ``_market_hours_stop_note`` by
+# design — a drifted wording passes through unchanged (diagnostic, never
+# load-bearing; the ``_STOP_FNO_CLAUSE`` posture).
+
+#: The exact clock-claim clause of the sequencer's market-hours deferral note.
+_MARKET_HOURS_WINDOW_CLAUSE: Final[str] = "inside NSE market-hours window (08:45-15:35 IST)"
+
+#: The both-arms replacement — true for the guard's window AND the Muhurat belt.
+_MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE: Final[str] = (
+    "market-session protection window active (NSE hours 08:45-15:35 IST or a Muhurat session)"
+)
+
+#: The generic three-phase list — on spot-only the F&O phases were designed
+#: no-ops that were never going to run (the ``_STOP_FNO_CLAUSE`` family).
+_MARKET_HOURS_PHASES_CLAUSE: Final[str] = (
+    "(spot / metadata / historical skipped to keep the shared Groww account free for the live feed)"
+)
+
+#: The spot-only replacement for :data:`_MARKET_HOURS_PHASES_CLAUSE`.
+_MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE: Final[str] = (
+    "(spot deferred to keep the shared Groww account free for the live feed; "
+    "F&O not applicable — spot-only scope)"
+)
+
+#: The self-contradictory-during-Muhurat resume advice.
+_MARKET_HOURS_RESUME_CLAUSE: Final[str] = "resume on the next out-of-hours run"
+
+#: The spot-only replacement for :data:`_MARKET_HOURS_RESUME_CLAUSE`.
+_MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE: Final[str] = "resume once the protection window clears"
+
+#: The CLI mid-run-halt mirror (``MarketHoursHalt`` caught in
+#: ``cmd_pull_all_spot`` — the exception message carries no clock claim, so
+#: only the RESUME advice needs the both-arms wording there).
+SPOT_ONLY_SESSION_RESUME_HINT: Final[str] = (
+    "resume once the market-session protection window clears "
+    "(NSE hours 08:45-15:35 IST or a Muhurat session)"
+)
+
+
+def rewrite_market_hours_note(note: str) -> str:
+    """Spot-only surgery on the sequencer's market-hours deferral note.
+
+    Refuter round 1 (r2 MINOR-1 + r1 NIT-A): the composed spot-only belt also
+    defers during a Muhurat session, where the sequencer's single deferral
+    note makes a FALSE clock claim and self-contradictory resume advice.
+    Replaces the three exact clauses with wording true for BOTH arms and
+    spot-only-aware for the phase list; a drifted note (anchors absent)
+    passes through UNCHANGED — the clause is diagnostic, never load-bearing,
+    so no WARN (the ``_STOP_FNO_CLAUSE`` posture). Pure; idempotent on an
+    already-rewritten note (the replacement strings contain no anchor).
+    """
+    note = note.replace(_MARKET_HOURS_WINDOW_CLAUSE, _MARKET_HOURS_WINDOW_SPOT_ONLY_CLAUSE, 1)
+    note = note.replace(_MARKET_HOURS_PHASES_CLAUSE, _MARKET_HOURS_PHASES_SPOT_ONLY_CLAUSE, 1)
+    return note.replace(_MARKET_HOURS_RESUME_CLAUSE, _MARKET_HOURS_RESUME_SPOT_ONLY_CLAUSE, 1)
 
 
 # ── crossverify tail seam (production default = REAL; fail-soft fence) ───────
@@ -285,13 +357,17 @@ def build_spot_only_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
     makes no F&O claim, so only step 3's honest clauses are appended — except
     the spot-stop note's generic "metadata + historical NOT started" trailer,
     which reads spot-only-aware as ``F&O not applicable (spot-only scope)``
-    (hostile-review r2 #3; those phases were designed no-ops here). A note
+    (hostile-review r2 #3; those phases were designed no-ops here), and the
+    market-hours deferral note, whose bare clock claim is rewritten to the
+    both-arms wording via :func:`rewrite_market_hours_note` (refuter round 1
+    r2 MINOR-1 — during an evening Muhurat session "inside 08:45-15:35 IST"
+    is FALSE). A note
     carrying exactly ONE anchor is a ``_complete_note`` wording DRIFT — log
     ONE ``pull_scope.note_surgery_miss`` WARN and still append step 3; the
     e2e negative pin (``test_e2e_no_zero_expiries_wording…``) fails loudly on
     a full drift, forcing a conscious re-pin.
     """
-    note = base_note
+    note = rewrite_market_hours_note(base_note)
     if _STOP_FNO_CLAUSE in note:
         note = note.replace(_STOP_FNO_CLAUSE, _STOP_FNO_SPOT_ONLY_CLAUSE, 1)
     prefix_present = _FULL_PREFIX in note

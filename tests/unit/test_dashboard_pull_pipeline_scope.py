@@ -311,6 +311,80 @@ def test_scope_spot_only_market_closed_is_composed_muhurat_belt(
     assert composed() is True  # the dashboard-wired belt fires (passes-after)
 
 
+def test_scope_spot_only_guard_off_market_closed_is_bare_base(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 MINOR-B — kills the M-I hardcoded-env mutant, dashboard
+    arm] With ``BRUTEX_MARKET_HOURS_GUARD=0`` the spot-only launch's CAPTURED
+    ``market_closed`` IS the guard's own never-blocked base (identity — the
+    compose returned it UNCHANGED) and reads False even at a frozen Muhurat
+    instant: the operator's kill switch genuinely disarms the belt at the
+    WIRING level. A compose call site hardcoding ``env={"…GUARD": "1"}``
+    would wrap the base and read True here."""
+    from brutex.calendars.market_hours import _market_never_blocked
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "0")
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert (
+            client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+    assert len(spines.spot_kwargs) == 1
+    captured = spines.spot_kwargs[0]["market_closed"]
+    assert captured is _market_never_blocked  # compose returned the base UNCHANGED
+    frozen = datetime(2024, 11, 1, 18, 30)  # inside the listed evening session
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    assert captured() is False  # guard off ⇒ belt off — never a Muhurat block
+
+
+def test_scope_spot_only_evening_muhurat_deferral_wording_and_attribution(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 r2 MINOR-1 — the reproduced evening instant] a spot-only
+    launch at frozen 2024-11-01 18:30 IST (inside the listed 18:00-19:00
+    Muhurat session) defers via the composed belt, and the finish detail no
+    longer makes the FALSE "inside 08:45-15:35" clock claim — it reads the
+    both-arms wording — while the ``auto_pull_gate.muhurat_belt_halt`` WARN
+    attributes the halt to the Muhurat arm in the logs."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+    frozen = datetime(2024, 11, 1, 18, 30)  # evening session; OUT of 08:45-15:35
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    _calls, tail = _tail_spy()
+    with (
+        _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client,
+        capture_logs() as logs,
+    ):
+        resp = client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"})
+        assert resp.status_code == 200
+        # 18:30 on a holiday is outside the START gate's 08:45-15:35 window,
+        # so the job STARTS; the sequencer's top belt then defers on the
+        # composed predicate's Muhurat arm.
+        assert resp.json()["started"] is True
+        snap = _wait_for_job(client)
+    assert spines.spot_kwargs == []  # ZERO vendor phases ran during the session
+    detail = snap["detail"]
+    assert (
+        "market-session protection window active "
+        "(NSE hours 08:45-15:35 IST or a Muhurat session)" in detail
+    )
+    assert "inside NSE market-hours window (08:45-15:35 IST)" not in detail  # the false claim
+    assert "F&O not applicable — spot-only scope" in detail
+    assert "resume on the next out-of-hours run" not in detail  # self-contradictory at 18:30
+    assert "cross-verify: skipped (dry-run)" in detail  # dry-run wins the fence order
+    belt = [e for e in logs if e["event"] == "auto_pull_gate.muhurat_belt_halt"]
+    assert len(belt) == 1  # the machine attribution — logs stop misattributing
+    assert belt[0]["instant"] == frozen.isoformat()
+
+
 def test_scope_spot_only_prebuild_empty_cascade(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -383,6 +457,38 @@ def test_scope_spot_only_segment_movers_spot_only(
         done = [e for e in logs if e["event"] == "pipeline.movers_warm.done"]
         assert len(done) == 1
         assert set(done[0]["warmed"]) == {"spot"}
+
+
+def test_scope_spot_only_dry_run_threads_into_noop_reports(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 r2 NIT-6, spy] the launcher threads its dry_run flag into
+    the bound no-op builders — a dry-run job's nested F&O sub-reports never
+    read ``dry_run: false`` inside an overall ``dry_run: true`` payload."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    captured: list[dict[str, Any]] = []
+    real_run = app_module.run_full_pipeline
+
+    def spy_run(**kwargs: Any) -> Any:
+        captured.append(dict(kwargs))
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(app_module, "run_full_pipeline", spy_run)
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert (
+            client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+    assert len(captured) == 1
+    meta = captured[0]["run_metadata"]()
+    hist = captured[0]["run_historical"](None)
+    assert meta.dry_run is True  # echoes the launch flag, never a constant False
+    assert hist.dry_run is True
+    assert meta.note.startswith("spot-only scope — ")  # still the designed no-op
+    assert hist.historical is None
 
 
 # ── inherited launcher rails ─────────────────────────────────────────────

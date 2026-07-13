@@ -798,6 +798,48 @@ def test_scope_spot_only_composes_muhurat_belt(
     assert hp_dry.market_closed is None  # dry-run parity (None passthrough)
 
 
+def test_scope_spot_only_guard_off_market_closed_is_bare_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 MINOR-B — kills the M-I hardcoded-env mutant, nightly arm]
+    With the guard kill switch OFF in the BUILD env, the spot-only binding's
+    ``market_closed`` IS the guard's own never-blocked base (the compose
+    returned it UNCHANGED) and reads False even at a frozen Muhurat instant —
+    the operator's ``BRUTEX_MARKET_HOURS_GUARD=0`` genuinely disarms the belt
+    at the WIRING level. A compose call site hardcoding ``env={"…": "1"}``
+    would wrap the base and read True here."""
+    from datetime import datetime as _dt
+
+    from brutex.calendars.market_hours import _market_never_blocked
+
+    hp, _spies, _store = _wire(
+        monkeypatch, tmp_path, scope="spot-only", env={"BRUTEX_MARKET_HOURS_GUARD": "0"}
+    )
+    assert hp.market_closed is not None
+    assert hp.market_closed is _market_never_blocked  # base returned UNCHANGED
+    frozen = _dt(2024, 11, 1, 18, 30)  # inside the listed evening session
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    assert hp.market_closed() is False  # guard off ⇒ belt off — never a block
+
+
+def test_scope_spot_only_dry_run_threads_into_noop_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 r2 NIT-6, nightly arm] the binding threads its dry_run
+    flag into the bound no-op builders — a dry-run report's nested F&O
+    sub-reports never read ``dry_run: false``. The wet build stays False."""
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    hp_dry, _sp, _st = _wire(monkeypatch, tmp_path, dry_run=True, scope="spot-only")
+    assert hp_dry.run_metadata().dry_run is True
+    prior = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False)
+    assert hp_dry.run_historical(prior).dry_run is True
+    hp_wet, _sp2, _st2 = _wire(monkeypatch, tmp_path, scope="spot-only")
+    assert hp_wet.run_metadata().dry_run is False
+    assert hp_wet.run_historical(prior).dry_run is False
+
+
 def test_scope_unknown_token_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown pull scope"):
         _wire(monkeypatch, tmp_path, scope="spotonly")

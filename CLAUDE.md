@@ -2481,8 +2481,30 @@ hostile-review pass._
   still_failed render, the tail-LakeWriteHalt CRITICAL alert-then-re-raise, the
   keep_awake span widened over the crossverify tail (locks still exit first), the
   `re.ASCII` settle shape, the actual-resolved-settle deferral detail, and the
-  spot-only-aware stopped-note trailer. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; `pull_scope.py` + `auto_pull_gate.py` 100%
+  spot-only-aware stopped-note trailer. REFUTER ROUND 1 folded (3 refuters; the
+  per-finding record lives in MIGRATION.md #1779): the Muhurat-belt deferral
+  HONESTY fix — the deferral surfaces no longer make the FALSE "inside
+  08:45-15:35" clock claim during an evening Muhurat session (NEW
+  `rewrite_market_hours_note` both-arms surgery on the dashboard finish detail +
+  the CLI prints; ONE `auto_pull_gate.muhurat_belt_halt` WARN per composed
+  instance attributes the Muhurat arm in the logs — the shared
+  `MarketHoursHalt.reason` contract untouched); the CLI ok=True headline is now
+  ALWAYS the surged note (ledger-reload-FAILED / prebuild-CRASHED warning
+  clauses never dropped; a crashed prebuild gets its own "CRASHED (ErrorType)"
+  line); junk `BRUTEX_PIPELINE_STRICT_GATE` is a clean pre-lock exit 1 (the
+  cmd_nightly precedent); `setBulkDisabled` covers BOTH pull buttons; the no-op
+  reports echo the launch's dry_run; the kill-switch no-re-read + both surfaces'
+  wiring-level guard-OFF arms pinned (the M-A2/M-I survivor mutants killed);
+  the vendor-EMPTY × prebuild × movers-warm interaction REAL-prebuild-e2e-pinned
+  as an INHERITED residual (the scoped exclusion REJECTED on executed evidence —
+  the spot report's `no_data` conflates vendor-empty with an already-settled
+  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001);
+  the `materialize_lake_timeframes` no-stored-bars remediation names BOTH causes
+  (the one shared-module text edit); the intent ROLLBACK scope-widening residual
+  disclosed (docstring + ledger + runbook §5); the dry-run
+  prebuild-failures-by-design shape documented (runbook §7). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `pull_scope.py` (80/18) + `auto_pull_gate.py`
+  (80/28) 100.00%
   line+branch on NEW ci.yml gates; touched app.py/cli.py/pipeline_binding.py/
   pull_intent.py lines covered; ruff/ruff-format clean, `mypy --strict` clean, pyright
   0 errors on every touched file.)

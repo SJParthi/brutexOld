@@ -4778,11 +4778,18 @@ def build_app(
                     # warmers (an absent segment, never a fabricated 0).
                     # _run_spot is bound kwarg-for-kwarg IDENTICALLY on both
                     # arms; the sequencer itself is byte-untouched.
+                    # The no-op builders echo the LAUNCH's dry_run flag
+                    # (refuter round 1, r2 NIT-6 — a dry-run payload's nested
+                    # sub-reports must never read ``dry_run: false``).
                     report = run_full_pipeline(
                         run_spot=_run_spot,
-                        run_metadata=(spot_only_metadata_report if spot_only else _run_metadata),
+                        run_metadata=(
+                            (lambda: spot_only_metadata_report(dry_run=dry_run))
+                            if spot_only
+                            else _run_metadata
+                        ),
                         run_historical=(
-                            (lambda _prior: spot_only_historical_report())
+                            (lambda _prior: spot_only_historical_report(dry_run=dry_run))
                             if spot_only
                             else _run_historical
                         ),

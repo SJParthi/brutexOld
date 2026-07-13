@@ -11,6 +11,7 @@ module gate).
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from typing import Any
 
 import pytest
 from brutex.calendars import auto_pull_gate
@@ -331,3 +332,77 @@ def test_compose_junk_kill_switch_raises_at_composition_time() -> None:
     loud there, never mid-run."""
     with pytest.raises(ValueError, match=MARKET_HOURS_GUARD_ENV):
         compose_market_closed(lambda: False, env={MARKET_HOURS_GUARD_ENV: "junk"})
+
+
+def test_compose_kill_switch_never_reread_after_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[refuter-r1 MINOR-A — kills the M-A2 call-time re-read mutant] the
+    switch resolver runs EXACTLY ONCE (at composition); junk written to
+    ``os.environ`` AFTER composition neither crashes a call nor changes the
+    verdict — the exact #1692 parse-once crash class a redundant "defensive"
+    per-call re-read would reintroduce (ValueError mid-pull ≠ MarketHoursHalt)."""
+    frozen = _at(date(2024, 11, 1), 18, 30)  # inside the evening session
+    resolve_calls: list[str] = []
+    real_resolve = auto_pull_gate.resolve_market_hours_guard_enabled
+
+    def counting_resolve(env: Any = None) -> bool:
+        resolve_calls.append("resolve")
+        return real_resolve(env)
+
+    monkeypatch.setattr(auto_pull_gate, "resolve_market_hours_guard_enabled", counting_resolve)
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "1")
+    composed = compose_market_closed(lambda: False, clock=lambda: frozen)
+    assert composed is not None
+    assert resolve_calls == ["resolve"]  # exactly once, at composition
+    # Junk written MID-run: a re-reading mutant raises ValueError per call.
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "garbage")
+    assert composed() is True  # no raise, verdict unchanged
+    # Flipping the switch OFF mid-run changes nothing either — resolved once.
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "0")
+    assert composed() is True
+    assert resolve_calls == ["resolve"]  # STILL exactly one resolver call
+
+
+def test_composed_muhurat_arm_emits_one_capped_attribution_event() -> None:
+    """[refuter-r1 r2 MINOR-1(b)] the MUHURAT arm (base False, session True)
+    emits ONE ``auto_pull_gate.muhurat_belt_halt`` WARN per composed instance
+    — the log-side tell-apart from a genuine market-hours deferral (the
+    shared ``MarketHoursHalt.reason``/``stopped_after`` contract is untouched)
+    — capped at once even across repeated consultations."""
+    evening = date(2024, 11, 1)
+    frozen = _at(evening, 18, 30)
+    composed = compose_market_closed(lambda: False, clock=lambda: frozen, env=_GUARD_ON)
+    assert composed is not None
+    with capture_logs() as logs:
+        assert composed() is True
+        assert composed() is True  # a second consultation must not re-emit
+    events = [e for e in logs if e["event"] == "auto_pull_gate.muhurat_belt_halt"]
+    assert len(events) == 1  # capped once per composed predicate instance
+    assert events[0]["instant"] == frozen.isoformat()
+    assert "Muhurat session belt" in events[0]["detail"]
+    # A FRESH composition gets its own one-shot cap (per-instance, not global).
+    composed2 = compose_market_closed(lambda: False, clock=lambda: frozen, env=_GUARD_ON)
+    assert composed2 is not None
+    with capture_logs() as logs2:
+        assert composed2() is True
+    assert [e["event"] for e in logs2] == ["auto_pull_gate.muhurat_belt_halt"]
+
+
+def test_composed_base_and_open_arms_emit_no_attribution_event() -> None:
+    """The event fires ONLY on the Muhurat arm: the guard's own arm (base
+    True) and the open verdict (both False) emit NOTHING — a genuine
+    market-hours halt is never mislabelled Muhurat."""
+    frozen_session = _at(date(2024, 11, 1), 18, 30)
+    base_arm = compose_market_closed(lambda: True, clock=lambda: frozen_session, env=_GUARD_ON)
+    assert base_arm is not None
+    with capture_logs() as logs:
+        assert base_arm() is True  # the base arm decides — no Muhurat claim
+    assert [e for e in logs if e["event"] == "auto_pull_gate.muhurat_belt_halt"] == []
+    open_arm = compose_market_closed(
+        lambda: False, clock=lambda: _at(_TRADING_DAY, 18, 30), env=_GUARD_ON
+    )
+    assert open_arm is not None
+    with capture_logs() as logs2:
+        assert open_arm() is False  # open — nothing fired
+    assert [e for e in logs2 if e["event"] == "auto_pull_gate.muhurat_belt_halt"] == []

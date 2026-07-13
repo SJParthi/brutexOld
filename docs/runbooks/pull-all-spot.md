@@ -59,6 +59,22 @@ protection family; there is no separate Muhurat switch). The `--auto` gate's
 whole-day Muhurat/holiday deferrals are calendar-keyed and independent of
 that switch.
 
+Mid-run / whole-chain deferral wording (refuter-round-1 r2 MINOR-1): the
+composed belt can also defer during an EVENING Muhurat session, so on
+spot-only surfaces the deferral text reads the both-arms
+`market-session protection window active (NSE hours 08:45-15:35 IST or a
+Muhurat session)` — never the bare market-hours clock claim — and the logs
+carry one `auto_pull_gate.muhurat_belt_halt` WARN when the Muhurat arm (not
+the guard) fired. `MarketHoursHalt.reason` stays `market_hours` (shared
+contract).
+
+CLI stdout honesty: the completion headline is ALWAYS the full pipeline note
+(through the spot-only surgery), so warning clauses — `window ledger reload
+FAILED …`, `prebuild CRASHED (…)`, `post-steps SKIPPED (strict gate: …)` —
+are never dropped on an exit-0 run; a crashed prebuild also gets its own
+`prebuild: CRASHED (ErrorType)` line. Junk `BRUTEX_PIPELINE_STRICT_GATE` is
+a clean exit-1 refusal before any lock (like the settle/market-hours knobs).
+
 ## 3. The settle time is a GUESS — measure it, then tighten
 
 `BRUTEX_PULL_ALL_SETTLE_IST` defaults to **17:30 IST** — a NAMED CONSERVATIVE
@@ -96,6 +112,15 @@ dashboard-launched real pull additionally persists a crash-recovery intent —
 the boot-time resume re-fires it **spot-only** (the scope rides the intent;
 it never widens into an F&O pull).
 
+NAMED RESIDUAL (refuter-round-1 r2 MINOR/NIT-4 — the ROLLBACK direction):
+that scope law holds only on scope-aware code. If you roll the DEPLOYED code
+back to a pre-scope build while a crashed spot-only pull's intent file is
+pending, the old code ignores the `scope` key and the boot resume re-fires a
+FULL-scope F&O pull (hours of vendor calls; all rails hold, but the scope
+widening is operator-unauthorized). Remediation: do not roll back across a
+crashed spot-only pull, or delete the intent file first
+(`<lake>/.pull_intent.json` — see `brutex/dashboard/pull_intent.py`).
+
 Mass-empty / zero-data settles: windows settled SKIPPED by the circuit
 breakers are re-verified via `brutex reopen-skipped` (see that command's
 help) — never an automatic re-pull storm.
@@ -115,9 +140,29 @@ help) — never an automatic re-pull storm.
   (`refused`/`withheld_partial`/`blocked`/`publish_failed`/`suspect`/`failed`)
   to exit 2; the default prints it and stays 0.
 
-## 7. First-run expectation
+## 7. First-run expectation + known shapes
 
 The first-ever full run is LONG (~750 symbols × 6+ years of 1-minute; the
 08:45 guard will halt + defer it repeatedly). Progress is monotone — every
 session's settled windows persist, and each subsequent run shrinks. NO
 wall-clock SLA is claimed (Golden Rule #10).
+
+**Vendor-EMPTY symbol ⇒ movers warm withheld (NAMED residual, refuter-round-1
+r3 F-1 — inherited #1145/#1221 pipeline law, real-prebuild-e2e-pinned):** a
+symbol the vendor cleanly returns NO data for (settled SKIPPED, zero stored
+bars — NOT a quarantine) has nothing to derive, so the prebuild reports it a
+failure (`prebuild failures: <SYM>`), `PrebuildOutcome.ok` reads False, and
+the sequencer withholds the DASHBOARD spot-movers warm for the whole run
+(the warm clause is honestly absent from the note — never fabricated). The
+healthy symbols' timeframes ARE still built. Impact is display-cache warmth
+only: the movers caches re-key on the revision token at the next poll. The
+scoped exclusion fix is the named follow-up
+DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 (the spot report's per-symbol
+`no_data` provably conflates vendor-empty with an already-settled
+incremental re-run, so the exclusion needs a zero-stored-bars lake probe).
+
+**Dry-run reports prebuild failures BY CONSTRUCTION (refuter-round-1 r3
+F-3):** a `--dry-run` / `dry_run=true` run writes no bars, so on a fresh
+lake the (real) prebuild fails every target and the note honestly reads
+`prebuild failures: …` — the inherited full-pipeline dry-run shape, not a
+defect of this button/command.

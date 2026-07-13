@@ -167,6 +167,16 @@ class PullIntent:
     #: full chain (every pre-scope intent file, back-compat). Persisted so a
     #: crashed spot-only pull resumes SPOT-ONLY, never a silently-widened
     #: full-scope F&O pull (the optional-field back-compat template).
+    #:
+    #: NAMED RESIDUAL (refuter round 1, r2 MINOR/NIT-4 — the DOWNGRADE
+    #: direction): that law holds only on scope-AWARE code. PRE-scope code
+    #: (an operator ROLLBACK across a crashed spot-only pull) ignores this
+    #: key entirely, so the boot-time resume re-fires as a FULL-scope F&O
+    #: pull — the pre-feature behavior with every rail (market-hours guard,
+    #: single-flight, ledger idempotence) intact, but an operator-unauthorized
+    #: scope WIDENING nonetheless. Remediation: do not roll back across a
+    #: crashed spot-only pull, or clear the intent file first
+    #: (``docs/runbooks/pull-all-spot.md`` §5).
     scope: str | None = None
 
     def to_payload(self) -> dict[str, Any]:

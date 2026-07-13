@@ -361,9 +361,16 @@ def build_headless_pipeline(
         # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): EXACTLY the two F&O
         # phase closures swap for the pull_scope no-op builders — the spot
         # closure + prebuild binding are shared verbatim between the arms.
-        run_metadata=spot_only_metadata_report if spot_only else _run_metadata,
+        # The no-op builders echo the BUILD's dry_run flag (refuter round 1,
+        # r2 NIT-6 — a dry-run report's nested sub-reports must never read
+        # ``dry_run: false``).
+        run_metadata=(
+            (lambda: spot_only_metadata_report(dry_run=dry_run)) if spot_only else _run_metadata
+        ),
         run_historical=(
-            (lambda _prior: spot_only_historical_report()) if spot_only else _run_historical
+            (lambda _prior: spot_only_historical_report(dry_run=dry_run))
+            if spot_only
+            else _run_historical
         ),
         run_prebuild=_run_prebuild,
         strict_gate=strict_gate,

@@ -275,13 +275,22 @@ def compose_market_closed(
     shared-account protection family — guard off ⇒ belt off): when the switch
     is disabled, *base* is returned UNCHANGED (no Muhurat term). The switch is
     resolved ONCE here at composition time (the ``resolve_market_closed``
-    parse-once posture — junk fails loud at pull start, never mid-run;
-    *env* ``None`` reads ``os.environ``). Otherwise returns
-    ``lambda: base() or muhurat_session_active(clock())`` — the launcher-level
+    parse-once posture — junk fails loud at pull start, never mid-run; a
+    junk value written AFTER composition is never re-read — no-re-read-pinned;
+    *env* ``None`` reads ``os.environ``). Otherwise returns the semantic
+    ``base() or muhurat_session_active(clock())`` — the launcher-level
     belt the trading-day-keyed guard is structurally blind to (a Muhurat date
     is a listed holiday ⇒ the guard reads non-trading ⇒ inert). COMPOSES the
     guard's own resolved callable; never edits the guard module. *clock*
     defaults to :func:`~brutex.calendars.nse.now_ist`.
+
+    MACHINE ATTRIBUTION (refuter round 1, r2 MINOR-1): when the MUHURAT arm
+    fires (base False, session window True) the composed predicate emits ONE
+    ``auto_pull_gate.muhurat_belt_halt`` WARN per composed instance — the
+    downstream deferral machinery (``MarketHoursHalt.reason`` /
+    ``stopped_after="market_hours"``) is a SHARED contract and stays
+    byte-untouched, so this event is the log-side tell-apart from a genuine
+    market-hours deferral.
     """
     if base is None:
         return None
@@ -290,10 +299,30 @@ def compose_market_closed(
         # (which the guard resolved to always-False) — the belt never arms.
         return base
 
+    belt_logged = False
+
     def _composed() -> bool:
         # ``now_ist`` resolved at CALL time (module-global lookup) so the live
         # clock stays current and tests can freeze it after composition.
+        nonlocal belt_logged
         tick = now_ist if clock is None else clock
-        return base() or muhurat_session_active(tick())
+        if base():
+            return True  # the guard's own arm — attribution is already honest
+        instant = tick()
+        if not muhurat_session_active(instant):
+            return False
+        if not belt_logged:
+            # Capped ONCE per composed instance (a mid-run halt consults the
+            # predicate once per window — one loud line, never a storm).
+            belt_logged = True
+            _LOG.warning(
+                "auto_pull_gate.muhurat_belt_halt",
+                instant=instant.isoformat(),
+                detail=(
+                    "the Muhurat session belt (NOT the 08:45-15:35 market-hours "
+                    "window) is deferring this spot-only pull"
+                ),
+            )
+        return True
 
     return _composed

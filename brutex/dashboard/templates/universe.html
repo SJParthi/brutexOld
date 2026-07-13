@@ -1779,13 +1779,17 @@ document.getElementById("tickconstbtn").onclick = async () => {
   btn.disabled = false;
 };
 
-/* ── In-flight lock for the ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
-   The bulk ①②③④ matrix + its multi-button disable loop are GONE: with a single
-   pipeline button, "disable the pull controls while a pull runs" is just disabling
-   that one button (PIPELINE_BTN was declared with the click handler above). Kept as
+/* ── In-flight lock for the pull buttons (DEC-UNIVERSE-PULL-CONSOLIDATE-001 +
+   DEC-PULL-SCOPED-ALL-ONECLICK-001, refuter-r1 NIT-5) ──
+   The bulk ①②③④ matrix + its multi-button disable loop are GONE: "disable the
+   pull controls while a pull runs" disables BOTH pull buttons — the full
+   pipeline button AND the scoped-ALL spot-only button (both were declared with
+   their click handlers above), so an in-page re-click really IS impossible on
+   either (the wedged-POST comments below reason from that invariant). Kept as
    setBulkDisabled so startAndPoll / finishLive call it unchanged. */
 function setBulkDisabled(on) {
   if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
+  if (PULL_ALL_SPOT_BTN) PULL_ALL_SPOT_BTN.disabled = on;
 }
 
 /* ── The LIVE feed: start a background pull, then poll /pull-progress ──
@@ -1914,8 +1918,9 @@ async function startAndPoll(path, label) {
   // (lastPollLabel still null) renderFeedAge names the pending start request +
   // the RELOAD-then-re-click remedy, never a false "retrying". Reload, NOT a
   // bare re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
-  // above disables the ONE pipeline button until finishLive — which never runs
-  // while the POST is wedged — so an in-page re-click is impossible; a fresh
+  // above disables BOTH pull buttons (full pipeline + spot-only) until
+  // finishLive — which never runs while the POST is wedged — so an in-page
+  // re-click is impossible; a fresh
   // page's enabled button re-attaches safely through the single-flight route.)
   startFeedAgeTicker();
   refreshWindowsLine();
@@ -2120,7 +2125,7 @@ function feedRetryDelayMs() {
    — during a hung/wedged start POST nothing retries, so the tail names the
    real state + the real remedy instead: RELOAD, then re-click. NOT a bare
    re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
-   disables the ONE pipeline button for the whole watch and finishLive — its
+   disables BOTH pull buttons for the whole watch and finishLive — their
    only re-enabler — never runs while the POST is wedged, so an in-page
    re-click is impossible; a fresh page's enabled button re-attaches safely
    through the single-flight route (see the startAndPoll comment). */
