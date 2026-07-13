@@ -1794,6 +1794,21 @@ jobs:
           else
             echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
           fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): the pull-scope
+          # registry + spot-only no-op F&O reports + note surgery + the fail-soft
+          # crossverify tail fence, and the CLI --auto gate (settle constant +
+          # Muhurat deferral + composed mid-run belt). Both ship at 100%
+          # line+branch standalone from the start.
+          if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+          else
+            echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+          else
+            echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
