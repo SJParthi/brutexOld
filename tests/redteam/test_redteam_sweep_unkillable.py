@@ -39,6 +39,7 @@ pytest.importorskip("lmdb")
 
 from brutex.audit_verify import auto_verify
 from brutex.data.models import CandleBar
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditChainCorruption
 from brutex.strategies.types import Side
 
@@ -92,6 +93,11 @@ def _grid() -> Any:
         data_snapshot_hash="snap-redteam",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the R45 diffcheck's naive
+        # reference is PRECISE-only in Stage 1 — a WORST_CASE grid disables
+        # the diffcheck (one loud WARN), so this redteam plant must run the
+        # PRECISE arm to have a diffcheck to break.
+        fill_mode=FillMode.PRECISE,
     )
 
 
