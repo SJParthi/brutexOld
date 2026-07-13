@@ -33,6 +33,33 @@ lake tooling below the gate (reachable only via the loud audit-stamped
 PULL/lake scope UNTOUCHED — futures ingest stays REFERENCE_ONLY; the
 per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
 #1790 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md
+#1789 — the cross-verify WITHHELD-day AUTO-RE-GATE folded into the daily
+run's catchup: every prior day inside `catchup_days` whose journal still
+names withheld symbols is re-gated from the since-healed lake (re-export →
+stage → publish the now-complete ones; the journal `withheld` map rewritten
+to the honest remainder; already-published keys NEVER re-put — journal
+idempotency; fail-closed gate-first; per-day LEAF journal flocks; runs
+BEFORE the session gate so weekend fires re-gate a healed Friday) — closing
+the runbook's "manual --day re-run" remediation for the heal-within-catchup
+case and CLOSING the #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001
+(id retired unused — the operator's separate historical whole-range S3
+backfill idea was STOOD DOWN by ruling 2026-07-13: current-day-only S3
+push); PLUS the persistent last-run failure surface — the runner persists
+`<lake>/.crossverify/last_run.json` for every MATERIAL verdict (never
+dry-runs, never the honest skips), `GET /api/v1/crossverify/progress`
+serves it as the additive `last_run` field (threadpool, never a 500) and
+the /universe panel renders it on load, so a finished failure survives
+page reloads AND dashboard restarts; the retryable-exhaustion
+`publish_failed` verdict gains a REAL detail (failing count + capped key
+sample); the summary/CLI lines gain the `re-gated N` token (INFO now
+requires recovered==0 AND regated==0). HONEST: only WITHHELD symbols
+re-gate — an honest-`nothing` zero-bar day backfilled later, or a day
+older than catchup_days, still needs `--day`; one month-partition read
+per re-gated symbol·day. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env; the per-item
+record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1789 —
+this header carries the pointer, never the story.)
 Earlier: 2026-07-13 (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md
 #1788 — the cross-verify export contract AMENDED to SPOT-ONLY over the
 WHOLE spot universe (operator ruling 2026-07-13): the NIFTY/BANKNIFTY
@@ -2498,6 +2525,65 @@ hostile-review pass._
   ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
   `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
   the blake3 formula on this branch, cite kept.)
+  Earlier: `claude/crossverify-backfill` (**DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789** —
+  the withheld-day AUTO-RE-GATE + the persistent last-run surface, stacked on PR #1515's
+  `claude/crossverify-spot-only` head (the PR opens after #1515 lands). OPERATOR SCOPE RULING 2026-07-13: the
+  originally-briefed HISTORICAL whole-range S3 backfill (2020→today walk) was STOOD DOWN before any code landed —
+  current-day-only S3 push stands; the "2020→today" ask concerned the LOCAL pull. Delivered: (1) step D2 in
+  `run.py` (`_regate_withheld_scan` + NEW `journal.scan_withheld_journals`) — every prior day inside
+  `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` (default 5; the ONE shared catchup window) whose journal still names WITHHELD
+  symbols has exactly those symbols re-gated from the since-healed lake: re-export → stage → publish the
+  now-complete ones under that day's LEAF journal flock (re-loaded under the lock — a peer's re-gate converges),
+  the journal `withheld` map rewritten to the honest remainder (still-withheld = reason UPDATED; honest `nothing`
+  = dropped + INFO, never a fabricated file; no-longer-enumerable = kept verbatim + WARN); already-published keys
+  are NEVER re-put (the `mark_staged` sha idempotency law + `publish_staged`'s pending-only puts — e2e-pinned
+  zero second PUTs); FAIL-CLOSED gate-first (gate absent ⇒ the whole scan skips with one WARN); runs BEFORE the
+  session gate (weekend fires re-gate a healed Friday — the step-D parity law); whole-run failure classes mirror
+  steps D/K/M (S3BackendUnavailable ⇒ publish_failed exit 2 · staging LakeWriteHalt ⇒ emit_pull_halt + suspect ·
+  nonretryable S3 ⇒ the scan aborts, later days left for the next run; a step-D recovery abort skips D2
+  entirely); defensive totality on calendar-abstain/non-trading/Muhurat prior days; ONE lazy `enumerate_targets`
+  per run. `CrossverifyReport` gains the additive put-level `regated` (counts toward the `published` verdict —
+  the recovered_prior twin); the Telegram summary + CLI lines gain `re-gated N` (INFO requires recovered==0 AND
+  regated==0; regated=None reads "?" never INFO); one `crossverify.regate_day` INFO per day. CLOSES the
+  #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001 (id RETIRED UNUSED — the runbook bound that name to exactly
+  this auto-re-gate; "backfill" now denotes the separately-stood-down historical push). (2) the PERSISTENT
+  last-run failure surface: `_finish` writes `<lake>/.crossverify/last_run.json` (atomic, best-effort — a failed
+  VIEW write never kills a run) for every MATERIAL verdict (summary verdicts + refused; NEVER dry-runs, NEVER the
+  honest skips — a weekend skip cannot clobber Friday's failure record, pinned) carrying the full report counts +
+  the NEW capped cross-pass `failed_keys` sample + detail; `journal.load_last_run` rides the load_journal
+  corruption-tolerance contract (absent/corrupt/oversized ⇒ None + one WARN); `GET /api/v1/crossverify/progress`
+  serves the additive `last_run` field (never-raises root resolve + `run_in_threadpool` — one O(1) sidecar read
+  per poll off the event loop; null never a 500) and the /universe panel's NEW `cvRenderLastRun` renders ✓/✕ +
+  day + verdict + counts + failing keys + detail on load, textContent-only — a finished failure survives page
+  reloads AND dashboard restarts (pinned across a REBUILT app instance); the retryable-exhaustion
+  `publish_failed` verdict gains the real "N key(s) still failing after retries (first: …)" detail (was empty).
+  HONEST LIMITS (named): only WITHHELD symbols re-gate — an honest-`nothing` zero-bar day backfilled later, or a
+  withheld day OLDER than catchup_days, still needs the manual `--day` re-run; each re-gated symbol pays one
+  month-partition read (O(one month of 1-minute bars) per symbol·day); a pending key published by the D2 pass
+  rather than the recovery scan counts `regated`, not `recovered_prior` (attribution only — both → published);
+  the last-run record is a VIEW — the per-day journal stays the durable truth. POLISH ROUND folded (same branch,
+  pre-open — both hostile reviews SHIP; their non-blocking items as ONE commit): a MATERIAL skip-day run
+  (regated/recovered_prior > 0 — a weekend/Muhurat/deferred fire that shipped real S3 objects) now emits the ONE
+  Telegram summary (WARN — the catch-up tier; the three skip verdicts gain markers + join the WARN set) AND
+  writes the last-run record (material-actions-only writes win — the Friday record a weekend re-gate overwrites
+  was resolved by that very re-gate; a TRUE no-op skip stays silent, Friday's failure record survives —
+  supersedes the initial summary/last_run-silent parity); the D2 target enumeration is guarded FAIL-OPEN (NEW
+  `_store_read_errors()` — the `spot_drift` house mirror; a transient store fault ⇒ one
+  `crossverify.regate_scan_failed` WARN + whole-scan skip, the main day never sinks; a genuine bug still
+  propagates); the two journal scans' oldest-boundary (offset == lookback IN, lookback+1 OUT) is mutation-pinned
+  (both `range(lookback_days - 1, …)` mutants verified killed); the peer-converged re-gate arm pinned SILENT (no
+  save, no INFO). TESTS: `TestWithheldRegate` (17) + `TestLastRunRecord` (7) + `TestSkipDayMaterialVisibility`
+  (6) + `TestRegateEnumerationGuard` (4 tests / 6 cases) on run.py (100.00%
+  line+branch), `TestScanWithheldJournals` + `TestLastRunRecordStore` + the 4 boundary pins on journal.py
+  (100.00%), the summary/CLI
+  token + severity pins (incl. the material-skip WARN/marker trio), `TestLastRunSurface` (5, incl.
+  across-a-rebuilt-app) + the panel textContent pin, and
+  the REAL-gate integration e2e (day D truncated-BANKNIFTY withheld exit 2 → lake healed via the production sink
+  → the NEXT trading day's run publishes D with regated==1, withheld cleared, staging gone, zero re-puts, the
+  last-run record flipping withheld_partial → published) — ci.yml UNTOUCHED (every new test in an already-gated
+  file). GATES: whole-package `brutex.crossverify` 100.00% line+branch; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; zero
+  new routes, zero new env vars.)
   Earlier: `claude/crossverify-spot-only` (**DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788** —
   the cross-verify export contract AMENDED to SPOT-ONLY over the WHOLE spot universe (operator ruling
   2026-07-13; supersedes-in-part #1776's "ALL spot + NIFTY/BANKNIFTY futures" tonight-scope clause):
@@ -6439,6 +6525,27 @@ hostile-review pass._
   scope untouched; ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line — see §1 + MIGRATION.md #1790 for the
   full blurb)
+  Earlier: `claude/crossverify-backfill`
+  (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789 — the cross-verify
+  WITHHELD-day AUTO-RE-GATE folded into the daily run's catchup (step D2:
+  prior days' gate-withheld symbols re-gated from the since-healed lake —
+  re-export → stage → publish the now-complete ones, journal withheld map
+  rewritten, published keys never re-put, fail-closed gate-first, per-day
+  LEAF journal flocks, runs before the session gate; closes the #1776-named
+  follow-up DEC-CROSSVERIFY-BACKFILL-001 — id retired unused, the historical
+  whole-range S3 backfill was STOOD DOWN by operator ruling 2026-07-13) +
+  the persistent last-run failure surface (`<lake>/.crossverify/last_run.json`
+  → the additive `last_run` progress field → the /universe panel renders it
+  on load; the retryable-exhaustion publish_failed verdict gains a real
+  failing-keys detail); POLISH ROUND folded — a MATERIAL skip-day run
+  (regated/recovered > 0) summarises (WARN catch-up tier) + writes the
+  last-run record (a true no-op skip stays silent — Friday's failure record
+  survives), the D2 enumeration is guarded FAIL-OPEN
+  (`crossverify.regate_scan_failed` — the main day never sinks), and the
+  journal scans' oldest-boundary is mutation-pinned; stacked on PR #1515's
+  `claude/crossverify-spot-only`
+  head; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1789 for the full blurb)
   Earlier: `claude/crossverify-spot-only`
   (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788 — the cross-verify
   export contract AMENDED to SPOT-ONLY over the WHOLE spot universe
