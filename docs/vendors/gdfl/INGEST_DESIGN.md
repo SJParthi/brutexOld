@@ -57,14 +57,14 @@ REFERENCE_ONLY). Every decision below was judge-decided across the two panels;
 | R3 | Raw-store identity | **RAW vendor ticker minus the `.NFO` suffix** (`NIFTY25200CE`, `OIL-I`), char-screened | Tickers/filenames are PROVENANCE, never guessed semantics; the suffix is redundant with the `<exchange>/<segment>` dirs it maps to (`.NFO` → `NSE`/`FNO`; any other suffix FILE-fails as unknown). |
 | R4 | Ticker → canonical resolution | **Decoupled: raw ingest NEVER blocked by resolution.** Best-effort ingest-time METADATA (recorded in the source manifest): multi-grammar candidate enumeration + registry/master validation (§4.4); exactly-one-valid ⇒ resolved; 0 or ≥2 ⇒ `unresolved` recorded; the DERIVE refuses `unresolved` loudly naming candidates | Storage keys on the vendor ticker, so archival never launders a guess and never stalls on the UNCONFIRMED fragment grammar; resolution is a mapping layer, not a storage gate. Never a guessed expiry (Golden Rule #1). |
 | R5 | Row key | **`(timestamp UTC, seq Int32)`**, seq = 0-based per-second ordinal in stable FILE order | No tiebreaker column exists (measured); file order is the only order there is; measured max 5 rows/s; cap 65,535 fail-loud. |
-| R6 | Re-ingest / vendor re-dump | **Byte-identity law**: source manifest records `source_sha256` per (source, ticker, date); identical hash ⇒ provable no-op; DIFFERENT bytes ⇒ (a) stored-rows-are-an-ordered-PREFIX-of-new ⇒ accept-and-extend, audited `GDFL_SNAP1S_SUPERSET`; (b) anything else ⇒ loud `GdflSourceConflictError` naming both hashes; explicit `--replace` = quarantine-copy → delete → re-ingest. Keep-first union on `(ts, seq)` stays the crash-rerun belt | seq is stable iff the bytes are stable; keep-first alone would MIX a reordered re-dump into a plausible-but-wrong union. The prefix-extend arm is the sibling's superset-accept NARROWED to the seq-stability-safe case (§11 A7). |
+| R6 | Re-ingest / vendor re-dump | **Byte-identity law**: source manifest records `source_sha256` per (source, ticker, date); identical hash ⇒ provable no-op; DIFFERENT bytes ⇒ (a) the stored rows are an ordered ROW-exact prefix of the re-parsed new file (**ordered row-prefix extend**, §3.4 — the DEFAULT baseline is the stored parquet, a post-normalization ROW comparison; the true BYTE prefix is checkable only under `--archive-raw`) ⇒ accept-and-extend, audited `GDFL_SNAP1S_SUPERSET`; (b) anything else ⇒ loud `GdflSourceConflictError` naming both hashes; explicit `--replace` = quarantine-copy → delete → re-ingest. Keep-first union on `(ts, seq)` stays the crash-rerun belt | seq is a pure function of the parsed row ORDER, so it is stable iff the stored rows stay a prefix; keep-first alone would MIX a reordered re-dump into a plausible-but-wrong union. The prefix-extend arm is the sibling's superset-accept NARROWED to the seq-stability-safe case (§11 A7). |
 | R7 | Parquet schema | **9 columns** (§3.2): ts · seq · ltp (2dp) · buy/sell price (2dp, nullable) · buy/sell qty (nullable) · ltq · open_interest (nullable) | Merge of the panel positions; per-row `src_line` dropped ((ts,seq) + audited sha reconstructs provenance); blank OI = NULL + counted (honest absence, never fabricated); a sent literal 0 quote is stored 0.00 (the raw store never edits — §11 A12). |
 | R8 | Row-skip vs FILE-fail | FILE-fatal: header drift · mixed ticker/date · undecodable encoding · non-trading date · out-of-coverage year · backward timestamp · 2M-row rail · malformed rows > `min(100, 1%)`. ROW-skip + per-class counters: blank line · field-count ≠ 10 (within the rail) · unparseable numeric · LTP ≤ 0/non-finite · negative qty/OI · out-of-session rows | Structural corruption invalidates a file's provenance; scattered blips are honest, counted absences — one torn line must not discard 13k good rows; the quantified rail still catches rot. |
 | R9 | Backward timestamps | **FILE FAIL by default**; operator escape `--allow-row-skips N` (skipped + counted, never re-sorted) | Deterministic seq is the foundation of R6; disorder is an UNMEASURED shape — refuse loudly until a real file shows it; sort-on-write would silently remap seq↔payload. |
-| R10 | Session law | Each row judged against its OWN IST date's REAL session (`calendars/nse.get_session`; Muhurat/half-day/special-weekend first-class). Raw store keeps `[open, close]` INCLUSIVE (a 15:30:00 closing print is real data); pre-open (09:00–09:15) + post-close rows skipped + counted per class; **the 1m derive counts+drops anything past the 15:29 minute label** (`post_grid_trades`) — BruteX 1m buckets are close-exclusive `[09:15, 15:30)` | Unanimous session law + the 15:30:00 boundary handled explicitly: the 375-minute grid ends at the 15:29 label; folding a 15:30:00 print into 15:29 fabricates placement. |
+| R10 | Session law | Each row judged against its OWN IST date's REAL session (`calendars/nse.get_session`; Muhurat/half-day/special-weekend first-class). Raw store keeps `[open, close]` INCLUSIVE (a closing print AT the close instant is real data); pre-open + post-close rows skipped + counted per class; **the 1m derive is SESSION-close-exclusive** — minute buckets span `[session.open, session.close)`, and any trade print at/after the session's REAL close is counted + dropped (`post_grid_trades`). On a REGULAR day that is exactly the 375-minute `[09:15, 15:30)` grid ending at the 15:29 label — same behavior, now DERIVED from the session, never hardcoded (§6.2) | Unanimous session law + the close boundary handled explicitly AND session-aware: folding a close-instant print into the last minute label fabricates placement; a fixed `[09:15, 15:30)` boundary would contradict this row's own first-class-Muhurat law — an evening-Muhurat file would raw-KEEP yet derive ZERO bars (refuter round 1). |
 | R11 | Ledger mapping | One file = one window in the SHARED lake-root WindowLedger: **`market="gdfl-snap1s"`**, `security_id=<raw_ticker>`, `interval="snap1s"`, window `[D, D+1)`; PLANNED rows seeded pre-write; SUCCESS-with-counters on stored>0; refusal ⇒ FAILED + `last_error`; header-only file ⇒ FAILED `empty_file` (deliberately NEVER the EMPTY→SKIPPED walk); **REQUIRED Phase-1 companion edit**: `db_view._window_market_bucket` gains a `gdfl` bucket matching BOTH exact `gdfl-*` market tokens + the counts-dict key (§5.1) | The ledger checkpoint IS the dashboard freshness hook (`lake_revision` stats the ledger); the sibling's scoped-separate-ledger REJECTED — it is structurally invisible to Groww rollups but moves NO freshness token (§11 A9); a compat gate pins that the ledger machinery actually accepts the new tokens. |
 | R12 | Clean 1-per-second series | **Read-time VIEW, never stored** (pure `collapse_to_1s`): state fields (LTP/quotes/OI) = LAST row of the second (max seq); `ltq_1s` = Σ ltq over the second's PAYLOAD-DISTINCT rows; + `prints`, `snap_count`; absent seconds ABSENT — never forward-filled | A snapshot is end-of-second STATE (last-wins); LTQ is FLOW (summing conserves traded quantity); a future materialized 1s track calls the SAME pure function. |
-| R13 | 1m derivation | Bar exists **iff ≥ 1 trade-print row (LTQ > 0)** in the minute; OHLC = first/max/min/last print LTP in `(ts, seq)` order; `volume` = Σ LTQ over payload-distinct prints, stamped `volume_basis="sum_ltq_undercount"`; `open_interest` = LAST observed OI in the minute across ALL rows (all-NULL minute ⇒ NULL, NO cross-minute carry); quote-only/idle minutes ABSENT; minute-start labels on the 09:15 session grid | Quote-only rows carry a STALE repeated LTP — an all-quote minute would fabricate a flat bar through the measured 698 s idle gaps (Golden Rule #1). The sibling's fold-ALL-rows default REJECTED (§11 A5); its never-overcount duplicate collapse ACCEPTED at the derive layer (§11 A6). |
+| R13 | 1m derivation | Bar exists **iff ≥ 1 trade-print row (LTQ > 0)** in the minute; OHLC = first/max/min/last print LTP in `(ts, seq)` order; `volume` = Σ LTQ over payload-distinct prints, stamped `volume_basis="sum_ltq_undercount"`; `open_interest` = LAST observed OI in the minute across ALL rows (all-NULL minute ⇒ NULL, NO cross-minute carry); quote-only/idle minutes ABSENT; minute-start labels on the session's REAL-open grid (09:15 on a regular day; the Muhurat open on a Muhurat day — §6.2) | Quote-only rows carry a STALE repeated LTP — an all-quote minute would fabricate a flat bar through the measured 698 s idle gaps (Golden Rule #1). The sibling's fold-ALL-rows default REJECTED (§11 A5); its never-overcount duplicate collapse ACCEPTED at the derive layer (§11 A6). |
 | R14 | Provenance isolation of derived 1m (highest stakes) | **Symbol-SUFFIX namespace under the true `bars/NSE/FNO/`**: canonical resolved contract + trailing `-G1S` token — `NSE-SIEMENS-31Jul25-8500-CE-G1S`, `NSE-OIL-29Jul25-FUT-G1S` | Grammar-verified: a last token ∉ {FUT, CE, PE} makes `parse_fno_symbol` return `None`, so EVERY parse-derived surface skips or honestly-buckets it by default. The `G1S-` PREFIX is REFUTED (it parses as exchange="G1S" and would JOIN the real chain); a new `FNO1S` segment is REJECTED (widens the most load-bearing frozenset + must chase every `exclude_segments={FNO}` site); `-G1S` over `-GDFL` because GDFL also serves native MINUTE bars — a future direct-1m ingest needs its own tag. §6.3. |
 | R15 | Derived bars: catalog + ledger + TFs | Catalog **YES** (via `ParquetBarSink` — `get_bars`/`/db` pager work); derive records its OWN ledger windows under `market="gdfl-derive-1m"` per (G1S symbol, day); 19 TFs + 1day via the derive command looping each resolved `-G1S` symbol over the single-partition seam DIRECTLY — `materialize_lake_timeframes(lake_root=…, exchange="NSE", segment="FNO", symbol=<…-G1S>, kind=<OPTIONS\|FUTURES>, include_daily=True)` per symbol (the seam is SINGLE-symbol with a REQUIRED `kind: PrebuildKind`; kind parsed from the canonical contract behind the suffix — CE/PE ⇒ OPTIONS, FUT ⇒ FUTURES; §6.4) | A derive-only run must move a freshness token or every `/db` view stays stale; the master-driven prebuild loop is untouched (G1S symbols are deliberately not master rows). |
 | R16 | /db surfacing | New `list_snap1s_datasets` + `query_snap1s_rows` mirroring the expired-options pager (DuckDB, keep-first `QUALIFY` on `(timestamp, seq)`, LIMIT/OFFSET, generation-keyed count memo); optional `?view=1s` serves the R12 collapse; one db.html left-panel row; derived `-G1S` bars ride the EXISTING F&O candle machinery | The proven `options/` read pattern; honest O-envelope: O(page) render over an O(files) footer count once per generation (the pre-stats-manifest posture). |
@@ -297,12 +297,25 @@ level 3, `statistics=False`, `use_pyarrow=False` — the house determinism knobs
   partition_raw_hash, ingested_utc}`.
 - Same `(source, ticker, date)` + identical `source_sha256` ⇒ provable no-op
   skip. DIFFERENT bytes:
-  - **Ordered-prefix extend** — the stored file's row sequence is a byte-exact
-    PREFIX of the new file's row sequence ⇒ accept-and-extend: ingest only the
-    tail (existing `(ts, seq)` assignments untouched by construction), one
-    `GDFL_SNAP1S_SUPERSET` audit line. This is the sibling's superset-accept
-    NARROWED to the seq-stability-safe case: a general superset with
-    mid-second insertions would remap seq↔payload and is NOT accepted.
+  - **Ordered row-prefix extend** — the re-PARSED new file's normalized row
+    sequence (ts, seq, payload — after the SAME §4 parse/normalization
+    pipeline: 2dp snap, blank→NULL) must carry the STORED partition's row
+    sequence as an exact PREFIX ⇒ accept-and-extend: ingest only the tail
+    (the prefix re-derives identical `(ts, seq)` assignments by construction
+    — seq is a pure function of row order, which a prefix preserves), one
+    `GDFL_SNAP1S_SUPERSET` audit line. Baselines, stated exactly (refuter
+    round 1 — the earlier "byte-exact PREFIX" wording was a misnomer): the
+    DEFAULT baseline is the stored parquet — a POST-normalization ROW
+    comparison, because the original CSV bytes live off-lake by default and
+    the parquet is a lossy transform of them (2dp snap, dropped `src_line`,
+    blank→NULL), so a byte-differing but parse-identical re-serialization of
+    the same rows is accepted BY DESIGN; when `--archive-raw` retained the
+    verbatim bytes, the check MAY additionally verify the true BYTE prefix;
+    and the manifest's whole-file `source_sha256` detects identical-file
+    re-ingest ONLY — it can never verify prefix growth. This is the
+    sibling's superset-accept NARROWED to the seq-stability-safe case: a
+    general superset with mid-second insertions would remap seq↔payload and
+    is NOT accepted.
   - **Anything else** ⇒ loud `GdflSourceConflictError` naming both hashes +
     remediation. Explicit `--replace` = quarantine-COPY the existing
     partition(s) to `.quarantine/<ts>/snap1s/…` (the healer's
@@ -493,9 +506,10 @@ keeps `[open, close]` INCLUSIVE — a 15:30:00 closing print is real data; rows
 strictly after the close instant are skipped + counted `rows_postclose`;
 pre-open (09:00–09:15) rows skipped + counted `rows_preopen`. Whether the
 vendor emits a 15:30:00 row at all is UNVERIFIED — the counters are the probe.
-The 1m derive is close-EXCLUSIVE (§6.2). Non-trading dates and out-of-coverage
-years are FILE-fatal (§4.3) — never ingest what cannot be session-judged
-(the abstain law).
+The 1m derive is SESSION-close-exclusive — `[session.open, session.close)`
+on the SAME per-date session this filter resolves (§6.2). Non-trading dates
+and out-of-coverage years are FILE-fatal (§4.3) — never ingest what cannot be
+session-judged (the abstain law).
 
 ### §4.6 File naming, streaming, one-instrument-one-day
 
@@ -694,18 +708,53 @@ that summing conserves into 1m volume.
   so a silent carry would be undisclosed staleness (§11 A6). Absent bar ⇒ no
   OI row exists to carry. Session-scoped-never-overnight holds trivially (the
   derive is per instrument-day).
-- **15:30:00 boundary (R10)**: the 375-minute session grid
+- **Session-close boundary (R10)**: `derive_1m_bars` already receives the
+  per-date `session`, and the minute grid is SESSION-AWARE — bucket labels
+  are anchored at the session's REAL open
+  (`get_session(...).open_time_ist`), close-EXCLUSIVE at its REAL close:
+  `[session.open, session.close)`. Any trade print at or past
+  `session.close` is counted + dropped (`post_grid_trades` WARN), because
+  folding it into the last minute label fabricates placement. On a REGULAR
+  day this is behavior-identical to a fixed law: the 375-minute grid
   (`trading_minutes_for_lake_interval` maps `1day` → 375,
-  `brutex/data/timeframes.py:157`) ends at the 15:29 label — the
-  close-exclusive `[09:15, 15:30)` property of the ONE resampler's
-  09:15-anchored fixed arithmetic (`brutex/data/tf_resampler.py:37-42`);
-  any trade print at
-  or past 15:30:00 is counted + dropped (`post_grid_trades` WARN), because
-  folding it into the 15:29 bar fabricates placement.
-- **Grid alignment**: minute-start labels on the session grid ⇒ trivially
-  consistent with the 09:15-anchored fixed-arithmetic law of the ONE
-  resampler (`brutex/data/tf_resampler.py:37-42`) — the derive emits 1m ONLY
-  and `resample_1m_to_tf` (`:169`) owns every coarser TF unchanged.
+  `brutex/data/timeframes.py:157`) ending at the 15:29 label, a 15:30:00
+  print dropped — the common case, now DERIVED from the session instead of
+  hardcoded. On a Muhurat day (`MUHURAT_SESSIONS`,
+  `brutex/calendars/nse.py:383-389` — evening 18:15–19:15 / 18:00–19:00
+  windows; the verified 2025 afternoon shift) the grid anchors at the
+  Muhurat open, so an evening-Muhurat F&O dump — first-class KEPT in the raw
+  store (§4.5) — derives REAL 1m bars instead of zero bars plus a
+  `post_grid_trades` flood (the refuter-round-1 self-contradiction: the
+  earlier fixed `[09:15, 15:30)` law was grounded on the 09:15-hardcoded
+  resampler, which is provably regular-day-only). Edge row 42 pins the
+  derive outcome; row 12 pins only the RAW filter.
+- **Grid alignment + the Muhurat coarser-TF disclosure**: at the 1-minute
+  level every minute label is its own bucket (`resample_1m_to_tf` treats
+  tf=1 as identity, `brutex/data/tf_resampler.py:169`), so the derive emits
+  1m ONLY and the ONE resampler owns every coarser TF unchanged. HONEST
+  downstream consequence, traced in-tree (not guessed): that resampler is
+  09:15-anchored FIXED arithmetic with NO session lookup and NO row drop —
+  `session_open_ist = ist.dt.truncate("1d") + 09:15` plus floor-division
+  bucketing (`brutex/data/tf_resampler.py:255-263`) — so for an
+  evening-Muhurat bar-day it folds every 1m bar into 09:15-anchored buckets
+  (offsets 525–600 min past the anchor for the evening windows), and
+  coarser-TF labels are generally MISALIGNED with the Muhurat open (e.g. the
+  18:00–19:00 session's `1hour` bars are labeled 17:15 and 18:15 IST;
+  aligned only where the TF divides the open's offset — 525 min for an
+  18:00 open). Nothing is dropped, nothing fabricated. This is the EXISTING
+  lake-wide behavior, NOT a GDFL divergence: the ingest session filter
+  already KEEPS evening-Muhurat 1m bars in the Groww `bars/` lake
+  (`filter_to_trading_session`, `brutex/data/session.py:13-36` — "an evening
+  muhurat bar is KEPT") and the same prebuild resampler serves them, so
+  `-G1S` bars inherit the status quo with zero new law. The Muhurat-specific
+  downstream laws already live where they matter: the daily-derive
+  forming-session cutoff honors per-date closes incl. Muhurat evenings
+  (`daily_derive_cutoff`, `brutex/calendars/nse.py:786`), the daily-open
+  census abstains on Muhurat (`classify_daily_open` → `muhurat_abstained`,
+  `brutex/data/spot_daily_resample.py:183-184`; spot-only by decision), and
+  Stage-1A never rolls a Muhurat OHLC into the next regular day's anchors
+  (`has_muhurat_session` guard, `brutex/engine/stage1a.py:960` —
+  DEC-SWEEP-DATA-EDGE-GUARDS-001, MIGRATION.md #1616).
 - **Session filter**: rows are already session-filtered at ingest (§4.5); the
   derive re-asserts via the SAME `filter_to_trading_session` family
   (`brutex/data/session.py:13-36`) — a belt, zero new law.
@@ -873,7 +922,7 @@ U = UNVERIFIED, D = design-derived.
 | 9 | M: `-I` futures (OILI/NTPCI/MIDCPNIFTY-I) | raw verbatim; calendar candidate recorded; derive flag-gated (R23) | `test_gdfl_ticker_resolution.py::test_future_i_derive_requires_roll_flag` + `::test_unknown_series_suffix_unresolved` |
 | 10 | M: one uniform 10-col schema | exact header gate, diff NAMED | `test_gdfl_csv_parse.py::test_header_drift_fails_naming_diff` (mutation: reordered cols) |
 | 11 | M: duplicate identical full rows (40/file) | RAW: stored distinct seq + counted; DERIVE: collapsed for ΣLTQ + counted | `test_gdfl_csv_parse.py::test_identical_rows_kept_and_counted` + `test_snap1s_derive.py::test_dup_prints_collapse_never_overcounts` |
-| 12 | M: session-bounded 09:15–15:30 | inclusive raw `[open, close]`; pre-open/post-close skip+count; Muhurat kept via `get_session` | `tests/unit/test_snap1s_session_filter.py::test_preopen_dropped` + `::test_muhurat_kept` |
+| 12 | M: session-bounded 09:15–15:30 | inclusive raw `[open, close]`; pre-open/post-close skip+count; Muhurat kept via `get_session` (RAW-filter row — the Muhurat DERIVE grid is row 42) | `tests/unit/test_snap1s_session_filter.py::test_preopen_dropped` + `::test_muhurat_kept` |
 | 13 | M: re-ingest same file | manifest sha no-op; keep-first belt ⇒ net_new=0, SUCCESS | `tests/integration/test_snap1s_ingest_idempotent.py` — property: double-ingest ≡ single |
 | 14 | D: crash between write and ledger | re-run converges (keep-first + PLANNED row visible) | `test_snap1s_ingest_idempotent.py::test_crash_between_write_and_ledger` |
 | 15 | U: emission semantics (change-only vs heartbeat) | change-driven ASSUMED, labeled; counter probes | `test_gdfl_csv_parse.py::test_identical_consecutive_counter` — the standing measurement |
@@ -884,11 +933,11 @@ U = UNVERIFIED, D = design-derived.
 | 20 | U: backward timestamps | FILE FAIL default; `--allow-row-skips` counts, never re-sorts | `test_gdfl_csv_parse.py::test_backward_ts_fails_file` + `::test_allow_skips_never_resorts` |
 | 21 | M(absent): zero/negative LTP | LTP ≤ 0 ⇒ row-skip + counter (within the rail) | `test_gdfl_csv_parse.py::test_nonpositive_ltp_skipped_counted` |
 | 22 | U: mixed ticker/date in one file | FILE FAIL (structural) | `test_gdfl_csv_parse.py::test_mixed_date_fails` |
-| 23 | U: reordered vendor re-dump | sha mismatch ⇒ `GdflSourceConflictError`, store byte-untouched | `tests/integration/test_snap1s_reingest.py::test_reorder_refused` |
-| 24 | U: appended (grown) re-dump | ordered-prefix ⇒ accept-and-extend + `GDFL_SNAP1S_SUPERSET`; else refuse; `--replace` quarantines | `test_snap1s_reingest.py::test_prefix_extend` + `::test_replace_quarantines_then_rewrites` |
+| 23 | U: reordered vendor re-dump | sha mismatch + the row-prefix check FAILS ⇒ `GdflSourceConflictError`, store byte-untouched | `tests/integration/test_snap1s_reingest.py::test_reorder_refused` |
+| 24 | U: appended (grown) re-dump | ordered ROW-prefix vs the stored parquet (§3.4 — byte-prefix only under `--archive-raw`) ⇒ accept-and-extend + `GDFL_SNAP1S_SUPERSET`; else refuse; `--replace` quarantines | `test_snap1s_reingest.py::test_prefix_extend` + `::test_replace_quarantines_then_rewrites` |
 | 25 | D: today-dated dump mid-session (G4) | FILE FAIL deferral; `--allow-today` escape | `test_gdfl_csv_parse.py::test_today_dated_file_deferred` |
 | 26 | U: non-trading / out-of-coverage file date | FILE FAIL `non_trading_date` / `calendar_coverage` | `test_snap1s_session_filter.py::test_holiday_date_fatal` + `::test_2027_abstains_loud` |
-| 27 | U: 15:30:00 closing print | raw KEPT (at-close inclusive); 1m derive drops past-15:29-label + `post_grid_trades` | `test_snap1s_derive.py::test_1530_print_stored_not_bucketed` |
+| 27 | U: 15:30:00 closing print | raw KEPT (at-close inclusive); 1m derive drops at/after the session's REAL close + `post_grid_trades` (the past-15:29-label case on a regular day) | `test_snap1s_derive.py::test_1530_print_stored_not_bucketed` |
 | 28 | U: expiry-fragment ambiguity (≥2 valid candidates) | `unresolved` recorded naming candidates; raw ingests; derive refuses | `test_gdfl_ticker_resolution.py::test_ambiguous_fragment_unresolved_derive_refused` |
 | 29 | D: >min(100,1%) malformed rows | FILE FAIL mass rail | `test_gdfl_csv_parse.py::test_mass_corruption_rail` |
 | 30 | D: adversarial huge file | streaming + 2M-row rail; bounded RSS | `tests/stress/test_snap1s_large_file.py` (process_probe RSS bound) |
@@ -903,6 +952,7 @@ U = UNVERIFIED, D = design-derived.
 | 39 | D: Greeks-backfill census noise (G6) | Phase-1 obligation: verify which backfill census bucket a `-G1S` 1minute FNO dataset ticks; prefilter or disclose | verification note in the Phase-1 PR + pin if a counter fires |
 | 40 | D: licensing repo pin (L13) | no tracked file under any gdfl data path; fixtures synthetic-only | `tests/unit/test_gdfl_no_raw_data_pin.py` |
 | 41 | D: mutation | new modules join the weekly per-module zero-survivor mutmut loop | `mutation.yml` wiring pin (the house pattern) |
+| 42 | M(calendar): evening-Muhurat session DERIVE (refuter round 1) | the 1m grid anchors at the session's REAL open, close-exclusive `[session.open, session.close)` (§6.2) — an evening-Muhurat file derives REAL bars with ZERO `post_grid_trades`; the coarser-TF fold inherits the lake-wide 09:15-anchored `resample_1m_to_tf` behavior (disclosed, §6.2) | `test_snap1s_derive.py::test_muhurat_session_derives_on_real_session_grid` — evening 18:00–19:00 fixture ⇒ real 1m bars, no post-grid drops; a regular-day fixture stays byte-identical to the fixed-grid law |
 
 ---
 
@@ -956,8 +1006,10 @@ U = UNVERIFIED, D = design-derived.
 8. **Vendor re-dump behavior UNVERIFIED.** If GDFL routinely re-issues
    reordered dumps per (ticker, day), every re-delivery hits the R6 refusal
    and the operator must `--replace` (quarantine preserves forensics;
-   continuity is operator-managed); grown dumps that extend the prior bytes
-   ride the prefix-extend arm. Measure on real deliveries before softening.
+   continuity is operator-managed); grown dumps whose re-parsed rows extend
+   the stored row sequence ride the row-prefix-extend arm (§3.4 — a
+   parquet-baseline ROW comparison by default; the byte-prefix check needs
+   `--archive-raw`). Measure on real deliveries before softening.
 9. **Zero census/heal/stats coverage of `snap1s/` in v1** (§3.5): walkers
    ignore the tree; integrity at rest = write-once + sha-manifest +
    refuse-on-change + flock/atomic writes; the three follow-up DECs are
@@ -1154,7 +1206,7 @@ it conflicts with repo-grounded findings. Every accept/reject:
 | A4 | Two-tier raw store (L-1: immutable spool + re-derivable parquet) for CSV ingest | REJECTED for CSV v1; tier-0 ACCEPTED for the WS capture leg (§9.5) | The operator's vendor CSV IS the raw artifact — a spool copy of it is redundant; the sha-manifest + deterministic re-ingest (§3.4) deliver the same delete-and-re-derive guarantee; the optional `--archive-raw` covers operators who want the copy in-lake. The WS stream has no vendor artifact, so THERE the spool is tier-0 truth. |
 | A5 | R-4: fold ALL rows' LTP into OHLC (default) + `open_is_stale` flag + config switch | REJECTED as default; divergence documented + probed | Sample evidence makes the two laws value-identical IF LTP only moves on trades — UNVERIFIED, so the default must be the one that degrades more honestly: LTQ>0-only fails toward ABSENT bars (honest absence); all-rows fails toward FABRICATED flat bars through the measured 698 s idle gaps (Golden Rule #1). No config switch — one law, no silent variants; the cross-validation diff (§6.4) measures the real difference. |
 | A6 | R-5: exact-duplicate collapse-and-count (Σ LTQ must never overcount) + L-7 volume/OI honesty | **ACCEPTED, split by layer** | RAW store keeps duplicates (dedup would ASSUME change-only semantics — archival is evidence); the DERIVE collapses payload-identical prints before summing LTQ (`dup_prints_collapsed`), so the `volume_basis="sum_ltq_undercount"` lower-bound stamp (folded ~verbatim) stays true under either emission model. OI: last-obs-in-minute kept; the sibling's cross-minute `oi_carried` carry REJECTED for derived bars — the frozen 7-column schema has no flag column, so a carry would be undisclosed staleness; NULL-before-first-observation + never-overnight hold trivially. |
-| A7 | D-5: superset-accept on re-serve | **ACCEPTED, narrowed** | Adopted as ordered-PREFIX extend only (§3.4): a general (ts, payload)-superset with mid-second insertions would remap seq↔payload and break the R6 stability contract; the prefix arm covers the real grown-re-dump case with zero seq risk. |
+| A7 | D-5: superset-accept on re-serve | **ACCEPTED, narrowed** | Adopted as ordered ROW-prefix extend only (§3.4 — parquet-baseline post-normalization comparison; the byte-prefix check only under `--archive-raw`): a general (ts, payload)-superset with mid-second insertions would remap seq↔payload and break the R6 stability contract; the prefix arm covers the real grown-re-dump case with zero seq risk. |
 | A8 | R-6: refuse `-I` continuous-contract STORAGE in v1 | REJECTED for storage; **ACCEPTED at the resolution layer, narrowed** | Our mandate's own samples are `-I` files; verbatim-ticker day-file storage never launders a roll guess (the refusal buys zero archival safety). The real hazard — resolving `-I` into a specific contract when GDFL's roll convention is UNVERIFIED — is gated behind the explicit, audited `--assume-calendar-roll` (R23), with the probe row deciding. |
 | A9 | Minimal §C.6: SEPARATE WindowLedger at the GDFL tree root (structurally invisible to Groww rollups) | REJECTED | `lake_revision` stats the LAKE-ROOT ledger — a scoped ledger moves NO dashboard freshness token, so every /db view stays stale unless `lake_revision` grows a component (a bigger brutex/ edit than the G1 one-map fix, plus a second ledger to operate). The invisibility goal is met better by the `gdfl` display bucket: visible, correctly labeled, never inflating SPOT counts. The sibling's compat-gate demand (ledger tokens asserted-never-checked) ACCEPTED as a Phase-1 pin (§5.1). |
 | A10 | L-13: licensing/security — raw data never committed; synthetic fixtures + repo pin; tree EXCLUDED from off-box replication until the agreement is read | **ACCEPTED in full** (supersedes our panel's "backup rides the whole-root include set" default) | The stricter posture costs nothing and the whole-root inclusion was our design's own flagged blocker; extended per our judge's G5 to the derived `-G1S` bars explicitly (derived-data clauses commonly restrict redistribution too). A named divergence from DEC-BACKUP-OFFBOX-001. |

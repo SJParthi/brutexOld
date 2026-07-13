@@ -28,7 +28,7 @@ byte-identity re-ingest law), the CSV parse taxonomy + ticker AMBIGUITY law
 read-time 1s collapse + LTQ>0-only 1m derivation into provenance-isolated
 `-G1S` symbols under bars/ (the suffix fails the right-anchored F&O grammar,
 so every parse-derived surface skips or honestly-buckets it), /db surfaces
-mirroring the expired-options pager, a 41-row edge matrix + the
+mirroring the expired-options pager, a 42-row edge matrix + the
 honest-limits/UNVERIFIED register, and the two-panel reconciliation appendix;
 raw GDFL data NEVER committed + `snap1s/` and the derived `*-G1S` bar dirs
 EXCLUDED from off-box backup until the licensing read (a named
@@ -2433,7 +2433,7 @@ hostile-review pass._
   never a storage gate; 9-column deterministic parquet keyed
   `(timestamp, seq)` with seq = stable file order; keep-first merge on the
   verbatim flock/atomic/LakeWriteHalt machinery; a BYTE-IDENTITY re-ingest
-  law over an append-only flocked sha manifest, with an ordered-prefix
+  law over an append-only flocked sha manifest, with an ordered ROW-prefix
   superset-extend arm and an explicit `--replace` quarantine flow); the
   exact-header CSV parse taxonomy (structural corruption FILE-fatal, scattered
   blips row-skip+counted, the min(100,1%) mass rail; a today-dated dump
@@ -2450,8 +2450,10 @@ hostile-review pass._
   `gdfl-ingest` audit file; the read-time `collapse_to_1s` view + LTQ>0-only
   1m derivation (volume = ΣLTQ over payload-distinct prints, stamped
   `volume_basis="sum_ltq_undercount"`; idle/quote-only minutes ABSENT — never
-  forward-filled; 15:30:00 prints stored raw, dropped+counted past the 15:29
-  label) into provenance-isolated **`-G1S`**-suffixed contract symbols under
+  forward-filled; close-instant prints stored raw, dropped+counted at/after
+  the session's REAL close on the session-aware `[session.open,
+  session.close)` grid — the 15:29 label on a regular day) into
+  provenance-isolated **`-G1S`**-suffixed contract symbols under
   the true `bars/NSE/FNO/` (the suffix fails `parse_fno_symbol`'s
   right-anchored grammar so movers/cascade/prebuild/Greeks/futures_series all
   skip or honestly-bucket it by default; the `G1S-` PREFIX is REFUTED — it
@@ -2461,7 +2463,7 @@ hostile-review pass._
   `materialize_lake_timeframes(..., kind=)` loop (the seam is single-symbol
   with a REQUIRED `kind: PrebuildKind`); /db
   discovery + pager mirroring the expired-options pattern with a
-  generation-keyed count memo; a 41-row edge matrix naming a planned test per
+  generation-keyed count memo; a 42-row edge matrix naming a planned test per
   measured/UNVERIFIED case; honest limits (NO API backfill — GDFL tick-class
   history is days-scale, the 01-Jul-2025 samples are vendor DUMPS and dump
   availability ≠ API depth; L1-only; derived-bar fidelity stamped; emission
@@ -2479,7 +2481,12 @@ hostile-review pass._
   the per-finding record lives in MIGRATION.md #1781): the derive seam
   restated to the real single-symbol kind-routed loop, the UNCONFIRMED
   native-1m depth label corrected, the G1 bucket edit made two-token
-  precise. DOCS-ONLY — zero brutex/rust/test/CI source
+  precise. REFUTER ROUND 1 folded (3-refuter panel, MIGRATION.md #1781):
+  the 1m-derive boundary made SESSION-aware (`[session.open, session.close)`
+  — an evening-Muhurat dump now derives REAL bars, regular days unchanged;
+  the coarser-TF 09:15-anchored fold inheritance disclosed) + the re-dump
+  prefix law renamed the ordered ROW-prefix extend (parquet-baseline;
+  byte-prefix only under `--archive-raw`). DOCS-ONLY — zero brutex/rust/test/CI source
   change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
   REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
@@ -6320,7 +6327,7 @@ hostile-review pass._
   re-ingest law) + the CSV parse taxonomy + the ticker ambiguity law (raw
   archival never blocked by resolution) + provenance-isolated `-G1S` derived
   1m bars under bars/ + /db read surfaces mirroring the options pager + the
-  41-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
+  42-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
   committed; `snap1s/` + `*-G1S` bars excluded from off-box backup until the
   licensing read — a named DEC-BACKUP-OFFBOX-001 divergence); DOCS-ONLY —
   zero source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
