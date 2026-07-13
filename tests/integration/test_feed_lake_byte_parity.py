@@ -1,6 +1,6 @@
 """Cross-cutting proof suite for the feed-root nesting law (the parity harness).
 
-DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1755) / DEC-FEED-INTERFACE-001 (#1779).
+DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1755) / DEC-FEED-INTERFACE-001 (#1782).
 The sacred invariant of the feed-add program is that the DEFAULT feed's write
 output + every existing lake reader's behaviour are byte-identical whether or not
 the feed-root machinery exists, and a non-default feed's nested tree

@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.feeds.registry` (DEC-FEED-INTERFACE-001, #1779).
+"""Unit tests for :mod:`brutex.feeds.registry` (DEC-FEED-INTERFACE-001, #1782).
 
 100% line + branch. The registry ships ONLY the default feed (PR-2 is
 vendor-token-free); an unknown id raises a typed refusal naming the registered
