@@ -5056,14 +5056,13 @@ class TestOptionIngestTodayGate:
         report_off = self._run(
             _FakeSDK(payload=_fno_payload(prior + settled_today)),
             sink_off,
-            led_off_fresh := WindowLedger(),
+            WindowLedger(),
             gate=False,
         )
         assert report_off.conflicts == 5  # every settled today row DISCARDED
         month_off = next((lake_off / "bars").rglob("*.parquet"))
         frozen = pl.read_parquet(month_off)
         assert frozen.filter(pl.col("open_interest").is_null()).height == 5  # frozen forever
-        del led_off_fresh
 
     def test_option_sparse_day_success_byte_identical(self) -> None:
         # The illiquid-but-legit pin, FNO side: a sparse CE day with settled
@@ -5103,7 +5102,7 @@ class TestOptionIngestTodayGate:
     def test_non_today_fno_window_byte_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A historical contract window under an armed gate: classifier never
         # consulted, ledger record identical to gate-off.
-        import brutex.data.today_completeness as tc_mod
+        from brutex.data import today_completeness as tc_mod
 
         calls: list[object] = []
         real = tc_mod.classify_today_completeness

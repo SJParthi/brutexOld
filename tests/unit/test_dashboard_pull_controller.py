@@ -3873,7 +3873,7 @@ class TestTodayCompletenessGateArming:
     def test_pull_all_spot_arms_today_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
         from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 
         monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
@@ -3898,7 +3898,7 @@ class TestTodayCompletenessGateArming:
     def test_pull_all_spot_dry_run_threads_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
         from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 
         # Junk env MUST NOT crash a dry-run: the resolve is short-circuited away
@@ -3919,7 +3919,7 @@ class TestTodayCompletenessGateArming:
     def test_pull_candles_arms_today_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
         from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 
         monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
@@ -4005,7 +4005,7 @@ class TestTodayCompletenessGateArming:
     def test_pull_candles_kill_switch_off_threads_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
         from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
 
         monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "0")

@@ -3272,7 +3272,7 @@ class TestIngestSpotTodayGate:
         # and the classifier is never consulted (spy).
         import hashlib
 
-        import brutex.data.today_completeness as tc_mod
+        from brutex.data import today_completeness as tc_mod
         from brutex.data.parquet_writer import ParquetWriter
         from brutex.data.sink import ParquetBarSink
         from brutex.data.window_ledger import WindowLedger
