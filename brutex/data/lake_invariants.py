@@ -57,7 +57,7 @@ the dependency edges stay acyclic.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import MAXYEAR, MINYEAR, UTC, datetime
 from pathlib import Path
@@ -683,28 +683,78 @@ def _pause(per_file_pause: Callable[[], None] | None) -> None:
         per_file_pause()
 
 
-def _bar_files(
+def _child_dirs(parent: Path, name_filter: str | None) -> list[Path]:
+    """Sorted child DIRECTORIES of *parent*, optionally narrowed to one name.
+
+    One level of the streaming ``bars/`` walk
+    (DEC-LAKE-INVARIANTS-PREINDEX-001). ``None`` widens like the old glob's
+    ``*`` (every child dir — pathlib ``*`` matches dot-names too, mirrored
+    here); a filter matches as the LITERAL directory name (coordinate filters
+    are the writer's own path-safe segment values, never glob patterns — the
+    old f-string glob interpolation behaved identically for every legal
+    coordinate). ``is_dir()`` follows a symlinked dir exactly as the old
+    fixed-depth glob's ``*`` components did (empirically pinned). A vanished
+    *parent* (or one raced away mid-``iterdir``) yields ``[]`` — the old
+    ``base.exists()`` guard generalised per level. A single CHILD whose
+    ``is_dir()`` stat faults (EACCES / EIO / ESTALE — the errnos 3.12
+    ``pathlib`` re-raises) is skipped ALONE under a per-child guard (review
+    fold, MINOR): pre-fix the one ``try`` wrapped the whole comprehension,
+    so one faulting sibling silently dropped the ENTIRE level — the old glob
+    dropped only the offending entry. Sorting ``Path`` objects sorts by path
+    COMPONENTS (3.12 ``PurePath.__lt__``), the same order
+    ``sorted(base.glob(...))`` yielded, so the walk preserves the old scan
+    order exactly.
+    """
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return []
+    children: list[Path] = []
+    for child in entries:
+        try:
+            if child.is_dir():
+                children.append(child)
+        except OSError:
+            continue  # one unstat-able child never drops its siblings
+    if name_filter is not None:
+        children = [child for child in children if child.name == name_filter]
+    return sorted(children)
+
+
+def _iter_series_candidates(
     lake_root: Path,
     *,
     exchange: str | None,
     segment: str | None,
     symbol: str | None,
     interval: str | None,
-) -> list[Path]:
-    """Every ``<year>/<month>.parquet`` bar file matching the coordinate filters.
+) -> Iterator[list[Path]]:
+    """Stream each series' candidate ``<year>/<month>.parquet`` files, one series at a time.
 
-    Deliberately its OWN tiny glob with the SAME six-segment shape as
-    ``catalog_reconcile._partition_files`` (importing the sibling's private
-    would be the worse coupling — documented as the same pattern, not shared
-    code). The fixed depth never matches the ``options/`` tree, and the
-    lake-root-sibling ``.quarantine/`` / ``.locks/`` dirs live outside ``bars/``
-    so quarantined copies are never re-scanned.
+    The grouping key ``PartitionCoords.series`` IS the directory structure
+    (``bars/<exch>/<seg>/<sym>/<interval>/<yyyy>/<mm>.parquet``), so a
+    hierarchical sorted walk yields exactly the groups the old whole-tree
+    glob + dict pre-index built — WITHOUT ever materialising an O(files)
+    index (DEC-LAKE-INVARIANTS-PREINDEX-001: the old pre-index held
+    ~1.2 KB/file for the WHOLE read phase — ~3.1-3.5 GiB at the operator's
+    measured 2.36M-file lake, resident for the ≥32.8 h throttled L3 sweep).
+    Resident is now O(one interval dir). The ``*/*.parquet`` leaf glob keeps
+    the old fixed depth: an off-depth stray is never seen, a stray AT the
+    canonical depth still reaches the caller's parse (→ ``files_skipped``),
+    and the ``options/`` tree / lake-root-sibling ``.quarantine`` +
+    ``.locks`` dirs stay invisible exactly as before (the
+    ``catalog_reconcile._partition_files`` shape note carries over). Empty
+    candidate lists are not yielded (an interval dir with no
+    canonical-depth files was invisible to the old glob too).
     """
     base = lake_root / BAR_DIR_NAME
-    if not base.exists():
-        return []
-    pattern = f"{exchange or '*'}/{segment or '*'}/{symbol or '*'}/{interval or '*'}/*/*.parquet"
-    return sorted(base.glob(pattern))
+    for exch_dir in _child_dirs(base, exchange):
+        for seg_dir in _child_dirs(exch_dir, segment):
+            for sym_dir in _child_dirs(seg_dir, symbol):
+                for interval_dir in _child_dirs(sym_dir, interval):
+                    candidates = sorted(interval_dir.glob("*/*.parquet"))
+                    if candidates:
+                        yield candidates
 
 
 def _engine_coord_from_path(path: Path, lake_root: Path) -> tuple[str, str, str] | None:
@@ -713,7 +763,8 @@ def _engine_coord_from_path(path: Path, lake_root: Path) -> tuple[str, str, str]
     Used ONLY on the path-parse-failure branch, where ``parse_partition_path``
     could not decode the file yet the census must still know whether the file
     lives on an :data:`ENGINE_INDEX_COORDS` series (a corrupt engine PATH must
-    flip the engine verdict — DEC-AUDIT-CENSUS-HONESTY-001). ``_bar_files``
+    flip the engine verdict — DEC-AUDIT-CENSUS-HONESTY-001). The
+    :func:`_iter_series_candidates` walk's ``*/*.parquet`` leaf glob
     guarantees the six-segment ``bars/exch/seg/sym/interval/yyyy/mm.parquet``
     layout, so the first three parts under ``bars/`` are the coordinate; returns
     ``None`` for any path that is not under ``bars/`` or is too shallow.
@@ -1154,6 +1205,18 @@ def scan_lake_invariants(
     ``lake.invariant.scan_skip`` WARNING (mirrors
     ``catalog.reconcile.parquet_skip``).
 
+    Space honesty (DEC-LAKE-INVARIANTS-PREINDEX-001): the ``bars/`` tree is
+    streamed ONE SERIES AT A TIME (a sorted directory walk — the series key
+    IS the directory structure), so resident memory is O(largest single
+    series + findings + symbol dirs) — NEVER O(files). The pre-streaming
+    scanner materialised a whole-tree pre-index (~1.2 KB/file measured) and
+    held it across the entire throttled read phase (~3.1-3.5 GiB resident for
+    ≥32.8 h at the operator-measured 2.36M-file lake under the default L3
+    throttle). ``findings`` stays deliberately UNCAPPED — it is O(poisoned
+    files), not O(files), each finding is small, and the healer requires the
+    complete list (a cap would silently un-heal; refusing is worse than
+    holding).
+
     Parameters
     ----------
     lake_root
@@ -1199,53 +1262,72 @@ def scan_lake_invariants(
     files_skipped = 0
     engine_files = 0
     engine_files_skipped = 0
-    first_skipped: list[str] = []
+    first_skipped_by_kind: dict[str, str] = {}
 
-    def _note_first_skip(skipped: Path) -> None:
-        """Remember the FIRST skipped file (O(1) — used to NAME it in the CLI)."""
-        if not first_skipped:
-            first_skipped.append(str(skipped))
+    def _note_first_skip(skipped: Path, *, parse: bool = False) -> None:
+        """Remember the FIRST skipped file (O(1) — used to NAME it in the CLI).
+
+        Two kinds, parse-priority: the pre-streaming scanner noted every
+        PATH-parse failure during its whole-tree pre-index pass — i.e. BEFORE
+        any read skip anywhere — so a parse skip anywhere in the tree beat a
+        read skip anywhere. The streaming walk interleaves the two in walk
+        order; keeping the first of EACH kind and preferring ``parse`` at
+        report build preserves the old ``first_skipped_path`` exactly
+        (DEC-LAKE-INVARIANTS-PREINDEX-001).
+        """
+        kind = "parse" if parse else "read"
+        first_skipped_by_kind.setdefault(kind, str(skipped))
 
     series_scanned = 0
     files_by_segment: dict[str, int] = {}
     if include_bars:
         symbol_dirs: dict[tuple[str, str], set[str]] = {}
-        per_series: dict[tuple[str, str, str, str], list[tuple[PartitionCoords, Path]]] = {}
-        for path in _bar_files(
+        for candidates in _iter_series_candidates(
             lake_root, exchange=exchange, segment=segment, symbol=symbol, interval=interval
         ):
-            try:
-                parsed = parse_partition_path(path, lake_root=lake_root)
-            except PartitionError:
-                files_skipped += 1
-                _note_first_skip(path)
-                # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review MAJOR): an ENGINE-index
-                # file whose PATH fails to parse (a non-integer / month-13 year dir
-                # under bars/NSE/INDEX/NIFTY/...) is STILL an unreadable engine file —
-                # derive its (exchange, segment, symbol) POSITIONALLY from the glob
-                # tail (`_bar_files` guarantees the six-segment
-                # bars/exch/seg/sym/interval/yyyy/mm.parquet shape) so it flips the
-                # engine verdict too. Without this the CLI/json mis-attribute it as a
-                # reference-only skip ("ENGINE verified CLEAN") while doctor — which
-                # scopes per-coord and counts ALL skips — FAILs, so the two disagree.
-                if _engine_coord_from_path(path, lake_root) in ENGINE_INDEX_COORDS:
-                    engine_files_skipped += 1
+            entries: list[tuple[PartitionCoords, Path]] = []
+            for path in candidates:
+                try:
+                    parsed = parse_partition_path(path, lake_root=lake_root)
+                except PartitionError:
+                    files_skipped += 1
+                    _note_first_skip(path, parse=True)
+                    # DEC-AUDIT-CENSUS-HONESTY-001 (hostile-review MAJOR): an
+                    # ENGINE-index file whose PATH fails to parse (a non-integer /
+                    # month-13 year dir under bars/NSE/INDEX/NIFTY/...) is STILL an
+                    # unreadable engine file — derive its (exchange, segment,
+                    # symbol) POSITIONALLY from the walk's leaf-glob tail
+                    # (`_iter_series_candidates` guarantees the six-segment
+                    # bars/exch/seg/sym/interval/yyyy/mm.parquet shape) so it flips
+                    # the engine verdict too. Without this the CLI/json
+                    # mis-attribute it as a reference-only skip ("ENGINE verified
+                    # CLEAN") while doctor — which scopes per-coord and counts ALL
+                    # skips — FAILs, so the two disagree.
+                    if _engine_coord_from_path(path, lake_root) in ENGINE_INDEX_COORDS:
+                        engine_files_skipped += 1
+                    continue
+                coords = PartitionCoords(
+                    exchange=cast(str, parsed["exchange"]),
+                    segment=cast(str, parsed["segment"]),
+                    symbol=cast(str, parsed["symbol"]),
+                    interval=cast(str, parsed["interval"]),
+                    year=cast(int, parsed["year"]),
+                    month=cast(int, parsed["month"]),
+                )
+                # Fed on every successful PARSE — including a month-scoped-out
+                # file — exactly as the old pre-index did (the legacy-drift fold
+                # must see a drifted symbol even when its only file is outside
+                # the L2 month scope).
+                symbol_dirs.setdefault((coords.exchange, coords.segment), set()).add(coords.symbol)
+                if month_scope is not None and (coords.year, coords.month) not in month_scope:
+                    continue  # the L2 scope bound — never read
+                entries.append((coords, path))
+            if not entries:
                 continue
-            coords = PartitionCoords(
-                exchange=cast(str, parsed["exchange"]),
-                segment=cast(str, parsed["segment"]),
-                symbol=cast(str, parsed["symbol"]),
-                interval=cast(str, parsed["interval"]),
-                year=cast(int, parsed["year"]),
-                month=cast(int, parsed["month"]),
-            )
-            symbol_dirs.setdefault((coords.exchange, coords.segment), set()).add(coords.symbol)
-            if month_scope is not None and (coords.year, coords.month) not in month_scope:
-                continue  # the L2 scope bound — never read
-            per_series.setdefault(coords.series, []).append((coords, path))
-
-        for series_key in sorted(per_series):
-            entries = sorted(per_series[series_key], key=lambda cp: (cp[0].year, cp[0].month))
+            # Numeric within-series order — byte-identical to the pre-streaming
+            # scanner (string-sorted year dirs would diverge for a non-4-digit
+            # year name; the parsed-int sort never cares).
+            entries.sort(key=lambda cp: (cp[0].year, cp[0].month))
             scanned_in_series = 0
             pending_overlap: list[tuple[int, PartitionCoords, set[datetime]]] = []
             canonical_cache: dict[tuple[int, int], set[datetime] | None] = {}
@@ -1523,7 +1605,7 @@ def scan_lake_invariants(
         files_by_segment=tuple(sorted(files_by_segment.items())),
         engine_files=engine_files,
         engine_files_skipped=engine_files_skipped,
-        first_skipped_path=first_skipped[0] if first_skipped else None,
+        first_skipped_path=first_skipped_by_kind.get("parse", first_skipped_by_kind.get("read")),
     )
     _LOG.info(
         "lake.invariant.scan_complete",

@@ -38,6 +38,7 @@ the module stays importable wheel-free).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Final
 
 from brutex.data.errors import ResampleInputError
@@ -72,6 +73,78 @@ def price_violation_expr() -> pl.Expr:
     for check in checks[1:]:
         combined = combined | check
     return combined
+
+
+def price_row_insane(
+    open_: float | None, high: float | None, low: float | None, close: float | None
+) -> bool:
+    """Scalar per-row twin of :func:`price_violation_expr` (positivity + ordering).
+
+    The ONE COMMON SCALAR price-sanity predicate (CLAUDE.md §11 COMMON) — the
+    row-at-a-time twin of the vectorized :func:`price_violation_expr`, so the
+    two are the SAME boolean by construction over the shared input space
+    (pinned row-wise by a property test). ``True`` for an INSANE row: ANY
+    price ``None`` / ``NaN`` / non-positive (``<= 0``), or the OHLC ordering
+    broken (``high < low``, or ``open`` / ``close`` outside ``[low, high]``).
+
+    Needed by the dashboard's scalar screening path
+    (:mod:`brutex.data.bar_screen`), where the columnar
+    :func:`price_violation_expr` is unavailable (a DuckDB page of Python
+    tuples). ``None`` is tested FIRST so a null price short-circuits before any
+    ``<=`` / ``<`` comparison (a ``None <= 0`` would raise) — mirroring the
+    ``is_null`` arm of the expression.
+
+    DELIBERATE NaN ASYMMETRY (scalar STRICTER — DEC-DASHBOARD-READ-SCREEN-001
+    round-2 refuter): a ``NaN`` price is INSANE here but NOT flagged by the
+    vectorized :func:`price_violation_expr` (every NaN comparison is False in
+    both planes). Without this arm the dashboard would SERVE a NaN bar the
+    engine REFUSES — the engine's :class:`~brutex.data.models.CandleBar`
+    constructor raises ``decimal.InvalidOperation`` on a NaN price (escaping
+    even ``arrow_table_to_bars``' ``except ValueError``), so outcome-parity
+    holds: neither surface ever serves a NaN bar. The vectorized twin (the
+    engine prebuild read path) + the ``arrow_table_to_bars`` except-clause gap
+    are the NAMED ENGINE-side follow-up, deliberately not changed here.
+
+    NON-NUMERIC GUARD (round-4 fold, scalar-only like the NaN arm): a
+    NON-NUMERIC price cell — a ``str`` from a DuckDB ``union_by_name`` VARCHAR
+    promotion over an out-of-band parquet (the lake writers never produce
+    one), or a ``bool`` (``isinstance(True, int)`` is True, but a boolean
+    "price" is junk — deliberately classified insane, never coerced to
+    0.0/1.0) — is INSANE, never a raised ``TypeError``. The dashboard callers
+    feed RAW page cells (typed ``Any`` at runtime despite this signature), and
+    without this arm ``math.isnan(str)`` raised through ``screen_rows`` into a
+    /db page 500 — internally inconsistent with
+    :func:`brutex.data.bar_screen.screen_rows`'s ``_sortable_cell``, which
+    already orders such junk cells last. Conservative in direction: DROP,
+    never fabricate. The vectorized twin is untouched (its columns are typed —
+    a VARCHAR-promoted column never reaches ``price_violation_expr`` as a
+    numeric plane), and non-numerics are structurally outside the
+    scalar==vector parity pin's input space (floats only), like NaN.
+
+    Parameters
+    ----------
+    open_, high, low, close
+        The four OHLC prices of one bar (rupees; ``None`` for a null cell).
+
+    Returns
+    -------
+    bool
+        ``True`` iff the row violates price positivity or OHLC ordering
+        (a ``None`` / ``NaN`` price counts as a violation).
+    """
+    if open_ is None or high is None or low is None or close is None:
+        return True
+    # Non-numeric junk (str/bool — see the docstring) is insane, never a raise;
+    # bool is excluded explicitly (a bool IS an int to isinstance) as junk.
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in (open_, high, low, close)
+    ):
+        return True
+    if math.isnan(open_) or math.isnan(high) or math.isnan(low) or math.isnan(close):
+        return True
+    if open_ <= 0 or high <= 0 or low <= 0 or close <= 0:
+        return True
+    return high < low or open_ > high or open_ < low or close > high or close < low
 
 
 def count_price_violations(df: pl.DataFrame) -> int:
@@ -144,6 +217,7 @@ def validate_frame_price_sanity(
 __all__ = [
     "PRICE_SANITY_COLUMNS",
     "count_price_violations",
+    "price_row_insane",
     "price_violation_expr",
     "validate_frame_price_sanity",
 ]
