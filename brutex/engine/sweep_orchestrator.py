@@ -284,9 +284,10 @@ class SweepGridConfig:
     #: Layer-1 engine-scope hard invariant (DEC-ENGINE-SCOPE-GUARD-001): by
     #: DEFAULT every instrument must satisfy
     #: :func:`brutex.universe.is_engine_sweep_symbol` (the 3 brute-force spot
-    #: indexes, CLAUDE.md §2 Rule 3, plus the ADR-0012 NIFTY-futures shapes) so
-    #: even PROGRAMMATIC construction cannot silently sweep India VIX / an F&O
-    #: stock. The ONLY production True site is the ``sweep-verify --recount``
+    #: indexes ONLY, CLAUDE.md §2 Rule 3 — the ADR-0012 NIFTY-futures alias
+    #: admit was RETIRED by DEC-ENGINE-SPOT-ONLY-001) so even PROGRAMMATIC
+    #: construction cannot silently sweep India VIX / an F&O stock / a
+    #: future. The ONLY production True site is the ``sweep-verify --recount``
     #: grid rebuild (verifying recorded work, not launching); the CLI research
     #: escape is ``--allow-out-of-scope`` (loud + audit-stamped). IDENTITY-SAFE
     #: by construction: this field enters NONE of ``_tuple_digest`` /
@@ -335,9 +336,10 @@ class SweepGridConfig:
                     raise ValueError(
                         f"SweepGridConfig.instruments contains {symbol!r}, which is "
                         "outside the brute-force engine scope — allowed: the 3 spot "
-                        "indexes NIFTY/BANKNIFTY/SENSEX (CLAUDE.md §2 Rule 3) plus "
-                        "the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
-                        "DEC-FUTURES-ADDRESSING-PIN-001). "
+                        "indexes NIFTY/BANKNIFTY/SENSEX ONLY (CLAUDE.md §2 Rule 3; "
+                        "DEC-ENGINE-SPOT-ONLY-001 — the engine is spot-only; the "
+                        "NIFTY-futures series alias 'NSE-NIFTY-FUT' is RETIRED from "
+                        "engine scope and remains lake/REFERENCE_ONLY). "
                         "Research escape hatch: construct with "
                         "unsafe_allow_out_of_scope_instruments=True "
                         "(the CLI flag is --allow-out-of-scope)"

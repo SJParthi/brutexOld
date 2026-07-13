@@ -111,7 +111,8 @@ def test_swept_set_is_subset_of_the_three_indexes(instruments: list[Instrument])
 #
 # The launch-time twin of the instrument-tier invariant above: for ANY
 # (exchange, segment, symbol) coordinate the classifier may allow ONLY the 3
-# spot triples or a NIFTY-futures shape under NSE/FNO — and a REFERENCE_ONLY
+# spot triples (DEC-ENGINE-SPOT-ONLY-001 — the engine is spot-only; the
+# pre-flip NIFTY-futures NSE/FNO arm is RETIRED) — and a REFERENCE_ONLY
 # symbol (India VIX) is NEVER allowed.
 
 _SCOPE_EXCHANGES = st.sampled_from(["NSE", "BSE", "MCX", "nse", ""])
@@ -119,6 +120,7 @@ _SCOPE_SEGMENTS = st.sampled_from(["INDEX", "FNO", "CASH", "index", ""])
 _SCOPE_SYMBOLS = st.sampled_from(
     [
         *_ADVERSARIAL_SYMBOLS,
+        "NSE-NIFTY-FUT",  # the RETIRED series alias (DEC-ENGINE-SPOT-ONLY-001)
         "NIFTY-FUT-2026-07-30",
         "BANKNIFTY-FUT-2026-07-30",
         "NSE-NIFTY-30Jul26-FUT",
@@ -132,23 +134,15 @@ _SCOPE_SYMBOLS = st.sampled_from(
 def test_engine_sweep_allowed_is_subset_of_the_law(
     exchange: str, segment: str, symbol: str
 ) -> None:
-    from brutex.universe import (
-        ENGINE_SWEEP_SPOT_TRIPLES,
-        classify_engine_sweep_target,
-        is_engine_sweep_symbol,
-    )
+    from brutex.universe import ENGINE_SWEEP_SPOT_TRIPLES, classify_engine_sweep_target
 
     verdict = classify_engine_sweep_target(exchange=exchange, segment=segment, symbol=symbol)
     if verdict.allowed:
-        spot = (exchange, segment, symbol) in ENGINE_SWEEP_SPOT_TRIPLES
-        nifty_future = (
-            is_engine_sweep_symbol(symbol)
-            and symbol not in _INDEX_SYMBOLS
-            and exchange == "NSE"
-            and segment == "FNO"
-        )
-        assert spot or nifty_future
-        assert verdict.tier in {"spot_index", "nifty_future"}
+        # DEC-ENGINE-SPOT-ONLY-001: the ONLY allowed coordinates are the 3
+        # spot index triples — the pre-flip nifty_future NSE/FNO arm is
+        # RETIRED, so an allowed verdict outside the triples is a scope leak.
+        assert (exchange, segment, symbol) in ENGINE_SWEEP_SPOT_TRIPLES
+        assert verdict.tier == "spot_index"
     else:
         assert verdict.tier == "refused"
         assert verdict.reason
