@@ -22,11 +22,13 @@ _Last updated: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
 #1760a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
 the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1760b–#1760d companion
-headers), REFUTER ROUNDS 1 + 2 + 3 folded: the /universe mapping-integrity compare
+headers), REFUTER ROUNDS 1 + 2 + 3 + 5 folded: the /universe mapping-integrity compare
 keyed through the COMMON F&O underlying-forms resolver via an injected
 plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
-alarm live; the writer's KEYING byte-untouched — the writer file gains only the
-sub-(c) blank-row isolation; default-None byte-identical), the /movers
+alarm live; the round-5 CROSS-OWNER guard — a normalize-colliding sibling's
+coverage can never mask an own-key attempted-and-zero — plus the MI-6
+attempted-match tooth; the writer's KEYING byte-untouched — the writer file
+gains only the sub-(c) blank-row isolation; default-None byte-identical), the /movers
 stored-first intraday read gains the VERIFY-EQUALITY freshness guard (a stored
 TF day frame is served only when it EQUALS the in-memory resample of the
 1-minute base — the round-1 day-max predicate was refuted by the executed
@@ -2387,7 +2389,22 @@ hostile-review pass._
   WRITER-keyed coverage (a legacy-RAW-keyed era leaves the primary-spelled arm a neutral
   non-gating `not_attempted` — the fold is one-directional spot→forms, round-1-executed);
   CSV golden byte-unmodified; route-executed fail-before regressions + the end-to-end
-  REAL-writer belt (the fake-SDK harness → the route reads green).
+  REAL-writer belt (the fake-SDK harness → the route reads green). REFUTER ROUND 5
+  folded (Z5-1 + Q5-1, both reproduced MINORs): the forms-union gains the CROSS-OWNER
+  guard — a form that is a DIFFERENT eligible symbol's own key (exact spot spelling OR
+  primary form, per exchange; ownership derived purely from the injected
+  eligible+key_forms data, the leaf stays dashboard-import-free) still RESOLVES coverage
+  (the with-legs law's pin passes unmodified) but can never RESCUE a symbol whose OWN
+  forms read attempted-and-zero, so two normalize-colliding eligible names (`{AB, A-B}`
+  — the executed route repro read GREEN where main read RED; nil real-master
+  reachability, executed check) can never mask each other's silent-vanish; the own spot
+  key always stays in the fold (main-parity floor — the guard's worst case is today's
+  exact-key verdict); and the previously-toothless attempted-match multi-form iteration
+  (the surviving MI-6 `forms[:1]` mutant) gains dedicated killers on the final guarded
+  semantics — 8 new unit pins + the route-executed colliding-pair port (RED + named,
+  the non-colliding union unchanged in the SAME store), all 8 applied mutants killed;
+  the guard mechanises the GATING direction only (a cross-owned form may still upgrade
+  a non-gating state in the unreachable collision world — no RED is ever masked).
   **(b — DEC-MOVERS-STORED-FRESHNESS-001, R7)** the
   /movers spot stored-first intraday read gains the FOURTH member of its decision
   family — a VERIFY-EQUALITY freshness guard (REFUTER ROUND 1 folded): a stored TF day
@@ -6102,11 +6119,13 @@ hostile-review pass._
   companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
   DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
   consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
-  #1751), REFUTER ROUNDS 1 + 2 + 3 folded: the /universe mapping-integrity compare
+  #1751), REFUTER ROUNDS 1 + 2 + 3 + 5 folded: the /universe mapping-integrity compare
   keyed through the COMMON F&O underlying-forms resolver via the injected
   plain-data `key_forms` map (the writer's KEYING byte-untouched — the writer
   file gains only the sub-(c) blank-row isolation; default-None
-  byte-identical; the hyphenated/aliased silent-vanish alarm live), the
+  byte-identical; the hyphenated/aliased silent-vanish alarm live; the round-5
+  CROSS-OWNER guard — a normalize-colliding sibling's coverage can never mask
+  an own-key attempted-and-zero — plus the MI-6 attempted-match tooth), the
   /movers stored-first intraday read freshness-guarded by VERIFY-EQUALITY
   (a stored TF day frame serves only when it equals the in-memory resample of
   the 1-minute base — the round-1 day-max predicate was refuted by the
