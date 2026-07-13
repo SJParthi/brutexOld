@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+_Last updated: 2026-07-13 (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md
+#1788 — the cross-verify export contract AMENDED to SPOT-ONLY over the
+WHOLE spot universe (operator ruling 2026-07-13): the NIFTY/BANKNIFTY
+futures legs come OUT — no futures pulls, no futures CSVs; TickVault must
+NOT expect futures files (absence is BY DESIGN) — and the export
+enumeration widens to ALL admitted indices (~25, incl. INDIAVIX +
+sectorals; the engine trio stays the structural floor) + ALL stocks (~751,
+F&O-eligible AND reference-only NTM names) via the ONE
+`whole_universe_spot_targets` law shared by pull AND export (export ≡ pull
+by construction). CSV byte contract (header incl. `oi`; spot empty-oi
+cell) / gate binding / S3 posture + key layout / 1-minute-only law /
+Muhurat-session semantics / journal-publish machinery ALL UNCHANGED; the
+FUT mapper/renderer/gate/prebuild arms retained STRUCTURAL
+(direct-unit-covered, unreachable from the producer, kept for possible
+re-expansion); the metadata + FUT-candle pull legs, the registry read, the
+G2 FUT settle-retry class DELETED; negative-pinned: a lake WITH futures
+contract dirs + registry FUT rows yields ZERO `*_FNO` keys.
+DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 CLOSED MOOT. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the
+per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1788 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
 one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
@@ -2400,7 +2421,52 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+- **Active branch:** `claude/crossverify-spot-only` (**DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788** —
+  the cross-verify export contract AMENDED to SPOT-ONLY over the WHOLE spot universe (operator ruling
+  2026-07-13; supersedes-in-part #1776's "ALL spot + NIFTY/BANKNIFTY futures" tonight-scope clause):
+  (1) FUTURES OUT — the metadata + FUT-candle pull legs DELETED from `pull_leg.py` (spot is the ONE vendor
+  leg; `PullLegReport` slims to `spot_ok/halted/halt_reason`; the str-vs-date dual-shape law collapses to
+  the spot chain's ISO-string law, its `pull_all_spot` signature drift pin kept), `run.py` loses the
+  registry read (the `_enumerate` FUT arm + skip-pull fallback + `registry_path`), the `default_seams`
+  `metadata_puller`/`candle_puller` params, and the G2 FUT settle-retry class
+  (`day_export.SETTLE_RETRY_REASONS_FUT` deleted — the belt is INDEX-only); NO futures pulls happen and NO
+  futures CSVs are produced — TickVault must NOT expect futures files, absence is BY DESIGN
+  (negative-pinned: a lake WITH a full FNO contract partition AND a registry holding live FUT rows yields
+  ZERO `*_FNO` keys — e2e over the full `run_crossverify` chain on S3+journal+staging, the seams-level
+  registry-ignored pin, and the spot-only `s3_keys.txt` golden regenerated via the gated generator).
+  (2) WHOLE-SPOT-UNIVERSE IN (the addendum census): the landed producer's STOCK enumeration was already
+  whole-universe (~751 — every NSE EQ row incl. reference-only NTM names; the lean store's
+  `fno_eligible_underlyings` unions every persisted EQ by construction) but its INDEX enumeration was the
+  ENGINE TRIO only — WIDENED: NEW COMMON `pull_leg.whole_universe_spot_targets` (the ONE
+  `classify_instrument` enumeration WITH `reference_only_security_ids` threaded — the /universe
+  full-membership precedent) is shared by the pull leg AND `run.py._enumerate`, so export ≡ pull BY
+  CONSTRUCTION; `canonical_identity`'s INDEX arm widens from the 3-coord `EXPORT_INDEX_COORDS` allowlist
+  (deleted) to the universe IDX fetch rule's mirror (every key-safe NSE index; from BSE only SENSEX —
+  mirror-pinned against `is_universe_underlying`), so ALL ~25 indices incl. INDIAVIX/sectorals export; the
+  engine trio stays a STRUCTURAL FLOOR in `_enumerate` (a masterless lake still enumerates + BLOCKS on a
+  missing brute-force index — the surface never silently narrows); three-tier pin: an index + an F&O stock
+  + a reference-only NTM stock ALL enumerate (leg unit + seams level over a real `instruments.duckdb`).
+  (3) UNCHANGED BYTE-FOR-BYTE: the CSV contract (header incl. `oi`; spot rows keep the pinned empty-oi
+  cell), the completeness-gate binding, the S3 posture/key layout (PutObject-only on
+  `tv-prod-cold/crossverify/*`), the 1-minute-only law, Muhurat/session semantics, the journal/publish
+  machinery; all 7 golden CSV fixtures byte-identical. (4) RETAINED STRUCTURAL (documented
+  unreachable-from-producer, 100% direct-unit-covered — no coverage pragma hides dead code): the canonical
+  FUT mapping + `NSE_FNO`/`BSE_FNO` tokens + `EXPORT_FUTURES_UNDERLYINGS`, the renderer's oi-int +
+  NULL-OI-fut refusal laws (the two FUT fixtures re-labelled STRUCTURAL renderer goldens), the prebuild
+  FNO arm, the gate's FUT class + fake-twin arms. (5) GATE POLICY at ~776 symbols (deliverable 2, verified
+  against the #1774 sibling): INDEX = strict count+close-edge, zero-bars ⇒ BLOCKED exit 2 (now covering
+  INDIAVIX/sectorals — disclosed); CASH = all-zero-volume shape ONLY, NO minute-count demand (the #1031
+  illiquid lesson — a legitimately thin day SHIPS, a zero-bar day is honest `nothing`); HONEST LIMIT
+  (named): a genuinely-settled all-zero-volume CASH day is indistinguishable from a still-settling one —
+  withheld either way, never wrong bytes; operator visibility: the ONE Telegram summary carries
+  withheld/blocked/nothing counts verbatim (NEW pin) + the journal's `withheld` map names each
+  symbol+reason; the runbook gains the gate-class table. CLOSES AS MOOT
+  DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (nothing to ingest with futures out; #1776's text NOT edited — the
+  closure lives in #1788); DEC-CROSSVERIFY-PREEMPT-002 unaffected. GATES: whole-package
+  `brutex.crossverify` 100.00% line+branch (1210/308, 475 battery tests) + every per-module ci.yml stanza
+  green (no test files deleted — ci.yml untouched); ruff/ruff-format clean; `mypy --strict` clean; pyright
+  0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
   renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
@@ -6229,7 +6295,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/crossverify-producer`
+- **Active feature branch:** `claude/crossverify-spot-only`
+  (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788 — the cross-verify
+  export contract AMENDED to SPOT-ONLY over the WHOLE spot universe
+  (operator ruling 2026-07-13): futures OUT — the metadata + FUT-candle pull
+  legs, the registry read and the G2 FUT settle-retry class DELETED; no
+  futures pulls, no futures CSVs (TickVault must NOT expect futures files —
+  absence is BY DESIGN; negative-pinned: an FNO-carrying lake + a registry
+  with live FUT rows yield ZERO `*_FNO` keys) — and whole-spot-universe IN:
+  the ONE `whole_universe_spot_targets` enumeration (ALL ~25 indices incl.
+  INDIAVIX/sectorals via the widened canonical INDEX arm + ALL ~751 stocks
+  incl. reference-only NTM names) shared by pull AND export, the engine trio
+  kept as the structural enumeration floor; CSV byte contract / gate binding
+  / S3 posture / 1-minute law / journal-publish machinery UNCHANGED; the FUT
+  mapper/renderer/gate/prebuild arms retained STRUCTURAL
+  (direct-unit-covered); DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 CLOSED MOOT;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1788 for the full blurb)
+  Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
   TickVault cross-verification producer: NEW `brutex/crossverify/` package

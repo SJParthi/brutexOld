@@ -67,11 +67,14 @@ CANONICAL_COLUMNS: Final[tuple[str, ...]] = (
 #: §4.3 — verdict reasons that admit a publish.
 _REASON_COMPLETE: Final[str] = "complete"
 
-#: §4.3 — withheld reasons eligible for the settle-retry belt (G2), per class.
+#: §4.3 — withheld INDEX reasons eligible for the settle-retry belt (G2).
+#: The FUT twin (``oi_null_settling``) left with the futures legs
+#: (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788); the reason itself
+#: stays a known withhold below — the gate's FUT class is STRUCTURAL,
+#: reachable via a directly-constructed FUT identity.
 SETTLE_RETRY_REASONS_INDEX: Final[frozenset[str]] = frozenset(
     {"count_short", "last_bar_incomplete"}
 )
-SETTLE_RETRY_REASONS_FUT: Final[frozenset[str]] = frozenset({"oi_null_settling"})
 
 #: §4.3 — the enumerated withhold reasons (any class ⇒ withheld, exit 2).
 _KNOWN_WITHHELD_REASONS: Final[frozenset[str]] = frozenset(
@@ -352,7 +355,6 @@ def export_symbol(
 
 __all__ = [
     "CANONICAL_COLUMNS",
-    "SETTLE_RETRY_REASONS_FUT",
     "SETTLE_RETRY_REASONS_INDEX",
     "DayFrameReader",
     "SymbolExport",

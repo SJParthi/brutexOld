@@ -2,14 +2,21 @@
 
 > DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776) ·
 > DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) ·
-> DEC-CROSSVERIFY-DAY-DERIVE-001 (#1778)
+> DEC-CROSSVERIFY-DAY-DERIVE-001 (#1778) ·
+> **DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788 — the operator contract amendment:
+> SPOT ONLY, whole spot universe)**
 >
 > The daily TickVault cross-verification producer: post-close priority pull
-> (ALL spot + NIFTY/BANKNIFTY futures — options EXCLUDED) → completeness
-> gate → day-scoped prebuild → pinned per-symbol CSV export → idempotent S3
-> publish to `s3://tv-prod-cold/crossverify/groww/<day>/<segment>/<symbol>.csv`
+> (the WHOLE spot universe — ALL indices (~25, incl. INDIAVIX/sectorals) +
+> ALL stocks (~751, F&O-eligible AND reference-only NTM names); futures AND
+> options EXCLUDED — TickVault must NOT expect futures files, their absence
+> is BY DESIGN) → completeness gate → day-scoped prebuild → pinned
+> per-symbol CSV export → idempotent S3 publish to
+> `s3://tv-prod-cold/crossverify/groww/<day>/<segment>/<symbol>.csv`
 > (ap-south-1). Correct-or-absent, never wrong bytes: an incomplete file is
-> WITHHELD (Telegram CRITICAL), never published short.
+> WITHHELD (Telegram CRITICAL), never published short. The CSV schema is
+> UNCHANGED — the header keeps its `oi` column; every spot row renders the
+> empty `oi` cell (the pinned byte contract).
 
 ---
 
@@ -112,13 +119,29 @@ a still-failing day's is kept and the skip verdict upgrades honestly to
 entirely — no files, both sides no-op**) → fail-closed completeness-gate
 presence → bounded pull-lock wait (45 min default; a peer pull holding the
 locks past the budget DEFERS the day with a CRITICAL `crossverify_refused`
-— no preemption in v1) → priority pull (spot whole-universe to TODAY,
-scoped metadata, `expiry>=day` NIFTY/BANKNIFTY futures) → per-symbol
-completeness gate + export decisions (INDEX missing its day = BLOCKED exit
-2; a settling future / short index gets ONE bounded settle-retry) →
-day-scoped derive (#1778; never blocks the export) → stage + journal →
-**locks released** → publish frozen staged bytes → exactly ONE Telegram
-summary.
+— no preemption in v1) → priority pull (the WHOLE spot universe to TODAY —
+the ONE spot leg; no metadata leg, no futures leg, zero F&O vendor calls —
+#1788) → per-symbol completeness gate + export decisions (INDEX missing its
+day = BLOCKED exit 2; a short/incomplete index gets ONE bounded
+settle-retry) → day-scoped derive (#1778; never blocks the export) → stage
++ journal → **locks released** → publish frozen staged bytes → exactly ONE
+Telegram summary.
+
+Gate-class table at ~776 spot symbols (what ships vs what withholds —
+honest since #1788's whole-universe widening):
+
+| Class | Publishes when | Withholds/blocks when | Thin-day handling |
+|---|---|---|---|
+| INDEX (`index_spot`, ALL ~25 indices incl. INDIAVIX) | strict: distinct minutes == the session's expected count AND the last bar is the close edge | `count_short`/`count_excess`/`last_bar_incomplete` → withheld exit 2 (ONE settle-retry first); ZERO bars for the day → **BLOCKED exit 2** (an index always prints — absence is a pull failure) | indices are dense derived series — a "thin" index day IS an incomplete one |
+| CASH (`cash_spot`, ALL ~751 stocks) | any bars whose volumes are not ALL zero — **NO minute-count demand** (the #1031 illiquid lesson: sparsity ≠ incompleteness) | ALL-zero-volume shape → withheld (`volume_all_zero`, exit 2) | a legitimately thin/sparse day SHIPS with exactly its stored minutes; a stock with ZERO bars for the day is honest `nothing` (exit unaffected) |
+
+HONEST LIMIT (named, not hidden): the gate cannot distinguish a genuinely
+settled all-zero-volume CASH day from a still-settling one — such a day
+(if the vendor ever serves one) is withheld, never published. The per-day
+refused-symbol counts ARE operator-visible: the ONE Telegram summary
+carries `withheld N · blocked N · nothing N` verbatim (pinned in
+`tests/unit/test_notifications_sweep_alerts_crossverify.py`), and the
+journal's `withheld` map names each symbol + reason.
 
 Exit codes (cron-red discipline): `0` published / staged-only / honest
 skips / disabled / market-hours deferral · `1` junk config / lock refusal /
@@ -128,7 +151,7 @@ failed / 4 h deadline / calendar abstain.
 The dashboard twin: the **Cross-verify → TickVault** button on `/universe`
 (same runner, dedicated progress feed at `/api/v1/crossverify/progress`).
 GREEKS N/A for this trigger — the Greeks stage is options-only and this
-pull excludes options; nothing to enrich.
+pull excludes ALL F&O (futures AND options — #1788); nothing to enrich.
 
 ## 2. Recovery playbook
 
@@ -136,7 +159,7 @@ pull excludes options; nothing to enrich.
 |---|---|---|
 | `publish_failed` exit 2, keys named | S3 throttle exhausted retries, or the grant is broken (`aborted_nonretryable`) | Fix the grant/backend; the NEXT run's recovery scan re-publishes the FROZEN staged bytes (no re-render, no re-gate) — or re-run manually |
 | `refused … locks still held` | A pull/backfill held the lake locks past the 45-min wait | Nothing lost — the day deferred; re-run after the peer finishes (`brutex crossverify run --day YYYY-MM-DD`) |
-| `withheld_partial` exit 2 | The gate withheld incomplete files (settling OI / short index / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
+| `withheld_partial` exit 2 | The gate withheld incomplete files (short index / all-zero-volume stock / render refusal) | TickVault sees honest absence. Re-pull later and re-run `--day YYYY-MM-DD` (manual backfill — auto re-gate is the named follow-up DEC-CROSSVERIFY-BACKFILL-001) |
 | `blocked` exit 2 | A brute-force INDEX has NO bars for the day — a pull failure | Investigate the pull (vendor outage / halt); re-run the day once healed |
 | `refused … gate module absent` | The sibling completeness gate (#1774) is not merged/installed | The producer is FAIL-CLOSED by design — never publishes ungated |
 | Corrupt journal WARN | `.crossverify/<day>.json` unreadable (junk JSON, invalid UTF-8, a directory) | Self-heals: the run re-renders + re-puts identical bytes (convergent); a corrupt PRIOR-day journal never blocks later runs |

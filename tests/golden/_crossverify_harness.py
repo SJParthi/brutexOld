@@ -41,13 +41,22 @@ FIXTURES_DIR: Final[Path] = Path(__file__).parent / "fixtures" / "crossverify"
 #: The pinned S3 key strings fixture (one per line, sorted).
 S3_KEYS_FIXTURE: Final[Path] = FIXTURES_DIR / "s3_keys.txt"
 
-#: The published golden symbols (fixture stem == canonical symbol).
+#: The PUBLISHED golden symbols (fixture stem == canonical symbol) — SPOT
+#: ONLY since DEC-CROSSVERIFY-SPOT-ONLY-001 (MIGRATION.md #1788); these are
+#: the symbols whose S3 keys the producer contract pins (s3_keys.txt).
 GOLDEN_SYMBOLS: Final[tuple[str, ...]] = (
     "NIFTY",
     "SENSEX",
     "RELIANCE",
     "BAJAJ-AUTO",
     "M&M",
+)
+
+#: STRUCTURAL renderer goldens (#1788): the FUT export chain is retained
+#: direct-unit-covered but UNREACHABLE from the spot-only producer — these
+#: byte pins freeze the oi-int render law for the contract's possible
+#: re-expansion; their keys are deliberately ABSENT from s3_keys.txt.
+STRUCTURAL_FUT_SYMBOLS: Final[tuple[str, ...]] = (
     "NIFTY-2026-07-30-FUT",
     "SENSEX-2026-09-24-FUT",
 )
@@ -177,7 +186,11 @@ def golden_exports(lake_root: Path) -> dict[str, SymbolExport]:
 
 
 def golden_key_lines(exports: dict[str, SymbolExport]) -> str:
-    """The pinned S3 key strings for the PUBLISHED goldens (sorted, one/line)."""
+    """The pinned S3 key strings for the PUBLISHED (spot) goldens — sorted.
+
+    SPOT ONLY (#1788): the STRUCTURAL_FUT_SYMBOLS renderer goldens never
+    contribute a key — the producer publishes no futures files.
+    """
     keys = sorted(
         s3_key(prefix="crossverify/groww", day=GOLDEN_DAY, identity=exports[s].identity)
         for s in GOLDEN_SYMBOLS
@@ -191,6 +204,7 @@ __all__ = [
     "GOLDEN_IDENTITIES",
     "GOLDEN_SYMBOLS",
     "S3_KEYS_FIXTURE",
+    "STRUCTURAL_FUT_SYMBOLS",
     "TRUNCATED_INDEX_SYMBOL",
     "build_golden_lake",
     "golden_exports",

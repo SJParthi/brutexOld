@@ -138,6 +138,21 @@ class TestCrossverifySummary:
         assert event.severity == TelegramSeverity.CRITICAL
         assert "totally\\_new\\_state" in event.message
 
+    def test_withheld_and_blocked_counts_surface_in_the_summary(self) -> None:
+        # DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788) operator-visibility pin: at
+        # ~776 spot symbols the per-day refused-symbol counts MUST reach the
+        # operator — the summary body carries withheld/blocked/nothing
+        # verbatim (the runbook's gate-class table relies on this).
+        notifier = FakeNotifier()
+        SweepAlerter(notifier=notifier).crossverify_summary(
+            run_id=RUN_ID,
+            report=_report(verdict="withheld_partial", withheld=17, blocked=2, nothing=41),
+        )
+        [event] = notifier.published
+        assert "withheld 17" in event.message
+        assert "blocked 2" in event.message
+        assert "nothing 41" in event.message
+
     def test_unknown_counts_render_question_never_zero(self) -> None:
         notifier = FakeNotifier()
         SweepAlerter(notifier=notifier).crossverify_summary(

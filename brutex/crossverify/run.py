@@ -34,7 +34,6 @@ import structlog
 
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity, s3_key
 from brutex.crossverify.day_export import (
-    SETTLE_RETRY_REASONS_FUT,
     SETTLE_RETRY_REASONS_INDEX,
     DayFrameReader,
     SymbolExport,
@@ -57,9 +56,9 @@ from brutex.crossverify.journal import (
 from brutex.crossverify.prebuild_leg import DeriveOutcome, run_prebuild_leg
 from brutex.crossverify.pull_leg import (
     PullLegReport,
-    live_fut_rows,
     run_pull_leg,
     run_settle_retry,
+    whole_universe_spot_targets,
 )
 from brutex.crossverify.s3_publish import (
     JOURNAL_SAVE_EVERY,
@@ -139,7 +138,7 @@ class CrossverifySeams:
     session_for: Callable[[date], TradingSession | None]
     classifier_factory: Callable[[], TodayCompletenessClassifier]
     reader: DayFrameReader
-    enumerate_targets: Callable[[date, PullLegReport | None], tuple[list[CanonicalIdentity], int]]
+    enumerate_targets: Callable[[date], tuple[list[CanonicalIdentity], int]]
     run_pull: Callable[[], PullLegReport]
     run_settle_retry: Callable[[Sequence[CanonicalIdentity]], PullLegReport]
     run_prebuild: Callable[[Sequence[CanonicalIdentity]], DeriveOutcome]
@@ -197,17 +196,19 @@ class _RunState:
 
 
 def _settle_retry_affected(exports: Mapping[str, SymbolExport]) -> list[CanonicalIdentity]:
-    """The G2 belt's affected set: settling FUTs + short/incomplete indices."""
-    affected: list[CanonicalIdentity] = []
-    for export in exports.values():
-        if export.disposition != "withheld":
-            continue
-        cls = export.identity.instrument_class
-        if (cls == "index_spot" and export.reason in SETTLE_RETRY_REASONS_INDEX) or (
-            cls == "fut" and export.reason in SETTLE_RETRY_REASONS_FUT
-        ):
-            affected.append(export.identity)
-    return affected
+    """The G2 belt's affected set: short/incomplete indices (spot-only #1788).
+
+    The FUT arm (``oi_null_settling``) left with the futures legs
+    (DEC-CROSSVERIFY-SPOT-ONLY-001) — a withheld non-index export is never
+    settle-retried.
+    """
+    return [
+        export.identity
+        for export in exports.values()
+        if export.disposition == "withheld"
+        and export.identity.instrument_class == "index_spot"
+        and export.reason in SETTLE_RETRY_REASONS_INDEX
+    ]
 
 
 def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> CrossverifyReport:
@@ -477,8 +478,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
                     1,
                 )
 
-        # ── G: priority pull ───────────────────────────────────────────────
-        pull_report: PullLegReport | None = None
+        # ── G: priority pull (spot-only — DEC-CROSSVERIFY-SPOT-ONLY-001) ───
         if not (config.dry_run or config.skip_pull):
             try:
                 pull_report = seams.run_pull()
@@ -509,7 +509,7 @@ def run_crossverify(config: CrossverifyConfig, seams: CrossverifySeams) -> Cross
             return _suspect("hard deadline exceeded after the pull leg")
 
         # ── H: completeness gate + export decisions ────────────────────────
-        targets, excluded = seams.enumerate_targets(config.day, pull_report)
+        targets, excluded = seams.enumerate_targets(config.day)
         state.excluded = excluded
         for identity in targets:
             exports[identity.canonical_symbol] = export_symbol(
@@ -788,8 +788,6 @@ def default_seams(
     account_key_resolver: Callable[[], str | None] | None = None,
     lease_factory: Callable[[Path], Any] | None = None,
     spot_puller: Callable[..., Any] | None = None,
-    metadata_puller: Callable[..., Any] | None = None,
-    candle_puller: Callable[..., Any] | None = None,
     materialize: Callable[..., Any] | None = None,
     derive_daily: Callable[..., Any] | None = None,
     read_window_factory: Callable[..., Any] | None = None,
@@ -812,7 +810,6 @@ def default_seams(
 
     lake_root = config.lake_root
     db_path = lake_root / DEFAULT_DB_NAME
-    registry_path = lake_root / "registry.duckdb"
     holder_note = f"crossverify:{config.day.isoformat()}:{os.getpid()}"
     opener = InstrumentStore.open if store_opener is None else store_opener
     # Resolved ONCE at seam build (fail-loud on junk env); a dry-run threads
@@ -866,18 +863,25 @@ def default_seams(
         stack.enter_context(inner.pop_all())
         return True
 
-    def _enumerate(
-        day: date, pull_report: PullLegReport | None
-    ) -> tuple[list[CanonicalIdentity], int]:
-        """§4.2 store+registry-authoritative target enumeration."""
+    def _enumerate(day: date) -> tuple[list[CanonicalIdentity], int]:
+        """§4.2 store-authoritative WHOLE-SPOT-UNIVERSE enumeration (#1788).
+
+        Export enumerates exactly what the spot pull covers — the SAME
+        :func:`whole_universe_spot_targets` set the pull leg pulls (every
+        admitted index + every admitted stock, reference-only NTM names
+        included) — plus the engine-trio STRUCTURAL FLOOR (``V1_INDICES``
+        minus reference-only): a masterless lake still enumerates + BLOCKS
+        on a missing brute-force index, so the export surface can never
+        silently narrow below the trio. NO registry read — futures are out
+        of the contract (DEC-CROSSVERIFY-SPOT-ONLY-001).
+        """
+        _ = day
         from brutex.models import InstrumentType
         from brutex.universe import V1_INDICES
 
         identities: list[CanonicalIdentity] = []
         excluded = 0
-        # The mapper mirrors V1_INDICES minus reference-only by construction
-        # (EXPORT_INDEX_COORDS derives from it), so every non-reference spec
-        # maps — the comprehension filter is the structural narrowing.
+        # The engine-trio floor: every non-reference spec maps by contract.
         identities.extend(
             identity
             for spec in V1_INDICES
@@ -891,82 +895,54 @@ def default_seams(
             )
             is not None
         )
+        seen = {identity.canonical_symbol for identity in identities}
         store = opener(db_path)
         try:
-            stock_symbols = sorted(
-                {
-                    inst.symbol_name
-                    for inst in store.list_index_equity_instruments()
-                    if inst.instrument is InstrumentType.EQ and inst.exch_id.value == "NSE"
-                }
-            )
+            targets = whole_universe_spot_targets(store)
         finally:
             store.close()
-        for symbol in stock_symbols:
-            stock_identity = canonical_identity(exchange="NSE", segment="CASH", lake_symbol=symbol)
-            if stock_identity is None:
-                excluded += 1
-                continue
-            identities.append(stock_identity)
-        if pull_report is not None:
-            fut_rows = sorted(pull_report.fut_contracts, key=lambda r: r.contract_symbol)
-        elif registry_path.exists():
-            from brutex.data.registry_store import RegistryStore
-
-            with RegistryStore.open(registry_path) as registry:
-                fut_rows = live_fut_rows(registry, day=day)
-        else:
-            _LOG.info("crossverify.no_registry", path=str(registry_path))
-            fut_rows = []
-        for row in fut_rows:
-            fut_identity = canonical_identity(
-                exchange=row.exch, segment="FNO", lake_symbol=row.contract_symbol
+        for inst in targets:
+            segment = "INDEX" if inst.instrument is InstrumentType.IDX else "CASH"
+            identity = canonical_identity(
+                exchange=inst.exch_id.value, segment=segment, lake_symbol=inst.symbol_name
             )
-            if fut_identity is None:
+            if identity is None:
                 excluded += 1
                 continue
-            identities.append(fut_identity)
+            if identity.canonical_symbol in seen:
+                continue  # the floor trio re-enumerated from the store
+            seen.add(identity.canonical_symbol)
+            identities.append(identity)
         return identities, excluded
 
     def _run_pull() -> PullLegReport:
-        from brutex.data.registry_store import RegistryStore
-
         store = opener(db_path)
         try:
-            with RegistryStore.open(registry_path) as registry:
-                return run_pull_leg(
-                    lake_root=lake_root,
-                    day=config.day,
-                    lookback_days=config.pull_lookback_days,
-                    store=store,
-                    registry=registry,
-                    session_rate=session_rate,
-                    market_closed=market_closed,
-                    spot_puller=spot_puller,
-                    metadata_puller=metadata_puller,
-                    candle_puller=candle_puller,
-                )
+            return run_pull_leg(
+                lake_root=lake_root,
+                day=config.day,
+                lookback_days=config.pull_lookback_days,
+                store=store,
+                session_rate=session_rate,
+                market_closed=market_closed,
+                spot_puller=spot_puller,
+            )
         finally:
             store.close()
 
     def _run_settle_retry(affected: Sequence[CanonicalIdentity]) -> PullLegReport:
-        from brutex.data.registry_store import RegistryStore
-
         store = opener(db_path)
         try:
-            with RegistryStore.open(registry_path) as registry:
-                return run_settle_retry(
-                    lake_root=lake_root,
-                    day=config.day,
-                    lookback_days=config.pull_lookback_days,
-                    affected=affected,
-                    store=store,
-                    registry=registry,
-                    session_rate=session_rate,
-                    market_closed=market_closed,
-                    spot_puller=spot_puller,
-                    candle_puller=candle_puller,
-                )
+            return run_settle_retry(
+                lake_root=lake_root,
+                day=config.day,
+                lookback_days=config.pull_lookback_days,
+                affected=affected,
+                store=store,
+                session_rate=session_rate,
+                market_closed=market_closed,
+                spot_puller=spot_puller,
+            )
         finally:
             store.close()
 

@@ -16,7 +16,6 @@ from brutex.calendars.nse import SessionType, TradingSession
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity
 from brutex.crossverify.day_export import (
     CANONICAL_COLUMNS,
-    SETTLE_RETRY_REASONS_FUT,
     SETTLE_RETRY_REASONS_INDEX,
     _decide,
     export_symbol,
@@ -337,8 +336,12 @@ class TestDecide:
         )
 
     def test_settle_retry_reason_sets(self) -> None:
+        # INDEX only — the FUT twin left with the futures legs
+        # (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788).
         assert frozenset({"count_short", "last_bar_incomplete"}) == SETTLE_RETRY_REASONS_INDEX
-        assert frozenset({"oi_null_settling"}) == SETTLE_RETRY_REASONS_FUT
+        from brutex.crossverify import day_export
+
+        assert not hasattr(day_export, "SETTLE_RETRY_REASONS_FUT")
 
 
 def _static_reader(bars: list[CandleBar]) -> DayFrameReader:

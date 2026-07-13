@@ -1,16 +1,19 @@
 # pyright: reportPrivateUsage=none
-"""End-to-end cross-verify producer chain (DEC-CROSSVERIFY-PRODUCER-001 §9.3).
+"""End-to-end cross-verify producer chain (DEC-CROSSVERIFY-PRODUCER-001 §9.3,
+SPOT-ONLY per DEC-CROSSVERIFY-SPOT-ONLY-001 — MIGRATION.md #1788).
 
 A REAL lake written through the production ``ParquetBarSink`` (the golden
 harness's build law: 3 pinned indices + an ``M&M`` stock enumerated from a
-REAL ``instruments.duckdb`` + one NIFTY future enumerated from a REAL
-``registry.duckdb``) driven through the FULL :func:`run_crossverify` step
-machine over :func:`default_seams` — real locks (tmp-lake flocks + lease),
-real reader/gate-seam/export/staging/journal/prebuild legs — with exactly
-TWO injected seams: :class:`FakeS3Client` (no AWS in CI) and a recording
-alerter (the exactly-once summary pin). The pull leg is exercised in
-``--skip-pull`` mode (the vendor is out of CI's reach by design; the pull
-leg's call shapes are spy-pinned in ``tests/unit/test_crossverify_pull_leg.py``).
+REAL ``instruments.duckdb``, PLUS a NIFTY-future lake partition AND a REAL
+``registry.duckdb`` holding live FUT rows — the #1788 NEGATIVE-pin fixture:
+futures data present, futures files NEVER produced) driven through the FULL
+:func:`run_crossverify` step machine over :func:`default_seams` — real locks
+(tmp-lake flocks + lease), real reader/gate-seam/export/staging/journal/
+prebuild legs — with exactly TWO injected seams: :class:`FakeS3Client` (no
+AWS in CI) and a recording alerter (the exactly-once summary pin). The pull
+leg is exercised in ``--skip-pull`` mode (the vendor is out of CI's reach by
+design; the spot pull leg's call shapes are spy-pinned in
+``tests/unit/test_crossverify_pull_leg.py``).
 
 GATE HONESTY: the sibling completeness-gate module
 (``brutex.data.today_completeness``, MIGRATION.md #1774 — PR #1503) is NOW in
@@ -61,13 +64,14 @@ if TYPE_CHECKING:
 
 _SESSION_MINUTES = 375
 
-#: The keys the clean-lake run publishes (the s3_key law, prefix default).
+#: The keys the clean-lake run publishes (the s3_key law, prefix default) —
+#: SPOT ONLY (#1788): despite the fixture lake's FNO partition + registry
+#: FUT rows, NO futures key is ever minted.
 _KEY_NIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTY.csv"
 _KEY_BANKNIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/BANKNIFTY.csv"
 _KEY_SENSEX = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/SENSEX.csv"
 _KEY_MM = f"crossverify/groww/{GOLDEN_DAY}/NSE_EQ/M&M.csv"
-_KEY_FUT = f"crossverify/groww/{GOLDEN_DAY}/NSE_FNO/NIFTY-2026-07-30-FUT.csv"
-_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM, _KEY_FUT}
+_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM}
 
 
 class _RecordingAlerter:
@@ -126,6 +130,8 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
             ),
         ),
         ("M&M", _bars(base_price="2900.00", minutes=range(3), oi_base=None)),
+        # The #1788 NEGATIVE-pin fixture: a FULL futures contract day IS in
+        # the lake — the spot-only producer must still emit ZERO *_FNO keys.
         ("NIFTY-2026-07-30-FUT", _bars(base_price="24100.00", minutes=full, oi_base=50_000)),
     ]
     for symbol, bars in plans:
@@ -148,7 +154,8 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
         )
     finally:
         store.close()
-    # The futures enumeration surface (--skip-pull falls back to the registry).
+    # A registry WITH live FUT rows — the #1788 negative pin: the spot-only
+    # producer never reads it, so these rows must yield ZERO exports.
     with RegistryStore.open(lake_root / "registry.duckdb") as registry:
         registry.upsert_contracts(
             "NSE",
@@ -202,17 +209,22 @@ class TestCleanChain:
 
         assert report.verdict == "published"
         assert report.exit_code == 0
-        assert report.published == 5
+        assert report.published == 4
         assert report.blocked == 0
         assert report.withheld == 0
         assert set(fake_s3.objects) == _ALL_KEYS
+
+        # #1788 NEGATIVE PIN: the lake HOLDS a full futures contract day and
+        # the registry HOLDS its live FUT row — yet ZERO *_FNO keys exist
+        # anywhere (S3, journal, staging); futures absence is BY DESIGN.
+        assert all("_FNO" not in key for key in fake_s3.objects)
+        assert all("-FUT" not in key for key in fake_s3.objects)
 
         # Byte-verified against the COMMITTED golden fixtures (same bar law).
         for key, fixture in (
             (_KEY_NIFTY, "NIFTY.csv"),
             (_KEY_SENSEX, "SENSEX.csv"),
             (_KEY_MM, "M&M.csv"),
-            (_KEY_FUT, "NIFTY-2026-07-30-FUT.csv"),
         ):
             assert fake_s3.objects[key] == (FIXTURES_DIR / fixture).read_bytes(), key
 
@@ -220,6 +232,7 @@ class TestCleanChain:
         journal = load_journal(clean_lake, GOLDEN_DAY)
         assert journal is not None
         assert set(journal.entries) == _ALL_KEYS
+        assert all("_FNO" not in key for key in journal.entries)  # the #1788 pin
         assert journal.pending_keys() == ()
         assert journal.withheld == {}
         assert not staging_dir(clean_lake, GOLDEN_DAY).exists()
@@ -236,7 +249,7 @@ class TestCleanChain:
         assert report2.verdict == "published"
         assert report2.exit_code == 0
         assert report2.published == 0
-        assert report2.skipped_already == 5
+        assert report2.skipped_already == 4
         assert len(fake_s3.puts) == puts_before
         assert len(alerter2.summaries) == 1
 
@@ -317,8 +330,8 @@ class TestRealGateBinding:
         report = run_crossverify(config, self._seams_real_gate(clean_lake, fake_s3, alerter))
         assert report.verdict == "published"
         assert report.exit_code == 0
-        assert report.published == 5
-        assert set(fake_s3.objects) == _ALL_KEYS
+        assert report.published == 4
+        assert set(fake_s3.objects) == _ALL_KEYS  # spot only — no *_FNO key (#1788)
         assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
 
     def test_real_gate_truncated_index_day_withholds_exit_2(self, tmp_path: Path) -> None:
@@ -365,7 +378,7 @@ class TestPublishCrashConvergence:
         report2 = _run(clean_lake, healthy, _RecordingAlerter())
         assert report2.verdict == "published"
         assert report2.exit_code == 0
-        assert report2.skipped_already == 4
+        assert report2.skipped_already == 3
         assert report2.published == 1
         assert set(healthy.objects) == {_KEY_MM}
         assert healthy.objects[_KEY_MM] == (FIXTURES_DIR / "M&M.csv").read_bytes()

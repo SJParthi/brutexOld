@@ -1,23 +1,30 @@
 """Lake coordinate → canonical cross-verify identity mapper (deny-by-default).
 
-DEC-CROSSVERIFY-PRODUCER-001 §1.3. Pure: stdlib + the ONE F&O grammar
-(:func:`brutex.data.fno_symbol.parse_fno_symbol` — never re-minted, the #1646
-truncation class) + :data:`brutex.universe.V1_INDICES` for the index
-allowlist cross-check. Every mapping is O(1); junk / out-of-contract
-coordinates map to ``None`` (skip + count at the caller), never a raise.
+DEC-CROSSVERIFY-PRODUCER-001 §1.3, amended SPOT-ONLY + WHOLE-SPOT-UNIVERSE by
+DEC-CROSSVERIFY-SPOT-ONLY-001 (MIGRATION.md #1788). Pure: stdlib + the ONE
+F&O grammar (:func:`brutex.data.fno_symbol.parse_fno_symbol` — never
+re-minted, the #1646 truncation class). Every mapping is O(1); junk /
+out-of-contract coordinates map to ``None`` (skip + count at the caller),
+never a raise.
 
 Pinned laws:
 
-* indices — exactly ``{("NSE","NIFTY"), ("NSE","BANKNIFTY"), ("BSE","SENSEX")}``
-  (derived from ``V1_INDICES`` minus reference-only, so INDIAVIX can never
-  silently join); segment token ``IDX_I`` is CROSS-exchange (the prior-vendor
-  era's single Index segment, MIGRATION.md #57/#80);
+* indices — the WHOLE admitted spot-index universe: every key-safe NSE
+  index (NIFTY / BANKNIFTY / INDIAVIX / the sectorals …), from BSE only
+  SENSEX — the exact mirror of the universe IDX fetch rule
+  (:func:`brutex.universe.is_universe_underlying`; mirror-pinned), so the
+  export enumerates precisely what the spot pull covers (#1788 supersedes
+  the 3-coord engine-trio allowlist ``EXPORT_INDEX_COORDS``); segment
+  token ``IDX_I`` is CROSS-exchange (the prior-vendor era's single Index
+  segment, MIGRATION.md #57/#80);
 * stocks — the lake ``CASH`` dir name verbatim (``BAJAJ-AUTO``, ``M&M``) —
   never split a groww_symbol on ``-``;
-* futures — ``parse_fno_symbol`` ONLY; canonical token
-  ``<underlying>-<YYYY-MM-DD>-FUT`` (date-BEFORE-FUT — deliberately distinct
-  from the RETIRED ``NIFTY-FUT-YYYY-MM-DD`` series key); identity is the
-  PARSED ``(underlying, expiry)``, never the token string;
+* futures — STRUCTURAL ONLY since #1788 (the producer neither pulls nor
+  enumerates futures; the mapping is retained, direct-unit-covered, for the
+  contract's possible re-expansion): ``parse_fno_symbol`` ONLY; canonical
+  token ``<underlying>-<YYYY-MM-DD>-FUT`` (date-BEFORE-FUT — deliberately
+  distinct from the RETIRED ``NIFTY-FUT-YYYY-MM-DD`` series key); identity
+  is the PARSED ``(underlying, expiry)``, never the token string;
 * the S3 key embeds the RAW canonical symbol (``M&M.csv`` — no ``%26``
   minting, the ``lake_keys`` pledge; boto3 percent-encodes at transport only).
 """
@@ -29,7 +36,6 @@ from datetime import date
 from typing import Final
 
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
-from brutex.universe import V1_INDICES
 
 SEGMENT_IDX: Final[str] = "IDX_I"
 SEGMENT_NSE_EQ: Final[str] = "NSE_EQ"
@@ -41,16 +47,18 @@ CLASS_INDEX_SPOT: Final[str] = "index_spot"
 CLASS_CASH_SPOT: Final[str] = "cash_spot"
 CLASS_FUT: Final[str] = "fut"
 
-#: The exported index coordinates — derived from ``V1_INDICES`` minus the
-#: reference-only rows (India VIX), so the allowlist can never drift from the
-#: universe's own index registry. Test-pinned to the literal 3-tuple set.
-EXPORT_INDEX_COORDS: Final[frozenset[tuple[str, str]]] = frozenset(
-    (spec.exchange.value, spec.underlying_symbol) for spec in V1_INDICES if not spec.reference_only
-)
+#: The BSE indices in the export contract — from BSE only SENSEX, the exact
+#: mirror of the universe IDX fetch rule (``is_universe_underlying`` /
+#: ``is_in_fetch_scope``: every NSE index; from BSE only SENSEX) so the
+#: export can never widen past what the spot pull covers. Mirror-pinned in
+#: ``tests/unit/test_crossverify_canonical.py`` against the universe rule.
+_BSE_INDEX_EXPORT_SYMBOLS: Final[frozenset[str]] = frozenset({"SENSEX"})
 
-#: Futures underlyings in the export contract. SENSEX is STRUCTURAL only —
-#: the v1 pull leg pulls NIFTY + BANKNIFTY (BSE derivatives are out of the
-#: fetch universe; DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 is the follow-up).
+#: Futures underlyings the STRUCTURAL FUT mapping accepts. The producer is
+#: SPOT-ONLY since DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788) — this arm is
+#: unreachable from the producer's enumeration and retained (direct-unit-
+#: covered) only for the contract's possible re-expansion; the SENSEX-FUT
+#: ingest follow-up DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 is CLOSED MOOT.
 EXPORT_FUTURES_UNDERLYINGS: Final[frozenset[str]] = frozenset({"NIFTY", "BANKNIFTY", "SENSEX"})
 
 #: The POSITIVE symbol charset (round-1 hostile review — a deny-list let
@@ -100,13 +108,20 @@ def canonical_identity(
 ) -> CanonicalIdentity | None:
     """Map one lake coordinate to its canonical export identity, or ``None``.
 
-    ``None`` = excluded (skip + count at the caller): a non-allowlisted index
-    (INDIAVIX / GIFTNIFTY), any CE/PE leg, an unparsed FNO dir, a
-    non-allowlisted FUT underlying, an exchange/segment outside the contract,
-    or a key-unsafe symbol. Case-exact; never raises. O(1).
+    ``None`` = excluded (skip + count at the caller): a BSE index other than
+    SENSEX (the universe IDX fetch rule's mirror), any CE/PE leg, an unparsed
+    FNO dir, a non-allowlisted FUT underlying (the STRUCTURAL arm), an
+    exchange/segment outside the contract, or a key-unsafe symbol.
+    Case-exact; never raises. O(1) — O(len(symbol)) for the charset check.
     """
     if segment == "INDEX":
-        if (exchange, lake_symbol) not in EXPORT_INDEX_COORDS:
+        # The WHOLE spot-index universe (#1788): every key-safe NSE index;
+        # from BSE only SENSEX — mirroring is_universe_underlying's IDX rule.
+        if not symbol_key_safe(lake_symbol):
+            return None
+        if exchange != "NSE" and not (
+            exchange == "BSE" and lake_symbol in _BSE_INDEX_EXPORT_SYMBOLS
+        ):
             return None
         return CanonicalIdentity(
             exchange=exchange,
@@ -165,7 +180,6 @@ __all__ = [
     "CLASS_FUT",
     "CLASS_INDEX_SPOT",
     "EXPORT_FUTURES_UNDERLYINGS",
-    "EXPORT_INDEX_COORDS",
     "SEGMENT_BSE_EQ",
     "SEGMENT_BSE_FNO",
     "SEGMENT_IDX",
