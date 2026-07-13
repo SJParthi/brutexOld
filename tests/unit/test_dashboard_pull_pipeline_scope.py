@@ -1621,6 +1621,64 @@ def test_scope_fno_only_never_clobbers_pull_verdict(
     assert after == before  # byte-equal: the no-op spot verdict never lands
 
 
+def test_scope_fno_only_failure_never_clobbers_pull_verdict(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter round 8 S-1 — the FAILURE arm's teeth, mutant M-S1 killer] a
+    FAILED fno-only run must never clobber the verdict either: the round-7
+    pin drives a SUCCESSFUL fno-only run, so a failure-conditioned regression
+    (``and (not fno_only or not report.ok)`` — clobber only when the fno-only
+    run FAILED) survived it plus the wider battery (205 tests). Under that
+    mutant a stopped-after-metadata fno-only run overwrites a prior REAL red
+    ``transient_residual`` banner with the no-op spot report's vacuous
+    verdict (the same B H1 class, failure-conditioned). Here the fno-only
+    run's metadata phase FAILS (``expiry_failures=1`` → the chain stops,
+    ``report.ok`` False) and the prior banner must survive byte-for-byte."""
+
+    def failing_spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        return BulkSpotReport(
+            dry_run=kwargs["dry_run"],
+            start_date="2020-01-01",
+            end_date="2026-07-12",
+            symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=0, no_data=0)],
+            still_failed_windows=5,
+        )
+
+    def failing_metadata(*args: Any, **kwargs: Any) -> MetadataPullReport:
+        return MetadataPullReport(
+            dry_run=kwargs["dry_run"],
+            years=tuple(kwargs["years"]),
+            underlyings=("NIFTY",),
+            expiry_cells=1,
+            cells_skipped=0,
+            expiry_failures=1,  # the metadata gate fails → report.ok is False
+            expiries_persisted=0,
+            contract_jobs=0,
+            contract_failures=0,
+            contracts_persisted=0,
+            note="offline failing fake",
+        )
+
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", failing_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", failing_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert client.post(_ROUTE, params={"scope": "spot-only"}).status_code == 200
+        _wait_for_job(client)
+        before = client.get("/api/v1/universe/pull-verdict").json()
+        assert before["present"] is True
+        assert before["kind"] == "transient_residual"  # the REAL red banner
+        assert client.post(_ROUTE, params={"scope": "fno-only"}).status_code == 200
+        snap = _wait_for_job(client)
+        after = client.get("/api/v1/universe/pull-verdict").json()
+    assert snap["state"] == "done"
+    # The fno-only run genuinely FAILED — the arm the round-7 pin never drove.
+    assert "stopped after metadata" in snap["detail"]
+    assert after == before  # byte-equal: a FAILED fno run never lands its no-op verdict
+
+
 def test_click_with_fifo_intent_file_recovers(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
