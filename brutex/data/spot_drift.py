@@ -117,8 +117,8 @@ def scan_spot_symbol_dirs(lake_root: Path) -> dict[str, tuple[str, ...]]:
     moved the ledger token, so the manifest is stale in exactly the production
     case — the fallback walk would run every time, so the walk IS the
     mechanism), NOT ``db_view.list_candle_datasets`` (``brutex/data`` never
-    imports ``brutex/dashboard``) and NOT ``lake_invariants._bar_files``
-    (private; O(files) — this needs O(dirs)).
+    imports ``brutex/dashboard``) and NOT ``lake_invariants``' streaming
+    series walk (private; O(files) reads — this needs O(dirs)).
 
     A scan ``OSError`` skips the SMALLEST subtree it can prove broken — every
     stat probe (head dirs AND enumerated children) goes through

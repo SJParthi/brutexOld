@@ -1106,9 +1106,8 @@ async function loadCompleteness() {
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
      actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
   try {
-    const r = await fetch("/api/v1/universe/completeness");
-    if (!r.ok) return;
-    const map = await r.json();
+    const map = await guardedPollJson("/api/v1/universe/completeness");
+    if (map === undefined) return;
     const sig = JSON.stringify(map);
     if (sig === covSig) return;   // unchanged — no needless re-render
     COV = map; covSig = sig;
@@ -1124,9 +1123,8 @@ async function loadMappingIntegrity() {
      never pulled yet (no coverage row) is the neutral "not attempted" tally — NEVER red, so a
      clean selective pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). Never throws. */
   try {
-    const r = await fetch("/api/v1/universe/mapping-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const m = await guardedPollJson("/api/v1/universe/mapping-integrity");
+    if (m === undefined) return;
     const panel = document.getElementById("mappanel");
     const verdict = document.getElementById("mapverdict");
     const detail = document.getElementById("mapdetail");
@@ -1157,9 +1155,8 @@ async function loadMasterIntegrity() {
      one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
      legs. Reads the snapshot the ingest hook persisted. Never throws — keeps last shown. */
   try {
-    const r = await fetch("/api/v1/universe/master-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const m = await guardedPollJson("/api/v1/universe/master-integrity");
+    if (m === undefined) return;
     const panel = document.getElementById("masterpanel");
     const verdict = document.getElementById("masterverdict");
     const detail = document.getElementById("masterdetail");
@@ -1188,9 +1185,8 @@ async function loadEconomicsIntegrity() {
      mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
      never RED. Reads the persisted snapshot. Never throws — keeps last shown. */
   try {
-    const r = await fetch("/api/v1/universe/economics-integrity");
-    if (!r.ok) return;
-    const m = await r.json();
+    const m = await guardedPollJson("/api/v1/universe/economics-integrity");
+    if (m === undefined) return;
     const panel = document.getElementById("econpanel");
     const verdict = document.getElementById("econverdict");
     const detail = document.getElementById("econdetail");
@@ -1220,9 +1216,8 @@ async function loadParseSkips() {
      reasons. Built with textContent ONLY (the universe.html CodeQL XSS guard).
      Never throws — keeps the last shown verdict on a transient fetch error. */
   try {
-    const r = await fetch("/api/v1/universe/parse-skips");
-    if (!r.ok) return;
-    const m = await r.json();
+    const m = await guardedPollJson("/api/v1/universe/parse-skips");
+    if (m === undefined) return;
     const panel = document.getElementById("skippanel");
     const verdict = document.getElementById("skipverdict");
     const detail = document.getElementById("skipdetail");
@@ -1256,9 +1251,8 @@ async function loadLakeUniqueness() {
      textContent ONLY (the universe.html CodeQL XSS guard). Never throws — keeps the
      last shown verdict on a transient fetch error. */
   try {
-    const r = await fetch("/api/v1/universe/lake-uniqueness");
-    if (!r.ok) return;
-    const m = await r.json();
+    const m = await guardedPollJson("/api/v1/universe/lake-uniqueness");
+    if (m === undefined) return;
     const panel = document.getElementById("lakepanel");
     const verdict = document.getElementById("lakeverdict");
     const detail = document.getElementById("lakedetail");
@@ -1782,6 +1776,35 @@ const FEED_STALE_RED_MS = 15000;
 const FEED_BACKOFF_BASE_MS = 3000;
 const FEED_BACKOFF_MAX_MS = 30000;
 const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND body) — mirrors the widget's
+/* DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): the 15 s side-panel
+   pollers below (the six integrity/completeness loaders; the seventh, the quota
+   poller, was since DELETED with its endpoint — DEC-QUOTA-VERDICT-MOOT-001) had
+   NO abort bound and NO no-overlap guard, so under the 2026-07-08 read-path wedge each tick
+   opened a fresh fetch that hung on the wedged server and — with browsers having no
+   body-read timeout — the stacked hung connections exhausted the per-origin pool and
+   silenced even pure-async routes. This ONE guarded reader carries the SAME 10 s
+   AbortController bound + a per-URL in-flight guard pollProgress already uses: a poll
+   whose prior fetch is still running is SKIPPED (never stacked), and a hung fetch is
+   aborted within FEED_FETCH_TIMEOUT_MS (armed through the body read, cleared in the
+   finally) so it becomes a transient the caller swallows, never a leaked connection.
+   Returns the parsed JSON, or `undefined` on skip / non-ok (JSON.parse never yields
+   `undefined`, so it is an unambiguous "no update" sentinel); an abort/timeout REJECTS
+   so each poller's own try/catch keeps its last-shown value. */
+const _pollInflight = Object.create(null);
+async function guardedPollJson(url) {
+  if (_pollInflight[url]) return undefined;   // no-overlap: a prior tick's fetch is still running
+  _pollInflight[url] = true;
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
+  try {
+    const r = await fetch(url, ctrl ? { signal: ctrl.signal } : {});
+    if (!r.ok) return undefined;              // non-ok — treat as "no update" (each poller's prior `if(!r.ok) return`)
+    return await r.json();                    // killer stays ARMED through the body read
+  } finally {
+    if (killer) clearTimeout(killer);         // cleared only AFTER json settles — a stalled body aborts too
+    _pollInflight[url] = false;
+  }
+}
 /* Monotonic client clock (immune to NTP/wall-clock jumps). Suspend caveat
    (Golden Rule #10, refuter-confirmed): on some browser/OS combinations
    performance.now() may NOT advance while the machine is suspended
@@ -1833,10 +1856,15 @@ async function refreshWindowsLine() {
   try {
     /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
        ?limit=0 keeps the identical counts payload while dropping the
-       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
-    const r = await fetch('/api/v1/coverage/windows?limit=0');
-    if (!r.ok) return;
-    const counts = (await r.json()).counts || {};
+       up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read.
+       DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): the same abort + no-overlap
+       guard as the side-panel pollers — this 5 s poll hits the heavy
+       /coverage/windows route (a lake-limiter seam per
+       DEC-DASHBOARD-LAKE-IO-LIMITER-001), so an unaborted hung fetch here is the
+       identical connection-leak hazard. */
+    const payload = await guardedPollJson('/api/v1/coverage/windows?limit=0');
+    if (payload === undefined) return;
+    const counts = payload.counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
     const segParts = [];
     for (const seg of WINDOW_SEGMENTS) {
