@@ -56,6 +56,22 @@ on:
   pull_request:
     branches:
       - main
+  # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): merge-queue readiness. When a
+  # merge queue rules `main`, GitHub dispatches `merge_group` events for the
+  # queue's speculative merge commits (refs/heads/gh-readonly-queue/...).
+  # EVERY branch-protection required context is produced by THIS workflow
+  # (the 21 static job names in branch-protection-drift.yml's expected
+  # snapshot + the ci-ok dynamic name below), so without this trigger no
+  # required check could ever report on a queue ref and every queued PR
+  # would hang until the queue times it out — the classic merge-queue
+  # deadlock. Notes: (a) `merge_group` supports NO `paths:` filtering —
+  # irrelevant here, this workflow is unfiltered; (b) the PR-only sub-gates
+  # (job/step `if: github.event_name == 'pull_request'`) SKIP on
+  # merge_group exactly as they already do on push-to-main — ci-ok treats
+  # skipped==pass and none of them is a DIRECT required context (they
+  # enforced the PR itself on its pull_request run); (c) the concurrency
+  # group below keys on github.ref, which is unique per queue entry.
+  merge_group:
   workflow_dispatch:
 
 # Cancel in-progress runs for the same branch on new pushes — saves
@@ -2527,6 +2543,14 @@ jobs:
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
           fi
+          # DEC-MERGE-QUEUE-001: on a merge_group ref, diff against the merge
+          # group's OWN base SHA (the exact commit the queue applies the group
+          # onto — an ancestor of the checked-out queue ref, so present under
+          # fetch-depth 0), not origin/main — precise when main advances while
+          # the group builds. Absent on every other event → no-op.
+          if [ -n "${{ github.event.merge_group.base_sha }}" ]; then
+            BASE="${{ github.event.merge_group.base_sha }}"
+          fi
           python scripts/ci/coverage_gate_discovery.py --base "$BASE"
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
         run: python scripts/ci/spec_test_crosswalk.py
@@ -4359,7 +4383,19 @@ jobs:
     # expected snapshot (line 133), so no existing green requirement breaks.
     # This NARROWS which event can produce the required context (adds
     # enforcement); it removes no gate.
-    name: ${{ github.event_name == 'pull_request' && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
+    #
+    # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): `merge_group` is the SECOND
+    # legitimate producer of the required context. A merge queue evaluates
+    # required checks against ITS OWN speculative merge commit (the
+    # gh-readonly-queue ref), so the context MUST report there or every
+    # queued PR deadlocks. This does NOT reopen the shadowing hole the
+    # PR-only narrowing closed: a merge-group check run lands on the queue's
+    # merge SHA, never on a PR head SHA, so it can never satisfy or shadow a
+    # PR head's required context on the manual-merge path (check runs are
+    # keyed by commit). The PR-only sub-gates skip on merge_group (as on
+    # push) — they are not direct required contexts and already enforced
+    # the PR on its own pull_request run.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
     runs-on: ubuntu-24.04
     needs:
       - lint
