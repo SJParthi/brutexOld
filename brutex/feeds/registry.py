@@ -1,6 +1,6 @@
 """Feed registry — resolve a feed id to its :class:`FeedBinding`.
 
-DEC-FEED-INTERFACE-001 (MIGRATION.md #1752). The registry maps a grammar-valid
+DEC-FEED-INTERFACE-001 (MIGRATION.md #1779). The registry maps a grammar-valid
 feed id to the builder that assembles its :class:`~brutex.feeds.binding.FeedBinding`.
 PR-2 is **vendor-token-free** (Golden Rule / the vendor-token CI guard): it
 ships with ONLY the default feed. A second feed id is registered in a later PR by
