@@ -111,11 +111,12 @@ dated SNAPSHOT of the then-open PR set: in-flight sets drift, and each
 such assessment must be re-verified at each merge, never read as a
 standing guarantee. Snapshot 2026-07-13 (R4c, on the post-#1462 rebase):
 the then-open relevant PRs were #1511 + #1358 (the not-pinned freshness
-owners) and #1399 — which carries a ``bar_screen`` API rework
-(DEC-BADTICK-HEAD-SEED-001) whose merge will need a main-side screen-call
-reconcile; until then a naive merge breaks main's own screen call site
-and these route-level pins fail loudly alongside main's own suites —
-intended fence behavior, not a defect of this file.
+owners) and #1399 — which carries a ``bad_tick``/``BadTickScreen`` API
+rework (DEC-BADTICK-HEAD-SEED-001) whose merge will need a main-side
+``bar_screen`` consumer reconcile; until then a naive merge breaks
+main's own ``bar_screen`` consumer call site and these route-level pins
+fail loudly alongside main's own suites — intended fence behavior, not
+a defect of this file.
 
 Skipped when ``fastapi`` / ``duckdb`` / ``polars`` / ``pyarrow`` are absent.
 """
