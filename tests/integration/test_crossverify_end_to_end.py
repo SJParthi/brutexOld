@@ -13,13 +13,13 @@ alerter (the exactly-once summary pin). The pull leg is exercised in
 leg's call shapes are spy-pinned in ``tests/unit/test_crossverify_pull_leg.py``).
 
 GATE HONESTY: the sibling completeness-gate module
-(``brutex.data.today_completeness``, MIGRATION.md #1774) has not merged into
-this tree — ``default_seams``' fail-closed binding would honestly REFUSE — so
-the classifier seam is swapped to the contract-faithful fake twin
-(``tests.fakes.fake_completeness_gate.faithful_classify``) EXCEPT when the
-real module imports, in which case the REAL gate drives (the
-real-gate-if-importable arm keeps this test meaningful post-merge with zero
-edits). Asserted: published object bytes vs the committed golden fixtures,
+(``brutex.data.today_completeness``, MIGRATION.md #1774 — PR #1503) is NOW in
+this tree, so ``_classifier_factory`` binds the REAL gate (the
+contract-faithful fake twin remains only as the honest degrade for a tree
+where the module is absent), and ``TestRealGateBinding`` pins the real-module
+binding STRICTLY — ``bind_production_classifier`` with NO fallback — through
+the full chain (complete day publishes; truncated index withholds exit 2).
+Asserted: published object bytes vs the committed golden fixtures,
 journal contents + staging cleanup, idempotent second run (0 new puts),
 truncated-index withhold → exit 2 with the file ABSENT from S3, crash-mid-
 publish → next-run convergence, and the derive leg via the independent
@@ -285,6 +285,61 @@ class TestWithheldIndex:
         # The summary fired once, CRITICAL-bound verdict carried verbatim.
         assert len(alerter.summaries) == 1
         assert alerter.summaries[0][1].verdict == "withheld_partial"
+
+
+class TestRealGateBinding:
+    """The integration moment (MIGRATION.md #1774 merged): the REAL sibling
+    module drives the chain — ``bind_production_classifier`` STRICT, no
+    fake-twin fallback anywhere in these tests."""
+
+    def _seams_real_gate(
+        self, lake: Path, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifySeams:
+        config = resolve_crossverify_config(lake_root=lake, day=GOLDEN_DAY, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        # STRICT: the real binding — a CompletenessGateUnavailable here FAILS
+        # the test (the module is in-tree post-#1503; no fallback allowed).
+        return dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+
+    def test_real_module_binds_without_fallback(self) -> None:
+        classifier = bind_production_classifier()  # raises ⇒ test fails
+        assert callable(classifier)
+
+    def test_real_gate_complete_index_day_publishes(self, clean_lake: Path) -> None:
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        config = resolve_crossverify_config(lake_root=clean_lake, day=GOLDEN_DAY, skip_pull=True)
+        report = run_crossverify(config, self._seams_real_gate(clean_lake, fake_s3, alerter))
+        assert report.verdict == "published"
+        assert report.exit_code == 0
+        assert report.published == 5
+        assert set(fake_s3.objects) == _ALL_KEYS
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+
+    def test_real_gate_truncated_index_day_withholds_exit_2(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _build_lake(lake, truncated_banknifty=True)
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        config = resolve_crossverify_config(lake_root=lake, day=GOLDEN_DAY, skip_pull=True)
+        report = run_crossverify(config, self._seams_real_gate(lake, fake_s3, alerter))
+        assert report.verdict == "withheld_partial"
+        assert report.exit_code == 2
+        assert report.withheld == 1
+        assert _KEY_BANKNIFTY not in fake_s3.objects
+        assert _KEY_NIFTY in fake_s3.objects
+        journal = load_journal(lake, GOLDEN_DAY)
+        assert journal is not None
+        assert "BANKNIFTY" in journal.withheld
+        # The REAL classifier's token for a truncated index day (never the
+        # fake twin's fabrication): count_short (0/short < expected minutes).
+        assert journal.withheld["BANKNIFTY"] == "count_short"
 
 
 class TestPublishCrashConvergence:

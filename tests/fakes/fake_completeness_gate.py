@@ -80,9 +80,18 @@ def faithful_classify(
     session; INDEX = count==expected AND last regular bar 15:29; CASH =
     all-zero-volume shape only; FUT = ANY OI-null OR all-zero-volume).
     """
+    from datetime import timedelta
+
     from brutex.calendars.nse import get_session
 
-    _ = window_end
+    if window_end != clamp_today + timedelta(days=1):
+        # The real module's STRICT covers-today law (MIGRATION.md #1774):
+        # a non-covering window is inert `not_covering` — mirrored here so
+        # the twin can never mask a caller passing the wrong window end
+        # (the integration-moment day_export defect class).
+        return FakeVerdict(
+            covers_today=False, incomplete=False, reason="not_covering", expected_minutes=None
+        )
     session = get_session(clamp_today)
     expected = session.duration_minutes if session is not None else None
     if session is None:
@@ -92,9 +101,12 @@ def faithful_classify(
     minutes = sorted({bar.timestamp.astimezone(IST).strftime("%H:%M") for bar in bars_today})
     distinct = len(minutes)
     last = minutes[-1] if minutes else None
-    if distinct == 0:
+    if distinct == 0 and instrument_class != "index_spot":
+        # Real-module law: only CASH/FUT/OPTION abstain on zero today bars
+        # (`no_today_bars`, covers_today=True); an INDEX with zero bars falls
+        # through to the count law and reads `count_short` (0 < expected).
         return FakeVerdict(
-            covers_today=False,
+            covers_today=True,
             incomplete=False,
             reason="no_today_bars",
             expected_minutes=expected,

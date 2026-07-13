@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, date
+from datetime import UTC, date, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
@@ -280,7 +280,13 @@ def export_symbol(
         verdict = classifier(
             bars_today=bars,
             clamp_today=day,
-            window_end=day,
+            # The REAL sibling gate's covers-today law is STRICT
+            # `window_end == clamp_today + 1 day` (MIGRATION.md #1774,
+            # `classify_today_completeness`) — the exporter judges exactly
+            # the exported day, so it passes the covering window end.
+            # (Integration-moment fix: `window_end=day` read `not_covering`
+            # inert on the real module — the fake twin had ignored the arg.)
+            window_end=day + timedelta(days=1),
             instrument_class=identity.instrument_class,
         )
     except TypeError as exc:
