@@ -273,24 +273,32 @@ class _RangeSource:
 
 def test_golden_worst_case_nifty_bull_atm_range_bars() -> None:
     """Fixture W — DEC-FILL-WORST-CASE-001 worst-case golden (locked once
-    2026-07-13, hand-derived; the SAME signal as Fixture A over RANGE bars
-    entry ₹120.00 [119.00–121.00] → exit ₹150.00 [149.00–151.00]):
+    2026-07-13, hand-derived; RE-LOCKED ONCE the same day by the fix-round-2
+    adverse-levy-rounding law — a BRANCH-NEW pin, the sanctioned single
+    relock: under WORST_CASE every nearest-rounded levy now rounds
+    ADVERSELY (ceiling), so exch/sebi/stamp moved 236/0/0 → 238/2/100 and
+    net 64,310 → 64,206; the frozen origin/main-era goldens are untouched.
+    The SAME signal as Fixture A over RANGE bars entry ₹120.00
+    [119.00–121.00] → exit ₹150.00 [149.00–151.00]):
 
       buy_fill = entry HIGH 12100 + 5 = 12105 (one tick OUTSIDE the printed
       range — the honest adverse floor); sell_fill = exit LOW 14900 − 5 =
       14895; n_shares = 25.
       buy_notional = 302,625;  sell_notional = 372,375;  gross = +69,750.
-      brokerage = 2×2000 = 4,000.
-      STT = round₹(372,375×10,000//1e7 = 372) = 400.
-      exch(NSE 3503) = ⌈302,625×3503⌉ₚ + ⌈372,375×3503⌉ₚ = 106 + 130 = 236.
-      sebi(10) = 0 + 0 = 0;  ipft(NSE 50) = 2 + 2 = 4;
-      stamp(300, buy) = round₹(9) = 0.
-      GST = round₹((4,000+236+0+4)×18% = 763) = 800.
-      total = 4,000+400+236+0+4+0+800 = 5,440;  net = 69,750 − 5,440 = +64,310.
+      brokerage = 2×2000 = 4,000 (flat — rounding-free, mode-invariant).
+      STT = ceil₹(372,375×10,000//1e7 = 372) = 400.
+      exch(NSE 3503) = ⌈106.0095⌉ₚ + ⌈130.44⌉ₚ = 107 + 131 = 238.
+      sebi(10) = ⌈0.30⌉ₚ + ⌈0.37⌉ₚ = 1 + 1 = 2;
+      ipft(NSE 50) = ⌈1.51⌉ₚ + ⌈1.86⌉ₚ = 2 + 2 = 4;
+      stamp(300, buy) = ceil₹(9 paisa) = 100.
+      GST = ceil₹((4,000+238+2+4)×18% = 763.92 → //1e7 = 763) = 800.
+      total = 4,000+400+238+2+4+100+800 = 5,544;  net = 69,750 − 5,544 =
+      +64,206.
       slippage = 2 ticks × 25 = 250 (tick discipline — the open→extreme move
       is fill-anchor semantics carried by gross, not slippage).
-    PRECISE on the SAME range bars anchors the opens ⇒ byte-identical to
-    Fixture A (net +69,310) — both pinned so the two arms can never collapse.
+    PRECISE on the SAME range bars anchors the opens AND keeps the legacy
+    nearest levy rounding ⇒ byte-identical to Fixture A (net +69,310) —
+    both pinned so the two arms can never collapse.
     """
     sig = SpotSignal(
         instrument=OptionsUnderlying.NIFTY,
@@ -314,13 +322,13 @@ def test_golden_worst_case_nifty_bull_atm_range_bars() -> None:
     assert b.gross_pnl_paisa == 69_750
     assert b.brokerage_paisa == 4000
     assert b.stt_paisa == 400
-    assert b.exch_paisa == 236
-    assert b.sebi_paisa == 0
+    assert b.exch_paisa == 238
+    assert b.sebi_paisa == 2
     assert b.ipft_paisa == 4
-    assert b.stamp_paisa == 0
+    assert b.stamp_paisa == 100
     assert b.gst_paisa == 800
-    assert b.total_charges_paisa == 5440
-    assert b.net_pnl_paisa == 64_310
+    assert b.total_charges_paisa == 5544
+    assert b.net_pnl_paisa == 64_206
     assert b.slippage_paisa == 250
 
     precise = materialize_trade(
@@ -331,11 +339,21 @@ def test_golden_worst_case_nifty_bull_atm_range_bars() -> None:
     assert out.net_pnl_paisa < precise.net_pnl_paisa  # worst never better
 
 
-def test_golden_flat_bars_worst_case_equals_precise() -> None:
+def test_golden_flat_bars_worst_case_fills_equal_precise() -> None:
     """THE NAMED FLAT-BAR REGRESSION (options leg): on flat bars the two
-    modes are byte-identical — the +tick on top of the extreme keeps the
+    modes FILL identically — the +tick on top of the extreme keeps the
     worst-case buy at ``open + tick`` (== precise), never the bare ``high``
-    (which would be one tick BETTER than today)."""
+    (which would be one tick BETTER than today) — so gross P&L is equal.
+
+    FIX-ROUND-2 REFRAME (the adverse-levy-rounding law, MIGRATION.md
+    #1786): the original ``worst == precise`` byte-identity claim is DEAD
+    for the cost-bearing options leg — at EQUAL notionals the worst-case
+    levies are CEIL'd where precise rounds nearest, so the charge stack can
+    only be HIGHER under worst (here: exch 238 vs 236, sebi 2 vs 0, stamp
+    100 vs 0 → charges 5,544 vs 5,440; net 69,206 vs 69,310). The floor
+    (never-better) is exactly what survives — pinned with the divergent
+    charge values so the ceil arm has teeth on flat bars too.
+    """
     sig = SpotSignal(
         instrument=OptionsUnderlying.NIFTY,
         direction=TradeDirection.BULL,
@@ -351,6 +369,15 @@ def test_golden_flat_bars_worst_case_equals_precise() -> None:
         source=_Source("120.00", "150.00"),
         fill_mode=FillMode.PRECISE,
     )
-    assert worst == precise
     assert isinstance(worst, MaterializedTrade)
+    assert isinstance(precise, MaterializedTrade)
     assert worst.breakdown.buy_fill_paisa == 12005  # open + tick, preserved
+    assert worst.breakdown.buy_fill_paisa == precise.breakdown.buy_fill_paisa
+    assert worst.breakdown.sell_fill_paisa == precise.breakdown.sell_fill_paisa
+    assert worst.breakdown.gross_pnl_paisa == precise.breakdown.gross_pnl_paisa
+    # The adverse levy rounding: worst charges HIGHER at equal notionals.
+    assert worst.breakdown.total_charges_paisa == 5_544
+    assert precise.breakdown.total_charges_paisa == 5_440
+    assert worst.net_pnl_paisa == 69_206
+    assert precise.net_pnl_paisa == 69_310
+    assert worst.net_pnl_paisa <= precise.net_pnl_paisa

@@ -81,7 +81,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final, Literal, cast, get_args
 
-from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import _round_levy_paisa, _round_levy_rupee
 from brutex.costs.constants import (
     BSE_IPFT_BPS_X100,
     GROWW_BROKERAGE_PAISA,
@@ -593,12 +593,19 @@ def apply_futures_fill(
     return buy_fill, sell_fill, realized_per_unit
 
 
-def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
+def futures_brokerage_leg_paisa(
+    notional_paisa: int, broker: Broker, *, worst_case: bool = False
+) -> int:
     """Brokerage for ONE executed futures order (one leg) in paisa.
 
     * ``groww``: ``min(₹20, 0.03% × leg turnover)`` — the VERIFIED Groww futures
       law (PLAN_FINALIZATION_2026-05-16.md §8.1 row 2); the turnover arm rounds
-      to paisa half-up (non-statutory, the COMMON ``_round_to_paisa`` rule).
+      to paisa half-up (non-statutory, the COMMON ``_round_to_paisa`` rule) —
+      or, under ``worst_case=True``, ADVERSELY to the next paisa (ceiling; the
+      DEC-FILL-WORST-CASE-001 fix-round-2 adverse-levy-rounding law — the
+      turnover arm is a nearest-rounded charge, so it joins the statutory
+      levies in never rounding in the worst-case trade's favor). The flat ₹20
+      arm is rounding-free — untouched in both modes.
     * ``zerodha``: flat ₹20 per executed order — the in-repo COSTS_VERIFIED.md
       §8.2 row ("flat for F&O since June 2024"); the min-formula verification is
       Groww-specific, so Zerodha deliberately keeps its own verified flat row.
@@ -609,6 +616,10 @@ def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
         The leg's turnover (fill × shares) in paisa.
     broker
         ``"groww"`` or ``"zerodha"``.
+    worst_case
+        ``True`` = the WORST_CASE adverse (ceiling) rounding on the turnover
+        arm; ``False`` (default) = the byte-identical legacy nearest-paisa
+        rounding.
 
     Returns
     -------
@@ -617,7 +628,9 @@ def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
     """
     if broker == "zerodha":
         return ZERODHA_BROKERAGE_PAISA
-    turnover_arm = _round_to_paisa(notional_paisa * GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100)
+    turnover_arm = _round_levy_paisa(
+        notional_paisa * GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100, worst_case=worst_case
+    )
     return min(GROWW_BROKERAGE_PAISA, turnover_arm)
 
 
@@ -922,35 +935,47 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         )
 
     entry_date = trade.entry_dt_ist.date()
-    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law).
+    # DEC-FILL-WORST-CASE-001 fix-round-2 (the adverse-levy-rounding law):
+    # under WORST_CASE every nearest-rounded charge below rounds ADVERSELY
+    # (ceiling) so a rounding boundary can never make the worst-case NET
+    # beat precise; PRECISE keeps the legacy nearest rounding byte-identical.
+    worst_case = trade.fill_mode is FillMode.WORST_CASE
+    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law);
+    # the flat arm is rounding-free, the turnover arm is mode-aware-rounded.
     brokerage_paisa = futures_brokerage_leg_paisa(
-        buy_notional_paisa, trade.broker
-    ) + futures_brokerage_leg_paisa(sell_notional_paisa, trade.broker)
+        buy_notional_paisa, trade.broker, worst_case=worst_case
+    ) + futures_brokerage_leg_paisa(sell_notional_paisa, trade.broker, worst_case=worst_case)
     # STT: sell-side turnover, statutory rupee rounding. Raises on the
     # pre-2024-10-01 refusal window.
     stt_rate = stt_futures_rate_bps_x100(entry_date)
-    stt_paisa = _round_to_rupee((sell_notional_paisa * stt_rate) // 10_000_000)
+    stt_paisa = _round_levy_rupee(
+        (sell_notional_paisa * stt_rate) // 10_000_000, worst_case=worst_case
+    )
     # ETC: both sides on turnover — raises for EVERY window today (all-refusal
     # tables; reachable past this line only under a synthetic-cited fixture).
     exch_rate = futures_exchange_charge_bps_x100(trade.instrument, entry_date)
-    exch_paisa = _round_to_paisa(buy_notional_paisa * exch_rate) + _round_to_paisa(
-        sell_notional_paisa * exch_rate
-    )
+    exch_paisa = _round_levy_paisa(
+        buy_notional_paisa * exch_rate, worst_case=worst_case
+    ) + _round_levy_paisa(sell_notional_paisa * exch_rate, worst_case=worst_case)
     # SEBI: both sides (COMMON verified rate).
-    sebi_paisa = _round_to_paisa(buy_notional_paisa * SEBI_FEE_BPS_X100) + _round_to_paisa(
-        sell_notional_paisa * SEBI_FEE_BPS_X100
-    )
+    sebi_paisa = _round_levy_paisa(
+        buy_notional_paisa * SEBI_FEE_BPS_X100, worst_case=worst_case
+    ) + _round_levy_paisa(sell_notional_paisa * SEBI_FEE_BPS_X100, worst_case=worst_case)
     # IPFT: both sides — NSE refuses today; BSE is the assumed-0 options stance.
     ipft_rate = ipft_futures_bps_x100(trade.instrument, entry_date)
-    ipft_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate) + _round_to_paisa(
-        sell_notional_paisa * ipft_rate
-    )
+    ipft_paisa = _round_levy_paisa(
+        buy_notional_paisa * ipft_rate, worst_case=worst_case
+    ) + _round_levy_paisa(sell_notional_paisa * ipft_rate, worst_case=worst_case)
     # Stamp: buy side, statutory rupee rounding — refuses today.
     stamp_rate = stamp_futures_rate_bps_x100(entry_date)
-    stamp_paisa = _round_to_rupee((buy_notional_paisa * stamp_rate) // 10_000_000)
+    stamp_paisa = _round_levy_rupee(
+        (buy_notional_paisa * stamp_rate) // 10_000_000, worst_case=worst_case
+    )
     # GST 18% on services only, rounded ONCE on the total (DEC-COST-001).
     gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
-    gst_paisa = _round_to_rupee((gst_base_paisa * GST_TOTAL_BPS_X100) // 10_000_000)
+    gst_paisa = _round_levy_rupee(
+        (gst_base_paisa * GST_TOTAL_BPS_X100) // 10_000_000, worst_case=worst_case
+    )
 
     total_charges_paisa = (
         brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa

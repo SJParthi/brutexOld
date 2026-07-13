@@ -92,6 +92,51 @@ def _round_to_rupee(amount_paisa: int) -> int:
     return -(((-amount_paisa + 50) // 100) * 100)
 
 
+def _round_levy_paisa(amount_x_bps_x100: int, *, worst_case: bool) -> int:
+    """Mode-aware paisa rounding for a rate-scaled levy product.
+
+    DEC-FILL-WORST-CASE-001 fix-round-2 (the adverse-levy-rounding law):
+    under PRECISE (``worst_case=False``) this IS :func:`_round_to_paisa` —
+    byte-identical legacy nearest-paisa half-up. Under WORST_CASE every
+    nearest-rounded levy in the cost stack instead rounds ADVERSELY
+    (ceiling toward +∞ — a levy is a charge, so "adverse" = larger). WHY:
+    nearest rounding on a levy computed from the SMALLER worst-case sell
+    notional can round DOWN across a boundary the precise levy rounded UP,
+    making the worst-case NET strictly BETTER than precise (the refuter's
+    executed ₹0.5-STT-boundary counterexample — see
+    ``_round_levy_rupee``); ceiling the worst-case levy restores the
+    unconditional net floor (the dominance proof lives in MIGRATION.md
+    #1786 + ``tests/property/test_futures_options_worst_case_floor.py``).
+    """
+    if not worst_case:
+        return _round_to_paisa(amount_x_bps_x100)
+    # Ceiling toward +∞ for any sign: -((-x) // u) == ceil(x / u).
+    return -((-amount_x_bps_x100) // 10_000_000)
+
+
+def _round_levy_rupee(amount_paisa: int, *, worst_case: bool) -> int:
+    """Mode-aware statutory rupee rounding (STT / stamp duty / GST).
+
+    DEC-FILL-WORST-CASE-001 fix-round-2: under PRECISE this IS
+    :func:`_round_to_rupee` — byte-identical legacy nearest-rupee half-up.
+    Under WORST_CASE the statutory levy rounds ADVERSELY (ceiling to the
+    next whole rupee). WHY (the refuter's executed counterexample): a
+    worst-case sell notional 25 paisa smaller than precise crossed a ₹0.5
+    STT rounding boundary DOWNWARD — STT dropped ₹1 while gross dropped
+    only 25 paisa, so the worst-case NET beat precise by 75 paisa
+    (falsifying the shipped unconditional net-floor property). With the
+    ceiling, a sell-side levy's shortfall vs precise is ≤ 0 whenever the
+    raw gap is below half a rupee, and ≤ 2×(rate × Δnotional) otherwise —
+    summed over all levies that is ≪ the gross drop Δ, so
+    ``net_worst <= net_precise`` holds unconditionally again (the full
+    dominance proof: MIGRATION.md #1786 + the floor-property docstring).
+    """
+    if not worst_case:
+        return _round_to_rupee(amount_paisa)
+    # Ceiling to the next whole rupee (100 paise) toward +∞ for any sign.
+    return -((-amount_paisa) // 100) * 100
+
+
 # ─────────────────────────────────────────────────────────────────
 # Lot-size lookup (proxy to brutex.options.lot_size_history)
 # ─────────────────────────────────────────────────────────────────
@@ -311,6 +356,13 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         exit_low_paisa=trade.exit_bar_low_paisa,
     )
 
+    # DEC-FILL-WORST-CASE-001 fix-round-2 (the adverse-levy-rounding law):
+    # under WORST_CASE every nearest-rounded levy below rounds ADVERSELY
+    # (ceiling) so rupee/paisa rounding boundaries can never make the
+    # worst-case NET beat precise; PRECISE keeps the legacy nearest
+    # rounding byte-identical.
+    worst_case = trade.fill_mode is FillMode.WORST_CASE
+
     # ── Step 2: lookup lot size ─────────────────────────────────────────
     n_shares_per_lot = _lookup_lot_size(trade.instrument, trade.entry_dt_ist.date())
     n_shares = trade.n_lots * n_shares_per_lot
@@ -328,7 +380,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # DEC-COST-003: rates locked per Finance Act 2026
     stt_rate_bps_x100 = C.stt_options_rate_bps_x100(trade.entry_dt_ist.date())
     stt_paisa_raw = (sell_notional_paisa * stt_rate_bps_x100) // 10_000_000
-    stt_paisa = _round_to_rupee(stt_paisa_raw)
+    stt_paisa = _round_levy_rupee(stt_paisa_raw, worst_case=worst_case)
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
     # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
@@ -338,24 +390,36 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # and rejects such trades before reaching this point, so this raise is
     # the authoritative defence-in-depth choke point for direct callers.
     exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
-    exch_buy_paisa = _round_to_paisa(buy_notional_paisa * exch_rate_bps_x100)
-    exch_sell_paisa = _round_to_paisa(sell_notional_paisa * exch_rate_bps_x100)
+    exch_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * exch_rate_bps_x100, worst_case=worst_case
+    )
+    exch_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * exch_rate_bps_x100, worst_case=worst_case
+    )
     exch_paisa = exch_buy_paisa + exch_sell_paisa
 
     # ── Step 7: SEBI turnover fee (both sides) ──────────────────────────
-    sebi_buy_paisa = _round_to_paisa(buy_notional_paisa * C.SEBI_FEE_BPS_X100)
-    sebi_sell_paisa = _round_to_paisa(sell_notional_paisa * C.SEBI_FEE_BPS_X100)
+    sebi_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * C.SEBI_FEE_BPS_X100, worst_case=worst_case
+    )
+    sebi_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * C.SEBI_FEE_BPS_X100, worst_case=worst_case
+    )
     sebi_paisa = sebi_buy_paisa + sebi_sell_paisa
 
     # ── Step 8: IPFT (both sides; NSE only — BSE near-zero) ─────────────
     ipft_rate_bps_x100 = C.ipft_bps_x100(trade.instrument)
-    ipft_buy_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate_bps_x100)
-    ipft_sell_paisa = _round_to_paisa(sell_notional_paisa * ipft_rate_bps_x100)
+    ipft_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * ipft_rate_bps_x100, worst_case=worst_case
+    )
+    ipft_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * ipft_rate_bps_x100, worst_case=worst_case
+    )
     ipft_paisa = ipft_buy_paisa + ipft_sell_paisa
 
     # ── Step 9: stamp duty (buy leg only, statutory rupee rounding) ─────
     stamp_paisa_raw = (buy_notional_paisa * C.STAMP_DUTY_OPTIONS_BPS_X100) // 10_000_000
-    stamp_paisa = _round_to_rupee(stamp_paisa_raw)
+    stamp_paisa = _round_levy_rupee(stamp_paisa_raw, worst_case=worst_case)
 
     # ── Step 10: GST 18% on services only (DEC-COST-001) ────────────────
     # Round TOTAL once at 18%. NOT CGST + SGST separately at 9% each.
@@ -371,7 +435,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # See COSTS_VERIFIED.md §20 known limitations.
     gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
     gst_paisa_raw = (gst_base_paisa * C.GST_TOTAL_BPS_X100) // 10_000_000
-    gst_paisa = _round_to_rupee(gst_paisa_raw)
+    gst_paisa = _round_levy_rupee(gst_paisa_raw, worst_case=worst_case)
 
     # ── Step 11: total charges ──────────────────────────────────────────
     total_charges_paisa = (

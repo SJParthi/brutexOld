@@ -719,3 +719,78 @@ class TestWorstCaseComputeCost:
             )
         )
         assert worst.gross_pnl_paisa < precise.gross_pnl_paisa
+
+    def test_worst_case_cost_bearing_levies_round_adversely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FIX-ROUND-2 (the adverse-levy-rounding law, MIGRATION.md #1786):
+        # the FULL cost-bearing worst-case charge stack under the synthetic
+        # cited fixture — every nearest-rounded levy CEILs under WORST_CASE
+        # so a rounding boundary can never make the worst net beat precise
+        # (the refuter's options-leg STT counterexample, closed on BOTH
+        # legs). Hand-recomputed (RELIANCE long, lot 500, entry 2025-01-02;
+        # extremes ±₹1 around the ₹1,300.00 / ₹1,310.00 opens):
+        #   worst buy 130,105 · sell 130,895 → notionals 65,052,500 /
+        #   65,447,500 · gross 395,000 (precise: 130,005/130,995 → 495,000).
+        #   brokerage: flat ₹20/leg wins the min → 4,000 (mode-invariant).
+        #   STT(2000): 65,447,500×2000//1e7 = 13,089 → ceil₹ 13,100
+        #     (precise raw 13,099 → nearest 13,100 — equal here).
+        #   ETC(173): ⌈1,125.41⌉+⌈1,132.24⌉ = 1,126+1,133 = 2,259
+        #     (precise nearest: 1,125+1,133 = 2,258 — the ceil diverges).
+        #   SEBI(10): ⌈65.05⌉+⌈65.45⌉ = 132 (precise 65+65 = 130).
+        #   IPFT(10): same shape → 132 (precise 130).
+        #   stamp(200): 65,052,500×200//1e7 = 1,301 → ceil₹ 1,400
+        #     (precise raw 1,300 → nearest 1,300).
+        #   GST: base 6,523 → 1,174 → ceil₹ 1,200 (precise 1,173 → 1,200).
+        #   total 22,223 (precise 22,118); net 372,777 <= 472,882.
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
+        common: dict[str, object] = {
+            "instrument": "RELIANCE",
+            "contract_symbol": "NSE-RELIANCE-30Jan25-FUT",
+            "lot_size": 500,
+            "entry_bar_open_paisa": 130_000,
+            "exit_bar_open_paisa": 131_000,
+        }
+        precise = compute_futures_trade_cost(_trade(**common))
+        worst = compute_futures_trade_cost(
+            _trade(
+                **common,
+                fill_mode=FillMode.WORST_CASE,
+                entry_bar_high_paisa=130_100,
+                entry_bar_low_paisa=129_900,
+                exit_bar_high_paisa=131_100,
+                exit_bar_low_paisa=130_900,
+            )
+        )
+        assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (130_105, 130_895)
+        assert worst.gross_pnl_paisa == 395_000
+        assert worst.brokerage_paisa == 4_000
+        assert (worst.stt_paisa, precise.stt_paisa) == (13_100, 13_100)
+        assert (worst.exch_paisa, precise.exch_paisa) == (2_259, 2_258)
+        assert (worst.sebi_paisa, precise.sebi_paisa) == (132, 130)
+        assert (worst.ipft_paisa, precise.ipft_paisa) == (132, 130)
+        assert (worst.stamp_paisa, precise.stamp_paisa) == (1_400, 1_300)
+        assert (worst.gst_paisa, precise.gst_paisa) == (1_200, 1_200)
+        assert (worst.total_charges_paisa, precise.total_charges_paisa) == (22_223, 22_118)
+        assert worst.net_pnl_paisa == 372_777
+        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
+
+
+class TestWorstCaseBrokerageArm:
+    def test_turnover_arm_ceils_under_worst_case(self) -> None:
+        # FIX-ROUND-2: the min(₹20, 0.03%×turnover) TURNOVER arm is a
+        # nearest-rounded charge, so it joins the adverse-rounding law:
+        # 1,000,500 paisa × 0.03% = 300.15 paisa → nearest 300 (PRECISE) /
+        # ceil 301 (WORST_CASE). The flat ₹20 arm is rounding-free.
+        assert futures_brokerage_leg_paisa(1_000_500, "groww") == 300
+        assert futures_brokerage_leg_paisa(1_000_500, "groww", worst_case=True) == 301
+
+    def test_flat_arm_and_zerodha_are_mode_invariant(self) -> None:
+        # A big notional lands on the flat ₹20 cap in both modes; zerodha is
+        # flat-only, so worst_case is inert there.
+        assert futures_brokerage_leg_paisa(65_002_500, "groww") == 2_000
+        assert futures_brokerage_leg_paisa(65_002_500, "groww", worst_case=True) == 2_000
+        assert futures_brokerage_leg_paisa(1_000_500, "zerodha") == 2_000
+        assert futures_brokerage_leg_paisa(1_000_500, "zerodha", worst_case=True) == 2_000

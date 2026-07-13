@@ -36,7 +36,13 @@ from brutex.costs import (
     compute_trade_cost,
     constants,
 )
-from brutex.costs.calculator import _apply_slippage, _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import (
+    _apply_slippage,
+    _round_levy_paisa,
+    _round_levy_rupee,
+    _round_to_paisa,
+    _round_to_rupee,
+)
 from brutex.execution.fill_mode import FillMode
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from hypothesis import given, settings
@@ -1085,6 +1091,52 @@ def test_round_to_rupee_half_up_away_from_zero() -> None:
     assert _round_to_rupee(-51) == -100  # just-below -half → -1
 
 
+def test_round_levy_paisa_precise_arm_is_round_to_paisa() -> None:
+    """`worst_case=False` IS the legacy nearest rounding — byte-identical."""
+    for x in (0, 1, 4_999_999, 5_000_000, 5_000_001, 15_000_000, 123_456_789, -5_000_000):
+        assert _round_levy_paisa(x, worst_case=False) == _round_to_paisa(x)
+
+
+def test_round_levy_paisa_worst_arm_ceils() -> None:
+    """The adverse (ceiling) arm — DEC-FILL-WORST-CASE-001 fix round 2.
+
+    Any fractional paisa rounds UP (a levy is a charge — adverse = larger);
+    an exact multiple is untouched; the ceiling is toward +∞ for any sign
+    (totality — the live calculator never feeds a negative product).
+    """
+    assert _round_levy_paisa(0, worst_case=True) == 0
+    assert _round_levy_paisa(1, worst_case=True) == 1  # any fraction → up
+    assert _round_levy_paisa(4_999_999, worst_case=True) == 1  # nearest says 0
+    assert _round_levy_paisa(5_000_000, worst_case=True) == 1
+    assert _round_levy_paisa(10_000_000, worst_case=True) == 1  # exact multiple
+    assert _round_levy_paisa(10_000_001, worst_case=True) == 2
+    assert _round_levy_paisa(-1, worst_case=True) == 0  # toward +∞
+    assert _round_levy_paisa(-10_000_000, worst_case=True) == -1
+
+
+def test_round_levy_rupee_precise_arm_is_round_to_rupee() -> None:
+    """`worst_case=False` IS the legacy nearest statutory rounding."""
+    for x in (0, 1, 49, 50, 51, 150, 1_149, 1_150, 12_345, -50):
+        assert _round_levy_rupee(x, worst_case=False) == _round_to_rupee(x)
+
+
+def test_round_levy_rupee_worst_arm_ceils() -> None:
+    """The adverse (ceiling) statutory arm — the refuter's boundary killed.
+
+    1,149 paisa is the refuter counterexample's worst-case STT raw value:
+    nearest rounds it DOWN to 1,100 (the ₹1 drop that beat the 25-paisa
+    gross drop); the ceiling keeps it at 1,200.
+    """
+    assert _round_levy_rupee(0, worst_case=True) == 0
+    assert _round_levy_rupee(1, worst_case=True) == 100  # any fraction → up
+    assert _round_levy_rupee(49, worst_case=True) == 100  # nearest says 0
+    assert _round_levy_rupee(100, worst_case=True) == 100  # exact multiple
+    assert _round_levy_rupee(101, worst_case=True) == 200
+    assert _round_levy_rupee(1_149, worst_case=True) == 1_200  # the boundary
+    assert _round_levy_rupee(-1, worst_case=True) == 0  # toward +∞
+    assert _round_levy_rupee(-100, worst_case=True) == -100
+
+
 # ─────────────────────────────────────────────────────────────────
 # Boundary LOTS / PRICES
 # ─────────────────────────────────────────────────────────────────
@@ -1488,7 +1540,15 @@ class TestWorstCaseComputeTradeCost:
         assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (10_105, 11_895)
         assert worst.net_pnl_paisa < precise.net_pnl_paisa
 
-    def test_worst_case_flat_bars_byte_identical_breakdown(self) -> None:
+    def test_worst_case_flat_bars_fills_identical_levies_ceiled(self) -> None:
+        # FIX-ROUND-2 REFRAME (the adverse-levy-rounding law, MIGRATION.md
+        # #1786): the original `worst == precise` byte-identity on flat bars
+        # is DEAD — the fills (and hence notionals + gross) stay identical
+        # (the +tick discipline), but under WORST_CASE every nearest-rounded
+        # levy is CEIL'd, so the charge stack can only be HIGHER: here exch
+        # 502 vs 501, ipft 8 vs 7, stamp 100 vs 0, GST 900 vs 800. The floor
+        # (never-better) is what survives — pinned exactly so the ceil arm
+        # has teeth at the calculator level too.
         flat = {
             "entry_bar_high_paisa": 9_995,
             "entry_bar_low_paisa": 9_995,
@@ -1497,4 +1557,90 @@ class TestWorstCaseComputeTradeCost:
         }
         worst = compute_trade_cost(_worst_trade(**flat))
         precise = compute_trade_cost(_make_trade(entry_dt=datetime(2026, 5, 15, 10, 0)))
-        assert worst == precise
+        assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (
+            precise.buy_fill_paisa,
+            precise.sell_fill_paisa,
+        )
+        assert worst.gross_pnl_paisa == precise.gross_pnl_paisa
+        assert (worst.exch_paisa, precise.exch_paisa) == (502, 501)
+        assert (worst.ipft_paisa, precise.ipft_paisa) == (8, 7)
+        assert (worst.stamp_paisa, precise.stamp_paisa) == (100, 0)
+        assert (worst.gst_paisa, precise.gst_paisa) == (900, 800)
+        assert (worst.stt_paisa, worst.sebi_paisa) == (precise.stt_paisa, precise.sebi_paisa)
+        assert worst.total_charges_paisa == 6_712
+        assert precise.total_charges_paisa == 6_510
+        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
+
+    def test_worst_case_net_floor_refuter_boundary_regression(self) -> None:
+        # THE FIX-ROUND-2 NAMED REGRESSION (refuter-confirmed MAJOR-1,
+        # MIGRATION.md #1786): entry FLAT at ₹460.05, exit low ONE paisa
+        # under the open, entry date 2024-10-03 (post-Oct-2024 STT regime,
+        # lot 25). PRE-fix the worst-case sell notional — 25 paisa smaller —
+        # crossed a ₹0.5 STT nearest-rupee boundary DOWNWARD (STT ₹11 vs
+        # ₹12), so worst net −7,095 BEAT precise net −7,170 by 75 paisa.
+        # With adverse (ceiling) levy rounding the worst STT stays ₹12 and
+        # the floor holds: worst −7,297 <= precise −7,170. Exact pins.
+        entry_dt = datetime(2024, 10, 3, 10, 0)
+        precise = compute_trade_cost(
+            _make_trade(
+                entry_dt=entry_dt,
+                expiry_date=date(2024, 10, 31),
+                entry_open_paisa=46_005,
+                exit_open_paisa=46_005,
+            )
+        )
+        worst = compute_trade_cost(
+            _worst_trade(
+                entry_dt_ist=entry_dt,
+                exit_dt_ist=entry_dt.replace(hour=11),
+                expiry_date=date(2024, 10, 31),
+                entry_bar_open_paisa=46_005,
+                exit_bar_open_paisa=46_005,
+                entry_bar_high_paisa=46_005,  # entry flat: buy fills equal
+                entry_bar_low_paisa=46_005,
+                exit_bar_high_paisa=46_005,
+                exit_bar_low_paisa=46_004,  # exit low 1 paisa under the open
+            )
+        )
+        assert (precise.buy_fill_paisa, precise.sell_fill_paisa) == (46_010, 46_000)
+        assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (46_010, 45_999)
+        # The boundary: precise STT round₹(1,150.0 → 1,150) = 1,200; the
+        # worst raw 1,149 would round to 1,100 under nearest (the pre-fix
+        # violation) — the ceiling keeps it 1,200.
+        assert precise.stt_paisa == 1_200
+        assert worst.stt_paisa == 1_200
+        assert precise.net_pnl_paisa == -7_170
+        assert worst.net_pnl_paisa == -7_297
+        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
+
+    def test_worst_case_net_floor_boundary_scan(self) -> None:
+        # FIX-ROUND-2 boundary-scan regression: several opens straddling
+        # ₹0.5 statutory rounding boundaries (the refuter reported a
+        # violation at EVERY ₹40 open boundary pre-fix — 46_005 ± k×4_000
+        # paisa all crossed), each with the exit low 1 paisa under the open.
+        # The adverse-levy-rounding law must hold the net floor at ALL of
+        # them, both entry dates flat.
+        for open_p in (42_005, 46_005, 50_005, 54_005, 58_005, 62_005):
+            entry_dt = datetime(2024, 10, 3, 10, 0)
+            precise = compute_trade_cost(
+                _make_trade(
+                    entry_dt=entry_dt,
+                    expiry_date=date(2024, 10, 31),
+                    entry_open_paisa=open_p,
+                    exit_open_paisa=open_p,
+                )
+            )
+            worst = compute_trade_cost(
+                _worst_trade(
+                    entry_dt_ist=entry_dt,
+                    exit_dt_ist=entry_dt.replace(hour=11),
+                    expiry_date=date(2024, 10, 31),
+                    entry_bar_open_paisa=open_p,
+                    exit_bar_open_paisa=open_p,
+                    entry_bar_high_paisa=open_p,
+                    entry_bar_low_paisa=open_p,
+                    exit_bar_high_paisa=open_p,
+                    exit_bar_low_paisa=open_p - 1,
+                )
+            )
+            assert worst.net_pnl_paisa <= precise.net_pnl_paisa, open_p

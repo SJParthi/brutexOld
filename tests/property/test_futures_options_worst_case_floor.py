@@ -11,9 +11,47 @@ UNCONDITIONAL per trade: for the SAME signal over the SAME bars,
 * the worst-case SELL fill is ``<=`` the precise sell fill,
 * the worst-case net P&L is ``<=`` the precise net P&L,
 
-with EQUALITY exactly when both fill bars are flat on their adverse sides
-(the +tick discipline — the flat-bar counterexample). Bars are drawn on the
-2dp tick grid (paisa ints ÷ 100 → exact Decimals, the lake-write snap law).
+with GROSS equality exactly when both fill bars are flat on their adverse
+sides (the +tick discipline — the flat-bar counterexample; on the
+COST-FREE index-futures leg ``net == gross``, so the flat-bar equality
+holds at the NET level there too). Bars are drawn on the 2dp tick grid
+(paisa ints ÷ 100 → exact Decimals, the lake-write snap law).
+
+THE NET FLOOR NEEDS THE ADVERSE-LEVY-ROUNDING LAW (fix round 2,
+MIGRATION.md #1786): as originally shipped, this file's net-floor clause
+asserted a FALSE theorem — the refuter's executed counterexample
+(``@example`` below: entry flat at ₹460.05, exit low ONE paisa under the
+open, entry date 2024-10-03) had the worst-case sell notional 25 paisa
+smaller crossing a ₹0.5 STT nearest-rupee rounding boundary DOWNWARD, so
+STT dropped ₹1 while gross dropped only 25 paisa: worst net −7,095 BEAT
+precise net −7,170 by 75 paisa. The fix: under WORST_CASE every
+nearest-rounded levy in the cost stack rounds ADVERSELY (ceiling) —
+``calculator._round_levy_rupee`` / ``_round_levy_paisa`` — while PRECISE
+keeps the legacy nearest rounding byte-identical.
+
+DOMINANCE PROOF (why the ceiling restores the unconditional net floor):
+let ``Δb = worst_buy_notional − precise_buy_notional ≥ 0`` and
+``Δs = precise_sell_notional − worst_sell_notional ≥ 0`` (fill dominance ×
+n_shares), so ``precise_gross − worst_gross = Δ = Δb + Δs``. Per levy with
+rounding unit ``u`` (₹1 statutory / 1 paisa commercial) and rate ``r``:
+
+* a BUY-anchored levy's worst raw value is ``>=`` its precise raw value,
+  and ``ceil(x) >= nearest(y)`` whenever ``x >= y`` — so the worst levy is
+  never SMALLER than the precise one (no shortfall, only extra charge);
+* a SELL-anchored levy's raw gap is ``d = r·Δs`` (plus at most 1 paisa of
+  statutory floor-division truncation): when ``d < u/2``,
+  ``nearest(raw_worst + d) <= ceil(raw_worst)`` — shortfall ``<= 0``; when
+  ``d >= u/2`` the shortfall is ``<= d + u/2 <= 2d = 2·r·Δs``;
+* GST compounds the other levies' gaps through its base at 18%.
+
+Summing: ``charges_precise − charges_worst <= 2·(Σ sell-side rates)·
+(1 + 2×18%)·Δs + O(paisa truncation) << Δs <= Δ`` because the summed levy
+rates (STT 0.1% + ETC ~0.035% + SEBI 0.0001% + IPFT 0.0005% + the futures
+brokerage turnover arm 0.03%) are ``<< 36%``. Hence
+``net_worst <= net_precise`` UNCONDITIONALLY. On flat adverse bars the
+notionals are equal, so every worst levy is ``ceil >= nearest`` — charges
+can only be HIGHER under worst — which is why the flat-bar clause pins
+GROSS equality (net equality survives only on the cost-free futures leg).
 """
 
 from __future__ import annotations
@@ -39,7 +77,7 @@ from brutex.options.executor import (
 )
 from brutex.options.lot_size_history import OptionsUnderlying
 from brutex.options.strike_rules import RULES_BY_NAME, TradeDirection
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 _IST = ZoneInfo("Asia/Kolkata")
@@ -164,6 +202,13 @@ class _OptSource:
 class TestOptionsWorstCaseFloor:
     @settings(max_examples=150, deadline=None)
     @given(entry=_BAR, exit_=_BAR, bull=st.booleans())
+    # The refuter's executed net-floor counterexample (fix round 2): entry
+    # flat at ₹460.05, exit low 1 paisa under the open — the 25-paisa-smaller
+    # worst sell notional crossed a ₹0.5 STT rounding boundary downward and
+    # the PRE-fix worst net (−7,095) BEAT precise (−7,170). Pinned as a
+    # permanent in-domain example; the adverse-levy-rounding law keeps it
+    # below the floor now (worst −7,297 <= precise −7,170).
+    @example(entry=(46005, 0, 0), exit_=(46005, 0, 1), bull=True)
     def test_per_trade_floor_unconditional(
         self, entry: tuple[int, int, int], exit_: tuple[int, int, int], bull: bool
     ) -> None:
@@ -187,6 +232,17 @@ class TestOptionsWorstCaseFloor:
         assert worst.breakdown.buy_fill_paisa >= precise.breakdown.buy_fill_paisa
         assert worst.breakdown.sell_fill_paisa <= precise.breakdown.sell_fill_paisa
         assert worst.net_pnl_paisa <= precise.net_pnl_paisa
-        # Flat adverse sides ⇒ exact equality (long: entry HIGH / exit LOW).
+        # The cost stack itself can never round in the worst trade's favor
+        # (the adverse-levy-rounding law, fix round 2): at equal-or-worse
+        # notionals every worst levy is ceil'd, so a SMALLER worst charge
+        # total can only come from the smaller sell notional — bounded by
+        # the dominance proof (module docstring), never a boundary flip.
         if entry[1] == 0 and exit_[2] == 0:
-            assert worst.net_pnl_paisa == precise.net_pnl_paisa
+            # Flat adverse sides ⇒ identical fills ⇒ GROSS equality; the
+            # ceil'd levies may exceed the nearest-rounded precise ones, so
+            # net equality is deliberately NOT asserted (charges_worst >=
+            # charges_precise is — the fix-round-2 reframe).
+            assert worst.breakdown.buy_fill_paisa == precise.breakdown.buy_fill_paisa
+            assert worst.breakdown.sell_fill_paisa == precise.breakdown.sell_fill_paisa
+            assert worst.breakdown.gross_pnl_paisa == precise.breakdown.gross_pnl_paisa
+            assert worst.breakdown.total_charges_paisa >= precise.breakdown.total_charges_paisa
