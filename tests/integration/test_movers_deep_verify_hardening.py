@@ -7,8 +7,8 @@ these tests upstream the audit's independent-oracle checks that were NOT already
 pinned by the shipped suites, so a future regression fails a named test instead
 of a re-audit. House rules throughout: real lakes via the production
 :class:`~brutex.data.parquet_writer.ParquetWriter` ONLY, routes (where a test
-drives a route — two tests deliberately drive ``run_movers_snapshot`` /
-``compute_spot_candidates`` directly) via
+drives a route — three test functions deliberately drive
+``run_movers_snapshot`` / ``compute_spot_candidates`` directly) via
 :func:`~brutex.dashboard.app.build_app` + ``TestClient``, and every expected
 number recomputed by a hand-rolled INTEGER-paisa / :class:`fractions.Fraction`
 oracle inside the test (no production helper computes an expected value).
@@ -89,14 +89,20 @@ DEC-MOVERS-STORED-FRESHNESS-001 / DEC-MOVERS-DAILY-FRESHNESS-001 (PRs #1511 +
 #1358). No test below touches ``_read_intraday_bars`` / ``_read_cut_1m_frame``
 freshness territory or ``templates/movers.html``.
 
-IN-FLIGHT COMPATIBILITY (PR #1462 — the dashboard bad-tick READ screen,
-``brutex/data/bar_screen.py`` + ``movers_snapshot.screen_frame``): that lane
-SKIPS at read time any bar whose close is ``>= 4x`` or ``<= 1/4x`` the
-previous in-session KEPT close (first bar of a session exempt). FIXTURE
-DESIGN RULE for this file: every fixture keeps ALL adjacent in-session
-closes within the (1/4x, 4x) band — or uses single-bar sessions (first-bar
-exempt) — so all 19 tests pass identically with and without that screen
-(round-2 merge-verified against the #1462 head).
+MERGED-SCREEN CONSTRAINT (PR #1462, MERGED to main — squash ``70d44a3``,
+DEC-DASHBOARD-READ-SCREEN-001, MIGRATION.md #1759 — the dashboard bad-tick
+READ screen, ``brutex/data/bar_screen.py`` + ``movers_snapshot.screen_frame``):
+that lane SKIPS at read time any bar whose close is ``>= 4x`` or ``<= 1/4x``
+the previous in-session KEPT close (first bar of a session exempt). It is a
+MERGED production constraint this file's fixtures respect BY DESIGN: every
+fixture keeps ALL adjacent in-session closes within the (1/4x, 4x) band — or
+uses single-bar sessions (first-bar exempt) — so all 19 tests pass
+identically with and without the bad-tick arm (round-2 merge-verified against
+the #1462 head; round 3 rebased this branch directly onto the merged main).
+With #1462 landed, the DELIBERATELY-NOT-PINNED in-flight list above shrinks
+to exactly PRs #1511 + #1358. (R3a evidence note: the in-flight
+movers-adjacent PRs #1500 / #1399 / #1434 were merge-checked green against
+this file without being fence-relevant.)
 
 Skipped when ``fastapi`` / ``duckdb`` / ``polars`` / ``pyarrow`` are absent.
 """
