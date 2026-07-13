@@ -327,6 +327,7 @@ from brutex.data.lake_invariants import (
     census_to_dict,
     scan_lake_invariants,
 )
+from brutex.data.lake_keys import StockDriftMap
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
@@ -339,6 +340,7 @@ from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
+from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
@@ -2018,6 +2020,41 @@ def build_app(
             compute=lambda: build_underlying_kind_map(store.list_index_equity_instruments()),
         )
         return kinds, master_token
+
+    # The /db moneyness stock-drift map cache (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 —
+    # the /db twin of the Greeks ladder's DEC-GREEKS-SPOTJOIN-STOCK-001 stock arm,
+    # the exact memo law the #1482 named follow-up prescribed): the map is a pure
+    # function of the on-disk spot dirs (moved by a pull → the write generation) AND
+    # the instrument master (moved by a keyless `load-instruments` WITHOUT a
+    # generation bump — the documented master_revision trap), so the memo keys on
+    # the COMPOSITE token: `master_revision` folded into the KEY, the write
+    # generation as the cache's native generation. REUSES the COMMON
+    # `MoversSnapshotCache` (no new class).
+    _stock_drift_cache = MoversSnapshotCache()
+
+    def _stock_drift_map_cached(store: Any, lake: Path) -> StockDriftMap | None:
+        """The moneyness spot-join's stock drift map, composite-token memoised.
+
+        Thin memo over the COMMON fail-soft
+        :func:`~brutex.data.spot_drift.load_stock_drift_map` — the EXACT loader +
+        verification law the Greeks enrichment pass consumes (CLAUDE.md §11 COMMON,
+        never a second fold), so a drifted stock lake reads the SAME recovered spot
+        key on `/db` moneyness as the Greeks ladder stamps. Inherits the loader's
+        contract verbatim: no master → ``None`` (the ladder stays byte-identical —
+        the honest ``"?"``), a confirmed master-read error → ``None`` with the
+        loader's own WARN, an empty master → ``{}`` with zero lake I/O. ``None`` is
+        a cacheable value (the `_registry_strike_chain` precedent). Runs on the
+        threadpool worker — the ONE consumer is the lazy `stock_drift_loader`
+        closure inside the `/api/v1/db/candles` `query_candles` call, invoked only
+        on the exhausted-primary recovery path (a healthy exact-key page never
+        loads the map).
+        """
+        count, latest = master_revision(store)
+        return _stock_drift_cache.get_or_compute(
+            f"stockdrift|m={count}:{latest}",
+            generation=_summary_cache.generation,
+            compute=lambda: load_stock_drift_map(lake),
+        )
 
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001,
     # re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001): three pollers —
@@ -5694,10 +5731,10 @@ def build_app(
         ``skip_pull`` runs make no vendor calls and are legitimately allowed
         in-window — the job-level all-or-nothing gate cannot express that
         split). GREEKS N/A for this trigger: the Greeks stage is
-        options-only, and this pull is options-EXCLUDING (spot + NIFTY/
-        BANKNIFTY futures), so there is nothing to enrich — pull → prebuild →
-        movers-revision run with no Greeks stage (tonight-scope addendum
-        item 3).
+        options-only, and this pull is SPOT-ONLY — all indices + all
+        stocks; futures AND options excluded
+        (DEC-CROSSVERIFY-SPOT-ONLY-001) — so there is nothing to enrich:
+        pull → prebuild → movers-revision run with no Greeks stage.
         """
         parsed_day: date | None = None
         if day is not None:
@@ -5756,15 +5793,39 @@ def build_app(
             }
         )
 
+    def _crossverify_last_run() -> dict[str, object] | None:
+        """The durable last-run record — the reload-proof failure surface.
+
+        DEC-CROSSVERIFY-WITHHELD-REGATE-001: reads the runner-written
+        ``<lake_root>/.crossverify/last_run.json`` view sidecar (best-effort;
+        absent / corrupt / no resolvable lake root → honest ``None`` — the
+        panel simply shows nothing, never a 500). Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.journal import load_last_run
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return None
+        return load_last_run(lake_root)
+
     @app.get("/api/v1/crossverify/progress")
     async def api_crossverify_progress() -> JSONResponse:
-        """GET /api/v1/crossverify/progress — the O(1) producer job snapshot.
+        """GET /api/v1/crossverify/progress — the producer job snapshot.
 
         The dedicated job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
-        (state / current / detail / percent …) — O(1) per poll, ZERO lake
-        reads (DEC-CROSSVERIFY-PRODUCER-001).
+        (state / current / detail / percent …) — O(1) per poll
+        (DEC-CROSSVERIFY-PRODUCER-001) — plus the ADDITIVE ``last_run`` field:
+        the durable end-of-run record the runner persists at
+        ``<lake_root>/.crossverify/last_run.json`` (verdict + counts + capped
+        failed keys + detail), so a finished failure survives a page reload
+        AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
+        O(1) small-sidecar stat+read per poll, off the event loop; ``null``
+        when absent/corrupt/unresolvable — never a fabricated record.
         """
-        return JSONResponse(_crossverify_job.snapshot().to_dict())
+        snapshot = _crossverify_job.snapshot().to_dict()
+        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
@@ -9152,6 +9213,13 @@ def build_app(
                     # count cache + generation; absent registry ⇒ the lake-observed
                     # step with its honest "observed" low-confidence label.
                     registry_path=registry_path_for(store_path),
+                    # The evidence-grounded stock drift rung for the moneyness
+                    # spot-join (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001): lazy — the
+                    # composite-token memo runs ONLY when the exact-key spot probe
+                    # came back empty, so a drifted stock lake classifies moneyness
+                    # exactly as the Greeks ladder recovers its spot join while a
+                    # healthy page pays zero extra I/O.
+                    stock_drift_loader=lambda: _stock_drift_map_cached(store, lake),
                     # Manifest-first paging (DEC-LAKE-STATS-MANIFEST-001): the
                     # production route opts into the per-file stats manifest —
                     # served only after full per-request revalidation, ANY

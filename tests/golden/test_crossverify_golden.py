@@ -22,6 +22,7 @@ from tests.golden._crossverify_harness import (
     FIXTURES_DIR,
     GOLDEN_SYMBOLS,
     S3_KEYS_FIXTURE,
+    STRUCTURAL_FUT_SYMBOLS,
     TRUNCATED_INDEX_SYMBOL,
     build_golden_lake,
     golden_exports,
@@ -44,8 +45,10 @@ def exports(tmp_path_factory: pytest.TempPathFactory) -> dict[str, SymbolExport]
 
 
 class TestGoldenBytes:
-    @pytest.mark.parametrize("symbol", GOLDEN_SYMBOLS)
+    @pytest.mark.parametrize("symbol", GOLDEN_SYMBOLS + STRUCTURAL_FUT_SYMBOLS)
     def test_fixture_bytes_exact(self, exports: dict[str, SymbolExport], symbol: str) -> None:
+        # SPOT publish goldens + the STRUCTURAL FUT renderer goldens (#1788 —
+        # the FUT export chain is retained direct-covered; never producer-run).
         export = exports[symbol]
         assert export.disposition == "publish", (symbol, export.reason)
         assert export.csv_bytes is not None
@@ -95,6 +98,9 @@ class TestGoldenBytes:
         keys = S3_KEYS_FIXTURE.read_text(encoding="utf-8")
         assert "crossverify/groww/2026-07-10/NSE_EQ/M&M.csv" in keys  # raw &, no %26
         assert "%26" not in keys
+        # SPOT-ONLY key surface (#1788): no futures key ever pins.
+        assert "_FNO" not in keys
+        assert "-FUT" not in keys
 
     def test_negative_truncated_index_day_unpublishable(
         self, exports: dict[str, SymbolExport]
@@ -107,7 +113,7 @@ class TestGoldenBytes:
     def test_render_is_deterministic_across_builds(self, tmp_path: Path) -> None:
         build_golden_lake(tmp_path)
         rebuilt = golden_exports(tmp_path)
-        for symbol in GOLDEN_SYMBOLS:
+        for symbol in GOLDEN_SYMBOLS + STRUCTURAL_FUT_SYMBOLS:
             frozen = (FIXTURES_DIR / f"{symbol}.csv").read_bytes()
             assert rebuilt[symbol].csv_bytes == frozen
 

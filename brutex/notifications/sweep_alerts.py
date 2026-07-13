@@ -370,6 +370,16 @@ class CrossverifyReportLike(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
+    def publish_strict(self) -> int | None:
+        """Export DECISIONS admitted under the strict law (#1788 fix round)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def publish_observe(self) -> int | None:
+        """Export DECISIONS admitted under the observe-only index count law."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
     def withheld(self) -> int | None:
         """Files withheld by the completeness gate / render refusals."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
@@ -392,6 +402,12 @@ class CrossverifyReportLike(Protocol):
     @property
     def recovered_prior(self) -> int | None:
         """Prior days' pending staged keys re-published by the recovery scan."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+    @property
+    def regated(self) -> int | None:
+        """Prior days' previously-WITHHELD symbols published by the auto-re-gate
+        (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
     @property
@@ -984,9 +1000,15 @@ class SweepAlerter:
 
         DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776). Severity law:
         INFO iff every admitted file published cleanly (``published`` with
-        ``recovered_prior == 0``); WARN for the benign anomalies
+        ``recovered_prior == 0`` AND ``regated == 0`` —
+        DEC-CROSSVERIFY-WITHHELD-REGATE-001); WARN for the benign anomalies
         (``nothing_to_do`` / ``staged_only`` / a ``published`` run that ALSO
-        recovered prior days' pending keys — worth a look, not a page);
+        recovered prior days' pending keys or auto-re-gated prior withheld
+        days — worth a look, not a page — and the MATERIAL skip-day runs:
+        the runner emits a skip-verdict summary ONLY when a
+        weekend/holiday/deferred run re-gated or recovered prior days' keys,
+        i.e. real objects shipped — the same catch-up tier, never CRITICAL
+        and never the clean-day INFO);
         CRITICAL for ``blocked`` / ``withheld_partial`` / ``publish_failed``
         / ``suspect`` AND for any UNKNOWN future verdict (never a silent
         INFO on an unrecognised state). PER-RUN dedupe key
@@ -996,9 +1018,18 @@ class SweepAlerter:
         :meth:`crossverify_refused` instead). Unknown counts render the
         literal ``"?"`` via ``_count_or_question`` — NEVER a fabricated 0
         (Golden Rule #1).
+
+        Three-way split visibility (the APPROVED index-policy ruling,
+        DEC-CROSSVERIFY-SPOT-ONLY-001 fix round, MIGRATION.md #1788):
+        ``strict-published`` / ``observe-published`` / the refused tail
+        (``withheld``/``blocked``/``nothing``) are export-DECISION counts —
+        an observe-tier index shipped under the count-anomaly law is never
+        invisible; the leading ``published`` stays the put-level S3 count
+        (an idempotent re-run PUTs 0 while still deciding N publishes).
         """
         verdict = report.verdict
         recovered = report.recovered_prior
+        regated = report.regated
         markers = {
             "published": "✅ published",
             "staged_only": "📦 staged only",
@@ -1007,12 +1038,20 @@ class SweepAlerter:
             "withheld_partial": "⚠️ WITHHELD (partial)",
             "publish_failed": "❌ PUBLISH FAILED",
             "suspect": "🛑 SUSPECT",
+            # The material skip-day verdicts — reachable ONLY when the run
+            # re-gated / recovered prior days' keys (the runner's law).
+            "skipped_non_trading": "⏭ non-trading day — prior-day catch-up shipped",
+            "skipped_muhurat": "⏭ Muhurat day — prior-day catch-up shipped",
+            "deferred_market_hours": "⏭ deferred (market hours) — prior-day catch-up shipped",
         }
         marker = markers.get(verdict, f"❌ {verdict}")
         counts = (
             f"published {_count_or_question(report.published)} · "
             f"already {_count_or_question(report.skipped_already)} · "
             f"recovered-prior {_count_or_question(recovered)} · "
+            f"re-gated {_count_or_question(regated)} · "
+            f"strict-published {_count_or_question(report.publish_strict)} · "
+            f"observe-published {_count_or_question(report.publish_observe)} · "
             f"withheld {_count_or_question(report.withheld)} · "
             f"blocked {_count_or_question(report.blocked)} · "
             f"nothing {_count_or_question(report.nothing)} · "
@@ -1023,9 +1062,22 @@ class SweepAlerter:
         body = f"🔁 Cross-verify {report.day.isoformat()} {run_id} — {marker}.\n{counts}"
         if report.detail:
             body += f"\n{report.detail}"
-        if verdict == "published" and recovered is not None and recovered == 0:
+        if (
+            verdict == "published"
+            and recovered is not None
+            and recovered == 0
+            and regated is not None
+            and regated == 0
+        ):
             severity = TelegramSeverity.INFO
-        elif verdict in {"published", "staged_only", "nothing_to_do"}:
+        elif verdict in {
+            "published",
+            "staged_only",
+            "nothing_to_do",
+            "skipped_non_trading",
+            "skipped_muhurat",
+            "deferred_market_hours",
+        }:
             severity = TelegramSeverity.WARN
         else:
             severity = TelegramSeverity.CRITICAL
@@ -1287,6 +1339,56 @@ class SweepAlerter:
             severity=severity,
             message=message,
             dedupe_key=f"lake-heal:{scope}",
+        )
+
+    def lake_heal_still_refused(
+        self, *, findings: int, files_scanned: int, attempt_utc: str, scope: str
+    ) -> bool:
+        """Re-alert a STANDING lake mass-heal refusal on a skipped boot sweep (CRITICAL).
+
+        DEC-LAKE-INVARIANTS-PREINDEX-001 (review fold): once a
+        mass-heal-refused sweep's attempt record lets later boots skip the
+        provably-identical O(files) re-scan, the operator would otherwise
+        LOSE the per-boot Telegram re-alert of a CRITICAL human-required
+        state. This is that re-alert, fired by the skipping boot from the
+        attempt record's PERSISTED REAL tallies (the refused sweep wrote them
+        itself) — explicitly worded as a re-alert of the PRIOR sweep, never a
+        fabricated fresh heal report. ``PHASE_BLOCKED`` kind (the CRITICAL
+        operator-must-act house pattern — :meth:`pull_halted`). HONESTY NOTE
+        (refuter NIT-2): at the ``PHASE_BLOCKED`` kind the notifier dedupe
+        WINDOW is ``0.0``
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`), so the
+        attempt-timestamp-bound ``dedupe_key`` provides NO notifier-side
+        suppression — it is identification / defence-in-depth only. The
+        per-boot re-alert cadence is therefore INTENTIONAL: every skipping
+        boot of a still-refused lake fires one CRITICAL push (mirroring the
+        pre-change every-boot re-sweep's cadence), and a NEW refusal alerts
+        fresh under its own timestamp.
+
+        Parameters
+        ----------
+        findings, files_scanned
+            The refused batch's real tallies, as persisted in the attempt
+            record.
+        attempt_utc
+            The refused sweep's recorded wall time (ISO) — named in the body.
+        scope
+            The seam token (``"startup-sweep"``) — part of the dedupe key.
+        """
+        message = escape_markdown_v2(
+            f"🛑 Lake heal STILL REFUSED (mass-heal rail) — re-alert of a prior "
+            f"sweep, still refused since {attempt_utc} ({scope}): {findings} "
+            f"finding(s) across {files_scanned} scanned file(s) would rewrite too "
+            "large a fraction of the lake, so NOTHING was fixed; this boot skipped "
+            "the provably-identical re-scan (lake unchanged). Human decision "
+            "required: inspect the findings, then re-arm (any lake content change "
+            "re-runs; BRUTEX_LAKE_HEAL=observe to diagnose)."
+        )
+        return self._publish(
+            kind=TelegramEventKind.PHASE_BLOCKED,
+            severity=TelegramSeverity.CRITICAL,
+            message=message,
+            dedupe_key=f"lake-heal-still-refused:{scope}:{attempt_utc}",
         )
 
     def vendor_down(self, *, failed_windows: int, distinct_symbols: int) -> bool:
@@ -1847,6 +1949,35 @@ def emit_lake_heal_alert(report: LakeHealReportLike, *, scope: str) -> None:
         )
 
 
+def emit_lake_heal_still_refused_alert(
+    *, findings: int, files_scanned: int, attempt_utc: str, scope: str
+) -> None:
+    """Fire the best-effort standing mass-heal-refusal RE-alert (DEC-LAKE-INVARIANTS-PREINDEX-001).
+
+    The :func:`emit_lake_heal_alert` sibling for the ONE caller that has no
+    fresh :class:`HealReport` — the L3 boot that SKIPPED a provably-identical
+    re-scan of a mass-heal-refused lake (``lake_heal._realert_mass_heal_refused``)
+    and re-alerts from the attempt record's persisted real tallies instead.
+    The whole body is wrapped in a blanket ``try/except`` so the
+    fire-and-forget contract is STRUCTURAL: an alert failure is swallowed +
+    logged and can NEVER fail the boot. Silent no-op when Telegram is
+    disabled (the default).
+    """
+    import structlog
+
+    try:
+        SweepAlerter().lake_heal_still_refused(
+            findings=findings,
+            files_scanned=files_scanned,
+            attempt_utc=attempt_utc,
+            scope=scope,
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — best-effort, never masks the boot
+        structlog.get_logger("brutex.notifications.sweep_alerts").exception(
+            "lake_heal_still_refused_alert_failed"
+        )
+
+
 def emit_greeks_backfill_complete_alert(report: GreeksBackfillReportLike) -> None:
     """Fire the ONE best-effort Greeks-backfill completion summary (DEC-GREEKS-BULK-REENRICH-001).
 
@@ -1934,6 +2065,7 @@ __all__ = [
     "emit_crossverify_summary_alert",
     "emit_greeks_backfill_complete_alert",
     "emit_lake_heal_alert",
+    "emit_lake_heal_still_refused_alert",
     "emit_pull_halt_alert",
     "emit_run_suspect_alert",
     "emit_vendor_conflict_alert",

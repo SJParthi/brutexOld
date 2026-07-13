@@ -6584,7 +6584,10 @@ def cmd_crossverify_run(
     print(f"[brutex] crossverify {report.day.isoformat()} — {report.verdict}{detail}")
     print(
         f"[brutex]   published {report.published} · already {report.skipped_already} · "
-        f"recovered-prior {report.recovered_prior} · withheld {report.withheld} · "
+        f"recovered-prior {report.recovered_prior} · "
+        f"re-gated {report.regated} · "
+        f"strict-published {report.publish_strict} · "
+        f"observe-published {report.publish_observe} · withheld {report.withheld} · "
         f"blocked {report.blocked} · nothing {report.nothing} · "
         f"excluded {report.excluded} · publish-failed {report.publish_failed} · "
         f"derived {report.derived} ({report.derive_failed} failed)"

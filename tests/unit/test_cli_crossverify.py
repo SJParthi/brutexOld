@@ -37,12 +37,15 @@ def _report() -> CrossverifyReport:
         verdict="published",
         published=3,
         skipped_already=0,
+        publish_strict=3,
+        publish_observe=0,
         withheld=0,
         blocked=0,
         nothing=1,
         excluded=2,
         publish_failed=0,
         recovered_prior=0,
+        regated=0,
         derived=4,
         derive_failed=0,
         movers_warm="revision-propagated (headless)",
@@ -178,7 +181,14 @@ class TestCmdRun:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         lake = _mini_lake(tmp_path)
-        report = _report2(verdict="withheld_partial", withheld=2, exit_code=2, detail="settling")
+        report = _report2(
+            verdict="withheld_partial",
+            withheld=2,
+            publish_strict=2,
+            publish_observe=1,
+            exit_code=2,
+            detail="settling",
+        )
         monkeypatch.setattr("brutex.crossverify.run.default_seams", lambda config: object())
         monkeypatch.setattr("brutex.crossverify.run.run_crossverify", lambda config, seams: report)
         rc = cli.main(["crossverify", "run", "--lake-root", str(lake), "--day", "2026-07-10"])
@@ -186,6 +196,10 @@ class TestCmdRun:
         out = capsys.readouterr().out
         assert "withheld_partial: settling" in out
         assert "withheld 2" in out
+        # The #1788-fix-round three-way split reaches the CLI line too.
+        assert "strict-published 2" in out
+        assert "re-gated 0" in out  # DEC-CROSSVERIFY-WITHHELD-REGATE-001
+        assert "observe-published 1" in out
         assert "derived 4 (0 failed)" in out
 
     def test_market_hours_deferral_is_clean_exit_ok(
