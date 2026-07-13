@@ -148,6 +148,20 @@ def compare_daily_freshness(
     a genuine bug (e.g. the R5 negative-volume-wrap ``CandleBar`` refusal)
     that must keep propagating.
 
+    A corrupt stored VALUE fail-closes the same way (refuter round 2): the
+    two stamp guards vet STAMPS only, so a null / NaN-unconvertible stored
+    OHLCV / volume / ``open_interest`` value (a hand-planted / corrupt
+    partition — ``float(None)`` / ``int(None)`` → ``TypeError``,
+    ``int(NaN)`` → ``ValueError``) previously ESCAPED the compare loop's
+    bare conversions as an uncaught raise through the sweep-preflight gate,
+    while the polars-only intraday twin read ``"stale"`` gracefully
+    (``.equals``) on the identical corruption. The per-row stored-key build
+    now rides its own NARROW ``(TypeError, ValueError)`` guard — spanning
+    ONLY the stored-row conversions, whose sole failure mode is an
+    unconvertible stored value, so the #1594 consumption law holds (a
+    genuine code bug elsewhere keeps propagating) — and reads the typed
+    ``"stale"`` verdict + ONE ``derived_1day_corrupt_value`` WARN.
+
     HONEST cost (Golden Rule #10): the per-date compare below is a
     NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
     per TRADING DAY per symbol (a full-history partition is hundreds-to-low-
@@ -176,8 +190,10 @@ def compare_daily_freshness(
         # verdict (fail-closed), never a raw OverflowError / ValueError /
         # PanicException out of the preflight gate. The reduction above
         # materialises EVERY stored stamp (`.to_list()` + the +05:30 shift),
-        # so a per-row conversion in the compare loop below can never hit a
-        # value this guard did not already vet. Loud: ONE WARN per partition.
+        # so a per-row STAMP conversion in the compare loop below can never
+        # hit a stamp this guard did not already vet — the loop's VALUE
+        # conversions have their OWN fail-closed guard (refuter round 2).
+        # Loud: ONE WARN per partition.
         _LOG.warning(
             "derived_1day_out_of_range_stamp",
             source=source or "1day",
@@ -239,15 +255,41 @@ def compare_daily_freshness(
             orphans.append(ist_date.isoformat())
             continue
         stored_oi = row["open_interest"] if has_oi else None
-        stored_key = (
-            _instant(row["ts_utc"]),
-            float(row["open"]),
-            float(row["high"]),
-            float(row["low"]),
-            float(row["close"]),
-            int(row["volume"]),
-            None if stored_oi is None else int(stored_oi),
-        )
+        try:
+            stored_key = (
+                _instant(row["ts_utc"]),
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                int(row["volume"]),
+                None if stored_oi is None else int(stored_oi),
+            )
+        except (TypeError, ValueError):
+            # Refuter round 2 (seat 1, MAJOR): the two stamp guards above vet
+            # STAMPS only — a corrupt/hand-planted stored 1day VALUE (a null
+            # OHLCV/volume → `float(None)`/`int(None)` TypeError; a NaN-f64
+            # volume/OI → `int(NaN)` ValueError) previously ESCAPED these
+            # bare conversions as an uncaught raise through the
+            # sweep-preflight gate, while the polars-only intraday twin read
+            # "stale" gracefully (`.equals`) on the identical corruption.
+            # NARROW try — it spans ONLY the stored-row conversions, whose
+            # sole failure mode is an unconvertible stored value, so catching
+            # (TypeError, ValueError) here honors the #1594 consumption law
+            # (a genuine code bug elsewhere keeps propagating). Loud: ONE
+            # WARN per partition, fail-closed.
+            _LOG.warning(
+                "derived_1day_corrupt_value",
+                source=source or "1day",
+                ist_date=ist_date.isoformat(),
+                detail=(
+                    "stored 1day OHLCV/volume/OI value is null or "
+                    "NaN-unconvertible (a corrupt/hand-planted partition) — "
+                    "verdict 'stale' fail-closed; heal-recall or re-derive "
+                    "the partition"
+                ),
+            )
+            return "stale"
         expected_key = (
             _instant(bar.timestamp),
             float(bar.open),

@@ -187,6 +187,14 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   deliberately excluded per the #1594 consumption law, since the resample
   spans arbitrary derive code). The intraday twin is polars-only (`.equals`)
   and was verified graceful on the same corrupt base — no guard needed there.
+- Corrupt stored 1day VALUES fail-closed the same way (refuter round 2 —
+  the stamp guards vet stamps only): a null / NaN-unconvertible stored
+  OHLCV/volume/OI value (`float(None)`/`int(None)` TypeError, `int(NaN)`
+  ValueError) previously escaped the daily compare loop's bare conversions
+  as an uncaught raise through the sweep-preflight gate; the per-row
+  stored-key build now rides a NARROW `(TypeError, ValueError)` guard →
+  `stale` + one `derived_1day_corrupt_value` WARN. The intraday twin was
+  already graceful (`.equals`) on the identical corruption.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that
