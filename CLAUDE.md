@@ -2461,11 +2461,15 @@ hostile-review pass._
   partition's OWN last date so it can never entangle with the grounded-deferral
   cutoff; intersecting dates only, orphan rows observe-only WARN; corrupt
   STAMPS and corrupt VALUES alike fail-closed to the typed `stale` — the
-  stored/base out-of-range stamp guards + the refuter-round-2 stored-VALUE
-  `(TypeError, ValueError)` guard (`derived_1day_corrupt_value` — a
-  null/NaN-unconvertible stored OHLCV/volume/OI previously escaped the
-  compare loop as an uncaught raise), never an uncaught raise out of the
-  sweep-preflight gate) keyed
+  stored/base out-of-range stamp guards + the refuter-rounds-2+3 stored-VALUE
+  `(TypeError, ValueError, OverflowError)` guard (`derived_1day_corrupt_value`
+  — a null/NaN/±inf-unconvertible stored OHLCV/volume/OI previously escaped
+  the compare loop as an uncaught raise; round 3 caught `int(inf)` →
+  OverflowError outside the round-2 narrow pair) + the refuter-round-3
+  corrupt-STAMP `(AttributeError, TypeError)` clause
+  (`derived_1day_corrupt_stamp` — a null / wrong-dtype stored `ts_utc`
+  raised AttributeError in NEITHER out-of-range set), never an uncaught
+  raise out of the sweep-preflight gate) keyed
   `(symbol, "1day")` in `lake_derived_freshness_verdicts` (sweep preflight picks
   it up with ZERO changes), the intraday compare made OI-AWARE (legacy OI=0
   partitions — SPOT engine lakes included — read stale ≤1 nightly with the

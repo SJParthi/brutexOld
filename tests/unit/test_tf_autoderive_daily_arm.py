@@ -577,6 +577,60 @@ class TestCorruptStoredValue:
             "stale"
         )
 
+    def test_inf_f64_volume_reads_stale_with_one_warn(self) -> None:
+        """Refuter round 3 (seat 2, MAJOR): ``int(inf)`` raises OverflowError
+        — a subclass of NEITHER TypeError nor ValueError — so an inf-f64
+        stored volume ESCAPED the round-2 narrow guard as an uncaught raise.
+        Now the same typed verdict + the same ONE WARN."""
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                self._df_1m(),
+                self._stored(volume_f64=float("inf")),
+                segment="INDEX",
+                source="NIFTY/1day",
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_value"]
+        assert event["log_level"] == "warning"
+        assert event["source"] == "NIFTY/1day"
+        assert event["ist_date"] == "2024-06-12"
+
+    def test_neg_inf_f64_volume_reads_stale(self) -> None:
+        """Pre-fix: ESCAPED ``OverflowError`` on ``int(-inf)`` too."""
+        stored = self._stored(volume_f64=float("-inf"))
+        assert tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == (
+            "stale"
+        )
+
+    def test_inf_f64_oi_reads_stale(self) -> None:
+        """An inf OI in a hand-planted Float64 OI column: pre-fix the same
+        ``int(inf)`` OverflowError escape through the OI leg of the key
+        build."""
+        stored = self._stored(oi_f64=float("inf"))
+        assert tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == (
+            "stale"
+        )
+
+    def test_inf_volume_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter-round-3 seat-2 executed repro shape verbatim: a real
+        lake whose STORED 1day partition is hand-poisoned with an inf Float64
+        ``volume`` (1-minute base left CLEAN); the exact cli sweep-preflight
+        call must return the typed verdict — never an uncaught
+        ``OverflowError: cannot convert float infinity to integer``. The
+        untouched intraday partition stays fresh (only the corrupt arm
+        refuses)."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1d = _partition(lake, "INDEX", "NIFTY", "1day")
+        pl.read_parquet(p1d).with_columns(
+            pl.lit(float("inf")).cast(pl.Float64).alias("volume")
+        ).write_parquet(p1d)
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "fresh",
+            ("NIFTY", "1day"): "stale",
+        }
+
     def test_null_close_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
         """The refuter's /tmp/repro_null_gate.py shape verbatim: a real lake
         whose STORED 1day partition is hand-poisoned with ``close=null`` on
@@ -593,6 +647,108 @@ class TestCorruptStoredValue:
             pl.lit(None).cast(pl.Float64).alias("close")
         ).write_parquet(p1d)
         assert df.height == 1  # the poisoned row IS the intersecting date
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "fresh",
+            ("NIFTY", "1day"): "stale",
+        }
+
+
+class TestCorruptStoredStamp:
+    """Refuter round 3 (seat 1, MAJOR): the out-of-range-STAMP guard vets
+    i64-RANGE faults only (``datetime_out_of_range_errors()`` = OverflowError
+    / ValueError / PanicException) — a NULL (None) Datetime cell or a
+    wrong-dtype (hand-planted Int64) stored ``ts_utc`` raises
+    ``AttributeError`` at ``_ist_date_of``'s ``ts.tzinfo`` probe instead,
+    a member of NEITHER COMMON set, and previously ESCAPED the stored-stamp
+    reduction as an uncaught raise through the exact ``cli.py``
+    sweep-preflight call (``lake_derived_freshness_verdicts``), while the
+    polars-only intraday twin read "stale" gracefully on the identical
+    corruption — the #1594 isolation-escape class. The reduction now
+    fail-closes to the typed "stale" verdict + ONE
+    ``derived_1day_corrupt_stamp`` WARN."""
+
+    def _df_1m(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": [
+                    datetime(2024, 6, 12, 3, 45, tzinfo=UTC) + timedelta(minutes=i)
+                    for i in range(5)
+                ],
+                "open": [100.0] * 5,
+                "high": [100.5] * 5,
+                "low": [99.5] * 5,
+                "close": [100.1] * 5,
+                "volume": [10] * 5,
+            }
+        ).with_columns(pl.col("ts_utc").dt.replace_time_zone("UTC"))
+
+    def _stored_with_ts(self, ts: pl.Series) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_utc": ts,
+                "open": [100.0],
+                "high": [100.5],
+                "low": [99.5],
+                "close": [100.1],
+                "volume": [10],
+            }
+        )
+
+    def test_null_ts_reads_stale_with_one_warn(self) -> None:
+        """The refuter's Vector A shape: pre-fix an ESCAPED
+        ``AttributeError: 'NoneType' object has no attribute 'tzinfo'``."""
+        stored = self._stored_with_ts(pl.Series("ts_utc", [None], dtype=pl.Datetime("us", "UTC")))
+        with capture_logs() as logs:
+            verdict = tf_autoderive.compare_daily_freshness(
+                self._df_1m(), stored, segment="INDEX", source="NIFTY/1day"
+            )
+        assert verdict == "stale"
+        (event,) = [e for e in logs if e["event"] == "derived_1day_corrupt_stamp"]
+        assert event["log_level"] == "warning"
+        assert event["source"] == "NIFTY/1day"
+        assert event["side"] == "stored-1day"
+
+    def test_wrong_dtype_int64_ts_reads_stale(self) -> None:
+        """The refuter's Vector B shape: an Int64 epoch-µs ``ts_utc`` column
+        — pre-fix an ESCAPED ``AttributeError: 'int' object has no attribute
+        'tzinfo'``."""
+        epoch_us = int(datetime(2024, 6, 11, 18, 30, tzinfo=UTC).timestamp() * 1_000_000)
+        stored = self._stored_with_ts(pl.Series("ts_utc", [epoch_us], dtype=pl.Int64))
+        assert tf_autoderive.compare_daily_freshness(self._df_1m(), stored, segment="INDEX") == (
+            "stale"
+        )
+
+    def test_null_ts_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's /tmp/repro_null_ts.py shape verbatim: a real lake
+        whose STORED 1day partition is hand-poisoned with a null
+        ``timestamp`` (1-minute base left CLEAN); the exact cli
+        sweep-preflight call must return the typed verdict — never an
+        uncaught AttributeError traceback. The untouched intraday partition
+        stays fresh (only the corrupt arm refuses)."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1d = _partition(lake, "INDEX", "NIFTY", "1day")
+        df = pl.read_parquet(p1d)
+        df.with_columns(pl.lit(None).cast(df.schema["timestamp"]).alias("timestamp")).write_parquet(
+            p1d
+        )
+        assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
+            ("NIFTY", "5minute"): "fresh",
+            ("NIFTY", "1day"): "stale",
+        }
+
+    def test_wrong_dtype_int64_ts_on_disk_gate_shape_reads_stale(self, tmp_path: Path) -> None:
+        """The refuter's /tmp/repro_int_ts.py shape: the stored 1day
+        ``timestamp`` column hand-planted as Int64 epoch-µs — same gate,
+        same typed verdict."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        p1d = _partition(lake, "INDEX", "NIFTY", "1day")
+        pl.read_parquet(p1d).with_columns(
+            pl.col("timestamp").dt.epoch(time_unit="us").alias("timestamp")
+        ).write_parquet(p1d)
         assert _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]) == {
             ("NIFTY", "5minute"): "fresh",
             ("NIFTY", "1day"): "stale",

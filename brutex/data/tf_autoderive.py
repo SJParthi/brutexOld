@@ -148,19 +148,33 @@ def compare_daily_freshness(
     a genuine bug (e.g. the R5 negative-volume-wrap ``CandleBar`` refusal)
     that must keep propagating.
 
-    A corrupt stored VALUE fail-closes the same way (refuter round 2): the
-    two stamp guards vet STAMPS only, so a null / NaN-unconvertible stored
-    OHLCV / volume / ``open_interest`` value (a hand-planted / corrupt
-    partition — ``float(None)`` / ``int(None)`` → ``TypeError``,
-    ``int(NaN)`` → ``ValueError``) previously ESCAPED the compare loop's
-    bare conversions as an uncaught raise through the sweep-preflight gate,
-    while the polars-only intraday twin read ``"stale"`` gracefully
-    (``.equals``) on the identical corruption. The per-row stored-key build
-    now rides its own NARROW ``(TypeError, ValueError)`` guard — spanning
-    ONLY the stored-row conversions, whose sole failure mode is an
-    unconvertible stored value, so the #1594 consumption law holds (a
-    genuine code bug elsewhere keeps propagating) — and reads the typed
-    ``"stale"`` verdict + ONE ``derived_1day_corrupt_value`` WARN.
+    A NULL or WRONG-DTYPE stored stamp fail-closes the same way (refuter
+    round 3): the out-of-range sets vet i64-RANGE faults only, so a stored
+    ``ts_utc`` cell that is ``None`` (a null Datetime cell) or not a
+    ``datetime`` at all (a hand-planted Int64 / Date / Utf8 column —
+    ``ts.tzinfo`` → ``AttributeError``, in NEITHER COMMON set) previously
+    ESCAPED the stored-stamp reduction as an uncaught raise through the
+    sweep-preflight gate, while the polars-only intraday twin read
+    ``"stale"`` gracefully on the identical corruption. The reduction now
+    carries its own NARROW ``(AttributeError, TypeError)`` clause — the
+    span's sole failure mode is the stored-stamp conversion, so the #1594
+    consumption law holds — reading the typed ``"stale"`` verdict + ONE
+    ``derived_1day_corrupt_stamp`` WARN.
+
+    A corrupt stored VALUE fail-closes the same way (refuter rounds 2 + 3):
+    the stamp guards vet STAMPS only, so a null / NaN- / inf-unconvertible
+    stored OHLCV / volume / ``open_interest`` value (a hand-planted /
+    corrupt partition — ``float(None)`` / ``int(None)`` → ``TypeError``,
+    ``int(NaN)`` → ``ValueError``, ``int(inf)`` → ``OverflowError``)
+    previously ESCAPED the compare loop's bare conversions as an uncaught
+    raise through the sweep-preflight gate, while the polars-only intraday
+    twin read ``"stale"`` gracefully (``.equals``) on the identical
+    corruption. The per-row stored-key build now rides its own NARROW
+    ``(TypeError, ValueError, OverflowError)`` guard — spanning ONLY the
+    stored-row conversions, whose sole failure mode is an unconvertible
+    stored value, so the #1594 consumption law holds (a genuine code bug
+    elsewhere keeps propagating) — and reads the typed ``"stale"`` verdict
+    + ONE ``derived_1day_corrupt_value`` WARN.
 
     HONEST cost (Golden Rule #10): the per-date compare below is a
     NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
@@ -191,9 +205,10 @@ def compare_daily_freshness(
         # PanicException out of the preflight gate. The reduction above
         # materialises EVERY stored stamp (`.to_list()` + the +05:30 shift),
         # so a per-row STAMP conversion in the compare loop below can never
-        # hit a stamp this guard did not already vet — the loop's VALUE
-        # conversions have their OWN fail-closed guard (refuter round 2).
-        # Loud: ONE WARN per partition.
+        # hit a stamp this guard (or the corrupt-stamp clause below) did not
+        # already vet — the loop's VALUE conversions have their OWN
+        # fail-closed guard (refuter rounds 2 + 3). Loud: ONE WARN per
+        # partition.
         _LOG.warning(
             "derived_1day_out_of_range_stamp",
             source=source or "1day",
@@ -202,6 +217,31 @@ def compare_daily_freshness(
                 "stored 1day stamp outside the Python datetime range (a corrupt/"
                 "hand-planted i64) — verdict 'stale' fail-closed; heal-recall or "
                 "re-derive the partition"
+            ),
+        )
+        return "stale"
+    except (AttributeError, TypeError):
+        # Refuter round 3 (seat 1, MAJOR): the out-of-range guard above vets
+        # i64-RANGE faults only — a NULL (None) or wrong-dtype (a
+        # hand-planted Int64 / Date / Utf8 `ts_utc` column) stored stamp
+        # raises AttributeError at the `_ist_date_of` `ts.tzinfo` probe
+        # instead, a member of NEITHER COMMON out-of-range set, and
+        # previously ESCAPED `lake_derived_freshness_verdicts` as an
+        # uncaught raise through the sweep-preflight gate while the
+        # polars-only intraday twin read "stale" gracefully on the identical
+        # corruption. NARROW try — the reduction's sole failure mode is the
+        # stored-stamp conversion, so catching (AttributeError, TypeError)
+        # here honors the #1594 consumption law (a genuine code bug
+        # elsewhere keeps propagating). Loud: ONE WARN per partition,
+        # fail-closed.
+        _LOG.warning(
+            "derived_1day_corrupt_stamp",
+            source=source or "1day",
+            side="stored-1day",
+            detail=(
+                "stored 1day timestamp is null or not a datetime (a corrupt/"
+                "hand-planted partition) — verdict 'stale' fail-closed; "
+                "heal-recall or re-derive the partition"
             ),
         )
         return "stale"
@@ -265,26 +305,29 @@ def compare_daily_freshness(
                 int(row["volume"]),
                 None if stored_oi is None else int(stored_oi),
             )
-        except (TypeError, ValueError):
-            # Refuter round 2 (seat 1, MAJOR): the two stamp guards above vet
-            # STAMPS only — a corrupt/hand-planted stored 1day VALUE (a null
-            # OHLCV/volume → `float(None)`/`int(None)` TypeError; a NaN-f64
-            # volume/OI → `int(NaN)` ValueError) previously ESCAPED these
-            # bare conversions as an uncaught raise through the
-            # sweep-preflight gate, while the polars-only intraday twin read
-            # "stale" gracefully (`.equals`) on the identical corruption.
-            # NARROW try — it spans ONLY the stored-row conversions, whose
-            # sole failure mode is an unconvertible stored value, so catching
-            # (TypeError, ValueError) here honors the #1594 consumption law
-            # (a genuine code bug elsewhere keeps propagating). Loud: ONE
-            # WARN per partition, fail-closed.
+        except (TypeError, ValueError, OverflowError):
+            # Refuter round 2 (seat 1, MAJOR) + round 3 (seat 2, MAJOR): the
+            # stamp guards above vet STAMPS only — a corrupt/hand-planted
+            # stored 1day VALUE (a null OHLCV/volume →
+            # `float(None)`/`int(None)` TypeError; a NaN-f64 volume/OI →
+            # `int(NaN)` ValueError; an ±inf-f64 volume/OI → `int(inf)`
+            # OverflowError, a subclass of NEITHER — the round-3 completion)
+            # previously ESCAPED these bare conversions as an uncaught raise
+            # through the sweep-preflight gate, while the polars-only
+            # intraday twin read "stale" gracefully (`.equals`) on the
+            # identical corruption. NARROW try — it spans ONLY the
+            # stored-row conversions, whose sole failure mode is an
+            # unconvertible stored value, so catching (TypeError,
+            # ValueError, OverflowError) here honors the #1594 consumption
+            # law (a genuine code bug elsewhere keeps propagating). Loud:
+            # ONE WARN per partition, fail-closed.
             _LOG.warning(
                 "derived_1day_corrupt_value",
                 source=source or "1day",
                 ist_date=ist_date.isoformat(),
                 detail=(
-                    "stored 1day OHLCV/volume/OI value is null or "
-                    "NaN-unconvertible (a corrupt/hand-planted partition) — "
+                    "stored 1day OHLCV/volume/OI value is null, NaN- or "
+                    "inf-unconvertible (a corrupt/hand-planted partition) — "
                     "verdict 'stale' fail-closed; heal-recall or re-derive "
                     "the partition"
                 ),

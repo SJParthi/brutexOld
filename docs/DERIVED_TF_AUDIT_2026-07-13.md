@@ -187,14 +187,30 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   deliberately excluded per the #1594 consumption law, since the resample
   spans arbitrary derive code). The intraday twin is polars-only (`.equals`)
   and was verified graceful on the same corrupt base — no guard needed there.
-- Corrupt stored 1day VALUES fail-closed the same way (refuter round 2 —
-  the stamp guards vet stamps only): a null / NaN-unconvertible stored
-  OHLCV/volume/OI value (`float(None)`/`int(None)` TypeError, `int(NaN)`
-  ValueError) previously escaped the daily compare loop's bare conversions
-  as an uncaught raise through the sweep-preflight gate; the per-row
-  stored-key build now rides a NARROW `(TypeError, ValueError)` guard →
-  `stale` + one `derived_1day_corrupt_value` WARN. The intraday twin was
-  already graceful (`.equals`) on the identical corruption.
+- Corrupt stored 1day VALUES fail-closed the same way (refuter rounds 2 + 3
+  — the stamp guards vet stamps only): a null / NaN- / ±inf-unconvertible
+  stored OHLCV/volume/OI value (`float(None)`/`int(None)` TypeError,
+  `int(NaN)` ValueError, `int(±inf)` OverflowError — the round-3 completion:
+  OverflowError is a subclass of NEITHER member of the round-2 narrow
+  guard, so an inf-f64 volume/OI still escaped) previously escaped the
+  daily compare loop's bare conversions as an uncaught raise through the
+  sweep-preflight gate; the per-row stored-key build now rides a NARROW
+  `(TypeError, ValueError, OverflowError)` guard → `stale` + one
+  `derived_1day_corrupt_value` WARN. The intraday twin was already graceful
+  (`.equals`) on the identical corruption.
+- A NULL or wrong-dtype stored 1day STAMP fail-closes too (refuter round 3
+  — the out-of-range sets vet i64-RANGE faults only): a `ts_utc` cell that
+  is `None` (a null Datetime cell) or not a `datetime` at all (a
+  hand-planted Int64/Date/Utf8 column) raised `AttributeError` at
+  `_ist_date_of`'s `ts.tzinfo` probe — a member of NEITHER COMMON
+  out-of-range set — and previously escaped the stored-stamp reduction as
+  an uncaught raise through the sweep-preflight gate; the reduction now
+  carries its own NARROW `(AttributeError, TypeError)` clause → `stale` +
+  one `derived_1day_corrupt_stamp` WARN. The reduction materialises every
+  stored stamp, so the compare loop's per-row conversion can never hit a
+  stamp neither stamp guard vetted; the intraday twin (polars-only,
+  null-safe `.equals`) was verified graceful on the identical null-ts
+  corruption.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that
