@@ -5226,10 +5226,10 @@ def build_app(
         ``skip_pull`` runs make no vendor calls and are legitimately allowed
         in-window — the job-level all-or-nothing gate cannot express that
         split). GREEKS N/A for this trigger: the Greeks stage is
-        options-only, and this pull is options-EXCLUDING (spot + NIFTY/
-        BANKNIFTY futures), so there is nothing to enrich — pull → prebuild →
-        movers-revision run with no Greeks stage (tonight-scope addendum
-        item 3).
+        options-only, and this pull is SPOT-ONLY — all indices + all
+        stocks; futures AND options excluded
+        (DEC-CROSSVERIFY-SPOT-ONLY-001) — so there is nothing to enrich:
+        pull → prebuild → movers-revision run with no Greeks stage.
         """
         parsed_day: date | None = None
         if day is not None:

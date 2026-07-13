@@ -310,6 +310,16 @@ class TestUniversePanel:
         nothing to enrich on this options-excluding pull — said in-template."""
         assert "GREEKS N/A" in _tpl()
 
+    def test_panel_wording_is_spot_only(self) -> None:
+        """DEC-CROSSVERIFY-SPOT-ONLY-001: the panel comment + the Run button
+        tooltip carry the amended spot-only contract — the stale
+        "spot + NIFTY/BANKNIFTY futures" wording class is guarded."""
+        text = _tpl()
+        start = text.index("Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001)")
+        block = text[start : text.index('id="cvstatus"', start)]
+        assert block.count("futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001") == 2
+        assert "NIFTY/BANKNIFTY futures" not in block
+
 
 class _InlineScriptExtractor(HTMLParser):
     """Collect every src-less inline ``<script>`` body (the frontend-latency
