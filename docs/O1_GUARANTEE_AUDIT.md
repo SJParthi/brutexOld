@@ -147,10 +147,15 @@ fix was needed; none was made.
   ci.yml's REQUIRED `bench` job runs the WHOLE `tests/bench` directory on
   every push + PR (feeding the `CI OK (aggregate gate)` required check) at
   the robust 3–10× ceilings of `tests/bench/_o1_tiers.py`. Census (measured
-  review round 1, 2026-07-13): **121 bench test files** — **75** import
-  `ratio_ceiling`, **19** use `cache_tier_ceiling` (3.0× strict), **2** use
-  `metadata_sweep_ceiling` (+ the tiers file itself), **10** are
-  `BRUTEX_M4PRO_ABS`-gated.
+  review round 1, 2026-07-13, pre-QUAD tree): **121 bench test files** —
+  **75** import `ratio_ceiling`, **19** use `cache_tier_ceiling` (3.0×
+  strict), **2** use `metadata_sweep_ceiling` (+ the tiers file itself),
+  **10** are `BRUTEX_M4PRO_ABS`-gated. Post-QUAD addendum (measured
+  2026-07-13 at the merged tree, review round 4): the origin/main QUAD fold
+  added `test_bar_screen_cost.py` + `test_lake_invariants_scan_space.py`,
+  raising the total to **123**; both use bespoke cost/space assertions —
+  none of the four `_o1_tiers` helper categories — so the 75/19/2/10
+  sub-split is unchanged.
 - **Which bench files actually EXECUTE on the bench job** (review round 1
   MAJOR fix — the section previously implied every file ran there): the job
   installs `.[dev,data,ui]` (the `ui` extra added by review round 1 — before

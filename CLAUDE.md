@@ -2441,7 +2441,8 @@ hostile-review pass._
   cost and its bench gate or an explicit "none" — under the anti-illusion rule: NO path claims bare O(1) where its
   FIRST read is O(files)/O(rows) (the #1528 posture, product-wide), and the enforcement split is stated plainly
   (the merge-blocking guarantee is the shared-CI ROBUST tier — the whole tests/bench dir every push at 3–10×
-  ceilings, 121 files: 75 ratio / 19 cache-tier / 2 metadata-sweep / 10 M4PRO_ABS-gated; the strict 1.1× M4-Pro
+  ceilings — 123 bench files (measured 2026-07-13 at the post-QUAD merged tree; the QUAD fold raised the round-1
+  census 121 → 123 — sub-split unchanged): 75 ratio / 19 cache-tier / 2 metadata-sweep / 10 M4PRO_ABS-gated; the strict 1.1× M4-Pro
   tier + absolute floors run post-merge, non-required + non-blocking BY DESIGN per #382 + #1753). THE TRIAGE: the
   reported M4-Pro ResultsStore.get "1.87×" strict-tier failure is VERIFIED NOT A REGRESSION — the path is a
   one-line dict probe (`results_store.py:692`), measured dead flat (51.7/53.5/51.7 ns at 1k/10k/100k rows;
