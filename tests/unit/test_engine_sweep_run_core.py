@@ -1406,9 +1406,8 @@ def test_diffcheck_enabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
     # WARN — and the bridge token is GONE from the run core's source.
     import inspect
 
-    from structlog.testing import capture_logs
-
     from brutex.engine import sweep_run_core as run_core_module
+    from structlog.testing import capture_logs
 
     grid = _grid(fill_mode=FillMode.WORST_CASE)
     with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
