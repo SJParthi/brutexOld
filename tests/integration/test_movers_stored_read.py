@@ -623,7 +623,6 @@ class TestDtypeInsensitiveEqualsPin:
         forces a conscious docs + behavior decision instead of silent drift.
         """
         import polars as pl
-
         from brutex.dashboard.movers_snapshot import _read_intraday_bars, _StoredStaleWarnState
 
         _seed_spot(tmp_path, "NIFTY", 20000)
