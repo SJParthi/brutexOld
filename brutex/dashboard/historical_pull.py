@@ -133,6 +133,7 @@ from brutex.data.registry_store import (
     RegistryStore,
 )
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -1286,6 +1287,12 @@ def _run_phase(
     # then reads the live clock only, so a junk env set mid-pull can never crash a long
     # F&O phase with a per-contract ValueError.
     market_closed = None if dry_run else resolve_market_closed()
+    # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001):
+    # the env kill switch is resolved ONCE per phase, fail-loud on junk at pull start
+    # (the ``resolve_market_closed`` posture, never mid-run); a dry-run short-circuits
+    # to ``False`` WITHOUT touching the env (belt — the F&O dry-run client returns
+    # EMPTY payloads, so the gate could never fire offline anyway).
+    today_gate = (not dry_run) and resolve_today_completeness_enabled()
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
     # phase and threaded into the FUTURES partial-window observe margin ONLY (an
     # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
@@ -1390,6 +1397,9 @@ def _run_phase(
                 # in production the PersistentSymbolFormPreference over the
                 # instrument master, so the winner survives across pulls too.
                 form_preference=form_preference,
+                # Pre-settle TODAY minute-completeness gate
+                # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                today_completeness_gate=today_gate,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
