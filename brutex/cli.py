@@ -1007,10 +1007,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-exit",
         action="store_true",
         help=(
-            "Exit 2 when the pull left residuals (still-failing windows, "
-            "quarantined symbols) or the cross-verify tail's verdict is in the "
-            "exit-2 family — default keeps residuals + tail failures exit 0 "
-            "(printed, re-attempted next run)"
+            "Exit 2 when the pull left quarantined symbols or the cross-verify "
+            "tail's verdict is in the exit-2 family — default keeps those exit 0 "
+            "(printed, re-attempted next run). Still-failing windows exit 2 "
+            "regardless (they stop the chain — no flag needed)"
         ),
     )
 
@@ -6228,17 +6228,24 @@ def cmd_pull_all_spot(
     CROSSVERIFY TAIL (fail-soft, ruling 8b): ``run_crossverify`` is invoked
     strictly AFTER the pull single-flight/lease with-block exits (the runner
     acquires the SAME account→lake→lease trio itself — nesting would be
-    guaranteed contention), sharing this run's ONE ``SessionRateController``.
-    A junk ``BRUTEX_CROSSVERIFY_*`` env reads ``not configured`` and never
-    blocks the pull; ``BRUTEX_CROSSVERIFY=off`` reads ``disabled``.
+    guaranteed contention), sharing this run's ONE ``SessionRateController``
+    and still INSIDE the command-wide ``keep_awake`` span (hostile-review
+    r1 #4 — the machine never sleeps mid-crossverify). A junk
+    ``BRUTEX_CROSSVERIFY_*`` env reads ``not configured`` and never blocks
+    the pull; ``BRUTEX_CROSSVERIFY=off`` reads ``disabled``; a tail
+    ``LakeWriteHalt`` fires ONE CRITICAL alert then re-raises (the cmd_fetch
+    halt convention — hostile-review r1 #3).
 
-    Exit law: 0 = clean OR residuals OR ANY deferral (auto gate, contention
-    under ``--auto``, market-hours); 1 = junk flags/env, missing lake /
-    instrument master, manual contention refusal; 2 = the chain stopped/halted
-    (``report.ok`` False, market-hours deferral excepted) — and, under
-    ``--strict-exit``, residuals (still-failing windows / quarantined symbols)
-    or an exit-2-family cross-verify verdict. A tail failure NEVER changes the
-    default exit (the fail-soft decree) — it is printed only.
+    Exit law (hostile-review r1 #1 — prose follows code): 0 = clean OR
+    quarantine residuals OR ANY deferral (auto gate, contention under
+    ``--auto``, market-hours); 1 = junk flags/env, missing lake / instrument
+    master, manual contention refusal; 2 = the chain stopped/halted
+    (``report.ok`` False, market-hours deferral excepted) — and STILL-FAILING
+    spot windows are exactly that class (they fail the spot gate, the chain
+    stops), so they exit 2 by DEFAULT, no ``--strict-exit`` needed. Under
+    ``--strict-exit``, quarantined symbols or an exit-2-family cross-verify
+    verdict ALSO escalate to 2. A tail failure NEVER changes the default exit
+    (the fail-soft decree) — it is printed only.
 
     Every heavy dependency is injected for tests (builders, locks, tail,
     clock); production defaults are the real machinery.
@@ -6307,122 +6314,145 @@ def cmd_pull_all_spot(
     # account rate budget (§2 Rule 6), never a second ceiling.
     session_rate = SessionRateController()
 
-    with contextlib.ExitStack() as stack:
-        if not dry_run:
-            # The nightly rail stack: lake single-flight (holder-noted) + the
-            # cross-host lease. A --dry-run is lock-free (zero vendor calls,
-            # zero real lake writes — the cmd_fetch posture).
+    with contextlib.ExitStack() as awake:
+        # keep_awake spans the WHOLE command — the pull AND the crossverify
+        # tail (hostile-review r1 #4: the tail is a real vendor pull + publish
+        # leg; the machine must not sleep mid-crossverify). The LOCK stack
+        # below still exits strictly BEFORE the tail (the lock-ordering law —
+        # keep_awake is lock-independent, so widening its span moves no lock).
+        awake.enter_context(keep_awake("brutex pull all spot"))
+        with contextlib.ExitStack() as stack:
+            if not dry_run:
+                # The nightly rail stack: lake single-flight (holder-noted) + the
+                # cross-host lease. A --dry-run is lock-free (zero vendor calls,
+                # zero real lake writes — the cmd_fetch posture).
+                try:
+                    stack.enter_context(locks(resolved, holder_note=f"pull-all-spot:{os.getpid()}"))
+                    stack.enter_context(lease(resolved))
+                except PullAlreadyRunningError as exc:
+                    print(
+                        f"[brutex] pull-all-spot refused: a pull is already running — {exc}",
+                        file=sys.stderr,
+                    )
+                    log.warning("pull_all_spot.refused_contention", error=str(exc))
+                    # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
+                    return EXIT_OK if auto else EXIT_USER_ERROR
             try:
-                stack.enter_context(locks(resolved, holder_note=f"pull-all-spot:{os.getpid()}"))
-                stack.enter_context(lease(resolved))
-            except PullAlreadyRunningError as exc:
+                hp = builder(
+                    lake_root=resolved,
+                    dry_run=dry_run,
+                    scope=SCOPE_SPOT_ONLY,
+                    session_rate=session_rate,
+                )
+            except NightlyCapabilityError as exc:
+                raise CliUserError(str(exc)) from exc
+            try:
+                report = executor(hp)
+            except MarketHoursHalt as exc:
+                # Mid-run market-hours halt (the #1692 cmd_fetch posture): the
+                # durable ledger keeps PLANNED/FAILED windows resumable — a
+                # deferral, never a failure.
                 print(
-                    f"[brutex] pull-all-spot refused: a pull is already running — {exc}",
-                    file=sys.stderr,
+                    f"[brutex] pull-all-spot deferred: {exc} — committed windows persisted; "
+                    "resume on the next out-of-hours run"
                 )
-                log.warning("pull_all_spot.refused_contention", error=str(exc))
-                # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
-                return EXIT_OK if auto else EXIT_USER_ERROR
-        stack.enter_context(keep_awake("brutex pull all spot"))
-        try:
-            hp = builder(
-                lake_root=resolved,
-                dry_run=dry_run,
-                scope=SCOPE_SPOT_ONLY,
-                session_rate=session_rate,
-            )
-        except NightlyCapabilityError as exc:
-            raise CliUserError(str(exc)) from exc
-        try:
-            report = executor(hp)
-        except MarketHoursHalt as exc:
-            # Mid-run market-hours halt (the #1692 cmd_fetch posture): the
-            # durable ledger keeps PLANNED/FAILED windows resumable — a
-            # deferral, never a failure.
-            print(
-                f"[brutex] pull-all-spot deferred: {exc} — committed windows persisted; "
-                "resume on the next out-of-hours run"
-            )
-            log.warning("pull_all_spot.deferred_market_hours", error=str(exc))
+                log.warning("pull_all_spot.deferred_market_hours", error=str(exc))
+                return EXIT_OK
+            except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError) as exc:
+                # Pull-wide HALT: CRITICAL Telegram then a loud nonzero exit (the
+                # cmd_fetch #888 pattern).
+                _emit_pull_halt_alert(exc)
+                print(f"[brutex] pull-all-spot HALTED: {exc}", file=sys.stderr)
+                return EXIT_INTERNAL_ERROR
+            finally:
+                hp.close()
+
+        # ← the pull single-flight + lease are RELEASED here (the inner stack
+        # exited); keep_awake is still HELD across the crossverify tail below.
+
+        # The whole-chain market-hours deferral (the sequencer's own belts).
+        if report.stopped_after == PHASE_MARKET_HOURS:
+            print(f"[brutex] pull-all-spot deferred: {report.note}")
+            log.info("pull_all_spot.deferred_market_hours", note=report.note)
             return EXIT_OK
-        except (LakeWriteHalt, DailyQuotaExceeded, QuotaInvariantError) as exc:
-            # Pull-wide HALT: CRITICAL Telegram then a loud nonzero exit (the
-            # cmd_fetch #888 pattern).
-            _emit_pull_halt_alert(exc)
-            print(f"[brutex] pull-all-spot HALTED: {exc}", file=sys.stderr)
-            return EXIT_INTERNAL_ERROR
-        finally:
-            hp.close()
 
-    # The whole-chain market-hours deferral (the sequencer's own belts).
-    if report.stopped_after == PHASE_MARKET_HOURS:
-        print(f"[brutex] pull-all-spot deferred: {report.note}")
-        log.info("pull_all_spot.deferred_market_hours", note=report.note)
-        return EXIT_OK
+        def _production_tail() -> CrossverifyTailOutcome:
+            """The REAL crossverify run — strictly AFTER the flock/lease release."""
+            from brutex.crossverify.config import resolve_crossverify_config
+            from brutex.crossverify.run import default_seams, run_crossverify
 
-    def _production_tail() -> CrossverifyTailOutcome:
-        """The REAL crossverify run — strictly AFTER the flock/lease release."""
-        from brutex.crossverify.config import resolve_crossverify_config
-        from brutex.crossverify.run import default_seams, run_crossverify
+            try:
+                config = resolve_crossverify_config(lake_root=resolved)
+                if not config.enabled:
+                    return CrossverifyTailOutcome(
+                        status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
+                    )
+                seams = default_seams(config, session_rate=session_rate)
+            except ValueError as exc:
+                # Genuine construction failure (junk BRUTEX_CROSSVERIFY_* env /
+                # market-hours env at the seam build) — the ONLY production
+                # "not configured" path (ruling 8); fail-SOFT, the pull stands.
+                return CrossverifyTailOutcome(
+                    status="not_configured", human=f"not configured (ValueError: {exc})"
+                )
+            cv = run_crossverify(config, seams)
+            return CrossverifyTailOutcome(
+                status=cv.verdict,
+                human=(
+                    f"{cv.verdict} (published {cv.published} · withheld {cv.withheld} · "
+                    f"failed {cv.publish_failed})"
+                ),
+            )
 
         try:
-            config = resolve_crossverify_config(lake_root=resolved)
-            if not config.enabled:
-                return CrossverifyTailOutcome(
-                    status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
-                )
-            seams = default_seams(config, session_rate=session_rate)
-        except ValueError as exc:
-            # Genuine construction failure (junk BRUTEX_CROSSVERIFY_* env /
-            # market-hours env at the seam build) — the ONLY production
-            # "not configured" path (ruling 8); fail-SOFT, the pull stands.
-            return CrossverifyTailOutcome(
-                status="not_configured", human=f"not configured (ValueError: {exc})"
+            tail = run_crossverify_tail(
+                _production_tail if crossverify_tail is None else crossverify_tail,
+                dry_run=dry_run,
+                stopped_after=report.stopped_after,
             )
-        cv = run_crossverify(config, seams)
-        return CrossverifyTailOutcome(
-            status=cv.verdict,
-            human=(
-                f"{cv.verdict} (published {cv.published} · withheld {cv.withheld} · "
-                f"failed {cv.publish_failed})"
-            ),
+        except LakeWriteHalt as exc:
+            # A disk-full during the crossverify publish/pull leg AFTER the spot
+            # pull already succeeded (the fence deliberately re-raises it, B M6):
+            # ONE best-effort CRITICAL Telegram alert, then re-raise — the
+            # cmd_fetch halt convention (hostile-review r1 #3; never a silent,
+            # alert-less traceback).
+            _emit_pull_halt_alert(exc)
+            raise
+
+        # ── stdout summary (C §4 shape; "?" for defensively-None fields) ──
+        spot = report.spot
+        kind = spot.verdict.kind if spot is not None else "?"
+        completed = str(spot.total_completed) if spot is not None else "?"
+        # "?" for an unknown spot phase like EVERY sibling field (hostile-review
+        # r2 #1) — never a fabricated 0-FAILED count for a phase that is unknown.
+        still_failed = str(spot.still_failed_windows) if spot is not None else "?"
+        skipped = str(spot.windows_skipped) if spot is not None else "?"
+        built = "?" if report.prebuild_built is None else str(report.prebuild_built)
+        bars = "?" if report.prebuild_total_bars is None else str(report.prebuild_total_bars)
+        headline = "spot-only pipeline complete" if report.ok else report.note
+        print(f"[brutex] pull-all-spot: {headline}")
+        print(
+            f"[brutex]   spot:      {kind} — {completed} pair(s) fetched, "
+            f"{still_failed} window(s) FAILED (will retry), "
+            f"{skipped} window(s) skipped (already present)"
         )
+        print(f"[brutex]   quarantined: {report.quarantined_count}")
+        print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+        print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
+        print("[brutex]   greeks:    not run — no options in this pull")
+        print(f"[brutex]   cross-verify: {tail.human}")
+        print("[brutex]   verify:    dashboard /coverage/windows (FAILED tab), /completeness")
 
-    tail = run_crossverify_tail(
-        _production_tail if crossverify_tail is None else crossverify_tail,
-        dry_run=dry_run,
-        stopped_after=report.stopped_after,
-    )
-
-    # ── stdout summary (C §4 shape; "?" for defensively-None fields) ──
-    spot = report.spot
-    kind = spot.verdict.kind if spot is not None else "?"
-    completed = str(spot.total_completed) if spot is not None else "?"
-    still_failed = spot.still_failed_windows if spot is not None else 0
-    skipped = str(spot.windows_skipped) if spot is not None else "?"
-    built = "?" if report.prebuild_built is None else str(report.prebuild_built)
-    bars = "?" if report.prebuild_total_bars is None else str(report.prebuild_total_bars)
-    headline = "spot-only pipeline complete" if report.ok else report.note
-    print(f"[brutex] pull-all-spot: {headline}")
-    print(
-        f"[brutex]   spot:      {kind} — {completed} pair(s) fetched, "
-        f"{still_failed} window(s) FAILED (will retry), "
-        f"{skipped} window(s) skipped (already present)"
-    )
-    print(f"[brutex]   quarantined: {report.quarantined_count}")
-    print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
-    print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
-    print("[brutex]   greeks:    not run — no options in this pull")
-    print(f"[brutex]   cross-verify: {tail.human}")
-    print("[brutex]   verify:    dashboard /coverage/windows (FAILED tab), /completeness")
-
-    if not report.ok:
-        return EXIT_INTERNAL_ERROR
-    if strict_exit and (
-        still_failed > 0 or report.quarantined_count > 0 or tail.status in TAIL_ALERT_STATUSES
-    ):
-        return EXIT_INTERNAL_ERROR
-    return EXIT_OK
+        if not report.ok:
+            # Still-failing spot windows land HERE: they fail the spot gate, the
+            # chain stops, ``report.ok`` reads False — exit 2 by DEFAULT (no
+            # --strict-exit needed). That is why the strict compound below
+            # carries NO still_failed term: it could never be the deciding
+            # subterm (hostile-review r1 #1 — no dead subterms).
+            return EXIT_INTERNAL_ERROR
+        if strict_exit and (report.quarantined_count > 0 or tail.status in TAIL_ALERT_STATUSES):
+            return EXIT_INTERNAL_ERROR
+        return EXIT_OK
 
 
 # ────────────────────────────────────────────────────────────────────────

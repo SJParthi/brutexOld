@@ -269,6 +269,48 @@ def test_scope_spot_only_swaps_exactly_two_fno_bindings(
     assert spines.historical_calls == 1
 
 
+def test_scope_spot_only_market_closed_is_composed_muhurat_belt(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[F/B — the R4 M6 mutant killer] The CAPTURED spot-only ``market_closed``
+    predicate is the REAL composed Muhurat belt: called at a frozen instant
+    INSIDE the 2025-10-21 afternoon session it returns True (blocked) while
+    the full-arm predicate (the bare guard) returns False (the guard's
+    structural Muhurat blindness). Severing the ``compose_market_closed``
+    wiring in ``_launch_pipeline._work`` (the M6 mutant — bare resolve on the
+    spot-only arm) fails EXACTLY this assertion; ``callable(...)`` alone
+    could never catch it. The guard kill switch is armed (r1 #2 coupling —
+    guard off would honestly disarm the belt), and BOTH clocks are frozen
+    OUTSIDE the session for the launch itself (10:00 on the listed holiday —
+    the start gate allows, the sequencer's between-phase belt stays open, the
+    spot spy captures its kwargs) then re-frozen INSIDE it for the verdict."""
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setenv("BRUTEX_MARKET_HOURS_GUARD", "1")
+    launch = datetime(2025, 10, 21, 10, 0)  # holiday; before the 13:15 margin
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: launch)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: launch)
+    _calls, tail = _tail_spy()
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert client.post(_ROUTE, params={"dry_run": "true"}).status_code == 200
+        _wait_for_job(client)
+        assert (
+            client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+    assert len(spines.spot_kwargs) == 2
+    full_kwargs, spot_only_kwargs = spines.spot_kwargs
+    bare = full_kwargs["market_closed"]
+    composed = spot_only_kwargs["market_closed"]
+    # Re-freeze INSIDE the 13:45-14:45 session (margined [13:15, 14:50)).
+    frozen = datetime(2025, 10, 21, 14, 0)
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    assert bare() is False  # the bare guard is provably BLIND (fails-before)
+    assert composed() is True  # the dashboard-wired belt fires (passes-after)
+
+
 def test_scope_spot_only_prebuild_empty_cascade(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

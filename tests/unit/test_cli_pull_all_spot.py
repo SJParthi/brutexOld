@@ -382,6 +382,80 @@ def test_cli_tail_invoked_after_singleflight_release(
     assert "cross-verify: published (post-lock)" in capsys.readouterr().out
 
 
+def test_cli_tail_lakewritehalt_alerts_then_reraises(
+    lake: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[r1 #3 — the cmd_fetch halt convention] a ``LakeWriteHalt`` raised out
+    of the crossverify tail (the fence deliberately re-raises it) fires ONE
+    CRITICAL alert then re-raises — never a silent, alert-less traceback."""
+    alerts: list[BaseException] = []
+    monkeypatch.setattr("brutex.cli._emit_pull_halt_alert", alerts.append)
+
+    def halting_tail() -> CrossverifyTailOutcome:
+        raise LakeWriteHalt("disk_full")
+
+    h = _Harness()
+    with pytest.raises(LakeWriteHalt):
+        cmd_pull_all_spot(
+            lake_root=lake,
+            pipeline_builder=h.builder,
+            pipeline_executor=h.executor,
+            crossverify_tail=halting_tail,
+        )
+    assert len(alerts) == 1
+    assert isinstance(alerts[0], LakeWriteHalt)
+
+
+def test_cli_keep_awake_spans_crossverify_tail_lock_released_first(
+    lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[r1 #4] ``keep_awake`` spans the WHOLE command — the tail (a real
+    vendor pull + publish leg) runs INSIDE the keep-awake span, while the
+    pull single-flight/lease still exit strictly BEFORE it (the lock-ordering
+    law preserved — keep_awake is lock-independent)."""
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_awake(_label: str) -> Any:
+        events.append("awake_enter")
+        try:
+            yield
+        finally:
+            events.append("awake_exit")
+
+    monkeypatch.setattr("brutex.observability.power_keepawake.keep_awake", fake_awake)
+
+    def lock_factory(*_a: Any, **_k: Any) -> Any:
+        @contextlib.contextmanager
+        def _cm() -> Any:
+            events.append("lock_enter")
+            try:
+                yield
+            finally:
+                events.append("lock_exit")
+
+        return _cm()
+
+    def ordered_tail() -> CrossverifyTailOutcome:
+        events.append("tail")
+        return CrossverifyTailOutcome(status="published", human="published (spanned)")
+
+    h = _Harness()
+    code = cmd_pull_all_spot(
+        lake_root=lake,
+        pipeline_builder=h.builder,
+        pipeline_executor=h.executor,
+        lock_factory=lock_factory,
+        lease_factory=lambda _root: contextlib.nullcontext(),
+        crossverify_tail=ordered_tail,
+    )
+    assert code == EXIT_OK
+    assert events.index("awake_enter") < events.index("lock_enter")
+    assert events.index("lock_exit") < events.index("tail")  # lock-ordering law intact
+    assert events.index("tail") < events.index("awake_exit")  # the tail is SPANNED
+    assert "cross-verify: published (spanned)" in capsys.readouterr().out
+
+
 def test_cli_one_session_rate_controller_spans_pull_and_tail(
     lake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -478,6 +552,28 @@ def test_stdout_defensive_none_fields_render_question_marks(
     report = _report(prebuild_built=None, prebuild_total_bars=None)
     assert _Harness(report=report).run(lake) == EXIT_OK
     assert "prebuild:  ? symbol(s), ? bars" in capsys.readouterr().out
+
+
+def test_stdout_unknown_spot_renders_question_mark_failed_count(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[r2 #1] the "?"-for-unknown law covers ``still_failed`` too: a
+    defensive ``spot=None`` report (non-market-hours shape) renders
+    ``? window(s) FAILED`` — never a fabricated clean-looking 0."""
+    report = PipelinePullReport(
+        spot=None,
+        metadata=None,
+        historical=None,
+        stopped_after="spot",
+        note="stopped after spot — defensive spot-less shape",
+    )
+    assert _Harness(report=report).run(lake) == EXIT_INTERNAL_ERROR
+    out = capsys.readouterr().out
+    assert (
+        "spot:      ? — ? pair(s) fetched, ? window(s) FAILED (will retry), "
+        "? window(s) skipped (already present)" in out
+    )
+    assert "0 window(s) FAILED" not in out
 
 
 def test_cli_dry_run_synthetic_no_tail_no_locks(

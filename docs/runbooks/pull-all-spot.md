@@ -44,12 +44,20 @@ WILL NEVER:
 |-----------------------|--------------------------------------------------|-------------------------------------------------------------------|
 | `non_trading_day`     | weekend / listed NSE holiday (incl. Muhurat days) | `<date> is not an NSE trading day — nothing new to pull`           |
 | `muhurat_deferral`    | a (hypothetical) trading-day Muhurat listing      | `<date> has a Muhurat session — deferred to the next regular trading day (evening-session settle behavior unverified)` |
-| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (conservative default 17:30 — the vendor's true settle time is UNMEASURED; …)` |
+| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (conservative — the vendor's true settle time is UNMEASURED; …)` — HH:MM is the ACTUAL resolved settle (default or override) |
 | `market_hours_blocked`| structural belt (unreachable while settle ≥ 15:35)| `inside the NSE market-hours pull window — deferred`               |
 
 Contention under `--auto` (another pull holds the lake single-flight) also
 exits 0 with one line — no cron retry storm. A manual run refuses contention
 with exit 1, naming the holder.
+
+Kill-switch coupling (hostile-review r1 ruling): the spot-only arm's
+Muhurat MID-RUN belt (the composed `market_closed` predicate) honors the
+SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch as the market-hours guard it
+composes over — `off` disables BOTH (ONE switch governs the shared-account
+protection family; there is no separate Muhurat switch). The `--auto` gate's
+whole-day Muhurat/holiday deferrals are calendar-keyed and independent of
+that switch.
 
 ## 3. The settle time is a GUESS — measure it, then tighten
 

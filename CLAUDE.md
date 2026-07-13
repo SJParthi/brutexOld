@@ -2456,8 +2456,12 @@ hostile-review pass._
   its last slot; re-derive when the probe lands) + the launcher-level
   `compose_market_closed` Muhurat mid-run belt ([open−30 min, close+5 min) from
   MUHURAT_SESSIONS; the guard module byte-UNTOUCHED — composed, never edited; the
+  belt honors the SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch as the guard it
+  composes over — guard off ⇒ belt off, ONE switch for the shared-account
+  protection family (the hostile-review r1 ruling, both-arms-pinned); the
   belt's fails-before proven IN-TEST: the bare guard is blind inside the frozen
-  2025-10-21 session). `PullIntent` gains the OPTIONAL `scope` field (pre-scope files
+  2025-10-21 session — and since the r1 fix round the DASHBOARD wiring itself is
+  frozen-clock predicate-pinned (the R4 M6 mutant re-applied + verified killed). `PullIntent` gains the OPTIONAL `scope` field (pre-scope files
   parse to None = full) so a crashed spot-only pull resumes SPOT-ONLY — never a
   silently-widened F&O pull. M2 verify-then-wire outcome: NO new ledger-flush wiring
   needed — `pull_all_spot` flushes the durable ledger per processed window internally
@@ -2470,7 +2474,14 @@ hostile-review pass._
   SLA claimed); manual click during a live Muhurat session starts-then-halts at the
   first window (named follow-up DEC-PULL-ALL-MUHURAT-MANUAL-GATE-001); the full-scope
   arm keeps the guard's Muhurat blindness (named follow-up
-  DEC-PIPELINE-MUHURAT-BELT-001). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  DEC-PIPELINE-MUHURAT-BELT-001). HOSTILE-REVIEW ROUND 1 folded (the per-finding
+  record lives in MIGRATION.md #1779): the R4-M6 dashboard-belt-wiring teeth, the
+  kill-switch coupling above, the exit-law prose-follows-code rewrite (still-failing
+  windows exit 2 by DEFAULT — the dead strict subterm deleted), the "?"-for-unknown
+  still_failed render, the tail-LakeWriteHalt CRITICAL alert-then-re-raise, the
+  keep_awake span widened over the crossverify tail (locks still exit first), the
+  `re.ASCII` settle shape, the actual-resolved-settle deferral detail, and the
+  spot-only-aware stopped-note trailer. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; `pull_scope.py` + `auto_pull_gate.py` 100%
   line+branch on NEW ci.yml gates; touched app.py/cli.py/pipeline_binding.py/
   pull_intent.py lines covered; ruff/ruff-format clean, `mypy --strict` clean, pyright
@@ -6314,7 +6325,9 @@ hostile-review pass._
   REAL #1776 producer, fired strictly outside our held pull single-flight);
   the CLI `--auto` gate (UNMEASURED-conservative 17:30 IST settle default,
   `BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) + Muhurat whole-day deferral +
-  the composed mid-run Muhurat belt — `market_hours.py` byte-untouched;
+  the composed mid-run Muhurat belt — `market_hours.py` byte-untouched, the
+  belt honoring the SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch (guard off ⇒
+  belt off — the hostile-review r1 ruling);
   spot-only intents resume spot-only; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)

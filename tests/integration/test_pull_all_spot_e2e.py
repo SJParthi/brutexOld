@@ -3,9 +3,13 @@
 
 The REAL sequencer (:func:`run_full_pipeline`) driven with the REAL
 ``pull_all_spot`` (synthetic recording adapter + the REAL ``ParquetBarSink``
-writer + the REAL durable window ledger on a tmp lake) and the EXACT spot-only
-bindings the launcher/binding install — the pull_scope no-op F&O reports, the
-note surgery, the crossverify tail fence, the composed Muhurat belt. Pins:
+writer + the REAL durable window ledger on a tmp lake) under a HAND-COMPOSED
+``_Chain`` harness binding the SAME primitives the launcher/binding install —
+the pull_scope no-op F&O reports, the note surgery, the crossverify tail
+fence, the composed Muhurat belt. The harness proves the CHAIN MECHANISM, not
+the launcher wiring: the wiring pins live in the route + nightly suites
+(``test_scope_spot_only_market_closed_is_composed_muhurat_belt`` — the R4 M6
+mutant killer — + ``test_scope_spot_only_composes_muhurat_belt``). Pins:
 
 * the chain law (no-op gates pass, prebuild fires over the exclusion set,
   spot movers warm after it, ``report.ok`` True);

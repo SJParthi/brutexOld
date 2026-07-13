@@ -202,17 +202,44 @@ def test_note_surgery_miss_warns_and_still_appends() -> None:
 
 
 def test_stopped_note_appends_without_surgery_or_warn() -> None:
-    """A stopped/deferred note (no anchors) gets clauses only — no WARN."""
-    stopped = "stopped after spot — auth_expired (3 window(s) still failing); ..."
+    """A stopped/deferred note (no completed-note anchors) gets clauses only —
+    no prefix/F&O surgery, no WARN — while the spot-stop note's generic
+    "metadata + historical NOT started" trailer reads spot-only-aware
+    (r2 #3: those phases were designed no-ops here), driven through the REAL
+    sequencer stop note (never a re-derived wording)."""
+    failing_spot = BulkSpotReport(
+        dry_run=False,
+        start_date="2020-01-01",
+        end_date="2026-07-12",
+        symbols=[SymbolPullResult(symbol="NIFTY", completed=0, failed=0, no_data=0)],
+        still_failed_windows=3,
+    )
+    report = run_full_pipeline(
+        run_spot=lambda: failing_spot,
+        run_metadata=spot_only_metadata_report,
+        run_historical=lambda _prior: spot_only_historical_report(),
+    )
+    assert report.stopped_after == "spot"
+    assert "metadata + historical NOT started" in report.note  # the REAL trailer
     tail = CrossverifyTailOutcome(
         status="skipped_pipeline_stopped", human="skipped (pipeline stopped: spot)"
     )
     with capture_logs() as logs:
-        note = build_spot_only_note(stopped, tail)
-    assert note == (
-        f"{stopped}, {GREEKS_NOT_RUN_NOTE}, cross-verify: skipped (pipeline stopped: spot)"
-    )
+        note = build_spot_only_note(report.note, tail)
+    assert note.startswith("stopped after spot — ")
+    assert "F&O not applicable (spot-only scope)" in note
+    assert "metadata + historical NOT started" not in note
+    assert note.endswith(f", {GREEKS_NOT_RUN_NOTE}, cross-verify: skipped (pipeline stopped: spot)")
     assert not [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
+    # A stopped note WITHOUT the trailer (e.g. a market-hours deferral shape)
+    # passes through untouched — clauses only.
+    plain = "stopped after spot — auth_expired (3 window(s) still failing); ..."
+    with capture_logs() as logs2:
+        note2 = build_spot_only_note(plain, tail)
+    assert note2 == (
+        f"{plain}, {GREEKS_NOT_RUN_NOTE}, cross-verify: skipped (pipeline stopped: spot)"
+    )
+    assert not [e for e in logs2 if e["event"] == "pull_scope.note_surgery_miss"]
 
 
 def test_greeks_clause_on_every_variant() -> None:

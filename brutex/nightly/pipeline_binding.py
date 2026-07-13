@@ -144,7 +144,8 @@ def build_headless_pipeline(
     untouched), feeds the prebuild an EMPTY F&O cascade, and composes the
     Muhurat mid-run belt over the resolved market-hours predicate
     (``compose_market_closed`` — the guard module is untouched; a dry-run's
-    ``None`` composes to ``None``).
+    ``None`` composes to ``None``; the belt honors the SAME
+    ``BRUTEX_MARKET_HOURS_GUARD`` kill switch — guard off ⇒ belt off).
 
     Raises
     ------
@@ -231,10 +232,13 @@ def build_headless_pipeline(
     # SPOT-ONLY (DEC-PULL-SCOPED-ALL-ONECLICK-001): the launcher-level Muhurat
     # mid-run belt composed OVER the resolved predicate — the trading-day-keyed
     # guard is structurally blind to a holiday-listed Muhurat session. A
-    # dry-run's ``None`` composes to ``None`` (byte-identical). The full-scope
-    # arm keeps the bare resolve (DEC-PIPELINE-MUHURAT-BELT-001 follow-up).
+    # dry-run's ``None`` composes to ``None`` (byte-identical), and the belt
+    # honors the SAME BRUTEX_MARKET_HOURS_GUARD kill switch as the guard it
+    # composes over (guard off ⇒ belt off — hostile-review r1 ruling; the SAME
+    # injected env the resolve above parsed). The full-scope arm keeps the
+    # bare resolve (DEC-PIPELINE-MUHURAT-BELT-001 follow-up).
     if spot_only:
-        _market_closed = compose_market_closed(_market_closed)
+        _market_closed = compose_market_closed(_market_closed, env=env)
 
     # F&O expiry scope with the LIVE-edge normalization the dashboard applies
     # (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): a default-shaped bound is lifted to

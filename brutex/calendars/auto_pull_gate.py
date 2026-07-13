@@ -10,7 +10,9 @@ session (a Muhurat date is a listed holiday, so :func:`~brutex.calendars.nse.
 is_trading_day` reads False and the guard never blocks), so the spot-only arm
 COMPOSES a session-window predicate over the guard's own resolved callable.
 The guard module (:mod:`brutex.calendars.market_hours`) is byte-UNTOUCHED —
-composed, never edited.
+composed, never edited. The belt honors the guard's OWN
+``BRUTEX_MARKET_HOURS_GUARD`` kill switch (guard off ⇒ belt off — one switch
+governs the shared-account protection family; hostile-review r1 ruling).
 
 Honest envelope (Golden Rule #10): the settle default is a NAMED CONSERVATIVE
 GUESS — the #1775 post-close settle probe is UNRUN, so the vendor's true
@@ -34,7 +36,11 @@ from typing import Final, overload
 
 import structlog
 
-from brutex.calendars.market_hours import BLOCK_END, pull_allowed_default
+from brutex.calendars.market_hours import (
+    BLOCK_END,
+    pull_allowed_default,
+    resolve_market_hours_guard_enabled,
+)
 from brutex.calendars.nse import (
     MUHURAT_SESSIONS,
     has_muhurat_session,
@@ -67,9 +73,11 @@ DEFAULT_PULL_ALL_SETTLE_IST: Final[time] = time(17, 30)
 #: ``pull-all-fno`` sibling unchanged). Strict ``HH:MM``; fail-loud on junk.
 PULL_ALL_SETTLE_ENV: Final[str] = "BRUTEX_PULL_ALL_SETTLE_IST"
 
-#: Strict ``HH:MM`` shape — exactly two digits each side (never a lenient
-#: parse; a junk knob must fail loud, DEC-RAM-BUDGETS-001 env convention).
-_SETTLE_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$")
+#: Strict ``HH:MM`` shape — exactly two ASCII digits each side (never a
+#: lenient parse; a junk knob must fail loud, DEC-RAM-BUDGETS-001 env
+#: convention). ``re.ASCII`` per the DEC-LAKE-STATS-MANIFEST-001 round-3
+#: precedent: Unicode ``\d`` would silently accept e.g. ``"١٧:٣٠"``.
+_SETTLE_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$", re.ASCII)
 
 
 def resolve_settle_time(env: Mapping[str, str] | None = None) -> time:
@@ -186,7 +194,7 @@ def auto_pull_allowed(
             reason="before_settle",
             detail=(
                 f"waiting for post-close settle time {settle:%H:%M} IST "
-                f"(conservative default 17:30 — the vendor's true settle time is "
+                f"(conservative — the vendor's true settle time is "
                 f"UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; "
                 f"override {PULL_ALL_SETTLE_ENV})"
             ),
@@ -235,14 +243,20 @@ def muhurat_session_active(ist_dt: datetime) -> bool:
 # outside the measured surface; the real implementation follows.
 @overload
 def compose_market_closed(  # pragma: no cover
-    base: None, *, clock: Callable[[], datetime] | None = None
+    base: None,
+    *,
+    clock: Callable[[], datetime] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     """Overload stub: a ``None`` base (dry-run) composes to ``None``."""
 
 
 @overload
 def compose_market_closed(  # pragma: no cover
-    base: Callable[[], bool], *, clock: Callable[[], datetime] | None = None
+    base: Callable[[], bool],
+    *,
+    clock: Callable[[], datetime] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Callable[[], bool]:
     """Overload stub: a resolved predicate composes to a predicate."""
 
@@ -251,18 +265,30 @@ def compose_market_closed(
     base: Callable[[], bool] | None,
     *,
     clock: Callable[[], datetime] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Callable[[], bool] | None:
     """Compose the Muhurat session belt OVER the resolved market-hours predicate.
 
-    ``None`` → ``None`` (dry-run parity — no vendor calls to gate). Otherwise
-    returns ``lambda: base() or muhurat_session_active(clock())`` — the
-    launcher-level belt the trading-day-keyed guard is structurally blind to
-    (a Muhurat date is a listed holiday ⇒ the guard reads non-trading ⇒
-    inert). COMPOSES the guard's own resolved callable; never edits the guard
-    module. *clock* defaults to :func:`~brutex.calendars.nse.now_ist`.
+    ``None`` → ``None`` (dry-run parity — no vendor calls to gate). The belt
+    honors the SAME ``BRUTEX_MARKET_HOURS_GUARD`` kill switch as the guard it
+    composes over (hostile-review r1 ruling: ONE switch governs the whole
+    shared-account protection family — guard off ⇒ belt off): when the switch
+    is disabled, *base* is returned UNCHANGED (no Muhurat term). The switch is
+    resolved ONCE here at composition time (the ``resolve_market_closed``
+    parse-once posture — junk fails loud at pull start, never mid-run;
+    *env* ``None`` reads ``os.environ``). Otherwise returns
+    ``lambda: base() or muhurat_session_active(clock())`` — the launcher-level
+    belt the trading-day-keyed guard is structurally blind to (a Muhurat date
+    is a listed holiday ⇒ the guard reads non-trading ⇒ inert). COMPOSES the
+    guard's own resolved callable; never edits the guard module. *clock*
+    defaults to :func:`~brutex.calendars.nse.now_ist`.
     """
     if base is None:
         return None
+    if not resolve_market_hours_guard_enabled(env):
+        # Kill switch off ⇒ the composed predicate defers ENTIRELY to base
+        # (which the guard resolved to always-False) — the belt never arms.
+        return base
 
     def _composed() -> bool:
         # ``now_ist`` resolved at CALL time (module-global lookup) so the live

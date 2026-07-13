@@ -12,9 +12,12 @@ mirroring ``test_dashboard_universe_template.py``):
 * ONE selection-aware **"▶ Pull · full pipeline"** button
   (DEC-UNIVERSE-PULL-CONSOLIDATE-001 — the redundant per-stage buttons "Pull spot"
   / "Pull expiries + contracts" / "Pull historical" / "Load instruments" and the
-  separate "Pull selected" button are removed; the single ``pullPipelineBtn`` scopes
+  separate "Pull selected" button are removed; ``pullPipelineBtn`` scopes
   to the ticks or pulls the whole universe) + **select-all-shown** / **clear**
-  controls;
+  controls — plus, since DEC-PULL-SCOPED-ALL-ONECLICK-001, a SECOND fixed-scope
+  **"▶ Pull EVERYTHING — spot only"** button (``pullAllSpotBtn``, the static
+  ``?scope=spot-only`` on the same launcher) — TWO pull buttons by design,
+  pinned in ``test_dashboard_universe_pull_consolidate.py``;
 * the page states the pull **stores 1m + 1d only** and the 19 intraday
   timeframes are **derived on demand, not written to the drive** (pre-
   materialising is a future external-drive step) — the operator asked "where do
@@ -56,10 +59,12 @@ def test_accessibility_focus_ring_and_reduced_motion_present() -> None:
 
 
 def test_multi_select_controls_present() -> None:
-    """The checkbox + the ONE pull button + select-all/clear controls are rendered.
+    """The checkbox + the selection-aware pull button + select-all/clear controls render.
 
     DEC-UNIVERSE-PULL-CONSOLIDATE-001: the per-stage ``pullbtn`` (Pull spot) is gone;
-    the single selection-aware ``pullPipelineBtn`` is the one pull button.
+    ``pullPipelineBtn`` is the one SELECTION-AWARE full-pipeline button (the second
+    pull button — the fixed-scope spot-only ``pullAllSpotBtn`` of
+    DEC-PULL-SCOPED-ALL-ONECLICK-001 — is pinned in the consolidate suite).
     """
     html = _render_universe_html()
     for needle in ('id="pullPipelineBtn"', 'id="selallbtn"', 'id="clrselbtn"', 'class="msel"'):
@@ -67,17 +72,20 @@ def test_multi_select_controls_present() -> None:
 
 
 def test_one_pull_button_is_selection_aware_full_pipeline() -> None:
-    """ONE "▶ Pull · full pipeline" button — selection-aware (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
+    """The "▶ Pull · full pipeline" button — selection-aware (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
 
     The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull
     historical / Load instruments) AND the separate "Pull selected" button are GONE.
-    The single ``pullPipelineBtn`` posts the SHARED ``/pull-pipeline`` route: with
+    ``pullPipelineBtn`` posts the SHARED ``/pull-pipeline`` route: with
     ticked rows it sends ``?symbols=`` (scoped to the selection); with NO ticks it
     posts the bare route (the whole universe). It runs the fixed gated chain.
+    (The page's OTHER pull button — the fixed-scope spot-only ``pullAllSpotBtn``,
+    DEC-PULL-SCOPED-ALL-ONECLICK-001 — is deliberately NOT selection-aware and is
+    pinned in ``test_dashboard_universe_pull_consolidate.py``.)
     """
     html = _render_universe_html()
-    # The ONE pull button + its label span exist.
-    assert 'id="pullPipelineBtn"' in html, "the single full-pipeline button is missing"
+    # The selection-aware pull button + its label span exist.
+    assert 'id="pullPipelineBtn"' in html, "the full-pipeline button is missing"
     assert 'id="pullPipelineLabel"' in html, "the selection-aware label span is missing"
     assert "Pull · full pipeline" in html, "the consolidated button label is missing"
     # Selection-aware: the ticked-rows branch posts ?symbols=, the empty branch the bare route.

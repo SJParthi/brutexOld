@@ -25,12 +25,19 @@ from brutex.calendars.auto_pull_gate import (
     muhurat_session_active,
     resolve_settle_time,
 )
-from brutex.calendars.market_hours import BLOCK_END
+from brutex.calendars.market_hours import BLOCK_END, MARKET_HOURS_GUARD_ENV
 from brutex.calendars.nse import MUHURAT_SESSIONS, is_trading_day
 from structlog.testing import capture_logs
 
 #: A plain NSE trading day (Tuesday, inside holiday coverage).
 _TRADING_DAY = date(2024, 1, 2)
+
+#: The kill switch explicitly ON/OFF for the compose tests — the suite runs
+#: under conftest's ``BRUTEX_MARKET_HOURS_GUARD=0`` hermeticity setdefault, so
+#: the belt-arm tests must arm the guard themselves (r1 #2 coupling: guard
+#: off ⇒ belt off).
+_GUARD_ON = {MARKET_HOURS_GUARD_ENV: "1"}
+_GUARD_OFF = {MARKET_HOURS_GUARD_ENV: "off"}
 
 
 def _at(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
@@ -63,6 +70,23 @@ def test_settle_env_junk_raises(junk: str) -> None:
         resolve_settle_time({PULL_ALL_SETTLE_ENV: junk})
 
 
+@pytest.mark.parametrize(
+    "unicode_junk",
+    [
+        "١٧:٣٠",  # Arabic-Indic digits
+        "１７:３０",  # fullwidth digits
+        "۱۷:۳۰",  # Extended Arabic-Indic digits
+        "1７:30",  # mixed ASCII/fullwidth
+    ],
+)
+def test_settle_env_unicode_digits_rejected(unicode_junk: str) -> None:
+    """[r3 #1 — the DEC-LAKE-STATS-MANIFEST-001 round-3 precedent] the strict
+    HH:MM shape is ``re.ASCII``: Unicode digits are junk, never silently
+    coerced to a valid settle time (the docstring's "strict" made true)."""
+    with pytest.raises(ValueError, match=PULL_ALL_SETTLE_ENV):
+        resolve_settle_time({PULL_ALL_SETTLE_ENV: unicode_junk})
+
+
 def test_settle_before_block_end_refused_15_35_allowed() -> None:
     """The STRUCTURAL floor: < 15:35 refused naming the guard; 15:35 exact OK."""
     with pytest.raises(ValueError, match="BLOCK_END 15:35"):
@@ -80,6 +104,24 @@ def test_settle_cli_style_mapping_override() -> None:
     assert (v.allowed, v.reason) == (False, "before_settle")
     assert "16:00" in v.detail
     assert auto_pull_allowed(now=_at(_TRADING_DAY, 16, 0), env=env).allowed is True
+
+
+def test_before_settle_detail_renders_actual_resolved_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[r2 #2] The deferral detail names the ACTUAL resolved settle time —
+    an overridden 16:00 never reads a hardcoded "default 17:30" — while the
+    conservative/UNMEASURED honesty label always rides."""
+    overridden = auto_pull_allowed(
+        now=_at(_TRADING_DAY, 15, 45), env={PULL_ALL_SETTLE_ENV: "16:00"}
+    )
+    assert "waiting for post-close settle time 16:00 IST" in overridden.detail
+    assert "17:30" not in overridden.detail  # never the stale hardcoded default
+    assert "conservative" in overridden.detail
+    assert "UNMEASURED" in overridden.detail
+    default = auto_pull_allowed(now=_at(_TRADING_DAY, 12, 0), env={})
+    assert "waiting for post-close settle time 17:30 IST" in default.detail
+    assert "conservative" in default.detail
 
 
 # ── auto_pull_allowed ────────────────────────────────────────────────────
@@ -220,15 +262,18 @@ def test_muhurat_session_active_margins() -> None:
 
 
 def test_compose_market_closed_none_passthrough() -> None:
-    """Dry-run parity: a ``None`` base predicate composes to ``None``."""
+    """Dry-run parity: a ``None`` base predicate composes to ``None`` — on
+    BOTH kill-switch arms (the base-None check precedes the switch read)."""
     assert compose_market_closed(None) is None
     assert compose_market_closed(None, clock=lambda: _at(_TRADING_DAY, 12, 0)) is None
+    assert compose_market_closed(None, env=_GUARD_ON) is None
+    assert compose_market_closed(None, env=_GUARD_OFF) is None
 
 
 def test_compose_or_composition_with_clock() -> None:
     evening = date(2024, 11, 1)
     ticks = [_at(evening, 18, 30), _at(evening, 20, 0)]
-    composed = compose_market_closed(lambda: False, clock=lambda: ticks.pop(0))
+    composed = compose_market_closed(lambda: False, clock=lambda: ticks.pop(0), env=_GUARD_ON)
     assert composed is not None
     assert composed() is True  # base False, muhurat session active → blocked
     assert composed() is False  # base False, past close+5 → open
@@ -241,7 +286,7 @@ def test_compose_base_short_circuits() -> None:
         calls.append("tick")  # pragma: no cover — must never run
         return _at(_TRADING_DAY, 12, 0)
 
-    composed = compose_market_closed(lambda: True, clock=_clock)
+    composed = compose_market_closed(lambda: True, clock=_clock, env=_GUARD_ON)
     assert composed is not None
     assert composed() is True
     assert calls == []  # the guard verdict short-circuits the muhurat probe
@@ -249,6 +294,40 @@ def test_compose_base_short_circuits() -> None:
 
 def test_compose_default_clock_binds_now_ist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auto_pull_gate, "now_ist", lambda: _at(date(2024, 11, 1), 18, 30))
-    composed = compose_market_closed(lambda: False)
+    composed = compose_market_closed(lambda: False, env=_GUARD_ON)
     assert composed is not None
     assert composed() is True
+
+
+def test_compose_honors_kill_switch_both_arms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[F/B — r1 #2 ruling] ONE switch governs the shared-account protection
+    family: guard ON ⇒ the belt blocks a frozen Muhurat instant; guard
+    explicitly OFF ⇒ the composed predicate defers ENTIRELY to the base
+    (returned unchanged — the belt never arms)."""
+    frozen = _at(date(2024, 11, 1), 18, 30)  # inside the evening session
+
+    def base() -> bool:
+        return False
+
+    armed = compose_market_closed(base, clock=lambda: frozen, env=_GUARD_ON)
+    assert armed is not None
+    assert armed() is True  # guard on ⇒ the belt blocks the Muhurat instant
+    disarmed = compose_market_closed(base, clock=lambda: frozen, env=_GUARD_OFF)
+    assert disarmed is base  # guard off ⇒ base returned UNCHANGED
+    assert disarmed() is False  # ⇒ defers to the base verdict at the same instant
+    # The default env read is os.environ — the conftest hermeticity setdefault
+    # ("0") reads OFF, an explicit "1" reads ON (parse-once at composition).
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "0")
+    assert compose_market_closed(base, clock=lambda: frozen) is base
+    monkeypatch.setenv(MARKET_HOURS_GUARD_ENV, "1")
+    composed_env = compose_market_closed(base, clock=lambda: frozen)
+    assert composed_env is not None
+    assert composed_env is not base
+    assert composed_env() is True
+
+
+def test_compose_junk_kill_switch_raises_at_composition_time() -> None:
+    """The switch is parsed ONCE at composition (pull start) — junk fails
+    loud there, never mid-run."""
+    with pytest.raises(ValueError, match=MARKET_HOURS_GUARD_ENV):
+        compose_market_closed(lambda: False, env={MARKET_HOURS_GUARD_ENV: "junk"})

@@ -4195,7 +4195,11 @@ def build_app(
             # The SPOT-ONLY arm additionally composes the Muhurat session belt
             # (DEC-PULL-SCOPED-ALL-ONECLICK-001 — the trading-day-keyed guard is
             # structurally blind to a holiday-listed Muhurat session; composed,
-            # the guard module untouched). The full-scope arm keeps the bare
+            # the guard module untouched; the belt honors the SAME
+            # BRUTEX_MARKET_HOURS_GUARD kill switch — guard off ⇒ belt off,
+            # hostile-review r1 ruling; wiring frozen-clock-pinned by
+            # test_scope_spot_only_market_closed_is_composed_muhurat_belt —
+            # the R4 M6 mutant killer). The full-scope arm keeps the bare
             # resolve byte-identically (the Muhurat blindness there is the named
             # follow-up DEC-PIPELINE-MUHURAT-BELT-001).
             _market_closed = (

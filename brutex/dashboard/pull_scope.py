@@ -155,6 +155,18 @@ _NOOP_FNO_CLAUSE: Final[str] = (
     ", metadata 0 expiries + 0 contracts, historical 0 bars over 0 contract(s)"
 )
 
+#: The EXACT trailing clause ``pipeline_pull._spot_stop_note`` renders on a
+#: spot-gate stop ("stopped after spot — … ; metadata + historical NOT
+#: started"). On a SPOT-ONLY run those phases were designed no-ops that were
+#: never going to run, so the generic wording is replaced by the honest
+#: spot-only clause below (hostile-review r2 #3 — cosmetic accuracy; a drifted
+#: wording simply passes through unchanged, no WARN — the clause is
+#: diagnostic, never load-bearing).
+_STOP_FNO_CLAUSE: Final[str] = "metadata + historical NOT started"
+
+#: The spot-only replacement for :data:`_STOP_FNO_CLAUSE`.
+_STOP_FNO_SPOT_ONLY_CLAUSE: Final[str] = "F&O not applicable (spot-only scope)"
+
 #: The completed-chain note prefix ``_complete_note`` composes — the ledger
 #: failure prefix, when present, sits BEFORE it and stays LEADING (B R3/H5).
 _FULL_PREFIX: Final[str] = "pipeline complete — "
@@ -270,13 +282,18 @@ def build_spot_only_note(base_note: str, tail: CrossverifyTailOutcome) -> str:
 
     A STOPPED/deferred note (neither anchor present — e.g. "stopped after
     spot — …" / the market-hours deferral) gets NO surgery and no WARN: it
-    makes no F&O claim, so only step 3's honest clauses are appended. A note
+    makes no F&O claim, so only step 3's honest clauses are appended — except
+    the spot-stop note's generic "metadata + historical NOT started" trailer,
+    which reads spot-only-aware as ``F&O not applicable (spot-only scope)``
+    (hostile-review r2 #3; those phases were designed no-ops here). A note
     carrying exactly ONE anchor is a ``_complete_note`` wording DRIFT — log
     ONE ``pull_scope.note_surgery_miss`` WARN and still append step 3; the
     e2e negative pin (``test_e2e_no_zero_expiries_wording…``) fails loudly on
     a full drift, forcing a conscious re-pin.
     """
     note = base_note
+    if _STOP_FNO_CLAUSE in note:
+        note = note.replace(_STOP_FNO_CLAUSE, _STOP_FNO_SPOT_ONLY_CLAUSE, 1)
     prefix_present = _FULL_PREFIX in note
     clause_present = _NOOP_FNO_CLAUSE in note
     if clause_present:
