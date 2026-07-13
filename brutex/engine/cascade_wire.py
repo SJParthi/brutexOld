@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -216,6 +217,12 @@ class CascadeTupleSpec:
     start_equity_paisa: int
     winners: tuple[tuple[str, int], ...]
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The run's global fill mode (DEC-FILL-WORST-CASE-001). An additive field
+    #: (default PRECISE — the legacy mode) so a pre-mode manifest parses
+    #: byte-compatibly (the ``fib_anchor`` precedent); it must round-trip so a
+    #: WORST_CASE winner is re-scored under the SAME adverse-max fills the
+    #: sweep ranked it with, never silently PRECISE.
+    fill_mode: FillMode = FillMode.PRECISE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -616,6 +623,7 @@ def _make_mc_evaluate(
     sl_paisa: int | None,
     tp_paisa: int | None,
     start_equity_paisa: int,
+    fill_mode: FillMode,
 ) -> Callable[[npt.NDArray[np.intp]], float]:
     """Build the Monte-Carlo exit-logic callable (filter #9) for one candidate.
 
@@ -625,10 +633,14 @@ def _make_mc_evaluate(
     Sharpe. An undefined Sharpe (``< 2`` trades / zero variance) returns ``nan``,
     which the permutation test treats as "did not beat" the observed statistic.
     """
-    from brutex.engine.trade_sim import simulate_trades
+    from brutex.engine.trade_sim import FillPolicy, simulate_trades
     from brutex.metrics.cpcv import sharpe_of_returns
 
     n_bars = len(bars)
+    # The permutation null must run the SAME exit logic AND fill mode the
+    # candidate ran (DEC-FILL-WORST-CASE-001) — sourced from the spec, never
+    # from env.
+    policy = FillPolicy(fill_mode=fill_mode)
 
     def evaluate(positions: npt.NDArray[np.intp]) -> float:
         signals = [False] * n_bars
@@ -641,6 +653,7 @@ def _make_mc_evaluate(
             tf_minutes=tf_minutes,
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
+            policy=policy,
             # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
             # Monte-Carlo permutation filter's trades are the DISCARDED null
             # distribution — relocated entry signals whose per-trade Sharpe is
@@ -677,6 +690,7 @@ def build_candidate_input(
     start_equity_paisa: int,
     lockbox_default_window_days: int = LOCKBOX_DEFAULT_WINDOW_DAYS,
     lockbox_min_trades: int = LOCKBOX_DEFAULT_MIN_TRADES,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> CandidateInput:
     """Re-simulate one winning *mask* over *bars* into a cascade :class:`CandidateInput`.
 
@@ -714,7 +728,7 @@ def build_candidate_input(
     from brutex.calendars.nse import IST
     from brutex.engine.combo_mask import mask_to_entry_signals
     from brutex.engine.sweep_driver import build_equity_curve
-    from brutex.engine.trade_sim import simulate_trades
+    from brutex.engine.trade_sim import FillPolicy, simulate_trades
     from brutex.metrics.cascade import CandidateInput
     from brutex.metrics.compute import compute_metrics
     from brutex.metrics.cpcv import sharpe_of_returns
@@ -729,6 +743,10 @@ def build_candidate_input(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        # The candidate re-simulation must reproduce the persisted finalist —
+        # under the run's OWN fill mode (DEC-FILL-WORST-CASE-001), threaded
+        # from the spec beside sl/tp, never from env.
+        policy=FillPolicy(fill_mode=fill_mode),
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-6 review): the
         # candidate re-simulation's trades are a DISCARDED stream — every
         # observable output is the CandidateInput SCALARS + returns tuples
@@ -834,6 +852,7 @@ def build_candidate_input(
             sl_paisa=sl_paisa,
             tp_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
+            fill_mode=fill_mode,
         ),
     )
 
@@ -892,6 +911,7 @@ def candidates_for_spec(
             start_equity_paisa=spec.start_equity_paisa,
             lockbox_default_window_days=lockbox_default_window_days,
             lockbox_min_trades=lockbox_min_trades,
+            fill_mode=spec.fill_mode,
         )
         for run_id, mask in spec.winners
     ]
@@ -1354,7 +1374,7 @@ def build_leaderboard_trials(
 
 def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
     """Serialise one :class:`CascadeTupleSpec` into a JSON-native dict."""
-    return {
+    payload: dict[str, object] = {
         "instrument": spec.instrument,
         "tf_label": spec.tf_label,
         "tf_minutes": spec.tf_minutes,
@@ -1367,6 +1387,12 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
         "fib_anchor": spec.fib_anchor.value,
     }
+    if spec.fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001 (emit-on-non-PRECISE — the canonical-params
+        # law's manifest twin): a PRECISE spec's manifest bytes are
+        # byte-identical to the pre-mode shape; absent key = PRECISE legacy.
+        payload["fill_mode"] = spec.fill_mode.value
+    return payload
 
 
 def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
@@ -1398,6 +1424,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 FibAnchorKind.PREV_DAY
                 if raw.get("fib_anchor") is None
                 else FibAnchorKind(str(raw["fib_anchor"]))
+            ),
+            # Absent on pre-DEC-FILL-WORST-CASE-001 manifests (additive
+            # parse): default to PRECISE — the only mode those sweeps ran.
+            fill_mode=(
+                FillMode.PRECISE
+                if raw.get("fill_mode") is None
+                else FillMode(str(raw["fill_mode"]))
             ),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -1670,6 +1703,7 @@ def spec_from_store_rows(
     rows: Sequence[ResultRow],
     top_k: int | None = None,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1714,6 +1748,7 @@ def spec_from_store_rows(
         start_equity_paisa=start_equity_paisa,
         winners=winners,
         fib_anchor=fib_anchor,
+        fill_mode=fill_mode,
     )
 
 
@@ -1784,6 +1819,10 @@ def build_stage2_cascade_specs(
             rows=ResultsStore.load(store_path).rows(),
             top_k=top_k,
             fib_anchor=sweep_tuple.fib_anchor,
+            # The cascade re-sim sources the mode from the SAME grid the
+            # sl/tp knobs come from (DEC-FILL-WORST-CASE-001) — and the
+            # manifest carries it for the manual replay.
+            fill_mode=grid.fill_mode,
         )
         if spec is not None:
             specs.append(spec)

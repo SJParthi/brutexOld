@@ -96,6 +96,7 @@ from brutex.engine.sweep_run import (
     SweepRunSummary,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.strategies.types import FibAnchorKind, Side
 from brutex.universe import is_engine_sweep_symbol
@@ -294,6 +295,16 @@ class SweepGridConfig:
     #: enumerations) — digests, checkpoints, cache keys and store paths stay
     #: byte-identical for in-scope grids (regression-pinned).
     unsafe_allow_out_of_scope_instruments: bool = False
+    #: The global fill mode (DEC-FILL-WORST-CASE-001): the PRODUCTION default
+    #: is the WORST_CASE anti-illusion floor; PRECISE is the legacy exact-fill
+    #: mode. Threaded to every tuple's :class:`SweepRunConfig` (and thence
+    #: into every mask run-identity via ``canonical_trade_params``) and
+    #: folded EMIT-ON-NON-PRECISE into all three grid/tuple identity
+    #: surfaces — ``grid_identity`` / ``tuple_cache_key`` (supervisor) and
+    #: :func:`_tuple_digest` (store address) — so a PRECISE grid keeps every
+    #: historical digest byte-identical while a WORST_CASE grid re-keys
+    #: (a resume can never serve one mode's stores as the other's).
+    fill_mode: FillMode = FillMode.WORST_CASE
 
     def __post_init__(self) -> None:
         # Order-preserving de-dup of every axis (set semantics, deterministic
@@ -534,6 +545,7 @@ class SweepTuple:
             min_hits=grid.min_hits,
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
+            fill_mode=grid.fill_mode,
         )
 
 
@@ -792,6 +804,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
+    if grid.fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001 (default-elision, the selection/gate
+        # template): a non-PRECISE mode changes every stored fill price, so
+        # it re-keys the store address; PRECISE emits NOTHING — every
+        # pre-mode on-disk store keeps its address byte-identically.
+        descriptor["fill_mode"] = grid.fill_mode.value
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).

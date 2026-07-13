@@ -117,6 +117,10 @@ SWEEP_FORWARDED_KEYS: Final[tuple[str, ...]] = (
     "stage3_top_k",
     "stage3_fevals",
     "stage3_restarts",
+    # DEC-FILL-WORST-CASE-001: the launch fill mode (the --fill-mode flag off
+    # the SHARED _add_sweep_grid_args parser; None = env-then-default inside
+    # cmd_sweep_all) — forwarded like every other grid knob.
+    "fill_mode",
 )
 
 #: Where PRODUCTION writes the supervisor completion tally, relative to the

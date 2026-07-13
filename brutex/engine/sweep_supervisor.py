@@ -131,6 +131,7 @@ from brutex.engine.sweep_progress import SweepProgress, SweepProgressSnapshot
 from brutex.engine.sweep_run import SweepComboError, _direction_label
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.engine.tuple_complete import missing_tuple_artifacts, resume_store_guard_enabled
+from brutex.execution.fill_mode import FillMode
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` / `lmdb` PyO3 wheels (pulled by
@@ -370,6 +371,12 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
+    if grid.fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001 (default-elision): a non-PRECISE grid is a
+        # DIFFERENT sweep (every fill price moves), so its checkpoint must
+        # never resume PRECISE work — and vice versa. PRECISE emits NOTHING,
+        # keeping every historical grid identity byte-identical.
+        descriptor["fill_mode"] = grid.fill_mode.value
     return descriptor
 
 
@@ -455,6 +462,13 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         params["gate_config"] = gate_config
+    if grid.fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001: the fill mode is tuple-identity — a
+        # cache-skip keyed without it would falsely skip a WORST_CASE tuple
+        # as already-done PRECISE work (the fib_anchor precedent). PRECISE
+        # emits NOTHING (default-elision — the frozen tuple_cache_key golden
+        # stays byte-identical).
+        params["fill_mode"] = grid.fill_mode.value
     return params
 
 

@@ -126,7 +126,7 @@ from brutex.engine.sweep_stream import (
     SurvivorColumns,
     rank_survivor_columns,
 )
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import FillPolicy, simulate_trades
 from brutex.engine.trial_stats import (
     TrialStatsError,
     read_tuple_trial_stats,
@@ -141,6 +141,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
     write_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
@@ -577,6 +578,15 @@ class SweepRunConfig:
     #: contained). ``None`` — every spot config — emits NO params key, so spot
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
+    #: The global fill mode (DEC-FILL-WORST-CASE-001): the PRODUCTION default
+    #: is the WORST_CASE anti-illusion floor — every fill at the bar's worst
+    #: price under the adverse-max law, so a persisted result can only
+    #: UNDERSTATE. Folded into the run identity via
+    #: :func:`canonical_trade_params` EMIT-ON-NON-PRECISE (the roll_schedule
+    #: conditional-emit template): a PRECISE config reproduces every
+    #: historical run_id byte-for-byte, a WORST_CASE config re-keys. Both
+    #: modes are legal on every instrument — no presence invariant needed.
+    fill_mode: FillMode = FillMode.WORST_CASE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -710,6 +720,7 @@ def canonical_trade_params(
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     roll_schedule: tuple[int, ...] | None = None,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
 
@@ -767,6 +778,14 @@ def canonical_trade_params(
     }
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
+    if fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001 (the roll_schedule conditional-emit
+        # template): the fill mode genuinely changes every fill price a combo
+        # simulates, so a non-PRECISE run is a DIFFERENT computation and MUST
+        # re-key (Golden Rule #4). PRECISE — the legacy mode — emits NO key,
+        # so every historical run identity is byte-identical; the recount /
+        # verify law is therefore "no fill_mode key = PRECISE legacy".
+        params["fill_mode"] = fill_mode.value
     return params
 
 
@@ -780,6 +799,7 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
         roll_schedule=cfg.roll_schedule,
+        fill_mode=cfg.fill_mode,
     )
 
 
@@ -797,6 +817,7 @@ def ranked_combo_to_result_row(
     sl_paisa: int | None,
     tp_paisa: int | None,
     reference_stamper: TradeReferenceStamper | None = None,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -861,6 +882,12 @@ def ranked_combo_to_result_row(
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
         reproduce the ranked combo's trades exactly.
+    fill_mode
+        The run's :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001) — MUST match the sweep's for the same
+        reason (a WORST_CASE finalist re-simulated PRECISE would restate
+        every fill price). Default PRECISE keeps legacy callers
+        byte-identical; production threads ``cfg.fill_mode``.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -891,6 +918,7 @@ def ranked_combo_to_result_row(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        policy=FillPolicy(fill_mode=fill_mode),
         reference_stamper=reference_stamper,
     )
     if trades:
@@ -1153,6 +1181,7 @@ def _reattribute_chunk_failure(
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
+                policy=FillPolicy(fill_mode=cfg.fill_mode),
                 reference_stamper=reference_stamper,
             )
         except MemoryError:
@@ -1210,6 +1239,7 @@ def _iter_mask_metrics(
                 direction=cfg.direction,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
+                policy=FillPolicy(fill_mode=cfg.fill_mode),
             )
             # Batch-contract guard: the batch call must RETURN exactly one
             # (trades, exit_indices) pair per mask (both arms do, by
@@ -1840,6 +1870,9 @@ def run_persisted_sweep(
             # re-simulation feeds the persisted row, so the run's stamper
             # lands here.
             reference_stamper=reference_stamper,
+            # The finalist projection MUST re-simulate under the run's own
+            # fill mode or the parity contract breaks (DEC-FILL-WORST-CASE-001).
+            fill_mode=cfg.fill_mode,
         )
         try:
             store.append(row)

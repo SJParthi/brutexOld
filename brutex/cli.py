@@ -367,6 +367,21 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--fill-mode",
+        default=None,
+        dest="fill_mode",
+        choices=("worst_case", "precise"),
+        help=(
+            "Global fill mode (DEC-FILL-WORST-CASE-001): worst_case (the "
+            "default — every fill at the bar's worst price under the "
+            "adverse-max law, the anti-illusion floor) or precise (the "
+            "legacy exact fills). The flag wins over $BRUTEX_FILL_MODE; "
+            "unset resolves the env then the worst_case default. The mode "
+            "enters every run identity (emit-on-non-precise), so the two "
+            "modes never collide in one results tree"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -6666,6 +6681,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     allow_out_of_scope: bool = False,
     acknowledge_sla_overrun: bool = False,
     detach: bool = False,
+    fill_mode: str | None = None,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -6842,6 +6858,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         results_depth_enabled = resolve_results_depth_enabled()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # Global fill mode (DEC-FILL-WORST-CASE-001), resolved ONCE at launch —
+    # the --fill-mode flag WINS over $BRUTEX_FILL_MODE; unset = the WORST_CASE
+    # production default; junk (flag or env) is a clean pre-sweep user-config
+    # error (the BRUTEX_LOG_LEVEL fail-loud precedent). The resolved mode
+    # rides the grid into every tuple config, every run identity, the
+    # cascade specs and the results-depth parity capture — ONE launch value,
+    # never re-read from env by any re-deriver.
+    from brutex.execution.fill_mode import FillMode, resolve_fill_mode
+
+    try:
+        launch_fill_mode = FillMode(fill_mode.strip().lower()) if fill_mode else resolve_fill_mode()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
     # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
@@ -7032,6 +7063,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "indicator_version": _indicator_version(),
         "code_commit_sha": _resolve_code_commit_sha(),
         "top_k": top,
+        "fill_mode": launch_fill_mode,
     }
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
@@ -7498,6 +7530,9 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 expiry=options_expiry,
                 broker=options_broker,
                 top=top,
+                # DEC-FILL-WORST-CASE-001: the winners replayed here were
+                # swept under THIS launch's mode — the replay must match.
+                fill_mode=launch_fill_mode,
             )
 
         # ── AUTOMATIC Stage-4 cascade on the top-K winners (DEC-CASCADE-WIRE-001) ──
@@ -8377,6 +8412,26 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
         print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
+    # DEC-FILL-WORST-CASE-001: the verify grid must carry the tree's RECORDED
+    # fill mode. SweepGridConfig defaults to the WORST_CASE production
+    # default, but the verify/recount law is the params contract's — "no
+    # fill_mode key on any recorded params = PRECISE legacy" (an absent audit
+    # reads PRECISE too) — so the recorded mode is folded UNCONDITIONALLY
+    # here; re-deriving identities under the wrong mode would read every
+    # store of the other mode's tree as corrupt.
+    import dataclasses as _fm_dc
+
+    from brutex.engine.sweep_verify import recorded_fill_mode_from_audit
+
+    try:
+        grid = _fm_dc.replace(
+            grid,
+            fill_mode=recorded_fill_mode_from_audit(out_root / "audit" / "sweep-all.jsonl"),
+        )
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —
@@ -9299,6 +9354,7 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     start: str,
     end: str,
     expiry_kind: Any,
+    fill_mode: Any,
 ) -> list[Any]:
     """Re-derive the winning combo's spot round-trips → ``SpotSignal`` inputs.
 
@@ -9365,11 +9421,21 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
     # kwarg here + bind builds at cmd_options_sim /
     # _maybe_run_options_sim_on_winners — a conscious follow-up that ALSO
     # needs a VIX field on SpotSignal + a leaderboard column.
+    from brutex.engine.trade_sim import FillPolicy
+
     trades = simulate_trades(
         bars,
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-WORST-CASE-001: the replay lifts a WINNER's round-trips
+        # into SpotSignals, so it simulates under the caller-threaded fill
+        # mode (cmd_sweep_all passes its launch mode — the SAME config the
+        # winners were swept under; the standalone cmd_options_sim resolves
+        # once at ITS launch). NOTE the honest pre-existing envelope: this
+        # replay carries NO sl/tp either — it is an entry/exit-instant
+        # approximation, not a byte-parity re-simulation.
+        policy=FillPolicy(fill_mode=fill_mode),
         reference_stamper=None,
     )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
@@ -9445,6 +9511,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
     expiry: str,
     broker: str,
     audit_path: Path,
+    fill_mode: Any,
 ) -> tuple[Any, ...]:
     """Replay a winning spot run into priced per-rule options results + audit."""
     from brutex.options.executor import ExpiryKind, execute_options_sim
@@ -9460,6 +9527,7 @@ def _options_sim_for_row(  # pragma: no cover — composes real-lake replay + te
         start=start,
         end=end,
         expiry_kind=expiry_kind,
+        fill_mode=fill_mode,
     )
     source = _LakeOptionBarSource(lake_root=lake_root)
     with AuditWriter.open(audit_path, resume=audit_path.exists()) as audit:
@@ -9526,6 +9594,20 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # Global fill mode for the replay (DEC-FILL-WORST-CASE-001): the STANDALONE
+    # options-sim command has no sweep config in hand (the stored ResultRow
+    # carries no params dict), so the mode resolves ONCE at THIS command's own
+    # launch (env, fail-loud) — the operator replays a worst-case tree under
+    # BRUTEX_FILL_MODE=worst_case (the default) and a legacy PRECISE tree
+    # under =precise. The AUTOMATIC post-sweep hook threads the sweep's own
+    # launch mode instead and never consults env here.
+    from brutex.execution.fill_mode import resolve_fill_mode
+
+    try:
+        replay_fill_mode = resolve_fill_mode()
+    except ValueError as exc:
+        print(f"[brutex] options-sim config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # replay's stamps were provably discarded at the SpotSignal conversion —
     # see the sanctioned literal-None site in _replay_spot_signals_for_row —
@@ -9541,6 +9623,7 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         expiry=expiry,
         broker=broker,
         audit_path=audit_path,
+        fill_mode=replay_fill_mode,
     )
     total_signals = results[0].n_signals if results else 0
     if total_signals == 0:
@@ -9567,6 +9650,7 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
     expiry: str,
     broker: str,
     top: int,
+    fill_mode: Any,
 ) -> None:
     """Automatic post-sweep options-sim on the top winners (zero-touch).
 
@@ -9606,6 +9690,7 @@ def _maybe_run_options_sim_on_winners(  # pragma: no cover — auto-hook over re
                 expiry=expiry,
                 broker=broker,
                 audit_path=audit_path,
+                fill_mode=fill_mode,
             )
         except (ValueError, KeyError, OSError) as exc:
             print(f"[brutex] options-sim: {row.run_id[:12]}… skipped ({exc})")
@@ -10048,6 +10133,7 @@ def _dispatch(argv: list[str] | None) -> int:
             allow_out_of_scope=args.allow_out_of_scope,
             acknowledge_sla_overrun=args.acknowledge_sla_overrun,
             detach=args.detach,
+            fill_mode=args.fill_mode,
         )
     # Scheduled/daemon sweep runner (DEC-SWEEP-SCHEDULER-001) — reuses cmd_sweep_all
     # for the grid; the scheduler core decides only WHEN each cycle fires.
@@ -10097,6 +10183,7 @@ def _dispatch(argv: list[str] | None) -> int:
             stage3_top_k=args.stage3_top_k,
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
+            fill_mode=args.fill_mode,
         )
     # Process supervisor (DEC-SUPERVISOR-AUTORESTART-001) — auto-relaunch the
     # sweep daemon on a hard crash; composes brutex.orchestrator.supervisor.

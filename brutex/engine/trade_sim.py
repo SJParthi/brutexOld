@@ -716,9 +716,7 @@ class TradeSimWalker:
         (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
         """
         if self._worst_case:
-            entry_price = _price_to_paisa(
-                bar.high if self._direction is Side.BUY else bar.low
-            )
+            entry_price = _price_to_paisa(bar.high if self._direction is Side.BUY else bar.low)
         else:
             entry_price = _price_to_paisa(bar.open)
         sl_level, tp_level = self._levels(entry_price)

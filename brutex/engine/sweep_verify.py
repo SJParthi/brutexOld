@@ -78,6 +78,7 @@ from brutex.engine.tuple_complete import (
     completion_sentinel_path,
     read_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -492,6 +493,70 @@ def _schedules_from_entries(
                 f"{audit_path}: {prior} vs {schedule}"
             )
     return schedules
+
+
+def recorded_fill_mode_from_audit(audit_path: Path) -> FillMode:
+    """Read the tree's RECORDED global fill mode from its audit log.
+
+    DEC-FILL-WORST-CASE-001: a run's ``SWEEP_START`` payload carries
+    ``params["fill_mode"]`` via ``canonical_trade_params`` EMIT-ON-NON-PRECISE
+    — the run is SELF-DESCRIBING — so the verify/recount grid re-derives row
+    identities (and the Tier-3 shadow re-sweep simulates) under the SAME mode
+    the tree was minted with. The law mirrors the params contract exactly:
+    **no ``fill_mode`` key on any recorded params = PRECISE legacy** (every
+    pre-mode tree), an absent audit file likewise reads PRECISE (nothing
+    recorded ⇒ nothing non-default), and a recorded key must parse to a known
+    mode and agree across every context entry.
+
+    Streams the chain via :func:`brutex.orchestrator.audit.iter_entries` —
+    one entry resident at a time (DEC-AUDIT-READERS-STREAM-001).
+
+    Raises
+    ------
+    SweepVerifyError
+        If the audit log is unreadable/corrupt, a recorded ``fill_mode`` is
+        not a known mode token, or two entries disagree (an inconsistent tree
+        is not a verifiable tree — refuse, Golden Rule #1).
+    """
+    if not audit_path.exists():
+        return FillMode.PRECISE
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    recorded: FillMode | None = None
+    try:
+        for entry in iter_entries(audit_path):
+            if entry.action not in _CONTEXT_ACTIONS:
+                continue
+            params = entry.payload.get("params")
+            if not isinstance(params, dict) or "fill_mode" not in params:
+                continue
+            raw = params["fill_mode"]
+            try:
+                mode = FillMode(str(raw))
+            except ValueError:
+                raise SweepVerifyError(
+                    f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
+                    f"{raw!r} is not a known fill mode"
+                ) from None
+            if mode is FillMode.PRECISE:
+                # canonical_trade_params NEVER emits the PRECISE token (the
+                # emit-on-non-PRECISE law) — a literal "precise" key is a
+                # hand-edited/tampered line, refused like a junk token.
+                raise SweepVerifyError(
+                    f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
+                    f"the PRECISE mode is recorded by KEY ABSENCE, never a literal "
+                    f"token — the audit line is corrupt or tampered"
+                )
+            if recorded is None:
+                recorded = mode
+            elif recorded is not mode:
+                raise SweepVerifyError(
+                    f"inconsistent recorded fill_mode in {audit_path}: "
+                    f"{recorded.value} vs {mode.value}"
+                )
+    except AuditError as exc:
+        raise SweepVerifyError(f"unreadable audit log at {audit_path}: {exc}") from exc
+    return FillMode.PRECISE if recorded is None else recorded
 
 
 def recorded_audit_facts(
@@ -1219,6 +1284,11 @@ def _verify_store_rows(
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
         roll_schedule=cfg.roll_schedule,
+        # DEC-FILL-WORST-CASE-001: the verify grid carries the tree's
+        # RECORDED fill mode (recorded_fill_mode_from_audit — no key on any
+        # recorded params = PRECISE legacy), so a WORST_CASE tree's row
+        # identities re-derive under the SAME mode they were minted with.
+        fill_mode=cfg.fill_mode,
     )
     expected_label = _direction_label(tuple_.direction)
     bits_mask = 0
@@ -2082,6 +2152,7 @@ __all__ = [
     "compare_recount",
     "plan_expected_stores",
     "recorded_context_from_audit",
+    "recorded_fill_mode_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
     "stale_roll_schedule_refusal",
