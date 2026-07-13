@@ -50,6 +50,7 @@ from brutex.engine.trade_store import (
     sweep_run_dir,
     write_tuple_sidecars,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
@@ -125,6 +126,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): these suites predate the
+        # worst-case fill mode — pin PRECISE explicitly (never regenerate).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]

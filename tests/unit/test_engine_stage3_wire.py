@@ -67,6 +67,7 @@ from brutex.engine.sweep_orchestrator import (
     tuple_store_path,
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.strategies.types import FibAnchorKind, Side
@@ -165,6 +166,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "stage3_max_fevals": 6,
         "stage3_max_restarts": 1,
         **_CTX,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): these suites predate the
+        # worst-case fill mode — pin PRECISE explicitly (never regenerate).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]

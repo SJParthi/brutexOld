@@ -52,6 +52,7 @@ from brutex.engine.trade_store import (
     sidecar_paths_for,
     sweep_run_dir,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 
@@ -165,6 +166,8 @@ def _grid() -> SweepGridConfig:
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        fill_mode=FillMode.PRECISE,
     )
 
 

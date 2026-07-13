@@ -45,6 +45,7 @@ from brutex.engine.sweep_run import (
     mask_run_id,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.feed.series_load import load_sweep_slice
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
@@ -183,6 +184,10 @@ def _config(bars: list[CandleBar], schedule: tuple[int, ...]) -> SweepRunConfig:
         sl_paisa=80,
         tp_paisa=50,
         roll_schedule=schedule,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this golden's store hash
+        # was frozen under the legacy exact fills — pin PRECISE explicitly;
+        # NEVER regenerate the literal.
+        fill_mode=FillMode.PRECISE,
     )
 
 

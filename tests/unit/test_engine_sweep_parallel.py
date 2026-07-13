@@ -70,6 +70,7 @@ from brutex.engine.sweep_supervisor import (
     tuple_label,
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.execution.fill_mode import FillMode
 from brutex.observability.logging import LOG_LEVEL_ENV, reset_configuration
 from brutex.orchestrator.audit import (
     AuditWriter,
@@ -147,6 +148,8 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
