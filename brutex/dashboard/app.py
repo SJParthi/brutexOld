@@ -1512,7 +1512,18 @@ def build_app(
             if scheduler_boot is not None:
                 # One small state-file read at startup; armed ⇒ resume ticking
                 # (the boot catch-up fires on an early TICK, never here).
-                scheduler_boot.start_if_armed()
+                # Belt (refuter round 6 N-1, the run_auto_resume "never crash
+                # boot" posture): the store's load() is itself never-raises,
+                # but a convenience scheduler must not be ABLE to kill boot —
+                # any unexpected raise logs and the dashboard serves.
+                try:
+                    scheduler_boot.start_if_armed()
+                except Exception as boot_exc:  # pylint: disable=broad-exception-caught  # never crash boot
+                    _LOG.warning(
+                        "auto_pull.boot_start_failed",
+                        error=str(boot_exc),
+                        error_type=type(boot_exc).__name__,
+                    )
             try:
                 yield
             finally:

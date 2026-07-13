@@ -21,11 +21,21 @@ Durable state: ONE atomic JSON sidecar ``<lake_root>/.pull_all_spot_auto.json``
 (:data:`AUTO_PULL_STATE_FILENAME`, schema :data:`AUTO_PULL_STATE_SCHEMA`)
 written via the COMMON :func:`~brutex.data.atomic_io.atomic_write_simple`.
 A corrupt / unreadable file reads as DISARMED with ONE
-``auto_pull.state_corrupt`` WARN — the dashboard never crashes on it.
+``auto_pull.state_corrupt`` WARN — the dashboard never crashes on it (EVERY
+corruption shape: junk JSON, wrong shape, invalid UTF-8, a nesting bomb, an
+oversized file — the refuter-round-6 N-1 hardening; see
+:meth:`AutoPullStateStore.load`).
 SINGLE-WRITER design: only this dashboard process's scheduler + arming routes
 write the file (the CLI never touches it), so the scheduler holds an
 in-memory mirror after the first load and every read is O(1) memory — no
-per-poll lake I/O.
+per-poll lake I/O. HONEST multi-process residual (refuter round 6 M-3 — the
+round-4 residual-(c) class extended to this sidecar): the once-per-day law is
+per DASHBOARD PROCESS — two armed dashboards over ONE lake each hold their own
+mirror, so both may fire once on the same day (flock-serialized, ledger-
+idempotent — bounded waste, never wrong data) and a DISARM from a stale-mirror
+process rewrites the sidecar from ITS mirror, clobbering the other process's
+day-marks on disk. ONE dashboard process per lake is the documented posture
+(``docs/runbooks/pull-all-spot.md``).
 
 ONCE-PER-DAY SEMANTICS (pinned): a STARTED launch marks ``last_attempt_date``
 — no further fire that day, whatever the run's outcome; a REFUSED launch
@@ -73,6 +83,7 @@ __all__ = [
     "AUTO_PULL_STATE_SCHEMA",
     "AUTO_PULL_TICK_ENV",
     "DEFAULT_TICK_SECONDS",
+    "MAX_STATE_BYTES",
     "AutoLaunchResult",
     "AutoLauncher",
     "AutoPullScheduler",
@@ -92,6 +103,13 @@ AUTO_PULL_STATE_SCHEMA: Final[int] = 1
 #: Tick cadence — how often the daemon consults the gate while armed. 60 s is
 #: plenty (the gate is day+settle-granular); env-overridable, fail-loud.
 DEFAULT_TICK_SECONDS: Final[float] = 60.0
+
+#: Size cap on the state file, checked BEFORE the read (refuter round 6 N-1 —
+#: the crossverify ``MAX_JOURNAL_BYTES`` / ``SweepCheckpointStore`` precedent):
+#: a real state file is ~200 bytes, so 16 MiB is ~80,000× headroom; a planted
+#: multi-GB file at the path reads DISARMED + one WARN instead of being read
+#: whole (where a ``MemoryError`` would crash boot).
+MAX_STATE_BYTES: Final[int] = 16 * 1024 * 1024
 
 #: The tick-cadence env knob (strict positive finite seconds; junk fails loud
 #: at construction — the ``resolve_*`` house convention).
@@ -176,20 +194,39 @@ class AutoPullStateStore:
         return self._path
 
     def load(self) -> AutoPullState:
-        """Read the persisted state; corrupt/unreadable ⇒ DISARMED — never raises."""
+        """Read the persisted state; corrupt/unreadable ⇒ DISARMED — never raises.
+
+        The read is BYTES + decode INSIDE the corruption-tolerant path (the
+        crossverify #1776 round-2 M1 template, refuter round 6 N-1): an
+        invalid-UTF-8 byte (``UnicodeDecodeError`` — a ``ValueError`` subclass
+        raised by the DECODE, not the read), a nesting-bomb payload
+        (``RecursionError``) and an out-of-range numeric (``OverflowError``)
+        all fold into the same DISARMED-plus-one-WARN answer as junk JSON —
+        pre-fix the first two ESCAPED and a bit-rotted state file crashed
+        dashboard boot persistently (uvicorn "Application startup failed" on
+        every restart). An oversized file (> :data:`MAX_STATE_BYTES`) is
+        refused BEFORE the read.
+        """
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            size = self._path.stat().st_size
+            if size > MAX_STATE_BYTES:
+                self._warn_corrupt(f"oversized ({size} bytes > the {MAX_STATE_BYTES} B cap)")
+                return AutoPullState()
+            raw = self._path.read_bytes()
         except FileNotFoundError:
-            # The normal never-armed answer — not a corruption.
+            # The normal never-armed answer — not a corruption (covers a file
+            # racing away between the stat and the read too).
             self._corrupt_warned = False
             return AutoPullState()
         except OSError as exc:
             self._warn_corrupt(f"unreadable ({type(exc).__name__}: {exc})")
             return AutoPullState()
         try:
-            state = _state_from_payload(json.loads(raw))
-        except ValueError as exc:
-            self._warn_corrupt(str(exc))
+            state = _state_from_payload(json.loads(raw.decode("utf-8")))
+        except (ValueError, RecursionError, OverflowError) as exc:
+            # ValueError covers junk JSON, the wrong-shape refusals of
+            # _state_from_payload AND UnicodeDecodeError (its subclass).
+            self._warn_corrupt(str(exc) or type(exc).__name__)
             return AutoPullState()
         self._corrupt_warned = False
         return state
@@ -264,9 +301,10 @@ class AutoPullScheduler:
     the boot catch-up fires on the first tick ≤ one cadence after startup —
     never a surprise fire inside ``build_app``/lifespan itself.
 
-    Log discipline: ``auto_pull.deferred`` / ``auto_pull.refused_retry`` are
-    deduplicated per (day, reason) — a sweep-long refusal or an all-morning
-    ``before_settle`` logs ONCE per day, never once per tick; ``armed`` /
+    Log discipline: ``auto_pull.deferred`` / ``auto_pull.refused_retry`` /
+    ``auto_pull.tick_error`` are deduplicated per (day, reason/error-type) —
+    a sweep-long refusal, an all-morning ``before_settle`` or a persistent
+    tick fault logs ONCE per day, never once per tick; ``armed`` /
     ``disarmed`` / ``fired`` / ``completed`` / ``state_corrupt`` always log.
     """
 
@@ -416,15 +454,36 @@ class AutoPullScheduler:
 
         WAIT-first (see the class docstring); a raising tick (an unexpected
         launcher/gate defect) logs ONE ``auto_pull.tick_error`` WARN per
-        occurrence and the loop continues — the dashboard is never crashed
-        by its convenience scheduler. Covered for REAL by the thread-based
-        loop tests (bounded event waits, no sleeps-as-synchronization).
+        (day, error type) — the refuter-round-6 M-2 fold: a PERSISTENT tick
+        error (e.g. a junk settle env written mid-process) previously logged
+        ~1440 WARNs/day; now the day-scoped memo dedupes it like the class's
+        own ``deferred``/``refused_retry`` discipline. No extra heartbeat is
+        needed: the memo clears at day rollover (so the WARN re-fires once
+        per day — the heartbeat) and ``_last_outcome`` carries the live error
+        into every ``status()``/payload poll. The loop continues either way —
+        the dashboard is never crashed by its convenience scheduler. Covered
+        for REAL by the thread-based loop tests (bounded event waits, no
+        sleeps-as-synchronization).
         """
         while not self._stop_event.wait(self._tick_seconds):
             try:
                 self.tick_once()
             except Exception as exc:  # pylint: disable=broad-exception-caught  # never-crash loop guard
-                _LOG.warning("auto_pull.tick_error", error=str(exc), error_type=type(exc).__name__)
+                self._note_tick_error(exc)
+
+    def _note_tick_error(self, exc: Exception) -> None:
+        """Record one raising tick: dedup the WARN per (day, error type) — never raises.
+
+        The clock read is itself guarded (the failing seam MAY be the injected
+        clock): an unreadable clock dedupes under the ``date.min`` sentinel day
+        (the memo then clears on the first healthy-clock tick's day rollover).
+        """
+        try:
+            today = self._clock().date()
+        except Exception:  # pylint: disable=broad-exception-caught  # the clock may be the fault
+            today = date.min
+        self._last_outcome = f"tick error — {type(exc).__name__}: {exc}"
+        self._log_once(today, "auto_pull.tick_error", type(exc).__name__, str(exc))
 
     def tick_once(self, *, now: datetime | None = None) -> str:
         """One scheduling decision; returns the action token (test surface).
@@ -533,7 +592,7 @@ class AutoPullScheduler:
             if key in self._log_memo:
                 return
             self._log_memo.add(key)
-        if event == "auto_pull.refused_retry":
+        if event in ("auto_pull.refused_retry", "auto_pull.tick_error"):
             _LOG.warning(event, reason=reason, detail=detail, date=today.isoformat())
             return
         _LOG.info(event, reason=reason, detail=detail, date=today.isoformat())

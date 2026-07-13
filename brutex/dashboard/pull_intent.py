@@ -123,6 +123,12 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
 
+#: Size cap on the intent file, checked BEFORE the read (refuter round 6 N-1,
+#: DEC-PULL-SCOPED-ALL-ONECLICK-001 — the crossverify #1776 ``MAX_JOURNAL_BYTES``
+#: precedent): a real intent is ~250 bytes; a planted multi-GB file reads as
+#: corrupt instead of being read whole.
+MAX_INTENT_BYTES: Final[int] = 16 * 1024 * 1024
+
 
 def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
     """Resolve the intent-resume escape hatch from the env — default ON.
@@ -368,10 +374,24 @@ class PullIntentStore:
         (non-JSON / wrong shape) logs ``pull_intent.corrupt``, is DELETED
         best-effort (it can never become readable again and must not re-trip
         every boot), and reads as absent — a boot can never crash here.
+
+        Hardened per the crossverify #1776 round-2 M1 template (refuter round
+        6 N-1's inherited note, DEC-PULL-SCOPED-ALL-ONECLICK-001): the read is
+        BYTES with the decode INSIDE the corruption-tolerant path, so an
+        invalid-UTF-8 byte (``UnicodeDecodeError`` escapes a ``read_text``
+        wrapped only for ``OSError``), a nesting-bomb payload
+        (``RecursionError``) and an out-of-range numeric (``OverflowError``)
+        all fold into the corrupt-file answer — pre-fix the launcher's
+        ``prior_intent = store.load()`` snapshot (held-mutex, round-4 fold)
+        500'd a REAL pull click on a bit-rotted intent file. An oversized
+        file (> :data:`MAX_INTENT_BYTES`) is refused BEFORE the read.
         """
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            size = self._path.stat().st_size
+            oversized = size > MAX_INTENT_BYTES
+            raw = b"" if oversized else self._path.read_bytes()
         except FileNotFoundError:
+            # Absent — including a file racing away between stat and read.
             return None
         except OSError as exc:
             _LOG.warning(
@@ -382,12 +402,13 @@ class PullIntentStore:
             )
             return None
         try:
-            payload: object = json.loads(raw)
-        except ValueError:
+            payload: object = None if oversized else json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError, OverflowError):
+            # ValueError covers junk JSON AND UnicodeDecodeError (its subclass).
             payload = None
         intent = PullIntent.from_payload(payload)
         if intent is None:
-            _LOG.warning("pull_intent.corrupt", path=str(self._path))
+            _LOG.warning("pull_intent.corrupt", path=str(self._path), oversized=oversized)
             self.clear()
             return None
         return intent

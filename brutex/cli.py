@@ -3686,6 +3686,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # must never silently change the cadence), while the construction
     # itself is best-effort (a fault logs and the dashboard still binds —
     # the button then runs without the auto-arm surface).
+    from brutex.calendars.auto_pull_gate import resolve_settle_time
     from brutex.dashboard.auto_pull_scheduler import (
         AutoPullScheduler,
         AutoPullStateStore,
@@ -3694,6 +3695,11 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
 
     try:
         auto_pull_tick_s = resolve_tick_seconds()
+        # Eager settle-env validation (refuter round 6 M-2): a junk
+        # BRUTEX_PULL_ALL_SETTLE_IST previously passed boot and surfaced only
+        # as per-tick gate errors on an ARMED dashboard (the scheduler never
+        # fired) — fail loud HERE like the tick env, the same clean one-liner.
+        resolve_settle_time()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR

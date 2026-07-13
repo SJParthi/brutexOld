@@ -232,7 +232,7 @@ def test_spot_only_intent_resumes_spot_only_never_widened(
 def test_refused_full_scope_click_never_clobbers_running_spot_only_intent(
     store: InstrumentStore, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuter round 3 F-1 (fails-before-proven at 08d1bb43): while a SPOT-ONLY
+    """Refuter round 3 F-1 (fails-before-proven at the r2-fold head): while a SPOT-ONLY
     pull genuinely RUNS (blocked mid-spot), a FULL-scope click is REFUSED by
     the single-flight — its pre-start intent persist must NOT clobber the
     running pull's persisted scope, and a SIGKILL inside that window
@@ -325,8 +325,8 @@ def test_refused_full_scope_click_never_clobbers_running_spot_only_intent(
 # here as regression tests, orchestration keyed on the pause-injection store
 # seams the probes used (event-synchronized pauses at points a thread
 # scheduler could pause anyway — NO sleeps) plus a launch-mutex contention
-# signal, so each test is deterministic in BOTH worlds: pre-fix (613c52ee,
-# no mutex) the second click genuinely progresses and the race assertion
+# signal, so each test is deterministic in BOTH worlds: pre-fix (the r3-fold
+# head, no mutex) the second click genuinely progresses and the race assertion
 # FAILS; post-fix it blocks on the held launch mutex and the invariant holds.
 # ---------------------------------------------------------------------------
 
@@ -416,7 +416,7 @@ class _PauseFirstFullPersistStore(PullIntentStore):
 def test_simultaneous_clicks_refused_loser_never_orphans_the_started_pulls_intent(
     store: InstrumentStore, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuter round 4 G-1 (fails-before-proven at 613c52ee): two simultaneous
+    """Refuter round 4 G-1 (fails-before-proven at the r3-fold head): two simultaneous
     clicks on an intent-less lake, the LOSER's snapshot (``prior=None``)
     landing BEFORE the winner's persist. Pre-mutex the refused loser's restore
     took the orphan-CLEAR arm off its stale snapshot and DELETED the RUNNING
@@ -564,7 +564,7 @@ class _TwoLoserInterleaveStore(PullIntentStore):
 def test_two_refused_clicks_interleave_keeps_winner_scope_and_replays_spot_only(
     store: InstrumentStore, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuter round 4 I R4-1 (fails-before-proven at 613c52ee): TWO refused
+    """Refuter round 4 I R4-1 (fails-before-proven at the r3-fold head): TWO refused
     full-scope clicks whose store ops interleave — pre-mutex the later loser
     re-installed the earlier loser's clobber, leaving a FULL-scope intent on
     disk for the spot-only winner's whole remaining runtime (a crash then

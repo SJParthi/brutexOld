@@ -91,6 +91,25 @@ def test_junk_tick_env_fails_loud_before_bind(
     assert AUTO_PULL_TICK_ENV in capsys.readouterr().err
 
 
+def test_junk_settle_env_fails_loud_before_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[refuter round 6 M-2] junk BRUTEX_PULL_ALL_SETTLE_IST: the SAME clean
+    EXIT_USER_ERROR one-liner as the tick env, BEFORE uvicorn ever runs.
+    Pre-fix an ARMED dashboard booted fine and the junk surfaced only as
+    per-tick gate errors (the scheduler never fired)."""
+    from brutex.calendars.auto_pull_gate import PULL_ALL_SETTLE_ENV
+
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.delenv(AUTO_PULL_TICK_ENV, raising=False)
+    monkeypatch.setenv(PULL_ALL_SETTLE_ENV, "half past five")
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+    assert cli.cmd_dashboard(None, "127.0.0.1", 9189) == cli.EXIT_USER_ERROR
+    assert "ran" not in probes  # uvicorn.run never reached
+    assert PULL_ALL_SETTLE_ENV in capsys.readouterr().err
+
+
 def test_construction_fault_logs_and_still_binds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

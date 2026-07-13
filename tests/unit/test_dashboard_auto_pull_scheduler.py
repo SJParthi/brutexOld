@@ -220,12 +220,57 @@ class TestStateStore:
 
     def test_unreadable_file_disarmed_warn(self, tmp_path: Path) -> None:
         store = AutoPullStateStore(tmp_path)
-        store.path.mkdir()  # a DIRECTORY at the path → OSError on read_text
+        store.path.mkdir()  # a DIRECTORY at the path → OSError on read_bytes
         with capture_logs() as logs:
             assert store.load() == AutoPullState()
         corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
         assert len(corrupt) == 1
         assert "unreadable" in str(corrupt[0]["detail"])
+
+    def test_invalid_utf8_disarmed_one_warn(self, tmp_path: Path) -> None:
+        """[F/B — refuter round 6 N-1 CASE1] a bit-rotted state file (ONE bad
+        byte, invalid UTF-8) reads DISARMED + one WARN. Pre-fix
+        ``read_text`` raised ``UnicodeDecodeError`` (a ValueError subclass
+        the OSError-only read guard missed) — executed: it crashed dashboard
+        BOOT persistently (uvicorn "Application startup failed" on every
+        restart until the operator hand-deleted the sidecar)."""
+        store = AutoPullStateStore(tmp_path)
+        store.path.write_bytes(b'\xff\xfe{"schema": 1, "armed": true}')
+        with capture_logs() as logs:
+            assert store.load() == AutoPullState()
+            assert store.load() == AutoPullState()  # once-flag holds
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0]["log_level"] == "warning"
+
+    def test_nesting_bomb_disarmed_one_warn(self, tmp_path: Path) -> None:
+        """[F/B — refuter round 6 N-1 CASE2] a deeply-nested payload's
+        ``RecursionError`` (escaped the ValueError-only parse guard pre-fix)
+        folds into the same DISARMED + one WARN answer."""
+        store = AutoPullStateStore(tmp_path)
+        depth = 200_000
+        store.path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+        with capture_logs() as logs:
+            assert store.load() == AutoPullState()
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+
+    def test_oversized_file_refused_before_read(self, tmp_path: Path) -> None:
+        """[refuter round 6 N-1, the size-cap belt] an over-cap file reads
+        DISARMED + one WARN naming the size. TEETH: the file's CONTENT is
+        valid armed-state JSON padded past the cap (trailing whitespace is
+        legal JSON) — were it read + parsed it would load ``armed=True``, so
+        the DISARMED answer proves the cap decided BEFORE the read."""
+        from brutex.dashboard.auto_pull_scheduler import MAX_STATE_BYTES
+
+        store = AutoPullStateStore(tmp_path)
+        body = b'{"schema": 1, "armed": true}'
+        store.path.write_bytes(body + b" " * (MAX_STATE_BYTES + 1 - len(body)))
+        with capture_logs() as logs:
+            assert store.load() == AutoPullState()
+        corrupt = [entry for entry in logs if entry["event"] == "auto_pull.state_corrupt"]
+        assert len(corrupt) == 1
+        assert "oversized" in str(corrupt[0]["detail"])
 
     def test_save_failure_logs_and_returns_false(self, tmp_path: Path) -> None:
         blocked = tmp_path / "not-a-dir"
@@ -517,6 +562,68 @@ class TestThreadLifecycle:
             assert second_tick.wait(timeout=10.0), "the loop died on the first raising tick"
         finally:
             scheduler.stop()
+
+    def test_tick_error_warn_deduped_per_day_and_error_type(self, tmp_path: Path) -> None:
+        """[refuter round 6 M-2] a PERSISTENT tick fault logs ONE
+        ``auto_pull.tick_error`` WARN per (day, error type) — never ~1440/day
+        — re-fires on the next day (the memo's day rollover IS the
+        heartbeat), fires again for a DIFFERENT error type the same day, and
+        surfaces the live error into ``status()``'s ``last_outcome``."""
+        calls = 0
+        third_tick = threading.Event()
+
+        def raising_gate(_instant: datetime) -> AutoGateVerdict:
+            nonlocal calls
+            calls += 1
+            if calls >= 3:
+                third_tick.set()
+            raise ValueError("junk settle env")
+
+        scheduler, _ = _scheduler(
+            tmp_path, gate=raising_gate, clock=lambda: _OPEN, tick_seconds=0.01
+        )
+        with capture_logs() as logs:
+            scheduler.arm(now=_OPEN)
+            try:
+                assert third_tick.wait(timeout=10.0), "the loop died on a raising tick"
+            finally:
+                scheduler.stop()
+        errors = [e for e in logs if e["event"] == "auto_pull.tick_error"]
+        assert len(errors) == 1, "the per-(day, error-type) dedup must hold"
+        assert errors[0]["log_level"] == "warning"
+        assert errors[0]["reason"] == "ValueError"
+        assert "junk settle env" in str(errors[0]["detail"])
+        status = scheduler.status(now=_OPEN)
+        assert "tick error — ValueError: junk settle env" in status["last_outcome"]
+        # A DIFFERENT error type the same day gets its own WARN; the SAME
+        # type on the NEXT day re-warns (day rollover clears the memo).
+        with capture_logs() as logs2:
+            scheduler._note_tick_error(RuntimeError("boom"))
+            scheduler._note_tick_error(RuntimeError("boom"))  # deduped
+        assert [e["reason"] for e in logs2 if e["event"] == "auto_pull.tick_error"] == [
+            "RuntimeError"
+        ]
+        next_day = _scheduler(
+            tmp_path, gate=raising_gate, clock=lambda: _NEXT_DAY_OPEN, tick_seconds=0.01
+        )[0]
+        with capture_logs() as logs3:
+            next_day._note_tick_error(ValueError("junk settle env"))
+        assert [e["event"] for e in logs3] == ["auto_pull.tick_error"]
+
+    def test_tick_error_with_raising_clock_still_dedupes_never_raises(self, tmp_path: Path) -> None:
+        """The guarded clock arm: when the failing seam IS the clock, the
+        dedup keys under the ``date.min`` sentinel day and never raises."""
+
+        def raising_clock() -> datetime:
+            raise RuntimeError("clock wedged")
+
+        scheduler, _ = _scheduler(tmp_path, gate=_allowed_gate, clock=raising_clock)
+        with capture_logs() as logs:
+            scheduler._note_tick_error(RuntimeError("clock wedged"))
+            scheduler._note_tick_error(RuntimeError("clock wedged"))  # deduped
+        errors = [e for e in logs if e["event"] == "auto_pull.tick_error"]
+        assert len(errors) == 1
+        assert errors[0]["date"] == "0001-01-01"  # the date.min sentinel day
 
 
 # ── status / next-eligible honesty ───────────────────────────────────────────

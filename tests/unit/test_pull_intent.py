@@ -259,6 +259,43 @@ def test_load_wrong_shape_is_none_and_deleted(tmp_path: Path) -> None:
     assert not store.path.exists()
 
 
+def test_load_invalid_utf8_is_none_and_deleted(tmp_path: Path) -> None:
+    """[F/B — refuter round 6 N-1 inherited note, the #1776 round-2 M1
+    template] a bit-rotted intent file (ONE bad byte) reads as corrupt →
+    ``None`` + deleted. Pre-fix ``read_text`` raised ``UnicodeDecodeError``
+    (a ValueError subclass the OSError-only read guard missed) — executed:
+    the launcher's held-mutex ``prior_intent`` snapshot 500'd a REAL
+    /pull-pipeline click."""
+    store = PullIntentStore(tmp_path)
+    store.path.write_bytes(b'\xff{"version": 1}')
+    assert store.load() is None
+    assert not store.path.exists(), "a corrupt intent is deleted so it never re-trips"
+
+
+def test_load_nesting_bomb_is_none_and_deleted(tmp_path: Path) -> None:
+    """[refuter round 6 N-1] a deeply-nested payload's ``RecursionError``
+    folds into the corrupt-file answer instead of escaping."""
+    store = PullIntentStore(tmp_path)
+    depth = 200_000
+    store.path.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    assert store.load() is None
+    assert not store.path.exists()
+
+
+def test_load_oversized_is_none_and_deleted_before_read(tmp_path: Path) -> None:
+    """[refuter round 6 N-1, the size-cap belt] an over-cap intent file is
+    refused BEFORE the read. TEETH: the content is a VALID intent payload
+    padded past the cap with legal JSON whitespace — were it read + parsed
+    it would load — so the ``None`` answer proves the cap decided."""
+    from brutex.dashboard.pull_intent import MAX_INTENT_BYTES
+
+    store = PullIntentStore(tmp_path)
+    body = json.dumps(_intent().to_payload()).encode()
+    store.path.write_bytes(body + b" " * (MAX_INTENT_BYTES + 1 - len(body)))
+    assert store.load() is None
+    assert not store.path.exists()
+
+
 def test_clear_is_idempotent(tmp_path: Path) -> None:
     store = PullIntentStore(tmp_path)
     store.write(_intent())
