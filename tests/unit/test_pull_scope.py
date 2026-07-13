@@ -657,8 +657,8 @@ def test_fno_only_note_keeps_ledger_fail_prefix_leading() -> None:
         phase1_clean=True,
         phase1_complete=(),
         start_dates={},
-        minute_requested=0,
-        minute_skipped=0,
+        minute_requested=False,
+        minute_skipped=False,
         ledger_load_failed=True,
     )
     composite = CompositePullReport(

@@ -237,6 +237,47 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     )
 
 
+def test_auto_pull_chip_seed_rides_the_one_pull_progress_fetch_site() -> None:
+    """The chip's one-shot seed reuses pollProgress's SINGLE fetch site.
+
+    Workspace-health fix (DEC-PULL-SCOPED-ALL-ONECLICK-001): the round-5
+    fold's ``refreshAutoPullChip`` seed carried its OWN literal
+    ``fetch('/api/v1/universe/pull-progress'`` call — a SECOND fetch site
+    tripping the pre-existing ``test_no_new_poll_loop_added`` one-fetch-site
+    architectural pin (test_dashboard_universe_stall_chip.py). The seed now
+    requests through the ONE shared ``fetchPullProgress`` helper (declared
+    beside pollProgress; the ``opts`` passthrough keeps the hung-fetch
+    abort-signal teeth — pinned in test_dashboard_progress_frontend.py), so
+    exactly one literal site exists while the chip still seeds at page load
+    AND refreshes after an arming click; the LIVE updates keep riding
+    pollProgress's own ``renderAutoPullChip(s.auto_pull)``. The seed stays a
+    one-shot request — never a loop.
+    """
+    html = _render_universe_html()
+    # The ONE shared site (the stall-chip pin's law, re-asserted here beside
+    # the helper mechanism) + the helper that owns the literal.
+    assert html.count("fetch('/api/v1/universe/pull-progress'") == 1
+    assert "function fetchPullProgress(opts)" in html
+    seed = html.split("async function refreshAutoPullChip()", 1)[1].split("\n}", 1)[0]
+    assert "await fetchPullProgress()" in seed, "the seed must ride the shared site"
+    assert "fetch('" not in seed, "the seed may not mint its own literal fetch site"
+    assert "renderAutoPullChip(s.auto_pull)" in seed, "the seed renders the chip on success"
+    assert "setInterval" not in seed and "setTimeout" not in seed, (
+        "the seed is a one-shot request — never a second poll loop"
+    )
+    # Page-load seed: the bare top-level invocation (function declarations
+    # hoist within the ONE inline script, so the later helper is in scope).
+    assert "\nrefreshAutoPullChip();" in html, "the chip must seed at page load"
+    # Post-click refresh: the ▶ Pull Spot onclick re-seeds (the arming took
+    # effect even on a market-hours-refused start).
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    assert "refreshAutoPullChip();" in wiring, "the ▶ click must refresh the chip"
+    # LIVE updates: pollProgress renders the chip from its own payload — the
+    # subscription that makes the one-shot seed sufficient.
+    poll = html.split("async function pollProgress(label)", 1)[1].split("\n}", 1)[0]
+    assert "renderAutoPullChip(s.auto_pull);" in poll
+
+
 def test_set_bulk_disabled_covers_both_pull_buttons() -> None:
     """[refuter-r1 r2 NIT-5, re-pinned at the round-6 two-button split]
     ``setBulkDisabled`` disables BOTH remaining pull buttons — ▶ Pull F&O AND
