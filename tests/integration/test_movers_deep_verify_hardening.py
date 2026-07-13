@@ -28,9 +28,13 @@ Pinned here (each verified ABSENT from the existing movers suites first):
 * the futures Near/Next/Far tier cache-INDEPENDENCE size law over an injected
   cache (one NEW entry per tier — ``[1, 2, 3]`` — and a repeat-Near hit that
   neither grows the cache nor serves a stale wrong-tier row);
-* the OI-ONLY contiguity split (close contiguous + OI baseline non-contiguous
-  stamps ONLY the ``oi_baseline_*`` twin with exactly one ``kind="oi"`` WARN —
-  the shipped futures golden covers only the both-False arm);
+* the multi-row gainers/losers ORDER law on ALL THREE tabs (spot / futures /
+  options): ≥3 candidates per side with distinct %CHNG magnitudes serve
+  ``price_gainers`` DESCENDING (largest gain first) and ``price_losers``
+  ASCENDING (most negative first) — the refuter-round-1 teeth gap: a
+  one-character sort-sign flip in any tab's ranker survived the entire
+  859-test movers battery because every shipped gainers/losers assertion
+  was single-row or empty (R1-teeth-refuter F1);
 * the noncontiguous-WARN cap END-TO-END through the real
   ``compute_spot_candidates`` loop (25 holed symbols → exactly 20 WARNs + ONE
   suppressed summary, every row still stamped — the shipped cap test drives
@@ -50,6 +54,18 @@ Pinned here (each verified ABSENT from the existing movers suites first):
   HTTP 200 + lake-derived tier rows + the ``movers.options.registry_unreadable``
   WARN (the shipped unit test mocks ``RegistryError`` — this drives the real
   DuckDB open over real garbage bytes end-to-end).
+
+CURATION CORRECTION (refuter round 1): an earlier revision of this file
+carried a ``TestOiOnlyContiguitySplit`` pin whose docstring — and this module
+docstring — claimed "the shipped futures golden covers only the both-False
+arm". That claim was FALSE: the OI-only contiguity split (close contiguous +
+OI baseline non-contiguous, exactly one ``kind="oi"`` WARN, served values
+untouched) was ALREADY pinned on the identical fixture dates and law by
+``tests/unit/test_movers_futures.py:1414``
+(``TestResolvePrevOi::test_null_oi_1day_divergence_close_true_oi_false``,
+which drives the production ``_futures_row`` projector). The duplicate class
+was DELETED under the zero-duplication rule; that unit test is the covering
+pin.
 
 DELIBERATELY NOT PINNED (owned by in-flight work — nothing here asserts the
 current stale-stored serve): the stored-partition freshness class of
@@ -78,7 +94,6 @@ pytest.importorskip("pyarrow")
 
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_cache import MoversSnapshotCache
-from brutex.dashboard.movers_futures import run_futures_snapshot
 from brutex.dashboard.movers_snapshot import compute_spot_candidates, run_movers_snapshot
 from brutex.dashboard.summary_cache import SummaryCache
 from brutex.data.instrument_store import InstrumentStore
@@ -474,74 +489,183 @@ class TestFuturesTierCacheIndependenceSizes:
         assert movers_cache.size() == 3
 
 
-# ── OI-only contiguity split (audit worker D, P3) ──────────────────────────
+# ── multi-row gainers/losers ORDER teeth (refuter round 1, F1) ─────────────
+#
+# The production laws under pin (read from source, then pinned):
+#   * ``movers_snapshot._gainers`` / ``movers_futures.rank_price_gainers`` /
+#     ``movers_options.rank_price_gainers`` — pct_change > 0, DESCENDING
+#     (``-(pct)`` primary key; largest gain first);
+#   * the ``_losers`` / ``rank_price_losers`` twins — pct_change < 0,
+#     ASCENDING (raw ``pct`` primary key; most negative first).
+# Every pre-existing repo assertion on those lists was single-row or empty,
+# so a one-character sort-sign flip survived the whole 859-test movers
+# battery (R1-teeth-refuter.md — captured wire repro: a 2-gainer lake served
+# ['SMALLGAIN', 'BIGGAIN'] under the mutant). These pins drive ≥3 candidates
+# per side, with distinct %CHNG magnitudes, through the LIVE routes.
+
+# symbol → (prior-session close, snapshot close) per side; %CHNG magnitudes
+# all distinct so the exact list order is fully pct-determined (the
+# deterministic symbol tie-break is a separate, untested-here law). Names
+# chosen so neither alphabetical NOR reversed-pct order coincides with the
+# expected order on the gainers side.
+_SPOT_GAINER_CLOSES = {"GMID": ("100", "102"), "GTOP": ("100", "103"), "GLOW": ("100", "101")}
+_SPOT_LOSER_CLOSES = {"LSML": ("100", "97"), "LMID": ("100", "98"), "LBIG": ("100", "99")}
 
 
-class TestOiOnlyContiguitySplit:
-    def test_contiguous_close_with_noncontiguous_oi_stamps_only_oi_twin(
-        self, tmp_path: Path
+def _pct_oracle(closes: dict[str, tuple[str, str]]) -> dict[str, Fraction]:
+    """Independent per-symbol %CHNG oracle: exact rationals, never Decimal."""
+    return {
+        sym: Fraction(int(cur) - int(prev), int(prev)) * 100 for sym, (prev, cur) in closes.items()
+    }
+
+
+def _order_oracle(pcts: dict[str, Fraction], *, descending: bool) -> list[str]:
+    """Independent rank oracle: sort by exact-Fraction pct (stable by symbol)."""
+    return sorted(pcts, key=lambda sym: (-pcts[sym] if descending else pcts[sym], sym))
+
+
+class TestGainersLosersMultiRowOrder:
+    """The gainers/losers ORDER law with ≥3 rows per side, on all three tabs.
+
+    ``price_gainers`` must serve descending pct (largest gain first) and
+    ``price_losers`` ascending pct (most negative first) — pinned against an
+    independent :class:`fractions.Fraction` oracle for both the per-row pct
+    values AND the exact list order, at ROUTE level so the pins exercise each
+    tab's real ranker (``_gainers``/``_losers`` · ``rank_price_gainers``/
+    ``rank_price_losers`` in ``movers_futures`` and ``movers_options``).
+    """
+
+    def _assert_orders(
+        self,
+        body: dict[str, object],
+        *,
+        gainer_pcts: dict[str, Fraction],
+        loser_pcts: dict[str, Fraction],
+        symbol_of: dict[str, str],
     ) -> None:
-        """DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 Law 5 — INDEPENDENT verdicts.
+        """Pin both lists' exact order + every wire pct vs the oracle.
 
-        The shipped futures golden covers only the BOTH-False arm; this pins
-        the split: the prev-CLOSE baseline rides the contiguous Fri 2025-09-26
-        1-day bar (whose OI is NULL), while the OI baseline minute-recovers
-        from the older Thu 2025-09-25 session → ONLY the ``oi_baseline_*``
-        twin appears (``prev_close_*`` absent) with exactly ONE ``kind="oi"``
-        WARN, and every served value is untouched.
+        *symbol_of* maps each oracle key to its WIRE symbol (identity for
+        spot; the full contract symbol for futures/options).
         """
-        day = date(2025, 9, 29)  # Mon — the snapshot day
-        fut = "NSE-NIFTY-30Sep25-FUT"
-        # Session bars (Mon) + the OLDER Thu minute bars carrying the OI the
-        # 1-day-NULL fallback recovers — one write (both in 2025-09).
-        _write(
-            tmp_path,
-            segment="FNO",
-            symbol=fut,
-            interval="1minute",
-            bars=[
-                _min_bar(
-                    hour=9, minute=15, close="19990", volume=50, oi=1000, day=date(2025, 9, 25)
-                ),
-                _min_bar(hour=9, minute=15, close="20050", volume=100, oi=1050, day=day),
-                _min_bar(hour=9, minute=16, close="20100", volume=400, oi=1100, day=day),
-            ],
-        )
-        # The prior 1-day bar ON the true prior session (Fri 09-26, weekend
-        # spanned → close CONTIGUOUS) — with a NULL OI, forcing the OI-baseline
-        # minute fallback onto Thu 09-25 (non-contiguous).
-        _write(
-            tmp_path,
-            segment="FNO",
-            symbol=fut,
-            interval="1day",
-            bars=[_day_bar(day=date(2025, 9, 26), close="20000", oi=None)],
-        )
-        with capture_logs() as logs:
-            payload = run_futures_snapshot(
-                lake_root=tmp_path, interval="1day", date=day.isoformat(), time=None, top_n=5
+        pct_of_wire = {symbol_of[key]: pct for key, pct in {**gainer_pcts, **loser_pcts}.items()}
+        gainers = body["price_gainers"]
+        losers = body["price_losers"]
+        assert isinstance(gainers, list) and isinstance(losers, list)
+        expected_gainers = [symbol_of[k] for k in _order_oracle(gainer_pcts, descending=True)]
+        expected_losers = [symbol_of[k] for k in _order_oracle(loser_pcts, descending=False)]
+        assert [r["symbol"] for r in gainers] == expected_gainers
+        assert [r["symbol"] for r in losers] == expected_losers
+        for row in [*gainers, *losers]:
+            assert Fraction(row["pct_change"]) == pct_of_wire[row["symbol"]]
+
+    def test_spot_gainers_descending_losers_most_negative_first(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        for sym, (prev, cur) in {**_SPOT_GAINER_CLOSES, **_SPOT_LOSER_CLOSES}.items():
+            _write(
+                tmp_path,
+                symbol=sym,
+                interval="1day",
+                bars=[
+                    _day_bar(day=date(2024, 6, 12), close=prev, volume=5),
+                    _day_bar(day=_DAY, close=cur, volume=5),
+                ],
             )
-        (row,) = payload["price_gainers"]
-        # Served values untouched: %CHNG off the CONTIGUOUS Fri close, OI% off
-        # the Thu-recovered baseline — both hand-recomputed as EXACT rationals
-        # (the PCTB idiom — genuinely independent of production's Decimal
-        # operand order, never a re-derivation with the same operators).
-        assert Fraction(row["pct_change"]) == Fraction(20100 - 20000, 20000) * 100
-        assert Fraction(row["pct_change"]) == Fraction(1, 2)
-        assert Fraction(row["oi_chg_pct"]) == Fraction(1100 - 1000, 1000) * 100
-        assert Fraction(row["oi_chg_pct"]) == Fraction(10, 1)
-        # ONLY the OI twin is stamped; the close pair is ABSENT (contiguous).
-        assert "prev_close_session" not in row
-        assert "prev_close_contiguous" not in row
-        assert row["oi_baseline_session"] == "2025-09-25"
-        assert row["oi_baseline_contiguous"] is False
-        # Exactly ONE warn, and it names the OI kind + both sessions.
-        warns = [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"]
-        assert len(warns) == 1
-        assert warns[0]["kind"] == "oi"
-        assert warns[0]["symbol"] == fut
-        assert warns[0]["found_session"] == "2025-09-25"
-        assert warns[0]["expected_session"] == "2025-09-26"
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "spot", "interval": "1day", "date": _DAY.isoformat()},
+        ).json()
+        self._assert_orders(
+            body,
+            gainer_pcts=_pct_oracle(_SPOT_GAINER_CLOSES),
+            loser_pcts=_pct_oracle(_SPOT_LOSER_CLOSES),
+            symbol_of={s: s for s in {**_SPOT_GAINER_CLOSES, **_SPOT_LOSER_CLOSES}},
+        )
+
+    def test_futures_gainers_descending_losers_most_negative_first(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # One near-month contract per DISTINCT underlying (the futures tab
+        # serves one row per underlying's near contract), prior 1-day close
+        # 20000 each, snapshot 1-minute closes giving ±3/±2/±1 %.
+        gainer_closes = {
+            "GMID": ("20000", "20400"),
+            "GTOP": ("20000", "20600"),
+            "GLOW": ("20000", "20200"),
+        }
+        loser_closes = {
+            "LSML": ("20000", "19400"),
+            "LMID": ("20000", "19600"),
+            "LBIG": ("20000", "19800"),
+        }
+        symbol_of = {u: f"NSE-{u}-27Jun24-FUT" for u in {**gainer_closes, **loser_closes}}
+        for underlying, (prev, cur) in {**gainer_closes, **loser_closes}.items():
+            fut = symbol_of[underlying]
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=fut,
+                interval="1day",
+                bars=[_day_bar(day=date(2024, 6, 12), close=prev, oi=1000)],
+            )
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=fut,
+                interval="1minute",
+                bars=[_min_bar(hour=9, minute=15, close=cur, volume=100, oi=1100)],
+            )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "futures", "interval": "1day", "date": _DAY.isoformat()},
+        ).json()
+        self._assert_orders(
+            body,
+            gainer_pcts=_pct_oracle(gainer_closes),
+            loser_pcts=_pct_oracle(loser_closes),
+            symbol_of=symbol_of,
+        )
+
+    def test_options_gainers_descending_losers_most_negative_first(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        # Six CE contracts on ONE underlying + expiry (all land in the near
+        # tier), prior 1-day close 100 each, snapshot closes giving ±3/±2/±1 %.
+        gainer_closes = {"20100": ("100", "102"), "20000": ("100", "103"), "20200": ("100", "101")}
+        loser_closes = {"20300": ("100", "97"), "20400": ("100", "98"), "20500": ("100", "99")}
+        symbol_of = {
+            strike: f"NSE-NIFTY-27Jun24-{strike}-CE" for strike in {**gainer_closes, **loser_closes}
+        }
+        for strike, (prev, cur) in {**gainer_closes, **loser_closes}.items():
+            ce = symbol_of[strike]
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=ce,
+                interval="1day",
+                bars=[_day_bar(day=date(2024, 6, 12), close=prev, oi=1000)],
+            )
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=ce,
+                interval="1minute",
+                bars=[_min_bar(hour=9, minute=15, close=cur, volume=100, oi=1100)],
+            )
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        body = client.get(
+            "/api/v1/movers",
+            params={"asset": "options", "interval": "1day", "date": _DAY.isoformat()},
+        ).json()
+        self._assert_orders(
+            body,
+            gainer_pcts=_pct_oracle(gainer_closes),
+            loser_pcts=_pct_oracle(loser_closes),
+            symbol_of=symbol_of,
+        )
 
 
 # ── noncontiguous WARN cap end-to-end (audit worker D, P7) ─────────────────
