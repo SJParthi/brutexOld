@@ -413,8 +413,10 @@ class TestRecordedFillMode:
             recorded_fill_mode_from_audit(path)
 
     def test_inconsistent_modes_refuse(self, tmp_path: Path) -> None:
-        # Reachable only via a >2-mode future vocabulary or a tampered tree —
-        # the reader refuses rather than picking a winner.
+        # A worst_case entry followed by a literal "precise" entry: today's
+        # two-member vocabulary makes the second line trip the KEY-ABSENCE
+        # tamper refusal (a literal PRECISE token is never emitted) BEFORE
+        # the inconsistency fold — refused either way, never a picked winner.
         path = tmp_path / "a.jsonl"
         with AuditWriter.open(path) as audit:
             audit.append(
@@ -428,6 +430,40 @@ class TestRecordedFillMode:
                 payload={"instrument": "NIFTY", "params": {"fill_mode": "precise"}},
             )
         with pytest.raises(SweepVerifyError):
+            recorded_fill_mode_from_audit(path)
+
+    def test_inconsistent_modes_refuse_under_a_future_vocabulary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The genuine two-DIFFERENT-recorded-modes raise is structurally
+        # unreachable under today's two-member vocabulary (the ONLY
+        # non-PRECISE member is WORST_CASE; a literal "precise" is refused
+        # earlier as tampered) — it is the DEFENSIVE TOTALITY arm for a
+        # future third mode. Drive it with a three-member fake vocabulary
+        # patched into the module's own FillMode binding.
+        import enum
+
+        from brutex.engine import sweep_verify as sv_mod
+
+        class _FutureMode(enum.Enum):
+            WORST_CASE = "worst_case"
+            PESSIMAL = "pessimal"  # the hypothetical third mode
+            PRECISE = "precise"
+
+        monkeypatch.setattr(sv_mod, "FillMode", _FutureMode)
+        path = tmp_path / "a.jsonl"
+        with AuditWriter.open(path) as audit:
+            audit.append(
+                action="SWEEP_START",
+                subject="s1",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "worst_case"}},
+            )
+            audit.append(
+                action="SWEEP_START",
+                subject="s2",
+                payload={"instrument": "NIFTY", "params": {"fill_mode": "pessimal"}},
+            )
+        with pytest.raises(SweepVerifyError, match="inconsistent recorded fill_mode"):
             recorded_fill_mode_from_audit(path)
 
     def test_corrupt_chain_refuses(self, tmp_path: Path) -> None:
