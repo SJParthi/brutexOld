@@ -6,7 +6,9 @@ E filters + the F tip re-verify). The audit found ZERO new correctness defects �
 these tests upstream the audit's independent-oracle checks that were NOT already
 pinned by the shipped suites, so a future regression fails a named test instead
 of a re-audit. House rules throughout: real lakes via the production
-:class:`~brutex.data.parquet_writer.ParquetWriter` ONLY, routes via
+:class:`~brutex.data.parquet_writer.ParquetWriter` ONLY, routes (where a test
+drives a route — two tests deliberately drive ``run_movers_snapshot`` /
+``compute_spot_candidates`` directly) via
 :func:`~brutex.dashboard.app.build_app` + ``TestClient``, and every expected
 number recomputed by a hand-rolled INTEGER-paisa / :class:`fractions.Fraction`
 oracle inside the test (no production helper computes an expected value).
@@ -31,10 +33,24 @@ Pinned here (each verified ABSENT from the existing movers suites first):
 * the multi-row gainers/losers ORDER law on ALL THREE tabs (spot / futures /
   options): ≥3 candidates per side with distinct %CHNG magnitudes serve
   ``price_gainers`` DESCENDING (largest gain first) and ``price_losers``
-  ASCENDING (most negative first) — the refuter-round-1 teeth gap: a
-  one-character sort-sign flip in any tab's ranker survived the entire
-  859-test movers battery because every shipped gainers/losers assertion
-  was single-row or empty (R1-teeth-refuter F1);
+  ASCENDING (most negative first). HONEST teeth provenance (refuter round 2
+  — corrects the round-1 over-generalised "any tab's flip survived the
+  battery" claim): the genuinely UNPINNED repo gaps were EXACTLY spot
+  gainers, spot losers and futures LOSERS — the SPOT flips empirically
+  survived R1's 859-passed ``-k movers`` battery snapshot
+  (R1-teeth-refuter F1, a spot-scoped measurement; the count is that run's
+  passed-count, not a stable selection size) and the futures-losers flip
+  survived every pre-existing test on round-2 re-measurement; futures
+  GAINERS and options BOTH directions were ALREADY killed by shipped
+  multi-row UNIT order pins (``tests/unit/test_movers_futures.py::
+  TestRanking::test_top_n_caps_and_orders_descending``;
+  ``tests/unit/test_movers_options.py::TestRankers::
+  test_price_gainers_positive_desc`` / ``test_price_losers_negative_asc``),
+  so for those three list-directions the pins here are ROUTE-level
+  complements — real lake → candidate compute → payload → wire, plus exact
+  wire-pct :class:`fractions.Fraction` oracles — to the ``_mover()``-stub
+  unit pins (the same unit-vs-route differentiation the min-volume equality
+  trio uses);
 * the noncontiguous-WARN cap END-TO-END through the real
   ``compute_spot_candidates`` loop (25 holed symbols → exactly 20 WARNs + ONE
   suppressed summary, every row still stamped — the shipped cap test drives
@@ -72,6 +88,15 @@ current stale-stored serve): the stored-partition freshness class of
 DEC-MOVERS-STORED-FRESHNESS-001 / DEC-MOVERS-DAILY-FRESHNESS-001 (PRs #1511 +
 #1358). No test below touches ``_read_intraday_bars`` / ``_read_cut_1m_frame``
 freshness territory or ``templates/movers.html``.
+
+IN-FLIGHT COMPATIBILITY (PR #1462 — the dashboard bad-tick READ screen,
+``brutex/data/bar_screen.py`` + ``movers_snapshot.screen_frame``): that lane
+SKIPS at read time any bar whose close is ``>= 4x`` or ``<= 1/4x`` the
+previous in-session KEPT close (first bar of a session exempt). FIXTURE
+DESIGN RULE for this file: every fixture keeps ALL adjacent in-session
+closes within the (1/4x, 4x) band — or uses single-bar sessions (first-bar
+exempt) — so all 19 tests pass identically with and without that screen
+(round-2 merge-verified against the #1462 head).
 
 Skipped when ``fastapi`` / ``duckdb`` / ``polars`` / ``pyarrow`` are absent.
 """
@@ -235,14 +260,25 @@ class TestValueWireExactness:
         # comparator COLLAPSES them to the same double, ties, and the
         # (symbol, exchange, segment) tie-break would rank BIGA first — the
         # exact-int ranking must put BIGB (v + 1) first.
-        big_v = 9_900_003 * 2_000_000_000  # close 99000.03 × volume 2e9, one bar
+        #
+        # Fixture design (round 2 — the PR #1462 read-screen rule in the module
+        # docstring): the paired second bars keep every adjacent-close ratio
+        # INSIDE the (1/4x, 4x) bad-tick band (99000.03 → 90000.00 / 90000.01
+        # ≈ 0.909x), so the +1 paisa differentiator never rides a screenable
+        # spike. big_v = 9_900_003 paisa × 2e9 + 9_000_000 paisa × 1 (both
+        # snapped-HLC3 × volume integer products, per bar).
+        big_v = 9_900_003 * 2_000_000_000 + 9_000_000 * 1
         assert big_v > 2**53
         assert float(big_v) == float(big_v + 1)  # the float64 collapse this pins
         _write(
             tmp_path,
             symbol="BIGA",
             interval="1minute",
-            bars=[_min_bar(hour=9, minute=15, close="99000.03", volume=2_000_000_000)],
+            bars=[
+                _min_bar(hour=9, minute=15, close="99000.03", volume=2_000_000_000),
+                # 9_000_000 paisa of turnover: close 90000.00 × volume 1.
+                _min_bar(hour=9, minute=16, close="90000.00", volume=1),
+            ],
         )
         _write(
             tmp_path,
@@ -250,8 +286,8 @@ class TestValueWireExactness:
             interval="1minute",
             bars=[
                 _min_bar(hour=9, minute=15, close="99000.03", volume=2_000_000_000),
-                # +1 paisa of turnover: close 0.01 × volume 1 (HLC3 == close).
-                _min_bar(hour=9, minute=16, close="0.01", volume=1),
+                # +1 paisa vs BIGA: close 90000.01 × volume 1 (HLC3 == close).
+                _min_bar(hour=9, minute=16, close="90000.01", volume=1),
             ],
         )
         client = TestClient(build_app(DashboardState(), instrument_store=store))
@@ -332,15 +368,17 @@ def _suffix_session(*, mutate_after: int | None) -> list[CandleBar]:
     """Ten 1-minute NIFTY bars 09:15–09:24 (close 100+i, volume 10+i).
 
     With *mutate_after* = 4, every bar STRICTLY AFTER 09:19 (indices 5..9) is
-    perturbed (+1000 close, +7 volume) — the divergent suffix; ``None`` keeps
-    the reference session.
+    perturbed (+150 close, +7 volume) — the divergent suffix. The +150 step
+    (104 → 255 at the boundary, ≈ 2.45x) stays INSIDE the PR #1462 (1/4x, 4x)
+    bad-tick band (the module-docstring fixture rule), so the divergence
+    survives a read screen. ``None`` keeps the reference session.
     """
     bars: list[CandleBar] = []
     for i in range(10):
         close = 100 + i
         volume = 10 + i
         if mutate_after is not None and i > mutate_after:
-            close += 1000
+            close += 150
             volume += 7
         bars.append(_min_bar(hour=9, minute=15 + i, close=str(close), volume=volume))
     return bars
@@ -398,7 +436,7 @@ class TestAsOfSuffixIndependence:
 
     def test_whole_day_rows_genuinely_diverge(self, tmp_path: Path) -> None:
         # The anti-vacuity control: WITHOUT a cutoff the two lakes serve
-        # different closes (109 vs 1109) — the suffix mutation is real.
+        # different closes (109 vs 259) — the suffix mutation is real.
         lake_a = tmp_path / "a"
         lake_b = tmp_path / "b"
         _seed_suffix_lake(lake_a, mutate_after=None)
@@ -410,7 +448,7 @@ class TestAsOfSuffixIndependence:
             lake_root=lake_b, interval="1minute", date=_DAY.isoformat(), time=None, top_n=5
         )
         assert whole_a["price_gainers"][0]["ltp"] == "₹109.00"
-        assert whole_b["price_gainers"][0]["ltp"] == "₹1,109.00"
+        assert whole_b["price_gainers"][0]["ltp"] == "₹259.00"
 
 
 # ── futures Near/Next/Far cache-independence SIZE law (audit worker C) ─────
@@ -489,7 +527,7 @@ class TestFuturesTierCacheIndependenceSizes:
         assert movers_cache.size() == 3
 
 
-# ── multi-row gainers/losers ORDER teeth (refuter round 1, F1) ─────────────
+# ── multi-row gainers/losers ORDER teeth (refuter rounds 1 + 2) ────────────
 #
 # The production laws under pin (read from source, then pinned):
 #   * ``movers_snapshot._gainers`` / ``movers_futures.rank_price_gainers`` /
@@ -497,11 +535,23 @@ class TestFuturesTierCacheIndependenceSizes:
 #     (``-(pct)`` primary key; largest gain first);
 #   * the ``_losers`` / ``rank_price_losers`` twins — pct_change < 0,
 #     ASCENDING (raw ``pct`` primary key; most negative first).
-# Every pre-existing repo assertion on those lists was single-row or empty,
-# so a one-character sort-sign flip survived the whole 859-test movers
-# battery (R1-teeth-refuter.md — captured wire repro: a 2-gainer lake served
-# ['SMALLGAIN', 'BIGGAIN'] under the mutant). These pins drive ≥3 candidates
-# per side, with distinct %CHNG magnitudes, through the LIVE routes.
+# HONEST teeth provenance (round 2 — corrects the round-1 fix's
+# over-generalised "a flip in any tab survived the battery" claim): the
+# genuinely UNPINNED repo gaps were exactly SPOT gainers, SPOT losers and
+# FUTURES losers. The spot flips survived R1's 859-passed ``-k movers``
+# battery snapshot (R1-teeth-refuter.md, a SPOT-scoped measurement —
+# captured wire repro: a 2-gainer lake served ['SMALLGAIN', 'BIGGAIN'] under
+# the mutant); the futures-losers flip survived every pre-existing test on
+# round-2 re-measurement. Futures GAINERS and options BOTH directions were
+# ALREADY killed by shipped multi-row UNIT order pins
+# (``test_movers_futures.py::TestRanking::test_top_n_caps_and_orders_descending``;
+# ``test_movers_options.py::TestRankers::test_price_gainers_positive_desc``
+# + ``test_price_losers_negative_asc``) — for those three list-directions
+# the tests below are ROUTE-level complements (real lake → candidate compute
+# → payload → wire, plus exact wire-pct ``Fraction`` oracles) to those
+# ``_mover()``-stub unit pins: the same unit-vs-route differentiation the
+# min-volume equality trio applies. These pins drive ≥3 candidates per side,
+# with distinct %CHNG magnitudes, through the LIVE routes.
 
 # symbol → (prior-session close, snapshot close) per side; %CHNG magnitudes
 # all distinct so the exact list order is fully pct-determined (the
@@ -533,6 +583,11 @@ class TestGainersLosersMultiRowOrder:
     values AND the exact list order, at ROUTE level so the pins exercise each
     tab's real ranker (``_gainers``/``_losers`` · ``rank_price_gainers``/
     ``rank_price_losers`` in ``movers_futures`` and ``movers_options``).
+
+    Teeth provenance (round 2, honest): NOVEL order coverage exists here for
+    spot (both sides) and futures LOSERS only; the futures-gainers and
+    options assertions are ROUTE-level + exact-wire-pct complements to the
+    shipped unit order pins (see the section comment above).
     """
 
     def _assert_orders(
@@ -634,8 +689,14 @@ class TestGainersLosersMultiRowOrder:
     ) -> None:
         # Six CE contracts on ONE underlying + expiry (all land in the near
         # tier), prior 1-day close 100 each, snapshot closes giving ±3/±2/±1 %.
-        gainer_closes = {"20100": ("100", "102"), "20000": ("100", "103"), "20200": ("100", "101")}
-        loser_closes = {"20300": ("100", "97"), "20400": ("100", "98"), "20500": ("100", "99")}
+        # Strike→pct assignment PERMUTED (round-2 F2) so the expected pct
+        # order is NEITHER the lexicographic contract-symbol order NOR its
+        # reverse on EITHER side: gainers expect [20200, 20000, 20100] and
+        # losers expect [20400, 20500, 20300] — a pct-key-drop mutant
+        # (``pool.sort(key=_sort_key)``) now fails IN-FILE instead of
+        # coinciding with the symbol tie-break (mutant-verified round 2).
+        gainer_closes = {"20000": ("100", "102"), "20100": ("100", "101"), "20200": ("100", "103")}
+        loser_closes = {"20300": ("100", "99"), "20400": ("100", "97"), "20500": ("100", "98")}
         symbol_of = {
             strike: f"NSE-NIFTY-27Jun24-{strike}-CE" for strike in {**gainer_closes, **loser_closes}
         }
