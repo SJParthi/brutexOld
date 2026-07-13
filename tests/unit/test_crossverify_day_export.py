@@ -16,10 +16,12 @@ from brutex.calendars.nse import SessionType, TradingSession
 from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity
 from brutex.crossverify.day_export import (
     CANONICAL_COLUMNS,
-    SETTLE_RETRY_REASONS_FUT,
+    OBSERVE_PUBLISH_REASONS,
     SETTLE_RETRY_REASONS_INDEX,
+    STRICT_INDEX_COORDS,
     _decide,
     export_symbol,
+    index_export_policy,
     make_day_frame_reader,
     read_day_bars,
 )
@@ -336,9 +338,106 @@ class TestDecide:
             == expected
         )
 
+    @pytest.mark.parametrize(
+        ("reason", "incomplete", "last_bar_complete", "expected"),
+        [
+            # The APPROVED index-policy ruling (#1788 fix round): off the
+            # trio the count law is OBSERVE-ONLY — bars + complete close
+            # edge PUBLISH; zero bars = honest nothing; a forming last bar
+            # still withholds (genuinely unsettled data).
+            ("count_short", True, True, "publish"),
+            ("count_excess", True, True, "publish"),
+            ("count_short", True, False, "withheld"),
+            ("count_excess", True, False, "withheld"),
+            ("count_short", True, None, "nothing"),  # zero bars → count_short(0)
+            ("no_today_bars", False, None, "nothing"),  # defensive — gate never emits
+            ("last_bar_incomplete", True, True, "withheld"),  # the gate's own close-edge law
+            ("abstain_coverage", False, None, "withheld"),
+            ("complete", False, None, "publish"),
+        ],
+    )
+    def test_observe_index_decision_table(
+        self,
+        reason: str,
+        incomplete: bool,
+        last_bar_complete: bool | None,
+        expected: str,
+    ) -> None:
+        assert (
+            _decide(
+                instrument_class="index_spot",
+                reason=reason,
+                incomplete=incomplete,
+                covers_today=True,
+                index_policy="observe",
+                last_bar_complete=last_bar_complete,
+            )
+            == expected
+        )
+
+    def test_observe_policy_never_touches_non_index_classes(self) -> None:
+        # The tier is index_spot-only: a cash/fut decision is byte-identical
+        # under either policy token (the observe arm is class-guarded).
+        for instrument_class in ("cash_spot", "fut"):
+            for reason, incomplete in (("volume_all_zero", True), ("no_today_bars", False)):
+                strict = _decide(
+                    instrument_class=instrument_class,
+                    reason=reason,
+                    incomplete=incomplete,
+                    covers_today=True,
+                )
+                observe = _decide(
+                    instrument_class=instrument_class,
+                    reason=reason,
+                    incomplete=incomplete,
+                    covers_today=True,
+                    index_policy="observe",
+                    last_bar_complete=True,
+                )
+                assert strict == observe
+
     def test_settle_retry_reason_sets(self) -> None:
+        # INDEX only — the FUT twin left with the futures legs
+        # (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788).
         assert frozenset({"count_short", "last_bar_incomplete"}) == SETTLE_RETRY_REASONS_INDEX
-        assert frozenset({"oi_null_settling"}) == SETTLE_RETRY_REASONS_FUT
+        from brutex.crossverify import day_export
+
+        assert not hasattr(day_export, "SETTLE_RETRY_REASONS_FUT")
+
+    def test_observe_publish_reasons_are_the_count_tokens(self) -> None:
+        assert frozenset({"count_short", "count_excess"}) == OBSERVE_PUBLISH_REASONS
+
+
+class TestIndexExportPolicy:
+    def test_strict_coords_mirror_the_engine_trio_constant(self) -> None:
+        # Reused, never re-minted (the ruling): the strict tier IS the
+        # brute-force engine surface — drift here means the engine scope moved.
+        from brutex.universe import BRUTE_FORCE_INDEX_UNDERLYINGS
+
+        assert (
+            frozenset(
+                (exchange.value, symbol) for exchange, symbol in BRUTE_FORCE_INDEX_UNDERLYINGS
+            )
+            == STRICT_INDEX_COORDS
+        )
+        assert (
+            frozenset({("NSE", "NIFTY"), ("NSE", "BANKNIFTY"), ("BSE", "SENSEX")})
+            == STRICT_INDEX_COORDS
+        )
+
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY"])
+    def test_trio_nse_indices_are_strict(self, symbol: str) -> None:
+        assert index_export_policy(_identity("INDEX", symbol)) == "strict"
+
+    def test_sensex_is_strict(self) -> None:
+        assert index_export_policy(_identity("INDEX", "SENSEX", exch="BSE")) == "strict"
+
+    @pytest.mark.parametrize("symbol", ["INDIAVIX", "NIFTYIT", "FINNIFTY"])
+    def test_non_trio_indices_observe(self, symbol: str) -> None:
+        # INDIAVIX is the canonical UNVERIFIED example (CLAUDE.md §6) —
+        # observe-only until a probe-evidenced promotion DEC lands
+        # (DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001, named in #1788).
+        assert index_export_policy(_identity("INDEX", symbol)) == "observe"
 
 
 def _static_reader(bars: list[CandleBar]) -> DayFrameReader:
@@ -637,3 +736,106 @@ class TestExportSymbol:
         assert export.disposition == "publish"
         assert export.csv_bytes is not None
         assert b",0\n" in export.csv_bytes  # oi=0 renders 0
+
+
+class TestObserveIndexTiers:
+    """The #1788-fix-round tier table at the export_symbol level (F1):
+    trio = strict withhold; non-trio = observe-only count law."""
+
+    _OBS = "NIFTYIT"  # any non-trio, key-safe NSE index
+
+    def _count_short(self, distinct: int) -> FakeVerdict:
+        return FakeVerdict(
+            reason="count_short",
+            incomplete=True,
+            distinct_minutes=distinct,
+            expected_minutes=375,
+        )
+
+    def test_non_trio_short_day_publishes_with_info_counter(self) -> None:
+        # 374-equivalent shape: bars exist, close edge complete (15:29 —
+        # session_last_bar_complete's +1-minute half-open law) → PUBLISH
+        # with the count anomaly COUNTED (one INFO), never a withhold.
+        import structlog.testing
+
+        bars = [_bar(9, 15), _bar(15, 29)]
+        with structlog.testing.capture_logs() as logs:
+            export = export_symbol(
+                identity=_identity("INDEX", self._OBS),
+                day=_DAY,
+                session=_SESSION,
+                reader=_static_reader(bars),
+                classifier=ScriptedClassifier(default=self._count_short(2)),
+            )
+        assert export.disposition == "publish"
+        assert export.reason == "count_short"  # the run-level observe counter keys on this
+        assert export.csv_bytes is not None
+        assert export.sha256 is not None
+        assert export.row_count == 2  # the strict expected_minutes belt is trio-scoped
+        events = [e for e in logs if e["event"] == "crossverify.observe_count_anomaly"]
+        assert len(events) == 1
+        assert events[0]["symbol"] == repr(self._OBS)
+        assert events[0]["distinct_minutes"] == 2
+        assert events[0]["expected_minutes"] == 375
+
+    def test_trio_short_day_still_withholds_even_with_complete_close_edge(self) -> None:
+        # The STRICT 375-bar law stays scoped to the VERIFIED engine trio:
+        # the SAME bars/verdict that publish for a non-trio index withhold
+        # for NIFTY (count_short verbatim — settle-retry eligible).
+        export = export_symbol(
+            identity=_identity(),  # NIFTY — strict trio
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15), _bar(15, 29)]),
+            classifier=ScriptedClassifier(default=self._count_short(2)),
+        )
+        assert export.disposition == "withheld"
+        assert export.reason == "count_short"
+        assert export.csv_bytes is None
+
+    def test_non_trio_zero_bar_day_is_honest_nothing(self) -> None:
+        # The real gate reads count_short(0) for a zero-bar index day — the
+        # observe tier maps it to honest nothing (never a CRITICAL), reason
+        # relabelled to the true cause (no_today_bars, not the masking count).
+        export = export_symbol(
+            identity=_identity("INDEX", self._OBS),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([]),
+            classifier=ScriptedClassifier(default=self._count_short(0)),
+        )
+        assert export.disposition == "nothing"
+        assert export.reason == "no_today_bars"
+        assert export.csv_bytes is None
+
+    def test_non_trio_forming_last_bar_withholds_named(self) -> None:
+        # A forming last bar is genuinely unsettled data — withheld under
+        # the TRUE cause token (last_bar_incomplete; count_short alone
+        # publishes off the trio), keeping the settle-retry belt armed.
+        export = export_symbol(
+            identity=_identity("INDEX", self._OBS),
+            day=_DAY,
+            session=_SESSION,
+            reader=_static_reader([_bar(9, 15), _bar(12, 0)]),
+            classifier=ScriptedClassifier(default=self._count_short(2)),
+        )
+        assert export.disposition == "withheld"
+        assert export.reason == "last_bar_incomplete"
+        assert export.csv_bytes is None
+
+    def test_non_trio_complete_day_publishes_without_anomaly_info(self) -> None:
+        # A complete non-trio day is a STRICT-tier publish (reason
+        # "complete") — no anomaly INFO, no observe counter.
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as logs:
+            export = export_symbol(
+                identity=_identity("INDEX", self._OBS),
+                day=_DAY,
+                session=_SESSION,
+                reader=_static_reader([_bar(9, 15), _bar(15, 29)]),
+                classifier=ScriptedClassifier(default=FakeVerdict(distinct_minutes=2)),
+            )
+        assert export.disposition == "publish"
+        assert export.reason == "complete"
+        assert not [e for e in logs if e["event"] == "crossverify.observe_count_anomaly"]
