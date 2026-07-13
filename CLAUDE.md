@@ -22,12 +22,14 @@ _Last updated: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
 #1760a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
 the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1760b–#1760d companion
-headers), REFUTER ROUNDS 1 + 2 + 3 + 5 folded: the /universe mapping-integrity compare
+headers), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
 keyed through the COMMON F&O underlying-forms resolver via an injected
 plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
 alarm live; the round-5 CROSS-OWNER guard — a normalize-colliding sibling's
 coverage can never mask an own-key attempted-and-zero — plus the MI-6
-attempted-match tooth; the writer's KEYING byte-untouched — the writer file
+attempted-match tooth, and the round-7 materialize-once memo so a
+single-shot `covered_years` iterator value can never exhaust into a
+false-RED; the writer's KEYING byte-untouched — the writer file
 gains only the sub-(c) blank-row isolation; default-None byte-identical), the /movers
 stored-first intraday read gains the VERIFY-EQUALITY freshness guard (a stored
 TF day frame is served only when it EQUALS the in-memory resample of the
@@ -40,7 +42,9 @@ bucket labels on the 1st of an IST month — a fresh month-edge lake now serves
 its COMPLETE stored frame instead of a permanent false-stale WARN or main's
 silent bucket drop; fresh lakes byte-identical, pinned; the round-3 fold gates
 the probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
-route-pinned; daily arm = named
+route-pinned; round-7: the equality wording corrected to the executed
+truth — value-exact, dtype-INSENSITIVE polars `.equals`, drift-pinned;
+daily arm = named
 follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made
 total for the blank-symbol degenerate (IndexError → self-key; blank rows
 skipped + counted at the kind-map AND the metadata grid — the round-1-falsified
@@ -2426,10 +2430,21 @@ hostile-review pass._
   the non-colliding union unchanged in the SAME store), all 8 applied mutants killed;
   the guard mechanises the GATING direction only (a cross-owned form may still upgrade
   a non-gating state in the unreachable collision world — no RED is ever masked).
+  REFUTER ROUND 7 folded (H1-2, reproduced MINOR): the round-2/5 fold read each
+  `covered_years` value TWICE (own_years + years — the raw key is in both), so a
+  single-shot `Iterable[int]` iterator value (annotation-legal; zero in-repo
+  producers) exhausted into a false-RED `none` where main read GREEN — closed by
+  the `_probe_years` per-call memo materializing each (exchange, form) probe
+  EXACTLY ONCE (re-iterable inputs byte-identical, the existing pin family green
+  unmodified; two new-signature regressions proven failing with the memo
+  stash-reverted — they pass `key_forms` explicitly, so they cannot even run at
+  merge-base).
   **(b — DEC-MOVERS-STORED-FRESHNESS-001, R7)** the
   /movers spot stored-first intraday read gains the FOURTH member of its decision
   family — a VERIFY-EQUALITY freshness guard (REFUTER ROUND 1 folded): a stored TF day
-  frame is served only when it EQUALS — dtype/column-order-exact `.equals` — the
+  frame is served only when it EQUALS — value-exact, column-name+order-exact,
+  dtype-INSENSITIVE polars `.equals` (the round-7 wording truth; value-exactness
+  is the load-bearing property) — the
   in-memory `resample_1m_to_tf` of the UNCUT 1-minute base day frame, the SAME resampler
   the fallback runs and the prebuild wrote the partition with (one implementation, §11;
   fresh ⇒ byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 contract, probed + pinned).
@@ -2481,7 +2496,16 @@ hostile-review pass._
   200) — closed with the `day > date.min` FOURTH probe conjunct (no prior day ⇒ no
   prior-month file, definitionally inapplicable; the explicit gate over a blanket
   except) + predicate/read and route-level 200 regressions, both proven failing
-  with the gate reverted. **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
+  with the gate reverted. REFUTER ROUND 7 folded (H1-1, docs accuracy): the
+  round-1 "dtype-exact" `.equals` claim was executed-FALSE — polars 1.42.1
+  `DataFrame.equals` is dtype-INSENSITIVE (Float64 ≡ Float32 with equal values;
+  name/order mismatches + precision-losing casts still unequal) — behavior fully
+  safe (value-exactness is the load-bearing property: any pun that compares equal
+  serves exactly the reference-resample values), so wording is corrected at all
+  three claim sites + the NEW `TestDtypeInsensitiveEqualsPin` drift pin (a
+  hand-recast value-identical partition serves from_stored with zero warns) locks
+  the documented semantics against a future polars bump.
+  **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
   for str input (guarantee-audit): the literal `""` returned IndexError — falsifying its
   own "Never empty" docstring — and ONE blank-symbol EQ row (parser-retained in the
   universe) poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol`
@@ -6190,13 +6214,15 @@ hostile-review pass._
   companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
   DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
   consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
-  #1751), REFUTER ROUNDS 1 + 2 + 3 + 5 folded: the /universe mapping-integrity compare
+  #1751), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
   keyed through the COMMON F&O underlying-forms resolver via the injected
   plain-data `key_forms` map (the writer's KEYING byte-untouched — the writer
   file gains only the sub-(c) blank-row isolation; default-None
   byte-identical; the hyphenated/aliased silent-vanish alarm live; the round-5
   CROSS-OWNER guard — a normalize-colliding sibling's coverage can never mask
-  an own-key attempted-and-zero — plus the MI-6 attempted-match tooth), the
+  an own-key attempted-and-zero — plus the MI-6 attempted-match tooth;
+  round-7: the materialize-once memo — a single-shot `covered_years`
+  iterator value can no longer exhaust into a false-RED), the
   /movers stored-first intraday read freshness-guarded by VERIFY-EQUALITY
   (a stored TF day frame serves only when it equals the in-memory resample of
   the 1-minute base — the round-1 day-max predicate was refuted by the
@@ -6208,7 +6234,8 @@ hostile-review pass._
   a fresh month-edge lake serves its COMPLETE stored frame, never a permanent
   false-stale WARN or main's silent bucket drop; the round-3 fold gates the
   probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
-  route-pinned; daily arm = named follow-up
+  route-pinned; round-7: the equality wording corrected to value-exact,
+  dtype-INSENSITIVE polars `.equals`, drift-pinned; daily arm = named follow-up
   DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made total
   for the blank-symbol degenerate (IndexError → self-key; blank rows skipped
   + counted at the kind-map AND the metadata grid — the round-1-falsified
