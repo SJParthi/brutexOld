@@ -2497,12 +2497,30 @@ hostile-review pass._
   superset of every per-session sum — reading the same typed `stale` +
   WARN with the `"<volume sum overflows int64>"` marker; the M2/M3
   WRITE-path wrap residual stands with its reachability honesty corrected
-  — the parser caps each value, never the aggregate), never an uncaught
-  raise out of the sweep-preflight gate on the daily arm's STAMP/VALUE
-  corruption plane — the ONE disclosed residual is a wrong-dtype/null-ts
-  1-minute-base COLUMN fault, which raises identically on the pre-existing
-  intraday twin (the adjudicated round-4 MINOR: a loud diagnostic crash
-  with no daily-vs-intraday asymmetry)) keyed
+  — the parser caps each value, never the aggregate) + the
+  DEFENSIVE-TOTALITY BELT (the refuter-loop STRUCTURAL close-out — rounds
+  1-5 + 7 each found a NEW per-plane input-conversion escape, proving
+  enumeration fragile): every per-(symbol, interval) unit of
+  `lake_derived_freshness_verdicts` — lake reads AND compare, intraday AND
+  daily arms — runs under ONE `(Exception,
+  *datetime_out_of_range_escape_errors())` belt (the #1594 round-18 L3
+  blanket shape; the #1774 `today_gate_error` diagnostic-wrapper
+  precedent), ANY residual exception fail-closing to the typed `stale` +
+  ONE capped `derived_freshness_gate_error` WARN (`repr(exc)` +
+  coordinate; 20/call + suppressed summary) — so "never an uncaught raise
+  out of the sweep-preflight gate" is now STRUCTURALLY true, not
+  enumeration-dependent; the ValueError-in-broad-guards trade is taken
+  deliberately (a fail-CLOSED diagnostic REFUSAL gate — a masked genuine
+  code bug becomes a loud named refusal, never wrong results, never
+  silence; the sanctioned price of totality), every narrow inner guard
+  KEPT for per-plane diagnostics, KeyboardInterrupt/SystemExit/MemoryError
+  propagate; the belt's own fails-before is the READ plane the rounds
+  never reached (a garbage-bytes parquet — base OR derived — and a
+  missing-canonical-column partition each crashed the pre-belt gate raw,
+  executed); the former "ONE disclosed residual" (a wrong-dtype/null-ts
+  1-minute-base COLUMN fault, the adjudicated round-4 MINOR) now
+  fail-closes through the gate too and keeps its propagation envelope
+  only on DIRECT `compare_*_freshness` calls — the doctor's probe) keyed
   `(symbol, "1day")` in `lake_derived_freshness_verdicts` (sweep preflight picks
   it up with ZERO changes), the intraday compare made OI-AWARE (legacy OI=0
   partitions — SPOT engine lakes included — read stale ≤1 nightly with the
@@ -6384,7 +6402,10 @@ hostile-review pass._
   while five boundary leaks are fixed — derived-intraday OI null-preserving +
   the writer_convention stamp heal; the price-sanity gate on the daily 1m
   window read; the derived-1day freshness VALUE arm + OI-aware compare +
-  doctor all-symbols; series_load predicting on the resampler's ACTUAL
+  doctor all-symbols (+ the refuter-loop structural close-out: the
+  sweep-preflight freshness gate's per-pair defensive-totality belt —
+  any residual exception fail-closes to the typed `stale` + one capped
+  WARN, never an uncaught raise); series_load predicting on the resampler's ACTUAL
   09:15-IST grid; the magnitude-bounded parse-time OHLC clamp
   (BRUTEX_OHLC_CLAMP_REFUSE, default ON). Residuals pinned + named
   (DEC-PREBUILD-BAD-TICK-001 + DEC-DERIVED-SERVE-FRESHNESS-001 lead the

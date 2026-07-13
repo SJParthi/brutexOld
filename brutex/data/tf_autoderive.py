@@ -30,13 +30,18 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import date, datetime
     from pathlib import Path
 
     import polars as pl
 
 _LOG = structlog.get_logger(__name__)
+
+# Cap on the per-gate-invocation `derived_freshness_gate_error` WARNs (the
+# #1649a capped-WARN-plus-suppressed-summary house pattern) — every failing
+# pair still fail-closes to "stale"; only the LOG volume is bounded.
+_GATE_BELT_WARN_CAP = 20
 
 # The daily law hands ``CandleBar`` the per-session AGGREGATE volume, and a
 # polars Int64 ``.sum()`` wraps mod 2**64 SILENTLY (refuter round 7; pinned
@@ -248,9 +253,12 @@ def compare_daily_freshness(
     writer's ``CandleBar`` refusal) refuses to DERIVE from such a base
     anyway, so remediation is heal / re-pull, exactly what the WARN names.
     Base COLUMN faults outside the probed value plane (e.g. a wrong-dtype
-    ``ts_utc``) keep the documented propagation envelope (the adjudicated
-    round-4 MINOR — the pre-existing intraday twin raises identically on
-    that class).
+    ``ts_utc``) keep the documented propagation envelope ON A DIRECT CALL
+    (the adjudicated round-4 MINOR — the pre-existing intraday twin raises
+    identically on that class); through the sweep-preflight gate they — and
+    ANY other residual fault plane — fail-close to ``"stale"`` under
+    :func:`lake_derived_freshness_verdicts`'s defensive-totality belt (the
+    structural close-out; see that function's docstring).
 
     HONEST cost (Golden Rule #10): the per-date compare below is a
     NON-vectorized ``iter_rows`` Python loop — O(stored 1day rows) ≈ one row
@@ -570,6 +578,24 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     return frame.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
 
 
+def _gate_belt_errors() -> tuple[type[BaseException], ...]:
+    """The freshness gate's defensive-totality belt set — ``(Exception, *escape)``.
+
+    The exact shape of the #1594 round-18 L3 blanket
+    (``lake_heal._SWEEP_GUARD_ERRORS = (Exception, *escape)`` — the
+    boot-never-crashes contract): ``Exception`` for TOTALITY over every
+    residual per-pair fault plane, plus the
+    :func:`~brutex.data.errors.datetime_out_of_range_escape_errors` members —
+    concretely the polars ``PanicException``, a ``BaseException`` a blanket
+    ``except Exception`` misses. ``KeyboardInterrupt``/``SystemExit`` are
+    NOT members (BaseException, deliberately un-caught) and the consumer
+    re-raises ``MemoryError`` explicitly (house convention — #1482/#1594).
+    """
+    from brutex.data.errors import datetime_out_of_range_escape_errors
+
+    return (Exception, *datetime_out_of_range_escape_errors())
+
+
 def lake_derived_freshness_verdicts(
     lake_root: Path,
     *,
@@ -601,6 +627,30 @@ def lake_derived_freshness_verdicts(
     * a symbol with NO stored ``1minute`` base is never keyed — the verdict is
       unknowable without the base (abstain, mirroring the doctor's skip).
 
+    DEFENSIVE-TOTALITY BELT (DEC-DERIVED-TF-AUDIT-001 structural close-out —
+    refuter rounds 1-5 + 7 each found a NEW per-plane input-conversion escape
+    inside the daily compare, proving plane-by-plane enumeration fragile):
+    every per-``(symbol, interval)`` unit here — the lake reads AND the
+    compare, BOTH arms — runs under ONE belt guard
+    (:func:`_gate_belt_errors`, the #1594 round-18
+    ``(Exception, *escape)`` blanket shape; the #1774 ``today_gate_error``
+    wrapper is the diagnostic-gate precedent), so ANY residual exception
+    fail-closes to the typed ``"stale"`` verdict + ONE capped
+    ``derived_freshness_gate_error`` WARN carrying ``repr(exc)`` + the
+    coordinate — never an uncaught raise crashing ``brutex sweep-all`` with
+    a raw traceback (live escapes closed by the belt, each proven at
+    pre-belt HEAD: a garbage-bytes parquet in the base OR derived partition;
+    a stored partition missing a canonical column — both crashed the gate
+    raw). The house ValueError-in-broad-guards law (#1594) is addressed
+    HEAD-ON: unlike a heal batch, this is a fail-CLOSED diagnostic REFUSAL
+    gate — a masked genuine code bug becomes a LOUD named refusal (the
+    sweep is REFUSED, the WARN names the coordinate + ``repr(exc)``), never
+    wrong results and never silence, the sanctioned trade for gate
+    totality. Every NARROW inner guard in the compares is KEPT — they give
+    the precise per-plane WARN diagnostics; the belt is the backstop.
+    ``KeyboardInterrupt``/``SystemExit``/``MemoryError`` propagate (house
+    convention).
+
     The per-pair 1-minute frame is read ONCE per symbol (shared by the
     intraday AND 1day arms). O(stored bars) per launch — a deliberate
     one-time preflight cost against consuming a stale derived table into run
@@ -619,32 +669,86 @@ def lake_derived_freshness_verdicts(
     want_daily = "1day" in intervals
     if not requested and not want_daily:
         return verdicts
+    belt_errors = _gate_belt_errors()
+    belt_failures = 0
+
+    def _belt_guarded(symbol: str, interval: str, compute: Callable[[], str]) -> str:
+        """Run one per-pair unit under the defensive-totality belt (docstring above)."""
+        nonlocal belt_failures
+        try:
+            return compute()
+        except MemoryError:
+            raise  # house convention: never absorbed (#1482/#1594)
+        except belt_errors as exc:
+            belt_failures += 1
+            if belt_failures <= _GATE_BELT_WARN_CAP:
+                _LOG.warning(
+                    "derived_freshness_gate_error",
+                    symbol=repr(symbol),
+                    interval=interval,
+                    error=repr(exc),
+                    detail=(
+                        "freshness check raised — verdict 'stale' fail-closed "
+                        "(defensive-totality belt): an unreadable/corrupt "
+                        "partition, OR a code bug surfaced as this loud named "
+                        "refusal (never wrong results, never silence) — "
+                        "inspect/heal the named partition and re-run"
+                    ),
+                )
+            return "stale"
+
     for symbol in symbols:
         symbol_dir = lake_root / "bars" / exchange / segment / symbol
         base = symbol_dir / "1minute"
         if not (base.is_dir() and any(base.rglob("*.parquet"))):
             continue  # no 1-minute base → verdict unknowable → honest abstain
         df_1m: pl.DataFrame | None = None
+
+        def _base_frame(symbol_dir: Path = symbol_dir) -> pl.DataFrame:
+            nonlocal df_1m
+            if df_1m is None:
+                df_1m = read_lake_bars_frame(symbol_dir, "1minute")
+            return df_1m
+
         for interval in requested:
             derived_dir = symbol_dir / interval
             if not (derived_dir.is_dir() and any(derived_dir.rglob("*.parquet"))):
                 continue  # nothing stored → the zero-bar preflight owns this pair
-            if df_1m is None:
-                df_1m = read_lake_bars_frame(symbol_dir, "1minute")
-            verdicts[(symbol, interval)] = compare_derived_freshness(
-                df_1m,
-                read_lake_bars_frame(symbol_dir, interval),
-                parse_label(interval_to_label[interval]),
-            )
+
+            def _intraday_verdict(
+                symbol_dir: Path = symbol_dir,
+                interval: str = interval,
+                base_frame: Callable[[], pl.DataFrame] = _base_frame,
+            ) -> str:
+                return compare_derived_freshness(
+                    base_frame(),
+                    read_lake_bars_frame(symbol_dir, interval),
+                    parse_label(interval_to_label[interval]),
+                )
+
+            verdicts[(symbol, interval)] = _belt_guarded(symbol, interval, _intraday_verdict)
         if want_daily:
             daily_dir = symbol_dir / "1day"
             if daily_dir.is_dir() and any(daily_dir.rglob("*.parquet")):
-                if df_1m is None:
-                    df_1m = read_lake_bars_frame(symbol_dir, "1minute")
-                verdicts[(symbol, "1day")] = compare_daily_freshness(
-                    df_1m,
-                    read_lake_bars_frame(symbol_dir, "1day"),
-                    segment=segment,
-                    source=f"{symbol}/1day",
-                )
+
+                def _daily_verdict(
+                    symbol_dir: Path = symbol_dir,
+                    symbol: str = symbol,
+                    base_frame: Callable[[], pl.DataFrame] = _base_frame,
+                ) -> str:
+                    return compare_daily_freshness(
+                        base_frame(),
+                        read_lake_bars_frame(symbol_dir, "1day"),
+                        segment=segment,
+                        source=f"{symbol}/1day",
+                    )
+
+                verdicts[(symbol, "1day")] = _belt_guarded(symbol, "1day", _daily_verdict)
+    if belt_failures > _GATE_BELT_WARN_CAP:
+        _LOG.warning(
+            "derived_freshness_gate_error_suppressed",
+            suppressed=belt_failures - _GATE_BELT_WARN_CAP,
+            total_failures=belt_failures,
+            detail="further per-pair gate-error WARNs suppressed (cap) — every pair still read 'stale'",
+        )
     return verdicts

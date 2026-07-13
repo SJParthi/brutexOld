@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pytest
@@ -37,6 +37,10 @@ from brutex.data.timeframe_materialize import PrebuildKind, materialize_lake_tim
 from structlog.testing import capture_logs
 
 _IST = timezone(timedelta(hours=5, minutes=30))
+
+
+class _BeltCustomError(Exception):
+    """An arbitrary user-defined Exception for the gate-belt fault injection."""
 
 
 def _ist(y: int, mo: int, d: int, h: int, mi: int) -> datetime:
@@ -1143,3 +1147,212 @@ class TestCorruptBaseAggregateVolume:
             ("NIFTY", "5minute"): "stale",
             ("NIFTY", "1day"): "stale",
         }
+
+
+class TestGateBelt:
+    """The defensive-totality belt at ``lake_derived_freshness_verdicts``.
+
+    The DEC-DERIVED-TF-AUDIT-001 structural close-out: refuter rounds 1-5 + 7
+    each found a NEW per-plane input-conversion escape inside the daily
+    compare — plane-by-plane enumeration is provably fragile — so every
+    per-(symbol, interval) unit (lake reads + compare, BOTH arms) now runs
+    under ONE ``(Exception, *escape)`` belt (the #1594 round-18 blanket
+    shape) that fail-closes ANY residual exception to the typed ``"stale"``
+    verdict + ONE capped ``derived_freshness_gate_error`` WARN, instead of an
+    uncaught raise crashing ``brutex sweep-all`` with a raw traceback.
+
+    The four ``test_live_escape_*`` shapes are the fails-before evidence:
+    each was EXECUTED at pre-belt HEAD and escaped the gate raw
+    (``polars.exceptions.ComputeError`` on a garbage-bytes parquet — base
+    AND derived; ``polars.exceptions.ColumnNotFoundError`` on a stored
+    partition missing a canonical column — intraday AND daily arms). The
+    fault-injection tests are the totality evidence for planes with no known
+    concrete shape left.
+    """
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("belt-injected"),
+            RuntimeError("belt-injected"),
+            InvalidOperation("belt-injected"),
+            _BeltCustomError("belt-injected"),
+            pl.exceptions.PanicException("belt-injected"),
+        ],
+        ids=[
+            "ValueError",
+            "RuntimeError",
+            "InvalidOperation",
+            "custom-Exception",
+            "PanicException",
+        ],
+    )
+    def test_fault_injection_intraday_arm_fail_closes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        """ANY residual exception out of the INTRADAY compare reads the typed
+        'stale' + ONE WARN carrying repr(exc) + the coordinate — never a raise."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+
+        def _raise(*args: object, **kwargs: object) -> str:
+            raise exc
+
+        monkeypatch.setattr(tf_autoderive, "compare_derived_freshness", _raise)
+        with capture_logs() as logs:
+            verdicts = _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute"])
+        assert verdicts == {("NIFTY", "5minute"): "stale"}
+        (event,) = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert event["log_level"] == "warning"
+        assert event["symbol"] == repr("NIFTY")
+        assert event["interval"] == "5minute"
+        assert event["error"] == repr(exc)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError("belt-injected"),
+            RuntimeError("belt-injected"),
+            InvalidOperation("belt-injected"),
+            _BeltCustomError("belt-injected"),
+        ],
+        ids=["ValueError", "RuntimeError", "InvalidOperation", "custom-Exception"],
+    )
+    def test_fault_injection_daily_arm_fail_closes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        """The DAILY arm rides the SAME belt — any residual exception reads
+        the typed 'stale' + the coordinate-carrying WARN."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+
+        def _raise(*args: object, **kwargs: object) -> str:
+            raise exc
+
+        monkeypatch.setattr(tf_autoderive, "compare_daily_freshness", _raise)
+        with capture_logs() as logs:
+            verdicts = _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["1day"])
+        assert verdicts == {("NIFTY", "1day"): "stale"}
+        (event,) = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert event["interval"] == "1day"
+        assert event["error"] == repr(exc)
+
+    def test_live_escape_garbage_parquet_derived_fail_closes(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE (executed at pre-belt HEAD): a garbage-bytes DERIVED
+        partition escaped the gate as an uncaught polars ComputeError
+        ('The file must end with PAR1') — now the typed 'stale' + WARN."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        _partition(lake, "INDEX", "NIFTY", "5minute").write_bytes(b"not a parquet")
+        with capture_logs() as logs:
+            verdicts = _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute"])
+        assert verdicts == {("NIFTY", "5minute"): "stale"}
+        (event,) = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert "ComputeError" in event["error"]
+
+    def test_live_escape_garbage_parquet_base_fail_closes(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE (executed at pre-belt HEAD): a garbage-bytes 1-MINUTE
+        BASE escaped the shared base read as an uncaught ComputeError. The
+        belt fail-closes EACH pair that needed the base — both arms."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        _partition(lake, "INDEX", "NIFTY", "1minute").write_bytes(b"junk")
+        with capture_logs() as logs:
+            verdicts = _verdicts(
+                lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]
+            )
+        assert verdicts == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }
+        events = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert {e["interval"] for e in events} == {"5minute", "1day"}
+
+    def test_live_escape_missing_column_both_arms_fail_close(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE (executed at pre-belt HEAD): a stored partition
+        missing a canonical column ('close') escaped ``read_lake_bars_frame``'s
+        select as an uncaught ColumnNotFoundError on BOTH arms."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        for interval in ("5minute", "1day"):
+            f = _partition(lake, "INDEX", "NIFTY", interval)
+            pl.read_parquet(f).drop("close").write_parquet(f)
+        with capture_logs() as logs:
+            verdicts = _verdicts(
+                lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]
+            )
+        assert verdicts == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }
+        events = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert len(events) == 2
+        assert all("ColumnNotFoundError" in e["error"] for e in events)
+
+    @pytest.mark.parametrize("exc_type", [MemoryError, KeyboardInterrupt, SystemExit])
+    def test_non_absorbable_exceptions_propagate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
+    ) -> None:
+        """House convention: MemoryError (explicit re-raise) and
+        KeyboardInterrupt/SystemExit (never in the belt set) PROPAGATE."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+
+        def _raise(*args: object, **kwargs: object) -> str:
+            raise exc_type("belt-must-not-absorb")
+
+        monkeypatch.setattr(tf_autoderive, "compare_derived_freshness", _raise)
+        with pytest.raises(exc_type):
+            _verdicts(lake, segment="INDEX", symbol="NIFTY", intervals=["5minute"])
+
+    def test_warn_cap_suppresses_excess_warns_all_pairs_still_stale(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #1649a capped-WARN pattern: past the cap, further failing pairs
+        emit NO per-pair WARN but STILL fail-close to 'stale'; ONE suppressed
+        summary carries the true counts."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+
+        def _raise(*args: object, **kwargs: object) -> str:
+            raise RuntimeError("belt-injected")
+
+        monkeypatch.setattr(tf_autoderive, "compare_derived_freshness", _raise)
+        monkeypatch.setattr(tf_autoderive, "compare_daily_freshness", _raise)
+        monkeypatch.setattr(tf_autoderive, "_GATE_BELT_WARN_CAP", 1)
+        with capture_logs() as logs:
+            verdicts = _verdicts(
+                lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]
+            )
+        assert verdicts == {
+            ("NIFTY", "5minute"): "stale",
+            ("NIFTY", "1day"): "stale",
+        }
+        per_pair = [e for e in logs if e["event"] == "derived_freshness_gate_error"]
+        assert len(per_pair) == 1  # capped at 1
+        (summary,) = [e for e in logs if e["event"] == "derived_freshness_gate_error_suppressed"]
+        assert summary["suppressed"] == 1
+        assert summary["total_failures"] == 2
+
+    def test_healthy_lake_emits_no_belt_events(self, tmp_path: Path) -> None:
+        """The belt is a pure backstop: a healthy lake's verdicts + logs carry
+        ZERO belt events (kills an always-warn mutant)."""
+        lake = tmp_path / "lake"
+        _seed(lake, segment="INDEX", symbol="NIFTY", bars=_session((2024, 6, 12)))
+        _materialize(lake, segment="INDEX", symbol="NIFTY", kind=PrebuildKind.SPOT)
+        with capture_logs() as logs:
+            verdicts = _verdicts(
+                lake, segment="INDEX", symbol="NIFTY", intervals=["5minute", "1day"]
+            )
+        assert verdicts == {
+            ("NIFTY", "5minute"): "fresh",
+            ("NIFTY", "1day"): "fresh",
+        }
+        assert [e for e in logs if str(e["event"]).startswith("derived_freshness_gate_error")] == []

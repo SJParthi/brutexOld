@@ -229,8 +229,10 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   prebuild's own boundaries refuse to derive from such a base anyway, so
   remediation is heal/re-pull. Wrong-dtype base COLUMN faults outside the
   probed value plane (e.g. an Int64 `ts_utc`) keep the documented
-  propagation envelope (the adjudicated round-4 MINOR — the pre-existing
-  intraday twin raises identically on that class).
+  propagation envelope on a DIRECT call (the adjudicated round-4 MINOR —
+  the pre-existing intraday twin raises identically on that class); through
+  the sweep-preflight gate they now fail-close under the defensive-totality
+  belt (below).
 - The base value-screen's OWN diagnostic can no longer reopen the escape it
   closes (refuter round 5 — a regression in the round-4 fix): extracting the
   first offending instant (`repr(corrupt.get_column("ts_utc")[0])`)
@@ -266,6 +268,31 @@ fno-math --release && python scripts/check_vocab_rust_parity.py`.
   R5-pinned residual → DEC-RESAMPLE-VOLUME-GUARD-001, its reachability
   honesty corrected in the §4 M2/M3 row (the parser caps each VALUE at
   int64, never the aggregate).
+- DEFENSIVE-TOTALITY BELT (the refuter-loop STRUCTURAL close-out — rounds
+  1-5 + 7 each found a NEW per-plane input-conversion escape, proving the
+  enumeration approach fragile): every per-(symbol, interval) unit of
+  `lake_derived_freshness_verdicts` — the lake reads AND the compare,
+  intraday AND daily arms — now runs under ONE belt guard,
+  `(Exception, *datetime_out_of_range_escape_errors())` (the #1594
+  round-18 L3 blanket shape; the #1774 `today_gate_error` wrapper is the
+  diagnostic-gate precedent), so ANY residual exception fail-closes to the
+  typed `stale` verdict + ONE capped `derived_freshness_gate_error` WARN
+  carrying `repr(exc)` + the coordinate (cap 20/gate call + a suppressed
+  summary) — never an uncaught raise crashing `brutex sweep-all`. The
+  ValueError-in-broad-guards trade is taken deliberately: this is a
+  fail-CLOSED diagnostic REFUSAL gate, so a masked genuine code bug becomes
+  a loud named refusal (never wrong results, never silence) — the
+  sanctioned price of gate totality; every narrow inner guard above is
+  KEPT (precise per-plane diagnostics — the belt is the backstop);
+  KeyboardInterrupt/SystemExit/MemoryError propagate. The belt's own
+  fails-before is a LIVE escape class the rounds never reached — the READ
+  plane: a garbage-bytes parquet (base OR derived) and a stored partition
+  missing a canonical column each crashed the pre-belt gate raw (executed:
+  polars ComputeError / ColumnNotFoundError, both arms). With the belt,
+  the per-plane bullets above describe the DIAGNOSTIC precision of the
+  inner guards; gate totality no longer depends on their enumeration
+  being complete. Direct `compare_*_freshness` calls (the doctor's probe)
+  keep the documented per-plane envelope — the belt is the GATE's.
 - Clamp-refused corrupt rows are ABSENT, not repaired (keep-first + durable
   ledger re-pulls them); a corrupt field within 4× still clamps-and-stores
   (the original observe-only envelope, now bounded); a corrupt extreme that
