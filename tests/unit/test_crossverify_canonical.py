@@ -10,7 +10,6 @@ from brutex.crossverify.canonical import (
     CLASS_FUT,
     CLASS_INDEX_SPOT,
     EXPORT_FUTURES_UNDERLYINGS,
-    EXPORT_INDEX_COORDS,
     SEGMENT_BSE_EQ,
     SEGMENT_BSE_FNO,
     SEGMENT_IDX,
@@ -21,24 +20,13 @@ from brutex.crossverify.canonical import (
     symbol_key_safe,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
-from brutex.universe import V1_INDICES
 
 
 class TestIndexMapping:
-    def test_allowlist_is_exactly_the_three_indices(self) -> None:
-        # Mirror-pinned against V1_INDICES minus reference-only (design §1.3).
-        assert (
-            frozenset({("NSE", "NIFTY"), ("NSE", "BANKNIFTY"), ("BSE", "SENSEX")})
-            == EXPORT_INDEX_COORDS
-        )
-
-    def test_v1_indices_cross_check(self) -> None:
-        derived = {
-            (spec.exchange.value, spec.underlying_symbol)
-            for spec in V1_INDICES
-            if not spec.reference_only
-        }
-        assert frozenset(derived) == EXPORT_INDEX_COORDS
+    """DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788): the WHOLE spot-index universe
+    maps — every key-safe NSE index, from BSE only SENSEX — mirroring the
+    universe IDX fetch rule (supersedes the 3-coord ``EXPORT_INDEX_COORDS``
+    engine-trio allowlist)."""
 
     def test_nifty(self) -> None:
         identity = canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="NIFTY")
@@ -53,11 +41,64 @@ class TestIndexMapping:
         assert identity.segment_token == "IDX_I"
         assert identity.exchange == "BSE"
 
-    def test_indiavix_excluded(self) -> None:
-        assert canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="INDIAVIX") is None
+    @pytest.mark.parametrize("symbol", ["INDIAVIX", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"])
+    def test_every_nse_index_maps(self, symbol: str) -> None:
+        # #1788: the whole-universe widening — INDIAVIX + the sectorals map
+        # (previously excluded by the engine-trio allowlist).
+        identity = canonical_identity(exchange="NSE", segment="INDEX", lake_symbol=symbol)
+        assert identity is not None
+        assert identity.canonical_symbol == symbol
+        assert identity.segment_token == "IDX_I"
+        assert identity.instrument_class == CLASS_INDEX_SPOT
 
-    def test_giftnifty_excluded(self) -> None:
-        assert canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="GIFTNIFTY") is None
+    def test_bse_non_sensex_index_excluded(self) -> None:
+        # The universe IDX fetch rule's mirror: from BSE only SENSEX.
+        assert canonical_identity(exchange="BSE", segment="INDEX", lake_symbol="BSE100") is None
+
+    def test_unknown_exchange_index_excluded(self) -> None:
+        assert canonical_identity(exchange="MCX", segment="INDEX", lake_symbol="GOLD") is None
+
+    def test_index_rule_mirrors_universe_idx_fetch_rule(self) -> None:
+        """Mirror-pin: the mapper's INDEX arm accepts exactly the coordinates
+        ``is_universe_underlying`` admits for an IDX row (every NSE index;
+        from BSE only SENSEX) — the export can never widen past the pull."""
+        from decimal import Decimal
+
+        from brutex.models import Exchange, Instrument, InstrumentType, Segment
+        from brutex.universe import is_universe_underlying
+
+        for exchange, symbol in (
+            (Exchange.NSE, "NIFTY"),
+            (Exchange.NSE, "INDIAVIX"),
+            (Exchange.NSE, "FINNIFTY"),
+            (Exchange.BSE, "SENSEX"),
+            (Exchange.BSE, "BSE100"),
+        ):
+            inst = Instrument(
+                exch_id=exchange,
+                security_id=1,
+                symbol_name=symbol,
+                display_name=symbol,
+                instrument=InstrumentType.IDX,
+                segment=Segment.INDEX,
+                series=None,
+                isin=None,
+                underlying_symbol=symbol,
+                underlying_security_id=None,
+                lot_size=0,
+                tick_size=Decimal(0),
+                sm_freeze_qty=None,
+                sm_expiry_date=None,
+                strike_price=None,
+            )
+            admitted = is_universe_underlying(inst, frozenset())
+            mapped = canonical_identity(
+                exchange=exchange.value, segment="INDEX", lake_symbol=symbol
+            )
+            assert (mapped is not None) == admitted, (exchange, symbol)
+
+    def test_key_unsafe_index_excluded(self) -> None:
+        assert canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="A/B") is None
 
     def test_case_exact(self) -> None:
         assert canonical_identity(exchange="NSE", segment="INDEX", lake_symbol="nifty") is None
@@ -202,6 +243,8 @@ class TestFuturesMapping:
         )
 
     def test_futures_allowlist(self) -> None:
+        # STRUCTURAL since #1788 — the mapping stays; the producer never
+        # enumerates it (DEC-CROSSVERIFY-SPOT-ONLY-001).
         assert frozenset({"NIFTY", "BANKNIFTY", "SENSEX"}) == EXPORT_FUTURES_UNDERLYINGS
 
     def test_canonical_token_is_no_lake_namespace_collision(self) -> None:
