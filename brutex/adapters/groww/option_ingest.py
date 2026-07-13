@@ -142,6 +142,11 @@ from brutex.data.partial_window_detect import (
 from brutex.data.raw_integrity_store import CaptureHookFactory
 from brutex.data.session import ALL_FILTERED, filter_to_trading_session, observe_all_filtered
 from brutex.data.sink import BarSink
+from brutex.data.today_completeness import (
+    TODAY_INCOMPLETE,
+    InstrumentClass,
+    observe_today_completeness,
+)
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
     LakeSpanIndex,
@@ -367,6 +372,15 @@ class _OptionRawWindow:
     #: the frozen payload additively; the producer always passes the real counts.
     empty_fetches: int = 0
     transient_fetches: int = 0
+    #: The IST date of the SAME clock instant ``_clamped_window_key`` resolved
+    #: inside ``ingest_option_contract`` (DEC-PULL-TODAY-COMPLETENESS-GATE-001)
+    #: — the tail's covers-today predicate (``key.end == clamp_today + 1 day``)
+    #: is judged against the date that MINTED the clamped end, so clamp and gate
+    #: stay coherent across a midnight-crossing async drain (the tail NEVER
+    #: reads a clock for the gate). ``None`` (a legacy/un-threaded constructor)
+    #: keeps the gate INERT for the window — fail-open to pre-gate behavior.
+    #: Appended LAST + defaulted (the ``empty_fetches`` additive precedent).
+    clamp_today: date | None = None
 
 
 def _clamped_window_key(
@@ -434,6 +448,7 @@ def ingest_option_contract(
     write_breaker: WriteHealthBreaker | None = None,
     form_preference: SymbolFormPreference | None = None,
     market_closed: Callable[[], bool] | None = None,
+    today_completeness_gate: bool = False,
 ) -> IngestReport:
     """Pull ONE contract's candles over ``[start, end)`` into *sink* (Groww, FNO).
 
@@ -742,6 +757,9 @@ def ingest_option_contract(
         attempt=attempt,
         empty_fetches=empty_fetches,
         transient_fetches=transient_fetches,
+        # The TODAY-gate clamp date (DEC-PULL-TODAY-COMPLETENESS-GATE-001): the
+        # SAME instant the clamp above used, so clamp and gate stay coherent.
+        clamp_today=now_for_clamp.date(),
     )
     if fetch_pipeline is None:
         # Synchronous, byte-identical path: run the tail inline on THIS thread.
@@ -755,6 +773,7 @@ def ingest_option_contract(
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             write_breaker=write_breaker,
+            today_completeness_gate=today_completeness_gate,
         )
     # Async separation: hand the tail off to a background consumer. The producer does NOT
     # wait on it — it returns a DEFERRED IngestReport immediately and re-paces + fetches the
@@ -780,6 +799,7 @@ def ingest_option_contract(
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             write_breaker=write_breaker,
+            today_completeness_gate=today_completeness_gate,
         )
         if result_report.still_failed_windows:
             # A tail-side PartitionLockTimeout DEFERRED this contract window (a wedged peer held
@@ -843,6 +863,7 @@ def _process_option_window_tail(
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
+    today_completeness_gate: bool = False,
 ) -> IngestReport:
     """The CONSUMER half — session-filter + sink-append + conflict-aggregate + ledger.record.
 
@@ -904,6 +925,44 @@ def _process_option_window_tail(
     # bar ON the boundary is KEPT, so this only ever removes an out-of-window / clock-skew
     # phantom, never a legitimate in-range bar (existing behaviour byte-unchanged).
     bars = drop_bars_after(bars, key.end)
+    # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001) —
+    # the F&O twin of the spot tail's gate: a covers-today contract window
+    # (``key.end == clamp_today + 1 day``) whose fetched TODAY bars carry the #837
+    # still-settling shape (OI-null on FUT/CE/PE; all-zero-volume on FUT) must NOT store
+    # today's bars (keep-first would freeze the forming rows FOREVER) nor settle SUCCESS.
+    # The guarded wrapper returns ``None`` (⇒ append the ORIGINAL bars, never demote) for
+    # every inert/abstain shape — a legacy payload, a non-1minute interval, a non-today
+    # window, a raw-EMPTY fetch (the EMPTY machinery; the F&O dry-run client returns EMPTY
+    # payloads, so the gate can never fire offline), zero today bars (a dead strike /
+    # dormant far-month contract legitimately prints nothing), out-of-coverage /
+    # non-trading dates, or an internal error (fail-open). On a FAIL only the bars
+    # strictly BEFORE clamp_today are appended and the record below is demoted under the
+    # streak-EXEMPT ``TODAY_INCOMPLETE`` reason. The FUT count-vs-expected check is
+    # OBSERVE-ONLY (a far-serial-month future is legitimately sparse intraday).
+    today_incomplete = False
+    append_bars = bars
+    if today_completeness_gate:
+        gate_result = observe_today_completeness(
+            _LOG,
+            bars=bars,
+            clamp_today=raw.clamp_today,
+            window_end=key.end,
+            instrument_class=(
+                InstrumentClass.FUT if contract.contract_type == "FUT" else InstrumentClass.OPTION
+            ),
+            symbol=contract.symbol,
+            interval=interval,
+            pull_id=pull_id,
+            raw_count=len(raw_bars),
+            fields={
+                "window_start": key.start.isoformat(),
+                "window_end": key.end.isoformat(),
+                **fields,
+            },
+        )
+        if gate_result is not None and gate_result[1].incomplete:
+            today_incomplete = True
+            append_bars = gate_result[0].prior
     # The write-health GROUP key (DEC-WRITE-HEALTH-BREAKER-001) — grouped by the
     # UNDERLYING, not the contract: each F&O ``(contract, interval)`` pair has exactly
     # ONE clamped ledger window per pass (``_clamped_window_key``) and the tail has NO
@@ -950,7 +1009,10 @@ def _process_option_window_tail(
             segment=OPTION_SEGMENT,
             symbol=contract.symbol,
             interval=interval,
-            bars=bars,
+            # The TODAY-gate write guard: on a today-incomplete verdict only the
+            # settled pre-today history is appended (``append_bars``); every
+            # other path appends the ORIGINAL ``bars`` object — byte-identical.
+            bars=append_bars,
         )
     except (PartitionLockTimeout, WriteDeadlineExceeded) as exc:
         # DEFER this contract window to the next pull, exactly like a 429 / timeout transient —
@@ -1053,8 +1115,16 @@ def _process_option_window_tail(
             # (``raw_bars == 0`` → EMPTY, this flag can never fire offline).
             # Orthogonal to sink dedup — a full-dedup re-pull keeps ``bars``
             # non-empty and stays SUCCESS.
-            degraded=all_filtered,
-            degraded_reason=ALL_FILTERED if all_filtered else None,
+            # Demotion priority (DEC-PULL-TODAY-COMPLETENESS-GATE-001 Ruling
+            # G-5): the TODAY gate's verdict WINS when it fired — its reason is
+            # streak-EXEMPT, so the streak-BUMPING ALL_FILTERED must not own a
+            # covers-today window (overlap is narrow anyway: an all-filtered
+            # covers-today FNO window has zero today bars, which ABSTAINS the
+            # gate, so ALL_FILTERED fires exactly as today).
+            degraded=today_incomplete or all_filtered,
+            degraded_reason=(
+                TODAY_INCOMPLETE if today_incomplete else (ALL_FILTERED if all_filtered else None)
+            ),
             old_window=raw.old_window,
             suppress_settle=suppress_settle,
         )
@@ -1920,6 +1990,7 @@ def run_groww_option_ingest(
     form_preference: SymbolFormPreference | None = None,
     audit: AuditWriter | None = None,
     market_closed: Callable[[], bool] | None = None,
+    today_completeness_gate: bool = False,
 ) -> GrowwOptionIngestReport:
     """Ingest every ``(contract, interval)`` derivative pair over ``[start, end)``.
 
@@ -2061,6 +2132,17 @@ def run_groww_option_ingest(
     real-vendor production sites construct one via
     :func:`~brutex.adapters.error_storm_breaker.resolve_error_storm_breaker`
     (the ``capture_hook_factory`` / ``detect_completeness_gaps`` gating pattern).
+
+    *today_completeness_gate* (DEC-PULL-TODAY-COMPLETENESS-GATE-001): the
+    pre-settle TODAY minute-completeness gate, threaded verbatim into every
+    contract's window tail (:mod:`brutex.data.today_completeness`) — a
+    covers-today ``1minute`` window whose fetched TODAY bars carry the #837
+    still-settling shape (OI-null / all-zero-volume-FUT) has today's bars
+    WITHHELD from the sink and is demoted to a re-pullable ``FAILED`` under the
+    streak-EXEMPT ``TODAY_INCOMPLETE`` reason. Default ``False``
+    (library-inert); the production site passes ``(not dry_run) and
+    resolve_today_completeness_enabled()`` (belt — the F&O dry-run client
+    returns EMPTY payloads, so the gate can never fire offline anyway).
 
     *market_closed* (DEC-GROWW-MARKET-HOURS-GUARD-001): a zero-arg ``() -> bool``
     predicate threaded verbatim into every contract's fetch — ``True`` means the
@@ -2222,6 +2304,7 @@ def run_groww_option_ingest(
                 write_breaker=wbreaker,
                 form_preference=preference,
                 market_closed=market_closed,
+                today_completeness_gate=today_completeness_gate,
             )
 
     pairs: dict[tuple[str, str], IngestReport] = {}
