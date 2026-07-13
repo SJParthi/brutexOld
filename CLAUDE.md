@@ -18,7 +18,24 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+_Last updated: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
+#1779 — the one-click scoped-ALL SPOT pull: the additive `scope=spot-only`
+token on the ONE `/pull-pipeline` launcher (default requests byte-identical,
+pinned) + the NEW `brutex pull-all-spot` CLI over
+`build_headless_pipeline(scope=…)`; the F&O phases run as no-op reports
+through the UNCHANGED sequencer (note SURGERY — "F&O skipped by design
+(spot-only scope)", never a fake "0 expiries"); explicit "Greeks: not run —
+no options in this pull" text; the fail-soft crossverify tail (production
+default = the REAL #1776 producer, fired strictly OUTSIDE our held pull
+single-flight); the CLI `--auto` gate with the UNMEASURED-conservative
+17:30 IST settle default (`BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) +
+Muhurat whole-day deferral + the composed mid-run Muhurat belt — the guard
+module byte-untouched; a persisted spot-only intent resumes SPOT-ONLY, never
+widened. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
 one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
@@ -2400,7 +2417,65 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+- **Active branch:** `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
+  MIGRATION.md #1779** — the one-click scoped-ALL SPOT pull: ONE dashboard button
+  (`#pullAllSpotBtn` → the EXISTING `/pull-pipeline` launcher with the NEW additive
+  `scope=spot-only` token — all launcher rails inherited byte-identically; a scope-less
+  request's payload is byte-identical modulo the ONE additive `scope` key,
+  exact-payload-pinned; unknown token = clean 400) + ONE CLI subcommand
+  `brutex pull-all-spot` (over `build_headless_pipeline(scope=…)`; NOT cmd_fetch;
+  deliberately NO --start/--end — full-range convergence is the promise). SPOT ONLY —
+  all indices + ~750 stocks, 1minute, 2020-01-01 → prev day, auto-incremental via the
+  durable window ledger (second-run ZERO-fetch convergence e2e-pinned). The chain runs
+  THROUGH the unchanged `run_full_pipeline`: NEW `dashboard/pull_scope.py` no-op
+  `MetadataPullReport`/`CompositePullReport` builders pass the sequencer gates vacuously
+  (`historical is None` → True, the documented no-op arm); prebuild rides an EMPTY F&O
+  cascade; ONLY the spot movers warmer is injected (futures/options segments honestly
+  ABSENT; the CLI warms nothing — process-local cache, stdout says so). Greeks:
+  structurally never run — the note carries the explicit "Greeks: not run — no options
+  in this pull" constant. NOTE SURGERY: the sequencer's "metadata 0 expiries + 0
+  contracts, historical 0 bars over 0 contract(s)" no-op wording is REPLACED by
+  ", F&O skipped by design (spot-only scope)" (negative-pinned — a designed no-op must
+  never read like a real empty vendor result); ledger-failure prefix + quarantine clause
+  stay LEADING; a half-drifted `_complete_note` wording logs ONE
+  `pull_scope.note_surgery_miss` WARN, the e2e negative pin guards a full drift.
+  CROSSVERIFY TAIL (fail-soft, PRODUCTION-DEFAULT-REAL): the injectable tail seam's
+  default binding is the LANDED #1776 producer — the dashboard reuses the
+  `_crossverify_job` trigger (the route's runner/start body extracted into ONE shared
+  `_start_crossverify_producer`, §11 COMMON; started as the launcher's LAST step; the
+  runner's own bounded-wait lock trio absorbs the pull-flock handoff — NEVER nested
+  inside our held single-flight), the CLI invokes `run_crossverify` strictly AFTER the
+  flock/lease release (lock-ordering law F/B-verified), sharing ONE
+  SessionRateController; "not configured" renders only on genuine construction failure
+  (junk BRUTEX_CROSSVERIFY_* env — fail-soft, the spot pull is never blocked);
+  LakeWriteHalt RE-RAISES out of the fence. AUTO GATE (CLI `--auto`, cron-green
+  deferrals exit 0): NEW `calendars/auto_pull_gate.py` — trading-day + Muhurat
+  whole-day deferral + the NAMED CONSERVATIVE settle constant 17:30 IST
+  (`BRUTEX_PULL_ALL_SETTLE_IST`, fail-loud strict HH:MM, structurally ≥ 15:35 =
+  the guard's BLOCK_END; explicitly UNMEASURED — the #1775 probe is unrun, 17:30 =
+  its last slot; re-derive when the probe lands) + the launcher-level
+  `compose_market_closed` Muhurat mid-run belt ([open−30 min, close+5 min) from
+  MUHURAT_SESSIONS; the guard module byte-UNTOUCHED — composed, never edited; the
+  belt's fails-before proven IN-TEST: the bare guard is blind inside the frozen
+  2025-10-21 session). `PullIntent` gains the OPTIONAL `scope` field (pre-scope files
+  parse to None = full) so a crashed spot-only pull resumes SPOT-ONLY — never a
+  silently-widened F&O pull. M2 verify-then-wire outcome: NO new ledger-flush wiring
+  needed — `pull_all_spot` flushes the durable ledger per processed window internally
+  (mid-run-interrupt durability e2e GREEN with zero wiring). HONEST residuals: settle
+  time UNMEASURED (mis-set ⇒ bounded deferral churn, never wrong data — the #1774
+  today-gate + prev-day bound are the net); 2026 Muhurat timings unnotified →
+  `muhurat_session_active` honestly False (AUTO still defers the whole day);
+  out-of-coverage ≥2027 weekday AUTO proceeds post-settle with ONE WARN; dashboard tail
+  handoff may idle ≤ one 60 s lock retry; first-ever full run is LONG (no wall-clock
+  SLA claimed); manual click during a live Muhurat session starts-then-halts at the
+  first window (named follow-up DEC-PULL-ALL-MUHURAT-MANUAL-GATE-001); the full-scope
+  arm keeps the guard's Muhurat blindness (named follow-up
+  DEC-PIPELINE-MUHURAT-BELT-001). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `pull_scope.py` + `auto_pull_gate.py` 100%
+  line+branch on NEW ci.yml gates; touched app.py/cli.py/pipeline_binding.py/
+  pull_intent.py lines covered; ruff/ruff-format clean, `mypy --strict` clean, pyright
+  0 errors on every touched file.)
+  Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
   renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
@@ -6229,7 +6304,21 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/crossverify-producer`
+- **Active feature branch:** `claude/pull-scoped-all-oneclick`
+  (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779 — the one-click
+  scoped-ALL SPOT pull: the additive `scope=spot-only` token on the ONE
+  `/pull-pipeline` launcher + the `#pullAllSpotBtn` button + the
+  `brutex pull-all-spot` CLI over `build_headless_pipeline(scope=…)`; no-op
+  F&O reports through the unchanged sequencer + note surgery + explicit
+  Greeks-not-run text; fail-soft crossverify tail (production default = the
+  REAL #1776 producer, fired strictly outside our held pull single-flight);
+  the CLI `--auto` gate (UNMEASURED-conservative 17:30 IST settle default,
+  `BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) + Muhurat whole-day deferral +
+  the composed mid-run Muhurat belt — `market_hours.py` byte-untouched;
+  spot-only intents resume spot-only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1779 for the full blurb)
+  Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
   TickVault cross-verification producer: NEW `brutex/crossverify/` package
@@ -6792,7 +6881,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4975-4976` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5054-5055` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
