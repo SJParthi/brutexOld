@@ -31,7 +31,11 @@ single-flight); the CLI `--auto` gate with the UNMEASURED-conservative
 17:30 IST settle default (`BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) +
 Muhurat whole-day deferral + the composed mid-run Muhurat belt — the guard
 module byte-untouched; a persisted spot-only intent resumes SPOT-ONLY, never
-widened. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+widened; since the round-5 fold the button SELF-ARMS the daily post-market
+auto-pull (NEW `dashboard/auto_pull_scheduler.py` — first click = run now +
+arm forever; the same gate + launcher reused, once-per-day law, durable
+`.pull_all_spot_auto.json`, disarm chip; the CLI `--auto` + cron lane is the
+headless alternative). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
 summary, never the story.)
@@ -2467,7 +2471,8 @@ hostile-review pass._
   launch RESTORES the running pull's persisted intent (the pre-start persist had
   clobbered it — a refused full-scope click during a live spot-only pull left a
   full-scope intent whose crash-replay resumed the WRONG scope; NEW
-  `restore_intent_after_refused_start`, fails-before-pinned at 08d1bb43 — the
+  `restore_intent_after_refused_start`, fails-before-pinned at the r2-fold
+  head — the
   clobber CLASS is inherited, the restore fixes the symbols/dates dimensions
   too), and since the refuter-round-4 fold the launcher's WHOLE intent
   transaction (snapshot → persist → start → restore) is SERIALIZED under the
@@ -2475,8 +2480,8 @@ hostile-review pass._
   raced-sibling interleavings (a stale prior=None snapshot orphan-clearing
   the RUNNING winner's intent; a second refused click re-installing the
   first's clobber) are structurally closed for in-process launchers, both
-  executed race repros shipped as fails-before-pinned regression tests at
-  613c52ee; cross-process launchers stay excluded by the flock, and the
+  executed race repros shipped as fails-before-pinned regression tests at the
+  r3-fold head; cross-process launchers stay excluded by the flock, and the
   winner-clear-vs-restore TOCTOU stays the disclosed best-effort residual
   (never a wrong scope; a resurrected just-finished intent costs one
   idempotent boot re-pull — zero re-fetched spot windows, though the
@@ -2520,9 +2525,32 @@ hostile-review pass._
   the `materialize_lake_timeframes` no-stored-bars remediation names BOTH causes
   (the one shared-module text edit); the intent ROLLBACK scope-widening residual
   disclosed (docstring + ledger + runbook §5); the dry-run
-  prebuild-failures-by-design shape documented (runbook §7). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  prebuild-failures-by-design shape documented (runbook §7). ROUND-5 FOLD —
+  the SELF-ARMING POST-MARKET SCHEDULER (the operator hard requirement: ONE
+  click ⇒ fully automatic daily): NEW `dashboard/auto_pull_scheduler.py` (own
+  ci.yml 100% gate) — a daemon ticker (60 s, fail-loud
+  `BRUTEX_AUTO_PULL_TICK_S`) consulting the EXISTING `auto_pull_allowed` gate
+  + the durable atomic `<lake>/.pull_all_spot_auto.json` state (corrupt ⇒
+  DISARMED + one WARN); the ▶ button's URL gains `auto_arm=1` — the FIRST
+  click arms forever (a market-hours-refused click still arms; the response
+  says both), the fire seam IS the same `_launch_pipeline(scope=spot-only)`
+  path (all rails inherited, NO new vendor-call surface), once-per-day
+  STARTED-attempt law (refused launches — e.g. a whole-run-flock-holding
+  multi-day dashboard sweep — retry on later ticks; a FAILED started run
+  retries the NEXT eligible day; the incremental ledger makes catch-up
+  complete), success marked only via `note_run_complete(ok=True)` for EVERY
+  real spot-only run (a successful manual click counts as the day's pull);
+  disarm chip + `POST /api/v1/universe/pull-all-spot-auto` toggle + additive
+  `auto_pull` payload/pull-progress blocks; boot lifespan resumes ticking iff
+  durably armed (None/disarmed = zero threads); fires only while the
+  dashboard runs — the CLI `--auto` + cron lane stays the headless
+  alternative. The r5 K-1 conv-commits MAJOR remediated pre-push (the
+  `docs(migration+claude+runbook)` subject reworded to the comma form — tree
+  byte-identical; orphaned interim SHA citations swept to round labels) +
+  the J-NIT-1 held-I/O-envelope wording quantified on all three surfaces.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; `pull_scope.py` (80/18) + `auto_pull_gate.py`
-  (80/28) 100.00%
+  (80/28) + `auto_pull_scheduler.py` (245/52) 100.00%
   line+branch on NEW ci.yml gates; touched app.py/cli.py/pipeline_binding.py/
   pull_intent.py lines covered; ruff/ruff-format clean, `mypy --strict` clean, pyright
   0 errors on every touched file.)
@@ -6374,7 +6402,16 @@ hostile-review pass._
   intent transaction serialized under the per-store process-local
   `launch_mutex` since the refuter-round-4 fold (G-1/R4-1 — raced sibling
   clicks can no longer orphan-clear or re-clobber the running pull's
-  intent; cross-process exclusion stays the flock); ENGINE UNCHANGED —
+  intent; cross-process exclusion stays the flock); since the round-5 fold
+  the button SELF-ARMS the daily post-market auto-pull — NEW
+  `dashboard/auto_pull_scheduler.py` (own ci.yml 100% gate): `auto_arm=1`
+  on the button's first click arms a durable daemon ticker that fires the
+  SAME spot-only launcher once per day when the EXISTING `auto_pull_allowed`
+  gate opens (refused launches — e.g. a whole-run sweep — retry on later
+  ticks; a successful manual click counts as the day's pull; disarm chip +
+  toggle route; boot resumes ticking iff durably armed; zero threads
+  otherwise; the CLI `--auto` + cron lane stays the headless alternative);
+  ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)
   Earlier: `claude/crossverify-producer`

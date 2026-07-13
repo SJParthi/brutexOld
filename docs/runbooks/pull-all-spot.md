@@ -17,7 +17,10 @@ DOES (every invocation, identically):
   symbols excluded + named in the headline) and — dashboard only — the **spot**
   movers warm;
 - fires the **TickVault cross-verify producer** as the LAST step (fail-soft:
-  a broken verify config/tail NEVER fails the pull).
+  a broken verify config/tail NEVER fails the pull);
+- **(dashboard button, round-5 fold)** ARMS the daily post-market auto-pull
+  on the first click — see §2 (disarm via the chip; the CLI never touches
+  the armed state).
 
 WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
 
@@ -43,7 +46,48 @@ WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
 - touch the ENGINE (NIFTY/BANKNIFTY/SENSEX), the vocabulary, the rate caps, or
   the lake schema.
 
-## 2. `--auto` (cron / launchd)
+## 2. Fully automatic daily — the SELF-ARMING button (round-5 fold)
+
+**One click does everything.** The FIRST click of ▶ Pull EVERYTHING — spot
+only runs the pull now (if allowed) AND arms the daily post-market
+auto-pull: from then on, while the dashboard process is up, a background
+ticker (`brutex/dashboard/auto_pull_scheduler.py`, 60 s cadence —
+`BRUTEX_AUTO_PULL_TICK_S`) fires the SAME button launch path once per
+trading day when the `--auto` gate opens (post-close settle time + trading
+day + Muhurat deferral — the same gate table below). Zero manual steps
+after the first click.
+
+- **Armed state is durable** — `<lake_root>/.pull_all_spot_auto.json`
+  survives dashboard restarts; the boot lifespan resumes ticking when armed
+  (and if today's window is open and today's pull has not yet succeeded, an
+  early tick catches up). A corrupt/unreadable state file reads DISARMED
+  with one WARN — never a crash.
+- **Once per day**: a STARTED run marks the day attempted (a FAILED run does
+  NOT retry the same day — it retries the next eligible day, and the
+  incremental ledger heals whatever it missed); a run that completes ok
+  marks the day done. A SUCCESSFUL MANUAL click also counts as the day's
+  pull — the auto never redundantly re-fires behind it.
+- **Contention defers, never breaks** (the coexistence law): a running pull
+  — or a multi-day dashboard SWEEP, which holds the lake flock + job slot
+  for its whole run — refuses the auto launch; the scheduler logs one
+  `auto_pull.refused_retry` per day per reason and retries on later ticks
+  until the day's window closes. Days fully blocked by a long sweep are
+  caught up automatically by the next successful run (auto-incremental).
+  No preemption — the sweep is never interrupted.
+- **A click during market hours still arms**: the immediate run is refused
+  by the untouched market-hours guard, the response says both
+  (`started: false` + the armed `auto_pull` block), and the first auto run
+  fires at/after the settle time the same day.
+- **Disarm / re-arm**: the `auto: ON — disarm` chip under the button
+  (`POST /api/v1/universe/pull-all-spot-auto?armed=0|1`). The armed state,
+  last outcome and the honest next-eligible text ride the
+  `/api/v1/universe/pull-progress` payload's additive `auto_pull` object.
+- **Honest limit**: the scheduler lives in the dashboard PROCESS — it fires
+  nothing while the dashboard is down (the state survives; the next boot
+  catches up if the day's window is still open). For a dashboard-less box,
+  use the headless lane below.
+
+### `--auto` (cron / launchd) — the HEADLESS alternative
 
 ```
 30 17 * * *  /path/to/brutex pull-all-spot --auto --lake-root /Volumes/lake
@@ -57,10 +101,15 @@ silent permanent no-pull. That silence is BY DESIGN (deferrals are
 cron-green) and this lane has NO dead-man/freshness check (unlike the
 nightly chain); an operator who wants "no pull landed today" alerting should
 wire the existing healthcheck patterns (the nightly chain's dead-man lane is
-the precedent) — deliberately not built into this command.
+the precedent) — deliberately not built into this command. (The dashboard's
+self-arming button above and this cron lane share the durable window ledger,
+so running both is safe — whichever fires second converges to a zero-fetch
+no-op; the single-flight refuses a genuine overlap.)
 
 `--auto` gates BEFORE any lock/vendor work; every deferral is ONE
-`pull-all-spot deferred: …` line + **exit 0** (cron-green):
+`pull-all-spot deferred: …` line + **exit 0** (cron-green). The SAME gate
+(one module, `calendars/auto_pull_gate.py`) drives the dashboard scheduler's
+ticks — its deferrals log `auto_pull.deferred` once per (day, reason):
 
 | reason token          | when                                             | detail text (exact family)                                        |
 |-----------------------|--------------------------------------------------|-------------------------------------------------------------------|
