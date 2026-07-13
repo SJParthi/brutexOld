@@ -28,7 +28,8 @@ WILL NEVER (the PULL COMMAND ITSELF — see the honest tail note below):
   the #1776 producer, whose OWN pull leg currently fetches NIFTY/BANKNIFTY
   FUTURES candles + their F&O metadata under its own DEC
   (DEC-CROSSVERIFY-PRODUCER-001 — that leg's scope is the producer's,
-  not this command's). PR #1515 (the crossverify spot-only trim, in flight)
+  not this command's). PR #1515 (the crossverify spot-only trim, in flight —
+  branch `claude/crossverify-spot-only` on origin, remote-verified 2026-07-13)
   removes that leg — once it lands the whole chain is spot-only;
 - run Greeks enrichment (the note says
   `Greeks: not run — no options in this pull`);
@@ -135,10 +136,22 @@ the un-flushed tail; the next run re-pulls ONLY missing/FAILED windows. A
 dashboard-launched real pull additionally persists a crash-recovery intent —
 the boot-time resume re-fires it **spot-only** (the scope rides the intent;
 it never widens into an F&O pull). A concurrently-REFUSED click cannot
-clobber the running pull's intent either: the launcher restores the prior
-on-disk intent on a refused start (refuter-round-3 F-1 — pre-fix a refused
-full-scope click during a live spot-only pull left a full-scope intent on
-disk, so a crash in that window resumed the wrong scope).
+clobber the running pull's intent either: the launcher SERIALIZES its whole
+intent transaction (snapshot → persist → start → restore) under a per-store
+process-local mutex and restores the prior on-disk intent on a refused start
+(refuter-round-3 F-1 + round-4 G-1/R4-1 — pre-fix a refused full-scope click
+during a live spot-only pull left a full-scope intent on disk, and raced
+sibling clicks could orphan-clear or re-clobber it even with the restore).
+Honest envelope: the mutex serializes launcher threads IN one dashboard
+process; cross-PROCESS launch exclusion stays the account-wide flock (a
+second dashboard process on the same lake is off-design — its refused
+clicks' snapshot/restore do not serialize against this process's). The one
+in-process residual is the running pull's own completion clear landing
+inside a refused click's restore window: the restore then either leaves the
+file honestly absent or resurrects the just-finished pull's OWN intent —
+worst case one idempotent boot re-pull of an already-complete pull (zero
+re-fetched spot windows; the metadata phase and the cross-verify tail's
+producer still issue their per-run vendor calls), never a wrong scope.
 
 NAMED RESIDUAL (refuter-round-1 r2 MINOR/NIT-4 — the ROLLBACK direction):
 that scope law holds only on scope-aware code. If you roll the DEPLOYED code

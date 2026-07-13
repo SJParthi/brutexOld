@@ -2469,7 +2469,19 @@ hostile-review pass._
   full-scope intent whose crash-replay resumed the WRONG scope; NEW
   `restore_intent_after_refused_start`, fails-before-pinned at 08d1bb43 — the
   clobber CLASS is inherited, the restore fixes the symbols/dates dimensions
-  too). M2 verify-then-wire outcome: NO new ledger-flush wiring
+  too), and since the refuter-round-4 fold the launcher's WHOLE intent
+  transaction (snapshot → persist → start → restore) is SERIALIZED under the
+  per-store process-local `PullIntentStore.launch_mutex` — the r4 G-1/R4-1
+  raced-sibling interleavings (a stale prior=None snapshot orphan-clearing
+  the RUNNING winner's intent; a second refused click re-installing the
+  first's clobber) are structurally closed for in-process launchers, both
+  executed race repros shipped as fails-before-pinned regression tests at
+  613c52ee; cross-process launchers stay excluded by the flock, and the
+  winner-clear-vs-restore TOCTOU stays the disclosed best-effort residual
+  (never a wrong scope; a resurrected just-finished intent costs one
+  idempotent boot re-pull — zero re-fetched spot windows, though the
+  metadata phase + the crossverify tail's producer still issue their
+  per-run vendor calls — the r4 G-2 zero-fetch honesty correction). M2 verify-then-wire outcome: NO new ledger-flush wiring
   needed — `pull_all_spot` flushes the durable ledger per processed window internally
   (mid-run-interrupt durability e2e GREEN with zero wiring). HONEST residuals: settle
   time UNMEASURED (mis-set ⇒ bounded deferral churn, never wrong data — the #1774
@@ -6358,7 +6370,11 @@ hostile-review pass._
   belt off — the hostile-review r1 ruling);
   spot-only intents resume spot-only — and a REFUSED concurrent launch
   restores the running pull's persisted intent (refuter-round-3 F-1;
-  the pre-start persist no longer clobbers it); ENGINE UNCHANGED —
+  the pre-start persist no longer clobbers it), with the whole launcher
+  intent transaction serialized under the per-store process-local
+  `launch_mutex` since the refuter-round-4 fold (G-1/R4-1 — raced sibling
+  clicks can no longer orphan-clear or re-clobber the running pull's
+  intent; cross-process exclusion stays the flock); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)
   Earlier: `claude/crossverify-producer`

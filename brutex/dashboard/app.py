@@ -40,6 +40,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -3048,9 +3049,14 @@ def build_app(
         the SAME ``_crossverify_job`` producer via
         :func:`_start_crossverify_producer` — never a nested inline run on the
         pipeline job thread (the runner's own bounded-wait lock trio absorbs
-        the pull-flock handoff; ruling 8a). A config/seam construction failure
-        (junk env) is the ONLY production ``not_configured`` path — fail-SOFT,
-        the spot pull is never blocked by a broken verify config (ruling 8).
+        the pull-flock handoff; ruling 8a). A CONFIG construction failure
+        (junk ``BRUTEX_CROSSVERIFY_*`` env) is the ONLY production
+        ``not_configured`` path on THIS binding — fail-SOFT, the spot pull is
+        never blocked by a broken verify config (ruling 8). Seam construction
+        (``default_seams``) happens later on the crossverify JOB thread, after
+        this tail already returned ``started`` — a failure there surfaces as
+        an honest job ✕, never ``not_configured`` (the CLI tail differs: its
+        try-block wraps ``default_seams`` too — refuter round 4 H NIT-3).
         """
         from brutex.crossverify.config import resolve_crossverify_config
 
@@ -4887,61 +4893,79 @@ def build_app(
         # worker's success AND failure, BEFORE the single-flight release.
         on_finally: Callable[[], None] | None = None
         prior_intent: PullIntent | None = None
-        if pull_intent_store is not None and not dry_run:
-            # Best-effort write (a failed write is logged, never blocks the
-            # pull); the clear hook is wired for EVERY real pull regardless —
-            # a completing real pull supersedes any lingering older intent.
-            # NOTE: the resume red-banner auto-clear does NOT live here — it
-            # fires AFTER start() below, gated on `started`
-            # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
-            # a refused start launches nothing and must not drop the banner).
-            # Snapshot the CURRENT on-disk intent FIRST so a REFUSED start can
-            # put it back (refuter round 3 F-1, DEC-PULL-SCOPED-ALL-ONECLICK-001
-            # — the pre-start persist otherwise CLOBBERS a RUNNING pull's
-            # intent, and a crash in that window resumes the WRONG scope).
-            prior_intent = pull_intent_store.load()
-            persist_intent_for_launch(
-                pull_intent_store,
-                dry_run=dry_run,
-                symbols=symbols,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                restarts=intent_restarts,
-                # Non-default scope persists so a crash-resume re-fires the SAME
-                # scope — a spot-only pull must never resume as a full-scope F&O
-                # pull (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full, the
-                # optional-field back-compat template).
-                scope=scope_token if scope_token != SCOPE_FULL else None,
+        # Intent-transaction mutex (refuter round 4 G-1 / R4-1,
+        # DEC-PULL-SCOPED-ALL-ONECLICK-001): the snapshot → persist → start()
+        # → restore span below is ONE transaction over the durable intent
+        # file — two concurrent launcher threads (two tabs / button+curl / a
+        # boot-resume racing a click; the route offloads via run_in_threadpool
+        # so requests are genuinely concurrent) interleaving those steps could
+        # defeat the round-3 restore (a stale prior=None snapshot
+        # orphan-clearing the RUNNING winner's freshly-persisted intent; a
+        # second refused click re-installing the first's clobber). The whole
+        # span therefore serializes under the store's process-local
+        # launch_mutex. Holding it across start() is SAFE: start() is
+        # non-blocking (market-hours gate / in-process flag / LOCK_NB flock
+        # refusals all return False; on success the worker is spawned and
+        # start() returns) and the worker thread never acquires this mutex
+        # (its on_finally is the plain store.clear). A dry_run enters the
+        # mutex too (harmless ms-scale hold; it persists/restores nothing);
+        # store-less apps skip it — there is no intent state to serialize.
+        with pull_intent_store.launch_mutex if pull_intent_store is not None else nullcontext():
+            if pull_intent_store is not None and not dry_run:
+                # Best-effort write (a failed write is logged, never blocks the
+                # pull); the clear hook is wired for EVERY real pull regardless —
+                # a completing real pull supersedes any lingering older intent.
+                # NOTE: the resume red-banner auto-clear does NOT live here — it
+                # fires AFTER start() below, gated on `started`
+                # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
+                # a refused start launches nothing and must not drop the banner).
+                # Snapshot the CURRENT on-disk intent FIRST so a REFUSED start can
+                # put it back (refuter round 3 F-1, DEC-PULL-SCOPED-ALL-ONECLICK-001
+                # — the pre-start persist otherwise CLOBBERS a RUNNING pull's
+                # intent, and a crash in that window resumes the WRONG scope).
+                prior_intent = pull_intent_store.load()
+                persist_intent_for_launch(
+                    pull_intent_store,
+                    dry_run=dry_run,
+                    symbols=symbols,
+                    symbol=symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                    restarts=intent_restarts,
+                    # Non-default scope persists so a crash-resume re-fires the SAME
+                    # scope — a spot-only pull must never resume as a full-scope F&O
+                    # pull (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full, the
+                    # optional-field back-compat template).
+                    scope=scope_token if scope_token != SCOPE_FULL else None,
+                )
+                on_finally = pull_intent_store.clear
+            started = _pull_job.start(
+                _work,
+                total=len(targets),
+                detail=pipeline_detail,
+                ledger_synced=True,
+                on_finally=on_finally,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+                market_hours_exempt=dry_run,
             )
-            on_finally = pull_intent_store.clear
-        started = _pull_job.start(
-            _work,
-            total=len(targets),
-            detail=pipeline_detail,
-            ledger_synced=True,
-            on_finally=on_finally,
-            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
-            market_hours_exempt=dry_run,
-        )
-        if pull_intent_store is not None:
-            # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
-            # stale resume red banner ONLY when the real pull actually started
-            # — start() acquired the in-process + cross-process guards and
-            # spawned the worker. A refused start (contention / foreign-host
-            # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
-            # touches it (both gates live inside the helper).
-            clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
-            # Refused-start intent RESTORE (refuter round 3 F-1): the persist
-            # above ran BEFORE start() for pre-crash durability, so a REFUSED
-            # start (a pull already RUNNING here, flock contention, or the
-            # foreign-host lease) clobbered the running pull's on-disk intent
-            # — put the prior snapshot back (prior=None ⇒ clear the orphan;
-            # already-cleared-by-the-winner ⇒ leave absent). A started or
-            # dry-run launch restores nothing (gates live in the helper).
-            restore_intent_after_refused_start(
-                pull_intent_store, prior=prior_intent, dry_run=dry_run, started=started
-            )
+            if pull_intent_store is not None:
+                # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
+                # stale resume red banner ONLY when the real pull actually started
+                # — start() acquired the in-process + cross-process guards and
+                # spawned the worker. A refused start (contention / foreign-host
+                # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
+                # touches it (both gates live inside the helper).
+                clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
+                # Refused-start intent RESTORE (refuter round 3 F-1): the persist
+                # above ran BEFORE start() for pre-crash durability, so a REFUSED
+                # start (a pull already RUNNING here, flock contention, or the
+                # foreign-host lease) clobbered the running pull's on-disk intent
+                # — put the prior snapshot back (prior=None ⇒ clear the orphan;
+                # already-cleared-by-the-winner ⇒ leave absent). A started or
+                # dry-run launch restores nothing (gates live in the helper).
+                restore_intent_after_refused_start(
+                    pull_intent_store, prior=prior_intent, dry_run=dry_run, started=started
+                )
         return {
             "started": started,
             "targets": len(targets),

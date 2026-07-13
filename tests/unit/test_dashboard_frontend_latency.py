@@ -324,6 +324,9 @@ _TOUCHED_TEMPLATES = [
     "results.html",
     "screener.html",
     "spot_coverage.html",
+    # DEC-PULL-SCOPED-ALL-ONECLICK-001 refuter-round-4 H NIT-1: the branch
+    # added inline JS (the pull-all-spot button wiring) with no syntax gate.
+    "universe.html",
     "v29.html",
 ]
 

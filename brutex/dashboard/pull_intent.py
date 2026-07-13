@@ -58,6 +58,7 @@ import json
 import os
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -302,6 +303,23 @@ class PullIntentStore:
         #: The resume red-banner holder — rides the store so ONE injected
         #: object carries both the durable intent and its UI surface.
         self.banner = ResumeBanner()
+        #: The launcher's PROCESS-LOCAL intent-transaction mutex (refuter
+        #: round 4 G-1 / R4-1, DEC-PULL-SCOPED-ALL-ONECLICK-001 — MIGRATION.md
+        #: #1779): the dashboard launcher holds it across its WHOLE
+        #: snapshot → persist → ``start()`` → restore span, so two concurrent
+        #: launcher threads can never interleave their snapshot/persist/restore
+        #: steps (a stale ``prior=None`` snapshot orphan-clearing a RUNNING
+        #: winner's freshly-persisted intent; a second refused click
+        #: re-installing the first's clobber). Rides the store so the mutex is
+        #: per-INTENT-FILE, exactly like the state it guards; cross-PROCESS
+        #: launchers are excluded by the account-wide pull ``flock`` instead.
+        #: Safe to hold across ``BackgroundPullJob.start`` — start() is
+        #: non-blocking (LOCK_NB flock; refusals return ``False``; the worker
+        #: is spawned then start() returns) and NOTHING on the worker thread
+        #: (``on_finally`` = :meth:`clear`) ever acquires this mutex. Typed as
+        #: a context manager so test seams may wrap it (the app only ever
+        #: ``with``-enters it).
+        self.launch_mutex: AbstractContextManager[object] = threading.Lock()
 
     @property
     def lake_root(self) -> Path:
@@ -525,10 +543,31 @@ def restore_intent_after_refused_start(
     A started launch or a *dry_run* restores nothing (``False`` —
     :func:`persist_intent_for_launch`'s dry-run law means there is nothing to
     undo). Returns ``True`` iff an on-disk restore/clear was performed.
-    HONEST residual (best-effort, the :func:`probe_pull_singleflight` TOCTOU
-    posture): a winner clear landing between this function's load and its
-    restore write resurrects the winner's OWN just-finished intent — worst
-    case one idempotent zero-fetch boot re-pull, never a wrong scope.
+
+    SERIALIZATION (refuter round 4 G-1 / R4-1): the snapshot-and-restore
+    alone is per-request and non-transactional, so two CONCURRENT launcher
+    threads could defeat it (a loser whose stale ``prior=None`` snapshot
+    predated the winner's persist orphan-CLEARED the running winner's intent;
+    a second refused click re-installed the first's clobber). The launcher
+    therefore holds :attr:`PullIntentStore.launch_mutex` across its whole
+    snapshot → persist → start → restore span — this function assumes that
+    serialization and does not re-lock.
+
+    HONEST residuals (best-effort, the :func:`probe_pull_singleflight` TOCTOU
+    posture): (a) the running winner's ``on_finally`` clear fires on the
+    WORKER thread — deliberately never under the launch mutex — so it can
+    still land between this function's load and its restore write, which
+    resurrects the winner's OWN just-finished intent: worst case one
+    idempotent boot re-pull of an already-complete pull (zero re-fetched spot
+    windows — the ledger settles them — though the metadata phase and the
+    default-ON crossverify tail's producer still issue their per-run vendor
+    calls), never a wrong scope (a clear landing BEFORE the load takes the
+    leave-absent arm — the correct record); (b) on a FAILED restore write the
+    refused click's clobber REMAINS on disk (logged
+    ``restored="write_failed"`` — the same volume fault usually failed the
+    persist too); (c) launcher threads in a SECOND dashboard process on the
+    same lake do not share the mutex (off-design — one dashboard per lake;
+    the flock still excludes a second RUNNING pull).
     """
     if dry_run or started:
         return False
