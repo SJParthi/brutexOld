@@ -17,8 +17,13 @@ from decimal import Decimal
 
 from brutex.data.models import CandleBar
 from brutex.engine.stage3_wire import data_snapshot_hash
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
+
+#: A separator-free key alphabet — the SAFE domain production slice keys live in
+#: (``sweep_scope`` allowlisted symbols + the fixed interval vocabulary carry no
+#: ``|`` / ``\n``). ``data_snapshot_hash`` is injective here.
+_KEY_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -107,3 +112,39 @@ def test_output_is_64_lowercase_hex(bars: list[CandleBar]) -> None:
     assert len(digest) == 64
     assert digest == digest.lower()
     int(digest, 16)
+
+
+@given(
+    base=st.text(alphabet=_KEY_ALPHABET, min_size=3, max_size=12),
+    i_seed=st.integers(min_value=1, max_value=1_000),
+    j_seed=st.integers(min_value=1, max_value=1_000),
+)
+def test_separator_free_slice_keys_cannot_alias(base: str, i_seed: int, j_seed: int) -> None:
+    # DEC-DEDUP-IDENTITY-EVIDENCE-PACK-001: in the SAFE (separator-free) key
+    # domain — the only domain production inputs live in — two DIFFERENT
+    # (symbol, interval) splits of one string build DIFFERENT preimages (the
+    # slice-header '|' delimiters sit at different offsets), so the hashes differ.
+    n = len(base)
+    i = 1 + (i_seed % (n - 1))
+    j = 1 + (j_seed % (n - 1))
+    assume(i != j)
+    bars = [_bar(0, 0, 1, None)]
+    h_i = data_snapshot_hash(**_SCOPE, slices={(base[:i], base[i:]): bars})
+    h_j = data_snapshot_hash(**_SCOPE, slices={(base[:j], base[j:]): bars})
+    assert h_i != h_j
+
+
+def test_crafted_separator_keys_alias_at_preimage_is_the_documented_limit() -> None:
+    # DOCUMENTED LIMIT (tripwire pin): the slice header '\n{sym}|{iv}|{len}' has
+    # no '|'/'\n' rejection, so ('A|B', 'C') and ('A', 'B|C') build the
+    # BYTE-IDENTICAL preimage '\nA|B|C|1' and hash EQUAL at HEAD. This is
+    # production-UNREACHABLE — the sweep_scope symbol allowlist + the fixed
+    # interval vocabulary + `_safe_segment` mean no '|'/'\n' key ever reaches
+    # here — so the reject-guard on the Rule-4 identity-critical snapshot_hash.py
+    # is deliberately DEFERRED (named follow-up DEC-SNAPSHOT-SLICE-KEY-GUARD-001).
+    # When that guard lands it flips this equality to `!=` and this pin FAILS
+    # LOUDLY, forcing the frozen-digest byte-neutrality re-proof at that time.
+    bars = [_bar(0, 0, 1, None)]
+    h_left = data_snapshot_hash(**_SCOPE, slices={("A|B", "C"): bars})
+    h_right = data_snapshot_hash(**_SCOPE, slices={("A", "B|C"): bars})
+    assert h_left == h_right
