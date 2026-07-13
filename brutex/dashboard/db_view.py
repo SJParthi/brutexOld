@@ -4015,8 +4015,10 @@ def _bad_tick_seed_bar(
     (DEC-DASHBOARD-READ-SCREEN-001), mirroring the predecessor read of
     :func:`_intraday_last_close_with_predecessor`: reads the last
     :data:`_BAD_TICK_SEED_WINDOW` bars STRICTLY BEFORE the page's earliest row AND
-    on the same UTC/session date (``CAST(timestamp AS DATE)`` — an NSE session
-    never crosses a UTC date), SCREENS that ascending window through the SAME
+    on the same IST session date (the COMMON :data:`_IST_DATE_EXPR` equality —
+    never a bare ``CAST(timestamp AS DATE)``, which resolves in the ambient
+    DuckDB session TimeZone; DEC-DB-TZ-MONEYNESS-FIXES-001), SCREENS that
+    ascending window through the SAME
     :func:`~brutex.data.bar_screen.screen_rows`, and returns the LAST KEPT bar as
     the seed — so the page's leading row is judged against the last GOOD close, not
     a spike sitting immediately before the page (the single-spike / short-cluster
