@@ -28,7 +28,7 @@ byte-identity re-ingest law), the CSV parse taxonomy + ticker AMBIGUITY law
 read-time 1s collapse + LTQ>0-only 1m derivation into provenance-isolated
 `-G1S` symbols under bars/ (the suffix fails the right-anchored F&O grammar,
 so every parse-derived surface skips or honestly-buckets it), /db surfaces
-mirroring the expired-options pager, a 43-row edge matrix + the
+mirroring the expired-options pager, a 44-row edge matrix + the
 honest-limits/UNVERIFIED register, and the two-panel reconciliation appendix;
 raw GDFL data NEVER committed + `snap1s/` and the derived `*-G1S` bar dirs
 EXCLUDED from off-box backup until the licensing read (a named
@@ -2463,7 +2463,7 @@ hostile-review pass._
   `materialize_lake_timeframes(..., kind=)` loop (the seam is single-symbol
   with a REQUIRED `kind: PrebuildKind`); /db
   discovery + pager mirroring the expired-options pattern with a
-  generation-keyed count memo; a 43-row edge matrix naming a planned test per
+  generation-keyed count memo; a 44-row edge matrix naming a planned test per
   measured/UNVERIFIED case; honest limits (NO API backfill — GDFL tick-class
   history is days-scale, the 01-Jul-2025 samples are vendor DUMPS and dump
   availability ≠ API depth; L1-only; derived-bar fidelity stamped; emission
@@ -2493,7 +2493,13 @@ hostile-review pass._
   so the market-blind skipped-audit rotation can never adopt a
   `gdfl-derive-1m` window (§5.2 G3; NEW edge row 43, matrix 42→43; zero
   ledger change — `record()`'s independent `raw_bars`/`bars_appended`
-  inputs carry it). DOCS-ONLY — zero brutex/rust/test/CI source
+  inputs carry it). REFUTER ROUND 3: CLEAN (zero MINOR+; 4 wording/coverage
+  NITs folded, MIGRATION.md #1781 — the R2 worst-case-VOLUME reword
+  (13,655 = the highest-liquidity sample), the §6.4 `prebuild_kind_for`
+  mirrored-law-not-callable-tool clarification, NEW edge row 44 pinning
+  `collapse_to_1s` (matrix 43→44,
+  `test_collapse_to_1s_last_wins_state_sum_flow`), and the §10 Phase-2
+  `snap1s_derive`-family test enumeration). DOCS-ONLY — zero brutex/rust/test/CI source
   change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
   REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
@@ -6334,7 +6340,7 @@ hostile-review pass._
   re-ingest law) + the CSV parse taxonomy + the ticker ambiguity law (raw
   archival never blocked by resolution) + provenance-isolated `-G1S` derived
   1m bars under bars/ + /db read surfaces mirroring the options pager + the
-  43-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
+  44-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
   committed; `snap1s/` + `*-G1S` bars excluded from off-box backup until the
   licensing read — a named DEC-BACKUP-OFFBOX-001 divergence); DOCS-ONLY —
   zero source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's

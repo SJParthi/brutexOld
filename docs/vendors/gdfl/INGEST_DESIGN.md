@@ -53,7 +53,7 @@ REFERENCE_ONLY). Every decision below was judge-decided across the two panels;
 | # | Question | DECISION | One-line rationale |
 |---|---|---|---|
 | R1 | Lake tree name | **`snap1s/`** | The framing ruling's own phrase; `ticks/` violates the ruling; `l1/` loses cadence; docstring pins "1s = timestamp RESOLUTION, not a fixed grid". |
-| R2 | Partition layout | **`snap1s/<source>/<exchange>/<segment>/<raw_ticker>/<YYYY>-<MM>.parquet`** — `source ∈ {csv_dump}` in v1 (`ws_live`/`rest_hist` reserved); MONTH files via the ONE `option_partition_stem` | The `options/`-tree precedent + one stem law; measured worst liquidity (~13,655 rows/day ≈ ~300k/month) is trivial; the sibling's per-source level accepted (one cheap dir level buys the cross-source-never-merged law forever); the sibling's per-DAY files rejected (month files + the per-(instrument, day) ledger window achieve the same idempotence unit). |
+| R2 | Partition layout | **`snap1s/<source>/<exchange>/<segment>/<raw_ticker>/<YYYY>-<MM>.parquet`** — `source ∈ {csv_dump}` in v1 (`ws_live`/`rest_hist` reserved); MONTH files via the ONE `option_partition_stem` | The `options/`-tree precedent + one stem law; measured worst-case volume (~13,655 rows/day ≈ ~300k/month — the highest-liquidity sample) is trivial; the sibling's per-source level accepted (one cheap dir level buys the cross-source-never-merged law forever); the sibling's per-DAY files rejected (month files + the per-(instrument, day) ledger window achieve the same idempotence unit). |
 | R3 | Raw-store identity | **RAW vendor ticker minus the `.NFO` suffix** (`NIFTY25200CE`, `OIL-I`), char-screened | Tickers/filenames are PROVENANCE, never guessed semantics; the suffix is redundant with the `<exchange>/<segment>` dirs it maps to (`.NFO` → `NSE`/`FNO`; any other suffix FILE-fails as unknown). |
 | R4 | Ticker → canonical resolution | **Decoupled: raw ingest NEVER blocked by resolution.** Best-effort ingest-time METADATA (recorded in the source manifest): multi-grammar candidate enumeration + registry/master validation (§4.4); exactly-one-valid ⇒ resolved; 0 or ≥2 ⇒ `unresolved` recorded; the DERIVE refuses `unresolved` loudly naming candidates | Storage keys on the vendor ticker, so archival never launders a guess and never stalls on the UNCONFIRMED fragment grammar; resolution is a mapping layer, not a storage gate. Never a guessed expiry (Golden Rule #1). |
 | R5 | Row key | **`(timestamp UTC, seq Int32)`**, seq = 0-based per-second ordinal in stable FILE order | No tiebreaker column exists (measured); file order is the only order there is; measured max 5 rows/s; cap 65,535 fail-loud. |
@@ -850,8 +850,11 @@ blocks keep-first cross-vendor mixing.
   (`brutex/data/timeframe_materialize.py:437` — the seam is SINGLE-symbol
   with a REQUIRED `kind: PrebuildKind`; no plural `symbols=` overload
   exists). `kind` is derived from the canonical contract parsed from behind
-  the `-G1S` suffix (CE/PE ⇒ `OPTIONS`, FUT ⇒ `FUTURES` — the
-  `prebuild_kind_for` classification law, `:211-230`), routing through the
+  the `-G1S` suffix — the CE/PE ⇒ `OPTIONS` / FUT ⇒ `FUTURES` mapping is
+  applied DIRECTLY to the parsed contract-type token, MIRRORING
+  `prebuild_kind_for`'s dispatch logic (`:211-230` — the mirrored LAW, not
+  the directly-callable tool: it takes a full master `Instrument`, and
+  `-G1S` symbols are deliberately not master rows), routing through the
   OI-aware FNO resampler (`intraday_resampler_for`, `:233-257`). The
   master-driven pipeline prebuild is UNTOUCHED — it filters instrument-MASTER rows
   (`underlying_match_tokens` over the master list,
@@ -982,6 +985,7 @@ U = UNVERIFIED, D = design-derived.
 | 41 | D: mutation | new modules join the weekly per-module zero-survivor mutmut loop | `mutation.yml` wiring pin (the house pattern) |
 | 42 | M(calendar): evening-Muhurat session DERIVE (refuter round 1) | the 1m grid anchors at the session's REAL open, close-exclusive `[session.open, session.close)` (§6.2) — an evening-Muhurat file derives REAL bars with ZERO `post_grid_trades`; the coarser-TF fold inherits the lake-wide 09:15-anchored `resample_1m_to_tf` behavior (disclosed, §6.2) | `test_snap1s_derive.py::test_muhurat_session_derives_on_real_session_grid` — evening 18:00–19:00 fixture ⇒ real 1m bars, no post-grid drops; a regular-day fixture stays byte-identical to the fixed-grid law |
 | 43 | D: legitimately zero-bar derive — index file / all-quote-only day (refuter round 2) | the derive window records **SUCCESS with `bars_appended=0`** (`raw_bars` = consumed clean-1s rows ≥ 1), NEVER EMPTY — the market-blind skipped-audit rotation can never adopt a `gdfl-derive-1m` window (§5.2 G3, the row-38 twin) | `test_snap1s_derive.py::test_zero_bar_derive_records_success_never_empty` — an index-file fixture derives 0 bars ⇒ ledger row SUCCESS/`bars=0`/streak reset; asserts status is not EMPTY and `audit_reopen_skipped` never selects it |
+| 44 | D: `collapse_to_1s` state-vs-flow law (R12/§6.1; refuter round 3 coverage NIT) | state fields (LTP/quotes/OI) = the max-`seq` LAST row of the second; `ltq_1s` = Σ ltq over the second's PAYLOAD-DISTINCT rows; absent seconds ABSENT in the 1s view — never forward-filled | `test_snap1s_derive.py::test_collapse_to_1s_last_wins_state_sum_flow` — a multi-rows-in-one-second fixture (divergent LTP/quotes + one duplicated print + a following empty second) pins max-seq last-wins state, payload-distinct ΣLTQ flow, and the absent-second hole |
 
 ---
 
@@ -1204,7 +1208,14 @@ into a recorder design (not this mandate). Vendor facts per
     db.html row + app.py routes.
   - `brutex/cli.py` — the `gdfl derive-1m` arm (`--assume-calendar-roll`).
   - The provenance-isolation integration test (§8 row 34) + the G1S drift pin
-    (row 35) ship here.
+    (row 35) ship here, alongside the FULL `snap1s_derive`-family test set —
+    the §8 rows 3/4/5/11/27/33/42/43/44 planned tests (gap/idle minutes
+    ABSENT · quote-only minute has no bar + OI-from-quote-row ·
+    duplicate-print collapse never overcounts · the close-instant drop ·
+    the derive-conservation property (`test_snap1s_derive_properties.py`) ·
+    the Muhurat real-session grid · the zero-bar SUCCESS ledger law · the
+    `collapse_to_1s` last-wins/Σ-flow pin) — Phase-2 deliverables, mirroring
+    the Phase-1 test callouts above.
 - **Phase 3+ — each its own DEC**: `DEC-SNAP1S-CENSUS-001` →
   `DEC-SNAP1S-HEAL-001` → `DEC-SNAP1S-STATS-MANIFEST-001` (§3.5); the
   `brutex doctor --gdfl-diff` cross-vendor check (§6.4); an F&O-picker group
