@@ -5362,15 +5362,39 @@ def build_app(
             }
         )
 
+    def _crossverify_last_run() -> dict[str, object] | None:
+        """The durable last-run record — the reload-proof failure surface.
+
+        DEC-CROSSVERIFY-WITHHELD-REGATE-001: reads the runner-written
+        ``<lake_root>/.crossverify/last_run.json`` view sidecar (best-effort;
+        absent / corrupt / no resolvable lake root → honest ``None`` — the
+        panel simply shows nothing, never a 500). Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.journal import load_last_run
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return None
+        return load_last_run(lake_root)
+
     @app.get("/api/v1/crossverify/progress")
     async def api_crossverify_progress() -> JSONResponse:
-        """GET /api/v1/crossverify/progress — the O(1) producer job snapshot.
+        """GET /api/v1/crossverify/progress — the producer job snapshot.
 
         The dedicated job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
-        (state / current / detail / percent …) — O(1) per poll, ZERO lake
-        reads (DEC-CROSSVERIFY-PRODUCER-001).
+        (state / current / detail / percent …) — O(1) per poll
+        (DEC-CROSSVERIFY-PRODUCER-001) — plus the ADDITIVE ``last_run`` field:
+        the durable end-of-run record the runner persists at
+        ``<lake_root>/.crossverify/last_run.json`` (verdict + counts + capped
+        failed keys + detail), so a finished failure survives a page reload
+        AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
+        O(1) small-sidecar stat+read per poll, off the event loop; ``null``
+        when absent/corrupt/unresolvable — never a fabricated record.
         """
-        return JSONResponse(_crossverify_job.snapshot().to_dict())
+        snapshot = _crossverify_job.snapshot().to_dict()
+        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
