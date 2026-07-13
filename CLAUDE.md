@@ -18,7 +18,31 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+_Last updated: 2026-07-13 (DEC-FILL-WORST-CASE-001, MIGRATION.md #1786 —
+the GLOBAL worst-case fill mode: by OPERATOR DIRECTIVE every entry/exit
+across the spot/index engine AND the futures/options translation executors
+fills at the fill bar's WORST price by DEFAULT — the adverse-max law (entry
+at the adverse extreme; AT_LEVEL SL/TP at min(level, low)/max(level, high);
+open-anchored/forced/end-of-data/session-gap at the adverse extreme;
+futures/options keep their ± one-tick discipline ON TOP of the extreme so a
+flat bar is EQUAL to precise, never better) — so the backtest can only
+UNDERSTATE. **ENGINE SEMANTICS CHANGED BY OPERATOR DIRECTIVE** — worst-case
+fills are the new production default; the explicit PRECISE opt-out is
+byte-identical legacy (frozen goldens reproduce byte-for-byte, pinned
+never-regenerate; `canonical_trade_params` emits `fill_mode` ONLY when
+non-PRECISE, so historical run identities are untouched);
+NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT scope unchanged; no
+lake/schema/scope/vocab/rate change. ONE `FillMode` vocabulary leaf
+(`brutex/execution/fill_mode.py`, fail-loud `$BRUTEX_FILL_MODE`), the
+library-PRECISE vs production-WORST_CASE default split, the Rust kernel
+twin (u64+u128; old-wheel `fill_mode_kernel_missing` demotion to the
+oracle), the R45 diffcheck naive worst-case arm (same-mode vs same-mode;
+the Stage-1 disable bridge removed), and the per-trade floor properties
+(matched-trade-scoped on spot; unconditional on the futures/options
+re-pricing legs). The per-item record lives ONLY in the §1 Active-branch
+blurb + MIGRATION.md #1786 — this header carries the pointer, never the
+story.)
+Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
 one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
@@ -2400,7 +2424,61 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+- **Active branch:** `claude/fill-worst-case` (**DEC-FILL-WORST-CASE-001, MIGRATION.md #1786** — the
+  GLOBAL worst-case fill mode, TWO stages on one branch. **ENGINE SEMANTICS CHANGED BY OPERATOR
+  DIRECTIVE** — the one sanctioned exception to the standing ENGINE-UNCHANGED posture: every entry/exit
+  fills at the fill bar's WORST price by DEFAULT (the adverse-max law) so the backtest can only
+  UNDERSTATE; the explicit `FillMode.PRECISE` opt-out is byte-identical legacy;
+  NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT scope unchanged; no lake/schema/scope/vocab/rate change.
+  STAGE 1 (spot engine): NEW stdlib-only vocabulary leaf `brutex/execution/fill_mode.py` (ONE
+  two-member `FillMode`, `DEFAULT_FILL_MODE=WORST_CASE`, fail-loud `resolve_fill_mode()` over
+  `$BRUTEX_FILL_MODE`); the Python walker + the width-generic Rust `MaskWord` kernel (u64+u128, all 4
+  FFI signatures gain the back-compat `worst_case=False`; an OLD wheel demotes to the Python oracle
+  with reason `fill_mode_kernel_missing`, warn-once) implement the law — entry at the entry bar's
+  adverse extreme (BUY HIGH / SELL LOW), AT_LEVEL SL/TP at `min(level, low)` / `max(level, high)`
+  (gap-through fills the extreme, gap-past clamps AT the level — never overstating),
+  forced/next-open/signal exits at the fill bar's adverse extreme, end-of-data/session-gap at the last
+  stored bar's adverse extreme; TIMING/triggers/tie/reasons/excursions/exit-index byte-identical to
+  PRECISE. IDENTITY: `canonical_trade_params` emits `fill_mode` ONLY when non-PRECISE (the
+  roll_schedule conditional-emit template) — the frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH`
+  reproduce byte-for-byte under explicit PRECISE (never regenerated) and the NEW worst-case golden is
+  locked once (empty-store outcome audited in-file + exact-trade-stream teeth); the elide fold is
+  mirrored in grid identity + tuple cache key + `_tuple_digest`; every re-deriver sources the mode
+  from the SAME params it sources sl/tp from (`sweep-verify --recount`: no `fill_mode` key = PRECISE
+  legacy). The production config layer owns the default (`SweepRunConfig`/`SweepGridConfig`, the CLI
+  `--fill-mode` flag beating env); the trade-sim library default stays PRECISE. STAGE 2
+  (futures/options + diffcheck): `apply_futures_fill`/`FuturesTradeInput`/`compute_futures_trade_cost`
+  + `_apply_slippage`/`TradeInput`/`compute_trade_cost` gain the mode + additive-defaulted bar-extreme
+  anchors (WORST_CASE fail-loud requires them; ordering validated; a sub-tick LOW is absorbed by the
+  kept `max(fill, tick)` floor) — worst-case anchors the SAME ± one tick on the adverse EXTREME
+  (long: entry HIGH + tick / exit LOW − tick; short mirrored), so the flat-bar counterexample
+  (`high == open` ⇒ bare high would BEAT precise) reads exactly EQUAL and worst-never-better is
+  structural; the executors (`materialize_futures_trade`/`materialize_trade` + their run/sim
+  surfaces) ARE the production config layer — default `DEFAULT_FILL_MODE`, extremes extracted from
+  the real bars in both modes, every reject gate (NO_DATA/STALE_BAR/§7.8 tick floor on the OPENs)
+  mode-INDEPENDENT; the stale "pessimistic/worst leg is DEFERRED — structurally absent" honesty
+  comments rewritten (the leg LANDS; gap-opens still fill on the REAL bar — its adverse extreme);
+  the futures `reference_sim` + the R45 `sweep_diffcheck.reference_simulate` independently RESTATE
+  the worst-case law keyed on the threaded mode (`DiffCheckGridLike.fill_mode`; the FillMode import
+  is shared vocabulary DATA — both AST import bans stay green) so the differentials compare
+  same-mode vs same-mode under BOTH modes, and the Stage-1 diffcheck disable bridge is REMOVED
+  (regression repurposed: closure live under WORST_CASE, zero disable WARNs, token gone from the run
+  core); the CLI options-sim wire gap closed (the launch-resolved mode now reaches
+  `execute_options_sim`, not just the spot replay). TESTS: PRECISE pins across every pre-worst-case
+  suite; NEW hand-derived worst-case goldens (futures + options Fixture W) locked once; the named
+  flat-bar regression at fill/executor/naive levels; per-trade floor properties — matched-trade-scoped
+  on the spot engine (SL/TP levels re-anchor on the worst entry ⇒ trigger timing can differ),
+  UNCONDITIONAL on the futures/options fixed-trade re-pricing legs; NEW ci.yml stanza for the
+  fill_mode leaf; touched gated modules 100% line+branch. HONEST: the options worst-case buy prices
+  one tick OUTSIDE the printed range (the tick discipline's adverse floor); `brutex sweep`'s
+  text-report replay stays library-PRECISE; the futures/options executors remain unwired into
+  cmd_sweep_all/the dashboard (the pre-existing Phase-5 envelope). NAMED FOLLOW-UP
+  DEC-FUTURES-LIVE-VOLUME-VERIFY: futures LIVE-feed volume UNVERIFIED (cross-verify is
+  historical-pull-fed; the Groww websocket doc carries no volume field, REST get_quote does;
+  TickVault's live capture is out-of-repo) — settle by inspecting the tickvault repo + a live probe
+  (subscribe front-month NIFTY-FUT, dump raw payload keys beside a parallel get_quote transcript);
+  the feed fix itself is deliberately NOT built here.)
+  Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
   renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
@@ -6229,7 +6307,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/crossverify-producer`
+- **Active feature branch:** `claude/fill-worst-case`
+  (DEC-FILL-WORST-CASE-001, MIGRATION.md #1786 — the GLOBAL worst-case fill
+  mode: ENGINE semantics changed BY OPERATOR DIRECTIVE — worst-case fills
+  (the adverse-max law; futures/options keep their ± one-tick discipline on
+  top of the adverse extreme so a flat bar equals precise, never better) are
+  the new production default across the spot engine + the futures/options
+  translation executors + the R45 diffcheck naive arm; the explicit PRECISE
+  opt-out is byte-identical (frozen goldens intact, never regenerated;
+  `fill_mode` emitted into run identity ONLY when non-PRECISE);
+  NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT scope unchanged; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1786 for the full blurb)
+  Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
   TickVault cross-verification producer: NEW `brutex/crossverify/` package
