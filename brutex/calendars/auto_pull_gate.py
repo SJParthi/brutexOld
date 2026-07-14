@@ -153,7 +153,11 @@ def resolve_settle_resolution(env: Mapping[str, str] | None = None) -> SettleRes
     junk ``BRUTEX_SETTLE_EVIDENCE_PATH`` raises out — the resolve_* law;
     default-path corruption WARNs once and falls through). Tier 3 —
     :data:`DEFAULT_PULL_ALL_SETTLE_IST` with the verbatim UNMEASURED
-    provenance. Resolved once per invocation — never mid-run.
+    provenance. Resolved once per invocation — never mid-run. Cost honesty
+    (r1 MINOR-2): tiers 2-3 perform ONE bounded dentry-cached ``os.stat``
+    probe of the evidence path per resolution (memoized on the stat token —
+    the 60 s scheduler tick + status renders pay one probe each); the tier-1
+    env short-circuit performs ZERO filesystem work.
     """
     mapping = os.environ if env is None else env
     raw = mapping.get(PULL_ALL_SETTLE_ENV, "")

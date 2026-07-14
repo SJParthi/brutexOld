@@ -146,23 +146,30 @@ class SettleEvidence:
 def default_evidence_path() -> Path:
     """The repo-committed default artifact path — ``<repo>/docs/groww/probe/...``.
 
-    ``parents[2]`` up from this file's package (the
-    ``brutex.config.dotenv._default_repo_root`` precedent: parents[0] =
-    ``calendars``, [1] = ``brutex``, [2] = the repo root). Under a
-    non-editable wheel install parents[2] lands in site-packages' parent —
-    the path reads ABSENT and the loader silently serves the tier-3 default
+    PURE path arithmetic — ``parents[2]`` up from this file's package
+    (parents[0] = ``calendars``, [1] = ``brutex``, [2] = the repo root; the
+    ``brutex.config.dotenv._default_repo_root`` precedent MINUS its
+    ``.resolve()`` — the module ``__file__`` is already absolute at import
+    on this Python, and symlink canonicalization is unnecessary for a
+    repo-relative default that every consumer addresses through THIS one
+    function, so :func:`resolve_evidence_path` performs genuinely zero
+    filesystem work; hostile-review r1 MINOR-1). Under a non-editable wheel
+    install parents[2] lands in site-packages' parent — the path reads
+    ABSENT and the loader silently serves the tier-3 default
     (safe-by-absence, documented in the module docstring). MUST be looked up
     as a module global by :func:`resolve_evidence_path` at CALL time so
     default-tier tests can monkeypatch this seam (the ``now_ist``-lookup
     idiom in ``auto_pull_gate.compose_market_closed``).
     """
-    return Path(__file__).resolve().parents[2] / DEFAULT_EVIDENCE_RELPATH
+    return Path(__file__).parents[2] / DEFAULT_EVIDENCE_RELPATH
 
 
 def resolve_evidence_path(
     env: Mapping[str, str] | None = None,
 ) -> tuple[Path | None, bool]:
-    """Resolve ``(path, explicit)`` from the env — pure, never raises, no I/O.
+    """Resolve ``(path, explicit)`` from the env — pure, never raises, no I/O
+    (the default branch is pure path arithmetic on this module's absolute
+    ``__file__`` — no ``.resolve()`` lstat walk; r1 MINOR-1).
 
     Unset / blank → ``(default_evidence_path(), False)``; the ``off`` token
     (casefold) → ``(None, False)`` — the channel disabled; any other value →
@@ -179,8 +186,13 @@ def resolve_evidence_path(
 
 
 def _fail(path: str, reason: str) -> NoReturn:
-    """Raise the validator's uniform :class:`ValueError` naming path + reason."""
-    raise ValueError(f"settle evidence {path}: {reason}")
+    """Raise the validator's uniform :class:`ValueError` naming path + reason.
+
+    The *path* is ``!r``'d like ``_absent_error``'s (the #907 source-repr
+    convention — every explicit-tier ValueError reprs the path consistently;
+    hostile-review r1 security F2).
+    """
+    raise ValueError(f"settle evidence {path!r}: {reason}")
 
 
 def _require_int(
@@ -338,6 +350,14 @@ def validate_evidence_payload(payload: object, *, path: str) -> SettleEvidence:
         _fail(path, f"generated_at_utc={generated!r} is not ISO-8601")
     if generated_dt.tzinfo is None:
         _fail(path, f"generated_at_utc={generated!r} is tz-naive (must be tz-aware)")
+    if generated_dt.utcoffset() != timedelta(0):
+        # The field NAME promises UTC and the emitter always writes UTC — an
+        # aware-but-non-UTC offset is refused (r1 correctness NIT-1; the
+        # staleness math would still be correct, the tightening is semantic).
+        _fail(
+            path,
+            f"generated_at_utc={generated!r} must be UTC (got offset {generated_dt.utcoffset()})",
+        )
     version = payload.get("probe_script_version")
     if not isinstance(version, str) or not version:
         # NOT exact-matched — informational provenance, but it must exist.
@@ -376,7 +396,16 @@ class _EvidenceMemo:
     corruption sighting" semantics — a replaced file re-validates + re-logs
     (truth-table row 25). An attribute-mutated holder, not module-global
     rebinds (§4 no-global-mutable-state discipline, the injectable seam being
-    :func:`_reset_evidence_memo_for_tests`)."""
+    :func:`_reset_evidence_memo_for_tests`).
+
+    COSMETIC-LOG residual (r1 correctness NIT-4): if an operator sets
+    :data:`SETTLE_EVIDENCE_PATH_ENV` to EXACTLY the repo default path AND a
+    corrupt-EXPLICIT call precedes a default (env-unset) call in the same
+    process, the explicit RAISE pre-empts the ``settle_evidence.invalid``
+    WARN and the later default call serves the memoized outcome
+    (``fresh=False``) → ``None`` with no WARN. The served VALUE is still
+    correct (``None`` → the 17:30 tier-3 fallback) — log-only, and it
+    requires the explicit path to equal the default path."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -438,8 +467,10 @@ def evidence_settle(env: Mapping[str, str] | None = None) -> SettleEvidence | No
     naming) plus ONE ``settle_evidence.stale`` WARN when older than
     :data:`STALE_EVIDENCE_AFTER_DAYS` (still adopted — measured-then-margined
     dominates a guess). Memoized on ``(path, st_mtime_ns, st_size)`` under a
-    module lock; ABSENT is re-probed every call (one failed stat, no log; a
-    later commit/deploy is picked up on the next poll).
+    module lock; ABSENT is re-probed every call — the per-call filesystem
+    cost is exactly ONE ``os.stat`` of the evidence path (dentry-cached; the
+    path derivation itself is pure — r1 MINOR-2), no log; a later
+    commit/deploy is picked up on the next poll.
     """
     path, explicit = resolve_evidence_path(env)
     if path is None:
@@ -457,10 +488,15 @@ def _evidence_settle_locked(path: Path, explicit: bool) -> SettleEvidence | None
         if explicit:
             raise _absent_error(path) from None
         return None
-    except OSError as exc:
-        # A stat-level fault (e.g. an unreadable parent) — no content token
-        # exists; fold into the read_error family under a degenerate token so
-        # the default-tier WARN still fires once per sighting.
+    except (OSError, ValueError) as exc:
+        # A stat-level fault — an unreadable parent (OSError) or an
+        # un-stat-able PATH VALUE (``os.stat`` raises raw ValueError on an
+        # embedded NUL byte; only an explicit operator path can carry one —
+        # r1 correctness NIT-2). No content token exists; fold into the
+        # read_error family under a degenerate token so the default-tier WARN
+        # still fires once per sighting and the explicit tier re-raises the
+        # module's uniform ValueError naming the env var (via ``_serve`` —
+        # the fail-loud direction preserved, never an unwrapped raw raise).
         token = (str(path), -1, -1)
         pre_outcome: SettleEvidence | str | None = f"unreadable ({type(exc).__name__}: {exc})"
     else:
@@ -499,9 +535,13 @@ def _serve(
             )
             generated = datetime.fromisoformat(outcome.generated_at_utc)
             if datetime.now(UTC) - generated > timedelta(days=STALE_EVIDENCE_AFTER_DAYS):
+                # generated_at_utc is FILE CONTENT — repr()'d at source (the
+                # #907 convention; ``fromisoformat`` accepts ANY single char
+                # as the separator, so a VALIDATED value can still carry e.g.
+                # a raw newline — r1 security F1).
                 _LOG.warning(
                     "settle_evidence.stale",
-                    generated_at_utc=outcome.generated_at_utc,
+                    generated_at_utc=repr(outcome.generated_at_utc),
                     stale_after_days=STALE_EVIDENCE_AFTER_DAYS,
                     path=outcome.path,
                     detail=(

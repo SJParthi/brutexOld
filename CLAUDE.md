@@ -2556,9 +2556,10 @@ hostile-review pass._
   without a qualifying slot — exit 2; self-validates via the repo validator) into
   `docs/groww/probe/settle_evidence.json` (schema 1, committed + reviewed BESIDE its
   transcripts — the tests/bench/baselines precedent). NEW `brutex/calendars/settle_evidence.py`
-  = the validator (26-row truth table: exact schema/kind, strict ASCII HH:MM, bool-refused
+  = the validator (the truth table: exact schema/kind, strict ASCII HH:MM, bool-refused
   ints, `adopted == earliest + margin` with no midnight wrap, the ≥15:35 BLOCK_END floor
-  with 15:35-exact allowed, the per-day support law, tz-aware `generated_at_utc`) + the
+  with 15:35-exact allowed, the per-day support law, tz-UTC-exact `generated_at_utc` —
+  aware-but-non-UTC refused since the r1 fold) + the
   stat-token-memoized loader with the D/X corruption SPLIT: an operator-typed EXPLICIT
   `BRUTEX_SETTLE_EVIDENCE_PATH` fails LOUD on every junk shape (the resolve_* law) while
   DEFAULT-path corruption is ONE `settle_evidence.invalid` WARN per stat-token + the 17:30
@@ -2597,15 +2598,24 @@ hostile-review pass._
   probe measures); the scheduler probe-until-available loop REJECTED (amends the #1779
   "NO new vendor-call surface" pin for an UNVERIFIED benefit); named follow-ups
   DEC-SETTLE-PROD-EVIDENCE-RECORDER-001 (crossverify recorder + default_too_early
-  raise-guard — diagnostics, deliberately out) + the evidence COMMIT itself. ENGINE
+  raise-guard — diagnostics, deliberately out) + the evidence COMMIT itself.
+  HOSTILE-REVIEW ROUND folded (4× SHIP — the per-item record lives in MIGRATION.md
+  #1792): honesty docstrings (`default_evidence_path` drops its `.resolve()` — the
+  resolver's "no I/O" claim made literally true; the per-poll one-stat probe cost
+  disclosed), repr conventions (the stale WARN's `generated_at_utc` field + `_fail`'s
+  path — the #907 source-repr law), `generated_at_utc` tightened to tz-UTC-exact, the
+  NUL-path raw-ValueError wrapped into the uniform env-naming refusal, the emitter's
+  informational non-monotonic note (emit-path-only — plain --summarize stdout stays
+  note-free), and the `_RECORD_KEYS` writer↔fixture drift pin. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ZERO new
   vendor calls; `market_hours.py` byte-untouched; new env var BRUTEX_SETTLE_EVIDENCE_PATH
   (+ the conftest hermeticity belt, off-by-default in tests only). GATES:
-  `settle_evidence.py` 100.00% line+branch standalone (210/88, 99 tests incl. the
-  subprocess emitter round-trip golden) + `sidecar_read.py` 100.00% (34/6) on their NEW
-  ci.yml stanzas; `auto_pull_gate.py` (93/30) · `auto_pull_scheduler.py` (253/56) ·
-  `pull_intent.py` (225/50 on its mapped trio) re-measured 100.00%; ruff/ruff-format
-  clean; `mypy --strict` clean; pyright 0 new vs the pre-change baseline.)
+  `settle_evidence.py` 100.00% line+branch standalone (212/90, 104 tests incl. the
+  subprocess emitter round-trip golden — r1 re-measure) + `sidecar_read.py` 100.00%
+  (34/6) on their NEW ci.yml stanzas; `auto_pull_gate.py` (93/30) ·
+  `auto_pull_scheduler.py` (253/56) · `pull_intent.py` (225/50 on its mapped trio)
+  re-measured 100.00%; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new vs
+  the pre-change baseline.)
   Earlier: `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
   MIGRATION.md #1779** — the one-click scoped-ALL SPOT pull: ONE dashboard button
   (`#pullAllSpotBtn` → the EXISTING `/pull-pipeline` launcher with the NEW additive

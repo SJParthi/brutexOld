@@ -97,6 +97,39 @@ _MARGIN_BOUNDS = (10, 240)
 #: special-weekend session is a full 375-minute regular session: INCLUDED).
 _REGULAR_SESSION_MINUTES = 375
 
+#: The full per-record key set the writer in :func:`main` emits on a
+#: SUCCESSFUL fetch (the 8 base keys + the 12 ``record.update`` keys); an
+#: errored fetch keeps only the 8 base keys with its ``error`` text filled.
+#: Keep in sync with the record build in main() — the round-trip suite pins
+#: BOTH the writer's literal key set (AST) AND its synthetic fixture's keys
+#: to THIS constant (tests/unit/test_settle_evidence.py — r1 coverage
+#: INFO-4), so the --emit-evidence golden can never silently drift from the
+#: real writer.
+_RECORD_KEYS = frozenset(
+    {
+        "probe_ts_ist",
+        "slot",
+        "symbol",
+        "kind",
+        "exchange",
+        "segment",
+        "expected_minutes",
+        "error",
+        "raw_rows",
+        "rows_len6",
+        "rows_len7",
+        "raw_null_volume",
+        "raw_null_oi",
+        "parsed_bars",
+        "count_ok",
+        "first_bar_ist",
+        "last_bar_ist",
+        "last_bar_is_1529",
+        "fut_volume_nonnull",
+        "fut_oi_nonnull",
+    }
+)
+
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -351,6 +384,27 @@ def _emit_evidence(
             f"passing on every such day (included days: {len(per_day)}) — keep probing"
         )
         return 2
+    # r1 correctness NIT-3: surface NON-MONOTONIC observations — the earliest
+    # slot all-pass on every observed day while a strictly LATER slot fails on
+    # some day deserves a human look before the commit review. INFORMATIONAL
+    # only: the adopted value + the evidence schema are UNCHANGED (a too-early
+    # adoption can never produce wrong data — the #1774 today-gate is the
+    # net), and the note lives in the EMIT path only (a plain --summarize
+    # keeps its byte-identical stdout).
+    later_slots = _SLOTS[_SLOTS.index(earliest) + 1 :]
+    non_monotonic = [
+        (day, slot)
+        for day in sorted(per_day)
+        for slot in later_slots
+        if slot in per_day[day] and not per_day[day][slot]["all_pass"]
+    ]
+    if non_monotonic:
+        first_day, first_slot = non_monotonic[0]
+        print(
+            f"note: non-monotonic observations — {len(non_monotonic)} later-slot "
+            f"failure(s) after the all-pass {earliest} (first: {first_day} at "
+            f"{first_slot}); adopted value unchanged — review per_day before committing"
+        )
     earliest_minutes = int(earliest[:2]) * 60 + int(earliest[3:])
     adopted_minutes = earliest_minutes + margin_minutes
     if adopted_minutes >= 24 * 60:

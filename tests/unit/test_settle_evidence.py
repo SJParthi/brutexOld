@@ -19,6 +19,8 @@ worlds (absent → pass; present → must validate).
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import os
 import signal
@@ -277,6 +279,9 @@ class TestValidateEvidencePayload:
             ({"generated_at_utc": None}, "generated_at_utc must be an ISO-8601 string"),
             ({"generated_at_utc": "yesterday"}, "is not ISO-8601"),
             ({"generated_at_utc": "2026-07-13T12:31:04"}, "tz-naive"),
+            # r1 correctness NIT-1: aware-but-non-UTC refused — the field
+            # NAME promises UTC and the emitter always writes UTC.
+            ({"generated_at_utc": "2026-07-13T18:01:04+05:30"}, "must be UTC"),
             ({"probe_script_version": None}, "probe_script_version must be a non-empty"),
             ({"probe_script_version": ""}, "probe_script_version must be a non-empty"),
             ({"probe_script_version": 1.1}, "probe_script_version must be a non-empty"),
@@ -293,7 +298,9 @@ class TestValidateEvidencePayload:
         payload = make_evidence_payload(**mutation)
         with pytest.raises(ValueError, match=match) as excinfo:
             validate_evidence_payload(payload, path="mut.json")
-        assert "mut.json" in str(excinfo.value)  # every refusal names the path
+        # Every refusal names the path, repr()'d — the #907 convention shared
+        # with _absent_error (r1 security F2).
+        assert "'mut.json'" in str(excinfo.value)
 
     @pytest.mark.parametrize(
         ("per_day", "match"),
@@ -346,6 +353,15 @@ class TestValidateEvidencePayload:
         """Row 22: any non-empty version string adopts (informational)."""
         payload = make_evidence_payload(probe_script_version="2.0")
         assert validate_evidence_payload(payload, path="p.json").probe_script_version == "2.0"
+
+    def test_generated_at_utc_accepts_both_utc_spellings(self) -> None:
+        """[r1 NIT-1 boundary] UTC-exact acceptance covers BOTH ISO spellings
+        (``Z`` and ``+00:00``) — the tightening refuses only non-zero offsets."""
+        for token in ("2026-07-13T12:31:04Z", "2026-07-13T12:31:04+00:00"):
+            ev = validate_evidence_payload(
+                make_evidence_payload(generated_at_utc=token), path="p.json"
+            )
+            assert ev.generated_at_utc == token
 
 
 # ── evidence_settle — the DEFAULT tier (truth-table col D) ───────────────
@@ -413,6 +429,10 @@ class TestEvidenceSettleDefaultTier:
         stale = [e for e in logs if e["event"] == "settle_evidence.stale"]
         assert len(stale) == 1
         assert stale[0]["stale_after_days"] == STALE_EVIDENCE_AFTER_DAYS
+        # The file-content field is repr()'d AT SOURCE (the #907 convention,
+        # r1 security F1 — fromisoformat accepts ANY single separator char,
+        # so even a validated value could carry e.g. a raw newline).
+        assert stale[0]["generated_at_utc"] == repr(old)
         assert "still ADOPTED" in str(stale[0]["detail"])
 
     @pytest.mark.parametrize(
@@ -637,6 +657,19 @@ class TestEvidenceSettleExplicitTier:
         with pytest.raises(ValueError, match="absent"):
             evidence_settle({SETTLE_EVIDENCE_PATH_ENV: str(target)})
 
+    def test_nul_byte_path_raises_wrapped_naming_env(self) -> None:
+        """[r1 correctness NIT-2] an embedded NUL byte makes ``os.stat`` raise
+        a raw ValueError — folded into the module's uniform refusal naming the
+        env var (fail-loud direction preserved, never an unwrapped raw raise)."""
+        env = {SETTLE_EVIDENCE_PATH_ENV: "/tmp/evi\x00dence.json"}
+        with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV) as excinfo:
+            evidence_settle(env)
+        assert "unreadable" in str(excinfo.value)
+        assert "embedded null byte" in str(excinfo.value)
+        # The memoized degenerate token re-raises the SAME wrapped refusal.
+        with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV):
+            evidence_settle(env)
+
     def test_valid_explicit_adopts(self, tmp_path: Path) -> None:
         target = write_evidence(tmp_path / "e.json")
         result = evidence_settle({SETTLE_EVIDENCE_PATH_ENV: str(target)})
@@ -796,6 +829,8 @@ class TestProbeEmitterRoundtrip:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "evidence written" in proc.stdout
         assert "off-grid-slot record(s) ignored" in proc.stdout
+        # A clean monotonic fixture prints NO non-monotonic note (r1 NIT-3).
+        assert "non-monotonic" not in proc.stdout
         payload = json.loads(out.read_text(encoding="utf-8"))
         ev = validate_evidence_payload(payload, path=str(out))
         assert ev.adopted == time(16, 0)  # 15:45 earliest + 15 min margin
@@ -853,3 +888,76 @@ class TestProbeEmitterRoundtrip:
         source = _PROBE.read_text(encoding="utf-8")
         assert f"_MARGIN_BOUNDS = ({MIN_MARGIN_MINUTES}, {MAX_MARGIN_MINUTES})" in source
         assert f"_MIN_EVIDENCE_DAYS = {MIN_EVIDENCE_DAYS}" in source
+
+    def test_non_monotonic_later_slot_failure_prints_note_emit_path_only(
+        self, tmp_path: Path
+    ) -> None:
+        """[r1 correctness NIT-3] the earliest slot all-pass on EVERY observed
+        day while a strictly LATER slot fails on some day prints ONE
+        informational note naming day+slot — the adopted value + the evidence
+        schema are UNCHANGED, and the note lives in the EMIT path only (a
+        plain ``--summarize`` keeps its pre-#1792 note-free stdout)."""
+        _write_transcripts(tmp_path)  # clean from 15:45 on all 5 days
+        day, slot = "2026-07-16", "16:30"
+        rows = [
+            _probe_record(day, slot, ok=False),
+            _probe_record(day, slot, ok=False),
+            _probe_record(day, slot, kind="FUT", ok=False),
+        ]
+        target = tmp_path / f"postclose-{day}-{slot.replace(':', '')}.jsonl"
+        with target.open("w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        out = tmp_path / "settle_evidence.json"
+        proc = _run_probe("--summarize", str(tmp_path), "--emit-evidence", str(out))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "note: non-monotonic observations" in proc.stdout
+        assert f"(first: {day} at {slot})" in proc.stdout
+        assert "1 later-slot failure(s) after the all-pass 15:45" in proc.stdout
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["earliest_all_pass_ist"] == "15:45"  # value UNCHANGED
+        assert payload["adopted_settle_ist"] == "16:00"
+        assert validate_evidence_payload(payload, path=str(out)).adopted == time(16, 0)
+        # The note is EMIT-path-only: a plain --summarize over the SAME
+        # fixture prints no note (the reviewers' byte-identity pin was the
+        # plain --summarize stdout — kept intact by construction).
+        plain = _run_probe("--summarize", str(tmp_path))
+        assert plain.returncode == 0, plain.stdout + plain.stderr
+        assert "non-monotonic" not in plain.stdout
+
+
+def _load_probe_module() -> Any:
+    """Import the probe as a module (module-level = constants only — safe)."""
+    spec = importlib.util.spec_from_file_location("_postclose_settle_probe_pin", _PROBE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_probe_record_keys_drift_pin() -> None:
+    """[r1 coverage INFO-4] BOTH sides pinned to the probe's ``_RECORD_KEYS``:
+    the round-trip suite's synthetic record uses EXACTLY the writer's key set,
+    AND the writer's literal keys (the base record dict + the ``record.update``
+    dict in ``main()``, extracted via AST) equal the constant — a key
+    rename/add on either side fails HERE, never a silently-vacuous golden."""
+    probe = _load_probe_module()
+    keys = probe._RECORD_KEYS
+    assert isinstance(keys, frozenset)
+    # Side 1: the synthetic fixture emits exactly the writer's key set.
+    assert frozenset(_probe_record("2026-07-14", "15:45")) == keys
+    # Side 2: the writer's literal key set equals the constant. The base
+    # record dict is the one carrying expected_minutes+error (the trailer has
+    # neither); the update dict is the one carrying raw_rows+fut_oi_nonnull
+    # (raw_stats has no fut_oi_nonnull).
+    tree = ast.parse(_PROBE.read_text(encoding="utf-8"))
+    literal_dicts = [
+        {key.value for key in node.keys if isinstance(key, ast.Constant)}
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        and node.keys
+        and all(isinstance(key, ast.Constant) for key in node.keys)
+    ]
+    base = next(d for d in literal_dicts if {"expected_minutes", "error"} <= d)
+    update = next(d for d in literal_dicts if {"raw_rows", "fut_oi_nonnull"} <= d)
+    assert base | update == keys
