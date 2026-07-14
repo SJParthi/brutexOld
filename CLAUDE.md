@@ -32,6 +32,16 @@ production resolution is byte-identical until the operator's evidence PR
 lands (parity-pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1793 —
 this header carries the one-line summary, never the story.)
+Earlier: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
+MIGRATION.md #1792 — vendor-empty spot symbols (zero stored 1-minute bars)
+classify NO-SOURCE at the prebuild read (the retyped whole-partition
+`NoStored1mBarsError` arm — lake truth, never the #1779-rejected report
+`no_data`), counted + named in the note/payload/CLI, `PrebuildOutcome.ok`
+unaffected so the movers warm fires over the healthy majority — the #1779
+withheld-run-wide residual CLOSED; default path byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1792 — this header carries the one-line
+summary, never the story.)
 Earlier: 2026-07-13 (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md
 #1785, branch `claude/sweep-lock-pull-concurrency` — the dashboard sweep route
 + the nightly sweep leg stop holding the LAKE pull flock through the sweep:
@@ -2637,8 +2647,101 @@ hostile-review pass._
   `auto_pull_scheduler.py` (253/56) · `pull_intent.py` (225/50 on its mapped trio)
   re-measured 100.00%; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new vs
   the pre-change baseline.)
-  Earlier: `claude/sweep-lock-pull-concurrency`
-  (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  (**DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792** — the
+  #1779 vendor-EMPTY × prebuild × movers-warm residual CLOSED: a spot symbol
+  with ZERO stored 1-minute bars (vendor-empty or never pulled — the reader
+  cannot distinguish, both causes named) is classified NO-SOURCE at the
+  prebuild read itself — the whole-partition arm of `make_lake_read_1m` is
+  retyped to the NEW `NoStored1mBarsError(ValueError)` (message bytes
+  UNCHANGED; the months-bounded heal-recall arm stays plain ValueError,
+  mutant-killed) with the existence predicate extracted §11-COMMON
+  (`has_stored_1m_bars` + `spot_1m_partition_dir`); the spot phase catches it
+  FIRST (except-order mutant-killed) → the new `no_source` class (still
+  `attempted`, never `failed`; the parallel worker kind-GATED to SPOT items —
+  a contract's identical error stays a failure, pinned), so
+  `PrebuildOutcome.ok` stays True and the #1145/#1221 movers-warm gate
+  (expression untouched) now FIRES over the healthy majority instead of
+  withholding the warm run-wide forever; the empty symbol is COUNTED + NAMED
+  (capped, the quarantine-headline idiom via the ONE shared
+  `format_capped_names`) on the note clause + emit-on-nonzero
+  `prebuild_no_source`/`prebuild_no_source_count` payload keys + the CLI
+  `no-source:` line + per-symbol INFO + the all-no-source WARN — never
+  silently dropped, never a fabricated snapshot (warm discovery is
+  parquet-file-gated per dataset — structural absence holds when NO
+  timeframe holds parquet, re-pinned with real-lake evidence; a surviving
+  previously stored DERIVED timeframe legitimately keeps the symbol
+  discoverable, serving genuine stored bars — the refuter-round-2
+  scoping). VERDICT = LAKE
+  truth by construction — no report field participates (the #1779 `no_data`
+  trap is dead structurally; the healthy-incremental-re-run trap twin is the
+  permanent regression net); a mixed no_source + REAL failure still reads
+  `ok=False`, warm withheld (failure wins, both surfaced). The #1779
+  inherited-behavior e2e pin consciously FLIPPED
+  (`…no_source_named_warm_fires`); fails-before proven — 9 [FB] tests fail
+  at merge-base source. HONEST residuals: cause attribution unwired (named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 — the ledger-fold risks
+  recorded in #1792); a hand-planted schema-complete 0-row parquet passes
+  the existence arm and the prebuild COMPLETES it as a 0-bar SUCCESS —
+  neither no_source nor failed, warm unaffected, byte-identical to main's
+  pre-change behavior (the refuter-round-3 EXECUTED correction of the
+  earlier FALSE "fails loudly" wording, now e2e-pinned; a schema-BROKEN
+  plant is the shape that still fails loudly via the per-symbol data-error
+  quarantine; out-of-band — production writers never render 0-row files);
+  empty symbols re-probe every pull (today's cost); the
+  strict gate deliberately does not block on no_source; the law is
+  deliberately NON-TIERED — an ENGINE-trio index (NIFTY/BANKNIFTY/SENSEX)
+  vendor-empty reads the SAME INFO + named skip, warm fires (the
+  refuter-round-1 disclosure fold — a conscious non-goal, the symbol stays
+  headline-named + /coverage//completeness-visible; escalation = named
+  follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001). REFUTER ROUND 1
+  folded (per-finding record in MIGRATION.md #1792): the index-tier
+  disclosure above + the `_warn_if_all_no_source` empty-phase guard's
+  surviving mutant killed (WARN-absence pins on BOTH fno-only paths — a
+  guard-dropped mutant fired a spurious count=0 all_no_source WARN on every
+  ▶ Pull F&O run and passed the whole 87-test battery pre-pin). REFUTER
+  ROUND 2 folded (2 MINOR, both executed-repro-validated then fixed —
+  per-finding record in MIGRATION.md #1792): the note clause's
+  "+ movers warm" exclusion tail DROPPED (an overclaim — a symbol whose 1m
+  partition was emptied post-pull while a previously DERIVED 1day survives
+  classifies no_source yet legitimately stays in warm discovery off the
+  stored 1day; the five structural-absence claim sites scoped to
+  no-parquet-in-ANY-timeframe; NEW stale-derived e2e twin, fails on the
+  pre-fix wording) + the runbook §7 remediation gains the heal-emptied
+  THIRD-shape branch (post-pull removal reads settled SUCCESS bars>0 on
+  /coverage/windows — never the vendor-empty "settled SKIPPED bars=0"
+  signature §7 alone prescribed; inspect `<lake>/.quarantine/`, restore or
+  re-pull). REFUTER ROUND 3 folded (1 MINOR, executed-repro-validated then
+  fixed WORDING-only — per-finding record in MIGRATION.md #1792): the
+  0-row-parquet residual claim corrected as above (the three claim sites
+  rewritten to the executed truth + the NEW
+  `test_e2e_zero_row_parquet_completes_as_zero_bar_success` pin; behavior
+  itself pre-existing + unchanged, merge-base-parity executed). REFUTER
+  ROUND 4 folded (1 MINOR, executed-repro-validated then fixed at ROOT
+  CAUSE — per-finding record in MIGRATION.md #1792): an UNENUMERABLE
+  permission-broken POPULATED partition no longer misclassifies benign
+  no_source — pathlib SUPPRESSES PermissionError during glob traversal, so
+  the probe's original `is_dir() and any(rglob(...))` spelling read the
+  EACCES fault as "empty" and the retyped arm turned a merge-base loud
+  warm-withholding FAILURE into ok=True + a false "vendor-empty or never
+  pulled" wording (executed real-permissions A/B, uid 65534);
+  `has_stored_1m_bars` now enumerates with an OSError-PROPAGATING
+  `os.walk(onerror=raise)` (rglob-parity kept, absent/non-dir shapes stay
+  the benign False), so the EACCES propagates out of the reader as OSError —
+  a `parquet_read_skip_errors` member — restoring the merge-base
+  per-symbol-FAILURE classification (WARNING, ok=False, warm withheld),
+  fails-before-pinned at probe + reader level via a CI-safe
+  monkeypatched-scandir harness. Default path
+  byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
+  zero added I/O — the classification rides an exception that only exists on
+  the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `timeframe_materialize.py` (176/56,
+  the round-4 re-measure) +
+  `gated_prebuild.py` (143/26) + `prebuild_parallel.py` (85/16) +
+  `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
+  line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
+  clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)
+  Earlier: `claude/sweep-lock-pull-concurrency` (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
   CLI parity: `cmd_sweep_all` OWNS the sweep-vs-pull exclusion — the G10 lake read-guard
   (`LOCK_SH` on the pull single-flight file, held across the bar PRELOAD ONLY) + the G6 sweep
@@ -2778,7 +2881,9 @@ hostile-review pass._
   the vendor-EMPTY × prebuild × movers-warm interaction REAL-prebuild-e2e-pinned
   as an INHERITED residual (the scoped exclusion REJECTED on executed evidence —
   the spot report's `no_data` conflates vendor-empty with an already-settled
-  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001);
+  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001
+  [CLOSED by DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 —
+  the reclassify-at-read no-source law; the e2e pin consciously flipped]);
   the `materialize_lake_timeframes` no-stored-bars remediation names BOTH causes
   (the one shared-module text edit); the intent ROLLBACK scope-widening residual
   disclosed (docstring + ledger + runbook §5); the dry-run
@@ -6999,6 +7104,26 @@ hostile-review pass._
   review → commit → CI validates → adopt); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1793 for the full blurb)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — the #1779
+  vendor-EMPTY × prebuild × movers-warm residual CLOSED: zero-stored-bars
+  spot symbols classify NO-SOURCE at the prebuild read (the retyped
+  whole-partition `NoStored1mBarsError` arm — lake truth, never the
+  #1779-rejected report `no_data`; spot phase catches it first, parallel
+  worker kind-gated; months-bounded arm stays plain ValueError), counted +
+  named on the note + emit-on-nonzero payload keys + the CLI `no-source:`
+  line; `PrebuildOutcome.ok` unaffected so the movers warm fires over the
+  healthy majority (the warm-side exclusion is structural when NO timeframe
+  holds parquet — discovery is parquet-file-gated, re-pinned; a surviving
+  stored DERIVED timeframe legitimately keeps a symbol discoverable — the
+  refuter-round-2 scoping, the "+ movers warm" note tail dropped); the
+  inherited e2e pin consciously
+  flipped + the healthy-incremental-re-run trap twin is the permanent
+  regression net; a mixed no_source + REAL failure still withholds the warm;
+  default path byte-identical (note/wire/stdout literal-pinned); named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 (cause attribution); ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1792 for the full blurb)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — the dashboard
   sweep route + the nightly sweep leg stop holding the LAKE pull flock through

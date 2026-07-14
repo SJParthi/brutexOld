@@ -182,6 +182,11 @@ def test_parallel_include_spot_false_runs_fno_phases_only(
     # The by-design note itself rides the internal spot PhasePrebuildReport
     # (the SAME COMMON constant on both paths) — note-shape pinned at the
     # gated_prebuild level, where the report is the public surface.
+    # [refuter round 1] The parallel path calls the SAME `_warn_if_all_no_source`
+    # over its assembled report — the empty no-op spot phase must not fire a
+    # spurious count=0 all-no-source WARN (the `and phase.attempted` guard's
+    # killing pin, sequential↔parallel parity).
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
 
 
 def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_path: Path) -> None:
@@ -364,6 +369,37 @@ def test_per_symbol_failure_quarantined(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert outcome.failed_count == 1
     assert outcome.failed[0].startswith("NSE-NIFTY-30Jan25-FUT")
     assert outcome.symbols_built == 3  # the other 3 still built
+
+
+def test_parallel_no_source_target_counted_ok_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T11 [fails-before] — the PARALLEL twin of the sequential no-source
+    classification (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a zero-stored-bars
+    SPOT target lands in the outcome's ``no_source`` (never ``failed``), ``ok``
+    stays True, and the F&O contracts still build — identical outcome shape to
+    the sequential path."""
+    from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+    fake = _FakeMaterialize(
+        fail={
+            "NSE-EMPTY": NoStored1mBarsError("no stored 1minute bars for NSE/INDEX/NSE-EMPTY — …")
+        }
+    )
+    _install(monkeypatch, fake)
+    outcome = run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-EMPTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=3,
+        daily_before=date(2025, 2, 1),
+    )
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.ok is True
+    assert outcome.failed == ()
+    assert outcome.failed_count == 0
+    assert outcome.symbols_built == 4  # NIFTY spot + 1 FUT + 2 options still built
 
 
 def test_tallies_unchanged_and_opens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
