@@ -47,7 +47,31 @@ def test_index_security_ids_are_the_in_repo_verified_values() -> None:
 
 def test_error_codes() -> None:
     assert constants.DHAN_ERR_INVALID_AUTH == "DH-901"
-    assert constants.DHAN_ERR_AUTHORIZATION == "DH-905"
+    # RELABEL (design §2, A-MINOR-2): the SUBSCRIPTION/authorization class is
+    # DH-902 (the annexure's "User has not subscribed to Data APIs…"); DH-905 is
+    # the INPUT exception (a bad request), carried by its own constant.
+    assert constants.DHAN_ERR_AUTHORIZATION == "DH-902"
+    assert constants.DHAN_ERR_INPUT_EXCEPTION == "DH-905"
+    assert constants.DHAN_ERR_RATE_LIMIT == "DH-904"
+    assert constants.DHAN_ERR_DATA_FETCH == "DH-907"
+    assert constants.DHAN_ERR_INTERNAL_SERVER == "DH-908"
+    assert constants.DHAN_ERR_NETWORK == "DH-909"
+
+
+def test_numeric_data_api_error_codes() -> None:
+    # The Data-API numeric code table (mirror 20-annexure.md) as named constants.
+    assert constants.DHAN_ERR_NUM_INTERNAL == "800"
+    assert constants.DHAN_ERR_NUM_INSTRUMENT_LIMIT == "804"
+    assert constants.DHAN_ERR_NUM_RATE_LIMIT == "805"
+    assert constants.DHAN_ERR_NUM_NOT_SUBSCRIBED == "806"
+    assert constants.DHAN_ERR_NUM_TOKEN_EXPIRED == "807"
+    assert constants.DHAN_ERR_NUM_AUTH_FAILED == "808"
+    assert constants.DHAN_ERR_NUM_TOKEN_INVALID == "809"
+    assert constants.DHAN_ERR_NUM_CLIENT_ID_INVALID == "810"
+    assert constants.DHAN_ERR_NUM_INVALID_EXPIRY == "811"
+    assert constants.DHAN_ERR_NUM_INVALID_DATE == "812"
+    assert constants.DHAN_ERR_NUM_INVALID_SECURITY_ID == "813"
+    assert constants.DHAN_ERR_NUM_INVALID_REQUEST == "814"
 
 
 def test_ssm_parameter_paths() -> None:

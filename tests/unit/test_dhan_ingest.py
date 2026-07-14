@@ -7,7 +7,14 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
-from brutex.adapters.dhan.errors import DhanSubscriptionError, DhanThrottleError
+import pytest
+from brutex.adapters.dhan.errors import (
+    DhanAuthError,
+    DhanBadRequestError,
+    DhanSubscriptionError,
+    DhanThrottleError,
+    DhanTokenStillStaleError,
+)
 from brutex.adapters.dhan.ingest import (
     STATUS_FAILED,
     STATUS_SKIPPED_UNRESOLVED,
@@ -170,7 +177,7 @@ def test_run_retryable_failure_retried_then_succeeds() -> None:
 
 
 def test_run_terminal_failure_stays_failed_repullable() -> None:
-    adapter = _FakeAdapter({"NIFTY": [DhanSubscriptionError("no sub")]})
+    adapter = _FakeAdapter({"NIFTY": [DhanBadRequestError("813: bad security id")]})
     sink = _RecordingSink()
     report = run_dhan_spot_ingest_with_retry(
         symbols=["NIFTY"],
@@ -185,7 +192,7 @@ def test_run_terminal_failure_stays_failed_repullable() -> None:
     assert report.failed_windows == 1
     assert adapter.calls == ["NIFTY"]  # NOT retried (terminal)
     assert report.outcomes[0].status == STATUS_FAILED
-    assert report.outcomes[0].error_type == "DhanSubscriptionError"
+    assert report.outcomes[0].error_type == "DhanBadRequestError"
 
 
 def test_run_retryable_exhausts_rounds_and_stays_failed() -> None:
@@ -272,7 +279,7 @@ def test_scan_all_empty_excludes_failed_unresolved_and_nonempty() -> None:
         {
             "NIFTY": [[]],
             "BANKNIFTY": [[_bar()]],
-            "SENSEX": [DhanSubscriptionError("no sub")],
+            "SENSEX": [DhanBadRequestError("813: bad security id")],
         }
     )
     sink = _RecordingSink()
@@ -317,3 +324,111 @@ def test_scan_all_empty_resolved_without_outcomes_is_skipped() -> None:
         unresolved_symbols=(),
     )
     assert scan_resolved_all_empty(report) == ()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal-auth escalation (design §3): the pull-wide global-stop carve-out.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTerminalPullStop:
+    """The FIRST terminal-auth/subscription/still-stale failure stops the WHOLE pull."""
+
+    @staticmethod
+    def _three_symbol_run(first_error: Exception) -> tuple[_FakeAdapter, _RecordingSink]:
+        adapter = _FakeAdapter(
+            {
+                "NIFTY": [first_error],
+                "BANKNIFTY": [[_bar()]],
+                "SENSEX": [[_bar()]],
+            }
+        )
+        return adapter, _RecordingSink()
+
+    @pytest.mark.parametrize(
+        "stop_error",
+        [
+            DhanAuthError("re-read budget exhausted"),
+            DhanSubscriptionError("806: Data APIs not subscribed"),
+            DhanTokenStillStaleError("re-read returned the same dead token"),
+        ],
+    )
+    def test_first_terminal_stop_halts_spine_and_burns_no_later_window(
+        self, stop_error: Exception
+    ) -> None:
+        """The window-count spy: the FIRST pull-stop failure propagates out of the
+        spine and the remaining ~all windows are NEVER processed (pre-fix the spine
+        quarantined it per-window and burned every remaining window against a dead
+        credential / inactive subscription).
+        """
+        adapter, sink = self._three_symbol_run(stop_error)
+        with pytest.raises(type(stop_error)):
+            run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY", "BANKNIFTY", "SENSEX"],
+                adapter=adapter,
+                sink=sink,
+                security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
+                start=date(2022, 6, 1),
+                end=date(2022, 6, 20),
+                session_filter=_no_filter,
+            )
+        assert adapter.calls == ["NIFTY"]  # the remaining windows were never burned
+        assert sink.appends == []  # nothing written after the stop
+
+    def test_non_stop_terminal_failure_still_quarantines_per_window(self) -> None:
+        # A bad-request terminal (813 etc.) is NOT a pull stop: the window fails,
+        # the OTHER symbols still process (the pre-existing per-window posture).
+        adapter, sink = self._three_symbol_run(DhanBadRequestError("813: bad id"))
+        report = run_dhan_spot_ingest_with_retry(
+            symbols=["NIFTY", "BANKNIFTY", "SENSEX"],
+            adapter=adapter,
+            sink=sink,
+            security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
+            start=date(2022, 6, 1),
+            end=date(2022, 6, 20),
+            session_filter=_no_filter,
+        )
+        assert report.failed_windows == 1
+        assert adapter.calls == ["NIFTY", "BANKNIFTY", "SENSEX"]
+
+    def test_lake_write_halt_propagates_out_of_the_spine(self) -> None:
+        # LakeWriteHalt is NOT a DhanError → the spine's except never swallows it
+        # (the global-stop posture works by construction — pinned, design §3).
+        from brutex.data.errors import LakeWriteHalt
+
+        class _HaltSink(_RecordingSink):
+            def append(self, **kwargs: object) -> SinkAppendResult:
+                raise LakeWriteHalt("disk_full")
+
+        adapter = _FakeAdapter({"NIFTY": [[_bar()]]})
+        with pytest.raises(LakeWriteHalt):
+            run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_HaltSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2022, 6, 1),
+                end=date(2022, 6, 20),
+                session_filter=_no_filter,
+            )
+
+    def test_daily_quota_exceeded_propagates_out_of_the_spine(self) -> None:
+        # A pace hook raising the quota stop (the Dhan 100k/day tracker) is not a
+        # DhanError either — it propagates to the job layer (design §3 pin).
+        from brutex.orchestrator.quota_tracker import DailyQuotaExceeded
+
+        def _quota_pace() -> None:
+            raise DailyQuotaExceeded("daily quota exhausted")
+
+        adapter = _FakeAdapter({"NIFTY": [[_bar()]]})
+        with pytest.raises(DailyQuotaExceeded):
+            run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2022, 6, 1),
+                end=date(2022, 6, 20),
+                session_filter=_no_filter,
+                pace=_quota_pace,
+            )

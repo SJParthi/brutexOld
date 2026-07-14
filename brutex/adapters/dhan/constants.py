@@ -151,16 +151,60 @@ SENSEX_SERVABILITY_UNVERIFIED: Final[None] = None
 INDIAVIX_SERVABILITY_UNVERIFIED: Final[None] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Known vendor error codes (PARTIAL: doc/community snippets; throttle code UNVERIFIED)
+# Known vendor error codes — the full documented table (VERIFIED-docs(mirror):
+# the DhanHQ v2 annexure, mirror 20-annexure.md ⇐ dhanhq.co/docs/v2/annexure/).
+# Trading-side codes are the DH-9xx strings; the Data-API additionally returns
+# NUMERIC codes (800-814). The SDK's failure envelope spells the remark keys
+# snake_case (``error_code``/``error_type``/``error_message`` — SDK
+# ``dhan_http.py`` ``_parse_response``); the docs' raw-HTTP shape is camelCase —
+# :func:`brutex.adapters.dhan.errors.classify_dhan_failure` accepts BOTH.
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: DH-901 ``Invalid_Authentication`` — a bad / expired 24-h JWT. Handled by RE-READING
-#: SSM (never a mint) — the read-only reauth self-heal.
+#: SSM (never a mint) — the read-only reauth self-heal. [mirror 20-annexure.md]
 DHAN_ERR_INVALID_AUTH: Final[str] = "DH-901"
 
-#: DH-905 — authorization / subscription / missing-field class (an inactive Data API
-#: subscription surfaces here). TERMINAL: fix the subscription, not a retry.
-DHAN_ERR_AUTHORIZATION: Final[str] = "DH-905"
+#: DH-902 — "User has not subscribed to Data APIs or does not have access to
+#: Trading APIs" — the SUBSCRIPTION / authorization class. TERMINAL: activate the
+#: Data-API subscription (₹499/mo or the 25-trades-in-30d waiver), not a retry.
+#: [mirror 20-annexure.md] RELABEL (DEC-DHAN-ROLLING-FLOOR-001 review, A-MINOR-2):
+#: this constant previously carried ``DH-905``, which the annexure documents as the
+#: INPUT-exception class (:data:`DHAN_ERR_INPUT_EXCEPTION`), not subscription.
+DHAN_ERR_AUTHORIZATION: Final[str] = "DH-902"
+
+#: DH-904 — "Too many requests on server from single user breaching rate limits"
+#: (the trading-side rate-limit twin of the Data-API numeric 805). RETRYABLE +
+#: rate-limit (feeds the AIMD ladder). [mirror 20-annexure.md]
+DHAN_ERR_RATE_LIMIT: Final[str] = "DH-904"
+
+#: DH-905 — "input exception" (missing / malformed fields). TERMINAL bad request —
+#: fix the request, never a retry. [mirror 20-annexure.md]
+DHAN_ERR_INPUT_EXCEPTION: Final[str] = "DH-905"
+
+#: DH-907 — "data-fetch error (bad params)". TERMINAL bad request. [mirror 20-annexure.md]
+DHAN_ERR_DATA_FETCH: Final[str] = "DH-907"
+
+#: DH-908 — internal server error. RETRYABLE (the Groww 5xx posture — rides the
+#: gentle timeout ladder, never the rate ladder). [mirror 20-annexure.md]
+DHAN_ERR_INTERNAL_SERVER: Final[str] = "DH-908"
+
+#: DH-909 — network error. RETRYABLE (server-stress class). [mirror 20-annexure.md]
+DHAN_ERR_NETWORK: Final[str] = "DH-909"
+
+#: The Data-API NUMERIC codes (mirror 20-annexure.md; numeric codes may arrive as
+#: ``int`` — the classifier normalises ``str(code).strip().upper()``).
+DHAN_ERR_NUM_INTERNAL: Final[str] = "800"  # Internal Server Error → retryable
+DHAN_ERR_NUM_INSTRUMENT_LIMIT: Final[str] = "804"  # instruments-per-request limit → bad request
+DHAN_ERR_NUM_RATE_LIMIT: Final[str] = "805"  # too many requests/connections → throttle
+DHAN_ERR_NUM_NOT_SUBSCRIBED: Final[str] = "806"  # Data APIs not subscribed → subscription
+DHAN_ERR_NUM_TOKEN_EXPIRED: Final[str] = "807"  # noqa: S105 — error code, not a secret; access token expired → auth (re-read)
+DHAN_ERR_NUM_AUTH_FAILED: Final[str] = "808"  # authentication failed → auth (re-read)
+DHAN_ERR_NUM_TOKEN_INVALID: Final[str] = "809"  # noqa: S105 — error code, not a secret; access token invalid → auth (re-read)
+DHAN_ERR_NUM_CLIENT_ID_INVALID: Final[str] = "810"  # client id invalid → auth (re-read)
+DHAN_ERR_NUM_INVALID_EXPIRY: Final[str] = "811"  # invalid expiry date → bad request
+DHAN_ERR_NUM_INVALID_DATE: Final[str] = "812"  # invalid date format → bad request
+DHAN_ERR_NUM_INVALID_SECURITY_ID: Final[str] = "813"  # invalid SecurityId → bad request
+DHAN_ERR_NUM_INVALID_REQUEST: Final[str] = "814"  # invalid request → bad request
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AWS SSM parameter paths for the READ-ONLY Dhan credentials (own params)
@@ -185,7 +229,24 @@ __all__ = [
     "DHAN_DAILY_QUOTA",
     "DHAN_ENGINE_INDEX_SYMBOLS",
     "DHAN_ERR_AUTHORIZATION",
+    "DHAN_ERR_DATA_FETCH",
+    "DHAN_ERR_INPUT_EXCEPTION",
+    "DHAN_ERR_INTERNAL_SERVER",
     "DHAN_ERR_INVALID_AUTH",
+    "DHAN_ERR_NETWORK",
+    "DHAN_ERR_NUM_AUTH_FAILED",
+    "DHAN_ERR_NUM_CLIENT_ID_INVALID",
+    "DHAN_ERR_NUM_INSTRUMENT_LIMIT",
+    "DHAN_ERR_NUM_INTERNAL",
+    "DHAN_ERR_NUM_INVALID_DATE",
+    "DHAN_ERR_NUM_INVALID_EXPIRY",
+    "DHAN_ERR_NUM_INVALID_REQUEST",
+    "DHAN_ERR_NUM_INVALID_SECURITY_ID",
+    "DHAN_ERR_NUM_NOT_SUBSCRIBED",
+    "DHAN_ERR_NUM_RATE_LIMIT",
+    "DHAN_ERR_NUM_TOKEN_EXPIRED",
+    "DHAN_ERR_NUM_TOKEN_INVALID",
+    "DHAN_ERR_RATE_LIMIT",
     "DHAN_FEED_ID",
     "DHAN_FETCH_INTERVAL",
     "DHAN_HISTORY_FLOOR",

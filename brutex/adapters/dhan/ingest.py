@@ -48,7 +48,7 @@ from brutex.adapters.dhan.constants import (
     DHAN_FETCH_INTERVAL,
     SENSEX_SYMBOL,
 )
-from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_retryable, is_terminal_pull_stop
 from brutex.adapters.ingest_common import plan_windows
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_to_trading_session
@@ -315,6 +315,14 @@ def _process_item(
             bars=kept,
         )
     except DhanError as exc:
+        # The pull-wide global-stop carve-out (the Groww spines' _GLOBAL_STOP_ERRORS
+        # mirror): a terminal auth / still-stale-token / subscription failure means
+        # EVERY later window of this pull would fail identically, so the FIRST
+        # occurrence re-raises past the per-window quarantine — the remaining
+        # windows are never burned, and the job layer's is_pull_halt fires the
+        # CRITICAL Telegram pull-halt alert (design §3, DEC-DHAN-SPOT-FEED-001).
+        if is_terminal_pull_stop(exc):
+            raise
         retryable = is_retryable(exc)
         _LOG.warning(
             "dhan.window_failed",
@@ -364,8 +372,12 @@ def run_dhan_spot_ingest_with_retry(
 
     Resolves + plans the work (:func:`plan_dhan_work`), loud-skips unresolved symbols,
     then processes each window; a RETRYABLE failure (throttle / empty body / timeout /
-    token-stale) is re-processed in a later round up to *max_rounds* (a terminal
-    failure is left FAILED — re-pullable by a future pull). Returns the aggregated
+    server blip) is re-processed in a later round up to *max_rounds* (a terminal
+    failure is left FAILED — re-pullable by a future pull). A
+    :func:`~brutex.adapters.dhan.errors.is_terminal_pull_stop` failure (terminal
+    auth / still-stale token / inactive subscription) PROPAGATES on its first
+    occurrence — the whole pull stops instead of burning every remaining window
+    (the job layer alerts it CRITICAL). Returns the aggregated
     :class:`DhanIngestReport`.
 
     Parameters

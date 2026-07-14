@@ -20,7 +20,7 @@ from brutex.adapters.dhan.constants import (
     DHAN_TOKEN_PARAM_ACCESS_TOKEN_DEFAULT,
     DHAN_TOKEN_PARAM_CLIENT_ID_DEFAULT,
 )
-from brutex.adapters.dhan.errors import DhanSubscriptionError, DhanThrottleError
+from brutex.adapters.dhan.errors import DhanBadRequestError, DhanThrottleError
 from brutex.adapters.dhan.ingest import FetchOhlcv
 from brutex.dashboard.dhan_pull import (
     DhanPrebuildOutcome,
@@ -301,7 +301,7 @@ def test_default_dhan_spot_pull_clean_runs_prebuild(tmp_path: Path) -> None:
 def test_default_dhan_spot_pull_failed_phase_skips_prebuild(tmp_path: Path) -> None:
     # FALSE gate branch: a FAILED window (terminal) leaves prebuild None (gated).
     script = _all_indices_script([_bar()])
-    script["NIFTY"] = [DhanSubscriptionError("no sub")]  # terminal → FAILED window
+    script["NIFTY"] = [DhanBadRequestError("813: bad id")]  # terminal → FAILED window
     adapter = _FakeAdapter(script)
 
     materialize_calls: list[object] = []

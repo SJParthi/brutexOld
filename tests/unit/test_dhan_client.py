@@ -24,7 +24,9 @@ from brutex.adapters.dhan.token_store_aws import DhanCachedToken
 _NOW = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
 _SUCCESS = {"status": "success", "data": {"open": [1.0]}}
 _DH901 = {"status": "failure", "remarks": {"errorCode": "DH-901", "errorMessage": "bad token"}}
-_DH905 = {"status": "failure", "remarks": {"errorCode": "DH-905", "errorMessage": "no sub"}}
+#: The subscription failure in the LIVE SDK's snake_case remark spelling (806/DH-902
+#: is the subscription class post-relabel; DH-905 is a bad request — design §2).
+_SUB_806 = {"status": "failure", "remarks": {"error_code": "806", "error_message": "no sub"}}
 _EMPTY = {"status": "failure", "remarks": {"errorMessage": "Expecting value"}}
 
 
@@ -75,11 +77,48 @@ def test_success_with_absent_data_returns_empty_mapping() -> None:
 
 
 def test_terminal_subscription_error_raised_no_retry() -> None:
-    sdk = _FakeSdk(_DH905)
+    # 806 in the live SDK's snake_case spelling — terminal, no retry, honest message.
+    sdk = _FakeSdk(_SUB_806)
     client = _client({"A": sdk}, "A")
-    with pytest.raises(DhanSubscriptionError):
+    with pytest.raises(DhanSubscriptionError) as excinfo:
         client.intraday_candles(security_id=13, from_date="a", to_date="b")
     assert sdk.calls == 1  # terminal — no retry
+    assert "web.dhan.co" in str(excinfo.value)
+
+
+def test_snake_case_807_drives_ssm_reread_self_heal() -> None:
+    """The judge-found BLOCKER regression (design §0): a snake_case 807 failure —
+    the LIVE ``dhanhq`` SDK envelope shape (``dhan_http.py`` ``_parse_response``
+    spells the remark keys ``error_code``/``error_message``) — must classify as
+    :class:`DhanAuthError` and DRIVE ``refresher.reauth`` (the read-only SSM
+    re-read self-heal). This test FAILS on the pre-fix classifier, which read only
+    the camelCase spellings: the code arm never fired, the failure fell to the
+    terminal base :class:`DhanError`, and the advertised self-heal was
+    production-dead (no re-read, no second SDK).
+    """
+    failure_807 = {
+        "status": "failure",
+        "remarks": {"error_code": "807", "error_message": "access token expired"},
+    }
+    sdks = {"A": _FakeSdk(failure_807), "B": _FakeSdk(_SUCCESS)}
+    client = _client(sdks, "A", "B")  # cold-start A; the re-read adopts B
+    data = client.intraday_candles(security_id=13, from_date="a", to_date="b")
+    assert data == {"open": [1.0]}
+    # The re-read actually FIRED: the refresher's generation advanced and the
+    # second (fresh-token) SDK served the retry.
+    assert client.refresher.current_generation() == 1
+    assert sdks["B"].calls == 1
+
+
+def test_string_remarks_tolerated_as_terminal_base() -> None:
+    # On an SDK transport exception `remarks` is a plain STRING (dhan_http.py's
+    # broad except) — the client tolerates the non-Mapping shape (design §0 pin).
+    failure = {"status": "failure", "remarks": "Connection aborted"}
+    sdk = _FakeSdk(failure)
+    client = _client({"A": sdk}, "A", max_attempts=1)
+    with pytest.raises(DhanError):
+        client.intraday_candles(security_id=13, from_date="a", to_date="b")
+    assert sdk.calls == 1
 
 
 def test_retryable_empty_body_exhausts_budget() -> None:
