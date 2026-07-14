@@ -221,10 +221,18 @@ def list_owed_days(lake_root: Path) -> list[date]:
         name = entry.name
         if name.endswith(_MARKER_SUFFIX):
             try:
-                days.append(date.fromisoformat(name[: -len(_MARKER_SUFFIX)]))
-                continue
+                marker_day: date | None = date.fromisoformat(name[: -len(_MARKER_SUFFIX)])
             except ValueError:
-                pass
+                # A ``.json`` entry whose stem is not a calendar date is NOT
+                # a marker (no day to attribute) — deliberately routed to the
+                # LOUD junk-entry WARN below, never a silent drop. Narrow
+                # (`date.fromisoformat` raises exactly ValueError) + observable
+                # (the WARN below is this arm's log line, pinned by
+                # ``test_junk_names_warned_and_skipped``).
+                marker_day = None
+            if marker_day is not None:
+                days.append(marker_day)
+                continue
         _LOG.warning(
             "crossverify.owed_junk_entry",
             path=str(root),

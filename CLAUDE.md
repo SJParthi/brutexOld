@@ -2649,10 +2649,13 @@ hostile-review pass._
   UNTOUCHED (the marker rides the launcher seam below it). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; zero new routes (one additive field);
-  whole-package `brutex.crossverify` 100.00% line+branch (1537/410, 614
-  battery tests) incl. the NEW ci.yml `owed` gate (104/22) + the touched
-  `run.py` (557/164); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
-  0 new; `node --check` green on universe.html.)
+  whole-package `brutex.crossverify` 100.00% line+branch (1541/414, 615
+  battery tests) incl. the NEW ci.yml `owed` gate (106/24) + the touched
+  `run.py` (559/166); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
+  0 new; `node --check` green on universe.html; the pre-open fix round —
+  the row-18 PR-body DEC-token rewording + the two CodeQL folds
+  (string-target monkeypatch; the owed junk-name arm restructured with no
+  empty except, still LOUD) — is recorded in MIGRATION.md #1792.)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to

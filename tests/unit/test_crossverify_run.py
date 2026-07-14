@@ -2935,8 +2935,6 @@ class TestDefaultSeamsRunDay:
     def test_run_day_binds_day_scoped_config_and_fresh_seams(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.crossverify.run as run_module
-
         recorded: list[tuple[CrossverifyConfig, CrossverifySeams]] = []
         sentinel = _owed_report(_DAY - timedelta(days=1), "published")
 
@@ -2944,7 +2942,11 @@ class TestDefaultSeamsRunDay:
             recorded.append((config, seams))
             return sentinel
 
-        monkeypatch.setattr(run_module, "run_crossverify", _fake_run)
+        # String-target setattr — the module is already imported via
+        # `from brutex.crossverify.run import …` at the top; a second
+        # `import brutex.crossverify.run` here would be the CodeQL
+        # dual-import-style smell (the #1791 registry-routes precedent).
+        monkeypatch.setattr("brutex.crossverify.run.run_crossverify", _fake_run)
         outer = default_seams(
             _seams_config(tmp_path, catchup_days=5),
             env=_GUARD_OFF,
