@@ -2577,8 +2577,14 @@ hostile-review pass._
   (`…no_source_named_warm_fires`); fails-before proven — 9 [FB] tests fail
   at merge-base source. HONEST residuals: cause attribution unwired (named
   follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 — the ledger-fold risks
-  recorded in #1792); a hand-planted 0-row parquet still fails the prebuild
-  loudly (fail-open); empty symbols re-probe every pull (today's cost); the
+  recorded in #1792); a hand-planted schema-complete 0-row parquet passes
+  the existence arm and the prebuild COMPLETES it as a 0-bar SUCCESS —
+  neither no_source nor failed, warm unaffected, byte-identical to main's
+  pre-change behavior (the refuter-round-3 EXECUTED correction of the
+  earlier FALSE "fails loudly" wording, now e2e-pinned; a schema-BROKEN
+  plant is the shape that still fails loudly via the per-symbol data-error
+  quarantine; out-of-band — production writers never render 0-row files);
+  empty symbols re-probe every pull (today's cost); the
   strict gate deliberately does not block on no_source; the law is
   deliberately NON-TIERED — an ENGINE-trio index (NIFTY/BANKNIFTY/SENSEX)
   vendor-empty reads the SAME INFO + named skip, warm fires (the
@@ -2601,7 +2607,12 @@ hostile-review pass._
   THIRD-shape branch (post-pull removal reads settled SUCCESS bars>0 on
   /coverage/windows — never the vendor-empty "settled SKIPPED bars=0"
   signature §7 alone prescribed; inspect `<lake>/.quarantine/`, restore or
-  re-pull). Default path
+  re-pull). REFUTER ROUND 3 folded (1 MINOR, executed-repro-validated then
+  fixed WORDING-only — per-finding record in MIGRATION.md #1792): the
+  0-row-parquet residual claim corrected as above (the three claim sites
+  rewritten to the executed truth + the NEW
+  `test_e2e_zero_row_parquet_completes_as_zero_bar_success` pin; behavior
+  itself pre-existing + unchanged, merge-base-parity executed). Default path
   byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
   zero added I/O — the classification rides an exception that only exists on
   the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
