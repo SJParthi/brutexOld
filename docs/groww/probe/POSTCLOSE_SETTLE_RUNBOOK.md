@@ -148,6 +148,57 @@ defers a still-forming day and re-pulls.
   not actually trade a full session — check the NSE calendar / the observed-sessions
   overlay before blaming the vendor.
 
+## Emit + adopt the evidence (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792)
+
+Once ≥ 5 REGULAR probe days exist, fold them into the machine-readable
+settle-evidence artifact the auto-pull gate ADOPTS:
+
+```bash
+python docs/groww/probe/postclose_settle_probe.py \
+  --summarize docs/groww/probe/ \
+  --emit-evidence docs/groww/probe/settle_evidence.json --margin-minutes 15
+```
+
+**The evidence law is deliberately STRONGER than the pooled stdout verdict**:
+the emitted `earliest_all_pass_ist` is the earliest canonical slot OBSERVED on
+≥ 5 distinct REGULAR trading days with every check passing on EVERY such day
+(per-day presence required — the stdout matrix pools records across days and
+may disagree; a printed note states which law the artifact used). Non-trading
+days (`expected_minutes=0`) and Muhurat/short sessions (`0 < expected < 375`)
+are EXCLUDED + recorded in `excluded_days`; off-grid slot labels (a run > 15
+min from every canonical slot) are ignored + counted in `ignored_records` —
+they can never contribute a pass or a fail. `adopted_settle_ist` = earliest +
+`--margin-minutes` (default 15 ≥ the ±15-min slot-snap window; bounds
+[10, 240]).
+
+**Refusal arms (exit 2, nothing written):** fewer than 5 qualifying regular
+days · no slot passing on every observed day · margin out of bounds ·
+`--emit-evidence` without `--summarize` · a failed self-validation (the file
+is kept for inspection). The emitter self-validates against
+`brutex.calendars.settle_evidence.validate_evidence_payload` when brutex is
+importable; the repo CI committed-file test validates at commit regardless.
+
+**Commit-review checklist (ONE PR):**
+
+1. `settle_evidence.json` + every `postclose-*.jsonl`/`.txt` transcript it
+   folded (evidence is reviewed BESIDE its raw data — the
+   `tests/bench/baselines` committed-machine-evidence precedent).
+2. Eyeball the `per_day` matrix: does the earliest all-pass slot hold on
+   every included day? Is the margin sane for the observed spread?
+3. CI green (the committed-file test validates schema + the ≥ 15:35 floor).
+4. After merge: `git pull` + restart (or wait one scheduler tick) and verify
+   the `settle_evidence.valid` INFO and the "measured — probe evidence"
+   deferral / `next_eligible` wording. `BRUTEX_PULL_ALL_SETTLE_IST` (and
+   `--settle-ist`) still override; `BRUTEX_SETTLE_EVIDENCE_PATH=off` disables
+   the channel.
+
+A > 180-day-old evidence file still ADOPTS with one `settle_evidence.stale`
+WARN — re-probe and re-commit when it fires. (Why not learn the value from
+production instead? Production "settled-by-T" observations are CENSORED at
+the very schedule being tuned — they can never legitimately LOWER the settle
+time — and the raw 6-vs-7 settled shape (`rows_all_len7`) is destroyed by the
+production parse; only this probe measures it.)
+
 ## Pre-fix lake remediation (already-stored partial days)
 
 The #1774 gate protects pulls going FORWARD. A partial day stored under an

@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
+_Last updated: 2026-07-14 (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md
+#1792 — the measured-settle evidence adoption channel: the #1775 probe's
+`--summarize --emit-evidence` → committed `docs/groww/probe/settle_evidence.json`
+(schema 1, reviewed beside its transcripts) → the validated three-tier
+resolution env > evidence > the conservative 17:30 default (the tier-1
+short-circuit preserves `--settle-ist`/env supremacy; explicit
+`BRUTEX_SETTLE_EVIDENCE_PATH` junk fails loud, default-path corruption
+WARNs once + falls back — the r6/r7 posture on the shared regular-file-only
+loader, MOVED to COMMON `brutex/data/sidecar_read.py` with a byte-compatible
+pull_intent shim); ships the CHANNEL, ships NO measured number — every
+production resolution is byte-identical until the operator's evidence PR
+lands (parity-pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1792 —
+this header carries the one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
 #1779 — the one-click scoped-ALL SPOT pull: the additive `scope=spot-only`
 token on the ONE `/pull-pipeline` launcher (default requests byte-identical,
 pinned) + the NEW `brutex pull-all-spot` CLI over
@@ -2533,7 +2547,66 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
+- **Active branch:** `claude/settle-evidence-adoption` (**DEC-SETTLE-EVIDENCE-ADOPTION-001,
+  MIGRATION.md #1792** — the measured-settle EVIDENCE-FILE adoption channel, closing the
+  #1779 standing promise "re-derive when the probe lands" MECHANICALLY. The #1775 probe
+  gains `--summarize --emit-evidence PATH [--margin-minutes N]`: a per-day × canonical-slot
+  fold of ≥5 REGULAR trading days of transcripts (non-trading/Muhurat days excluded +
+  recorded; off-grid slot labels ignored + counted `ignored_records`; refuses to emit
+  without a qualifying slot — exit 2; self-validates via the repo validator) into
+  `docs/groww/probe/settle_evidence.json` (schema 1, committed + reviewed BESIDE its
+  transcripts — the tests/bench/baselines precedent). NEW `brutex/calendars/settle_evidence.py`
+  = the validator (26-row truth table: exact schema/kind, strict ASCII HH:MM, bool-refused
+  ints, `adopted == earliest + margin` with no midnight wrap, the ≥15:35 BLOCK_END floor
+  with 15:35-exact allowed, the per-day support law, tz-aware `generated_at_utc`) + the
+  stat-token-memoized loader with the D/X corruption SPLIT: an operator-typed EXPLICIT
+  `BRUTEX_SETTLE_EVIDENCE_PATH` fails LOUD on every junk shape (the resolve_* law) while
+  DEFAULT-path corruption is ONE `settle_evidence.invalid` WARN per stat-token + the 17:30
+  fallback (the r6/r7 never-crash-never-hang boot posture — the fail-loud tier for
+  COMMITTED content is CI's committed-file test + the emitter's self-validation, the
+  DEC-BENCH-ABS-BASELINE-001 two-tier posture). `resolve_settle_time` = a thin wrapper over
+  NEW `resolve_settle_resolution` (env > evidence > default; the tier-1 short-circuit keeps
+  `--settle-ist`/env supremacy — evidence NEVER read while the settle env is set, spy- +
+  e2e-pinned); the `before_settle` deferral detail carries per-tier provenance — the DEFAULT
+  arm BYTE-IDENTICAL incl. the verbatim UNMEASURED clause (exact-string-pinned), the
+  measured arm "measured — probe evidence: earliest all-pass HH:MM IST + N min margin over
+  D trading days", the env arm "operator override BRUTEX_PULL_ALL_SETTLE_IST" (a documented
+  pin move — Golden Rule #10 both directions). The r7-hardened regular-file-only loader
+  (`read_sidecar_bytes`/`SidecarReadResult`) MOVED VERBATIM to NEW COMMON
+  `brutex/data/sidecar_read.py` (calendars must not import dashboard; copy refused by §11;
+  the #1715 leaf+shim precedent; the calendars→data edge verified acyclic) with pull_intent
+  re-exporting byte-compatibly. BOTH eager-validation surfaces (cmd_dashboard boot +
+  cmd_pull_all_spot pre-lock) PROBE the channel via one `evidence_settle()` line each, so a
+  junk explicit path fails loud even while the settle env's tier-1 short-circuit masks the
+  resolver's own read (the latent-junk class); the scheduler's `_next_eligible` junk arm
+  reads "unknown — invalid settle config: {exc}" (the exc self-names its env var; the
+  "NO new vendor-call surface" pin byte-untouched). Observability: `settle_evidence.valid`
+  INFO (once per stat-token — truthful under a tier-1 override: "adopted whenever
+  BRUTEX_PULL_ALL_SETTLE_IST is unset") · `settle_evidence.invalid` WARN ·
+  `settle_evidence.stale` WARN (>180 d, still ADOPTED — measured-then-margined dominates a
+  guess); no new Telegram lane (config, not runtime health). HONEST: this PR ships ZERO
+  measured numbers — the build env provably cannot probe (agent proxy CONNECT 403 to both
+  Groww hosts, verified 2026-07-14; `growwapi` not installed) — so the UNMEASURED wording
+  stays true + verbatim on the default tier and the no-evidence resolution is
+  BYTE-IDENTICAL to #1779 (the `test_resolution_no_evidence_is_byte_identical` parity
+  oracle sweeps the full env matrix on both the channel-off and default-path-absent arms);
+  the measured value is OPERATOR WORK (probe ≥5 regular days → --emit-evidence → review →
+  commit → CI validates → next deploy adopts); production self-learning REJECTED (passive
+  evidence is CENSORED at the observation schedule — it can never legitimately LOWER the
+  value — and the gate-pass time is parse-blind to the raw 6-vs-7 settle shape only the
+  probe measures); the scheduler probe-until-available loop REJECTED (amends the #1779
+  "NO new vendor-call surface" pin for an UNVERIFIED benefit); named follow-ups
+  DEC-SETTLE-PROD-EVIDENCE-RECORDER-001 (crossverify recorder + default_too_early
+  raise-guard — diagnostics, deliberately out) + the evidence COMMIT itself. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ZERO new
+  vendor calls; `market_hours.py` byte-untouched; new env var BRUTEX_SETTLE_EVIDENCE_PATH
+  (+ the conftest hermeticity belt, off-by-default in tests only). GATES:
+  `settle_evidence.py` 100.00% line+branch standalone (210/88, 99 tests incl. the
+  subprocess emitter round-trip golden) + `sidecar_read.py` 100.00% (34/6) on their NEW
+  ci.yml stanzas; `auto_pull_gate.py` (93/30) · `auto_pull_scheduler.py` (253/56) ·
+  `pull_intent.py` (225/50 on its mapped trio) re-measured 100.00%; ruff/ruff-format
+  clean; `mypy --strict` clean; pyright 0 new vs the pre-change baseline.)
+  Earlier: `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
   MIGRATION.md #1779** — the one-click scoped-ALL SPOT pull: ONE dashboard button
   (`#pullAllSpotBtn` → the EXISTING `/pull-pipeline` launcher with the NEW additive
   `scope=spot-only` token — all launcher rails inherited byte-identically; a scope-less
@@ -6830,7 +6903,31 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/pull-scoped-all-oneclick`
+- **Active feature branch:** `claude/settle-evidence-adoption`
+  (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792 — the measured-settle
+  EVIDENCE-FILE adoption channel: the #1775 probe's `--summarize
+  --emit-evidence PATH [--margin-minutes N]` folds ≥5 REGULAR probe days into
+  the committed schema-1 `docs/groww/probe/settle_evidence.json`, and the
+  `--auto`/scheduler settle resolution becomes the validated three-tier law
+  env > evidence > the conservative 17:30 default (NEW
+  `calendars/settle_evidence.py` validator + memoized loader; explicit
+  `BRUTEX_SETTLE_EVIDENCE_PATH` junk fails loud — the resolve_* law;
+  default-path corruption = one WARN + the 17:30 fallback — the r6/r7 boot
+  posture; the CI committed-file test is the fail-loud tier for committed
+  content); `resolve_settle_time` wraps NEW `resolve_settle_resolution`
+  (tier-1 short-circuit keeps `--settle-ist`/env supremacy, e2e-pinned); the
+  `before_settle` detail carries per-tier provenance — the DEFAULT arm
+  byte-identical incl. the verbatim UNMEASURED clause; the shared
+  regular-file-only loader MOVED to COMMON `brutex/data/sidecar_read.py`
+  (pull_intent re-exports byte-compatibly — the #1715 leaf+shim precedent);
+  both eager-validation surfaces probe the channel so a junk explicit path
+  fails loud even under a tier-1 override; ships the CHANNEL, ships NO
+  measured number — the no-evidence resolution is BYTE-IDENTICAL to #1779
+  (parity-pinned) and the measured value is operator work (probe → emit →
+  review → commit → CI validates → adopt); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1792 for the full blurb)
+  Earlier: `claude/pull-scoped-all-oneclick`
   (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779 — the one-click
   scoped-ALL SPOT pull: the additive `scope=spot-only` token on the ONE
   `/pull-pipeline` launcher + the `#pullAllSpotBtn` button + the
@@ -7524,7 +7621,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5103-5104` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5114-5115` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
