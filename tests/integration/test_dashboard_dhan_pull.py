@@ -255,3 +255,180 @@ class TestDhanJobIsolation:
         # Both arms of the pure nesting wrapper.
         assert _dhan_feed_root_resolver(lambda: Path("/lake"))() == Path("/lake/feeds/dhan")
         assert _dhan_feed_root_resolver(lambda: None)() is None
+
+
+class TestDhanRollingFloorRoute:
+    """DEC-DHAN-ROLLING-FLOOR-001 — the route-level floor surface."""
+
+    def test_whole_pre_floor_pick_is_400_naming_the_floor_zero_fetches(
+        self,
+        client: TestClient,
+        fake_pull: _FakeDhanPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit range ending on/before the floor is a LOUD HTTP 400 naming
+        the floor — zero vendor calls, zero job start (the operator picked a
+        structurally-unservable range; a silent no-op would hide that).
+
+        ``dry_run=True`` keeps the test offline: the CREDENTIAL gate runs FIRST on
+        a wet pull (a creds-less box 503s before date validation — the documented
+        gate order), and the floor refusal applies to dry-run and wet identically
+        (it sits after ``resolve_candle_range``, before any job start).
+        """
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-pipeline-dhan",
+            params={"from_date": "2020-01-01", "to_date": "2020-06-01", "dry_run": True},
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "2021-07-21" in detail  # today−5y+7d, from the frozen clock
+        assert "rolling 5-year floor" in detail
+        assert "nothing was pulled" in detail
+        # ZERO fetches, ZERO job start: the fake pull was never invoked.
+        assert fake_pull.request is None
+        assert fake_pull.client.calls == 0
+
+    def test_clamped_start_payload_gains_floor_keys(
+        self,
+        client: TestClient,
+        fake_pull: _FakeDhanPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A pre-floor start with a servable end → the start payload names the clamp
+        # (EMIT-ON-CLAMP additive keys; the threaded today keys the same floor).
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-pipeline-dhan",
+            params={"from_date": "2020-01-01", "dry_run": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["started"] is True
+        assert body["floor"] == "2021-07-21"
+        assert body["effective_start"] == "2021-07-21"
+        # The request threads the SAME resolved today (resolved ONCE per launch).
+        assert fake_pull.done.wait(timeout=10.0)
+        assert fake_pull.request is not None
+        assert fake_pull.request.today == date(2026, 7, 14)
+
+    def test_post_floor_pick_payload_has_no_floor_keys(
+        self,
+        client: TestClient,
+        fake_pull: _FakeDhanPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        resp = client.post(
+            "/api/v1/universe/pull-pipeline-dhan",
+            params={"from_date": "2024-01-01", "to_date": "2024-02-01", "dry_run": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "floor" not in body  # EMIT-ON-CLAMP — absent when untouched
+        assert "effective_start" not in body
+        assert fake_pull.done.wait(timeout=10.0)
+
+
+class TestDhanGrowwInterplayNegativePins:
+    """Merge-interplay negative pins (design §11, the #1779 round-7 style)."""
+
+    def test_scheduler_never_arms_or_fires_the_dhan_route(
+        self, store: InstrumentStore, fake_pull: _FakeDhanPull, tmp_path: Path
+    ) -> None:
+        """A Dhan pull under an ARMED wired scheduler never marks the Groww day's
+        ``last_attempt_date`` / ``last_success_date`` — the auto-pull scheduler is
+        Groww-spot-EXCLUSIVE (its launcher IS the Groww ``_launch_pipeline``; the
+        Dhan route carries no ``auto_arm`` and never calls ``note_run_complete``).
+        """
+        from brutex.calendars.auto_pull_gate import AutoGateVerdict
+        from brutex.dashboard.auto_pull_scheduler import (
+            AutoPullScheduler,
+            AutoPullStateStore,
+        )
+
+        sched_dir = tmp_path / "sched"
+        sched_dir.mkdir()
+        scheduler = AutoPullScheduler(
+            AutoPullStateStore(sched_dir),
+            tick_seconds=3600.0,
+            # A permanently-CLOSED gate: the armed ticker can never launch a real
+            # Groww pull inside the test (deterministic, wall-clock-free).
+            gate=lambda instant: AutoGateVerdict(
+                allowed=False, reason="test_closed", detail="closed for the pin"
+            ),
+            env={},
+        )
+        scheduler.arm()
+        with TestClient(
+            build_app(
+                DashboardState(),
+                instrument_store=store,
+                dhan_spot_pull=fake_pull,
+                auto_pull_scheduler=scheduler,
+            )
+        ) as c:
+            resp = c.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": True})
+            assert resp.status_code == 200
+            assert fake_pull.done.wait(timeout=10.0)
+            status = scheduler.status()
+            assert status["armed"] is True
+            assert status["last_attempt_date"] is None  # the Dhan run marked nothing
+            assert status["last_success_date"] is None
+
+    def test_dhan_route_source_has_no_auto_arm_or_scheduler_reference(self) -> None:
+        # Structural pin: the Dhan block (banner → the pull_intent resume block)
+        # references neither the scheduler nor the auto_arm token.
+        source = Path(app_module.__file__).read_text(encoding="utf-8")
+        start = source.index("# DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001")
+        end = source.index("if pull_intent_store is not None:", start)
+        dhan_block = source[start:end]
+        assert "auto_arm" not in dhan_block
+        assert "auto_pull_scheduler" not in dhan_block
+        assert "note_run_complete" not in dhan_block
+
+    def test_dhan_pull_never_clobbers_the_groww_pull_verdict(
+        self, client: TestClient, fake_pull: _FakeDhanPull
+    ) -> None:
+        # The Groww /pull-verdict banner survives a Dhan pull byte-equal (the Dhan
+        # block never writes _last_pull_verdict — a prior red banner must survive).
+        before = client.get("/api/v1/universe/pull-verdict")
+        assert before.status_code == 200
+        resp = client.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": True})
+        assert resp.status_code == 200
+        assert fake_pull.done.wait(timeout=10.0)
+        after = client.get("/api/v1/universe/pull-verdict")
+        assert after.status_code == 200
+        assert after.json() == before.json()
+
+    def test_set_bulk_disabled_stays_groww_scoped_template_pin(self, client: TestClient) -> None:
+        # Template pin: the Dhan button carries its OWN id + handler; the Groww
+        # bulk-disable helper does not list the Dhan button (a Dhan pull must not
+        # grey out the Groww pipeline buttons — disjoint accounts + trees).
+        html = client.get("/universe").text
+        assert 'id="pullDhanBtn"' in html
+        bulk_fn_start = html.index("function setBulkDisabled")
+        bulk_fn_end = html.index("}", bulk_fn_start)
+        assert "pullDhanBtn" not in html[bulk_fn_start:bulk_fn_end]
+
+    def test_rate_widget_meter_lifecycle_vacuous_hold_for_meterless_dhan_pull(
+        self, client: TestClient, fake_pull: _FakeDhanPull
+    ) -> None:
+        """DEC-DHAN-RATE-VISIBILITY-001 deferral (design §7): the Dhan pull
+        registers NO CallMeter, so the meter-lifecycle law ("no in-process pull ⇒
+        no meter registered") holds VACUOUSLY — /api/v1/pull/rate reads
+        meter-absent during AND after a Dhan pull (the Groww-keyed widget never
+        fabricates a Dhan rate; interim visibility = the Dhan job progress route).
+        """
+        resp = client.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": True})
+        assert resp.status_code == 200
+        assert fake_pull.done.wait(timeout=10.0)
+        rate = client.get("/api/v1/pull/rate")
+        assert rate.status_code == 200
+        body = rate.json()
+        # No meter was registered by the Dhan pull: the achieved slot reads the
+        # honest meter-absent shape, never a fabricated "flowing".
+        assert body.get("meter_present") in (False, None)

@@ -104,6 +104,7 @@ def test_pull_report_phase_ok_and_to_dict_without_prebuild(tmp_path: Path) -> No
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 2),
         end=date(2022, 6, 3),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         symbols=["NIFTY"],
         session_filter=_no_filter,
     )
@@ -126,6 +127,7 @@ def test_pull_report_phase_ok_false_when_failed_windows(tmp_path: Path) -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 2),
         end=date(2022, 6, 3),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         symbols=["NIFTY"],
         session_filter=_no_filter,
         max_rounds=2,
@@ -163,6 +165,7 @@ def test_run_dhan_spot_pull_writes_into_feeds_dhan(tmp_path: Path) -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 2),
         end=date(2022, 6, 3),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         symbols=["NIFTY"],
         session_filter=_no_filter,
         code_commit="deadbeef",
@@ -258,6 +261,7 @@ def test_dhan_pull_request_record() -> None:
     )
     assert req.lake_root == Path("/lake")
     assert req.dry_run is False
+    assert req.today is None  # defaulted — a headless caller resolves once in the spine
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,7 +288,11 @@ def test_default_dhan_spot_pull_clean_runs_prebuild(tmp_path: Path) -> None:
         return adapter
 
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=False
+        lake_root=tmp_path,
+        start=date(2022, 6, 2),
+        end=date(2022, 6, 3),
+        dry_run=False,
+        today=date(2022, 7, 1),
     )
     report = default_dhan_spot_pull(
         request, adapter_factory=_factory, materialize=_fake_materialize
@@ -317,7 +325,11 @@ def test_default_dhan_spot_pull_failed_phase_skips_prebuild(tmp_path: Path) -> N
     # A REAL (wet) pull — a dry_run would short-circuit before fetching, so this gate
     # branch is exercised with dry_run=False.
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=False
+        lake_root=tmp_path,
+        start=date(2022, 6, 2),
+        end=date(2022, 6, 3),
+        dry_run=False,
+        today=date(2022, 7, 1),
     )
     report = default_dhan_spot_pull(request, adapter_factory=_factory, materialize=_spy_materialize)
     assert report.spot_phase_ok is False
@@ -344,7 +356,11 @@ def test_default_dhan_spot_pull_dry_run_builds_no_adapter_and_calls_no_vendor(
         return MaterializeResult(written={}, skipped=())
 
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2022, 6, 2), end=date(2022, 6, 3), dry_run=True
+        lake_root=tmp_path,
+        start=date(2022, 6, 2),
+        end=date(2022, 6, 3),
+        dry_run=True,
+        today=date(2022, 7, 1),
     )
     report = default_dhan_spot_pull(
         request, adapter_factory=_spy_factory, materialize=_spy_materialize
@@ -372,3 +388,161 @@ def test_default_dhan_spot_pull_dry_run_builds_no_adapter_and_calls_no_vendor(
     assert payload["dry_run"] is True
     assert payload["spot"]["total_bars"] == 0  # type: ignore[index]
     assert payload["prebuild"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rolling-floor report surface + retention (DEC-DHAN-ROLLING-FLOOR-001).
+# Frozen today = 2026-07-14 → floor 2021-07-21 (today−5y + 7d).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FROZEN_TODAY = date(2026, 7, 14)
+_FROZEN_FLOOR = date(2021, 7, 21)
+
+
+def _floor_bar(ts: datetime) -> CandleBar:
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100.5"),
+        volume=0,
+        open_interest=None,
+    )
+
+
+class _EmptyAdapter:
+    def fetch_ohlcv(self, **kwargs: Any) -> list[CandleBar]:
+        _ = kwargs
+        return []
+
+
+def test_clamped_pull_report_note_and_emit_on_clamp_keys(tmp_path: Path) -> None:
+    report = run_dhan_spot_pull(
+        lake_root=tmp_path,
+        adapter=_EmptyAdapter(),
+        security_ids={"NIFTY": 13},
+        symbols=["NIFTY"],
+        start=date(2020, 1, 1),  # the blank-date default — before the floor
+        end=date(2021, 8, 21),
+        session_filter=_no_filter,
+        today=_FROZEN_TODAY,
+    )
+    pull_report = DhanPullReport(spot=report, prebuild=None, dry_run=False)
+    assert pull_report.floor_clamped is True
+    assert pull_report.note == (
+        "dhan spot pipeline — start clamped 2020-01-01 → 2021-07-21 (Dhan rolling 5y floor)"
+    )
+    payload = pull_report.to_dict()
+    assert payload["note"] == pull_report.note
+    assert payload["floor"] == _FROZEN_FLOOR.isoformat()
+    assert payload["effective_start"] == _FROZEN_FLOOR.isoformat()
+
+
+def test_unclamped_pull_report_note_plain_no_floor_keys(tmp_path: Path) -> None:
+    report = run_dhan_spot_pull(
+        lake_root=tmp_path,
+        adapter=_EmptyAdapter(),
+        security_ids={"NIFTY": 13},
+        symbols=["NIFTY"],
+        start=date(2024, 1, 1),
+        end=date(2024, 2, 1),
+        session_filter=_no_filter,
+        today=_FROZEN_TODAY,
+    )
+    pull_report = DhanPullReport(spot=report, prebuild=None, dry_run=False)
+    assert pull_report.floor_clamped is False
+    assert pull_report.note == "dhan spot pipeline"  # byte-identical, no clamp suffix
+    payload = pull_report.to_dict()
+    assert "floor" not in payload  # EMIT-ON-CLAMP: absent on an un-clamped pull
+    assert "effective_start" not in payload
+
+
+def test_entirely_pre_floor_report_note(tmp_path: Path) -> None:
+    report = run_dhan_spot_pull(
+        lake_root=tmp_path,
+        adapter=_EmptyAdapter(),
+        security_ids={"NIFTY": 13},
+        symbols=["NIFTY"],
+        start=date(2020, 1, 1),
+        end=date(2020, 6, 1),  # wholly before the floor → zero windows
+        session_filter=_no_filter,
+        today=_FROZEN_TODAY,
+    )
+    pull_report = DhanPullReport(spot=report, prebuild=None, dry_run=False)
+    assert pull_report.note == (
+        "nothing to pull (requested range wholly before the Dhan rolling floor 2021-07-21)"
+    )
+    payload = pull_report.to_dict()
+    assert payload["floor"] == _FROZEN_FLOOR.isoformat()
+    assert "effective_start" not in payload  # nothing was planned
+
+
+def test_dry_run_report_note_stays_plain_headline(tmp_path: Path) -> None:
+    # A dry-run short-circuits BEFORE planning: no floor stamps, plain headline
+    # (it echoes the REQUESTED range only — documented, design §1).
+    request = DhanPullRequest(
+        lake_root=tmp_path,
+        start=date(2020, 1, 1),
+        end=date(2021, 8, 21),
+        dry_run=True,
+        today=_FROZEN_TODAY,
+    )
+    report = default_dhan_spot_pull(request)
+    assert report.spot.floor is None
+    assert report.note == "dhan spot pipeline"
+    assert "floor" not in report.to_dict()
+
+
+def test_retention_pre_floor_bars_byte_untouched_by_clamped_repull(tmp_path: Path) -> None:
+    """The retention property (DEC-DHAN-ROLLING-FLOOR-001, stated verbatim in the
+    DEC): the floor governs VENDOR REQUESTS ONLY — bars already in ``feeds/dhan/``
+    that age past the current floor are NEVER deleted (keep-first, append-only; no
+    reaper exists or is authorized). A clamped re-pull leaves the pre-floor
+    partition file BYTE-IDENTICAL.
+    """
+    from brutex.feeds.binding import build_feed_sink
+    from brutex.feeds.dhan_binding import build_dhan_binding
+
+    # Pre-seed a PRE-floor bar (2021-06-01 — before the 2021-07-21 floor) through
+    # the production feed sink.
+    sink = build_feed_sink(lake_root=tmp_path, binding=build_dhan_binding())
+    pre_floor_ts = datetime(2021, 6, 1, 3, 45, tzinfo=UTC)
+    sink.append(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_floor_bar(pre_floor_ts)],
+    )
+    dhan_root = feed_lake_root(tmp_path, feed="dhan")
+    pre_floor_file = (
+        dhan_root / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "2021" / "06.parquet"
+    )
+    assert pre_floor_file.exists()
+    before = pre_floor_file.read_bytes()
+
+    # A CLAMPED re-pull over the full range (requests start AT the floor; the
+    # adapter serves one post-floor bar).
+    post_floor_ts = datetime(2021, 8, 2, 3, 45, tzinfo=UTC)
+
+    class _OneBarAdapter:
+        def fetch_ohlcv(self, **kwargs: Any) -> list[CandleBar]:
+            start = kwargs["start"]
+            assert start >= _FROZEN_FLOOR  # the tripwire holds here too
+            if kwargs["start"] <= post_floor_ts.date() < kwargs["end"]:
+                return [_floor_bar(post_floor_ts)]
+            return []
+
+    report = run_dhan_spot_pull(
+        lake_root=tmp_path,
+        adapter=_OneBarAdapter(),
+        security_ids={"NIFTY": 13},
+        symbols=["NIFTY"],
+        start=date(2020, 1, 1),
+        end=date(2021, 9, 1),
+        session_filter=_no_filter,
+        today=_FROZEN_TODAY,
+    )
+    assert report.total_bars == 1  # the post-floor bar landed
+    assert pre_floor_file.read_bytes() == before  # pre-floor bytes UNTOUCHED

@@ -8,6 +8,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from brutex.adapters.dhan.constants import dhan_history_floor as constants_floor
 from brutex.adapters.dhan.errors import (
     DhanAuthError,
     DhanBadRequestError,
@@ -111,6 +112,7 @@ def test_plan_work_resolves_and_omits_unresolved() -> None:
         interval="1minute",
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
     )
     assert unresolved == ["MYSTERY"]
     assert all(isinstance(item, DhanWorkItem) for item in work)
@@ -127,6 +129,7 @@ def test_run_success_appends_and_reports() -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
     )
     assert report.total_bars == 1
@@ -146,6 +149,7 @@ def test_run_unresolved_symbol_is_loud_skip_zero_bars() -> None:
         security_ids={},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
     )
     assert report.unresolved_symbols == ("MYSTERY",)
@@ -166,6 +170,7 @@ def test_run_retryable_failure_retried_then_succeeds() -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
         max_rounds=3,
         backoff=backoffs.append,
@@ -186,6 +191,7 @@ def test_run_terminal_failure_stays_failed_repullable() -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
         max_rounds=3,
     )
@@ -205,6 +211,7 @@ def test_run_retryable_exhausts_rounds_and_stays_failed() -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
         max_rounds=2,
     )
@@ -223,6 +230,7 @@ def test_run_no_windows_when_range_empty() -> None:
         security_ids={"NIFTY": 13},
         start=date(2022, 6, 1),
         end=date(2022, 6, 1),  # start >= end → no windows
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
     )
     assert report.outcomes == ()
@@ -241,6 +249,7 @@ def test_default_pace_and_session_filter_paths() -> None:
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
         # no session_filter / pace / backoff → defaults
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
     )
     # The 2022-06-01 03:45 UTC (09:15 IST) bar is in-session → kept.
     assert report.total_bars == 1
@@ -259,6 +268,9 @@ def test_resolved_all_empty_symbol_flagged_and_warned() -> None:
             security_ids={"NIFTY": 13},
             start=date(2022, 6, 1),
             end=date(2022, 6, 20),
+            today=date(
+                2022, 7, 1
+            ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
             session_filter=_no_filter,
         )
     assert report.total_bars == 0
@@ -291,6 +303,9 @@ def test_scan_all_empty_excludes_failed_unresolved_and_nonempty() -> None:
             security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
             start=date(2022, 6, 1),
             end=date(2022, 6, 20),
+            today=date(
+                2022, 7, 1
+            ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
             session_filter=_no_filter,
         )
     assert scan_resolved_all_empty(report) == ("NIFTY",)
@@ -309,6 +324,7 @@ def test_scan_all_empty_empty_report_is_empty() -> None:
         security_ids={},
         start=date(2022, 6, 1),
         end=date(2022, 6, 20),
+        today=date(2022, 7, 1),  # frozen — the rolling floor must never eat these fixed 2022 ranges
         session_filter=_no_filter,
     )
     assert scan_resolved_all_empty(report) == ()
@@ -370,6 +386,9 @@ class TestTerminalPullStop:
                 security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
                 start=date(2022, 6, 1),
                 end=date(2022, 6, 20),
+                today=date(
+                    2022, 7, 1
+                ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
                 session_filter=_no_filter,
             )
         assert adapter.calls == ["NIFTY"]  # the remaining windows were never burned
@@ -386,6 +405,9 @@ class TestTerminalPullStop:
             security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51},
             start=date(2022, 6, 1),
             end=date(2022, 6, 20),
+            today=date(
+                2022, 7, 1
+            ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
             session_filter=_no_filter,
         )
         assert report.failed_windows == 1
@@ -409,6 +431,9 @@ class TestTerminalPullStop:
                 security_ids={"NIFTY": 13},
                 start=date(2022, 6, 1),
                 end=date(2022, 6, 20),
+                today=date(
+                    2022, 7, 1
+                ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
                 session_filter=_no_filter,
             )
 
@@ -429,6 +454,9 @@ class TestTerminalPullStop:
                 security_ids={"NIFTY": 13},
                 start=date(2022, 6, 1),
                 end=date(2022, 6, 20),
+                today=date(
+                    2022, 7, 1
+                ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
                 session_filter=_no_filter,
                 pace=_quota_pace,
             )
@@ -470,6 +498,9 @@ class TestToDateBelt:
                 security_ids={"NIFTY": 13},
                 start=date(2022, 6, 1),
                 end=date(2022, 6, 20),  # half-open — 2022-06-20 is NOT servable
+                today=date(
+                    2022, 7, 1
+                ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
                 session_filter=_no_filter,
             )
         assert report.total_bars == 1  # only the in-range bar was stored
@@ -501,7 +532,294 @@ class TestToDateBelt:
                 security_ids={"NIFTY": 13},
                 start=date(2022, 6, 1),
                 end=date(2022, 6, 20),
+                today=date(
+                    2022, 7, 1
+                ),  # frozen — the rolling floor must never eat these fixed 2022 ranges
                 session_filter=_no_filter,
             )
         assert report.total_bars == 1
         assert [e for e in logs if e.get("event") == "dhan.future_bar_dropped"] == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The rolling-floor clamp (DEC-DHAN-ROLLING-FLOOR-001): the ONE plan chokepoint.
+# Frozen today = 2026-07-14 → edge 2021-07-14, floor 2021-07-21 (edge + 7d).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FROZEN_TODAY = date(2026, 7, 14)
+_FROZEN_FLOOR = date(2021, 7, 21)
+
+
+class _StartRecordingAdapter:
+    """A fake adapter recording every requested (start, end) — the clamp tripwire spy."""
+
+    def __init__(self) -> None:
+        self.windows: list[tuple[date, date]] = []
+
+    def fetch_ohlcv(
+        self,
+        *,
+        symbol: str,
+        exchange: Exchange,
+        interval: str,
+        start: date,
+        end: date,
+    ) -> list[CandleBar]:
+        _ = (symbol, exchange, interval)
+        self.windows.append((start, end))
+        return []
+
+
+class TestRollingFloorClamp:
+    def test_from_before_floor_clamped_with_info_and_report_stamps(self) -> None:
+        adapter = _StartRecordingAdapter()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2020, 1, 1),  # the blank-date default — before the floor
+                end=date(2021, 8, 21),
+                session_filter=_no_filter,
+                today=_FROZEN_TODAY,
+            )
+        infos = [e for e in logs if e.get("event") == "dhan.window_floor_clamped"]
+        assert len(infos) == 1  # ONE INFO per pull, at plan time
+        assert infos[0]["requested_start"] == "2020-01-01"
+        assert infos[0]["effective_start"] == _FROZEN_FLOOR.isoformat()
+        assert infos[0]["floor"] == _FROZEN_FLOOR.isoformat()
+        assert infos[0]["margin_days"] == 7
+        # Report stamps computed from the SAME threaded today.
+        assert report.requested_start == date(2020, 1, 1)
+        assert report.effective_start == _FROZEN_FLOOR
+        assert report.floor == _FROZEN_FLOOR
+        assert report.entirely_pre_floor is False
+        # The FIRST window STARTS at the floor — no window straddles it.
+        assert adapter.windows[0][0] == _FROZEN_FLOOR
+
+    def test_from_equal_floor_untouched_no_clamp_note(self) -> None:
+        # The margin edge: from == edge + 7d EXACTLY → untouched, no INFO.
+        adapter = _StartRecordingAdapter()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=_FROZEN_FLOOR,
+                end=date(2021, 8, 21),
+                session_filter=_no_filter,
+                today=_FROZEN_TODAY,
+            )
+        assert [e for e in logs if e.get("event") == "dhan.window_floor_clamped"] == []
+        assert report.effective_start == report.requested_start == _FROZEN_FLOOR
+        assert adapter.windows[0][0] == _FROZEN_FLOOR
+
+    def test_from_after_floor_untouched(self) -> None:
+        adapter = _StartRecordingAdapter()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2024, 1, 1),
+                end=date(2024, 2, 1),
+                session_filter=_no_filter,
+                today=_FROZEN_TODAY,
+            )
+        assert [e for e in logs if e.get("event") == "dhan.window_floor_clamped"] == []
+        assert report.effective_start == date(2024, 1, 1)
+        assert adapter.windows[0][0] == date(2024, 1, 1)
+
+    def test_entirely_pre_floor_plans_zero_windows_with_one_warning(self) -> None:
+        # The spine's defensive-totality arm (headless callers): end <= floor plans
+        # ZERO windows — never doomed requests recorded as clean-empty SUCCESS.
+        adapter = _StartRecordingAdapter()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2020, 1, 1),
+                end=date(2020, 6, 1),  # wholly before the 2021-07-21 floor
+                session_filter=_no_filter,
+                today=_FROZEN_TODAY,
+            )
+        warns = [e for e in logs if e.get("event") == "dhan.pull_entirely_pre_floor"]
+        assert len(warns) == 1
+        assert warns[0]["floor"] == _FROZEN_FLOOR.isoformat()
+        assert warns[0]["log_level"] == "warning"
+        assert adapter.windows == []  # ZERO vendor requests
+        assert report.entirely_pre_floor is True
+        assert report.effective_start is None
+        assert report.outcomes == ()
+
+    def test_clamp_tripwire_no_request_before_floor_across_full_pull(self) -> None:
+        """The BELT is this TEST (design §1, B's ruling — no adapter-level runtime
+        belt): a full multi-symbol pull over the blank-date default range issues
+        ZERO requests with ``from_date < floor`` under a frozen today.
+        """
+        adapter = _StartRecordingAdapter()
+        run_dhan_spot_ingest_with_retry(
+            symbols=["NIFTY", "BANKNIFTY", "SENSEX", "INDIAVIX"],
+            adapter=adapter,
+            sink=_RecordingSink(),
+            security_ids={"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51, "INDIAVIX": 21},
+            start=date(2020, 1, 1),
+            end=date(2026, 7, 14),  # the full default range → many 90-day tiles
+            session_filter=_no_filter,
+            today=_FROZEN_TODAY,
+        )
+        assert adapter.windows, "the pull must have planned windows"
+        assert all(start >= _FROZEN_FLOOR for start, _ in adapter.windows), (
+            f"a request crossed the floor: {sorted(self_w for self_w in adapter.windows)[:3]}"
+        )
+
+    def test_plan_dhan_work_today_none_resolves_now_ist(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The default arm: today=None resolves now_ist().date() ONCE inside the plan.
+        import brutex.adapters.dhan.ingest as ingest_mod
+
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(ingest_mod, "now_ist", lambda: frozen)
+        work, unresolved = plan_dhan_work(
+            symbols=["NIFTY"],
+            security_ids={"NIFTY": 13},
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2026, 7, 14),
+        )
+        assert unresolved == []
+        assert min(item.start for item in work) == constants_floor(frozen.date())
+
+    def test_ist_date_pin_late_utc_evening_is_next_ist_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The IST pin (design §11): a frozen 23:00 UTC clock is ALREADY the next
+        IST day (+05:30 → 04:30 next day), so the floor keys on the IST date, not
+        the UTC date — the real now_ist() returns an IST-zoned datetime whose
+        .date() IS the IST day; this pins the plan's default arm consuming it.
+        """
+        from zoneinfo import ZoneInfo
+
+        import brutex.adapters.dhan.ingest as ingest_mod
+
+        # 2026-07-14 23:00 UTC == 2026-07-15 04:30 IST.
+        frozen_utc = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)
+        frozen_ist = frozen_utc.astimezone(ZoneInfo("Asia/Kolkata"))
+        assert frozen_ist.date() == date(2026, 7, 15)  # the NEXT IST day
+        monkeypatch.setattr(ingest_mod, "now_ist", lambda: frozen_ist)
+        work, _ = plan_dhan_work(
+            symbols=["NIFTY"],
+            security_ids={"NIFTY": 13},
+            interval="1minute",
+            start=date(2020, 1, 1),
+            end=date(2026, 7, 14),
+        )
+        # floor keys on the IST 2026-07-15, one day past the UTC date's floor.
+        assert min(item.start for item in work) == constants_floor(date(2026, 7, 15))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ledger-less crash-recovery convergence (design §6, condition 1 of the
+# DEC-FEED-SPINE-GENERALIZE-001 deferral re-ratification).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _DeterministicAdapter:
+    """Serves one deterministic bar per (symbol, window-start) — replay-stable."""
+
+    def __init__(self, *, crash_after: int | None = None) -> None:
+        self.crash_after = crash_after
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self,
+        *,
+        symbol: str,
+        exchange: Exchange,
+        interval: str,
+        start: date,
+        end: date,
+    ) -> list[CandleBar]:
+        _ = (exchange, interval, end)
+        self.calls += 1
+        if self.crash_after is not None and self.calls > self.crash_after:
+            raise RuntimeError("simulated crash (SIGKILL-shaped: not a DhanError)")
+        # One bar at 09:15 IST on the window's first day, price keyed on the window.
+        ts = datetime(start.year, start.month, start.day, 3, 45, tzinfo=UTC)
+        price = Decimal(100 + (start.toordinal() % 50))
+        return [
+            CandleBar(
+                timestamp=ts,
+                open=price,
+                high=price + 1,
+                low=price - 1,
+                close=price,
+                volume=0,
+                open_interest=None,
+            )
+        ]
+
+
+def _tree_bytes(root: object) -> dict[str, bytes]:
+    from pathlib import Path as PathAlias
+
+    base = PathAlias(str(root))
+    return {
+        str(f.relative_to(base)): f.read_bytes() for f in sorted(base.rglob("*")) if f.is_file()
+    }
+
+
+def test_crash_convergence_interrupted_then_full_rerun_matches_control(tmp_path: object) -> None:
+    """Interrupt a REAL-sink pull after N windows → whole-range re-run → the
+    ``feeds/dhan/`` tree is BYTE-IDENTICAL to an uninterrupted control run.
+
+    The ledger-less deferral's honest envelope (DEC-FEED-SPINE-GENERALIZE-001):
+    re-pull is a whole-range operator re-run, idempotent via the keep-first sink —
+    this test IS the convergence proof (a crash loses no durability, a re-run
+    restores completeness, bars never duplicate or restate).
+    """
+    from pathlib import Path as PathAlias
+
+    from brutex.data.feed_root import feed_lake_root
+    from brutex.feeds.binding import build_feed_sink
+    from brutex.feeds.dhan_binding import build_dhan_binding
+
+    base = PathAlias(str(tmp_path))
+    frozen_today = date(2026, 7, 14)
+    span = {"start": date(2024, 1, 1), "end": date(2024, 12, 31)}  # 4+ windows/symbol
+
+    def _run(lake: PathAlias, adapter: _DeterministicAdapter) -> None:
+        run_dhan_spot_ingest_with_retry(
+            symbols=["NIFTY", "BANKNIFTY"],
+            adapter=adapter,
+            sink=build_feed_sink(lake_root=lake, binding=build_dhan_binding()),
+            security_ids={"NIFTY": 13, "BANKNIFTY": 25},
+            start=span["start"],
+            end=span["end"],
+            session_filter=_no_filter,
+            today=frozen_today,
+        )
+
+    # CONTROL: one uninterrupted run.
+    control = base / "control"
+    _run(control, _DeterministicAdapter())
+
+    # INTERRUPTED: crash after 3 windows (mid-pull), then a full re-run.
+    crashed = base / "crashed"
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _run(crashed, _DeterministicAdapter(crash_after=3))
+    partial = _tree_bytes(feed_lake_root(crashed, feed="dhan") / "bars")
+    assert partial, "the interrupted run must have durably written its first windows"
+    _run(crashed, _DeterministicAdapter())  # the whole-range operator re-run
+
+    control_tree = _tree_bytes(feed_lake_root(control, feed="dhan") / "bars")
+    crashed_tree = _tree_bytes(feed_lake_root(crashed, feed="dhan") / "bars")
+    assert control_tree.keys() == crashed_tree.keys()
+    for rel, payload in control_tree.items():
+        assert crashed_tree[rel] == payload, f"byte divergence at {rel}"

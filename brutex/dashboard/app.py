@@ -52,7 +52,11 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from brutex.adapters.dhan.constants import DHAN_SPOT_INDEX_SYMBOLS
+from brutex.adapters.dhan.constants import (
+    DHAN_FLOOR_MARGIN_DAYS,
+    DHAN_SPOT_INDEX_SYMBOLS,
+    dhan_history_floor,
+)
 from brutex.adapters.dhan.live_controller import build_dhan_live_controller
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
@@ -5404,9 +5408,16 @@ def build_app(
         range is validated EAGERLY via
         :func:`~brutex.dashboard.pull_controller.resolve_candle_range` (a reversed /
         non-ISO pick → clean 400); blank ⇒ the canonical ``[2020-01-01, prev day]``
-        default (the Dhan honest-degrade records clean-empty windows for the
-        pre-servable span until ``DHAN_HISTORY_FLOOR`` is probe-verified, Golden Rule
-        #1). The pull runs on the SEPARATE single-flight ``_dhan_pull_job`` (own flock
+        default, whose start the ROLLING FLOOR then CLAMPS
+        (DEC-DHAN-ROLLING-FLOOR-001): ``today_ist`` is resolved ONCE here and
+        threaded on the request; a range ending on/before
+        ``dhan_history_floor(today_ist)`` is a LOUD **HTTP 400** naming the floor
+        (Dhan cannot serve any of it — zero vendor calls, zero job start), and a
+        partially-pre-floor start is clamped at the plan chokepoint
+        (``max(start, floor)`` — one ``dhan.window_floor_clamped`` INFO + the
+        clamp note on the report; NEVER doomed pre-floor requests recorded as
+        clean-empty SUCCESS windows). The pull runs on the SEPARATE single-flight
+        ``_dhan_pull_job`` (own flock
         on ``feeds/dhan/`` — no collision with Groww's ``_pull_job``), and is
         ``market_hours_exempt`` because Dhan uses its OWN account (the 08:45-15:35 NSE
         guard exists only to free the SHARED Groww account for TickVault → the Dhan
@@ -5436,10 +5447,30 @@ def build_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # DEC-DHAN-ROLLING-FLOOR-001: the IST "today" is resolved EXACTLY ONCE per
+        # launch and threaded (the pull never re-reads the clock mid-plan). A range
+        # ending on/before the floor is structurally unservable — refuse LOUDLY
+        # (zero vendor calls, zero job start) instead of recording doomed
+        # clean-empty windows; end_dt.date() is the EXCLUSIVE day.
+        today_ist = now_ist().date()
+        floor = dhan_history_floor(today_ist)
+        if end_dt.date() <= floor:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "requested range ends before the Dhan rolling 5-year floor "
+                    f"({floor.isoformat()} = today−5y+{DHAN_FLOOR_MARGIN_DAYS}d margin) — "
+                    "Dhan cannot serve any of it; nothing was pulled"
+                ),
+            )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         dhan_root = feed_lake_root(lake_root, feed="dhan")
         request = DhanPullRequest(
-            lake_root=lake_root, start=start_dt.date(), end=end_dt.date(), dry_run=dry_run
+            lake_root=lake_root,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            dry_run=dry_run,
+            today=today_ist,
         )
         _LOG.info(
             "universe.pull_pipeline_dhan.requested",
@@ -5470,12 +5501,19 @@ def build_app(
             cross_process_lock=not dry_run,
             market_hours_exempt=True,
         )
-        return {
+        payload: dict[str, Any] = {
             "started": started,
             "feed": "dhan",
             "total": len(DHAN_SPOT_INDEX_SYMBOLS),
             "dry_run": dry_run,
         }
+        # EMIT-ON-CLAMP additive keys (DEC-DHAN-ROLLING-FLOOR-001): a start before
+        # the floor names the clamp on the start payload too (the report carries
+        # the same two keys computed from the SAME threaded today).
+        if request.start < floor:
+            payload["floor"] = floor.isoformat()
+            payload["effective_start"] = max(request.start, floor).isoformat()
+        return payload
 
     @app.post("/api/v1/universe/pull-pipeline-dhan")
     async def api_universe_pull_pipeline_dhan(

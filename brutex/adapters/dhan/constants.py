@@ -19,7 +19,7 @@ the 24-h JWT access token) and never PutParameter'd by BruteX.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Final
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,17 +126,66 @@ DHAN_INDEX_SECURITY_IDS: Final[dict[str, int]] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# History floor + per-index servability — UNVERIFIED until a probe transcript lands
+# History floor — the ROLLING today−5y(+margin) request-clamp LAW
+# (DEC-DHAN-ROLLING-FLOOR-001, operator ruling 2026-07-14) + per-index
+# servability — UNVERIFIED until a probe transcript lands
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: The earliest 1-minute date Dhan is CONFIRMED to serve. ``None`` = UNVERIFIED
-#: (Golden Rule #1): Dhan's official policy is a ROLLING "last 5 years" window, so
-#: June-2022 is reachable TODAY but the true floor + rolling edge are UNVERIFIED
-#: (all ``*.dhan.co`` hosts are egress-blocked in-sandbox). The credentialed probe
-#: (docs/runbooks §6 gate G1) flips this to a real ``date`` in a ONE-line data
-#: change; until then the pull NEVER fabricates a floor — it plans from the operator
-#: date range and records honest empty windows for a too-old span.
+#: The static MEASURED-edge slot: the earliest 1-minute date Dhan is CONFIRMED to
+#: serve. ``None`` = UNVERIFIED (Golden Rule #1) — the probe has not run (all
+#: ``*.dhan.co`` hosts are egress-blocked in-sandbox; §6 gate G1 / ``--floor-edge``
+#: flips this to a real ``date`` in a ONE-line data change). The LIVE request-clamp
+#: LAW is the ROLLING :func:`dhan_history_floor` below (DEC-DHAN-ROLLING-FLOOR-001)
+#: — this slot stays the binding's ``history_floor`` identity pin
+#: (:mod:`brutex.feeds.dhan_binding`) and the probe's measured-edge landing spot,
+#: deliberately NOT the law's home (the law is a function of ``today``, never a
+#: constant).
 DHAN_HISTORY_FLOOR: Final[date | None] = None
+
+#: The floor SAFETY MARGIN (days) on top of the rolling today−5y edge —
+#: DEC-DHAN-ROLLING-FLOOR-001. Provenance: UNVERIFIED design-time constant, NOT a
+#: vendor figure — pre-floor request behaviour is undocumented (research §3: it may
+#: be an error OR a silently-TRUNCATED payload recorded as clean SUCCESS, the
+#: integrity-violating case), so the clamp stands off the edge by a week; the
+#: cross-verification use-case makes the oldest week expendable. Recalibrated by
+#: the G-A/G-B ``--floor-edge`` probe transcript via a ONE-line code change + a
+#: ledger note — deliberately NO env override (a design-time safety constant, not
+#: an operator lever).
+DHAN_FLOOR_MARGIN_DAYS: Final[int] = 7
+
+
+def dhan_rolling_edge(today: date) -> date:
+    """The rolling vendor-depth edge: ``today − 5 years`` (Feb-29 rounds FORWARD to Mar-1).
+
+    Dhan's documented intraday depth is "for the last 5 years" (VERIFIED-docs
+    (mirror+snippet): 17-historical-data.md; expanded to 5y by release v2.2). The
+    calendar arithmetic rounds a Feb-29 ``today`` FORWARD to Mar-1 — a floor may
+    only ever be LATER than the true vendor edge, never earlier (Golden Rule #1).
+    The ``--floor-edge`` probe stage compares the MEASURED edge against this
+    function (gate G-A); the exact edge granularity stays UNVERIFIED until then.
+    """
+    try:
+        return today.replace(year=today.year - 5)
+    except ValueError:  # Feb-29 on a non-leap target year → round FORWARD to Mar-1
+        return date(today.year - 5, 3, 1)
+
+
+def dhan_history_floor(today: date) -> date:
+    """The ROLLING request floor: ``dhan_rolling_edge(today) + DHAN_FLOOR_MARGIN_DAYS``.
+
+    DEC-DHAN-ROLLING-FLOOR-001 (operator ruling 2026-07-14): a Dhan pull must NEVER
+    request data before roughly ``today − 5 years`` — this function is the ONE law
+    every request clamp consults (the plan chokepoint
+    :func:`~brutex.adapters.dhan.ingest.plan_dhan_work` + the route's
+    whole-pre-floor refusal). ``today`` is the IST date, resolved ONCE per launch
+    and threaded (never re-read mid-plan). The floor governs VENDOR REQUESTS ONLY —
+    bars already in ``feeds/dhan/`` that age past the current floor are NEVER
+    deleted (keep-first, append-only; no reaper exists or is authorized). Groww
+    keeps its SEPARATE fixed ``GROWW_HISTORY_FLOOR = 2020-01-01`` — a DIFFERENT
+    law; no shared code path may conflate the two.
+    """
+    return dhan_rolling_edge(today) + timedelta(days=DHAN_FLOOR_MARGIN_DAYS)
+
 
 #: Per-index intraday SERVABILITY — UNVERIFIED until a credentialed probe transcript
 #: lands (Golden Rule #1). These are HONESTY MARKERS ONLY: no decision branch reads
@@ -249,6 +298,7 @@ __all__ = [
     "DHAN_ERR_RATE_LIMIT",
     "DHAN_FEED_ID",
     "DHAN_FETCH_INTERVAL",
+    "DHAN_FLOOR_MARGIN_DAYS",
     "DHAN_HISTORY_FLOOR",
     "DHAN_INDEX_SECURITY_IDS",
     "DHAN_INTERVAL_1MIN",
@@ -269,4 +319,6 @@ __all__ = [
     "SEGMENT_INDEX",
     "SENSEX_SERVABILITY_UNVERIFIED",
     "SENSEX_SYMBOL",
+    "dhan_history_floor",
+    "dhan_rolling_edge",
 ]

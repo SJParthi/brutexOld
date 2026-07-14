@@ -97,12 +97,18 @@ class DhanPullRequest:
     dry_run
         Whether this is the explicit synthetic offline pass (no real credentials /
         no vendor call — honestly writes nothing real, Golden Rule #1).
+    today
+        The IST date the rolling floor keys on (DEC-DHAN-ROLLING-FLOOR-001) —
+        resolved ONCE per launch at the route (``now_ist().date()``) and threaded
+        so a pull never re-reads the clock mid-plan. ``None`` (a headless/legacy
+        caller) resolves once inside the spine.
     """
 
     lake_root: Path
     start: date
     end: date
     dry_run: bool
+    today: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +174,48 @@ class DhanPullReport:
         """``True`` iff the spot phase left no re-pullable FAILED window."""
         return self.spot.failed_windows == 0
 
+    @property
+    def floor_clamped(self) -> bool:
+        """``True`` iff the rolling floor genuinely MOVED the start (DEC-DHAN-ROLLING-FLOOR-001)."""
+        return (
+            self.spot.effective_start is not None
+            and self.spot.requested_start is not None
+            and self.spot.effective_start != self.spot.requested_start
+        )
+
+    @property
+    def note(self) -> str:
+        """The completion headline (the job's ``_finish_detail`` note contract).
+
+        Un-clamped pulls read the byte-identical ``"dhan spot pipeline"``; a
+        clamped pull names the clamp; a wholly-pre-floor pull reads the honest
+        nothing-to-pull wording (DEC-DHAN-ROLLING-FLOOR-001). A dry-run
+        short-circuits BEFORE planning, so its stamps are ``None`` and the note
+        stays the plain headline (it echoes the REQUESTED range only).
+        """
+        if self.spot.entirely_pre_floor and self.spot.floor is not None:
+            return (
+                "nothing to pull (requested range wholly before the Dhan rolling "
+                f"floor {self.spot.floor.isoformat()})"
+            )
+        requested = self.spot.requested_start
+        effective = self.spot.effective_start
+        if requested is not None and effective is not None and effective != requested:
+            return (
+                "dhan spot pipeline — start clamped "
+                f"{requested.isoformat()} → {effective.isoformat()} "
+                "(Dhan rolling 5y floor)"
+            )
+        return "dhan spot pipeline"
+
     def to_dict(self) -> dict[str, object]:
-        """A JSON-safe payload dict for the ``/pull-pipeline-dhan`` route."""
-        return {
+        """A JSON-safe payload dict for the ``/pull-pipeline-dhan`` route.
+
+        The ``floor`` / ``effective_start`` keys are EMIT-ON-CLAMP additive
+        (DEC-DHAN-ROLLING-FLOOR-001): an un-clamped pull's payload carries only the
+        pre-existing keys plus the ``note`` headline, byte-compatible.
+        """
+        payload: dict[str, object] = {
             "feed": "dhan",
             "dry_run": self.dry_run,
             "spot": {
@@ -181,7 +226,13 @@ class DhanPullReport:
             },
             "spot_phase_ok": self.spot_phase_ok,
             "prebuild": None if self.prebuild is None else self.prebuild.to_dict(),
+            "note": self.note,
         }
+        if (self.floor_clamped or self.spot.entirely_pre_floor) and self.spot.floor is not None:
+            payload["floor"] = self.spot.floor.isoformat()
+            if self.spot.effective_start is not None:
+                payload["effective_start"] = self.spot.effective_start.isoformat()
+        return payload
 
 
 def resolve_dhan_spot_security_ids(
@@ -209,6 +260,7 @@ def run_dhan_spot_pull(
     session_filter: Callable[..., object] = filter_to_trading_session,
     max_rounds: int = 3,
     code_commit: str | None = None,
+    today: date | None = None,
 ) -> DhanIngestReport:
     """Run the Dhan SPOT ingest into ``<lake_root>/feeds/dhan/`` and return the report.
 
@@ -233,6 +285,11 @@ def run_dhan_spot_pull(
         controller pace hook, the calendar session filter, and the retry-round budget.
     code_commit
         The optional commit stamp threaded into the feed audit chain.
+    today
+        The IST date the rolling floor keys on (DEC-DHAN-ROLLING-FLOOR-001),
+        threaded verbatim into the spine — the returned report's
+        ``requested_start`` / ``effective_start`` / ``floor`` stamps are computed
+        from this SAME date.
     """
     sink = build_feed_sink(
         lake_root=lake_root,
@@ -250,6 +307,7 @@ def run_dhan_spot_pull(
         session_filter=session_filter,
         pace=pace,
         max_rounds=max_rounds,
+        today=today,
     )
 
 
@@ -394,7 +452,11 @@ def default_dhan_spot_pull(
     resolved / unresolved symbols the run WOULD pull, and ``prebuild=None`` (nothing
     derived), so the route payload reads "would pull the resolved indices over
     ``[start, end)``; no vendor call, nothing written". *adapter_factory* and
-    *materialize* are never invoked on this path.
+    *materialize* are never invoked on this path. Because the short-circuit runs
+    BEFORE planning, the dry-run report echoes the REQUESTED range only — its
+    rolling-floor stamps (``requested_start`` / ``effective_start`` / ``floor``)
+    stay ``None`` and the note stays the plain headline
+    (DEC-DHAN-ROLLING-FLOOR-001; the route's start payload still names the clamp).
 
     The resolve → pull → prebuild-GATE → prebuild orchestration itself is fully
     fake-driven: a test injects *adapter_factory* (a fetch fake) + *materialize* (a
@@ -444,6 +506,7 @@ def default_dhan_spot_pull(
         start=request.start,
         end=request.end,
         pace=pace,
+        today=request.today,
     )
     prebuild: DhanPrebuildOutcome | None = None
     if spot.failed_windows == 0:

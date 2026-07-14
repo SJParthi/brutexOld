@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 
 from brutex.adapters.dhan import constants
@@ -81,9 +82,53 @@ def test_ssm_parameter_paths() -> None:
     assert constants.DHAN_TOKEN_PARAM_ACCESS_TOKEN_ENV == "BRUTEX_TOKEN_PARAM_DHAN_ACCESS_TOKEN"
 
 
-def test_history_floor_is_none_until_verified() -> None:
-    # Golden Rule #1: the floor is UNVERIFIED — NEVER a fabricated date until a probe.
+def test_history_floor_slot_is_none_until_verified() -> None:
+    # Golden Rule #1: the static MEASURED-edge slot is UNVERIFIED — never a
+    # fabricated date until a probe transcript lands. The LIVE request-clamp law is
+    # the ROLLING dhan_history_floor(today) function (DEC-DHAN-ROLLING-FLOOR-001) —
+    # a CONSUMED law (plan_dhan_work + the route), unlike the servability markers.
     assert constants.DHAN_HISTORY_FLOOR is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The rolling floor LAW (DEC-DHAN-ROLLING-FLOOR-001): floor = today−5y + 7d,
+# Feb-29 rounding FORWARD (a floor may only ever be LATER than the true edge).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_floor_margin_is_seven_days_no_env_override() -> None:
+    assert constants.DHAN_FLOOR_MARGIN_DAYS == 7
+    # The margin is a design-time safety constant, NOT an operator lever: no env
+    # var reads it (recalibration = a one-line code change + a ledger note).
+    source = Path(constants.__file__).read_text(encoding="utf-8")
+    assert "BRUTEX_DHAN_FLOOR_MARGIN" not in source
+
+
+def test_rolling_edge_is_today_minus_five_years() -> None:
+    assert constants.dhan_rolling_edge(date(2026, 7, 14)) == date(2021, 7, 14)
+    assert constants.dhan_rolling_edge(date(2025, 1, 1)) == date(2020, 1, 1)
+
+
+def test_rolling_edge_feb29_rounds_forward_to_mar1() -> None:
+    # 2028-02-29 − 5y = 2023-02-29 (nonexistent) → Mar-1 — round FORWARD, never
+    # earlier than the true vendor edge (Golden Rule #1).
+    assert constants.dhan_rolling_edge(date(2028, 2, 29)) == date(2023, 3, 1)
+
+
+def test_history_floor_is_edge_plus_margin() -> None:
+    assert constants.dhan_history_floor(date(2026, 7, 14)) == date(2021, 7, 21)
+
+
+def test_history_floor_feb29_case() -> None:
+    # Frozen clock 2028-02-29 → edge 2023-03-01, floor 2023-03-08 (design §11).
+    assert constants.dhan_history_floor(date(2028, 2, 29)) == date(2023, 3, 8)
+
+
+def test_history_floor_rolls_daily() -> None:
+    # Two frozen clocks a day apart → the floor moves exactly one day (rolling law).
+    a = constants.dhan_history_floor(date(2026, 7, 14))
+    b = constants.dhan_history_floor(date(2026, 7, 15))
+    assert (b - a).days == 1
 
 
 def test_servability_sentinels_are_none() -> None:

@@ -46,10 +46,12 @@ from brutex.adapters.dhan.chunks import window_days_for_interval
 from brutex.adapters.dhan.constants import (
     DHAN_COVERAGE_MARKET,
     DHAN_FETCH_INTERVAL,
+    DHAN_FLOOR_MARGIN_DAYS,
     SENSEX_SYMBOL,
+    dhan_history_floor,
 )
 from brutex.adapters.dhan.errors import DhanError, is_retryable, is_terminal_pull_stop
-from brutex.adapters.ingest_common import drop_bars_after, plan_windows
+from brutex.adapters.ingest_common import drop_bars_after, now_ist, plan_windows
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_to_trading_session
 from brutex.data.sink import BarSink
@@ -155,12 +157,26 @@ class DhanIngestReport:
     market
         The per-symbol outcome/attribution namespace (``"dhan"``); not a durable
         ledger namespace (this lean spine uses no WindowLedger).
+    requested_start, effective_start, floor
+        The rolling-floor stamps (DEC-DHAN-ROLLING-FLOOR-001): the operator's
+        requested start, the CLAMPED effective start (``max(start, floor)``), and
+        the floor itself — all computed from the SAME threaded ``today``.
+        ``None`` on a report built without planning (a dry-run short-circuits
+        BEFORE planning and echoes the REQUESTED range only).
+    entirely_pre_floor
+        ``True`` when the whole requested range ended before the floor — ZERO
+        windows were planned (never doomed requests recorded as clean-empty
+        SUCCESS).
     """
 
     outcomes: tuple[DhanWindowOutcome, ...]
     resolved_symbols: tuple[str, ...]
     unresolved_symbols: tuple[str, ...]
     market: str = _MARKET
+    requested_start: date | None = None
+    effective_start: date | None = None
+    floor: date | None = None
+    entirely_pre_floor: bool = False
 
     @property
     def total_bars(self) -> int:
@@ -180,6 +196,7 @@ def plan_dhan_work(
     interval: str,
     start: date,
     end: date,
+    today: date | None = None,
 ) -> tuple[list[DhanWorkItem], list[str]]:
     """Plan the ingest work: resolve each symbol + tile ``[start, end)`` into windows.
 
@@ -187,14 +204,48 @@ def plan_dhan_work(
     is unresolved (no work item planned — the caller loud-skips it). ``[start, end)``
     is half-open (the ``ingest_common`` tiling convention); an inclusive operator
     range passes ``end + 1 day`` at the surface.
+
+    **The rolling-floor clamp (DEC-DHAN-ROLLING-FLOOR-001) lives HERE — the ONE
+    plan chokepoint.** The effective start is ``max(start,
+    dhan_history_floor(today))`` so no planned window ever starts (or straddles)
+    before the floor — the first window STARTS at it; a range ending ON or before
+    the floor plans ZERO windows with ONE ``dhan.pull_entirely_pre_floor`` WARNING
+    (never doomed requests recorded as clean-empty SUCCESS). A genuine clamp emits
+    ONE ``dhan.window_floor_clamped`` INFO (EMIT-ON-CLAMP — it fires on every
+    blank-date pull by construction, since the default 2020-01-01 sits before the
+    floor; that is honest, not noise). *today* is the IST date resolved ONCE per
+    launch and threaded (``None`` resolves ``now_ist().date()`` here — a plan
+    never re-reads the clock mid-run). The floor governs REQUESTS only: pre-floor
+    bars already stored are never deleted (keep-first, append-only).
     """
+    floor = dhan_history_floor(today if today is not None else now_ist().date())
     work: list[DhanWorkItem] = []
     unresolved: list[str] = []
-    windows = plan_windows(
-        datetime.combine(start, time.min),
-        datetime.combine(end, time.min),
-        window_days=window_days_for_interval(interval),
-    )
+    if end <= floor:
+        _LOG.warning(
+            "dhan.pull_entirely_pre_floor",
+            requested_start=start.isoformat(),
+            requested_end=end.isoformat(),
+            floor=floor.isoformat(),
+            margin_days=DHAN_FLOOR_MARGIN_DAYS,
+            detail="nothing to pull (requested range wholly before the Dhan rolling floor)",
+        )
+        windows = []
+    else:
+        effective_start = max(start, floor)
+        if effective_start > start:
+            _LOG.info(
+                "dhan.window_floor_clamped",
+                requested_start=start.isoformat(),
+                effective_start=effective_start.isoformat(),
+                floor=floor.isoformat(),
+                margin_days=DHAN_FLOOR_MARGIN_DAYS,
+            )
+        windows = plan_windows(
+            datetime.combine(effective_start, time.min),
+            datetime.combine(end, time.min),
+            window_days=window_days_for_interval(interval),
+        )
     for symbol in symbols:
         security_id = security_ids.get(symbol)
         if security_id is None:
@@ -384,6 +435,7 @@ def run_dhan_spot_ingest_with_retry(
     pace: Callable[[], None] = _noop_pace,
     max_rounds: int = 3,
     backoff: Callable[[int], None] = _noop_backoff,
+    today: date | None = None,
 ) -> DhanIngestReport:
     """Run the Dhan spot ingest with bounded in-run retry of retryable-failed windows.
 
@@ -413,13 +465,21 @@ def run_dhan_spot_ingest_with_retry(
         back-off.
     max_rounds
         The bounded retry-round budget (``>= 1``).
+    today
+        The IST date the rolling floor keys on (DEC-DHAN-ROLLING-FLOOR-001) —
+        resolved ONCE per launch at the surface and threaded; ``None`` resolves
+        ``now_ist().date()`` HERE (once per run, never re-read mid-plan).
     """
+    today_resolved = today if today is not None else now_ist().date()
+    floor = dhan_history_floor(today_resolved)
+    effective_start = max(start, floor) if end > floor else None
     work, unresolved = plan_dhan_work(
         symbols=symbols,
         security_ids=security_ids,
         interval=interval,
         start=start,
         end=end,
+        today=today_resolved,
     )
     resolved = tuple(dict.fromkeys(item.symbol for item in work))
     outcomes: list[DhanWindowOutcome] = [_warn_unresolved(symbol) for symbol in unresolved]
@@ -450,6 +510,10 @@ def run_dhan_spot_ingest_with_retry(
         outcomes=tuple(outcomes),
         resolved_symbols=resolved,
         unresolved_symbols=tuple(unresolved),
+        requested_start=start,
+        effective_start=effective_start,
+        floor=floor,
+        entirely_pre_floor=end <= floor,
     )
     _warn_resolved_all_empty(report)
     return report
