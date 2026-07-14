@@ -73,7 +73,6 @@ from typing import Any, Final
 import structlog
 
 from brutex.calendars.auto_pull_gate import (
-    PULL_ALL_SETTLE_ENV,
     AutoGateVerdict,
     auto_pull_allowed,
     resolve_settle_time,
@@ -578,13 +577,18 @@ class AutoPullScheduler:
         }
 
     def _next_eligible(self, state: AutoPullState, instant: datetime) -> str:
-        """The honest next-fire description — never a fabricated instant."""
+        """The honest next-fire description — never a fabricated instant.
+
+        A settle-config :class:`ValueError` self-names its env var
+        (``BRUTEX_PULL_ALL_SETTLE_IST`` or ``BRUTEX_SETTLE_EVIDENCE_PATH`` —
+        DEC-SETTLE-EVIDENCE-ADOPTION-001), so no hardcoded prefix names one.
+        """
         if not state.armed:
             return "disarmed — the ▶ Pull Spot button arms the daily auto-pull"
         try:
             settle = resolve_settle_time(self._env)
         except ValueError as exc:
-            return f"unknown — fix {PULL_ALL_SETTLE_ENV}: {exc}"
+            return f"unknown — invalid settle config: {exc}"
         iso = instant.date().isoformat()
         if state.last_success_date == iso:
             return f"done for today — next at/after {settle:%H:%M} IST on the next trading day"

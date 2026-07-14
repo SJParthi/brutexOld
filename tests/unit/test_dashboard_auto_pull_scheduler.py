@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 from brutex.calendars.auto_pull_gate import PULL_ALL_SETTLE_ENV, AutoGateVerdict
+from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
 from brutex.dashboard.auto_pull_scheduler import (
     AUTO_PULL_STATE_FILENAME,
     AUTO_PULL_STATE_SCHEMA,
@@ -110,6 +111,14 @@ def _refused() -> AutoLaunchResult:
     return AutoLaunchResult(started=False, detail="launch refused — the pull single-flight is held")
 
 
+#: DEC-SETTLE-EVIDENCE-ADOPTION-001 hermeticity for the helper's INJECTED
+#: default mapping (mappings bypass os.environ, so the conftest belt cannot
+#: protect them): the default env disables the evidence channel so the DAY a
+#: measured evidence file lands, the real-gate tests here keep their 17:30
+#: semantics. Tests that inject their own env choose their own channel state.
+_NO_EVID = {SETTLE_EVIDENCE_PATH_ENV: "off"}
+
+
 def _scheduler(
     tmp_path: Path,
     *,
@@ -126,7 +135,7 @@ def _scheduler(
         gate=gate,
         clock=clock,
         tick_seconds=tick_seconds,
-        env={} if env is None else env,
+        env=dict(_NO_EVID) if env is None else env,
     )
     return scheduler, store
 
@@ -777,11 +786,53 @@ class TestStatus:
             scheduler.stop()
 
     def test_next_eligible_junk_settle_env_is_honest(self, tmp_path: Path) -> None:
+        """[DEC-SETTLE-EVIDENCE-ADOPTION-001 documented pin move] the junk
+        arm's hardcoded `fix BRUTEX_PULL_ALL_SETTLE_IST` prefix is DROPPED —
+        the raised ValueError self-names its env var (settle env OR evidence
+        path), so the hardcoded name could lie for an evidence-path fault."""
         scheduler, _ = _scheduler(tmp_path, gate=_allowed_gate, env={PULL_ALL_SETTLE_ENV: "25:99"})
         scheduler.arm(now=_OPEN)
         try:
             text = scheduler.status(now=_OPEN)["next_eligible"]
-            assert text.startswith("unknown — fix BRUTEX_PULL_ALL_SETTLE_IST")
+            assert text.startswith("unknown — invalid settle config")
+            assert PULL_ALL_SETTLE_ENV in text  # the exc self-names the knob
+        finally:
+            scheduler.stop()
+
+    def test_next_eligible_junk_evidence_path_is_honest(self, tmp_path: Path) -> None:
+        """The evidence-path twin: an explicit junk BRUTEX_SETTLE_EVIDENCE_PATH
+        renders the same honest unknown text naming ITS env var."""
+        junk = tmp_path / "settle_evidence.json"
+        junk.write_bytes(b"{junk")
+        scheduler, _ = _scheduler(
+            tmp_path, gate=_allowed_gate, env={SETTLE_EVIDENCE_PATH_ENV: str(junk)}
+        )
+        scheduler.arm(now=_OPEN)
+        try:
+            text = scheduler.status(now=_OPEN)["next_eligible"]
+            assert text.startswith("unknown — invalid settle config")
+            assert SETTLE_EVIDENCE_PATH_ENV in text
+        finally:
+            scheduler.stop()
+
+    def test_next_eligible_renders_evidence_settle(self, tmp_path: Path) -> None:
+        """[DEC-SETTLE-EVIDENCE-ADOPTION-001] a valid committed evidence file
+        (adopts 16:00) drives the next-eligible wording — the display surface
+        rides the SAME three-tier resolver."""
+        from tests.unit.test_settle_evidence import write_evidence
+
+        evidence = write_evidence(tmp_path / "settle_evidence.json")
+        scheduler, _ = _scheduler(
+            tmp_path,
+            launcher=_Launcher(_started()),
+            gate=_allowed_gate,
+            env={SETTLE_EVIDENCE_PATH_ENV: str(evidence)},
+        )
+        scheduler.arm(now=_OPEN)
+        try:
+            scheduler.note_run_complete(ok=True, run_date=_OPEN.date(), source="auto")
+            text = scheduler.status(now=_OPEN)["next_eligible"]
+            assert text == ("done for today — next at/after 16:00 IST on the next trading day")
         finally:
             scheduler.stop()
 
