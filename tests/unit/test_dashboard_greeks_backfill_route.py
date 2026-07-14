@@ -431,13 +431,15 @@ class TestFlockRootAlignment:
         monkeypatch.setattr(app_module, "BackgroundPullJob", _Recording)
         build_app(DashboardState(), instrument_store=store)
         # The pull job + the backfill job + the cross-verify job
-        # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776 — an
+        # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) + the DHAN pull
+        # job (DEC-DHAN-SPOT-PULL-001, MIGRATION.md #1794 — an
         # intent-preserved pin update: EVERY job keys its flock resolver on
-        # the store-derived WRITE root, which is exactly what this asserts).
-        assert len(created) == 3
-        for kwargs in created:
-            resolver = kwargs["lake_root_resolver"]
-            assert resolver() == tmp_path  # the store's parent — the WRITE root
+        # the store-derived WRITE root; the Dhan job's root is the NESTED
+        # ``<write root>/feeds/dhan/`` feed subtree per DEC-FEED-LAKE-ROOT-001,
+        # so a Dhan pull never contends with a Groww writer on the top root).
+        assert len(created) == 4
+        resolved = sorted(kwargs["lake_root_resolver"]() for kwargs in created)
+        assert resolved == sorted([tmp_path, tmp_path, tmp_path, tmp_path / "feeds" / "dhan"])
 
     def test_job_lake_root_resolver_falls_back_to_env_without_a_store(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

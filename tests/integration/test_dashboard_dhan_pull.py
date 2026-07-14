@@ -333,6 +333,87 @@ class TestDhanRollingFloorRoute:
         assert fake_pull.done.wait(timeout=10.0)
 
 
+class TestDhanWetPathRoute:
+    """The WET (dry_run=False) route arms (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001).
+
+    The sibling classes above keep every start offline via ``dry_run=True``; these
+    two drive the wet-only branches — the credential 503 refusal and the
+    non-synthetic detail label + kept cross-process lock — with the credential
+    resolver monkeypatched (no AWS is ever touched; the injected fake seam keeps
+    the vendor offline).
+    """
+
+    def test_wet_pull_without_credentials_is_503_with_fix_text(
+        self,
+        client: TestClient,
+        fake_pull: _FakeDhanPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A REAL pull with unresolvable SSM creds is a LOUD HTTP 503 relaying the
+        loader's own fix text — zero vendor calls, zero job start, never a silent
+        synthetic downgrade (the gate order the floor-route docstring documents).
+        """
+        fix_text = "Dhan SSM credentials missing — seed /tickvault/prod/dhan/* first"
+        monkeypatch.setattr(app_module, "dhan_credentials_error", lambda **_kw: fix_text)
+        resp = client.post("/api/v1/universe/pull-pipeline-dhan")  # dry_run defaults False
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert fix_text in detail  # the loader's fix text is relayed VERBATIM
+        assert "NEVER silently degrades to synthetic" in detail
+        # ZERO fetches, ZERO job start: the fake pull was never invoked.
+        assert fake_pull.request is None
+        assert fake_pull.client.calls == 0
+
+    def test_wet_start_detail_is_not_synthetic_and_keeps_cross_process_lock(
+        self,
+        store: InstrumentStore,
+        fake_pull: _FakeDhanPull,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A creds-resolving WET start labels the job with the PLAIN detail (no
+        synthetic marker — ``label_synthetic`` is the dry-run-only arm) and KEEPS
+        the cross-process single-flight lock (the dry-run skips it)."""
+        monkeypatch.setattr(app_module, "dhan_credentials_error", lambda **_kw: None)
+        frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+        monkeypatch.setattr(app_module, "now_ist", lambda: frozen)
+        starts: list[dict[str, Any]] = []
+        orig_start = app_module.BackgroundPullJob.start
+
+        def _spy(self: Any, work: Any, **kwargs: Any) -> bool:
+            starts.append(
+                {"detail": kwargs.get("detail"), "lock": kwargs.get("cross_process_lock")}
+            )
+            return bool(orig_start(self, work, **kwargs))
+
+        monkeypatch.setattr(app_module.BackgroundPullJob, "start", _spy)
+        with TestClient(
+            build_app(DashboardState(), instrument_store=store, dhan_spot_pull=fake_pull)
+        ) as c:
+            resp = c.post(
+                "/api/v1/universe/pull-pipeline-dhan",
+                params={"from_date": "2024-01-01", "to_date": "2024-02-01"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["started"] is True
+            assert body["dry_run"] is False
+            assert fake_pull.done.wait(timeout=10.0)
+        dhan_starts = [s for s in starts if "dhan" in str(s["detail"])]
+        assert dhan_starts, f"no dhan job start captured: {starts}"
+        # The PLAIN detail — the synthetic label is the dry-run-only arm.
+        assert dhan_starts[0]["detail"] == "dhan spot pipeline"
+        # The WET run keeps the cross-process single-flight lock.
+        assert dhan_starts[0]["lock"] is True
+        # The wet request genuinely reached the seam and built the (fake) adapter;
+        # everything nested under feeds/dhan/ — the Groww top lake untouched.
+        assert fake_pull.request is not None
+        assert fake_pull.request.dry_run is False
+        assert fake_pull.adapter_built is True
+        assert (tmp_path / "feeds" / "dhan").exists()
+        assert not (tmp_path / "bars").exists()
+
+
 class TestDhanGrowwInterplayNegativePins:
     """Merge-interplay negative pins (design §11, the #1779 round-7 style)."""
 
