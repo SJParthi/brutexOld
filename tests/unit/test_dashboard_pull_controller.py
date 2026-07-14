@@ -4116,7 +4116,8 @@ class _InteriorGapAdapter(SyntheticSpotAdapter):
     """Bars at the window's START + END with a >5-session interior hole between.
 
     2024-03-04 (Mon) then 2024-03-27/28 (Wed/Thu): the contiguous bar-less run
-    2024-03-05 → 2024-03-26 spans ~15 real NSE sessions — far past the
+    2024-03-05 → 2024-03-26 spans exactly 14 real NSE sessions (the 03-08
+    Maha Shivaratri + 03-25 Holi holidays excluded) — far past the
     INTERIOR_GAP_TOLERANCE_SESSIONS=5 tolerance — while the last stored bar sits
     ON the window's final session (2024-03-28; 2024-03-29 is Good Friday), so the
     interior-gap detector fires and the truncation detector does not. The
@@ -4127,7 +4128,7 @@ class _InteriorGapAdapter(SyntheticSpotAdapter):
     def fetch_ohlcv(
         self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
     ) -> list[CandleBar]:
-        """Return bars bookending a 15-session interior hole (never truncated)."""
+        """Return bars bookending a 14-session interior hole (never truncated)."""
         del symbol, exchange, interval, start, end
         return (
             synthetic_spot_bars(date(2024, 3, 4), count=self.bars_per_window)

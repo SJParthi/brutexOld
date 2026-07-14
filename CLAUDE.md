@@ -26,7 +26,9 @@ idiom), so the #1031 interior-gap / trailing-truncation demotions run on
 EVERY daily production path (nightly · ▶ Pull Spot + auto-pull · /pull-all ·
 retry-failed · the crossverify pull legs) instead of being dead on all of
 them — closing #1774's honest-envelope item (i). The spine's `is_index` gate
-keeps the ~750 illiquid CASH names observe-only; dry-runs stay
+keeps the ~750 illiquid CASH names observe-only on the gap/truncation class
+(the intrinsic ALL_FILTERED demotion stays deliberately un-index-gated);
+dry-runs stay
 double-protected (flag False + record-inert None ledger); demotions are
 bounded (settle SKIPPED at threshold 3, remediation `brutex
 reopen-skipped`). ONE call site + docs + tests — the detectors + spine are
@@ -2583,13 +2585,17 @@ hostile-review pass._
   CLOSES #1774's honest-envelope item (i) + the in-code NOTE. The spine's
   three hard gates are byte-untouched and do the correctness work
   (`detect_completeness_gaps AND is_index AND interval != 1day`; ALL_FILTERED
-  stays flag-gated-not-index-gated — intrinsic): the ~750 illiquid CASH names
-  stay observe-only WARNed, never demoted; demotion = re-pullable FAILED +
+  stays flag-gated-not-index-gated — intrinsic, so arming the bulk path
+  reaches CASH names on THAT class too): the ~750 illiquid CASH names stay
+  observe-only WARNed on the interior-gap/truncation class, never demoted on
+  it; demotion = re-pullable FAILED +
   INTERIOR_GAP/SUSPECTED_PARTIAL, streak-bumping, settles SKIPPED at
   EMPTY_TERMINAL_THRESHOLD=3 (bounded — never a livelock; honest
   DEMOTED_SETTLE_REASONS label; remediation `brutex reopen-skipped`); stored
   bars always kept. HONEST: covers ALL ~25 admitted indices via `is_index`
-  (dense-printing — the #1031 rationale holds), NOT retroactive
+  (every index prints on every session — the session-level presence the
+  detectors key on; intra-session density not claimed — so the #1031
+  rationale holds), NOT retroactive
   (already-settled holey windows stay settled — the #1774 item-(a)
   fetched-bars boundary; lake audit = DEC-LAKE-AUDIT-SETTLING-ROWS-001), the
   detectors abstain out-of-calendar-coverage from 2027-01-01 until the 2027
@@ -6956,7 +6962,9 @@ hostile-review pass._
   trailing-truncation demotions run on every daily production path —
   nightly, ▶ Pull Spot + auto-pull, /pull-all, retry-failed, the
   crossverify pull legs — closing #1774's honest-envelope item (i); the
-  spine's `is_index` gate keeps the ~750 illiquid CASH names observe-only,
+  spine's `is_index` gate keeps the ~750 illiquid CASH names observe-only
+  on the gap/truncation class (the intrinsic ALL_FILTERED demotion stays
+  deliberately un-index-gated),
   dry-runs stay double-protected (flag False + record-inert None ledger),
   demotions settle SKIPPED at threshold 3 (bounded; `brutex
   reopen-skipped`); NOT retroactive; detectors abstain out-of-coverage
