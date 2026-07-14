@@ -717,8 +717,14 @@ class TestEvidenceSettleExplicitTier:
         env = {SETTLE_EVIDENCE_PATH_ENV: "/tmp/evi\x00dence.json"}
         with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV) as excinfo:
             evidence_settle(env)
-        assert "unreadable" in str(excinfo.value)
-        assert "embedded null byte" in str(excinfo.value)
+        msg = str(excinfo.value)
+        # Pins that the RAW ValueError class was folded (not OSError).
+        assert "unreadable (ValueError:" in msg
+        # Common substring across CPython patch versions: 3.12.3 renders
+        # "embedded null byte" while 3.12.13+/3.13 render
+        # "stat: embedded null character in path" — never pin the
+        # interpreter-internal tail verbatim.
+        assert "embedded null" in msg
         # The memoized degenerate token re-raises the SAME wrapped refusal.
         with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV):
             evidence_settle(env)
