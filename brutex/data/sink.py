@@ -30,9 +30,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from brutex.data.catalog import Catalog
+from brutex.data.frame_write_gate import DegradeReason, FrameWriteStats, note_degrade
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import (
     ParquetWriter,
@@ -41,6 +42,9 @@ from brutex.data.parquet_writer import (
     max_conflict_close_delta,
 )
 from brutex.data.partition import partition_for_timestamp
+
+if TYPE_CHECKING:  # pragma: no cover — typing-only polars import (lazy at runtime)
+    import polars as pl
 
 
 def vendor_surface_from_write_results(
@@ -276,6 +280,129 @@ class ParquetBarSink:
         dup_rows, max_delta = vendor_surface_from_write_results(results)
         return SinkAppendResult(
             bars_appended=len(bars),
+            partitions_written=len(results),
+            write_results=tuple(results),
+            bars_net_new=sum(wr.bars_added for wr in results),
+            vendor_dup_rows_dropped=dup_rows,
+            max_close_delta=max_delta,
+        )
+
+    def append_frame(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        frame: pl.DataFrame,
+        merge_mode: str = "latest-wins",
+        absent_open_interest: int | None = 0,
+        stats: FrameWriteStats | None = None,
+    ) -> SinkAppendResult:
+        """FRAME-DIRECT sibling of :meth:`append` (DEC-PREBUILD-FRAME-WRITE-001).
+
+        Persists a resampled polars *frame* (columns ``ts_utc, open, high,
+        low, close, volume[, open_interest]``) WITHOUT materialising per-bar
+        :class:`~brutex.data.models.CandleBar` objects — the prebuild's
+        measured GIL-held wall. The vendor :meth:`append` entry is
+        byte/type-UNTOUCHED; the ONLY production caller of this sibling is
+        the derived-TF writer built by
+        :func:`~brutex.data.timeframe_materialize.make_lake_write_tf` when
+        the ``BRUTEX_PREBUILD_FRAME_WRITE`` gate is engaged.
+
+        The sink OWNS its derived-path contracts here (never bypassed):
+
+        * an EMPTY frame early-returns the SAME empty
+          :class:`SinkAppendResult` as ``append([])`` (the C13 law);
+        * **`bars_appended` = `frame.height`** — the INPUT count, exactly
+          the legacy ``len(bars)`` by 1:1 construction (the historical
+          ``> 0`` "did this call carry data?" gate contract);
+        * vectorized UTC-month grouping (the exact
+          :func:`~brutex.data.partition.partition_for_timestamp` law on the
+          tz-aware column), iterated in ASCENDING month order mirroring the
+          legacy ``sorted(groups.items())``;
+        * one :meth:`ParquetWriter.write_frame` per month sub-frame; the
+          catalog arm reused verbatim (the prebuild sink wires
+          ``catalog=None``, but parity is kept for any future caller);
+        * ``bars_net_new`` = Σ ``WriteResult.bars_added`` as today.
+
+        A frame whose ``ts_utc`` column cannot be trusted for UTC-month
+        grouping (missing / wrong dtype / nulls) degrades the WHOLE call to
+        the verbatim legacy ``append(bars=frame_to_candle_bars(frame), …)``
+        — which reproduces today's grouping AND today's failure semantics
+        exactly (counted ``schema_mismatch``; the writer-level G1 re-checks
+        the full shape per month either way).
+        """
+        import polars as pl
+
+        if frame.height == 0:
+            # The C13 empty-input law — byte-identical to ``append([])``.
+            return SinkAppendResult(
+                bars_appended=0,
+                partitions_written=0,
+                write_results=(),
+            )
+
+        ts_dtype = frame.schema.get("ts_utc")
+        if (
+            ts_dtype != pl.Datetime(time_unit="us", time_zone="UTC")
+            or frame.get_column("ts_utc").null_count() > 0
+        ):
+            # The month grouping below needs a trustworthy tz-aware UTC
+            # column; anything else routes the WHOLE frame through the
+            # verbatim legacy path (same grouping, same errors — e.g. a
+            # null timestamp raises CandleBar's own loud error exactly as
+            # the flag-OFF branch would). Observable, never silent.
+            note_degrade(DegradeReason.SCHEMA_MISMATCH, stats, symbol=symbol, interval=interval)
+            from brutex.data.spot_daily_resample import frame_to_candle_bars
+
+            return self.append(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                bars=frame_to_candle_bars(frame, absent_open_interest=absent_open_interest),
+                merge_mode=merge_mode,
+            )
+
+        # Vectorized UTC-month grouping — the exact `partition_for_timestamp`
+        # law (year/month of the UTC instant; the column IS UTC by the dtype
+        # check above). Helper columns are dropped before the writer sees the
+        # sub-frame (G1 would reject them).
+        keyed = frame.with_columns(
+            pl.col("ts_utc").dt.year().alias("__fw_year"),
+            pl.col("ts_utc").dt.month().alias("__fw_month"),
+        )
+        groups = keyed.partition_by(["__fw_year", "__fw_month"], as_dict=True)
+
+        results: list[WriteResult] = []
+        for _key, sub in sorted(groups.items()):  # ascending (year, month) — the sink law
+            month_frame = sub.drop("__fw_year", "__fw_month")
+            write_result = self._writer.write_frame(
+                exchange=exchange,
+                segment=segment,
+                symbol=symbol,
+                interval=interval,
+                frame=month_frame,
+                merge_mode=merge_mode,
+                absent_open_interest=absent_open_interest,
+                stats=stats,
+            )
+            results.append(write_result)
+
+            if self._catalog is not None:
+                entry = self._writer.make_catalog_entry(
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                    result=write_result,
+                )
+                self._catalog.upsert(entry)
+
+        dup_rows, max_delta = vendor_surface_from_write_results(results)
+        return SinkAppendResult(
+            bars_appended=frame.height,
             partitions_written=len(results),
             write_results=tuple(results),
             bars_net_new=sum(wr.bars_added for wr in results),
