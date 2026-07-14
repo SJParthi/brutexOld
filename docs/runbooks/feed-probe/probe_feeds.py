@@ -1323,7 +1323,11 @@ def dhan_volume_literal_probe(
     ).encode("utf-8")
     pacer.wait()
     status, parsed, _raw = http_json("POST", endpoint, headers, body=body, redactor=redactor)
-    container = parsed.get("data") if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) else parsed
+    container = (
+        parsed.get("data")
+        if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict)
+        else parsed
+    )
     if isinstance(container, dict):
         for column in ("volume", "open_interest"):
             values = container.get(column)
