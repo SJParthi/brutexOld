@@ -55,7 +55,7 @@ full sweep until Phase 9.5 pilot passes.
 - **NIFTY-futures track (reconciles the line above — ADR-0012 / CLAUDE.md §2
   Rule 3 engine-scope amendment, operator-authorized 2026-06-29; LAUNCHED by
   DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
-  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1521–#1523):** the brute-force
+  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702):** the brute-force
   ENGINE additionally runs on **NIFTY futures** (signal-only, like spot) for the
   dedicated dynamic-strategy track — addressed by the ONE pinned series alias
   `NSE-NIFTY-FUT`, roll-resolved at launch into the per-contract
@@ -69,6 +69,16 @@ full sweep until Phase 9.5 pilot passes.
   decision; ADR-0012 supersedes it for NIFTY futures specifically (they carry
   real traded volume — the reason the session-VWAP conditions are feasible).
   BANKNIFTY/SENSEX futures and every other F&O contract stay REFERENCE_ONLY.
+  **[RETIRED — DEC-ENGINE-SPOT-ONLY-001, 2026-07-13, MIGRATION.md #1790:
+  the operator directed the engine back to SPOT-ONLY ("wipe off the future,
+  only spots alone") — this track's ENGINE authorization is consciously
+  superseded; `NSE-NIFTY-FUT` is refused at every production sweep entry
+  ("the engine is spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY")
+  and the engine sweep surface is EXACTLY the 3 spot indices. The paragraph
+  above is kept as the historical record; the alias/resolver/roll machinery
+  survive ONLY as lake tooling below the scope gate. The 2026-05-16 "NOT in
+  scope: futures execution on the indices" line above is authoritative
+  again.]**
 - **Engine-vs-lake distinction:** wording like "4 index instruments / no F&O contracts" elsewhere in this spec
   describes the BRUTE-FORCE ENGINE; the LAKE is the expanded surface per DEC-P0-063. See CLAUDE.md §3 +
   MIGRATION.md entry #200 for the locked decision.

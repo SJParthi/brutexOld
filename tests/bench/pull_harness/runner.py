@@ -244,7 +244,7 @@ def run_pull_harness(scenario: PullScenario, *, lake_root: Path) -> PullHarnessR
         # takes the explicit-hook path and NEVER resolves the AWS Parameter
         # Store backend — without these, `resolve_token_store()` imports boto3
         # and the harness fails in any environment lacking the [token-broker]
-        # extra (the CI bench job installs `.[dev,data]` only, so this bench
+        # extra (the CI bench job installs `.[dev,data,ui]` only, so this bench
         # would go RED the moment the [data] fix made it actually execute).
         # A `None` load = cache miss → the injected fake token_factory mints
         # "HARNESS-TOKEN"; the store hook is a no-op success. Offline-pure.

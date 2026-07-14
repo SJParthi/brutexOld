@@ -605,6 +605,36 @@ def test_lake_write_halt_propagates_through_options_phase() -> None:
         )
 
 
+def test_spot_noop_phase_when_materialize_spot_is_none() -> None:
+    """[round-6 two-button split] ``materialize_spot=None`` makes the SPOT
+    phase an explicit REPORTED no-op carrying the COMMON by-design note
+    (the options-no-op posture: never a silent skip) while the contract
+    phases run for real over the same underlyings."""
+    from brutex.dashboard.gated_prebuild import SPOT_PREBUILD_SKIPPED_NOTE
+
+    contracts = {"NSE-NIFTY": ["NSE-NIFTY-30Jan25-FUT"]}
+    report = run_gated_prebuild(
+        underlyings=[_spot("NSE-NIFTY")],
+        materialize_spot=None,
+        futures_contracts_for=lambda inst: contracts.get(inst.symbol_name, []),
+        materialize_future=lambda symbol: _ok(4),
+        options_contracts_for=lambda inst: [],
+        materialize_option=lambda symbol: _ok(4),
+        source="pipeline",
+    )
+    spot_phase, futures_phase, options_phase = report.phases
+    assert spot_phase.phase == "spot"
+    assert spot_phase.attempted == ()
+    assert spot_phase.succeeded == ()
+    assert spot_phase.failed == ()
+    assert spot_phase.total_bars == 0
+    assert spot_phase.note == SPOT_PREBUILD_SKIPPED_NOTE
+    assert "skipped by design (F&O-only scope)" in spot_phase.note
+    assert futures_phase.succeeded == ("NSE-NIFTY-30Jan25-FUT",)  # F&O phases REAL
+    assert options_phase.attempted == ()
+    assert report.ok is True
+
+
 def test_empty_selection_runs_three_empty_phases() -> None:
     report = run_gated_prebuild(
         underlyings=[],

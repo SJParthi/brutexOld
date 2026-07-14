@@ -1736,7 +1736,9 @@ class TestIdentity:
         from brutex.engine.sweep_orchestrator import make_store_for
 
         schedule = (date(2026, 3, 31).toordinal(),)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: the futures verify machinery below the
+        # gate is RETAINED — constructed via the sanctioned research flag.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         root = tmp_path / "results"
         root.mkdir()
         with AuditWriter.open(root / "audit.jsonl") as audit:

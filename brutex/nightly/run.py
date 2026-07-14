@@ -6,17 +6,23 @@ are production), so the FULL composition — lock acquisition order, the account
 lock's post-PREBUILD release, the pull-halt alert, the report/bundle-in-
 ``finally`` law, the Telegram emits — is unit-testable offline.
 
-Collision law (acquire-and-HOLD; spec §7.2): the nightly single-flight lock is
-taken FIRST (pre-chain; contention ⇒ refusal report + ``nightly_refused`` +
-``EXIT_USER_ERROR``, no chain); the COLLISION link then acquires the ACCOUNT
-pull lock (released after PREBUILD — no vendor calls happen during the sweep,
-so it never starves a different-lake pull on the same account) and the LAKE
-pull lock (held through the SWEEP link — the R4/G10 sweep-vs-pull exclusion:
-no sweep-level flock exists, so holding the lake pull lock is the only
-mechanical delivery; a manual pull attempted mid-nightly reads
-``(holder: nightly:<id>)``), then runs the sweep-liveness heuristic.
-try-acquire-and-release was REJECTED as a TOCTOU (the headless spines take no
-lock internally).
+Collision law (spec §7.2; DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): the nightly
+single-flight lock is taken FIRST (pre-chain; contention ⇒ refusal report +
+``nightly_refused`` + ``EXIT_USER_ERROR``, no chain); the COLLISION link then
+acquires the ACCOUNT pull lock AND the LAKE pull lock — BOTH released after
+PULL+PREBUILD (no vendor calls happen during the sweep, so the account lock
+never starves a different-lake pull on the same account; a manual pull
+attempted mid-PULL reads ``(holder: nightly:<id>)``) — then runs the
+sweep-liveness heuristic. The SWEEP link runs with the lake lock RELEASED:
+its sweep-vs-pull exclusion is owned by ``cmd_sweep_all`` itself — the G10
+lake read-guard (``LOCK_SH`` on the same pull lock file, held across the bar
+PRELOAD only; :mod:`brutex.engine.sweep_singleflight`) + the G6 sweep
+single-flight (``sweep_run_lock``, DEC-SWEEP-UNKILLABLE-CORE-001) — so the
+daily pull / crossverify can run CONCURRENTLY with the sweep's multi-day
+compute phase. (The pre-G10 acquire-and-HOLD design — its "no sweep-level
+flock exists" rationale — is SUPERSEDED: holding the lake lock EX through the
+SWEEP link self-conflicted with cmd_sweep_all's own G10 SH guard, flock being
+per open file description → ``LakeBusyError`` at every nightly sweep preload.)
 
 ``--dry-run`` is the documented post-install smoke: probes + inventory + plan
 + report ONLY — takes NO locks and mutates NOTHING (the report is RETURNED for
@@ -330,6 +336,13 @@ def _run_locked(
     extra_tripwires: list[Tripwire] = []
     account_stack = ExitStack()
     locks.callback(account_stack.close)  # backstop: released even if PULL never runs
+    # The LAKE pull lock rides the SAME post-PULL+PREBUILD release discipline
+    # as the account lock (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): held through
+    # PULL+PREBUILD only, closed in pull_fn's ``finally``; the SWEEP leg's
+    # sweep-vs-pull exclusion is cmd_sweep_all's own G10 (preload-only SH on
+    # the same file — an EX still held here would self-conflict it) + G6.
+    lake_stack = ExitStack()
+    locks.callback(lake_stack.close)  # backstop: released even if PULL never runs
     inventory_bytes = 0
     snapshot_id: str | None = None
     absent_artifacts: tuple[str, ...] = ()
@@ -392,7 +405,7 @@ def _run_locked(
                 return LinkResult(status=LinkStatus.REFUSED, detail=f"pull_in_flight: {exc}")
             locks_taken += 1
         try:
-            locks.enter_context(
+            lake_stack.enter_context(
                 pull_singleflight_lock(plan.lake_root, holder_note=f"nightly:{nightly_id}")
             )
         except PullAlreadyRunningError as exc:
@@ -496,6 +509,7 @@ def _run_locked(
             )
         except NightlyCapabilityError as exc:
             account_stack.close()
+            lake_stack.close()
             return LinkResult(status=LinkStatus.REFUSED, detail=str(exc))
         phase_started = seams.now()
         try:
@@ -507,9 +521,15 @@ def _run_locked(
                 emit_pull_halt_alert(exc)
             raise
         finally:
-            # The ACCOUNT lock releases after PULL+PREBUILD — no vendor calls
-            # happen during the sweep (spec §7.2); the LAKE lock stays held.
+            # BOTH pull locks release after PULL+PREBUILD (spec §7.2 +
+            # DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): no vendor calls happen
+            # during the sweep, and the SWEEP leg's sweep-vs-pull exclusion is
+            # owned by cmd_sweep_all's own G10 preload read-guard (an EX still
+            # held HERE would self-conflict its SH acquire) + the G6 sweep
+            # single-flight — so a pull/crossverify can run concurrently with
+            # the sweep's compute phase.
             account_stack.close()
+            lake_stack.close()
             pipeline.close()
         result, t3 = decompose_pipeline_report(
             pipe_report, started_utc=phase_started, ended_utc=seams.now()

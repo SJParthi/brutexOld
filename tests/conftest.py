@@ -10,6 +10,11 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
+from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
+from brutex.data.today_completeness import (
+    TODAY_COMPLETENESS_GATE_ENV,
+    reset_today_gate_log_state,
+)
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -61,6 +66,49 @@ _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 # test_cli_retry_storm.py / test_nightly_pipeline_binding.py) — so this
 # default disables ONLY the ambient real-clock read, never the tested law.
 os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
+
+# DEC-PULL-TODAY-COMPLETENESS-GATE-001 test hermeticity (the #1692 philosophy —
+# hermetic against the WALL CLOCK): the gate's four production arm sites resolve
+# the REAL ``os.environ`` (``resolve_today_completeness_enabled``) and the gate
+# then judges real-clock-clamped windows, so a production-wrapper test that
+# fabricates a today-ending window and runs at/after 15:30 IST on a trading day
+# would wall-clock-flake. The suite therefore runs under the DOCUMENTED operator
+# kill switch (``setdefault`` so an explicit outer choice wins). The gate's OWN
+# tests stay fully armed on both arms — they inject ``env=`` mappings + explicit
+# ``clamp_today`` dates / ``now_ist`` clocks (test_today_completeness.py, the
+# gate tests in test_groww_ingest.py / test_groww_option_ingest.py) — so this
+# default disables ONLY the ambient real-environ read, never the tested law.
+os.environ.setdefault(TODAY_COMPLETENESS_GATE_ENV, "0")
+
+# DEC-O1-GUARANTEE-HARDEN-001 (H2) test hermeticity (the same philosophy —
+# hermetic against the WALL CLOCK): the revision-probe TTL memo
+# (``lake_revision.RevisionProbeMemo``, default TTL 1 s) would make any test
+# that writes a sweep/run artifact and RE-POLLS a probe-keyed route within one
+# second serve the pre-write token — a timing-dependent flake class over every
+# /results + oneclick-runs invalidation test. The suite therefore runs under
+# the DOCUMENTED kill switch (``BRUTEX_REVISION_PROBE_TTL_S=0`` = the memo is
+# a pass-through, byte-identical per-poll probes; ``setdefault`` so an
+# explicit outer choice wins). The memo's OWN tests stay fully armed — they
+# inject ``ttl_s=`` + clocks explicitly (test_lake_revision.py, the route pins
+# in tests/bench/test_revision_probe_ttl_o1.py) — so this default disables
+# ONLY the ambient real-clock TTL, never the tested law.
+os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_today_gate_log_state() -> None:
+    """Reset the TODAY-gate's per-pull capped-event counters before EVERY test.
+
+    DEC-PULL-TODAY-COMPLETENESS-GATE-001 round-1 R2-M1: the module keeps
+    thread-safe per-``pull_id`` counters for its capped WARN/INFO events (the
+    per-pull design — production never resets them). Tests that drive the gate
+    without a bound pull scope share the ``""`` key, so without a reset a
+    later-added test could inherit a prior test's counts and flake on its
+    event-count asserts (measured headroom was 11/20 at review time). The reset
+    is the module's OWN test seam (``reset_today_gate_log_state``) — never a
+    production-code reset; 5 dict clears per test, negligible.
+    """
+    reset_today_gate_log_state()
 
 
 @pytest.fixture
