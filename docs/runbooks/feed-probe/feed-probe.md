@@ -288,6 +288,30 @@ To answer the gates:
   windows are `EMPTY` but 2023/recent are `CANDLES`, the "last 5 years" rolling
   policy is confirmed and Dhan intraday does **not** reach the `2020-01-01` floor.
 * **Dhan VIX (b):** the `INDIA VIX … @ recent` row — `CANDLES` = served.
+* **FLOOR_EDGE (the `--floor-edge` stage — DEC-DHAN-ROLLING-FLOOR-001; UNRUN so
+  far, no transcript exists):** the `floor-edge: …` rows use the SAME verdict
+  grammar. Reading them:
+  * **G-A (rolling edge):** the `NIFTY @ E0±Nd` day-march — the day where
+    `CANDLES` flips to `EMPTY`/error IS the measured rolling edge; compare it
+    against `dhan_rolling_edge(today)` (today−5y, Feb-29→Mar-1) and recalibrate
+    `DHAN_FLOOR_MARGIN_DAYS` (a one-line code change + a ledger note) if the
+    measured edge sits more than 7 days later than the computed one. The
+    per-index `@ E0+7d` confirm rows answer whether the edge is per-instrument.
+  * **G-B (straddle / silent truncation):** the `NIFTY straddle` row — a
+    `CANDLES` verdict whose **first ts** sits at/after the edge instead of the
+    requested start means pre-edge spans are **silently truncated** (the
+    integrity-violating clean-SUCCESS shape the +7d clamp margin guards
+    against); an error verdict means pre-edge requests FAIL loudly (the margin
+    could then shrink).
+  * **G-H (over-cap):** the `91-day over-cap` row — record which error code
+    (804? 814?) a >90-day window draws, vs silent truncation at 90 days.
+  * **G-I (timestamp = bar OPEN?):** on any served row, a **first ts** of
+    exactly `09:15:00` IST reads as OPEN-stamped bars (the parser's
+    epoch-is-bar-open assumption); a `09:16:00` first ts would mean
+    CLOSE-stamped — a parser change, stop and re-derive.
+  * **G-J (index volume/OI literals):** the `volume/OI literal capture` row's
+    notes carry the literal array heads (zeros? nulls? absent?) — the evidence
+    that re-derives the parser's absent-volume tolerance.
 * **Dhan auth (c):** a non-`SKIPPED` intraday row (any `CANDLES` / `EMPTY` /
   `401` verdict) proves the **provided** token reached the Data API — the probe
   never mints, so a `SKIPPED (no token)` here means you did not supply

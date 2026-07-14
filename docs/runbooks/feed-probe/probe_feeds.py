@@ -1255,6 +1255,233 @@ def run_dhan(
     return records, resolved
 
 
+# --------------------------------------------------------------------------- #
+# Dhan: --floor-edge stage (DEC-DHAN-ROLLING-FLOOR-001 gates G-A/G-B/G-H/G-J).
+# Day-resolution rolling-edge march + straddle + over-cap + volume capture.
+# Adds ~13 calls inside the existing budget; UNRUN in-sandbox (egress-blocked).
+# --------------------------------------------------------------------------- #
+
+# The NIFTY edge-march day offsets around E0 = today - 5 years (Feb-29 rounds
+# FORWARD to Mar-1, mirroring brutex.adapters.dhan.constants.dhan_rolling_edge —
+# a floor may only ever be LATER than the true edge). One single-day window per
+# offset; the FLOOR_EDGE verdict grammar reads SERVED/EMPTY/HTTP_<code> per day.
+FLOOR_EDGE_OFFSETS_DAYS: tuple[int, ...] = (-30, -7, -1, 0, 1, 7, 30)
+
+
+def _floor_edge_e0(today: dt.date) -> dt.date:
+    """today - 5y with the Feb-29 FORWARD rounding (the adapter's twin rule)."""
+    try:
+        return today.replace(year=today.year - 5)
+    except ValueError:  # Feb-29 on a non-leap target year
+        return dt.date(today.year - 5, 3, 1)
+
+
+def dhan_volume_literal_probe(
+    token: str,
+    client_id: str | None,
+    name: str,
+    security_id: str,
+    from_date: str,
+    to_date: str,
+    redactor: Redactor,
+    pacer: Pacer,
+    budget: CallBudget,
+) -> ProbeRecord:
+    """Gate G-J: capture the LITERAL volume / open_interest array head for IDX_I.
+
+    The adapter drops index volume unread (drop_volume=True) and tolerates an
+    ABSENT array; what Dhan actually returns (zeros? nulls? absent?) is
+    UNVERIFIED -- this records the literal first values so the tolerance can be
+    re-derived from evidence.
+    """
+    record = dhan_intraday_probe(
+        token, client_id, name, security_id, from_date, to_date, redactor, pacer, budget
+    )
+    # Re-issue is NOT needed: dhan_intraday_probe already recorded the verdict;
+    # the literal capture rides one EXTRA request so the raw arrays are in hand.
+    if not budget.spend():
+        record.notes.append("volume-literal capture skipped (budget exhausted)")
+        return record
+    endpoint = f"{DHAN_API_BASE}/charts/intraday"
+    headers = {
+        "access-token": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if client_id:
+        headers["dhanClientId"] = client_id
+    body = json.dumps(
+        {
+            "securityId": security_id,
+            "exchangeSegment": DHAN_INDEX_SEGMENT,
+            "instrument": DHAN_INDEX_INSTRUMENT,
+            "interval": 1,
+            "oi": True,  # ALSO ask for OI so the IDX_I OI content is captured
+            "fromDate": from_date,
+            "toDate": to_date,
+        }
+    ).encode("utf-8")
+    pacer.wait()
+    status, parsed, _raw = http_json("POST", endpoint, headers, body=body, redactor=redactor)
+    container = parsed.get("data") if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict) else parsed
+    if isinstance(container, dict):
+        for column in ("volume", "open_interest"):
+            values = container.get(column)
+            head = values[:3] if isinstance(values, list) else values
+            record.notes.append(
+                redactor.scrub(f"G-J literal {column} (oi=true, http {status}): {head!r}")[
+                    :MAX_NOTE_CHARS
+                ]
+            )
+    else:
+        record.notes.append(f"G-J literal capture: non-dict body (http {status})")
+    return record
+
+
+def run_dhan_floor_edge(
+    token: str,
+    client_id: str | None,
+    resolved: dict[str, Any],
+    redactor: Redactor,
+    budget: CallBudget,
+) -> list[ProbeRecord]:
+    """The ``--floor-edge`` stage (DEC-DHAN-ROLLING-FLOOR-001 probe extension).
+
+    ~13 read-only calls: (a) gate G-A -- a day-resolution NIFTY march around
+    E0 = today-5y (offsets -30/-7/-1/0/+1/+7/+30, one single-day window each:
+    where does SERVED flip to EMPTY/error?); (b) one confirm window per
+    remaining index at E0+7d (is the edge per-instrument?); (c) gate G-B -- a
+    [E0-7d, E0+7d) STRADDLE window (the silent-truncation detector: a SERVED
+    verdict whose first_ts sits at/after the edge instead of the requested
+    start means pre-edge spans are silently truncated -- recorded clean-SUCCESS
+    poison for an unclamped puller); (d) gate G-H -- one 91-day over-cap
+    request (error code vs truncation); (e) gate G-J -- one IDX_I volume/OI
+    literal-values capture. Verdict grammar: every record is named
+    ``floor-edge: ...`` and reads the standard SERVED (n bars) / EMPTY /
+    HTTP_<code> verdicts -- the FLOOR_EDGE reading rows live in feed-probe.md.
+    """
+    pacer = Pacer(DHAN_MAX_RPS)
+    records: list[ProbeRecord] = []
+    today = dt.date.today()
+    e0 = _floor_edge_e0(today)
+    one_day = dt.timedelta(days=1)
+
+    def _window(day: dt.date, days: int = 1) -> tuple[str, str]:
+        return day.isoformat(), (day + dt.timedelta(days=days)).isoformat()
+
+    nifty = resolved.get("NIFTY 50")
+    nifty_sid = nifty["security_id"] if nifty else None
+    if nifty_sid is None:
+        records.append(
+            ProbeRecord(
+                vendor="dhan",
+                name="floor-edge: NIFTY march",
+                endpoint="(skipped)",
+                request_summary={"reason": "NIFTY id unresolved"},
+                http_status=None,
+                verdict="SKIPPED (NIFTY id unresolved)",
+            )
+        )
+        return records
+
+    # (a) G-A: the NIFTY day-resolution march around E0.
+    for offset in FLOOR_EDGE_OFFSETS_DAYS:
+        day = e0 + dt.timedelta(days=offset)
+        frm, to = _window(day)
+        rec = dhan_intraday_probe(
+            token,
+            client_id,
+            f"floor-edge: NIFTY @ E0{offset:+d}d ({day.isoformat()})",
+            nifty_sid,
+            frm,
+            to,
+            redactor,
+            pacer,
+            budget,
+        )
+        records.append(rec)
+        _log(f"  - {rec.name}: {rec.verdict}")
+        if rec.http_status == HTTP_RATE_LIMITED:
+            time.sleep(RATE_LIMIT_BACKOFF_S)
+
+    # (b) one confirm window per remaining index at E0+7d (per-instrument edge?).
+    confirm_day = e0 + dt.timedelta(days=7)
+    for name, info in resolved.items():
+        if name == "NIFTY 50":
+            continue
+        frm, to = _window(confirm_day)
+        rec = dhan_intraday_probe(
+            token,
+            client_id,
+            f"floor-edge: {name} @ E0+7d ({confirm_day.isoformat()})",
+            info["security_id"],
+            frm,
+            to,
+            redactor,
+            pacer,
+            budget,
+        )
+        records.append(rec)
+        _log(f"  - {rec.name}: {rec.verdict}")
+
+    # (c) G-B: the straddle window [E0-7d, E0+7d) -- silent-truncation detector.
+    frm, to = (e0 - dt.timedelta(days=7)).isoformat(), (e0 + dt.timedelta(days=7)).isoformat()
+    rec = dhan_intraday_probe(
+        token,
+        client_id,
+        f"floor-edge: NIFTY straddle [{frm}, {to})",
+        nifty_sid,
+        frm,
+        to,
+        redactor,
+        pacer,
+        budget,
+    )
+    rec.notes.append(
+        "G-B reading: SERVED with first_ts at/after the edge (not the requested "
+        "start) = SILENT TRUNCATION -- the integrity-violating pre-floor shape "
+        "the +7d clamp margin guards against"
+    )
+    records.append(rec)
+    _log(f"  - {rec.name}: {rec.verdict}")
+
+    # (d) G-H: one 91-day over-cap request (the documented cap is 90).
+    over_start = e0 + dt.timedelta(days=30)
+    frm, to = over_start.isoformat(), (over_start + dt.timedelta(days=91)).isoformat()
+    rec = dhan_intraday_probe(
+        token,
+        client_id,
+        f"floor-edge: NIFTY 91-day over-cap [{frm}, {to})",
+        nifty_sid,
+        frm,
+        to,
+        redactor,
+        pacer,
+        budget,
+    )
+    rec.notes.append("G-H reading: which error code (804/814?) vs silent truncation at 90d")
+    records.append(rec)
+    _log(f"  - {rec.name}: {rec.verdict}")
+
+    # (e) G-J: the IDX_I volume/open_interest literal capture on a recent window.
+    recent_from, recent_to = _recent_window()
+    rec = dhan_volume_literal_probe(
+        token,
+        client_id,
+        "floor-edge: NIFTY volume/OI literal capture",
+        nifty_sid,
+        recent_from,
+        recent_to,
+        redactor,
+        pacer,
+        budget,
+    )
+    records.append(rec)
+    _log(f"  - {rec.name}: {rec.verdict}")
+    _ = one_day  # (kept for symmetry with the window helper's default)
+    return records
+
+
 def run_kite(redactor: Redactor, budget: CallBudget) -> list[ProbeRecord]:
     """Run all Kite probes (goal d): SENSEX/VIX/BANKNIFTY checks + NIFTY control.
 
@@ -1531,6 +1758,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "public CSV (it needs no creds and runs by default).",
     )
     parser.add_argument(
+        "--floor-edge",
+        action="store_true",
+        help="Run the DEC-DHAN-ROLLING-FLOOR-001 floor-edge stage (~13 extra Dhan "
+        "calls: NIFTY day-resolution march around today-5y, per-index confirm, "
+        "the straddle silent-truncation detector, one 91-day over-cap request, "
+        "one IDX_I volume/OI literal capture). Off by default.",
+    )
+    parser.add_argument(
         "--call-budget",
         type=int,
         default=DEFAULT_CALL_BUDGET,
@@ -1584,6 +1819,26 @@ def main(argv: list[str] | None = None) -> int:
                 run_rollingoption=not args.no_rollingoption,
                 run_scrip_confirm=not args.no_scrip_confirm,
             )
+            if args.floor_edge:
+                token = os.environ.get("DHAN_ACCESS_TOKEN")
+                client_id = os.environ.get("DHAN_CLIENT_ID")
+                if token:
+                    _log("[dhan] --floor-edge stage (DEC-DHAN-ROLLING-FLOOR-001)…")
+                    dhan_records.extend(
+                        run_dhan_floor_edge(token, client_id, resolved, redactor, budget)
+                    )
+                else:
+                    _log("[dhan] --floor-edge requested but no DHAN_ACCESS_TOKEN — skipped.")
+                    dhan_records.append(
+                        ProbeRecord(
+                            vendor="dhan",
+                            name="floor-edge",
+                            endpoint="(skipped)",
+                            request_summary={"reason": "no access token"},
+                            http_status=None,
+                            verdict="SKIPPED (no token)",
+                        )
+                    )
         except Exception as exc:
             dhan_records.append(_vendor_error_record("dhan", exc, redactor))
     if run_kite_flag:
