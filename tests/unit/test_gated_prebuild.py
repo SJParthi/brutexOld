@@ -828,3 +828,107 @@ class TestReportProjections:
         assert report.ok
         assert report.total_bars == 0
         assert report.phases == ()
+
+
+# ── the vendor-empty no-source classification (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) ──
+
+
+class TestSpotNoSourceClassification:
+    """The SPOT phase classifies a whole-partition zero-stored-bars read
+    (:class:`NoStored1mBarsError`) as ``no_source`` — never a warm-withholding
+    failure; every OTHER data error keeps today's quarantine semantics."""
+
+    def test_no_stored_bars_classified_no_source_not_failed(self) -> None:
+        """T4 [fails-before] — one of three spot targets reads no-source: it
+        joins ``no_source`` (still ``attempted``), never ``failed``; ``ok``
+        stays True; the others succeed; ONE per-symbol INFO event."""
+        from brutex.data.timeframe_materialize import NoStored1mBarsError
+        from structlog.testing import capture_logs
+
+        def materialize_spot(inst: Instrument) -> MaterializeResult:
+            if inst.symbol_name == "EMPTY":
+                raise NoStored1mBarsError("no stored 1minute bars for NSE/CASH/EMPTY — …")
+            return _ok(5)
+
+        with capture_logs() as logs:
+            report = run_gated_prebuild(
+                underlyings=[_spot("A"), _spot("EMPTY"), _spot("B")],
+                materialize_spot=materialize_spot,
+                futures_contracts_for=_no_contracts,
+                materialize_future=_raise_contract,
+            )
+        spot = report.phases[0]
+        assert spot.no_source == ("EMPTY",)
+        assert spot.failed == ()
+        assert spot.ok is True
+        assert report.ok is True  # the movers-warm gate upstream stays OPEN
+        assert spot.attempted == ("A", "EMPTY", "B")  # honest — it WAS attempted
+        assert spot.succeeded == ("A", "B")
+        infos = [e for e in logs if e["event"] == "universe.prebuild.spot_no_source"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == "EMPTY"
+        assert infos[0]["log_level"] == "info"  # expected vendor behavior — never a WARN
+        # And NEVER double-counted as a spot_failed WARN.
+        assert not [e for e in logs if e["event"] == "universe.prebuild.spot_failed"]
+
+    def test_plain_value_error_still_fails_pins_except_order(self) -> None:
+        """T5 — a plain ``ValueError`` (a NON-no-source data fault) still
+        quarantines into ``failed``; together with T4 this pins the except
+        ORDER (``NoStored1mBarsError`` ⊂ ``ValueError`` — swapping the
+        clauses reclassifies T4's symbol as failed) AND kills the
+        widened-catch mutant (classifying every ValueError no_source)."""
+
+        def materialize_spot(inst: Instrument) -> MaterializeResult:
+            raise ValueError("poisoned partition")
+
+        report = run_gated_prebuild(
+            underlyings=[_spot("BAD")],
+            materialize_spot=materialize_spot,
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+        )
+        spot = report.phases[0]
+        assert spot.failed == (("BAD", "ValueError: poisoned partition"),)
+        assert spot.no_source == ()
+        assert report.ok is False
+
+    def test_contract_phase_no_stored_bars_stays_failure(self) -> None:
+        """T6 — the deliberate SPOT scope: a ``NoStored1mBarsError`` from a
+        contract materialise is still a FAILURE (a discovered-with-files
+        contract whose partition vanished by read time is a heal/TOCTOU
+        anomaly worth a red prebuild, not vendor-empty-by-design)."""
+        from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+        def materialize_future(contract: str) -> MaterializeResult:
+            raise NoStored1mBarsError("no stored 1minute bars for NSE/FNO/FUT-1 — …")
+
+        report = run_gated_prebuild(
+            underlyings=[_spot("NSE-NIFTY")],
+            materialize_spot=lambda _i: _ok(3),
+            futures_contracts_for=lambda _i: ["FUT-1"],
+            materialize_future=materialize_future,
+        )
+        futures = report.phases[1]
+        assert [s for s, _ in futures.failed] == ["FUT-1"]
+        assert futures.no_source == ()
+        assert report.ok is False  # the warm stays withheld — unchanged law
+
+    def test_phase_report_no_source_default_and_to_dict_both_arms(self) -> None:
+        """T7 — the appended field defaults ``()`` and ``to_dict`` is
+        EMIT-ON-NONEMPTY (the default payload above stays byte-identical —
+        ``test_phase_to_dict``'s exact-dict pin is the absent arm)."""
+        assert PhasePrebuildReport("spot", ("A",), ("A",), (), 1).no_source == ()
+        with_no_source = PhasePrebuildReport(
+            phase="spot",
+            attempted=("A", "EMPTY"),
+            succeeded=("A",),
+            failed=(),
+            total_bars=3,
+            no_source=("EMPTY",),
+        )
+        assert with_no_source.ok is True  # no_source never flips ok
+        payload = with_no_source.to_dict()
+        assert payload["no_source"] == ["EMPTY"]
+        assert payload["ok"] is True
+        clean = PhasePrebuildReport("spot", ("A",), ("A",), (), 1).to_dict()
+        assert "no_source" not in clean  # emit-on-nonempty — the absent arm

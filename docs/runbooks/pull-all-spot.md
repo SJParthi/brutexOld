@@ -260,25 +260,63 @@ The first-ever full run is LONG (~750 symbols × 6+ years of 1-minute; the
 session's settled windows persist, and each subsequent run shrinks. NO
 wall-clock SLA is claimed (Golden Rule #10).
 
-**Vendor-EMPTY symbol ⇒ movers warm withheld (NAMED residual, refuter-round-1
-r3 F-1 — inherited #1145/#1221 pipeline law, real-prebuild-e2e-pinned):** a
-symbol the vendor cleanly returns NO data for (settled SKIPPED, zero stored
-bars — NOT a quarantine) has nothing to derive, so the prebuild reports it a
-failure (`prebuild failures: <SYM>`), `PrebuildOutcome.ok` reads False, and
-the sequencer withholds the DASHBOARD spot-movers warm for the whole run
-(the warm clause is honestly absent from the note — never fabricated). The
-healthy symbols' timeframes ARE still built. Impact is display-cache warmth
-only: the movers caches re-key on the revision token at the next poll. The
-scoped exclusion fix is the named follow-up
-DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 (the spot report's per-symbol
-`no_data` provably conflates vendor-empty with an already-settled
-incremental re-run, so the exclusion needs a zero-stored-bars lake probe).
+**Vendor-EMPTY symbol ⇒ classified no-source, warm FIRES
+(DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — closes the
+#1779 named residual):** a symbol the vendor cleanly returns NO data for
+(settled SKIPPED, zero stored bars — NOT a quarantine) has nothing to
+derive; the prebuild's read itself proves the empty partition (the
+zero-stored-bars LAKE-truth arm) and classifies it `no_source` instead of a
+failure — `PrebuildOutcome.ok` stays True and the DASHBOARD spot-movers warm
+FIRES over the healthy set (pre-#1792 the symbol read `prebuild failures:
+<SYM>` and withheld the warm run-wide). The symbol is COUNTED + NAMED in the
+headline and the CLI structured block (`N symbol(s) skipped — no stored
+1-minute data (vendor-empty or never pulled), excluded from timeframe
+build: <SYM> …`) — never silently dropped, and never warmed into a
+fabricated snapshot (warm discovery is parquet-file-gated per dataset: a
+symbol with NO parquet in ANY timeframe is structurally absent from every
+snapshot; a surviving previously stored DERIVED timeframe — e.g. a legacy
+vendor-fetched `1day` — legitimately keeps the symbol in the snapshot,
+serving genuine stored bars, which is why the clause claims only the
+timeframe-build exclusion — refuter round 2, MIGRATION.md #1792).
+Operator action for a delisted / never-traded name: NONE. A symbol you
+EXPECTED data for reading no-source means ZERO stored 1-minute bars at
+derive time — usually the vendor served nothing over the pulled range, or
+the spot was never pulled (the probe cannot distinguish; cause attribution
+is the named follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001) — verify on
+`/coverage/windows` (settled SKIPPED, `bars=0`). If `/coverage/windows`
+instead shows settled SUCCESS with `bars>0` for a no-source symbol, the
+stored 1-minute bars were removed AFTER the pull (e.g. a lake-heal
+quarantine MOVE of a poisoned partition — the heal moves files and never
+rewrites the window ledger) — inspect `<lake>/.quarantine/` and restore or
+re-pull (the third probe-blind shape; refuter round 2, MIGRATION.md
+#1792). The law is
+deliberately NON-TIERED (refuter round 1, MIGRATION.md #1792): a brute-force
+ENGINE index (NIFTY/BANKNIFTY/SENSEX) reading no-source gets the SAME INFO +
+named skip clause and the warm still fires — that shape means the engine's
+own 1-minute data is absent, which stays independently visible (the headline
+names it; `/coverage/windows` shows the settled-SKIPPED zero-bar windows;
+`/completeness` never reads `full` for a no-record spot row); a WARN-tier
+escalation for the engine trio (the #1788 strict-trio precedent) is the
+named follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001. The verdict is
+LAKE truth, deliberately never the spot report's per-symbol `no_data` (which
+provably conflates vendor-empty with an already-settled incremental re-run —
+the #1779 executed evidence; the trap twin is regression-pinned). The warm
+stays display-cache only: the movers caches re-key on the revision token at
+the next poll. A GENUINE prebuild failure (corrupt parquet, poisoned
+partition — and, since refuter round 4, an UNENUMERABLE partition: a
+chmod/ownership mishap on a symbol's `1minute` subtree raises the EACCES
+loudly instead of reading as "empty", so it can never masquerade as
+no-source) still reads `prebuild failures: …` and still withholds the warm —
+unchanged law.
 
-**Dry-run reports prebuild failures BY CONSTRUCTION (refuter-round-1 r3
-F-3):** a `--dry-run` / `dry_run=true` run writes no bars, so on a fresh
-lake the (real) prebuild fails every target and the note honestly reads
-`prebuild failures: …` — the inherited full-pipeline dry-run shape, not a
-defect of this button/command.
+**Dry-run reports no-source targets BY CONSTRUCTION (refuter-round-1 r3
+F-3, wording updated by #1792):** a `--dry-run` / `dry_run=true` run writes
+no bars, so on a fresh lake the (real) prebuild finds ZERO stored 1-minute
+bars for every spot target and the note honestly reads the no-source skip
+clause (`N symbol(s) skipped — no stored 1-minute data (vendor-empty or
+never pulled) …` — the never-pulled arm is literally the dry-run truth;
+pre-#1792 this shape read `prebuild failures: …`) — the inherited
+full-pipeline dry-run shape, not a defect of this button/command.
 
 ## 8. ▶ Pull F&O — the manual fno-only sibling (round-6 two-button split)
 

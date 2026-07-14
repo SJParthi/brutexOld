@@ -135,7 +135,11 @@ class PrebuildOutcome:
     ok
         ``True`` iff the run completed with ZERO failures. ``False`` for any
         per-symbol failure AND for a guarded whole-run crash
-        (:func:`run_pipeline_prebuild_guarded`) — never a silent zero.
+        (:func:`run_pipeline_prebuild_guarded`) — never a silent zero. A
+        vendor-empty NO-SOURCE spot target is NOT a failure — counted in
+        ``no_source``, ``ok`` unaffected
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — so the
+        ``pipeline_pull.py`` movers-warm gate opens over the healthy majority.
     crashed
         ``None`` for a run that COMPLETED (even with per-symbol failures);
         the escaping error's type name (e.g. ``"ValueError"``) when the
@@ -182,6 +186,21 @@ class PrebuildOutcome:
         derive skips as unchanged contributes 0 that run). ``0`` for a
         guarded whole-run crash (nothing was scanned). Folded into the
         pipeline completion headline + ``PipelinePullReport``.
+    no_source
+        The SPOT-target names classified NO-SOURCE — ZERO stored 1-minute
+        bars at derive time, nothing to derive (vendor-empty or never
+        pulled; DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — CAPPED at
+        :data:`MAX_REPORTED_FAILURES` by the producer (never a flooded
+        note); ``no_source_count`` is the TRUE total. NOT failures: ``ok``
+        is unaffected, and one with NO parquet in ANY timeframe is
+        structurally absent from movers-warm discovery (no parquet ⇒ no
+        dataset row); a surviving previously stored DERIVED timeframe
+        legitimately keeps it discoverable — genuine stored bars, never
+        fabricated (refuter round 2, MIGRATION.md #1792) — counted + NAMED
+        in the pipeline note instead of silently vanishing (Golden Rule #1).
+    no_source_count
+        The TRUE number of no-source spot targets (may exceed
+        ``len(no_source)``).
     """
 
     symbols_built: int
@@ -195,6 +214,8 @@ class PrebuildOutcome:
     disk_guard_blocked: bool = False
     disk_guard_detail: str | None = None
     opens_substituted: int = 0
+    no_source: tuple[str, ...] = ()
+    no_source_count: int = 0
 
 
 def _disk_guard_outcome(
@@ -452,6 +473,7 @@ def run_pipeline_prebuild(
         source=source,
     )
     _log_phase_done(report)
+    _warn_if_all_no_source(report)
     outcome = _build_outcome(
         report,
         fs_note=fs_note,
@@ -484,8 +506,30 @@ def _log_prebuild_done(outcome: PrebuildOutcome, started: float) -> None:
         failed_count=outcome.failed_count,
         unchanged_skips=outcome.unchanged_skips,
         opens_substituted=outcome.opens_substituted,
+        # Additive always-present kwarg (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001
+        # — grep-able; logs are not a byte-pinned wire surface, the #1527
+        # ``excluded_symbols`` precedent).
+        no_source=outcome.no_source_count,
         duration_s=round(time.monotonic() - started, 3),
     )
+
+
+def _warn_if_all_no_source(report: GatedPrebuildReport) -> None:
+    """ONE loud WARN when EVERY attempted SPOT target read no-source (COMMON to both paths).
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — the ``all_excluded`` degrade
+    twin: the run still completes ``ok=True`` 0-built and the warm then fires
+    (a truly empty lake's ``latest_movers_date`` is ``None`` → warms nothing,
+    honest), but a WHOLE-universe no-source verdict is anomalous enough to
+    warrant one WARNING beside the per-symbol INFOs.
+    """
+    for phase in report.phases:
+        if (
+            phase.phase == PrebuildKind.SPOT.value
+            and phase.attempted
+            and len(phase.no_source) == len(phase.attempted)
+        ):
+            _LOG.warning("pipeline.prebuild.all_no_source", count=len(phase.no_source))
 
 
 def _unique_spot_instruments(instruments: Sequence[Instrument]) -> list[Instrument]:
@@ -523,6 +567,10 @@ def _build_outcome(
     incremental + daily-open tallies).
     """
     failed_names = tuple(s for phase in report.phases for s, _ in phase.failed)
+    # NO-SOURCE fold (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): only the SPOT
+    # phase ever carries no_source (the sequential catch + the parallel
+    # worker's kind gate), but the fold stays phase-generic — ONE law.
+    no_source_names = tuple(s for phase in report.phases for s in phase.no_source)
     return PrebuildOutcome(
         symbols_built=sum(len(phase.succeeded) for phase in report.phases),
         total_bars=report.total_bars,
@@ -532,6 +580,8 @@ def _build_outcome(
         fs_note=fs_note,
         unchanged_skips=unchanged_skips,
         opens_substituted=opens_substituted,
+        no_source=no_source_names[:MAX_REPORTED_FAILURES],
+        no_source_count=len(no_source_names),
     )
 
 
@@ -762,14 +812,21 @@ def run_pipeline_prebuild_parallel(
         attempted = tuple(symbol for symbol, _ in group)
         succeeded: list[str] = []
         failed: list[tuple[str, str]] = []
+        no_source: list[str] = []
         total_bars = 0
         for symbol, item in group:
             res = result_by_coords[(item.exchange, item.segment, item.symbol)]
             if res.error is not None:
                 failed.append((symbol, res.error))
                 continue
-            # A non-error result ALWAYS carries a MaterializeResult (a pure
-            # type-narrowing cast — no runtime branch, keeps 100% branch cover).
+            if res.no_source is not None:
+                # DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: the worker's kind
+                # gate guarantees this arm only ever fires for the SPOT group.
+                no_source.append(symbol)
+                continue
+            # A non-error, non-no-source result ALWAYS carries a MaterializeResult
+            # (a pure type-narrowing cast — no runtime branch, keeps 100% branch
+            # cover).
             materialized = cast("MaterializeResult", res.result)
             succeeded.append(symbol)
             total_bars += materialized.total_bars
@@ -784,10 +841,12 @@ def run_pipeline_prebuild_parallel(
                 failed=tuple(failed),
                 total_bars=total_bars,
                 note=(empty_note if not attempted and not failed else ""),
+                no_source=tuple(no_source),
             )
         )
     report = GatedPrebuildReport(phases=tuple(phases), source=source)
     _log_phase_done(report)
+    _warn_if_all_no_source(report)
     outcome = _build_outcome(
         report,
         fs_note=fs_note,
