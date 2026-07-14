@@ -568,7 +568,16 @@ def test_regression_universe_hung_fetch_could_wedge_poll_forever() -> None:
         in poll
     )
     assert "if (ctrl) opts.signal = ctrl.signal;" in poll, "the signal wire is the abort's teeth"
-    assert "const r = await fetch('/api/v1/universe/pull-progress', opts);" in poll
+    # DEC-PULL-SCOPED-ALL-ONECLICK-001 (round-5 chip-seed reconcile): the literal
+    # fetch moved into the ONE shared fetchPullProgress helper so the auto-pull
+    # chip's one-shot seed reuses THIS site instead of minting a second one (the
+    # test_no_new_poll_loop_added one-fetch-site law). The abort teeth are
+    # unchanged: `opts` — carrying the signal wired above — passes through the
+    # helper VERBATIM to the single literal fetch site pinned below.
+    assert "const r = await fetchPullProgress(opts);" in poll
+    assert "return fetch('/api/v1/universe/pull-progress', opts || {});" in html, (
+        "the shared helper must pass opts (the abort signal) through verbatim"
+    )
     # The killer is cleared ONLY in the finally — after r.json() settles — so a
     # stalled BODY aborts too; and the finally is the one clear site.
     assert "} finally {\n    if (killer) clearTimeout(killer);" in poll, (

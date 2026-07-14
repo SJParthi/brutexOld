@@ -933,9 +933,17 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         elif base.is_dir() and any(base.rglob("*.parquet")):
             source = base.as_posix() + "/**/*.parquet"
         else:
+            # Shape-matched remediation (refuter round 1, r3 F-2 — the #1649a
+            # precedent): this reader cannot tell WHY the partition is empty,
+            # and "pull the spot first" is the WRONG advice for a symbol the
+            # vendor cleanly returned NO data for (settled EMPTY — there is
+            # nothing to pull), so BOTH candidate causes are named.
             raise ValueError(
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
-                "pull the 1-minute spot first, then derive timeframes"
+                "nothing to derive: if the 1-minute spot was never pulled, "
+                "pull it first, then derive timeframes; if the vendor cleanly "
+                "returned no data for this symbol (windows settled EMPTY), "
+                "there is nothing to derive — no action needed"
             )
         # Schema-tolerant tree read (DEC-GREEKS-ENGINE-PR2B-001): an enriched
         # OPTION contract's month files may mix the raw 7-column and the

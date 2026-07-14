@@ -1,10 +1,15 @@
-"""Guards the consolidated ``/universe`` pull controls (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
+"""Guards the consolidated ``/universe`` pull controls (DEC-UNIVERSE-PULL-CONSOLIDATE-001,
+amended by the DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 TWO-BUTTON split).
 
-The operator's "the pipeline ALWAYS runs the fixed gated order spot → futures →
-options, so the per-stage buttons are redundant" — collapse to ONE selection-aware
-``▶ Pull · full pipeline`` button, auto-load instruments on an empty master, keep ONE
-unified pre-build (which also runs as the pipeline's final stage), and FIX the
-misleading "lost the live feed: Failed to fetch" header.
+The one-button law becomes the TWO-BUTTON law at the UI level: the combined
+``▶ Pull · full pipeline`` button is REMOVED and the operator surface is
+exactly ``▶ Pull Spot`` (scope=spot-only, whole-universe, auto-arming) +
+``▶ Pull F&O`` (scope=fno-only, selection/date-aware, manual only) — while the
+``/pull-pipeline`` route keeps ``scope=full`` as its API default
+(byte-identical; nightly + old intents + external callers). The per-stage
+buttons stay collapsed, instruments auto-load on an empty master, the ONE
+unified pre-build runs as the pipeline's final stage, and the misleading
+"lost the live feed: Failed to fetch" header stays fixed.
 
 The dashboard JS has no unit harness, so these substring guards lock the markup +
 wiring in CI (mirroring ``test_dashboard_universe_ux.py``). The pure pipeline /
@@ -19,18 +24,29 @@ from __future__ import annotations
 from brutex.dashboard.app import _render_universe_html
 
 
-def test_only_one_pull_button_remains() -> None:
-    """Exactly ONE pull button — the selection-aware full pipeline — survives.
+def test_exactly_two_pull_buttons_remain() -> None:
+    """The TWO-BUTTON law — ▶ Pull Spot + ▶ Pull F&O, nothing else.
 
-    The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull
-    historical / Load instruments), the bulk ①②③④ matrix, and the separate "Pull
-    selected" button are all GONE; only ``pullPipelineBtn`` remains.
+    CONSCIOUS RE-PIN (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 two-button
+    split, superseding the one-button law of DEC-UNIVERSE-PULL-CONSOLIDATE-001
+    at the UI level only): the combined ``▶ Pull · full pipeline`` button is
+    REMOVED — its id + label join the removed-button negative pins — and the
+    two remaining buttons both ride the SAME ``/pull-pipeline`` launcher with
+    additive scope tokens (every rail inherited; the route's scope=full
+    default stays API-reachable, pinned in
+    test_dashboard_pull_pipeline_scope.py). The redundant per-stage buttons
+    (Pull spot / Pull expiries + contracts / Pull historical / Load
+    instruments), the bulk ①②③④ matrix, and the separate "Pull selected"
+    button stay GONE.
     """
     html = _render_universe_html()
-    assert 'id="pullPipelineBtn"' in html, "the single pull button must remain"
-    assert "Pull · full pipeline" in html, "the consolidated label must be present"
+    assert 'id="pullAllSpotBtn"' in html, "the ▶ Pull Spot button must be present"
+    assert 'id="pullFnoBtn"' in html, "the ▶ Pull F&O button must be present"
+    assert ">Pull Spot</b>" in html, "the ▶ Pull Spot label is missing"
+    assert ">Pull F&amp;O</b>" in html, "the ▶ Pull F&O label is missing"
     # Every removed button id is absent (a null getElementById().onclick can't throw).
     for gone in (
+        'id="pullPipelineBtn"',  # the round-6 removal — the combined button
         'id="pullbtn"',
         'id="pullDerivBtn"',
         'id="pullHistBtn"',
@@ -43,6 +59,12 @@ def test_only_one_pull_button_remains() -> None:
         'id="bulkStkDeriv"',
     ):
         assert gone not in html, f"the redundant button {gone} must be removed"
+    assert "Pull · full pipeline" not in html, (
+        "the combined-button label must be gone (the round-6 two-button split)"
+    )
+    assert "scope=full" not in html, (
+        "the UI must never send scope=full explicitly — the full chain is API-only now"
+    )
 
 
 def test_kept_controls_are_present() -> None:
@@ -131,23 +153,149 @@ def test_date_pickers_stamp_defaults_and_omit_unchanged_values() -> None:
     assert "toEl.value !== toEl.dataset.default" in html, (
         "to_date must be omitted when still at its stamped default"
     )
-    # The honest copy: the lead names BOTH roles + the unbounded default.
-    assert "select which F&amp;O expiries are pulled" in html
-    assert "including live/unexpired contracts" in html
+    # The honest copy: the lead names the F&O-expiry role + the unbounded
+    # default (re-pinned at the round-6 two-button split: the dates scope
+    # ▶ Pull F&O; ▶ Pull Spot ignores them by promise).
+    assert "select which F&amp;O expiries ▶ Pull F&amp;O pulls" in html
+    assert "ALL expiries including live/unexpired contracts" in html
 
 
-def test_pull_button_is_selection_aware() -> None:
-    """The ONE button pulls the ticks, or the whole universe when none are ticked."""
+def test_pull_fno_button_is_selection_and_date_aware() -> None:
+    """▶ Pull F&O pulls the ticks (or the whole F&O universe) with the date
+    query — the selection/date surfaces the removed combined button carried
+    now scope the fno-only pull (round-6 two-button split); NO auto_arm ever
+    rides it (manual only — the scheduler is spot-only-scoped)."""
     html = _render_universe_html()
     assert "function pipelineSelection" in html, "the selection-scope helper is missing"
-    # Ticked rows → ?symbols= (scoped, + optional date query); no ticks → the bare
-    # route (whole universe) with the date query folded into the URL when present.
-    assert '"/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids) + dq' in html, (
-        "the ticked branch must post the scoped pipeline route with the date query"
+    assert (
+        '"/api/v1/universe/pull-pipeline?scope=fno-only&symbols=" + encodeURIComponent(ids) + dq'
+        in html
+    ), "the ticked branch must post the fno-only scoped route with the date query"
+    assert '"/api/v1/universe/pull-pipeline?scope=fno-only" + dq' in html, (
+        "the no-selection branch must post the whole-F&O-universe fno-only route"
     )
-    assert '"/api/v1/universe/pull-pipeline"' in html, (
-        "the no-selection branch must post the bare (whole-universe) pipeline route"
+    # The F&O button never arms the daily auto-pull (the coordinator ruling:
+    # arming is spot-only-scoped; auto_arm on any other scope is a 400).
+    # Slice from the const decl to the ▶ Pull Spot comment block (which
+    # legitimately mentions auto_arm) — the F&O button's OWN wiring only.
+    fno_wiring = html.split('const PULL_FNO_BTN = document.getElementById("pullFnoBtn")', 1)[
+        1
+    ].split("/* ▶ Pull Spot")[0]
+    assert "auto_arm" not in fno_wiring, "▶ Pull F&O must never send auto_arm"
+    assert "startAndPoll(" in fno_wiring
+
+
+def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
+    """The scoped-ALL spot-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001).
+
+    Static markup + a static-URL ``startAndPoll`` onclick ONLY (textContent
+    discipline — no new dynamic sink): the label, the always-visible scope
+    chip (the chip IS the consent), the verify-links row, and the JS wiring to
+    the SAME ``/pull-pipeline`` launcher with ``scope=spot-only``. Deliberately
+    NOT wired to the ``#pipeFrom``/``#pipeTo`` pickers — full-range convergence
+    is the button's promise. CONSCIOUS RE-PIN (round-5 fold): the static URL
+    additionally carries ``auto_arm=1`` — the first click ARMS the daily
+    post-market auto-pull scheduler (the self-arming operator semantics); the
+    chip names it and the ``#autoPullChip`` row renders the armed state with
+    the disarm/re-arm toggle (textContent only).
+    """
+    html = _render_universe_html()
+    assert ">Pull Spot</b>" in html, "the button label is missing"
+    assert "Pull EVERYTHING — spot only" not in html, (
+        "the pre-round-6 label must be gone (relabeled ▶ Pull Spot)"
     )
+    # The always-visible scope chip — the consent text, verbatim.
+    assert (
+        "all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · "
+        "incremental (settled windows skipped) · NO options, NO Greeks · "
+        "cross-verify producer runs after the pull · first click arms the daily auto-pull"
+    ) in html, "the scope chip must state the whole contract incl. the self-arming clause"
+    # The verify row: the three read-only verification surfaces.
+    assert 'id="pullAllSpotVerify"' in html
+    for href in ('href="/coverage/windows"', 'href="/completeness"', 'href="/coverage"'):
+        assert href in html, f"verify-row link missing: {href}"
+    # The auto-pull chip row (round-5 fold): armed state + toggle, fed by the
+    # pull-progress payload's additive auto_pull object — textContent only.
+    assert 'id="autoPullChip"' in html
+    assert 'id="autoPullToggleBtn"' in html
+    assert "renderAutoPullChip" in html
+    assert "'/api/v1/universe/pull-all-spot-auto?armed='" in html
+    # JS wiring: the SAME launcher + the additive scope token + the self-arming
+    # auto_arm=1, single-flighted through the shared startAndPoll; the date
+    # pickers are NOT consulted.
+    assert '"/api/v1/universe/pull-pipeline?scope=spot-only&auto_arm=1"' in html
+    assert '"/api/v1/universe/pull-pipeline?scope=spot-only"' not in html, (
+        "the arm-less URL form must not linger beside the self-arming one"
+    )
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    assert "startAndPoll(" in wiring
+    assert "pipelineDateQuery" not in wiring, (
+        "the spot-only button must NOT thread the date pickers (full-range promise)"
+    )
+    assert "pipelineSelection" not in wiring, (
+        "the spot-only button must NOT scope to row ticks (whole-universe promise)"
+    )
+
+
+def test_auto_pull_chip_seed_rides_the_one_pull_progress_fetch_site() -> None:
+    """The chip's one-shot seed reuses pollProgress's SINGLE fetch site.
+
+    Workspace-health fix (DEC-PULL-SCOPED-ALL-ONECLICK-001): the round-5
+    fold's ``refreshAutoPullChip`` seed carried its OWN literal
+    ``fetch('/api/v1/universe/pull-progress'`` call — a SECOND fetch site
+    tripping the pre-existing ``test_no_new_poll_loop_added`` one-fetch-site
+    architectural pin (test_dashboard_universe_stall_chip.py). The seed now
+    requests through the ONE shared ``fetchPullProgress`` helper (declared
+    beside pollProgress; the ``opts`` passthrough keeps the hung-fetch
+    abort-signal teeth — pinned in test_dashboard_progress_frontend.py), so
+    exactly one literal site exists while the chip still seeds at page load
+    AND refreshes after an arming click; the LIVE updates keep riding
+    pollProgress's own ``renderAutoPullChip(s.auto_pull)``. The seed stays a
+    one-shot request — never a loop.
+    """
+    html = _render_universe_html()
+    # The ONE shared site (the stall-chip pin's law, re-asserted here beside
+    # the helper mechanism) + the helper that owns the literal.
+    assert html.count("fetch('/api/v1/universe/pull-progress'") == 1
+    assert "function fetchPullProgress(opts)" in html
+    seed = html.split("async function refreshAutoPullChip()", 1)[1].split("\n}", 1)[0]
+    assert "await fetchPullProgress()" in seed, "the seed must ride the shared site"
+    assert "fetch('" not in seed, "the seed may not mint its own literal fetch site"
+    assert "renderAutoPullChip(s.auto_pull)" in seed, "the seed renders the chip on success"
+    assert "setInterval" not in seed and "setTimeout" not in seed, (
+        "the seed is a one-shot request — never a second poll loop"
+    )
+    # Page-load seed: the bare top-level invocation (function declarations
+    # hoist within the ONE inline script, so the later helper is in scope).
+    assert "\nrefreshAutoPullChip();" in html, "the chip must seed at page load"
+    # Post-click refresh: the ▶ Pull Spot onclick re-seeds (the arming took
+    # effect even on a market-hours-refused start).
+    wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split("function toggleMulti")[0]
+    assert "refreshAutoPullChip();" in wiring, "the ▶ click must refresh the chip"
+    # LIVE updates: pollProgress renders the chip from its own payload — the
+    # subscription that makes the one-shot seed sufficient.
+    poll = html.split("async function pollProgress(label)", 1)[1].split("\n}", 1)[0]
+    assert "renderAutoPullChip(s.auto_pull);" in poll
+
+
+def test_set_bulk_disabled_covers_both_pull_buttons() -> None:
+    """[refuter-r1 r2 NIT-5, re-pinned at the round-6 two-button split]
+    ``setBulkDisabled`` disables BOTH remaining pull buttons — ▶ Pull F&O AND
+    ▶ Pull Spot — so the wedged-POST comments' "an in-page re-click is
+    impossible" invariant is genuinely true: during any in-flight watch
+    neither button can wipe the live watch UI with a re-click."""
+    html = _render_universe_html()
+    body = html.split("function setBulkDisabled", 1)[1].split("}", 1)[0]
+    assert "PULL_FNO_BTN.disabled = on" in body, "the ▶ Pull F&O button must be disabled"
+    assert "PULL_ALL_SPOT_BTN.disabled = on" in body, (
+        "the spot button must join the in-flight disable (the no-in-page-re-click invariant)"
+    )
+    # The consts are declared before use; the removed combined button's const
+    # is gone with its handler.
+    assert 'const PULL_ALL_SPOT_BTN = document.getElementById("pullAllSpotBtn")' in html
+    assert 'const PULL_FNO_BTN = document.getElementById("pullFnoBtn")' in html
+    assert "PIPELINE_BTN" not in html, "the removed combined button's const must be gone"
+    assert "disables the ONE pipeline button" not in html
 
 
 def test_auto_load_fires_only_on_empty_master() -> None:
