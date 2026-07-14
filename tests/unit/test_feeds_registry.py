@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.feeds.registry` (DEC-FEED-INTERFACE-001, #1752).
+"""Unit tests for :mod:`brutex.feeds.registry` (DEC-FEED-INTERFACE-001, #1792).
 
 100% line + branch. The registry ships the default feed plus the ``dhan`` feed
 (DEC-DHAN-FEED-BINDING-001 — the real second consumer); an unknown id raises a

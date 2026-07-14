@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.feeds.groww_binding` (DEC-FEED-INTERFACE-001, #1752).
+"""Unit tests for :mod:`brutex.feeds.groww_binding` (DEC-FEED-INTERFACE-001, #1792).
 
 100% line + branch. Every seam is pinned by OBJECT IDENTITY to the live spine
 object, so the thin shim structurally cannot drift without a red test; ceilings

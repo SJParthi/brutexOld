@@ -1,7 +1,7 @@
 # ADR-0021 — Historical-feed interface + feed-tagged lake root
 
-**Decision IDs:** `DEC-FEED-LAKE-ROOT-001` (MIGRATION.md entry #1755),
-`DEC-FEED-INTERFACE-001` (MIGRATION.md entry #1752)
+**Decision IDs:** `DEC-FEED-LAKE-ROOT-001` (MIGRATION.md entry #1793),
+`DEC-FEED-INTERFACE-001` (MIGRATION.md entry #1792)
 **Date:** 2026-07-12
 **Status:** **ACCEPTED** — shipped as PR-2 on `claude/feed-historical-interface`
 (off origin/main `4865dad9`), the interface + feed-tagged-lake half of the

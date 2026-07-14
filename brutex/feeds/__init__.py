@@ -1,6 +1,6 @@
 """The ``brutex.feeds`` package — the COMMON historical-feed interface.
 
-DEC-FEED-INTERFACE-001 (MIGRATION.md #1752). A historical feed is defined by
+DEC-FEED-INTERFACE-001 (MIGRATION.md #1792). A historical feed is defined by
 composition over the existing :class:`~brutex.adapters.protocol.MarketAdapter`
 fetch waist (:class:`~brutex.feeds.binding.FeedBinding`), resolved from a registry
 (:func:`~brutex.feeds.registry.resolve_feed_binding`) and written through the ONE

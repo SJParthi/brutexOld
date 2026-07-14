@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.data.feed_audit` (DEC-FEED-INTERFACE-001, #1752).
+"""Unit tests for :mod:`brutex.data.feed_audit` (DEC-FEED-INTERFACE-001, #1792).
 
 100% line + branch. Covers the transparent passthrough (byte-equal result), the
 ``FEED_TREE_INIT``-once + ``FEED_WRITE_BATCH``-per-append hash chain (Golden Rule

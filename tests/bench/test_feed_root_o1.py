@@ -1,6 +1,6 @@
 """O(1)/zero-cost pins for the feed-root resolver on the default (Groww) path.
 
-DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1755), Golden Rule #5 / #10. The feed-root
+DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1793), Golden Rule #5 / #10. The feed-root
 nesting law must add ZERO cost to the default write/read path. Two deterministic,
 noise-free teeth (a wall-clock ratio would be secondary — the real claim is a
 STRUCTURAL zero-syscall / zero-extra-touch invariant, per CLAUDE.md §11 SCALABLE):

@@ -548,7 +548,7 @@ jobs:
           else
             echo "(brutex.audit_verify test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1755): the feed-root
+          # DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1793): the feed-root
           # nesting-law leaf ships at 100% line+branch — the identity-default
           # law + grammar/reserved refusal + path-structural attribution.
           if compgen -G "tests/unit/test_data_feed_root.py" > /dev/null; then
@@ -556,28 +556,28 @@ jobs:
           else
             echo "(brutex.data.feed_root test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1752): the FeedAuditSink
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1792): the FeedAuditSink
           # (Golden Rule #8 hash chain for non-default feed writes) at 100%.
           if compgen -G "tests/unit/test_data_feed_audit.py" > /dev/null; then
             pytest --cov=brutex.data.feed_audit --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_feed_audit.py
           else
             echo "(brutex.data.feed_audit test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1752): the FeedBinding
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1792): the FeedBinding
           # composition record + the ONE sanctioned build_feed_sink constructor.
           if compgen -G "tests/unit/test_feeds_binding.py" > /dev/null; then
             pytest --cov=brutex.feeds.binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_binding.py
           else
             echo "(brutex.feeds.binding test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1752): the feed registry
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1792): the feed registry
           # (ships ONLY the default feed — vendor-token-free).
           if compgen -G "tests/unit/test_feeds_registry.py" > /dev/null; then
             pytest --cov=brutex.feeds.registry --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_registry.py
           else
             echo "(brutex.feeds.registry test file not present yet — gate inactive)"
           fi
-          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1752): the default feed's
+          # DEC-FEED-INTERFACE-001 (MIGRATION.md #1792): the default feed's
           # identity-pinned thin binding (spine conformance evidence).
           if compgen -G "tests/unit/test_feeds_groww_binding.py" > /dev/null; then
             pytest --cov=brutex.feeds.groww_binding --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feeds_groww_binding.py

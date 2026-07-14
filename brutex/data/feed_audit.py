@@ -1,6 +1,6 @@
 """``FeedAuditSink`` — a hash-chained audit decorator for non-default feed writes.
 
-DEC-FEED-INTERFACE-001 (MIGRATION.md #1752), Golden Rule #8. Every material
+DEC-FEED-INTERFACE-001 (MIGRATION.md #1792), Golden Rule #8. Every material
 write to a NON-default feed's nested lake tree appends one line to a per-feed
 hash-chained JSONL audit log at ``<feed_root>/.audit/ingest-chain.jsonl``, on the
 COMMON orchestrator SHA-256 :class:`~brutex.orchestrator.audit.AuditWriter`
