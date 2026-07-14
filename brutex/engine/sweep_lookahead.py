@@ -77,6 +77,7 @@ from typing import TYPE_CHECKING, Final, overload
 
 import structlog
 
+from brutex.config.env_flags import FALSY_LITERALS, TRUTHY_LITERALS, env_flag_tristate
 from brutex.feed.lookahead import LookAheadBarrier
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -92,16 +93,25 @@ _LOG = structlog.get_logger("brutex.engine.sweep_lookahead")
 SWEEP_LOOKAHEAD_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_LOOKAHEAD_GUARD"
 
 #: The accepted truthy literals (case-insensitive, whitespace-stripped).
-_TRUTHY: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+#: Since DEC-PREBUILD-FRAME-WRITE-001 the literal sets + the
+#: :func:`env_flag_tristate` classifier LIVE in the wheel-free
+#: :mod:`brutex.config.env_flags` leaf (the prebuild frame-write kill switch
+#: in ``brutex.data`` needs the same vocabulary WITHOUT importing the engine
+#: package, whose ``__init__`` requires the compiled ``fno_math`` wheel);
+#: this module re-exports them byte-compatibly — every existing
+#: ``from brutex.engine.sweep_lookahead import env_flag_tristate`` consumer
+#: (``rust_metrics`` / ``rust_stage1a`` / ``sweep_apriori`` /
+#: ``results_depth_pass``) is untouched.
+_TRUTHY: Final[frozenset[str]] = TRUTHY_LITERALS
 
 #: The accepted falsy literals (case-insensitive, whitespace-stripped) — the
-#: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY`. Defined
-#: HERE (the sweep env-flag vocabulary home, CLAUDE.md §11 COMMON) so a
-#: default-ON sibling flag (``brutex.engine.rust_metrics``,
-#: DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001) can recognise an explicit OFF via
-#: :func:`env_flag_tristate`; this module's own default-OFF flag needs no
-#: falsy branch — anything non-truthy is already OFF.
-_FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
+#: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY` (see the
+#: relocation note there): a default-ON sibling flag
+#: (``brutex.engine.rust_metrics``, DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001)
+#: recognises an explicit OFF via :func:`env_flag_tristate`; this module's
+#: own default-OFF flag needs no falsy branch — anything non-truthy is
+#: already OFF.
+_FALSY: Final[frozenset[str]] = FALSY_LITERALS
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",
@@ -110,37 +120,6 @@ __all__ = [
     "maybe_guard_bars",
     "sweep_lookahead_guard_enabled",
 ]
-
-
-def env_flag_tristate(raw: str) -> bool | None:
-    """Classify *raw* against the ONE sweep env-flag vocabulary.
-
-    The COMMON classifier for every sweep env flag (CLAUDE.md §11 — the
-    truthy/falsy literal sets live HERE, their vocabulary home, and the
-    default-ON sibling flag in :mod:`brutex.engine.rust_metrics` delegates to
-    this helper instead of copying the ``strip().lower()`` + membership
-    logic).
-
-    Parameters
-    ----------
-    raw
-        The raw env value (surrounding whitespace ignored,
-        case-insensitive).
-
-    Returns
-    -------
-    bool | None
-        ``True`` for a :data:`_TRUTHY` literal (``1/true/yes/on``),
-        ``False`` for a :data:`_FALSY` literal (``0/false/no/off``), and
-        ``None`` for anything else — unset/empty AND unrecognised both map
-        to ``None``; the CALLER owns the default + warn policy for those.
-    """
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    return None
 
 
 def sweep_lookahead_guard_enabled() -> bool:
