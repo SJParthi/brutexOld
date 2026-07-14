@@ -155,6 +155,50 @@ def test_parallel_covers_all_phases(
     assert kinds["NSE-NIFTY-30Jan25-20000-CE"] is PrebuildKind.OPTIONS
 
 
+def test_parallel_include_spot_false_runs_fno_phases_only(
+    patched: _FakeMaterialize, tmp_path: Path
+) -> None:
+    """[round-6 two-button split] the PARALLEL twin of the spot-exclusion arm:
+    ZERO spot work items are planned, the spot phase carries the COMMON
+    by-design note, and the F&O contract phases run for real."""
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild_parallel(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            lake_root=tmp_path,
+            workers=3,
+            daily_before=date(2025, 2, 1),
+            include_spot=False,
+        )
+    assert outcome.symbols_built == 3  # 1 future + 2 options — never the spot
+    assert outcome.ok is True
+    assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["spot_symbols"] == 0
+    spot_phase = [
+        e for e in logs if e["event"] == "pipeline.prebuild.phase_done" and e["phase"] == "spot"
+    ]
+    assert spot_phase[0]["attempted"] == 0
+    # The by-design note itself rides the internal spot PhasePrebuildReport
+    # (the SAME COMMON constant on both paths) — note-shape pinned at the
+    # gated_prebuild level, where the report is the public surface.
+
+
+def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_path: Path) -> None:
+    """The guard forwards ``include_spot`` to the parallel path (workers>1)."""
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=lambda target: (_ for _ in ()).throw(AssertionError("unused")),
+        lake_root=tmp_path,
+        workers=2,
+        daily_before=date(2025, 2, 1),
+        include_spot=False,
+    )
+    assert outcome.symbols_built == 3
+    assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
+
+
 def test_dense_flag_set_for_index_spot_only(patched: _FakeMaterialize, tmp_path: Path) -> None:
     run_pipeline_prebuild_parallel(
         instruments=[_spot("NSE-NIFTY")],

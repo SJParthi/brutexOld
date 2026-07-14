@@ -19,6 +19,12 @@ Failure isolation: per-symbol try/except (the gated-prebuild quarantine
 posture) — counted + capped-logged, never blocks the 1-minute export;
 ``LakeWriteHalt`` re-raises (a full disk halts the run).
 
+The FNO arm (``PrebuildKind.FUTURES`` + the OI-carry positional 1day
+resampler) is STRUCTURAL since DEC-CROSSVERIFY-SPOT-ONLY-001 (MIGRATION.md
+#1788) — unreachable from the spot-only producer's enumeration, retained
+(direct-unit-covered via a constructed FNO identity) for the contract's
+possible re-expansion.
+
 Honest cost (Golden Rule #10): O(touched symbols × one UTC month of 1-minute
 bars) read × 19 TF resamples + O(symbols × 3-day window) for 1day — NOT
 O(1), NOT strictly O(new day) (the month read grows through the month), and

@@ -3,7 +3,9 @@
 DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 / DEC-FUTURES-ADDRESSING-PIN-001: the REAL
 ``cmd_sweep_all`` is driven over REAL Parquet mini-lakes (written with the
 same ``ParquetBarSink`` + ``materialize_lake_timeframes`` the pull pipeline
-uses) under ``--symbols NSE-NIFTY-FUT --exchange NSE --segment FNO``,
+uses) under ``--symbols NSE-NIFTY-FUT --exchange NSE --segment FNO``
+(+ ``--allow-out-of-scope`` since DEC-ENGINE-SPOT-ONLY-001 retired the alias
+from default engine scope — the retained machinery's ONLY admit path),
 composing the whole chain the unit suites own piecewise:
 
     scope gate → resolver → stitched loader slices → zero-bar preflight →
@@ -155,6 +157,12 @@ def _kwargs(
         # rank gates and persist NOTHING (the Stage-1 pin sweep missed this
         # file; the explicit pin is byte-identical to the pre-mode launch).
         "fill_mode": "precise",
+        # DEC-ENGINE-SPOT-ONLY-001: NSE-NIFTY-FUT is RETIRED from default
+        # engine sweep scope — these tests exercise the RETAINED
+        # below-the-gate futures machinery via the loud, audit-stamped
+        # research override, the ONLY remaining admit path (the default
+        # refusal itself is pinned by TestSpotOnlyScopeRefusal below).
+        "allow_out_of_scope": True,
     }
     kwargs.update(overrides)
     return kwargs
@@ -260,6 +268,10 @@ def _verify_kwargs(
         "recount": True,
         "scratch_root": scratch,
         "allow_context_mismatch": False,
+        # DEC-ENGINE-SPOT-ONLY-001: the recount Tier-3 shadow re-sweep rides
+        # the SAME launch gate — a recorded futures tree recounts only under
+        # the research override.
+        "allow_out_of_scope": True,
     }
 
 
@@ -929,12 +941,22 @@ def test_staled_derived_tf_on_one_contract_is_refused_by_g1(
 def test_alias_under_index_segment_refused_before_any_lake_io(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F8: the alias needs NSE/FNO — the Layer-2 scope gate refuses INDEX."""
+    """F8, reworded by DEC-ENGINE-SPOT-ONLY-001: the alias is refused on
+    EVERY coordinate (the pre-flip wrong-coordinate arm folded into the ONE
+    spot-only refusal) — no override, the DEFAULT gate."""
     lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
-    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, tmp_path / "sweeps", segment="INDEX"))
+    rc = cmd_sweep_all(
+        **_kwargs(
+            lake_root,
+            catalog_path,
+            tmp_path / "sweeps",
+            segment="INDEX",
+            allow_out_of_scope=False,
+        )
+    )
     err = capsys.readouterr().err
     assert rc == EXIT_USER_ERROR
-    assert "NSE/FNO" in err
+    assert "DEC-ENGINE-SPOT-ONLY-001" in err
 
 
 def test_mixed_spot_and_futures_symbols_under_one_segment_refused(
@@ -944,7 +966,13 @@ def test_mixed_spot_and_futures_symbols_under_one_segment_refused(
     (exchange, segment) coordinate cannot satisfy both symbol families."""
     lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
     rc = cmd_sweep_all(
-        **_kwargs(lake_root, catalog_path, tmp_path / "sweeps", symbols=f"NIFTY,{_ALIAS}")
+        **_kwargs(
+            lake_root,
+            catalog_path,
+            tmp_path / "sweeps",
+            symbols=f"NIFTY,{_ALIAS}",
+            allow_out_of_scope=False,
+        )
     )
     err = capsys.readouterr().err
     assert rc == EXIT_USER_ERROR
@@ -979,4 +1007,61 @@ def test_dashboard_route_400s_the_alias_under_the_default_index_segment(
     ):
         resp = client.post("/api/v1/sweep/run", params={"symbols": _ALIAS})
         assert resp.status_code == 400
-        assert "NSE/FNO" in resp.json()["detail"]
+        # DEC-ENGINE-SPOT-ONLY-001: the alias is refused on EVERY coordinate
+        # (the pre-flip "expected NSE/FNO" arm is gone) — the detail cites
+        # the spot-only law; there is NO dashboard override by design.
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
+
+
+# ────── DEC-ENGINE-SPOT-ONLY-001 — the spot-only DEFAULT refusal ──────
+
+
+class TestSpotOnlyScopeRefusal:
+    """The engine is SPOT-ONLY (DEC-ENGINE-SPOT-ONLY-001, operator directive
+    2026-07-13 — consciously supersedes the ADR-0012 /
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 engine-scope authorization): a
+    ``NSE-NIFTY-FUT`` sweep through the REAL production entry is REFUSED by
+    default — loud, typed, citing the DEC + the remediation — and the
+    refusal fires BEFORE any futures-series resolution or lake I/O."""
+
+    def test_futures_alias_sweep_all_refused_by_default(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The fails-before regression: pre-flip this launch RAN a sweep."""
+        lake_root, catalog_path = _seed_lake(tmp_path)
+        results_root = tmp_path / "sweeps"
+        rc = cmd_sweep_all(
+            **_kwargs(lake_root, catalog_path, results_root, allow_out_of_scope=False)
+        )
+        err = capsys.readouterr().err
+        assert rc == EXIT_USER_ERROR
+        assert "sweep REFUSED" in err
+        assert "DEC-ENGINE-SPOT-ONLY-001" in err
+        assert "spot-only" in err
+        assert "lake/REFERENCE_ONLY" in err
+        # Nothing persisted — the refusal beats every store write.
+        assert _persisted_frames(results_root) == []
+
+    def test_refusal_fires_before_any_futures_series_resolution(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal-before-I/O pin: a refused request never touches the
+        futures resolver or the alias-aware slice loader (zero lake I/O)."""
+        import brutex.data.futures_series as futures_series_module
+        import brutex.feed.series_load as series_load_module
+
+        def _never_resolves(*args: object, **kwargs: object) -> object:
+            raise AssertionError("resolve_futures_series must never run on a scope-refused launch")
+
+        def _never_loads(*args: object, **kwargs: object) -> object:
+            raise AssertionError("load_sweep_slice must never run on a scope-refused launch")
+
+        monkeypatch.setattr(futures_series_module, "resolve_futures_series", _never_resolves)
+        monkeypatch.setattr(series_load_module, "load_sweep_slice", _never_loads)
+        lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
+        rc = cmd_sweep_all(
+            **_kwargs(lake_root, catalog_path, tmp_path / "sweeps", allow_out_of_scope=False)
+        )
+        err = capsys.readouterr().err
+        assert rc == EXIT_USER_ERROR
+        assert "DEC-ENGINE-SPOT-ONLY-001" in err

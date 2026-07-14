@@ -179,7 +179,7 @@ ADR-0012 authorizes the engine on **NIFTY futures** for the dynamic-strategy tra
 Futures need no split adjustment (an index future tracks the divisor-adjusted index),
 so the gate does not conflict with ADR-0012. **THIS OBLIGATION IS SATISFIED
 (2026-07-06, DEC-FUTURES-ADDRESSING-PIN-001 + DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001,
-MIGRATION.md #1521–#1522):** the launch PR pinned the final addressing shape — the ONE
+MIGRATION.md #1700–#1701):** the launch PR pinned the final addressing shape — the ONE
 series alias `NSE-NIFTY-FUT` — in `brutex.universe.is_engine_sweep_symbol` AND assigned
 its `symbol_id` (4) in `brutex/strategies/spec.py` in the SAME reviewed PR, exactly as
 required below. The pre-launch dual-acceptance envelope (the
@@ -190,6 +190,11 @@ alias roll-aware via `brutex/data/futures_series.py`. Historical requirement tex
 (recorded as written pre-launch): the futures-sweep launch
 PR MUST pin its final addressing shape in `brutex.universe.is_engine_sweep_symbol` in
 the same reviewed PR that assigns its symbol id.
+
+**SUPERSEDED-IN-PART by DEC-ENGINE-SPOT-ONLY-001 (MIGRATION.md #1790):** the engine
+is spot-only again — `NSE-NIFTY-FUT` is refused at every sweep entry (the alias +
+symbol_id remain pinned as the lake/registry record; this section's present-tense
+"authorizes the engine on NIFTY futures" reading no longer holds).
 
 ## 7. References
 
