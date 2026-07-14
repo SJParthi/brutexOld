@@ -45,8 +45,11 @@ absent from a derivation — or absent from the derived dict — is reported as
 
 from __future__ import annotations
 
+import os
+import stat as stat_module
 from dataclasses import dataclass
 from enum import Enum
+from itertools import chain
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -872,27 +875,66 @@ def spot_1m_partition_dir(lake_root: Path, exchange: str, segment: str, symbol: 
     return lake_root / "bars" / exchange / segment / symbol / "1minute"
 
 
+def _raise_partition_scan_error(error: OSError) -> None:
+    """Propagate a partition-enumeration fault out of :func:`has_stored_1m_bars`.
+
+    The ``os.walk(onerror=...)`` hook (refuter round 4): a fault while
+    LISTING the partition must never read as "the partition is empty" —
+    raise it so the reader classifies the symbol a per-symbol FAILURE
+    (``OSError`` is a :func:`~brutex.data.errors.parquet_read_skip_errors`
+    member), never the benign ``no_source``.
+    """
+    raise error
+
+
 def has_stored_1m_bars(lake_root: Path, exchange: str, segment: str, symbol: str) -> bool:
     """``True`` iff the partition holds >=1 stored 1-minute parquet file — lake truth NOW.
 
     The EXACT existence predicate :func:`make_lake_read_1m`'s whole-tree arm
     gates on (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — ONE predicate for the
     reader AND every future probe consumer; §11 COMMON). O(dir entries),
-    short-circuits at the first parquet; ZERO Parquet opens. Deliberately
-    blind to WHY the partition is empty (vendor-empty vs never-pulled vs
-    heal-emptied) and to a 0-ROW parquet: a hand-planted schema-complete
-    0-row file passes here and the prebuild then COMPLETES the symbol as a
-    0-bar SUCCESS (neither no_source nor failed; warm unaffected) —
-    EXECUTED, byte-identical to main's pre-change behavior on the same
-    plant (refuter round 3, pinned by
+    short-circuits at the first parquet-named entry (file OR directory —
+    ``rglob``-parity, so a dataset-style ``01.parquet/`` dir plant keeps its
+    pre-change verdict); ZERO Parquet opens. Deliberately blind to WHY the
+    partition is empty (vendor-empty vs never-pulled vs heal-emptied) and to
+    a 0-ROW parquet: a hand-planted schema-complete 0-row file passes here
+    and the prebuild then COMPLETES the symbol as a 0-bar SUCCESS (neither
+    no_source nor failed; warm unaffected) — EXECUTED, byte-identical to
+    main's pre-change behavior on the same plant (refuter round 3, pinned by
     ``test_e2e_zero_row_parquet_completes_as_zero_bar_success``). The shape
     is out-of-band — production writers never render 0-row files and the
     #1594 heal quarantine-MOVES a wholly-removed partition — while a
     schema-BROKEN plant still fails the prebuild loudly via the per-symbol
     data-error quarantine (the round-1 R2 executed ComputeError pin).
+
+    Fail-LOUD on an UNENUMERABLE partition (refuter round 4): CPython
+    pathlib SUPPRESSES ``PermissionError`` during glob traversal (and
+    ``Path.is_dir()`` swallows ``OSError``), so the original ``is_dir() and
+    any(rglob("*.parquet"))`` spelling read a permission-broken POPULATED
+    partition (chmod/ownership mishap on one symbol's subtree) as *empty* —
+    reclassifying a real fault as the benign ``no_source`` whose
+    "vendor-empty or never pulled" wording named two FALSE causes, with
+    ``ok=True`` and the movers warm firing (executed A/B: the merge-base
+    classified the identical lake state a loud warm-withholding FAILURE).
+    The probe therefore enumerates with an OSError-PROPAGATING walk
+    (:func:`_raise_partition_scan_error`): an ``EACCES`` — base dir OR any
+    subtree level — propagates out of the reader as ``OSError``, a
+    :func:`~brutex.data.errors.parquet_read_skip_errors` member, restoring
+    the merge-base per-symbol-FAILURE classification (WARNING, ``ok=False``,
+    warm withheld). An ABSENT partition — or a non-directory at/inside the
+    path (an out-of-band hand-planted shape: nothing can be stored under a
+    file) — still reads ``False``, the benign shape.
     """
     base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
-    return base.is_dir() and any(base.rglob("*.parquet"))
+    try:
+        if not stat_module.S_ISDIR(os.stat(base).st_mode):
+            return False
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    for _dirpath, dirnames, filenames in os.walk(base, onerror=_raise_partition_scan_error):
+        if any(name.endswith(".parquet") for name in chain(dirnames, filenames)):
+            return True
+    return False
 
 
 __all__ = [
