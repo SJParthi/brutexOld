@@ -6308,7 +6308,11 @@ def cmd_pull_all_spot(
         auto_pull_allowed,
         resolve_settle_time,
     )
-    from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS, strict_gate_enabled
+    from brutex.dashboard.pipeline_pull import (
+        PHASE_MARKET_HOURS,
+        format_capped_names,
+        strict_gate_enabled,
+    )
     from brutex.dashboard.pull_scope import (
         SCOPE_SPOT_ONLY,
         SPOT_ONLY_SESSION_RESUME_HINT,
@@ -6519,6 +6523,15 @@ def cmd_pull_all_spot(
             print(f"[brutex]   prebuild:  CRASHED ({report.prebuild_crashed})")
         else:
             print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+        if report.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the
+            # structured-block twin of the headline's no-source clause — a
+            # clean run's stdout stays byte-identical.
+            print(
+                f"[brutex]   no-source: {report.prebuild_no_source_count} symbol(s) skipped "
+                "— no stored 1-minute data (vendor-empty or never pulled): "
+                f"{format_capped_names(report.prebuild_no_source, report.prebuild_no_source_count)}"
+            )
         print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
         print("[brutex]   greeks:    not run — no options in this pull")
         print(f"[brutex]   cross-verify: {tail.human}")

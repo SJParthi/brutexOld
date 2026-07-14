@@ -624,6 +624,29 @@ def test_stdout_defensive_none_fields_render_question_marks(
     assert "prebuild:  ? symbol(s), ? bars" in capsys.readouterr().out
 
 
+def test_stdout_no_source_line_emit_on_nonzero(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T22 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the structured no-source
+    line renders ONLY when the count is non-zero (capped names + the honest
+    remainder from the TRUE count); the clean run's stdout stays
+    byte-identical — no line, no token (the sibling clean-run pins above pass
+    unmodified)."""
+    report = _report(
+        prebuild_no_source=("RELIANCE", "IDEA", "YESBANK", "SUZLON"),
+        prebuild_no_source_count=6,
+    )
+    assert _Harness(report=report).run(lake) == EXIT_OK
+    out = capsys.readouterr().out
+    assert (
+        "[brutex]   no-source: 6 symbol(s) skipped — no stored 1-minute data "
+        "(vendor-empty or never pulled): RELIANCE, IDEA, YESBANK (+3 more)" in out
+    )
+    # The clean run renders NO no-source token at all (emit-on-nonzero).
+    assert _Harness().run(lake) == EXIT_OK
+    assert "no-source" not in capsys.readouterr().out
+
+
 def test_stdout_ok_headline_carries_note_warning_clauses(
     lake: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

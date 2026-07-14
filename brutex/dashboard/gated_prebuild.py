@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any, Final
 import structlog
 
 from brutex.data.errors import ResampleInputError, parquet_read_skip_errors
-from brutex.data.timeframe_materialize import PrebuildKind
+from brutex.data.timeframe_materialize import NoStored1mBarsError, PrebuildKind
 from brutex.observability.progress_beat import emit_progress_beat
 
 if TYPE_CHECKING:
@@ -247,6 +247,14 @@ class PhasePrebuildReport:
         The sum of bars written across this phase's successful symbols.
     note
         A short human note (e.g. the options-not-injected explanation), or ``""``.
+    no_source
+        SPOT targets with ZERO stored 1-minute bars — nothing to derive
+        (vendor-empty or never pulled;
+        :class:`~brutex.data.timeframe_materialize.NoStored1mBarsError`). NOT
+        failures — ``ok`` is unaffected, so the movers-warm gate stays open
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001). Always ``()`` for the
+        contract phases (a contract discovered-with-files whose partition
+        vanished by read time stays a FAILURE — the deliberate spot scope).
     """
 
     phase: str
@@ -255,15 +263,21 @@ class PhasePrebuildReport:
     failed: tuple[tuple[str, str], ...]
     total_bars: int
     note: str = ""
+    no_source: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
-        """``True`` iff every attempted symbol succeeded (no failures)."""
+        """``True`` iff every attempted symbol succeeded (no failures).
+
+        A ``no_source`` symbol (zero stored 1-minute bars — nothing to
+        derive) is NOT a failure and never flips this
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001).
+        """
         return not self.failed
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the pipeline report + panel."""
-        return {
+        payload = {
             "phase": self.phase,
             "ok": self.ok,
             "attempted": list(self.attempted),
@@ -272,6 +286,11 @@ class PhasePrebuildReport:
             "total_bars": self.total_bars,
             "note": self.note,
         }
+        if self.no_source:
+            # EMIT-ON-NONEMPTY (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — the
+            # default all-stored-data payload stays byte-identical.
+            payload["no_source"] = list(self.no_source)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,10 +350,26 @@ def _run_spot_phase(
     failures are named); a genuine bug (``KeyError`` / ``TypeError`` / …) or a
     pull-wide :class:`~brutex.data.errors.LakeWriteHalt` PROPAGATES (never
     miscounted as a per-symbol data failure).
+
+    A whole-partition zero-stored-bars read
+    (:class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` — the
+    vendor-empty / never-pulled shape) is caught FIRST and classified
+    ``no_source`` instead of a failure
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive — and
+    structurally absent from movers-warm discovery when NO timeframe holds
+    parquet (a surviving previously stored DERIVED timeframe legitimately
+    keeps it discoverable, serving genuine stored bars; refuter round 2,
+    MIGRATION.md #1792) — so it must never withhold the warm run-wide.
+    The clause ORDER is load-bearing — ``NoStored1mBarsError`` is a
+    ``ValueError``, a member of :func:`_per_symbol_data_errors`. INFO not
+    WARN: a delisted symbol recurs every daily pull — expected healthy vendor
+    behavior (the #1630 log posture); the completion note + report carry the
+    operator surfacing.
     """
     attempted = tuple(inst.symbol_name for inst in underlyings)
     succeeded: list[str] = []
     failed: list[tuple[str, str]] = []
+    no_source: list[str] = []
     total_bars = 0
     for inst in underlyings:
         # Liveness beat per underlying (DEC-PIPELINE-STALL-HEARTBEAT-001): the prebuild
@@ -344,6 +379,14 @@ def _run_spot_phase(
         emit_progress_beat()
         try:
             result = materialize_spot(inst)
+        except NoStored1mBarsError as exc:
+            _LOG.info(
+                "universe.prebuild.spot_no_source",
+                symbol=inst.symbol_name,
+                detail=str(exc),
+            )
+            no_source.append(inst.symbol_name)
+            continue
         except _per_symbol_data_errors() as exc:
             _LOG.warning(
                 "universe.prebuild.spot_failed",
@@ -361,6 +404,7 @@ def _run_spot_phase(
         succeeded=tuple(succeeded),
         failed=tuple(failed),
         total_bars=total_bars,
+        no_source=tuple(no_source),
     )
 
 
@@ -385,6 +429,14 @@ def _run_contract_phase(
     data error (:func:`_per_symbol_data_errors`) in discovery OR materialise is
     recorded as a failure and the loop CONTINUES; a genuine bug (and a pull-wide
     :class:`~brutex.data.errors.LakeWriteHalt`) propagates.
+
+    DELIBERATELY no ``no_source`` classification here
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 is SPOT-scoped): a
+    :class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` from a
+    contract materialise still lands in :func:`_per_symbol_data_errors` → a
+    FAILURE — a contract was DISCOVERED from its stored files, so a
+    zero-stored-bars read is a heal/TOCTOU anomaly worth a red prebuild, not
+    vendor-empty-by-design.
     """
     attempted: list[str] = []
     succeeded: list[str] = []

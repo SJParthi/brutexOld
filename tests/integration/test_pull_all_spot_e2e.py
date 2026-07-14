@@ -316,38 +316,260 @@ def test_e2e_vendor_empty_stock_settles_empty(tmp_path: Path) -> None:
     assert report.spot.total_no_data >= 1
 
 
-def test_e2e_vendor_empty_stock_real_prebuild_withholds_movers_warm(tmp_path: Path) -> None:
-    """[refuter-r1 r3 F-1 — the REAL-prebuild pin of the INHERITED behavior]
-    a clean vendor-EMPTY stock (settled SKIPPED, zero stored bars — the
-    honest pull outcome, NOT quarantined) fails the REAL
-    ``materialize_lake_timeframes`` (nothing to derive), so
-    ``PrebuildOutcome.ok`` reads False and the sequencer's #1145/#1221 warm
-    gate WITHHOLDS the spot movers warm for the WHOLE run. The shipped e2e
-    for this scenario fakes the prebuild (always-ok) — this test executes the
-    real one, pinning the interaction the fixture-only suite never reached.
-    INHERITED pipeline law, deliberately NOT changed on this branch (the spot
-    report does not expose the vendor-empty set cleanly — its per-symbol
-    ``no_data`` conflates a vendor-empty with an already-settled incremental
-    re-run); the residual + follow-up DEC is ledgered in MIGRATION #1779.
-    The note stays HONEST: the failure is NAMED, the warm clause is ABSENT
-    (never fabricated), the healthy symbol's timeframes ARE built."""
+def test_e2e_vendor_empty_stock_real_prebuild_no_source_named_warm_fires(tmp_path: Path) -> None:
+    """[fails-before — the CONSCIOUS FLIP of the #1779 inherited-behavior pin
+    ``test_e2e_vendor_empty_stock_real_prebuild_withholds_movers_warm``]
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: a clean vendor-EMPTY stock
+    (settled SKIPPED, zero stored bars — the honest pull outcome, NOT
+    quarantined) is classified NO-SOURCE at the REAL
+    ``materialize_lake_timeframes`` read (the whole-partition
+    ``NoStored1mBarsError`` arm — lake truth, no report field consulted), so
+    ``PrebuildOutcome.ok`` stays True and the sequencer's #1145/#1221 warm
+    gate now FIRES over the healthy majority instead of withholding the warm
+    run-wide forever. The symbol is COUNTED + NAMED in the note (both causes
+    — the probe cannot distinguish vendor-empty from never-pulled), never a
+    silent drop, never a fabricated snapshot (structural evidence below).
+    At the pre-fix head every new pin fails (``ok=False``, ``warm_calls==0``,
+    ``prebuild_failed==("RELIANCE",)``, no ``prebuild_no_source`` field)."""
     adapter = _RecordingAdapter(empty_symbols=frozenset({"RELIANCE"}))
     chain = _Chain(tmp_path / "lake", [_nifty(), _reliance()], adapter=adapter, real_prebuild=True)
     report, note = chain.run()
     assert report.stopped_after is None  # the chain itself completes
     assert report.quarantined_count == 0  # vendor-empty is NOT a quarantine
-    assert chain.prebuild_exclusions == [frozenset()]  # …so NOT excluded either
-    # The REAL prebuild: the healthy symbol builds, the empty one FAILS.
-    assert report.prebuild_failed == ("RELIANCE",)
+    # The QUARANTINE exclusion set stays EMPTY — the #1779 rejection honored:
+    # the spot report's `no_data` never feeds ANY exclusion set (the verdict
+    # is the prebuild read's own zero-stored-bars arm, lake truth).
+    assert chain.prebuild_exclusions == [frozenset()]
+    # The REAL prebuild: the healthy symbol builds; the empty one is
+    # classified no-source — NEVER a failure.
+    assert report.prebuild_failed == ()
+    assert report.prebuild_no_source == ("RELIANCE",)
+    assert report.prebuild_no_source_count == 1
     assert report.prebuild_built == 1
     assert report.prebuild_total_bars is not None and report.prebuild_total_bars > 0
     nifty_1day = tmp_path / "lake" / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day"
     assert nifty_1day.is_dir()  # the healthy symbol's derived TFs are on disk
-    # The load-bearing consequence: the movers warm is WITHHELD run-wide.
-    assert chain.warm_calls == 0
-    assert report.segment_movers_warmed == {}
-    assert "prebuild failures: RELIANCE" in note  # named, never hidden
-    assert "snapshot(s) warmed" not in note  # the warm clause is honestly absent
+    # THE behavioral flip: the movers warm FIRES over the healthy set.
+    assert chain.warm_calls == 1
+    assert report.segment_movers_warmed == {"spot": 3}
+    # Note honesty: counted + named (the skip clause) + the warmed clause;
+    # never the failure wording, never the movers-warm overclaim (refuter
+    # round 2 — the stale-derived-data twin below is the counter-evidence).
+    assert (
+        ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: RELIANCE" in note
+    )
+    assert "+ movers warm" not in note
+    assert "snapshot(s) warmed" in note
+    assert "prebuild failures" not in note
+    # STRUCTURAL warm-absence evidence (graft G3 — never a fabricated
+    # snapshot): discovery is parquet-file-gated, so the zero-stored-bars
+    # symbol has NO dataset row, and the REAL warm-side candidate compute
+    # over this lake screens the healthy symbol while RELIANCE is absent.
+    from brutex.dashboard.db_view import list_candle_datasets
+    from brutex.dashboard.movers_snapshot import compute_spot_candidates
+    from brutex.dashboard.movers_warm import latest_movers_date
+
+    lake = tmp_path / "lake"
+    discovered = {d["symbol"] for d in list_candle_datasets(lake)}
+    assert "NIFTY" in discovered
+    assert "RELIANCE" not in discovered
+    warm_date = latest_movers_date(lake)
+    assert warm_date is not None
+    cands = compute_spot_candidates(lake_root=lake, interval="1day", date=warm_date, time=None)
+    warmed_symbols = {snap.instrument.symbol for snap in cands.snapshots}
+    assert "NIFTY" in warmed_symbols
+    assert "RELIANCE" not in warmed_symbols  # structurally absent, now COUNTED upstream
+
+
+def test_e2e_incremental_rerun_never_classified_no_source(tmp_path: Path) -> None:
+    """[the #1779 TRAP twin — the permanent regression net] a HEALTHY
+    fully-settled symbol on an incremental re-run reads the byte-identical
+    per-symbol ``no_data == 1`` shape a vendor-empty symbol reads (the
+    conflation is kept VISIBLE here) — yet it is NEVER classified no-source:
+    the verdict is the lake's stored bars (run 1 stored them), not any report
+    field. Any future report-scoped predicate fails this test."""
+    lake = tmp_path / "lake"
+    first = _Chain(lake, [_nifty(), _reliance()], real_prebuild=True)
+    report1, _ = first.run()
+    assert report1.ok is True
+    assert report1.prebuild_no_source == ()
+    second = _Chain(lake, [_nifty(), _reliance()], real_prebuild=True)
+    report2, note2 = second.run()
+    assert second.adapter.fetches == []  # every window settled — no vendor hit
+    assert report2.spot is not None
+    # THE TRAP, visible: each healthy settled symbol reads no_data == 1 —
+    # byte-identical to the vendor-empty report shape (#1779's executed
+    # evidence). It must NEVER feed the no-source verdict.
+    assert [(s.completed, s.failed, s.no_data) for s in report2.spot.symbols] == [
+        (0, 0, 1),
+        (0, 0, 1),
+    ]
+    assert report2.prebuild_no_source == ()
+    assert report2.prebuild_no_source_count == 0
+    assert report2.ok is True
+    assert second.warm_calls == 1  # the warm fires — nothing withheld
+    assert "symbol(s) skipped — no stored 1-minute data" not in note2
+
+
+def test_e2e_old_stored_bars_with_empty_pull_today_not_no_source(tmp_path: Path) -> None:
+    """[the delisted-mid-history twin] a symbol with OLD stored bars whose
+    pull TODAY returns vendor-empty (the adapter IS consulted — the widened
+    range plans a new window) is NOT no-source: the lake holds run-1 bars, the
+    derive runs off them (zero stored bars is a CUMULATIVE lake property,
+    never a this-pull delta)."""
+    lake = tmp_path / "lake"
+    first = _Chain(lake, [_nifty(), _reliance()], real_prebuild=True)
+    report1, _ = first.run()
+    assert report1.ok is True
+    # Run 2 widens the range by one day and the vendor now returns EMPTY for
+    # RELIANCE — the new window genuinely consults the adapter.
+    adapter = _RecordingAdapter(empty_symbols=frozenset({"RELIANCE"}))
+    second = _Chain(
+        lake, [_nifty(), _reliance()], adapter=adapter, to_date="2024-01-04", real_prebuild=True
+    )
+    report2, note2 = second.run()
+    assert any(sym == "RELIANCE" for sym, _s, _e in second.adapter.fetches)
+    assert report2.prebuild_no_source == ()  # old stored bars ⇒ NOT vendor-empty
+    assert report2.ok is True
+    assert second.warm_calls == 1
+    assert "symbol(s) skipped — no stored 1-minute data" not in note2
+    # The derive genuinely ran off the stored bars — the derived 1day exists.
+    assert (lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1day").is_dir()
+
+
+def test_e2e_zero_row_parquet_completes_as_zero_bar_success(tmp_path: Path) -> None:
+    """[refuter round 3 — the executed truth behind residual (2)] a
+    hand-planted schema-complete 0-ROW 1-minute parquet passes the
+    existence-only ``has_stored_1m_bars`` arm and the REAL prebuild then
+    COMPLETES the symbol as a 0-bar SUCCESS: neither ``no_source`` nor
+    ``failed``, the warm unaffected — byte-identical to main's pre-change
+    behavior on the same plant (executed on merge-base 349b1a9 too). The
+    diff's earlier "fails the prebuild LOUDLY (fail-open)" residual wording
+    was FALSE and is corrected to this pin; the shape that DOES still fail
+    loudly is a schema-BROKEN plant, via the per-symbol data-error
+    quarantine (the round-1 R2 executed repro + the ComputeError pins in
+    ``test_gated_prebuild.py``). The 0-row shape is out-of-band: production
+    writers never render 0-row files and the #1594 heal quarantine-MOVES a
+    wholly-removed partition."""
+    import polars as pl
+    from brutex.data.timeframe_materialize import has_stored_1m_bars
+
+    lake = tmp_path / "lake"
+    part = lake / "bars" / "NSE" / "CASH" / "ZERO" / "1minute" / "2024"
+    part.mkdir(parents=True)
+    pl.DataFrame(
+        schema={
+            "timestamp": pl.Datetime("us", "UTC"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        }
+    ).write_parquet(part / "01.parquet")
+    assert has_stored_1m_bars(lake, "NSE", "CASH", "ZERO") is True
+    zero = _instrument("ZERO", InstrumentType.EQ, 77)
+    adapter = _RecordingAdapter(empty_symbols=frozenset({"ZERO"}))
+    chain = _Chain(lake, [_nifty(), zero], adapter=adapter, real_prebuild=True)
+    report, note = chain.run()
+    assert report.ok is True
+    assert report.prebuild_no_source == ()  # existence-only: the plant IS "stored"
+    assert report.prebuild_no_source_count == 0
+    assert report.prebuild_failed == ()  # a VALID 0-row read is not a data error
+    assert report.prebuild_crashed is None
+    assert report.prebuild_built == 2  # ZERO counts as built at 0 bars (pre-existing)
+    assert chain.warm_calls == 1  # the warm is unaffected
+    # The silent shape, honestly pinned: no skip clause, no failure wording,
+    # no ZERO token anywhere on the operator note.
+    assert "ZERO" not in note
+    assert "symbol(s) skipped — no stored 1-minute data" not in note
+    assert "prebuild failures" not in note
+
+
+def test_e2e_stale_derived_1day_no_source_note_never_claims_warm_exclusion(
+    tmp_path: Path,
+) -> None:
+    """[refuter round 2 — the stale-derived-data twin] a symbol whose 1-minute
+    partition was emptied AFTER a healthy run (post-pull removal — e.g. a
+    lake-heal quarantine MOVE, operator pruning, a legacy vendor-fetched-1day
+    lake) while a previously DERIVED ``1day`` partition survives still
+    classifies ``no_source`` (zero stored 1-MINUTE bars is the law) and the
+    warm still fires — but the note's skip clause claims ONLY the
+    timeframe-build exclusion: warm discovery is parquet-file-gated per
+    DATASET, so the surviving stored ``1day`` legitimately keeps the symbol in
+    the warmed snapshot (genuine stored bars — /movers would serve them with
+    or without the warm; never fabricated). A "+ movers warm" exclusion claim
+    here would be false (executed refuter-round-2 evidence) — this pin fails
+    on the pre-fix wording. The window ledger keeps the run-1 settled SUCCESS
+    ``bars>0`` rows (the heal never rewrites the ledger) — the post-pull
+    removal signature the runbook §7 third-shape branch documents."""
+    import shutil
+
+    lake = tmp_path / "lake"
+    first = _Chain(lake, [_nifty(), _reliance()], real_prebuild=True)
+    report1, _ = first.run()
+    assert report1.ok is True
+    rel_1m = lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1minute"
+    rel_1d = lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1day"
+    assert any(rel_1m.rglob("*.parquet")) and any(rel_1d.rglob("*.parquet"))
+    shutil.rmtree(rel_1m)  # the post-pull 1m removal; the derived 1day SURVIVES
+    second = _Chain(
+        lake,
+        [_nifty(), _reliance()],
+        adapter=_RecordingAdapter(empty_symbols=frozenset({"RELIANCE"})),
+        real_prebuild=True,
+    )
+    report2, note2 = second.run()
+    assert report2.prebuild_no_source == ("RELIANCE",)
+    assert report2.ok is True
+    assert second.warm_calls == 1  # the warm fires — nothing withheld
+    # The honest clause: timeframe-build exclusion ONLY.
+    assert (
+        ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: RELIANCE" in note2
+    )
+    assert "+ movers warm" not in note2
+    # The overclaim's counter-evidence, kept VISIBLE: the surviving derived
+    # 1day keeps the symbol in warm discovery AND the REAL warm-side candidate
+    # compute — genuine stored bars served as any stored data is.
+    from brutex.dashboard.db_view import list_candle_datasets
+    from brutex.dashboard.movers_snapshot import compute_spot_candidates
+    from brutex.dashboard.movers_warm import latest_movers_date
+
+    discovered = {d["symbol"] for d in list_candle_datasets(lake)}
+    assert "RELIANCE" in discovered
+    warm_date = latest_movers_date(lake)
+    assert warm_date is not None
+    cands = compute_spot_candidates(lake_root=lake, interval="1day", date=warm_date, time=None)
+    assert "RELIANCE" in {snap.instrument.symbol for snap in cands.snapshots}
+    # The runbook §7 third-shape /coverage/windows signature: the durable
+    # ledger keeps settled SUCCESS bars>0 rows for the post-pull-removed
+    # symbol — never the vendor-empty "settled SKIPPED, bars=0" shape.
+    from brutex.data.window_ledger_store import load_window_ledger
+
+    rel_rows = [r for r in load_window_ledger(lake).records() if r.security_id == "RELIANCE"]
+    assert rel_rows and all(r.status == "SUCCESS" and r.bars > 0 for r in rel_rows)
+
+
+def test_e2e_no_source_note_survives_spot_only_surgery(tmp_path: Path) -> None:
+    """[T21 — the note-surgery anchor pin] a note CARRYING the no-source skip
+    clause round-trips ``build_spot_only_note`` with the clause preserved and
+    NO ``pull_scope.note_surgery_miss`` WARN (the clause contains neither
+    surgery anchor)."""
+    from structlog.testing import capture_logs
+
+    adapter = _RecordingAdapter(empty_symbols=frozenset({"RELIANCE"}))
+    chain = _Chain(tmp_path / "lake", [_nifty(), _reliance()], adapter=adapter, real_prebuild=True)
+    with capture_logs() as logs:
+        _report, note = chain.run()
+    assert note.startswith("spot-only pipeline complete — ")
+    assert ", F&O skipped by design (spot-only scope)" in note  # the surgery applied
+    assert (
+        ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: RELIANCE" in note
+    )
+    assert not [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
 
 
 def test_vendor_empty_materialize_remediation_names_both_causes(tmp_path: Path) -> None:
