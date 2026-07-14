@@ -730,3 +730,116 @@ def test_dispatch_wires_all_flags(lake: Path, monkeypatch: pytest.MonkeyPatch) -
             "strict_exit": True,
         }
     ]
+
+
+# ── the durable owed-day sentinel (DEC-CROSSVERIFY-OWED-SENTINEL-001) ─────
+
+
+def test_owed_marker_written_before_the_chain_real_run_only(lake: Path) -> None:
+    """A REAL run writes the owed marker at pull-tail-commit ENTRY — locks
+    held, BEFORE the pipeline builder ever runs — so a death anywhere
+    downstream (mid-pull / mid-prebuild / pre-tail) leaves the sentinel; the
+    marker SURVIVES the finished run when the injected tail never completes
+    the day (the crash-sentinel shape)."""
+    from datetime import date
+
+    from brutex.crossverify.owed import list_owed_days
+
+    day = date(2024, 1, 2)
+    h = _Harness()
+    real_builder = h.builder
+    seen_at_builder: list[list[date]] = []
+
+    def builder(**kwargs: Any) -> Any:
+        seen_at_builder.append(list_owed_days(lake))
+        return real_builder(**kwargs)
+
+    rc = cmd_pull_all_spot(
+        lake_root=lake,
+        now=lambda: _TRADING_EVENING,
+        pipeline_builder=builder,
+        pipeline_executor=h.executor,
+        crossverify_tail=h.tail,
+    )
+    assert rc == EXIT_OK
+    assert seen_at_builder == [[day]]  # marked BEFORE the chain ran
+    assert list_owed_days(lake) == [day]  # …and kept (the tail spy cleared nothing)
+
+
+def test_owed_marker_absent_for_dry_run_and_refused_lock(lake: Path) -> None:
+    from brutex.crossverify.owed import list_owed_days
+
+    h = _Harness()
+    assert h.run(lake, dry_run=True, now=lambda: _TRADING_EVENING) == EXIT_OK
+    assert list_owed_days(lake) == []  # a dry-run owes nothing
+
+    def refusing_lock(*_args: Any, **_kwargs: Any) -> Any:
+        raise PullAlreadyRunningError(Path("/x.lock"), "pull already running (holder: peer)")
+
+    h2 = _Harness()
+    rc = h2.run(lake, lock_factory=refusing_lock, now=lambda: _TRADING_EVENING)
+    assert rc == EXIT_USER_ERROR
+    assert list_owed_days(lake) == []  # a refused start commits to nothing
+
+
+def test_owed_marker_cleared_by_a_real_tail_completed_verdict(lake: Path) -> None:
+    """The happy-path-clears pin on the CLI surface: the injected tail runs
+    the REAL ``run_crossverify`` (a Saturday launch → the honest
+    ``skipped_non_trading`` completed verdict), whose clear-on-verdict
+    removes the marker the CLI wrote at entry — no marker lingers."""
+    from datetime import date, datetime
+
+    from brutex.calendars.nse import get_session_checked
+    from brutex.crossverify.config import resolve_crossverify_config
+    from brutex.crossverify.owed import list_owed_days
+    from brutex.crossverify.run import CrossverifySeams, run_crossverify
+    from brutex.dashboard.pull_scope import CrossverifyTailOutcome as _Outcome
+
+    saturday = date(2024, 1, 6)
+
+    def _never(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("seam must not be reached on a non-trading day")
+
+    def real_tail() -> Any:
+        config = resolve_crossverify_config(lake_root=lake, day=saturday)
+        seams = CrossverifySeams(
+            acquire_locks=lambda _stack: True,
+            session_for=get_session_checked,
+            classifier_factory=_never,
+            reader=_never,
+            enumerate_targets=_never,
+            run_pull=_never,
+            run_settle_retry=_never,
+            run_prebuild=_never,
+            s3_client_factory=_never,
+            alerter=_RecordingTailAlerter(),
+            emit_pull_halt=_never,
+            market_hours_blocked=lambda: False,
+            now_ist=lambda: datetime(2024, 1, 6, 18, 0),
+            sleeper=lambda _s: None,
+        )
+        cv = run_crossverify(config, seams)
+        return _Outcome(status=cv.verdict, human=cv.verdict)
+
+    h = _Harness()
+    rc = cmd_pull_all_spot(
+        lake_root=lake,
+        now=lambda: datetime(2024, 1, 6, 18, 0),
+        pipeline_builder=h.builder,
+        pipeline_executor=h.executor,
+        crossverify_tail=real_tail,
+    )
+    assert rc == EXIT_OK
+    assert list_owed_days(lake) == []  # written at entry, cleared by the verdict
+
+
+class _RecordingTailAlerter:
+    """A no-op CrossverifyAlerter for the real-tail clear pin."""
+
+    def crossverify_summary(self, *, run_id: str, report: Any) -> bool:
+        _ = (run_id, report)
+        return True
+
+    def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+        _ = (run_id, reason)
+        return True
