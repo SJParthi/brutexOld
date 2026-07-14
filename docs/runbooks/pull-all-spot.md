@@ -303,7 +303,10 @@ provably conflates vendor-empty with an already-settled incremental re-run —
 the #1779 executed evidence; the trap twin is regression-pinned). The warm
 stays display-cache only: the movers caches re-key on the revision token at
 the next poll. A GENUINE prebuild failure (corrupt parquet, poisoned
-partition) still reads `prebuild failures: …` and still withholds the warm —
+partition — and, since refuter round 4, an UNENUMERABLE partition: a
+chmod/ownership mishap on a symbol's `1minute` subtree raises the EACCES
+loudly instead of reading as "empty", so it can never masquerade as
+no-source) still reads `prebuild failures: …` and still withholds the warm —
 unchanged law.
 
 **Dry-run reports no-source targets BY CONSTRUCTION (refuter-round-1 r3

@@ -2612,11 +2612,27 @@ hostile-review pass._
   0-row-parquet residual claim corrected as above (the three claim sites
   rewritten to the executed truth + the NEW
   `test_e2e_zero_row_parquet_completes_as_zero_bar_success` pin; behavior
-  itself pre-existing + unchanged, merge-base-parity executed). Default path
+  itself pre-existing + unchanged, merge-base-parity executed). REFUTER
+  ROUND 4 folded (1 MINOR, executed-repro-validated then fixed at ROOT
+  CAUSE — per-finding record in MIGRATION.md #1792): an UNENUMERABLE
+  permission-broken POPULATED partition no longer misclassifies benign
+  no_source — pathlib SUPPRESSES PermissionError during glob traversal, so
+  the probe's original `is_dir() and any(rglob(...))` spelling read the
+  EACCES fault as "empty" and the retyped arm turned a merge-base loud
+  warm-withholding FAILURE into ok=True + a false "vendor-empty or never
+  pulled" wording (executed real-permissions A/B, uid 65534);
+  `has_stored_1m_bars` now enumerates with an OSError-PROPAGATING
+  `os.walk(onerror=raise)` (rglob-parity kept, absent/non-dir shapes stay
+  the benign False), so the EACCES propagates out of the reader as OSError —
+  a `parquet_read_skip_errors` member — restoring the merge-base
+  per-symbol-FAILURE classification (WARNING, ok=False, warm withheld),
+  fails-before-pinned at probe + reader level via a CI-safe
+  monkeypatched-scandir harness. Default path
   byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
   zero added I/O — the classification rides an exception that only exists on
   the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
-  lake/schema/scope/vocab/rate change; `timeframe_materialize.py` (163/50) +
+  lake/schema/scope/vocab/rate change; `timeframe_materialize.py` (176/56,
+  the round-4 re-measure) +
   `gated_prebuild.py` (143/26) + `prebuild_parallel.py` (85/16) +
   `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
   line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
