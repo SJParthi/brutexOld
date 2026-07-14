@@ -31,9 +31,8 @@ from brutex.data.frame_write_gate import (
     DegradeReason,
     FrameWriteStats,
 )
-from brutex.data.models import CandleBar, CatalogEntry
+from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter, WriteResult
-from brutex.data.sink import ParquetBarSink
 from brutex.data.spot_daily_resample import frame_to_candle_bars
 
 pytest.importorskip("polars")
@@ -934,114 +933,6 @@ class TestRenderFrameBytesAssert:
         )
         assert multi.n_chunks() > 1
         assert ParquetWriter._render_frame_bytes(multi) == ParquetWriter._render_frame_bytes(single)
-
-
-# ────────────────────────────────────────────────────────────────────────
-# Sink sibling: append_frame
-# ────────────────────────────────────────────────────────────────────────
-
-
-class _RecordingCatalog:
-    def __init__(self) -> None:
-        self.entries: list[CatalogEntry] = []
-
-    def upsert(self, entry: CatalogEntry) -> None:
-        self.entries.append(entry)
-
-
-class TestAppendFrame:
-    def test_empty_frame_early_return(self, writer: ParquetWriter) -> None:
-        """The C13 law — byte-identical to append([])."""
-        sink = ParquetBarSink(writer=writer)
-        result = sink.append_frame(**_COORDS, frame=_frame(0))
-        assert result.bars_appended == 0
-        assert result.partitions_written == 0
-        assert result.write_results == ()
-
-    def test_bars_appended_is_input_count(
-        self, writer: ParquetWriter, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _steady_on(monkeypatch)
-        sink = ParquetBarSink(writer=writer)
-        result = sink.append_frame(**_COORDS, frame=_frame(4))
-        assert result.bars_appended == 4
-        assert result.bars_net_new == 4
-        assert result.partitions_written == 1
-
-    def test_multi_month_grouping_ascending(
-        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A month-straddling frame becomes one write per month, ascending."""
-        _steady_on(monkeypatch)
-        sink = ParquetBarSink(writer=writer)
-        straddle = _frame(4, start=datetime(2024, 3, 31, 23, 50, tzinfo=UTC), step_minutes=5)
-        result = sink.append_frame(**_COORDS, frame=straddle)
-        assert result.partitions_written == 2
-        months = [wr.path.name for wr in result.write_results]
-        assert months == ["03.parquet", "04.parquet"]  # ascending — the sink law
-        assert result.bars_appended == 4
-        assert result.bars_net_new == 4
-
-    def test_ts_dtype_pre_check_degrades_whole_frame(
-        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An untrustworthy ts column routes the WHOLE call through legacy append."""
-        _steady_on(monkeypatch)
-        sink = ParquetBarSink(writer=writer)
-        naive = _frame().with_columns(pl.col("ts_utc").dt.replace_time_zone(None))
-        stats = FrameWriteStats()
-        # frame_to_candle_bars on a NAIVE ts builds bars CandleBar refuses —
-        # the exact flag-OFF failure (same class, same site).
-        with pytest.raises(ValueError, match="timezone-aware"):
-            sink.append_frame(**_COORDS, frame=naive, stats=stats)
-        assert stats.degrade_reasons == {"schema_mismatch": 1}
-
-    def test_ts_null_pre_check_degrades_whole_frame(
-        self, writer: ParquetWriter, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _steady_on(monkeypatch)
-        sink = ParquetBarSink(writer=writer)
-        bad = _frame(3).with_columns(
-            pl.when(pl.int_range(pl.len()) == 1)
-            .then(None)
-            .otherwise(pl.col("ts_utc"))
-            .alias("ts_utc")
-        )
-        stats = FrameWriteStats()
-        # frame_to_candle_bars hands CandleBar a None timestamp — TODAY's exact
-        # legacy failure class (AttributeError from the tz check), reproduced.
-        with pytest.raises(AttributeError):
-            sink.append_frame(**_COORDS, frame=bad, stats=stats)
-        assert stats.degrade_reasons == {"schema_mismatch": 1}
-
-    def test_catalog_arm_parity(
-        self, writer: ParquetWriter, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The catalog upsert arm mirrors append() (parity for future callers)."""
-        _steady_on(monkeypatch)
-        catalog = _RecordingCatalog()
-        sink = ParquetBarSink(writer=writer, catalog=catalog)  # type: ignore[arg-type]
-        sink.append_frame(**_COORDS, frame=_frame(4))
-        assert len(catalog.entries) == 1
-        assert catalog.entries[0].row_count == 4
-
-    def test_append_frame_bytes_equal_legacy_append(
-        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Sink-level parity: append_frame ≡ append(frame_to_candle_bars(...))."""
-        _steady_on(monkeypatch)
-        sink = ParquetBarSink(writer=writer)
-        sink.append_frame(**_COORDS, frame=_frame(with_oi=True))
-        twin_root = lake.parent / "twin"
-        twin_sink = ParquetBarSink(
-            writer=ParquetWriter(lake_root=twin_root, partition_log_level="debug")
-        )
-        twin_sink.append(
-            **_COORDS,
-            bars=frame_to_candle_bars(_frame(with_oi=True), absent_open_interest=0),
-            merge_mode="latest-wins",
-        )
-        assert _dest(lake).read_bytes() == _dest(twin_root).read_bytes()
 
 
 # ────────────────────────────────────────────────────────────────────────
