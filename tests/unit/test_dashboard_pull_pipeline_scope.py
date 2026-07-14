@@ -1432,6 +1432,31 @@ class TestAutoArmRoute:
             _wait_for_job(client)
         assert AutoPullStateStore(tmp_path / "lake").load().last_success_date is None
 
+    def test_scheduler_fire_credential_refusal_maps_to_started_false(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A credential 503 raised SYNCHRONOUSLY by ``_launch_pipeline`` during
+        the scheduler's fire is caught by ``_auto_spot_launcher``'s
+        ``except HTTPException`` arm → the fire reads ``started=False`` with the
+        honest ``launch rejected (503)`` reason, so the tick is a NON-attempt
+        deferral (``refused_retry``) the scheduler retries once the credential
+        outage heals — never an unhandled raise that would kill the ticker
+        thread (app.py lines 5256-5257, the fire seam's rejection arm)."""
+        # Deliberately NOT `_pin_creds_present`: the LOUD resolver reports the
+        # fix text (creds missing), so the real-pull credential gate refuses.
+        monkeypatch.setattr(
+            app_module,
+            "groww_credentials_error",
+            lambda: "groww credentials unavailable (test): fix the AWS SSM params",
+        )
+        scheduler = _wired_scheduler(tmp_path)
+        with _make_client(store, monkeypatch, tmp_path, auto_pull_scheduler=scheduler):
+            scheduler.arm()
+            assert scheduler.tick_once() == "refused_retry"
+        on_disk = AutoPullStateStore(tmp_path / "lake").load()
+        assert on_disk.last_attempt_date is None  # a 503-refused fire is not an attempt
+        assert on_disk.last_success_date is None  # …and marks no success
+
     def test_boot_lifespan_resumes_armed_ticker(
         self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
