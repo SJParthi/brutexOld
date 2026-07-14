@@ -7864,7 +7864,53 @@ def _contract_grid_row(row: Any) -> list[Any]:
     ]
 
 
-def registry_counts(registry_path: Path) -> dict[str, Any]:
+def registry_count_key(
+    kind: str,
+    *,
+    exch: str | None = None,
+    underlying: str | None = None,
+    expiry_date: str | None = None,
+) -> str:
+    """Build the stable cache key for a registry COUNT (DEC-O1-GUARANTEE-HARDEN-001 H1).
+
+    The registry pagers' ``total`` is a FILTERED ``COUNT(*)`` over the
+    monotonically-growing ``registry.duckdb`` tables — paging-invariant (the
+    :func:`candle_count_key` law: ``limit`` / ``offset`` never change how many
+    rows match), so every page of the same ``(kind, filters)`` shares ONE
+    cached total per registry content revision. *kind* names the counted
+    surface (``"exp"`` expiries / ``"con"`` contracts / ``"counts"`` the
+    whole-registry nav-badge dict). The filter triple is folded via ``repr``
+    (never a bare ``|`` join): the registry filters are UNVALIDATED query
+    strings, so a literal ``|`` inside one must not collide two distinct
+    filter shapes into one key.
+    """
+    return f"reg|{kind}|{(exch, underlying, expiry_date)!r}"
+
+
+def _registry_total(
+    count_cache: CandleCountCache | None,
+    *,
+    generation: int,
+    key: str,
+    compute: Callable[[], int],
+) -> int:
+    """One registry COUNT — memoised when a cache is injected, direct otherwise.
+
+    The ONE cache-or-compute chokepoint for the registry pagers' totals
+    (§11 COMMON — both pagers ride it). ``count_cache=None`` is the
+    byte-identical legacy path (every click recounts, the pre-H1 behaviour).
+    """
+    if count_cache is None:
+        return compute()
+    return count_cache.get_or_compute(key, generation=generation, compute=compute)
+
+
+def registry_counts(
+    registry_path: Path,
+    *,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
+) -> dict[str, Any]:
     """Return ``{"expiries", "contracts", "exists", "note"}`` for the registry cache.
 
     A MISSING ``registry.duckdb`` degrades honestly to ``{"expiries": 0,
@@ -7874,31 +7920,53 @@ def registry_counts(registry_path: Path) -> dict[str, Any]:
     counts are read read-only via :class:`~brutex.data.registry_store.RegistryStore`
     (which is closed before returning), and ``note`` is ``None``.
 
+    With a *count_cache* injected (DEC-O1-GUARANTEE-HARDEN-001 H1) the two
+    whole-table ``COUNT(*)`` reads are memoised under
+    ``registry_count_key("counts")`` at *generation* (the registry-content
+    stat-token digest the route derives) — a repeat nav-badge read within one
+    registry revision is an O(1) dict handoff instead of a store open + two
+    COUNTs; the FIRST read per revision still pays the real store read (honest
+    O(1)-on-repeat, never bare O(1)). ``count_cache=None`` (the default) is
+    the byte-identical legacy path.
+
     Parameters
     ----------
     registry_path
         The ``registry.duckdb`` path (see :func:`registry_path_for`).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (:func:`candle_count_key` precedent — the COMMON
+        :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` satisfies
+        the Protocol).
 
     Returns
     -------
     dict[str, Any]
         ``{"expiries": <int>, "contracts": <int>, "exists": <bool>,
-        "note": <str|None>}``.
+        "note": <str|None>}`` — always a FRESH dict (a memoised hit is copied,
+        so a caller mutating the payload never poisons the cache).
     """
     if not registry_path.is_file():
         return {"expiries": 0, "contracts": 0, "exists": False, "note": _REGISTRY_MISSING_NOTE}
-    from brutex.data.registry_store import RegistryStore
 
-    store = RegistryStore.open(registry_path)
-    try:
-        return {
-            "expiries": store.count_expiries(),
-            "contracts": store.count_contracts(),
-            "exists": True,
-            "note": None,
-        }
-    finally:
-        store.close()
+    def _read() -> dict[str, Any]:
+        """Open the store read-only and count both tables (the legacy body)."""
+        from brutex.data.registry_store import RegistryStore
+
+        with RegistryStore.open(registry_path) as store:
+            return {
+                "expiries": store.count_expiries(),
+                "contracts": store.count_contracts(),
+                "exists": True,
+                "note": None,
+            }
+
+    if count_cache is None:
+        return _read()
+    cached = count_cache.get_or_compute(
+        registry_count_key("counts"), generation=generation, compute=_read
+    )
+    return dict(cached)
 
 
 def list_registry_expiries(
@@ -7908,6 +7976,8 @@ def list_registry_expiries(
     underlying: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted expiry DATES as a browsable grid (``/db``).
 
@@ -7931,6 +8001,16 @@ def list_registry_expiries(
         the store's parameterized SELECT.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1 — the :func:`candle_count_key` idiom):
+        the FILTERED ``total`` is paging-invariant, so with a cache injected a
+        repeat/paging click within one registry revision is an O(1) memo hit
+        instead of an O(filtered rows) ``COUNT(*)`` per click; the FIRST count
+        per revision still runs the real query (honest O(1)-on-repeat). The
+        default ``None`` is the byte-identical legacy path. The page DATA
+        query below stays a per-click ``LIMIT``/``OFFSET`` SELECT (already
+        O(page)) — only the COUNT is memoised.
 
     Returns
     -------
@@ -7956,7 +8036,12 @@ def list_registry_expiries(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_expiries(exch=exch, underlying=underlying)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key("exp", exch=exch, underlying=underlying),
+            compute=lambda: store.count_expiries(exch=exch, underlying=underlying),
+        )
         rows = [
             _expiry_grid_row(r)
             for r in store.list_expiries(
@@ -7983,6 +8068,8 @@ def list_registry_contracts(
     expiry_date: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
 
@@ -8009,6 +8096,12 @@ def list_registry_contracts(
         malformed value raises ``ValueError``.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1; see :func:`list_registry_expiries` —
+        the same O(1)-on-repeat law over the FILTERED leg count, keyed with
+        the validated ISO *expiry_date* string; ``None`` = byte-identical
+        legacy recount per click).
 
     Returns
     -------
@@ -8041,7 +8134,19 @@ def list_registry_contracts(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key(
+                "con",
+                exch=exch,
+                underlying=underlying,
+                expiry_date=None if parsed_expiry is None else parsed_expiry.isoformat(),
+            ),
+            compute=lambda: store.count_contracts(
+                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+            ),
+        )
         rows = [
             _contract_grid_row(r)
             for r in store.list_contracts(
@@ -8100,6 +8205,7 @@ __all__ = [
     "query_candles",
     "query_option_candles",
     "query_table",
+    "registry_count_key",
     "registry_counts",
     "registry_path_for",
     "resolve_applied_range",

@@ -48,6 +48,44 @@ round 7). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
 summary, never the story.)
+Earlier: 2026-07-13 (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 —
+the O(1)-guarantee verification + hardening pass: `docs/O1_GUARANTEE_AUDIT.md`
+becomes the AUTHORITATIVE honest per-path complexity classification (51 rows —
+the six Golden-Rule-#5 engine hot paths · the DB/lake dashboard reads · the
+frontend; the anti-illusion rule applied to every row — no bare O(1) claim
+where the FIRST read is O(files)/O(rows)); the reported M4-Pro
+ResultsStore.get "1.87×" strict-tier failure is triaged
+VERIFIED-NOT-A-REGRESSION (a one-line dict probe, measured flat
+51.7/53.5/51.7 ns at 1k/10k/100k rows; the #1301 cache-tier 3.0× re-gate
+already absorbs the dict-probe physics band; NEW 100k-deep pin); FIVE
+hardenings land (the last 3 unbounded-body poller templates ride the NEW
+COMMON `BXUI.fetchTextBounded`; the oneclick timeline gains a dup-tick
+skip token + a NAMED newest-500 render cap + the 200 ms search debounce;
+universe.html's seven interval loaders ride ONE bounded latest-wins helper;
+the /db registry pagers' filtered COUNT gains an O(1)-on-repeat memo on the
+NEW `registry_revision` stat token; the leaderboard + oneclick-runs O(dirs)
+freshness probes are TTL-bounded by the NEW `RevisionProbeMemo` — a ≤1 s
+DISCLOSED staleness window, kill switch `BRUTEX_REVISION_PROBE_TTL_S=0`)
++ EIGHT bench gates close the audit's missing-gate findings. READ-side
+dashboard + tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1791 — this header carries the
+one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 —
+the brute-force ENGINE is SPOT-ONLY by operator directive: the ADR-0012 /
+DEC-NIFTY-DYNAMIC-STRATEGY-001 NIFTY-futures engine authorization + the
+DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface are CONSCIOUSLY
+SUPERSEDED (engine surface {3 spot} ∪ {NSE-NIFTY-FUT} → {3 spot});
+`is_engine_sweep_symbol` admits EXACTLY NIFTY/BANKNIFTY/SENSEX and every
+production sweep entry refuses `NSE-NIFTY-FUT` loudly citing the DEC +
+"the engine is spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY" —
+BEFORE any futures-series resolution or lake I/O; the futures resolver /
+alias-aware loader / Stage-1A roll machinery / symbol_id 4 are RETAINED as
+lake tooling below the gate (reachable only via the loud audit-stamped
+--allow-out-of-scope research escape or recorded-work forensics); Groww
+PULL/lake scope UNTOUCHED — futures ingest stays REFERENCE_ONLY; the
+per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1790 — this header carries the pointer, never the story.)
 Earlier: 2026-07-13 (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md
 #1789 — the cross-verify WITHHELD-day AUTO-RE-GATE folded into the daily
 run's catchup: every prior day inside `catchup_days` whose journal still
@@ -2693,6 +2731,112 @@ hostile-review pass._
   `pipeline_prebuild.py` 193/54 re-measured 100.00%); touched
   app.py/cli.py/pipeline_binding.py lines covered; ruff/ruff-format clean,
   `mypy --strict` clean, pyright 0 errors on every touched file.)
+  Earlier: `claude/o1-guarantee-harden` (**DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791** —
+  the O(1)-guarantee verification + hardening pass. THE RECORD: NEW `docs/O1_GUARANTEE_AUDIT.md` — the
+  authoritative honest per-path complexity classification (51 rows: the six Golden-Rule-#5 engine hot paths ·
+  the DB/lake dashboard read paths · the frontend), every row carrying its honest class
+  (genuine-O(1) / O(1)-on-repeat / O(page) / O(rows)-O(files) / O(n log n)), its first-read/worst-case/error-path
+  cost and its bench gate or an explicit "none" — under the anti-illusion rule: NO path claims bare O(1) where its
+  FIRST read is O(files)/O(rows) (the #1528 posture, product-wide), and the enforcement split is stated plainly
+  (the merge-blocking guarantee is the shared-CI ROBUST tier — the whole tests/bench dir every push at 3–10×
+  ceilings — 123 bench files (measured 2026-07-13 at the post-QUAD merged tree; the QUAD fold raised the round-1
+  census 121 → 123 — sub-split unchanged): 75 ratio / 19 cache-tier / 2 metadata-sweep / 10 M4PRO_ABS-gated; the strict 1.1× M4-Pro
+  tier + absolute floors run post-merge, non-required + non-blocking BY DESIGN per #382 + #1753). THE TRIAGE: the
+  reported M4-Pro ResultsStore.get "1.87×" strict-tier failure is VERIFIED NOT A REGRESSION — the path is a
+  one-line dict probe (`results_store.py:692`), measured dead flat (51.7/53.5/51.7 ns at 1k/10k/100k rows;
+  re-measured 0.994×/0.962×), "1.87" has NO trace in the repo, the ledgered history is the #1301 1.134× cache-tier
+  singleton (rerouted to `cache_tier_ceiling` → 3.0× strict; the DEC-O1-CACHE-TIER-001 M4-Pro calibration bounds
+  the dict band at 2.11×) — a 1.87× reading PASSES today's gate with headroom while the O(1) oracle keeps teeth;
+  NEW deep-depth pin `test_get_ratio_is_o1_deep_depth` (100k-vs-1k) carries the triage note in-test. THE FIVE
+  HARDENINGS: (F1) the headers-then-stalled-body poller wedge closed on its LAST THREE carriers —
+  coverage/spot_coverage/expired_options ride the NEW COMMON `BXUI.fetchTextBounded` (abort armed THROUGH
+  `r.text()`; same TimeoutError shape, degrades byte-identical; `TestBoundedTickFetch` widened 2 → ALL FIVE
+  templates + a node-EXECUTED stalled-body golden; fetch_windows/completeness deliberately KEEP their
+  self-contained local copies — they do not load bx-ui.js, documented); (F2) the bx-oneclick timeline render
+  bounded — a dup-only events tick renders NOTHING (`ringMutations` skip token), the render caps at the NEWEST 500
+  with the truncation NAMED on-screen, the search input gains the 200 ms house debounce (killing the 5,000-node
+  teardown+rebuild every ~3 s / per keystroke; node-executed goldens); (F3) universe.html's `refreshWindowsLine` +
+  six integrity loaders ride ONE `boundedLatestJson` (the EXISTING `gbFetchJson` body-armed abort + a per-loader
+  generation claim — stale late responses never repaint; renders byte-identical, poll-hygiene pins pass
+  unmodified; the 2026-07-13 merge-reconcile folded main's #1763 client-belt NO-OVERLAP guard into the SAME
+  helper — a tick whose prior fetch is in flight is skipped, and #1763's interim inline `guardedPollJson`
+  AbortController copy is superseded by the gbFetchJson-delegating helper); (H1) the /db registry pagers — the ONE wholly-uncached /db pager — gain an O(1)-on-repeat
+  filtered-COUNT memo: NEW `lake_revision.registry_revision` (base + `.wal` stat token; probe fault → uncached
+  legacy, never stale) + `db_view.registry_count_key` (repr-folded, collision-proof) + optional
+  `count_cache`/`generation` on both pagers + `registry_counts` (None = byte-identical legacy), page DATA
+  untouched (O(page) LIMIT/OFFSET); (H2) the per-poll O(dirs) freshness-probe tax TTL-bounded at the two named
+  sites — NEW `lake_revision.RevisionProbeMemo` (default-ON TTL 1.0 s, `BRUTEX_REVISION_PROBE_TTL_S`; `0` =
+  byte-identical legacy; junk fails LOUD; single-flight; a None probe is never memoised + evicts the prior entry —
+  outage recovery immediate) wrapping EXACTLY the leaderboard `sweep_results_revision` + oneclick
+  `runs_revision_probe` calls via `build_app(revision_probe_memo=)`, with the conftest hermeticity belt
+  (`REVISION_PROBE_TTL_ENV` setdefault "0" — the #1692/#1774 precedent). THE EIGHT BENCH GATES (all green this
+  session, shared tier): the deep-depth pin + `test_registry_count_cache_o1.py` (4 clicks → 1 COUNT; generation
+  move → exactly +1; cached click flat 2000-vs-200 legs) + `test_db_tables_swr_o1.py` (5 polls → 1 sweep;
+  master-revision move → +1) + `test_preopen_export_memo_o1.py` (warm click = ZERO further read_parquet
+  statements, bytes identical) + `test_window_ledger_degrade_memo_o1.py` (degrade arm: one parse per stamp) +
+  `test_revision_probe_ttl_o1.py` (6 polls → 1 sweep per route; post-TTL → exactly one re-probe) +
+  `test_sweep_cache_bloom_rebuild_cost.py` (resume rebuild LINEAR: 10k→61.0 ms / 100k→78.0 ms = 1.28× vs the 20×
+  ceiling) + the `test_blake3_combo_hash_o1.py` payload pins (measured: `roll_schedule` 80 ordinals → 3.54× base,
+  pinned < 8×; 10.66× bytes → 10.59× time = LINEAR — flat-vs-payload is physics-impossible, honestly NOT
+  claimed). HONEST ENVELOPES: the TTL memo INTRODUCES a ≤1 s freshness-detection staleness window (disclosed +
+  kill-switched; the walk itself stays O(run dirs) per fresh probe — the F5 uncapped ruling stands, FREQUENCY
+  bounded not the walk); the registry cache is O(1)-on-repeat — the FIRST click per revision pays the O(filtered
+  rows) COUNT; frontend caps are NAMED on-screen, never silent truncation; the SummaryCache `revision_probe` path
+  is deliberately NOT wrapped (scoped to the two named sites). DELIBERATELY NOT CHANGED (named follow-ups):
+  MoversSnapshotCache negative-result backoff = DEC-MOVERS-CACHE-ERROR-BACKOFF-001; movers LRU eviction churn
+  under hostile coordinate churn (capacity 256 — note only); `OptionDedupIndex._add_locked` Bloom-first ordering
+  (the pre-existing in-source Rule-11 follow-up); `ResultsStore.top_k` O(n log n) (documented; the #1533 route
+  cache is the enforcement). GATES: db_view ci.yml-EXACT stanza 100.00% (1659/536, 764 passed); lake_revision
+  100.00% (139/36) via the coverage_gate_discovery per-module gate; frontend six-suite 195 passed + the 44-file
+  battery 988 passed + the backend 12-file suite 125 passed; ruff/ruff-format clean; `mypy --strict` clean on
+  touched files (0 new); pyright 0 new vs the origin/main baseline; `node --check` clean. READ-side dashboard +
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/engine-spot-only` (**DEC-ENGINE-SPOT-ONLY-001,
+  MIGRATION.md #1790** — the brute-force ENGINE is SPOT-ONLY (operator
+  directive 2026-07-13, "wipe off the future, only spots alone"): the
+  NIFTY-futures series alias `NSE-NIFTY-FUT` is RETIRED from engine sweep
+  scope — a CONSCIOUS, ledgered supersession of the engine-scope clause of
+  DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012 and the launch surface of
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 (#1700–#1710), never a silent scope
+  change (Golden Rule #3). `brutex/universe.py::is_engine_sweep_symbol`
+  admits EXACTLY the 3 spot indexes; `classify_engine_sweep_target` refuses
+  the alias on EVERY coordinate (the `EngineSweepVerdict.tier` Literal drops
+  `"nifty_future"` STRUCTURALLY); every production sweep entry — `brutex
+  sweep`/`sweep-all`/the daemon/`sweep-verify --recount` via
+  `check_sweep_scope`, the dashboard sweep route (400, no override by
+  design), the dashboard launch button (`probe_futures_alias` reads honestly
+  unavailable citing the DEC), and programmatic `SweepGridConfig`
+  construction (Layer-1 ValueError) — refuses LOUDLY citing
+  DEC-ENGINE-SPOT-ONLY-001 + "the engine is spot-only; NSE-NIFTY-FUT remains
+  lake/REFERENCE_ONLY", BEFORE any futures-series resolution or lake I/O
+  (spy-pinned). RATIONALE: the 3 spot indices carry no traded volume, so the
+  VWAP bits 52/53 permanently abstain on every remaining engine instrument —
+  removing the one volume-bearing engine instrument makes that unconditional
+  (coordinates with the #1787 volume-bits work). RETAINED below the gate
+  (tested internals + lake tooling, NOT deleted): `futures_series.py`,
+  `series_load.py`, the Stage-1A roll-reset machinery, the
+  instrument⟺roll_schedule invariant, the cascade `roll_schedules` carriage,
+  and `_SYMBOL_ID_TABLE` row 4 (append-only law) — reachable ONLY via the
+  pre-existing loud, audit-stamped `--allow-out-of-scope` CLI research
+  escape or recorded-work forensics; the frozen futures goldens drive
+  `run_persisted_sweep` below the gate and pass UNMODIFIED (run identity
+  untouched). Groww PULL/lake scope UNTOUCHED — futures ingest + the F&O
+  lake stay REFERENCE_ONLY. Fails-before-proven regression
+  (`TestSpotOnlyScopeRefusal` — the pre-flip source RAN the sweep) + the
+  `is_engine_sweep_symbol` truth table + the isolation property collapse to
+  the 3 spot triples. ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX; no
+  vocab/rate/lake-schema change; `universe.py` 100% line+branch on its
+  ci.yml gate + the whole-engine gate green; ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new. HOSTILE-REVIEW ROUND folded (verdict
+  SHIP×2 — 2 MINOR + 3 NIT, per-item record in MIGRATION.md #1790): the
+  stale lowercase-alias case-hint clause DROPPED (never "did you mean" a
+  symbol that is itself refused — `nse-nifty-fut` now takes the generic
+  spot-only refusal, its test flipped to pin that); ADR-0016 §6 gains the
+  appended SUPERSEDED-IN-PART note; the ADR-0012/ADR-0016/spec launch-DEC
+  ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
+  `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
+  the blake3 formula on this branch, cite kept.)
   Earlier: `claude/crossverify-backfill` (**DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789** —
   the withheld-day AUTO-RE-GATE + the persistent last-run surface, stacked on PR #1515's
   `claude/crossverify-spot-only` head (the PR opens after #1515 lands). OPERATOR SCOPE RULING 2026-07-13: the
@@ -2822,7 +2966,11 @@ hostile-review pass._
   (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
   full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
   #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
-  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard) · **#1441** docs
+  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard [MECHANISM
+  SUPERSEDED at the 2026-07-13 #1791 merge-reconcile: the belt's no-overlap guard is folded
+  into `boundedLatestJson` — the gbFetchJson-delegating helper carrying the same body-armed
+  abort — and the interim inline `guardedPollJson` copy was deleted; the belt's INTENT stands])
+  · **#1441** docs
   club DEC-EAP-FEEDBACK-INDEX-001 #1764 (+ the Zerodha 10y feasibility record + the market
   one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
   `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
@@ -6391,7 +6539,11 @@ hostile-review pass._
 
    **Engine-scope amendment (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012,
    2026-06-29, MIGRATION.md entry #1006; companion clause owned by PR-1
-   DEC-VOCAB-U128-CODEGEN-001 #1010):** the operator has AUTHORIZED the
+   DEC-VOCAB-U128-CODEGEN-001 #1010) — the ENGINE-FUTURES AUTHORIZATION in
+   this block is RETIRED by DEC-ENGINE-SPOT-ONLY-001 (2026-07-13,
+   MIGRATION.md #1790 — see the retirement note at the end of this block;
+   the history below is kept verbatim per the supersession convention):**
+   the operator had AUTHORIZED the
    brute-force ENGINE to ALSO run on **NIFTY futures** for the dedicated
    dynamic-strategy track (a session-anchored intraday VWAP is feasible on
    futures because they carry traded volume, unlike a spot index per
@@ -6423,6 +6575,24 @@ hostile-review pass._
    reset at every roll (D11 — no level ever crosses the basis gap). The
    engine sweep surface is EXACTLY {the 3 spot index triples} ∪
    {NSE/FNO/NSE-NIFTY-FUT}.**
+
+   **RETIREMENT (DEC-ENGINE-SPOT-ONLY-001, 2026-07-13, MIGRATION.md
+   #1790):** the operator has DIRECTED the engine back to SPOT-ONLY ("wipe
+   off the future, only spots alone") — this CONSCIOUSLY SUPERSEDES the
+   engine-futures authorization above and the PR-5 launch surface: the
+   engine sweep surface is EXACTLY the 3 spot index triples
+   (NIFTY/BANKNIFTY/SENSEX), `is_engine_sweep_symbol` refuses
+   `NSE-NIFTY-FUT`, and every production sweep entry refuses it loudly
+   citing the DEC + the remediation ("the engine is spot-only;
+   NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"). NIFTY futures REJOIN the
+   REFERENCE_ONLY surface (lake ingest + the F&O candle lake untouched);
+   the 60-condition vocabulary itself is UNCHANGED (data-independent —
+   the volume-bearing VWAP bits 52/53 now permanently abstain on every
+   engine instrument, since no spot index carries volume); the futures
+   resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
+   are RETAINED as tested lake-tooling internals below the scope gate,
+   reachable only via the loud, audit-stamped `--allow-out-of-scope` CLI
+   research escape or recorded-work forensics.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
@@ -6486,8 +6656,9 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:760` after spec growth moved it from :743
-   (earlier :654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:770` after spec growth moved it from :760
+   (earlier :743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
+   :760→:770 with the DEC-ENGINE-SPOT-ONLY-001 scope-retirement note) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
@@ -6708,6 +6879,36 @@ hostile-review pass._
   ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
   MIGRATION.md #1779 for the full blurb)
+  Earlier: `claude/o1-guarantee-harden`
+  (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 — the O(1)-guarantee
+  verification + hardening pass: NEW `docs/O1_GUARANTEE_AUDIT.md` is the
+  authoritative honest per-path complexity classification (51 rows across
+  the engine hot paths / DB-lake reads / frontend; no bare-O(1) claim where
+  the first read is O(files); the merge-blocking vs post-merge enforcement
+  split stated plainly); the M4-Pro ResultsStore.get "1.87×" report triaged
+  VERIFIED-NOT-A-REGRESSION (one-line dict probe, measured flat at 100×
+  depth; the #1301 cache-tier re-gate absorbs the physics band; NEW
+  deep-depth pin); five hardenings (the NEW COMMON `BXUI.fetchTextBounded`
+  on the last 3 unbounded-body poller templates; the oneclick timeline
+  dup-tick skip token + NAMED newest-500 render cap + 200 ms search
+  debounce; universe.html's seven loaders on ONE bounded latest-wins
+  helper; the /db registry filtered-COUNT memo on the NEW
+  `registry_revision` token; the NEW `RevisionProbeMemo` TTL-bounding the
+  leaderboard + oneclick-runs O(dirs) probes — ≤1 s disclosed staleness,
+  kill switch) + eight bench gates; READ-side dashboard + tests + docs
+  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; matches §1's Active branch line)
+  Earlier: `claude/engine-spot-only`
+  (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 — the brute-force ENGINE is
+  SPOT-ONLY: `NSE-NIFTY-FUT` RETIRED from engine sweep scope, every
+  production sweep entry refuses it loudly citing the DEC + "the engine is
+  spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"; consciously
+  supersedes the ADR-0012 engine-futures authorization + the
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface; futures machinery
+  retained below the gate as lake/REFERENCE_ONLY tooling; Groww pull/lake
+  scope untouched; ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1790 for the
+  full blurb)
   Earlier: `claude/crossverify-backfill`
   (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789 — the cross-verify
   WITHHELD-day AUTO-RE-GATE folded into the daily run's catchup (step D2:
@@ -7323,7 +7524,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5090-5091` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5103-5104` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
@@ -7331,7 +7532,7 @@ bruteX/
 | F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:595-608` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
-| NIFTY-futures ENGINE series alias | **`NSE-NIFTY-FUT`** (symbol_id 4) — the ONE pinned ADR-0012 futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolved at launch by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the engine hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
+| NIFTY-futures series alias (LAKE tooling — NO LONGER an ENGINE series, DEC-ENGINE-SPOT-ONLY-001 #1790) | **`NSE-NIFTY-FUT`** (symbol_id 4, append-only registry row) — the ONE pinned futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolvable by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the Stage-1A machinery hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias. **ENGINE-RETIRED (DEC-ENGINE-SPOT-ONLY-001):** `is_engine_sweep_symbol` refuses it — the alias + resolver + loader survive ONLY as lake/REFERENCE_ONLY tooling below the scope gate (reachable via the loud `--allow-out-of-scope` research escape or recorded-work forensics), never a default engine series | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |

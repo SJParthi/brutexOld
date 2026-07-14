@@ -2840,16 +2840,25 @@ jobs:
         run: |
           git fetch --no-tags origin "${BASE_REF}"
           python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
-      - name: Install deps (dev + data — the lake benches need polars/duckdb)
+      - name: Install deps (dev + data + ui — the lake AND route benches need them)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
         # gates (test_parquet_write_o1.py, test_db_candle_query_o1.py,
         # test_catalog_reconcile_o1.py, test_write_latency.py, …) NEVER ran in
         # CI, so a linear-scan regression on those hot paths could not fail
-        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute; the
+        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute.
+        # DEC-O1-GUARANTEE-HARDEN-001 review round 1 (the same finding class,
+        # one extra over): `[ui]` (fastapi) makes the SIX route-level bench
+        # gates execute too (test_db_tables_swr_o1 / test_preopen_export_memo_o1
+        # / test_revision_probe_ttl_o1 / test_lake_census_route_o1 /
+        # test_ledger_delta_o_page_o1 / test_movers_pcr_o1 — all previously
+        # collected-then-SKIPPED on this job via importorskip("fastapi")); the
         # fno_math/trading_core wheels the remaining skips need are built by
-        # the steps below, so no bench silently skips for a missing extra.
-        run: pip install -e ".[dev,data]"
+        # the steps below, so no bench silently skips for a missing extra
+        # (verified locally: the full tests/bench dir with ui deps = 371
+        # passed / 11 skipped, every remaining skip the documented
+        # BRUTEX_M4PRO_ABS class; the 6 route files ran 3× stable ~30 s).
+        run: pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable

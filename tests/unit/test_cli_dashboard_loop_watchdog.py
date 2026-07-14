@@ -91,6 +91,26 @@ def test_junk_env_fails_loud_before_bind(
     assert "BRUTEX_LOOP_WATCHDOG" in capsys.readouterr().err
 
 
+def test_junk_revision_probe_ttl_env_fails_loud_before_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Junk ``BRUTEX_REVISION_PROBE_TTL_S``: the SAME clean EXIT_USER_ERROR
+    one-liner as the loop-watchdog sibling above, BEFORE build_app/uvicorn —
+    never a raw ValueError traceback (DEC-O1-GUARANTEE-HARDEN-001, review
+    round 2; build_app keeps its OWN eager raise for non-CLI embedders,
+    pinned in test_dashboard_revision_probe_memo.py)."""
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+    assert cli.cmd_dashboard(None, "127.0.0.1", 9089) == cli.EXIT_USER_ERROR
+    assert "ran" not in probes  # uvicorn.run never reached
+    assert "loop_watchdog" not in probes  # refused BEFORE build_app
+    err = capsys.readouterr().err
+    assert err.startswith("[brutex] ")  # the clean one-liner, not a traceback
+    assert "BRUTEX_REVISION_PROBE_TTL_S" in err
+
+
 def test_construction_fault_logs_and_still_binds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

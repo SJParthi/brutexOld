@@ -3733,6 +3733,19 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
             loop_watchdog = LoopWatchdog(alerter=SweepAlerter(), registry=get_registry())
         except Exception as exc:  # pylint: disable=broad-exception-caught  # never block the bind
             _log.warning("loop_watchdog.build_failed", error=str(exc))
+    # Revision-probe TTL memo env (DEC-O1-GUARANTEE-HARDEN-001 H2, review
+    # round 2): validate BRUTEX_REVISION_PROBE_TTL_S eagerly HERE so a junk
+    # value refuses with the SAME clean [brutex] one-liner + EXIT_USER_ERROR
+    # as the loop-watchdog sibling above (main() does not catch ValueError,
+    # so build_app's own eager raise would surface as a raw traceback on the
+    # CLI path). build_app KEEPS its eager raise for non-CLI embedders.
+    from brutex.dashboard.lake_revision import resolve_revision_probe_ttl
+
+    try:
+        resolve_revision_probe_ttl()
+    except ValueError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     app = build_app(
         state,
         instrument_store=store,
