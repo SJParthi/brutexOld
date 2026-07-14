@@ -241,6 +241,11 @@ class TestValidateEvidencePayload:
             ({"earliest_all_pass_ist": None}, "earliest_all_pass_ist must be a string"),
             ({"earliest_all_pass_ist": "١٥:٤٥"}, "not strict ASCII HH:MM"),
             ({"earliest_all_pass_ist": "3pm"}, "not strict ASCII HH:MM"),
+            # Refuter r1 F-R1-1: under ``.match`` the ``$`` anchor matches
+            # BEFORE a single trailing newline — pre-fix this fell through the
+            # shape check (only the support law caught the mutated field);
+            # the fullmatch sweep refuses it AT the shape check.
+            ({"earliest_all_pass_ist": "15:45\n"}, "not strict ASCII HH:MM"),
             (
                 {"earliest_all_pass_ist": "24:00", "adopted_settle_ist": "24:15"},
                 "not a real wall-clock time",
@@ -307,6 +312,12 @@ class TestValidateEvidencePayload:
         [
             ({1: {"15:45": {}}}, "is not an ISO calendar day"),
             ({"2026/07/13": {}}, "is not an ISO calendar day"),
+            # Refuter r1 F-R1-1: a trailing newline sailed past the ``.match``
+            # ``$`` anchor — the DAY key was pre-fix caught only by the
+            # strptime realness belt ("not a real calendar day"), the SLOT key
+            # by nothing at all; both now refuse AT the shape check.
+            ({"2026-07-10\n": {}}, "is not an ISO calendar day"),
+            ({"2026-07-13": {"15:45\n": {}}}, "is not HH:MM"),
             ({"2026-02-30": {}}, "is not a real calendar day"),
             ({"2026-07-13": "x"}, "must be a non-empty object of slots"),
             ({"2026-07-13": {}}, "must be a non-empty object of slots"),
@@ -337,6 +348,25 @@ class TestValidateEvidencePayload:
         # refusal must fire FIRST (shape before arithmetic), so `match` pins it.
         with pytest.raises(ValueError, match=match):
             validate_evidence_payload(payload, path="p.json")
+
+    def test_trailing_newline_repro_payload_refused(self) -> None:
+        """Refuter r1 F-R1-1 — the executed repro's EXACT previously-PASSING
+        payload now yields invalid: ``earliest_all_pass_ist="15:45\\n"`` with
+        matching newline slot keys (so the support law held) VALIDATED at the
+        pre-fix head under the ``.match`` ``$``-before-trailing-newline quirk,
+        and the raw newline reached the ``settle_evidence.valid`` INFO + the
+        gate provenance un-repr'd. The fullmatch sweep refuses it at the
+        shape check — no content field can carry a trailing newline."""
+        payload = make_evidence_payload(earliest_all_pass_ist="15:45\n")
+        per_day = payload["per_day"]
+        assert isinstance(per_day, dict)
+        payload["per_day"] = {
+            day: {"15:45\n": {"records": 1, "all_pass": True, "failed_checks": []}}
+            for day in per_day
+        }
+        with pytest.raises(ValueError, match="not strict ASCII HH:MM") as excinfo:
+            validate_evidence_payload(payload, path="repro.json")
+        assert "'15:45\\n'" in str(excinfo.value)  # the value reprs, newline escaped
 
     def test_per_day_support_count_must_equal_distinct_days(self) -> None:
         """Row 18: the earliest slot must be observed-and-passing on EXACTLY

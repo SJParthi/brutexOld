@@ -118,9 +118,19 @@ MAX_EVIDENCE_BYTES: Final[int] = 1 * 1024 * 1024
 
 #: Strict ASCII ``HH:MM`` (the auto_pull_gate ``_SETTLE_SHAPE`` twin —
 #: ``re.ASCII`` per the DEC-LAKE-STATS-MANIFEST-001 round-3 precedent).
+#: Consumed via ``fullmatch`` ONLY: under ``.match`` the ``$`` anchor matches
+#: BEFORE a single trailing newline, so ``"15:45\n"`` would validate and the
+#: raw newline would reach the ``settle_evidence.valid`` INFO + the gate
+#: provenance un-repr'd (refuter r1 F-R1-1 — executed repro; fullmatch
+#: refuses it). The env-tier ``_SETTLE_SHAPE`` twin stays ``.match`` with the
+#: same pattern BYTE-UNTOUCHED: its token is ``.strip()``'d pre-match, so a
+#: post-strip token can never end in a newline (the quirk is unreachable
+#: there) and the base resolver ACCEPTED ``"17:00\n"`` — converting it would
+#: churn a behavior-equivalent surface for zero safety.
 _HHMM_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$", re.ASCII)
 
-#: Strict ASCII ISO calendar-day shape for ``per_day`` keys.
+#: Strict ASCII ISO calendar-day shape for ``per_day`` keys (``fullmatch``
+#: ONLY — the same ``$``-before-trailing-newline refusal as ``_HHMM_SHAPE``).
 _ISO_DAY_SHAPE: Final[re.Pattern[str]] = re.compile(r"^\d{4}-\d{2}-\d{2}$", re.ASCII)
 
 #: The settle override env var's LITERAL name, mirrored from
@@ -217,7 +227,7 @@ def _require_hhmm(value: object, *, path: str, field: str) -> tuple[time, int]:
     """A strict ASCII ``HH:MM`` real wall-clock field → ``(time, minute-of-day)``."""
     if not isinstance(value, str):
         _fail(path, f"{field} must be a string 'HH:MM', got {value!r}")
-    match = _HHMM_SHAPE.match(value)
+    match = _HHMM_SHAPE.fullmatch(value)
     if match is None:
         _fail(path, f"{field}={value!r} is not strict ASCII HH:MM")
     hour, minute = int(match.group(1)), int(match.group(2))
@@ -241,7 +251,7 @@ def _validate_per_day(per_day: object, *, path: str) -> dict[str, dict[str, dict
     if not per_day:
         _fail(path, "per_day is empty — no observations")
     for day, slots in per_day.items():
-        if not isinstance(day, str) or _ISO_DAY_SHAPE.match(day) is None:
+        if not isinstance(day, str) or _ISO_DAY_SHAPE.fullmatch(day) is None:
             _fail(path, f"per_day key {day!r} is not an ISO calendar day")
         try:
             datetime.strptime(day, "%Y-%m-%d")  # date-only realness check
@@ -250,7 +260,7 @@ def _validate_per_day(per_day: object, *, path: str) -> dict[str, dict[str, dict
         if not isinstance(slots, dict) or not slots:
             _fail(path, f"per_day[{day!r}] must be a non-empty object of slots")
         for slot, cell in slots.items():
-            if not isinstance(slot, str) or _HHMM_SHAPE.match(slot) is None:
+            if not isinstance(slot, str) or _HHMM_SHAPE.fullmatch(slot) is None:
                 _fail(path, f"per_day[{day!r}] slot key {slot!r} is not HH:MM")
             if not isinstance(cell, dict):
                 _fail(path, f"per_day[{day!r}][{slot!r}] must be an object")
