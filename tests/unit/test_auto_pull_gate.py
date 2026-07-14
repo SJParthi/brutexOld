@@ -11,6 +11,7 @@ module gate).
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,13 +22,16 @@ from brutex.calendars.auto_pull_gate import (
     MUHURAT_PRE_MARGIN,
     PULL_ALL_SETTLE_ENV,
     AutoGateVerdict,
+    SettleResolution,
     auto_pull_allowed,
     compose_market_closed,
     muhurat_session_active,
+    resolve_settle_resolution,
     resolve_settle_time,
 )
 from brutex.calendars.market_hours import BLOCK_END, MARKET_HOURS_GUARD_ENV
 from brutex.calendars.nse import MUHURAT_SESSIONS, is_trading_day
+from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
 from structlog.testing import capture_logs
 
 #: A plain NSE trading day (Tuesday, inside holiday coverage).
@@ -40,6 +44,15 @@ _TRADING_DAY = date(2024, 1, 2)
 _GUARD_ON = {MARKET_HOURS_GUARD_ENV: "1"}
 _GUARD_OFF = {MARKET_HOURS_GUARD_ENV: "off"}
 
+#: DEC-SETTLE-EVIDENCE-ADOPTION-001 hermeticity for INJECTED env mappings —
+#: mappings bypass os.environ, so the conftest belt cannot protect them: a
+#: settle-env-less mapping would read the repo default evidence path, and the
+#: DAY a measured evidence file lands every such test would silently change
+#: semantics (17:30 → the measured value). Every injected mapping without the
+#: settle key therefore merges this (the channel's OWN tests inject tmp
+#: paths/env explicitly).
+_NO_EVID = {SETTLE_EVIDENCE_PATH_ENV: "off"}
+
 
 def _at(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
     return datetime(d.year, d.month, d.day, hh, mm, ss)
@@ -49,9 +62,9 @@ def _at(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
 
 
 def test_resolve_settle_default_17_30() -> None:
-    assert resolve_settle_time({}) == time(17, 30)
-    assert resolve_settle_time({PULL_ALL_SETTLE_ENV: ""}) == time(17, 30)
-    assert resolve_settle_time({PULL_ALL_SETTLE_ENV: "   "}) == time(17, 30)
+    assert resolve_settle_time(_NO_EVID) == time(17, 30)
+    assert resolve_settle_time({**_NO_EVID, PULL_ALL_SETTLE_ENV: ""}) == time(17, 30)
+    assert resolve_settle_time({**_NO_EVID, PULL_ALL_SETTLE_ENV: "   "}) == time(17, 30)
     assert time(17, 30) == DEFAULT_PULL_ALL_SETTLE_IST
 
 
@@ -111,18 +124,28 @@ def test_before_settle_detail_renders_actual_resolved_settle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[r2 #2] The deferral detail names the ACTUAL resolved settle time —
-    an overridden 16:00 never reads a hardcoded "default 17:30" — while the
-    conservative/UNMEASURED honesty label always rides."""
+    an overridden 16:00 never reads a hardcoded "default 17:30" — with the
+    resolved TIER's honest provenance (DEC-SETTLE-EVIDENCE-ADOPTION-001
+    documented pin move: the override arm's "conservative"/"UNMEASURED"
+    labels became a Golden-Rule-#10 falsehood once evidence CAN exist — a
+    valid file could sit unread at the default path while the env wins — so
+    the env arm now reads "operator override <env>"; the DEFAULT arm's
+    detail stays byte-identical incl. the verbatim UNMEASURED clause)."""
     overridden = auto_pull_allowed(
-        now=_at(_TRADING_DAY, 15, 45), env={PULL_ALL_SETTLE_ENV: "16:00"}
+        now=_at(_TRADING_DAY, 15, 45), env={**_NO_EVID, PULL_ALL_SETTLE_ENV: "16:00"}
     )
     assert "waiting for post-close settle time 16:00 IST" in overridden.detail
     assert "17:30" not in overridden.detail  # never the stale hardcoded default
-    assert "conservative" in overridden.detail
-    assert "UNMEASURED" in overridden.detail
-    default = auto_pull_allowed(now=_at(_TRADING_DAY, 12, 0), env={})
-    assert "waiting for post-close settle time 17:30 IST" in default.detail
-    assert "conservative" in default.detail
+    assert "operator override" in overridden.detail
+    assert PULL_ALL_SETTLE_ENV in overridden.detail
+    assert "UNMEASURED" not in overridden.detail  # the honesty correction
+    default = auto_pull_allowed(now=_at(_TRADING_DAY, 12, 0), env=_NO_EVID)
+    assert default.detail == (
+        "waiting for post-close settle time 17:30 IST (conservative — the "
+        "vendor's true settle time is UNMEASURED; see "
+        "docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override "
+        "BRUTEX_PULL_ALL_SETTLE_IST)"
+    )  # BYTE-IDENTICAL to the pre-#1792 wording
 
 
 # ── auto_pull_allowed ────────────────────────────────────────────────────
@@ -131,14 +154,16 @@ def test_before_settle_detail_renders_actual_resolved_settle(
 def test_gate_junk_env_raises_out() -> None:
     """Junk settle env RAISES out of the gate — the caller fails loud pre-vendor."""
     with pytest.raises(ValueError, match=PULL_ALL_SETTLE_ENV):
-        auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env={PULL_ALL_SETTLE_ENV: "nope"})
+        auto_pull_allowed(
+            now=_at(_TRADING_DAY, 18, 0), env={**_NO_EVID, PULL_ALL_SETTLE_ENV: "nope"}
+        )
 
 
 @pytest.mark.parametrize(("hh", "mm"), [(8, 45), (9, 15), (12, 0), (15, 0), (15, 34)])
 def test_gate_blocked_every_market_hours_minute(hh: int, mm: int) -> None:
     """Every in-window minute defers — via before_settle (< the 17:30 default,
     which the ≥ 15:35 settle floor makes the STRUCTURALLY first-reached arm)."""
-    v = auto_pull_allowed(now=_at(_TRADING_DAY, hh, mm), env={})
+    v = auto_pull_allowed(now=_at(_TRADING_DAY, hh, mm), env=_NO_EVID)
     assert v.allowed is False
     assert v.reason == "before_settle"
 
@@ -146,7 +171,7 @@ def test_gate_blocked_every_market_hours_minute(hh: int, mm: int) -> None:
 def test_gate_15_34_59_and_15_35_00_defer_before_settle() -> None:
     """B C1/C2 boundary: both sides of BLOCK_END still wait for the settle."""
     for now in (_at(_TRADING_DAY, 15, 34, 59), _at(_TRADING_DAY, 15, 35, 0)):
-        v = auto_pull_allowed(now=now, env={})
+        v = auto_pull_allowed(now=now, env=_NO_EVID)
         assert (v.allowed, v.reason) == (False, "before_settle")
         assert "UNMEASURED" in v.detail
         assert "POSTCLOSE_SETTLE_RUNBOOK.md" in v.detail
@@ -155,9 +180,9 @@ def test_gate_15_34_59_and_15_35_00_defer_before_settle() -> None:
 
 def test_gate_boundary_17_29_defers_17_30_allows() -> None:
     """C 9: the settle boundary is INCLUSIVE — 17:30 exactly is allowed."""
-    before = auto_pull_allowed(now=_at(_TRADING_DAY, 17, 29), env={})
+    before = auto_pull_allowed(now=_at(_TRADING_DAY, 17, 29), env=_NO_EVID)
     assert (before.allowed, before.reason) == (False, "before_settle")
-    at = auto_pull_allowed(now=_at(_TRADING_DAY, 17, 30), env={})
+    at = auto_pull_allowed(now=_at(_TRADING_DAY, 17, 30), env=_NO_EVID)
     assert at == AutoGateVerdict(allowed=True, reason="ok", detail="ok")
 
 
@@ -166,7 +191,7 @@ def test_gate_weekend_holiday_non_trading() -> None:
     sunday = date(2026, 7, 12)
     holiday = date(2026, 11, 10)  # Diwali Balipratipada (listed, Tuesday)
     for d in (sunday, holiday):
-        v = auto_pull_allowed(now=_at(d, 18, 0), env={})
+        v = auto_pull_allowed(now=_at(d, 18, 0), env=_NO_EVID)
         assert v.allowed is False
         assert v.reason == "non_trading_day"
         assert v.detail == f"{d.isoformat()} is not an NSE trading day — nothing new to pull"
@@ -179,7 +204,7 @@ def test_gate_all_muhurat_dates_whole_day_deferred() -> None:
     muhurat arm is the belt."""
     for d in (*MUHURAT_SESSIONS, date(2026, 11, 8), date(2026, 11, 10)):
         for hh in (17, 19):
-            v = auto_pull_allowed(now=_at(d, hh, 0), env={})
+            v = auto_pull_allowed(now=_at(d, hh, 0), env=_NO_EVID)
             assert v.allowed is False, f"{d} @ {hh}:00 must defer"
             assert v.reason in {"non_trading_day", "muhurat_deferral"}
 
@@ -191,7 +216,7 @@ def test_gate_muhurat_belt_fires_even_if_trading_flag_true(
     muhurat_day = date(2025, 10, 21)  # afternoon session 13:45-14:45
     assert is_trading_day(muhurat_day) is False  # today: a listed holiday
     monkeypatch.setattr(auto_pull_gate, "is_trading_day", lambda _d: True)
-    v = auto_pull_allowed(now=_at(muhurat_day, 18, 0), env={})
+    v = auto_pull_allowed(now=_at(muhurat_day, 18, 0), env=_NO_EVID)
     assert (v.allowed, v.reason) == (False, "muhurat_deferral")
     assert "evening-session settle behavior unverified" in v.detail
 
@@ -202,7 +227,7 @@ def test_gate_out_of_coverage_weekday_allows_post_settle_with_one_warn() -> None
     market-hours guard still blocks in-window."""
     monday_2027 = date(2027, 1, 4)
     with capture_logs() as logs:
-        v = auto_pull_allowed(now=_at(monday_2027, 18, 0), env={})
+        v = auto_pull_allowed(now=_at(monday_2027, 18, 0), env=_NO_EVID)
     assert v == AutoGateVerdict(allowed=True, reason="ok", detail="ok")
     warns = [e for e in logs if e["event"] == "auto_pull_gate.calendar_coverage_exhausted"]
     assert len(warns) == 1
@@ -211,7 +236,7 @@ def test_gate_out_of_coverage_weekday_allows_post_settle_with_one_warn() -> None
 
 def test_gate_in_coverage_trading_day_no_coverage_warn() -> None:
     with capture_logs() as logs:
-        v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env={})
+        v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=_NO_EVID)
     assert v.allowed is True
     assert not [e for e in logs if e["event"] == "auto_pull_gate.calendar_coverage_exhausted"]
 
@@ -221,7 +246,7 @@ def test_gate_market_hours_belt_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     (every in-window minute is already before_settle) — monkeypatch the guard
     predicate to prove a future settle-law change cannot open a hole."""
     monkeypatch.setattr(auto_pull_gate, "pull_allowed_default", lambda *, now: False)
-    v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env={})
+    v = auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=_NO_EVID)
     assert (v.allowed, v.reason) == (False, "market_hours_blocked")
     assert v.detail == "inside the NSE market-hours pull window — deferred"
 
@@ -229,7 +254,7 @@ def test_gate_market_hours_belt_arm(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_gate_default_clock_is_live(monkeypatch: pytest.MonkeyPatch) -> None:
     """``now=None`` binds the live ``nse.now_ist`` (frozen here for determinism)."""
     monkeypatch.setattr(auto_pull_gate, "now_ist", lambda: _at(_TRADING_DAY, 18, 0))
-    assert auto_pull_allowed(env={}).allowed is True
+    assert auto_pull_allowed(env=_NO_EVID).allowed is True
 
 
 # ── muhurat_session_active ───────────────────────────────────────────────
@@ -406,3 +431,193 @@ def test_composed_base_and_open_arms_emit_no_attribution_event() -> None:
     with capture_logs() as logs2:
         assert open_arm() is False  # open — nothing fired
     assert [e for e in logs2 if e["event"] == "auto_pull_gate.muhurat_belt_halt"] == []
+
+
+# ── the three-tier evidence resolution (DEC-SETTLE-EVIDENCE-ADOPTION-001) ─
+
+
+def _write_valid_evidence(tmp_path: Path, **overrides: object) -> Path:
+    """A valid committed-evidence artifact (the canonical shared builder)."""
+    from tests.unit.test_settle_evidence import write_evidence
+
+    return write_evidence(tmp_path / "settle_evidence.json", **overrides)
+
+
+def test_resolution_order_env_beats_evidence_beats_default(tmp_path: Path) -> None:
+    """The three-tier law: env > validated evidence > the 17:30 default —
+    and the tier-1 short-circuit means the evidence is NEVER READ while the
+    settle env is set (spy-pinned)."""
+    evidence = _write_valid_evidence(tmp_path)  # adopts 16:00
+    both = {
+        SETTLE_EVIDENCE_PATH_ENV: str(evidence),
+        PULL_ALL_SETTLE_ENV: "18:00",
+    }
+    reads: list[str] = []
+    real_evidence_settle = auto_pull_gate.evidence_settle
+
+    def counting_evidence_settle(env: Any = None) -> Any:
+        reads.append("read")
+        return real_evidence_settle(env)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(auto_pull_gate, "evidence_settle", counting_evidence_settle)
+        env_wins = resolve_settle_resolution(both)
+        assert reads == []  # tier-1 short-circuit: evidence never consulted
+        evidence_wins = resolve_settle_resolution({SETTLE_EVIDENCE_PATH_ENV: str(evidence)})
+        assert reads == ["read"]
+    assert env_wins == SettleResolution(
+        value=time(18, 0), source="env", provenance=f"operator override {PULL_ALL_SETTLE_ENV}"
+    )
+    assert evidence_wins.value == time(16, 0)
+    assert evidence_wins.source == "evidence"
+    off = resolve_settle_resolution(_NO_EVID)
+    assert (off.value, off.source) == (time(17, 30), "default")
+    # resolve_settle_time is the .value wrapper — same law, same values.
+    assert resolve_settle_time(both) == time(18, 0)
+    assert resolve_settle_time({SETTLE_EVIDENCE_PATH_ENV: str(evidence)}) == time(16, 0)
+    assert resolve_settle_time(_NO_EVID) == time(17, 30)
+
+
+def test_before_settle_detail_measured_wording(tmp_path: Path) -> None:
+    """The evidence tier's deferral detail reads MEASURED provenance —
+    earliest slot + margin + day count + the override env name (Golden Rule
+    #10: a measured value never reads UNMEASURED)."""
+    evidence = _write_valid_evidence(tmp_path)
+    env = {SETTLE_EVIDENCE_PATH_ENV: str(evidence)}
+    v = auto_pull_allowed(now=_at(_TRADING_DAY, 15, 50), env=env)
+    assert (v.allowed, v.reason) == (False, "before_settle")
+    assert "waiting for post-close settle time 16:00 IST" in v.detail
+    assert "measured — probe evidence" in v.detail
+    assert "earliest all-pass 15:45 IST" in v.detail
+    assert "+ 15 min margin" in v.detail
+    assert "over 5 trading days" in v.detail
+    assert PULL_ALL_SETTLE_ENV in v.detail
+    assert "UNMEASURED" not in v.detail
+    assert "conservative" not in v.detail
+    # The settle boundary law is tier-independent: 16:00 exactly allows.
+    assert auto_pull_allowed(now=_at(_TRADING_DAY, 16, 0), env=env).allowed is True
+
+
+def test_gate_explicit_evidence_junk_raises_out(tmp_path: Path) -> None:
+    """An operator-typed junk BRUTEX_SETTLE_EVIDENCE_PATH raises OUT of
+    ``auto_pull_allowed`` (the resolve_* fail-loud law — the caller fails
+    loud BEFORE any lock/vendor work, exactly like junk settle env)."""
+    junk = tmp_path / "settle_evidence.json"
+    junk.write_bytes(b"{junk")
+    env = {SETTLE_EVIDENCE_PATH_ENV: str(junk)}
+    with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV):
+        auto_pull_allowed(now=_at(_TRADING_DAY, 18, 0), env=env)
+    absent = {SETTLE_EVIDENCE_PATH_ENV: str(tmp_path / "missing.json")}
+    with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV):
+        resolve_settle_resolution(absent)
+
+
+def test_gate_default_path_corrupt_falls_back_17_30_one_warn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt file at the DEFAULT path degrades to the conservative 17:30
+    with ONE ``settle_evidence.invalid`` WARN — never a raise, never a boot
+    crash (the r6/r7 posture through the whole gate)."""
+    from brutex.calendars import settle_evidence
+
+    settle_evidence._reset_evidence_memo_for_tests()  # pyright: ignore[reportPrivateUsage]
+    corrupt = tmp_path / "settle_evidence.json"
+    corrupt.write_bytes(b"\xffnot-json")
+    monkeypatch.setattr(settle_evidence, "default_evidence_path", lambda: corrupt)
+    env: dict[str, str] = {}  # no path key → the (monkeypatched) default tier
+    with capture_logs() as logs:
+        v = auto_pull_allowed(now=_at(_TRADING_DAY, 12, 0), env=env)
+        v2 = auto_pull_allowed(now=_at(_TRADING_DAY, 12, 5), env=env)
+    assert (v.allowed, v.reason) == (False, "before_settle")
+    assert "waiting for post-close settle time 17:30 IST" in v.detail
+    assert "UNMEASURED" in v.detail  # the default tier's honest wording
+    assert v2.reason == "before_settle"
+    warns = [e for e in logs if e["event"] == "settle_evidence.invalid"]
+    assert len(warns) == 1  # once per stat-token, not per gate consult
+
+
+def test_evidence_settle_at_floor_and_market_hours_belt_stays_unreachable(
+    tmp_path: Path,
+) -> None:
+    """An evidence-adopted settle at/near the 15:35 floor keeps the step-4
+    market-hours belt structurally unreachable: 15:44 defers before_settle
+    (never market_hours_blocked), 15:45 allows; a 15:35-exact adopted value
+    is ACCEPTED (validation mirrors the env-tier floor boundary)."""
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    per_day_1535 = {
+        (_date(2026, 7, 13) + _timedelta(days=i)).isoformat(): {
+            "15:30": {"records": 14, "all_pass": True, "failed_checks": []}
+        }
+        for i in range(5)
+    }
+    early = _write_valid_evidence(
+        tmp_path,
+        earliest_all_pass_ist="15:30",
+        adopted_settle_ist="15:45",
+        margin_minutes=15,
+        per_day=per_day_1535,
+    )
+    env = {SETTLE_EVIDENCE_PATH_ENV: str(early)}
+    before = auto_pull_allowed(now=_at(_TRADING_DAY, 15, 44), env=env)
+    assert (before.allowed, before.reason) == (False, "before_settle")
+    at = auto_pull_allowed(now=_at(_TRADING_DAY, 15, 45), env=env)
+    assert at == AutoGateVerdict(allowed=True, reason="ok", detail="ok")
+    # 15:35-exact adopted (the floor boundary) is accepted by validation.
+    floor_dir = tmp_path / "floor"
+    floor_dir.mkdir()
+    per_day_1525 = {
+        (_date(2026, 7, 13) + _timedelta(days=i)).isoformat(): {
+            "15:25": {"records": 14, "all_pass": True, "failed_checks": []}
+        }
+        for i in range(5)
+    }
+    floor = _write_valid_evidence(
+        floor_dir,
+        earliest_all_pass_ist="15:25",
+        adopted_settle_ist="15:35",
+        margin_minutes=10,
+        per_day=per_day_1525,
+    )
+    res = resolve_settle_resolution({SETTLE_EVIDENCE_PATH_ENV: str(floor)})
+    assert res.value == BLOCK_END
+    assert res.source == "evidence"
+
+
+def test_resolution_no_evidence_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """THE PARITY ORACLE: with the channel off OR the default path absent,
+    ``resolve_settle_time`` over the full env matrix (default + every
+    valid/junk token) equals the pre-#1792 values — this PR changes NOTHING
+    until an evidence file lands."""
+    from brutex.calendars import settle_evidence
+
+    valid_expectations: list[tuple[str | None, time]] = [
+        (None, time(17, 30)),
+        ("", time(17, 30)),
+        ("   ", time(17, 30)),
+        ("15:35", time(15, 35)),
+        ("16:00", time(16, 0)),
+        ("17:30", time(17, 30)),
+        ("23:59", time(23, 59)),
+    ]
+    junk_tokens = ["25:99", "1730", "x", "9:30", "17:30:00", "24:00", "17:60", "17-30", "15:34"]
+
+    def _assert_matrix(base_env: dict[str, str]) -> None:
+        for token, expected in valid_expectations:
+            env = dict(base_env)
+            if token is not None:
+                env[PULL_ALL_SETTLE_ENV] = token
+            assert resolve_settle_time(env) == expected, (token, expected)
+        for junk in junk_tokens:
+            with pytest.raises(ValueError, match=PULL_ALL_SETTLE_ENV):
+                resolve_settle_time({**base_env, PULL_ALL_SETTLE_ENV: junk})
+
+    # Arm 1: the channel explicitly OFF.
+    _assert_matrix(dict(_NO_EVID))
+    # Arm 2: the channel ON but the default path ABSENT (this PR's ship state).
+    settle_evidence._reset_evidence_memo_for_tests()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(settle_evidence, "default_evidence_path", lambda: tmp_path / "absent.json")
+    _assert_matrix({})
