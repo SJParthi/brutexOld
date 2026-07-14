@@ -2575,7 +2575,17 @@ hostile-review pass._
   follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 — the ledger-fold risks
   recorded in #1792); a hand-planted 0-row parquet still fails the prebuild
   loudly (fail-open); empty symbols re-probe every pull (today's cost); the
-  strict gate deliberately does not block on no_source. Default path
+  strict gate deliberately does not block on no_source; the law is
+  deliberately NON-TIERED — an ENGINE-trio index (NIFTY/BANKNIFTY/SENSEX)
+  vendor-empty reads the SAME INFO + named skip, warm fires (the
+  refuter-round-1 disclosure fold — a conscious non-goal, the symbol stays
+  headline-named + /coverage//completeness-visible; escalation = named
+  follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001). REFUTER ROUND 1
+  folded (per-finding record in MIGRATION.md #1792): the index-tier
+  disclosure above + the `_warn_if_all_no_source` empty-phase guard's
+  surviving mutant killed (WARN-absence pins on BOTH fno-only paths — a
+  guard-dropped mutant fired a spurious count=0 all_no_source WARN on every
+  ▶ Pull F&O run and passed the whole 87-test battery pre-pin). Default path
   byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
   zero added I/O — the classification rides an exception that only exists on
   the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no

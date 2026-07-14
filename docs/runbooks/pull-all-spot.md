@@ -278,7 +278,15 @@ Operator action for a delisted / never-traded name: NONE. A symbol you
 EXPECTED data for reading no-source means the vendor served nothing over the
 pulled range (or the spot was never pulled — the probe cannot distinguish;
 cause attribution is the named follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001)
-— verify on `/coverage/windows` (settled SKIPPED, `bars=0`). The verdict is
+— verify on `/coverage/windows` (settled SKIPPED, `bars=0`). The law is
+deliberately NON-TIERED (refuter round 1, MIGRATION.md #1792): a brute-force
+ENGINE index (NIFTY/BANKNIFTY/SENSEX) reading no-source gets the SAME INFO +
+named skip clause and the warm still fires — that shape means the engine's
+own 1-minute data is absent, which stays independently visible (the headline
+names it; `/coverage/windows` shows the settled-SKIPPED zero-bar windows;
+`/completeness` never reads `full` for a no-record spot row); a WARN-tier
+escalation for the engine trio (the #1788 strict-trio precedent) is the
+named follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001. The verdict is
 LAKE truth, deliberately never the spot report's per-symbol `no_data` (which
 provably conflates vendor-empty with an already-settled incremental re-run —
 the #1779 executed evidence; the trap twin is regression-pinned). The warm
