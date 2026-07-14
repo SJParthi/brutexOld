@@ -2961,14 +2961,20 @@ class TestPullAllLedgerRescueSurface:
         # Run 1 settles the range SUCCESS (real sink + ledger, dry_run=False with an
         # injected synthetic adapter); run 2 skips the settled window WITHOUT a
         # vendor hit and SAYS so — in the report, its dict, the spine INFO line,
-        # and the pull-done INFO.
+        # and the pull-done INFO. The range is bounded to 2026-02-06 so the
+        # synthetic adapter's first-day-only bars stay WITHIN the 5-session
+        # truncation tolerance: a live bulk pull now arms
+        # ``detect_completeness_gaps`` (DEC-BULK-SPOT-COMPLETENESS-FLAG-001), and
+        # the original 2026-02-13 range (9 missing sessions) would legitimately
+        # DEMOTE the index window (SUSPECTED_PARTIAL) instead of settling it —
+        # this test pins the SETTLED-window skip law, so the fixture must settle.
         first = pull_all_spot(
             [_index("13")],
             lake_root=tmp_path,
             dry_run=False,
             now=_BULK_NOW,
             from_date="2026-02-02",
-            to_date="2026-02-13",
+            to_date="2026-02-06",
             adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
         )
         assert first.windows_skipped == 0  # a fresh lake has nothing skippable
@@ -2979,7 +2985,7 @@ class TestPullAllLedgerRescueSurface:
                 dry_run=False,
                 now=_BULK_NOW,
                 from_date="2026-02-02",
-                to_date="2026-02-13",
+                to_date="2026-02-06",
                 adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
             )
         # One symbol × the 1-minute default interval × one 30-day tile = 1 window.
@@ -3866,9 +3872,10 @@ class TestSharedLedgerSeam:
 class TestTodayCompletenessGateArming:
     """DEC-PULL-TODAY-COMPLETENESS-GATE-001: both dashboard spot arm sites resolve the
     env kill switch ONCE per pull and thread the flag — live pull only (a dry-run
-    threads ``False``, the ``detect_completeness_gaps`` gating pattern). The bulk
-    ``pull_all_spot`` phase — which never armed ``detect_completeness_gaps`` — IS
-    wired (the gate rides its OWN parameter)."""
+    threads ``False``, the ``detect_completeness_gaps`` gating pattern). The gate
+    rides its OWN parameter on the bulk ``pull_all_spot`` phase — which now ALSO
+    arms ``detect_completeness_gaps`` itself (DEC-BULK-SPOT-COMPLETENESS-FLAG-001,
+    pinned by :class:`TestCompletenessDemotionArming`)."""
 
     def test_pull_all_spot_arms_today_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4027,3 +4034,166 @@ class TestTodayCompletenessGateArming:
         )
         assert captured
         assert all(flag is False for flag in captured)
+
+
+class TestCompletenessDemotionArming:
+    """DEC-BULK-SPOT-COMPLETENESS-FLAG-001: the bulk ``pull_all_spot`` phase arms
+    ``detect_completeness_gaps`` on a LIVE pull (``not dry_run`` — the cli.py
+    ``cmd_fetch`` idiom), so the #1031 interior-gap / trailing-truncation
+    demotions run on every production bulk path; a dry-run threads ``False``
+    (the synthetic adapter's first-day-only bars would false-red every wide
+    window). The exact spy template of :class:`TestTodayCompletenessGateArming`."""
+
+    def test_pull_all_spot_live_arms_detect_completeness_gaps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            from_date="2026-02-02",
+            to_date="2026-02-06",
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        assert captured
+        assert all(flag is True for flag in captured)
+
+    def test_pull_all_spot_dry_run_threads_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A dry-run is double-protected: the flag is False (never a demotion of
+        # the synthetic first-day-only shape) AND begin_pull_ledger(dry_run=True)
+        # returns None, so a demotion would be record-inert anyway.
+        from brutex.dashboard import pull_controller as pc
+
+        captured: list[object] = []
+        real = pc.run_groww_spot_ingest_with_retry
+
+        def _spy(*args: object, **kwargs: object) -> object:
+            captured.append(kwargs.get("detect_completeness_gaps"))
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _spy)
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert captured
+        assert all(flag is False for flag in captured)
+
+
+def _equity(symbol: str = "RELIANCE") -> Instrument:
+    """A minimal non-index NSE cash equity (the ~750 REFERENCE_ONLY class)."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=2,
+        symbol_name=symbol,
+        display_name=None,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,  # EQ requires a positive lot size
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+class _InteriorGapAdapter(SyntheticSpotAdapter):
+    """Bars at the window's START + END with a >5-session interior hole between.
+
+    2024-03-04 (Mon) then 2024-03-27/28 (Wed/Thu): the contiguous bar-less run
+    2024-03-05 → 2024-03-26 spans ~15 real NSE sessions — far past the
+    INTERIOR_GAP_TOLERANCE_SESSIONS=5 tolerance — while the last stored bar sits
+    ON the window's final session (2024-03-28; 2024-03-29 is Good Friday), so the
+    interior-gap detector fires and the truncation detector does not. The
+    interior-gap classifier is CLOCK-FREE (its coverage abstention keys only on
+    the covered bar dates, all 2024), so this fixture is deterministic forever.
+    """
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: Exchange, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        """Return bars bookending a 15-session interior hole (never truncated)."""
+        del symbol, exchange, interval, start, end
+        return (
+            synthetic_spot_bars(date(2024, 3, 4), count=self.bars_per_window)
+            + synthetic_spot_bars(date(2024, 3, 27), count=self.bars_per_window)
+            + synthetic_spot_bars(date(2024, 3, 28), count=self.bars_per_window)
+        )
+
+
+class TestBulkSpotCompletenessDemotionE2E:
+    """DEC-BULK-SPOT-COMPLETENESS-FLAG-001 end-to-end: the bulk twin of
+    ``TestIngestSpotCompletenessRepull`` — a LIVE ``pull_all_spot`` over a real
+    tmp lake demotes an INDEX window with a confirmed interior hole to a
+    re-pullable FAILED + ``INTERIOR_GAP``, while a non-index equity on the SAME
+    pull with the SAME holey shape stays observe-only SUCCESS (the spine's
+    ``is_index`` gate — the #1031 illiquid-name re-pull-storm protection)."""
+
+    def test_live_bulk_pull_demotes_holey_index_and_keeps_equity_success(
+        self, tmp_path: Path
+    ) -> None:
+        from brutex.data.window_ledger_store import load_window_ledger
+
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13"), _equity("RELIANCE")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                from_date="2024-03-04",
+                to_date="2024-03-28",
+                adapter_factory=_real_bulk_factory(_InteriorGapAdapter()),
+            )
+        assert report.dry_run is False
+        ledger = load_window_ledger(tmp_path)
+        rows = {r.security_id: r for r in ledger.records()}
+        assert set(rows) == {"13", "RELIANCE"}
+        # The INDEX window is DEMOTED — re-pullable FAILED with the honest reason,
+        # never a silently-settled SUCCESS the skip rule would freeze forever.
+        index_row = rows["13"]
+        assert index_row.status == "FAILED"
+        assert index_row.status not in {"SUCCESS", "SKIPPED"}  # the skip-authority set
+        assert index_row.last_error == "INTERIOR_GAP"
+        # The non-index equity with the IDENTICAL holey shape is observed but
+        # NEVER demoted (legitimately sparse names must not re-pull-storm).
+        equity_row = rows["RELIANCE"]
+        assert equity_row.status == "SUCCESS"
+        assert equity_row.last_error is None
+        # The observe-only WARNING fired for BOTH symbols (visibility is never
+        # gated — only the re-pull action is index-gated).
+        gap_events = [e for e in logs if e["event"] == "window.interior_gap"]
+        assert {e["symbol"] for e in gap_events} == {"'13'", "'RELIANCE'"}
+
+    def test_dry_run_same_shape_is_never_demoted(self, tmp_path: Path) -> None:
+        # The dry-run counterfactual: the SAME holey shape through the SAME bulk
+        # entry with dry_run=True threads detect_completeness_gaps=False AND a
+        # None ledger (begin_pull_ledger dry-run contract) — no demotion, no
+        # ledger rows, nothing persisted (the false-red protection this flag's
+        # ``not dry_run`` gating exists for).
+        from brutex.data.window_ledger_store import ledger_path
+
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            from_date="2024-03-04",
+            to_date="2024-03-28",
+        )
+        assert report.dry_run is True
+        assert not ledger_path(tmp_path).is_file()  # record-inert — no ledger written
