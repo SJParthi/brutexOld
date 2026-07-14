@@ -512,10 +512,14 @@ class PipelinePullReport:
         DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — capped at 10 by the
         producer, exactly the ``quarantined_symbols``/``quarantined_count``
         template; empty when the phase did not run or every target had
-        stored data. NOT failures: the movers warm still fires, and each
-        no-source symbol is structurally absent from the warmed snapshots
-        (no parquet ⇒ no discovery row) — counted + NAMED in the note
-        instead of silently vanishing (Golden Rule #1).
+        stored data. NOT failures: the movers warm still fires, and a
+        no-source symbol with NO parquet in ANY timeframe is structurally
+        absent from the warmed snapshots (no parquet ⇒ no discovery row);
+        previously stored DERIVED timeframes (a legacy vendor-fetched
+        ``1day``, a partially heal-emptied lake) still serve — genuine
+        stored bars, never fabricated (refuter round 2, MIGRATION.md
+        #1792) — counted + NAMED in the note instead of silently
+        vanishing (Golden Rule #1).
     prebuild_no_source_count
         The TRUE (uncapped) no-source total — the note's ``(+K more)``
         remainder derives from it, so the cap never lies.
@@ -770,10 +774,14 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # deliberately distinct from "quarantined" (healthy vendor behavior,
         # not a failure) and from "prebuild failures" (nothing failed), and
         # naming BOTH causes honestly (the probe cannot prove the vendor arm).
-        # Zero keeps the note byte-identical.
+        # The clause claims ONLY the timeframe-build exclusion — the probe
+        # proves zero stored 1-MINUTE parquet, not zero parquet at all, and a
+        # previously stored DERIVED timeframe (a legacy vendor-fetched 1day)
+        # legitimately keeps the symbol in warm discovery (refuter round 2,
+        # MIGRATION.md #1792). Zero keeps the note byte-identical.
         clause += (
             f", {prebuild.no_source_count} symbol(s) skipped — no stored 1-minute data "
-            "(vendor-empty or never pulled), excluded from timeframe build + movers warm: "
+            "(vendor-empty or never pulled), excluded from timeframe build: "
             f"{format_capped_names(prebuild.no_source, prebuild.no_source_count)}"
         )
     if prebuild.failed:
@@ -1259,11 +1267,15 @@ def run_full_pipeline(
     #    movers warm over the freshly-derived CLEAN symbols, honestly
     #    omitting the quarantined ones the note names. A vendor-empty
     #    NO-SOURCE spot target does NOT withhold the warm
-    #    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive AND
-    #    structurally absent from warm discovery (no parquet ⇒ no dataset
-    #    row, db_view._walk_candle_datasets' any-parquet gate) — counted +
-    #    named in the note instead. The gate EXPRESSION below is unchanged —
-    #    the behavioral flip is entirely `ok` now staying True.
+    #    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive, and
+    #    when NO timeframe holds parquet it is structurally absent from warm
+    #    discovery (no parquet ⇒ no dataset row, db_view's
+    #    _walk_candle_datasets any-parquet gate); a surviving previously
+    #    stored DERIVED timeframe legitimately keeps it discoverable — the
+    #    warm then serves genuine stored bars, never fabricated (refuter
+    #    round 2, MIGRATION.md #1792) — counted + named in the note either
+    #    way. The gate EXPRESSION below is unchanged — the behavioral flip
+    #    is entirely `ok` now staying True.
     segment_movers_warmed: dict[str, int] = {}
     segment_movers_failed: dict[str, int] = {}
     if prebuild is not None and prebuild.ok:

@@ -353,11 +353,13 @@ def test_e2e_vendor_empty_stock_real_prebuild_no_source_named_warm_fires(tmp_pat
     assert chain.warm_calls == 1
     assert report.segment_movers_warmed == {"spot": 3}
     # Note honesty: counted + named (the skip clause) + the warmed clause;
-    # never the failure wording.
+    # never the failure wording, never the movers-warm overclaim (refuter
+    # round 2 — the stale-derived-data twin below is the counter-evidence).
     assert (
         ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
-        "excluded from timeframe build + movers warm: RELIANCE" in note
+        "excluded from timeframe build: RELIANCE" in note
     )
+    assert "+ movers warm" not in note
     assert "snapshot(s) warmed" in note
     assert "prebuild failures" not in note
     # STRUCTURAL warm-absence evidence (graft G3 — never a fabricated
@@ -436,6 +438,71 @@ def test_e2e_old_stored_bars_with_empty_pull_today_not_no_source(tmp_path: Path)
     assert (lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1day").is_dir()
 
 
+def test_e2e_stale_derived_1day_no_source_note_never_claims_warm_exclusion(
+    tmp_path: Path,
+) -> None:
+    """[refuter round 2 — the stale-derived-data twin] a symbol whose 1-minute
+    partition was emptied AFTER a healthy run (post-pull removal — e.g. a
+    lake-heal quarantine MOVE, operator pruning, a legacy vendor-fetched-1day
+    lake) while a previously DERIVED ``1day`` partition survives still
+    classifies ``no_source`` (zero stored 1-MINUTE bars is the law) and the
+    warm still fires — but the note's skip clause claims ONLY the
+    timeframe-build exclusion: warm discovery is parquet-file-gated per
+    DATASET, so the surviving stored ``1day`` legitimately keeps the symbol in
+    the warmed snapshot (genuine stored bars — /movers would serve them with
+    or without the warm; never fabricated). A "+ movers warm" exclusion claim
+    here would be false (executed refuter-round-2 evidence) — this pin fails
+    on the pre-fix wording. The window ledger keeps the run-1 settled SUCCESS
+    ``bars>0`` rows (the heal never rewrites the ledger) — the post-pull
+    removal signature the runbook §7 third-shape branch documents."""
+    import shutil
+
+    lake = tmp_path / "lake"
+    first = _Chain(lake, [_nifty(), _reliance()], real_prebuild=True)
+    report1, _ = first.run()
+    assert report1.ok is True
+    rel_1m = lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1minute"
+    rel_1d = lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1day"
+    assert any(rel_1m.rglob("*.parquet")) and any(rel_1d.rglob("*.parquet"))
+    shutil.rmtree(rel_1m)  # the post-pull 1m removal; the derived 1day SURVIVES
+    second = _Chain(
+        lake,
+        [_nifty(), _reliance()],
+        adapter=_RecordingAdapter(empty_symbols=frozenset({"RELIANCE"})),
+        real_prebuild=True,
+    )
+    report2, note2 = second.run()
+    assert report2.prebuild_no_source == ("RELIANCE",)
+    assert report2.ok is True
+    assert second.warm_calls == 1  # the warm fires — nothing withheld
+    # The honest clause: timeframe-build exclusion ONLY.
+    assert (
+        ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: RELIANCE" in note2
+    )
+    assert "+ movers warm" not in note2
+    # The overclaim's counter-evidence, kept VISIBLE: the surviving derived
+    # 1day keeps the symbol in warm discovery AND the REAL warm-side candidate
+    # compute — genuine stored bars served as any stored data is.
+    from brutex.dashboard.db_view import list_candle_datasets
+    from brutex.dashboard.movers_snapshot import compute_spot_candidates
+    from brutex.dashboard.movers_warm import latest_movers_date
+
+    discovered = {d["symbol"] for d in list_candle_datasets(lake)}
+    assert "RELIANCE" in discovered
+    warm_date = latest_movers_date(lake)
+    assert warm_date is not None
+    cands = compute_spot_candidates(lake_root=lake, interval="1day", date=warm_date, time=None)
+    assert "RELIANCE" in {snap.instrument.symbol for snap in cands.snapshots}
+    # The runbook §7 third-shape /coverage/windows signature: the durable
+    # ledger keeps settled SUCCESS bars>0 rows for the post-pull-removed
+    # symbol — never the vendor-empty "settled SKIPPED, bars=0" shape.
+    from brutex.data.window_ledger_store import load_window_ledger
+
+    rel_rows = [r for r in load_window_ledger(lake).records() if r.security_id == "RELIANCE"]
+    assert rel_rows and all(r.status == "SUCCESS" and r.bars > 0 for r in rel_rows)
+
+
 def test_e2e_no_source_note_survives_spot_only_surgery(tmp_path: Path) -> None:
     """[T21 — the note-surgery anchor pin] a note CARRYING the no-source skip
     clause round-trips ``build_spot_only_note`` with the clause preserved and
@@ -451,7 +518,7 @@ def test_e2e_no_source_note_survives_spot_only_surgery(tmp_path: Path) -> None:
     assert ", F&O skipped by design (spot-only scope)" in note  # the surgery applied
     assert (
         ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
-        "excluded from timeframe build + movers warm: RELIANCE" in note
+        "excluded from timeframe build: RELIANCE" in note
     )
     assert not [e for e in logs if e["event"] == "pull_scope.note_surgery_miss"]
 

@@ -987,8 +987,13 @@ def test_pipeline_no_source_clause_named_in_note_capped() -> None:
     assert report.prebuild_no_source_count == 1
     assert (
         ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
-        "excluded from timeframe build + movers warm: RELIANCE" in report.note
+        "excluded from timeframe build: RELIANCE" in report.note
     )
+    # Refuter round 2 (MIGRATION.md #1792): the clause claims ONLY the
+    # timeframe-build exclusion — a surviving previously stored DERIVED
+    # timeframe legitimately keeps the symbol in warm discovery, so a
+    # movers-warm exclusion claim would overstate the proven premise.
+    assert "+ movers warm" not in report.note
     assert "quarantined" not in report.note  # never misnamed as a quarantine
     assert "prebuild failures" not in report.note  # …nor as a failure
     many = run_full_pipeline(
@@ -999,7 +1004,7 @@ def test_pipeline_no_source_clause_named_in_note_capped() -> None:
     )
     assert (
         "5 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
-        "excluded from timeframe build + movers warm: E0, E1, E2 (+2 more)" in many.note
+        "excluded from timeframe build: E0, E1, E2 (+2 more)" in many.note
     )
 
 

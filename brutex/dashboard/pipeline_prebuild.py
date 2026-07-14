@@ -192,9 +192,12 @@ class PrebuildOutcome:
         pulled; DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — CAPPED at
         :data:`MAX_REPORTED_FAILURES` by the producer (never a flooded
         note); ``no_source_count`` is the TRUE total. NOT failures: ``ok``
-        is unaffected, and each is structurally absent from movers-warm
-        discovery anyway (no parquet ⇒ no dataset row) — counted + NAMED in
-        the pipeline note instead of silently vanishing (Golden Rule #1).
+        is unaffected, and one with NO parquet in ANY timeframe is
+        structurally absent from movers-warm discovery (no parquet ⇒ no
+        dataset row); a surviving previously stored DERIVED timeframe
+        legitimately keeps it discoverable — genuine stored bars, never
+        fabricated (refuter round 2, MIGRATION.md #1792) — counted + NAMED
+        in the pipeline note instead of silently vanishing (Golden Rule #1).
     no_source_count
         The TRUE number of no-source spot targets (may exceed
         ``len(no_source)``).

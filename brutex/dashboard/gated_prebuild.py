@@ -355,9 +355,12 @@ def _run_spot_phase(
     (:class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` — the
     vendor-empty / never-pulled shape) is caught FIRST and classified
     ``no_source`` instead of a failure
-    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive, structurally
-    absent from movers-warm discovery, so it must never withhold the warm
-    run-wide. The clause ORDER is load-bearing — ``NoStored1mBarsError`` is a
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive — and
+    structurally absent from movers-warm discovery when NO timeframe holds
+    parquet (a surviving previously stored DERIVED timeframe legitimately
+    keeps it discoverable, serving genuine stored bars; refuter round 2,
+    MIGRATION.md #1792) — so it must never withhold the warm run-wide.
+    The clause ORDER is load-bearing — ``NoStored1mBarsError`` is a
     ``ValueError``, a member of :func:`_per_symbol_data_errors`. INFO not
     WARN: a delisted symbol recurs every daily pull — expected healthy vendor
     behavior (the #1630 log posture); the completion note + report carry the
