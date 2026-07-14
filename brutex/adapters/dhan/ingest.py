@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Final, Protocol
 
 import structlog
@@ -49,7 +49,7 @@ from brutex.adapters.dhan.constants import (
     SENSEX_SYMBOL,
 )
 from brutex.adapters.dhan.errors import DhanError, is_retryable, is_terminal_pull_stop
-from brutex.adapters.ingest_common import plan_windows
+from brutex.adapters.ingest_common import drop_bars_after, plan_windows
 from brutex.data.models import CandleBar
 from brutex.data.session import filter_to_trading_session
 from brutex.data.sink import BarSink
@@ -307,12 +307,29 @@ def _process_item(
             end=item.end,
         )
         kept = session_filter(raw_bars).kept  # type: ignore[attr-defined]
+        # The toDate-inclusivity BELT (design §4, the COMMON drop_bars_after —
+        # DEC-CANDLE-DROP-FUTURE-BAR-001): work items carry the HALF-OPEN ``end``,
+        # so the last servable day is ``end − 1``. Dhan's documented daily
+        # ``toDate`` is "non-inclusive" but the intraday boundary is UNVERIFIED
+        # (probe gate #13) — under an INCLUSIVE vendor the FINAL window would
+        # over-fetch one day PAST the operator range, and on a prev-day-capped
+        # pull that day is TODAY'S forming session, which keep-first would freeze
+        # (the #837/#1774 class). Dropped bars are counted + warned, never stored.
+        bounded = drop_bars_after(kept, item.end - timedelta(days=1))
+        dropped = len(kept) - len(bounded)
+        if dropped > 0:
+            _LOG.warning(
+                "dhan.future_bar_dropped",
+                symbol=item.symbol,
+                window=f"{item.start.isoformat()}..{item.end.isoformat()}",
+                dropped=dropped,
+            )
         result = sink.append(
             exchange=item.exchange.value,
             segment=_SEGMENT,
             symbol=item.symbol,
             interval=interval,
-            bars=kept,
+            bars=bounded,
         )
     except DhanError as exc:
         # The pull-wide global-stop carve-out (the Groww spines' _GLOBAL_STOP_ERRORS

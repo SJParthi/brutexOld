@@ -154,3 +154,40 @@ def _restore_tz() -> object:
         _time.tzset()
     except AttributeError:  # pragma: no cover
         pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Absent-volume tolerance for index payloads (design §5): under drop_volume=True
+# the volume column is OPTIONAL (its values are never read; IDX_I volume content
+# is UNVERIFIED — gate G-J); every other missing column stays vendor drift.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_absent_volume_with_drop_volume_parses() -> None:
+    cols = _columns()
+    del cols["volume"]  # an IDX_I payload with NO volume array
+    bars = parse_candle_columns(cols, drop_volume=True)
+    assert len(bars) == 1
+    assert bars[0].volume == 0  # dropped → 0 (an inherent index market fact)
+
+
+def test_absent_volume_without_drop_volume_still_rejects() -> None:
+    cols = _columns()
+    del cols["volume"]
+    with pytest.raises(DhanVendorDriftError):
+        parse_candle_columns(cols, drop_volume=False)
+
+
+def test_absent_close_still_rejects_even_with_drop_volume() -> None:
+    cols = _columns()
+    del cols["close"]
+    with pytest.raises(DhanVendorDriftError):
+        parse_candle_columns(cols, drop_volume=True)
+
+
+def test_present_volume_with_drop_volume_still_length_checked() -> None:
+    # When PRESENT the volume array still rides the length check (an unequal
+    # volume array is vendor drift even though its values are never read).
+    cols = _columns(volume=[0, 0])
+    with pytest.raises(DhanVendorDriftError):
+        parse_candle_columns(cols, drop_volume=True)

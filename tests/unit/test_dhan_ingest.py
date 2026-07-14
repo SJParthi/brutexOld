@@ -432,3 +432,76 @@ class TestTerminalPullStop:
                 session_filter=_no_filter,
                 pace=_quota_pace,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The toDate-inclusivity BELT (design §4): drop_bars_after at the ingest tail.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestToDateBelt:
+    """Inclusive-vendor simulation: a bar dated ON the half-open ``end`` day is DROPPED."""
+
+    def test_inclusive_vendor_bar_on_end_day_never_stored(self) -> None:
+        """The bugfix-reversion shape (design §4): the fake returns one in-range bar
+        PLUS one bar dated on the exclusive ``to_date`` day (what an INCLUSIVE
+        vendor would hand back on the final window — on a prev-day-capped pull
+        that day is TODAY'S forming session, which keep-first would freeze, the
+        #837/#1774 class). With the belt REVERTED this test FAILS: the end-day
+        bar reaches the sink.
+        """
+        in_range = _bar()  # 2022-06-01 03:45 UTC (window start day)
+        end_day_bar = CandleBar(
+            timestamp=datetime(2022, 6, 20, 3, 45, tzinfo=UTC),  # ON the exclusive end day
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=0,
+            open_interest=None,
+        )
+        adapter = _FakeAdapter({"NIFTY": [[in_range, end_day_bar]]})
+        sink = _RecordingSink()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=sink,
+                security_ids={"NIFTY": 13},
+                start=date(2022, 6, 1),
+                end=date(2022, 6, 20),  # half-open — 2022-06-20 is NOT servable
+                session_filter=_no_filter,
+            )
+        assert report.total_bars == 1  # only the in-range bar was stored
+        assert sink.appends == [{"exchange": "NSE", "segment": "INDEX", "symbol": "NIFTY", "n": 1}]
+        warns = [e for e in logs if e.get("event") == "dhan.future_bar_dropped"]
+        assert len(warns) == 1
+        assert warns[0]["dropped"] == 1
+        assert warns[0]["symbol"] == "NIFTY"
+
+    def test_bar_on_last_servable_day_is_kept(self) -> None:
+        # A bar dated exactly end−1 (the last servable day) is KEPT — the belt is
+        # strictly-after end−1, never a re-interpretation of the half-open range.
+        last_day_bar = CandleBar(
+            timestamp=datetime(2022, 6, 19, 3, 45, tzinfo=UTC),  # end − 1 day
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100.5"),
+            volume=0,
+            open_interest=None,
+        )
+        adapter = _FakeAdapter({"NIFTY": [[last_day_bar]]})
+        sink = _RecordingSink()
+        with capture_logs() as logs:
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=adapter,
+                sink=sink,
+                security_ids={"NIFTY": 13},
+                start=date(2022, 6, 1),
+                end=date(2022, 6, 20),
+                session_filter=_no_filter,
+            )
+        assert report.total_bars == 1
+        assert [e for e in logs if e.get("event") == "dhan.future_bar_dropped"] == []

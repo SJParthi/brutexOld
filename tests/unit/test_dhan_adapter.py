@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 
@@ -135,3 +136,58 @@ def test_list_instruments_is_empty_single_page() -> None:
 def test_list_derivatives_is_empty() -> None:
     adapter = DhanMarketAdapter(client=_FakeClient([]), security_ids={})
     assert list(adapter.list_derivatives(underlying_symbol="NIFTY", exchange=Exchange.NSE)) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# toDate request-pair seam pins (design §4): the exact (from_date, to_date)
+# sequence the adapter sends over a multi-tile range.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_multi_tile_request_pair_sequence_contiguous_no_shared_day() -> None:
+    """The exact wire pairs over a range needing THREE 90-day tiles.
+
+    The half-open [start, end) tiling yields contiguous windows whose boundary
+    INSTANT is shared (w1.end == w2.start) — under the DOCUMENTED non-inclusive
+    ``toDate`` (daily law; intraday boundary = probe gate #13) no DAY is fetched
+    twice: day b is w1's exclusive to_date and w2's inclusive from_date.
+    """
+    fake = _FakeClient([_one_bar(), _one_bar(), _one_bar()])
+    adapter = DhanMarketAdapter(client=fake, security_ids={"NIFTY": 13})
+    adapter.fetch_ohlcv(
+        symbol="NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2025, 1, 1),
+        end=date(2025, 7, 15),  # 195 days → 90 + 90 + 15
+    )
+    pairs = [(c["from_date"], c["to_date"]) for c in fake.calls]
+    assert pairs == [
+        ("2025-01-01", "2025-04-01"),
+        ("2025-04-01", "2025-06-30"),
+        ("2025-06-30", "2025-07-15"),
+    ]
+    # Contiguous: each window's to_date IS the next window's from_date (half-open).
+    for (_, prev_to), (next_from, _) in itertools.pairwise(pairs):
+        assert prev_to == next_from
+
+
+def test_final_to_date_is_operator_to_plus_one() -> None:
+    """The FINAL window's to_date == the half-open end == operator inclusive to + 1.
+
+    The surface law: an operator inclusive to_date resolves to ``end = to + 1``
+    (resolve_candle_range), the spine/adapter receive the half-open end verbatim —
+    so under an INCLUSIVE vendor the final window over-fetches exactly the ``end``
+    day, which the ingest belt (drop_bars_after) drops before the write.
+    """
+    fake = _FakeClient([_one_bar()])
+    adapter = DhanMarketAdapter(client=fake, security_ids={"NIFTY": 13})
+    # Operator picked an inclusive to_date of 2025-06-30 → half-open end 2025-07-01.
+    adapter.fetch_ohlcv(
+        symbol="NIFTY",
+        exchange=Exchange.NSE,
+        interval="1minute",
+        start=date(2025, 6, 1),
+        end=date(2025, 7, 1),
+    )
+    assert fake.calls[-1]["to_date"] == "2025-07-01"

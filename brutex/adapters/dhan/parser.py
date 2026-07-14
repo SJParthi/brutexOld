@@ -91,7 +91,13 @@ def parse_candle_columns(
     drop_volume
         When ``True`` the per-row volume is ignored (every bar's volume → 0). An
         index (NIFTY / BANKNIFTY / SENSEX / INDIA VIX) carries no traded volume; the
-        adapter passes ``drop_volume=True``.
+        adapter passes ``drop_volume=True``. Under ``drop_volume=True`` the
+        ``volume`` column is additionally OPTIONAL (design §5): what the vendor
+        returns in an IDX_I ``volume`` array is UNDOCUMENTED (probe gate G-J —
+        zeros? nulls? absent?) and the values are never read on this path, so an
+        ABSENT volume array must not wedge every index window as vendor drift.
+        When PRESENT it still rides the length check; every other missing column
+        stays :class:`DhanVendorDriftError`.
 
     Returns
     -------
@@ -111,19 +117,25 @@ def parse_candle_columns(
     present = {name: payload[name] for name in _ALL_COLUMNS if name in payload}
     if not present:
         return []  # no columns at all — a holiday / no-session / too-old span (honest no-data)
-    if len(present) != len(_ALL_COLUMNS):
-        missing = [name for name in _ALL_COLUMNS if name not in present]
+    # Under drop_volume the volume column is OPTIONAL (its values are never read
+    # and the IDX_I volume content is UNVERIFIED, gate G-J); when present it still
+    # rides the array/length checks below. All other columns stay REQUIRED.
+    required = (
+        tuple(name for name in _ALL_COLUMNS if name != "volume") if drop_volume else _ALL_COLUMNS
+    )
+    missing = [name for name in required if name not in present]
+    if missing:
         raise DhanVendorDriftError(
             f"Dhan payload missing required column(s) {missing} (partial vendor payload)"
         )
-    for name in _ALL_COLUMNS:
-        if not isinstance(present[name], (list, tuple)):
+    for name, column in present.items():
+        if not isinstance(column, (list, tuple)):
             raise CandleParseError(
-                f"Dhan column {name!r} must be an array, got {type(present[name]).__name__}"
+                f"Dhan column {name!r} must be an array, got {type(column).__name__}"
             )
     columns: dict[str, list[object] | tuple[object, ...]] = {
         name: present[name]  # type: ignore[misc]  # narrowed to list/tuple above
-        for name in _ALL_COLUMNS
+        for name in present
     }
     lengths = {name: len(col) for name, col in columns.items()}
     if len(set(lengths.values())) > 1:
