@@ -1,6 +1,6 @@
 # ADR-0022 — Dhan read-only SPOT feed track (standalone, `feeds/dhan/`)
 
-**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1763, umbrella),
+**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1794, umbrella),
 `DEC-DHAN-READONLY-AUTH-001`, `DEC-DHAN-SPOT-PULL-001`,
 `DEC-DHAN-PULL-SURFACE-001`, `DEC-DHAN-FEED-BINDING-001`,
 `DEC-DHAN-GUARD-RETIRE-002`, `DEC-DHAN-HONEST-DEGRADE-001`
@@ -241,3 +241,68 @@ re-pivot) is preserved without banning a legitimately-present token.
   `adapter.py::fetch_ohlcv`).
 - The post-pull movers warm is NOT yet feed-aware, so a Dhan pull warms NOTHING (rather
   than warm the wrong Groww tree) — `DEC-DHAN-MOVERS-FEED-AWARE-001`.
+
+---
+
+## 8. Amendment (2026-07-14, the merge-forward delta) — rolling floor · error map · terminal halt · token ops
+
+### §floor — the rolling history-floor LAW (`DEC-DHAN-ROLLING-FLOOR-001`, MIGRATION.md entry #1795)
+
+Operator ruling 2026-07-14: a Dhan pull must NEVER request data before roughly
+`today − 5 years` (the documented intraday depth is the ROLLING "last 5 years" —
+VERIFIED-docs(mirror), `17-historical-data.md`). The law:
+`dhan_history_floor(today) = dhan_rolling_edge(today) + DHAN_FLOOR_MARGIN_DAYS`,
+where `dhan_rolling_edge(today) = today − 5y` with Feb-29 rounding FORWARD to Mar-1
+(a floor may only ever be LATER than the true vendor edge) and
+`DHAN_FLOOR_MARGIN_DAYS = 7` — an UNVERIFIED design-time safety constant with
+deliberately NO env override. **Margin provenance:** pre-floor request behaviour is
+undocumented (it may be an error OR a silently-TRUNCATED payload recorded as clean
+SUCCESS — the integrity-violating case); the cross-verification use-case makes the
+oldest week expendable; the `--floor-edge` probe transcript recalibrates it via a
+one-line code change + a ledger note. ONE clamp chokepoint (`plan_dhan_work(today=…)`,
+`today` = the IST date resolved ONCE per launch); a wholly-pre-floor pick is a route
+HTTP 400 naming the floor + the spine's zero-window `dhan.pull_entirely_pre_floor`
+WARNING. **The retention property (binding, verbatim):** the floor governs VENDOR
+REQUESTS ONLY. Bars already in `feeds/dhan/` that age past the current floor are
+NEVER deleted (keep-first, append-only; no reaper exists or is authorized).
+Consequences: idempotent-re-pull byte-parity is scoped to the POST-floor span;
+pre-floor content is verified by lake-invariants/heal, never by re-fetch; Groww keeps
+its SEPARATE fixed `GROWW_HISTORY_FLOOR = 2020-01-01` — no shared code path may
+conflate the two laws. `DHAN_HISTORY_FLOOR = None` stays the static measured-edge
+slot (the binding identity pin), not the law's home.
+
+### §3 amendment — the terminal-halt posture
+
+`is_terminal_pull_stop` (errors.py) carves the pull-wide global stops out of the
+per-window quarantine: a terminal `DhanAuthError` (the client's bounded re-read
+budget already exhausted), a `DhanTokenStillStaleError` (the SSM re-read returned
+the SAME dead token — nothing else in THIS pull can succeed; supersedes the original
+per-window-quarantine wording), or a `DhanSubscriptionError` (806/DH-902 —
+vendor-terminal) RE-RAISES on its FIRST occurrence, so the remaining ~76 windows are
+never burned, and `pull_jobs.is_pull_halt` gains the lazy Dhan arm so the existing
+CRITICAL Telegram `emit_pull_halt_alert` fires with zero further wiring (Groww
+verdicts byte-identical, pinned). The error CLASSIFIER now consults the full
+documented code table FIRST (805/DH-904 throttle · 806/DH-902 subscription ·
+807-810/DH-901 auth · 804/811-814/DH-905/DH-907 bad request — DH-905 RELABELED
+input-exception · 800/DH-908/DH-909 retryable server), reading BOTH remark-key
+spellings — the live `dhanhq` SDK envelope is snake_case (`dhan_http.py`
+`_parse_response`), the docs' raw-HTTP shape camelCase; pre-fix the camelCase-only
+classifier left the DH-901 re-read self-heal production-dead.
+
+### Static-IP posture (softened wording)
+
+Dhan's static-IP whitelisting requirement is documented for **Order APIs only**
+(v2.4/v2.5.1 releases); no doc statement binds it to the Data/historical APIs. The
+posture here: documented Order-API-only — **confirm on the first credentialed run**
+(probe gate #12); the read-only feed places no order and hits no order endpoint.
+
+### Token-ops contract (WHO mints — a PRE-FIRST-WET-PULL gate)
+
+BruteX NEVER mints (Decision 2, unchanged). The `/tickvault/prod/dhan/access-token`
+SecureString must be populated by an EXTERNAL minter — TickVault's Dhan minter or a
+manual web.dhan.co seed (My Profile → "Access DhanHQ APIs" → generate → put to SSM).
+**With no minter, the re-read self-heal has nothing to read**: cold start fails loud
+and a mid-run DH-901 escalates to the `DhanTokenStillStaleError` pull-wide stop. The
+operator's minter decision (automated vs manual cadence; the token-lifetime conflict
+24h vs 8h–30d selectable is probe gate #10) is RECORDED as a pre-first-wet-pull
+gate — not assumed.
