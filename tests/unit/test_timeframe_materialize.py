@@ -255,6 +255,104 @@ def test_months_with_include_daily_raises(tmp_path: Path) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# The zero-stored-bars probe + the typed whole-partition refusal
+# (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestHasStored1mBars:
+    """T1 — the ONE lake-truth existence predicate + the base-path law."""
+
+    def test_spot_1m_partition_dir_path_law(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import spot_1m_partition_dir
+
+        assert spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE") == (
+            tmp_path / "bars" / "NSE" / "CASH" / "RELIANCE" / "1minute"
+        )
+
+    def test_absent_dir_is_false(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import has_stored_1m_bars
+
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_dir_with_zero_parquet_is_false(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "notes.txt").write_bytes(b"not a parquet")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_nested_year_month_parquet_is_true(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        f = base / "2024" / "01.parquet"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"stub")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is True
+
+
+def test_empty_partition_raises_typed_no_stored_1m_bars_error(tmp_path: Path) -> None:
+    """T2 [fails-before] — the whole-partition zero-stored-bars refusal is the
+    typed :class:`NoStored1mBarsError` (a ``ValueError`` subclass, so every
+    existing catcher is behavior-identical) with the two-cause message bytes
+    UNCHANGED (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)."""
+    from brutex.data.timeframe_materialize import (
+        NoStored1mBarsError,
+        PrebuildKind,
+        materialize_lake_timeframes,
+    )
+
+    with pytest.raises(NoStored1mBarsError) as exc:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+        )
+    assert isinstance(exc.value, ValueError)  # back-compat pin — subclass, never a sibling
+    assert str(exc.value) == (
+        "no stored 1minute bars for NSE/CASH/RELIANCE — "
+        "nothing to derive: if the 1-minute spot was never pulled, "
+        "pull it first, then derive timeframes; if the vendor cleanly "
+        "returned no data for this symbol (windows settled EMPTY), "
+        "there is nothing to derive — no action needed"
+    )
+
+
+def test_months_bounded_absence_stays_plain_value_error(tmp_path: Path) -> None:
+    """T3 — the months-bounded arm (the heal-recall path) keeps plain
+    ``ValueError`` and is NEVER the typed no-source class: a months-scoped
+    absence says nothing about the whole partition (kills the
+    retype-both-arms mutant; DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)."""
+    from brutex.data.timeframe_materialize import (
+        NoStored1mBarsError,
+        PrebuildKind,
+        materialize_lake_timeframes,
+    )
+
+    with pytest.raises(ValueError, match="in the requested months") as exc:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            kind=PrebuildKind.SPOT,
+            months=[(2030, 1)],
+        )
+    assert not isinstance(exc.value, NoStored1mBarsError)
+
+
+# ────────────────────────────────────────────────────────────────────────
 # frame_to_candle_bars — the batched frame → CandleBar conversion
 # (DEC-PREBUILD-GIL-VECTORIZE-001). BYTE-IDENTITY oracle: the verbatim
 # legacy per-row loop this replaced.

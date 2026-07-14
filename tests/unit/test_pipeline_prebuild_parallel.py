@@ -366,6 +366,37 @@ def test_per_symbol_failure_quarantined(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert outcome.symbols_built == 3  # the other 3 still built
 
 
+def test_parallel_no_source_target_counted_ok_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T11 [fails-before] — the PARALLEL twin of the sequential no-source
+    classification (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a zero-stored-bars
+    SPOT target lands in the outcome's ``no_source`` (never ``failed``), ``ok``
+    stays True, and the F&O contracts still build — identical outcome shape to
+    the sequential path."""
+    from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+    fake = _FakeMaterialize(
+        fail={
+            "NSE-EMPTY": NoStored1mBarsError("no stored 1minute bars for NSE/INDEX/NSE-EMPTY — …")
+        }
+    )
+    _install(monkeypatch, fake)
+    outcome = run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-EMPTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=3,
+        daily_before=date(2025, 2, 1),
+    )
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.ok is True
+    assert outcome.failed == ()
+    assert outcome.failed_count == 0
+    assert outcome.symbols_built == 4  # NIFTY spot + 1 FUT + 2 options still built
+
+
 def test_tallies_unchanged_and_opens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _FakeMaterialize(
         unchanged={"NSE-NIFTY-30Jan25-20000-CE"},
