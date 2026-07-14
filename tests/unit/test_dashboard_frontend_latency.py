@@ -453,7 +453,10 @@ _TOUCHED_TEMPLATES = [
     "results.html",
     "screener.html",
     "spot_coverage.html",
-    "universe.html",  # DEC-O1-GUARANTEE-HARDEN-001 — bounded latest-wins loaders
+    # DEC-PULL-SCOPED-ALL-ONECLICK-001 refuter-round-4 H NIT-1: the branch
+    # added inline JS (the pull-all-spot button wiring) with no syntax gate.
+    # DEC-O1-GUARANTEE-HARDEN-001 — bounded latest-wins loaders.
+    "universe.html",
     "v29.html",
 ]
 
