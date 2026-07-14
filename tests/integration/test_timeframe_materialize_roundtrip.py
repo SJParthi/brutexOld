@@ -1012,6 +1012,59 @@ def test_intraday_only_materialize_also_emits_one_summary(tmp_path: Path) -> Non
     assert [e["log_level"] for e in logs if e["event"] == "lake.partition.write"] == ["debug"]
 
 
+def test_write_summary_frame_fields_engaged_vs_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-PREBUILD-FRAME-WRITE-001: the summary's ADDITIVE ``frame_*`` fields.
+
+    Flag OFF (the PR-1 default) ⇒ the summary payload carries NO ``frame_*``
+    key — byte-identical to the pre-change event (the negative pin). Flag ON
+    ⇒ the five additive counters appear, existing fields untouched.
+    """
+    from brutex.data import frame_write_gate as gate
+    from structlog.testing import capture_logs
+
+    def _run() -> None:
+        # incremental=False so the warm second run RE-DERIVES (the stamp skip
+        # would otherwise short-circuit before any write — nothing to count).
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+            incremental=False,
+        )
+
+    _write_1m_bars(tmp_path, n=120)
+    monkeypatch.delenv(gate.PREBUILD_FRAME_WRITE_ENV, raising=False)
+    with capture_logs() as logs_off:
+        _run()
+    (summary_off,) = [e for e in logs_off if e["event"] == "lake.derived.write_summary"]
+    assert not any(key.startswith("frame_") for key in summary_off)
+
+    monkeypatch.setenv(gate.PREBUILD_FRAME_WRITE_ENV, "1")
+    gate.reset_gate_for_tests(fresh_remaining=0, merge_remaining=0)
+    gate.reset_observability_memo_for_tests()
+    try:
+        with capture_logs() as logs_on:
+            _run()
+    finally:
+        gate.reset_gate_for_tests()
+        gate.reset_observability_memo_for_tests()
+    (summary_on,) = [e for e in logs_on if e["event"] == "lake.derived.write_summary"]
+    # The warm re-derive no-ops on the fast merge probe — one fast admission.
+    assert summary_on["frame_fast"] == 1
+    assert summary_on["frame_degraded"] == 0
+    assert summary_on["frame_degrade_reasons"] == {}
+    assert summary_on["frame_shadow_checked"] == 0
+    assert summary_on["frame_shadow_mismatches"] == 0
+    # Existing fields untouched (C14).
+    assert summary_on["timeframes_written"] == summary_off["timeframes_written"]
+    assert summary_on["symbol"] == summary_off["symbol"]
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Corrupt 1-minute input is QUARANTINED, never laundered
 # (DEC-STORED-DATA-VALIDATION-001)
