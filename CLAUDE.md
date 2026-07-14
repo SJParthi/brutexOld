@@ -18,7 +18,32 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
+_Last updated: 2026-07-14 (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1793,
+branch `claude/prebuild-frame-write` — the verify-or-degrade FRAME-DIRECT
+derived-TF write, shipped DARK (default OFF via the tristate+`shadow`
+`BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒ FAIL-SAFE OFF + warn-once,
+a recorded kill-must-kill deviation from the fail-loud-env law): the
+prebuild's resampled polars frame reaches the partition writer WITHOUT the
+frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+21.9–23.9% + per-bar `_tick_round` 18.3–20.1% cold, both re-paid on
+1,581/1,581 warm no-op merges; sandbox ratios) behind admission guards
+G0–G9, the CLOSED 15-reason per-partition degrade-to-VERBATIM-legacy enum
+(degrade never decides correctness), a 16-write both-lanes burn-in shipping
+LEGACY bytes + durable autorevert latch, and a shadow mode whose clean
+operator transcript (`frame_shadow_mismatches == 0`) gates the PR-2
+default-ON flip; the 2dp snap stays UNCONDITIONAL (vectorized, ROUND_HALF_UP
+— the naive-skip idempotence claim was REFUTED); ONE encoder serves both
+lanes (`_frame_from_bars` + `_render_frame_bytes`, legacy render bytes
+FROZEN as a golden BEFORE any production change); vendor `write()`/`append()`
+signatures byte-untouched — NEW siblings `write_frame`/`append_frame` + ONE
+call-site branch in `make_lake_write_tf._write`; byte-identical lake output
+proven by the 13-case whole-tree A/B corpus + op-count bench gates; NO
+speedup claimed (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³
+bars). Run identity / `data_snapshot_hash` / the 1-minute lake untouched;
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change. This header carries the pointer, never the story — the full record
+lives in the §1 Active-branch blurb + MIGRATION.md #1793.)
+Earlier: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
 MIGRATION.md #1792 — vendor-empty spot symbols (zero stored 1-minute bars)
 classify NO-SOURCE at the prebuild read (the retyped whole-partition
 `NoStored1mBarsError` arm — lake truth, never the #1779-rejected report
@@ -2562,7 +2587,71 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/spotonly-prebuild-empty-exclude`
+- **Active branch:** `claude/prebuild-frame-write`
+  (**DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1793** — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF). THE MEASURED ROOT
+  (Phase-1 profiling, sandbox ratios — the operator M4-Pro measurement decides):
+  the derived-TF prebuild is GIL-held Python, not I/O — the polars-frame →
+  per-bar CandleBar CONVERT costs 21.9–23.9% of the cold prebuild wall, the
+  per-bar Decimal `_tick_round` another 18.3–20.1%, BOTH re-paid on every warm
+  NO-OP merge (1,581/1,581 warm merges re-converted + re-snapped bars producing
+  zero byte changes); fsync 10–12%; the resample math ~2.5%; thread scaling
+  ZERO. THE MECHANISM: the resampled frame reaches the partition writer without
+  the frame→CandleBar→frame round trip — NEW `brutex/data/frame_write_gate.py`
+  (mode resolution over the tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE`
+  kill switch [junk ⇒ FAIL-SAFE OFF + warn-once — a RECORDED kill-must-kill
+  deviation from the fail-loud-env law, the #1531 rust_metrics precedent]; the
+  8-fresh + 8-merge per-process BURN-IN running BOTH lanes, shipping LEGACY
+  bytes, bit-comparing — mismatch ⇒ durable first-writer-wins autorevert latch
+  + ONE never-throttled ERROR; the SHADOW mode — both lanes every write, ship
+  legacy, count `frame_shadow_checked`/`frame_shadow_mismatches`, non-latching;
+  the CLOSED 15-member `DegradeReason` enum, exhaustiveness-pinned —
+  `MERGE_DELTA` is the ONE NORMAL-class production reason, gate verdicts never
+  counted as degrades) + NEW sibling entries `ParquetWriter.write_frame` /
+  `ParquetBarSink.append_frame` (vendor `write()`/`append()` signatures
+  byte-UNTOUCHED; `append_frame` owns the sink contracts — empty-input early
+  return, `bars_appended` = INPUT count, vectorized UTC-month `partition_by`
+  written ascending) + ONE call-site branch in
+  `timeframe_materialize.make_lake_write_tf._write`. Admission G0–G9 (schema/
+  dtype exactness · ts_utc non-null tz-aware strictly-sorted unique · price
+  domain · the 1e12 magnitude cast-parity bound · the UNCONDITIONAL vectorized
+  2dp ROUND_HALF_UP snap [the naive-skip idempotence claim was REFUTED — a
+  pre-DEC off-grid legacy month exists in real lakes] · single-month dest
+  bound · the Tier-1 provable-NO-OP merge probe over `eq_missing` overlap
+  equality · the stored-file decode verify · the G9 belt degrading ANY
+  unexpected fast-lane exception to legacy while RE-RAISING
+  `LakeWriteHalt`/`MemoryError`); every unprovable shape degrades
+  PER-PARTITION to the VERBATIM legacy path — a degrade NEVER decides
+  correctness, legacy owns the bytes AND the failure semantics. ONE encoder
+  serves both lanes: `_render_bytes` split into `_frame_from_bars` +
+  `_render_frame_bytes` (unconditional `.rechunk()` + schema assert), with the
+  verbatim PRE-change render law FROZEN as an inline-oracle byte golden
+  COMMITTED FIRST (48ab57f) + the Decimal(38,2)→Float64 cast law its own
+  golden; the wheel-free `brutex/config/env_flags.py` leaf promotes
+  `env_flag_tristate` out of `engine/sweep_lookahead.py` (identity-pinned
+  re-export — `brutex.data` must not import `brutex.engine`). PROOF: the
+  13-case whole-tree A/B integration corpus proves ON≡OFF trees byte-identical
+  per case; hypothesis differentials (frame↔bars parity ·
+  dict-merge≡frame-merge · month grouping · OI mapping · eq_missing); op-count
+  bench gates (fsync/replace/flock/render counts EQUAL both lanes; ZERO
+  CandleBar constructions on an admitted fresh write; warm no-op 0/0/0;
+  burn-in bounded; degrade-storm within `ratio_ceiling(3.0)`); real-writer A/B
+  smoke (cold identical · warm stable · steady no-op clean · shadow 19/0).
+  HONEST: NO production speedup claimed — tiny symbols measure SLOWER flag-ON
+  (n=375 → 2.78; crossover ≈ few×10³ bars: n=7,500 → 0.63, n=30,000 → 0.30);
+  fsync/parquet-encode/resample floor UNADDRESSED; Tier-1 accelerates only the
+  provable no-op (Tier-2 columnar merge = DEC-PREBUILD-FRAME-MERGE-TIER2-001);
+  the M3 rechunk hand-mutant is EQUIVALENT-TODAY (polars 1.42.1 probe-verified;
+  kept as a belt, disclosed). PR-2 FLIP: DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON
+  opens within 3 days of a clean operator shadow transcript
+  (`frame_shadow_mismatches == 0`). Run identity / `data_snapshot_hash` / the
+  1-minute lake untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake-schema/scope/vocab/rate change; `frame_write_gate.py`
+  (117/30) + `env_flags.py` (12/4) + `parquet_writer.py` (626/222) + `sink.py`
+  (80/18) + `timeframe_materialize.py` (181/58) ALL 100.00% line+branch on
+  their gates; the new battery 202 passed + 1 env-gated skip; ruff/ruff-format
+  clean; `mypy --strict` clean; pyright 0 new vs the origin/main baseline.)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
   (**DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792** — the
   #1779 vendor-EMPTY × prebuild × movers-warm residual CLOSED: a spot symbol
   with ZERO stored 1-minute bars (vendor-empty or never pulled — the reader
@@ -6995,7 +7084,32 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/spotonly-prebuild-empty-exclude`
+- **Active feature branch:** `claude/prebuild-frame-write`
+  (DEC-PREBUILD-FRAME-WRITE-001, MIGRATION.md #1793 — the verify-or-degrade
+  FRAME-DIRECT derived-TF write, shipped DARK (default OFF via the
+  tristate+`shadow` `BRUTEX_PREBUILD_FRAME_WRITE` kill switch; junk ⇒
+  FAIL-SAFE OFF + warn-once, a recorded kill-must-kill deviation): the
+  resampled polars frame reaches the partition writer without the
+  frame→CandleBar→frame Python round trip (the measured GIL wall — CONVERT
+  21.9–23.9% + `_tick_round` 18.3–20.1% cold, re-paid on 1,581/1,581 warm
+  no-op merges; sandbox ratios) behind admission guards G0–G9 + the CLOSED
+  15-reason per-partition degrade-to-VERBATIM-legacy enum (a degrade never
+  decides correctness) + the 16-write both-lanes burn-in shipping LEGACY
+  bytes with a durable autorevert latch + the shadow mode whose clean
+  operator transcript gates the PR-2 default-ON flip
+  (DEC-PREBUILD-FRAME-WRITE-DEFAULT-ON opens within 3 days of
+  `frame_shadow_mismatches == 0`); the 2dp snap stays UNCONDITIONAL (the
+  naive-skip idempotence claim REFUTED); ONE encoder serves both lanes with
+  the legacy render bytes FROZEN as a golden BEFORE any production change;
+  vendor `write()`/`append()` byte-untouched — NEW siblings
+  `write_frame`/`append_frame` + ONE call-site branch in
+  `make_lake_write_tf._write`; byte-identical lake output proven by the
+  13-case whole-tree A/B corpus + op-count bench gates; NO speedup claimed
+  (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³ bars); run
+  identity / `data_snapshot_hash` / the 1-minute lake untouched; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1793 for the full blurb)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
   (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — the #1779
   vendor-EMPTY × prebuild × movers-warm residual CLOSED: zero-stored-bars
   spot symbols classify NO-SOURCE at the prebuild read (the retyped
