@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
+_Last updated: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
+MIGRATION.md #1792 — vendor-empty spot symbols (zero stored 1-minute bars)
+classify NO-SOURCE at the prebuild read (the retyped whole-partition
+`NoStored1mBarsError` arm — lake truth, never the #1779-rejected report
+`no_data`), counted + named in the note/payload/CLI, `PrebuildOutcome.ok`
+unaffected so the movers warm fires over the healthy majority — the #1779
+withheld-run-wide residual CLOSED; default path byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1792 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
 #1779 — the one-click scoped-ALL SPOT pull: the additive `scope=spot-only`
 token on the ONE `/pull-pipeline` launcher (default requests byte-identical,
 pinned) + the NEW `brutex pull-all-spot` CLI over
@@ -2533,7 +2543,48 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
+- **Active branch:** `claude/spotonly-prebuild-empty-exclude`
+  (**DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792** — the
+  #1779 vendor-EMPTY × prebuild × movers-warm residual CLOSED: a spot symbol
+  with ZERO stored 1-minute bars (vendor-empty or never pulled — the reader
+  cannot distinguish, both causes named) is classified NO-SOURCE at the
+  prebuild read itself — the whole-partition arm of `make_lake_read_1m` is
+  retyped to the NEW `NoStored1mBarsError(ValueError)` (message bytes
+  UNCHANGED; the months-bounded heal-recall arm stays plain ValueError,
+  mutant-killed) with the existence predicate extracted §11-COMMON
+  (`has_stored_1m_bars` + `spot_1m_partition_dir`); the spot phase catches it
+  FIRST (except-order mutant-killed) → the new `no_source` class (still
+  `attempted`, never `failed`; the parallel worker kind-GATED to SPOT items —
+  a contract's identical error stays a failure, pinned), so
+  `PrebuildOutcome.ok` stays True and the #1145/#1221 movers-warm gate
+  (expression untouched) now FIRES over the healthy majority instead of
+  withholding the warm run-wide forever; the empty symbol is COUNTED + NAMED
+  (capped, the quarantine-headline idiom via the ONE shared
+  `format_capped_names`) on the note clause + emit-on-nonzero
+  `prebuild_no_source`/`prebuild_no_source_count` payload keys + the CLI
+  `no-source:` line + per-symbol INFO + the all-no-source WARN — never
+  silently dropped, never a fabricated snapshot (warm discovery is
+  parquet-file-gated; re-pinned with real-lake evidence). VERDICT = LAKE
+  truth by construction — no report field participates (the #1779 `no_data`
+  trap is dead structurally; the healthy-incremental-re-run trap twin is the
+  permanent regression net); a mixed no_source + REAL failure still reads
+  `ok=False`, warm withheld (failure wins, both surfaced). The #1779
+  inherited-behavior e2e pin consciously FLIPPED
+  (`…no_source_named_warm_fires`); fails-before proven — 9 [FB] tests fail
+  at merge-base source. HONEST residuals: cause attribution unwired (named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 — the ledger-fold risks
+  recorded in #1792); a hand-planted 0-row parquet still fails the prebuild
+  loudly (fail-open); empty symbols re-probe every pull (today's cost); the
+  strict gate deliberately does not block on no_source. Default path
+  byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
+  zero added I/O — the classification rides an exception that only exists on
+  the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `timeframe_materialize.py` (163/50) +
+  `gated_prebuild.py` (143/26) + `prebuild_parallel.py` (85/16) +
+  `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
+  line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
+  clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)
+  Earlier: `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
   MIGRATION.md #1779** — the one-click scoped-ALL SPOT pull: ONE dashboard button
   (`#pullAllSpotBtn` → the EXISTING `/pull-pipeline` launcher with the NEW additive
   `scope=spot-only` token — all launcher rails inherited byte-identically; a scope-less
@@ -2633,7 +2684,9 @@ hostile-review pass._
   the vendor-EMPTY × prebuild × movers-warm interaction REAL-prebuild-e2e-pinned
   as an INHERITED residual (the scoped exclusion REJECTED on executed evidence —
   the spot report's `no_data` conflates vendor-empty with an already-settled
-  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001);
+  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001
+  [CLOSED by DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 —
+  the reclassify-at-read no-source law; the e2e pin consciously flipped]);
   the `materialize_lake_timeframes` no-stored-bars remediation names BOTH causes
   (the one shared-module text edit); the intent ROLLBACK scope-widening residual
   disclosed (docstring + ledger + runbook §5); the dry-run
@@ -6830,7 +6883,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/pull-scoped-all-oneclick`
+- **Active feature branch:** `claude/spotonly-prebuild-empty-exclude`
+  (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — the #1779
+  vendor-EMPTY × prebuild × movers-warm residual CLOSED: zero-stored-bars
+  spot symbols classify NO-SOURCE at the prebuild read (the retyped
+  whole-partition `NoStored1mBarsError` arm — lake truth, never the
+  #1779-rejected report `no_data`; spot phase catches it first, parallel
+  worker kind-gated; months-bounded arm stays plain ValueError), counted +
+  named on the note + emit-on-nonzero payload keys + the CLI `no-source:`
+  line; `PrebuildOutcome.ok` unaffected so the movers warm fires over the
+  healthy majority (the warm-side exclusion itself is structural — discovery
+  is parquet-file-gated, re-pinned); the inherited e2e pin consciously
+  flipped + the healthy-incremental-re-run trap twin is the permanent
+  regression net; a mixed no_source + REAL failure still withholds the warm;
+  default path byte-identical (note/wire/stdout literal-pinned); named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 (cause attribution); ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1792 for the full blurb)
+  Earlier: `claude/pull-scoped-all-oneclick`
   (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779 — the one-click
   scoped-ALL SPOT pull: the additive `scope=spot-only` token on the ONE
   `/pull-pipeline` launcher + the `#pullAllSpotBtn` button + the
