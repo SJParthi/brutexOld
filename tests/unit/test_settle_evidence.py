@@ -1004,7 +1004,15 @@ def test_probe_record_keys_drift_pin() -> None:
     the round-trip suite's synthetic record uses EXACTLY the writer's key set,
     AND the writer's literal keys (the base record dict + the ``record.update``
     dict in ``main()``, extracted via AST) equal the constant — a key
-    rename/add on either side fails HERE, never a silently-vacuous golden."""
+    rename/add on either side fails HERE, never a silently-vacuous golden.
+
+    [post-open CodeQL fold] the writer additionally SELF-CHECKS each
+    successful record against ``_RECORD_KEYS`` at runtime (fail-loud
+    RuntimeError on drift); the writer is inline in ``main()`` behind the
+    read-only vendor-client build, so the self-check's raise arm is NOT
+    unit-driven here (no vendor creds in CI) — this AST pin remains the
+    teeth, and the consumption pin below keeps the self-check from
+    regressing back to an unused global."""
     probe = _load_probe_module()
     keys = probe._RECORD_KEYS
     assert isinstance(keys, frozenset)
@@ -1025,3 +1033,14 @@ def test_probe_record_keys_drift_pin() -> None:
     base = next(d for d in literal_dicts if {"expected_minutes", "error"} <= d)
     update = next(d for d in literal_dicts if {"raw_rows", "fut_oi_nonnull"} <= d)
     assert base | update == keys
+    # Side 3 (consumption pin): the writer genuinely LOADS _RECORD_KEYS inside
+    # a function body (the runtime self-check) — never again a module-level
+    # constant only the tests read (the CodeQL unused-global class).
+    function_loads = {
+        name.id
+        for func in ast.walk(tree)
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for name in ast.walk(func)
+        if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
+    }
+    assert "_RECORD_KEYS" in function_loads

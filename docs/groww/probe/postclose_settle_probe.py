@@ -104,7 +104,8 @@ _REGULAR_SESSION_MINUTES = 375
 #: BOTH the writer's literal key set (AST) AND its synthetic fixture's keys
 #: to THIS constant (tests/unit/test_settle_evidence.py — r1 coverage
 #: INFO-4), so the --emit-evidence golden can never silently drift from the
-#: real writer.
+#: real writer; the writer additionally SELF-CHECKS each successful record
+#: against this set at runtime (fail-loud RuntimeError on drift).
 _RECORD_KEYS = frozenset(
     {
         "probe_ts_ist",
@@ -717,6 +718,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
+        if record["error"] is None and record.keys() != _RECORD_KEYS:
+            # Keep the drift pin honest at RUNTIME too: a successful fetch must
+            # emit EXACTLY the pinned key set (an errored fetch keeps only the
+            # 8 base keys by contract, so it is exempt). A drift here is a code
+            # bug, never a vendor error — fail loud, don't record-and-continue.
+            raise RuntimeError(
+                "probe record keys drifted from _RECORD_KEYS: "
+                f"{sorted(record.keys() ^ _RECORD_KEYS)}"
+            )
         records.append(record)
 
     settled = sum(
