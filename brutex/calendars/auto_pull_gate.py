@@ -14,11 +14,17 @@ composed, never edited. The belt honors the guard's OWN
 ``BRUTEX_MARKET_HOURS_GUARD`` kill switch (guard off ⇒ belt off — one switch
 governs the shared-account protection family; hostile-review r1 ruling).
 
-Honest envelope (Golden Rule #10): the settle default is a NAMED CONSERVATIVE
-GUESS — the #1775 post-close settle probe is UNRUN, so the vendor's true
+Settle resolution is the THREE-TIER law (DEC-SETTLE-EVIDENCE-ADOPTION-001,
+MIGRATION.md #1792): explicit ``BRUTEX_PULL_ALL_SETTLE_IST`` (fail-loud,
+strict HH:MM — the tier-1 short-circuit, evidence never read) > VALIDATED
+committed probe evidence (:mod:`brutex.calendars.settle_evidence` — the
+#1775 probe's ``--emit-evidence`` artifact) > the conservative 17:30 default.
+Honest envelope (Golden Rule #10): the DEFAULT tier is a NAMED CONSERVATIVE
+GUESS — until a measured evidence file is committed, the vendor's true
 settle time is UNMEASURED; 17:30 IST is the probe's LAST slot
-(``docs/groww/probe/postclose_settle_probe.py`` ``_SLOTS``). Re-derive once
-the probe matrix lands (``docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md``). A
+(``docs/groww/probe/postclose_settle_probe.py`` ``_SLOTS``). The evidence
+tier replaces the guess ONLY with a validated ≥5-regular-day probe matrix
+(``docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md``). A
 mis-set settle time costs bounded deferral churn, never wrong data — the
 today-completeness gate + the prev-day end bound are the data safety net.
 ``allowed`` NEVER bypasses the market-hours guard: the launcher still binds
@@ -48,6 +54,7 @@ from brutex.calendars.nse import (
     is_trading_day,
     now_ist,
 )
+from brutex.calendars.settle_evidence import evidence_settle
 
 _LOG = structlog.get_logger("brutex.calendars.auto_pull_gate")
 
@@ -57,16 +64,21 @@ __all__ = [
     "MUHURAT_PRE_MARGIN",
     "PULL_ALL_SETTLE_ENV",
     "AutoGateVerdict",
+    "SettleResolution",
     "auto_pull_allowed",
     "compose_market_closed",
     "muhurat_session_active",
+    "resolve_settle_resolution",
     "resolve_settle_time",
 ]
 
-#: CONSERVATIVE default post-close settle time (IST wall clock) — the #1775
-#: settle probe is UNRUN; 17:30 = the probe's LAST slot
-#: (docs/groww/probe/postclose_settle_probe.py ``_SLOTS``). Re-derive once the
-#: probe matrix lands (docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md).
+#: CONSERVATIVE default post-close settle time (IST wall clock) — tier 3 of
+#: the DEC-SETTLE-EVIDENCE-ADOPTION-001 resolution law (env > evidence >
+#: this default): while no measured evidence file is committed the vendor's
+#: settle time stays UNMEASURED and 17:30 = the #1775 probe's LAST slot
+#: (docs/groww/probe/postclose_settle_probe.py ``_SLOTS``); the probe's
+#: ``--emit-evidence`` matrix is the measured replacement channel
+#: (docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md).
 DEFAULT_PULL_ALL_SETTLE_IST: Final[time] = time(17, 30)
 
 #: The feature-family env knob (B's naming — survives a Phase-2
@@ -80,22 +92,15 @@ PULL_ALL_SETTLE_ENV: Final[str] = "BRUTEX_PULL_ALL_SETTLE_IST"
 _SETTLE_SHAPE: Final[re.Pattern[str]] = re.compile(r"^(\d{2}):(\d{2})$", re.ASCII)
 
 
-def resolve_settle_time(env: Mapping[str, str] | None = None) -> time:
-    """Resolve the post-close settle time ONCE — strict, fail-loud, floored.
+def _parse_settle_token(raw: str) -> time:
+    """The strict ``HH:MM`` parse + the ≥ ``BLOCK_END`` floor — fail-loud.
 
-    Unset / blank → :data:`DEFAULT_PULL_ALL_SETTLE_IST`. A set value must be
-    strict ``HH:MM`` (two digits each, a real wall-clock time) — anything else
-    raises :class:`ValueError` (junk is never silently coerced). STRUCTURAL
-    refusal: a value BEFORE the market-hours guard's ``BLOCK_END`` (15:35 IST)
-    is refused naming the guard — a pre-close "settle" would just bounce off
-    the untouched market-hours gate; exactly 15:35 is ALLOWED (boundary
-    pinned). Resolved once per invocation — never mid-run.
+    The VERBATIM tier-1 parse body (identical error messages — every junk pin
+    stays green): shape, real-wall-clock range, then the STRUCTURAL floor —
+    a value BEFORE the market-hours guard's ``BLOCK_END`` (15:35 IST) is
+    refused naming the guard; exactly 15:35 is ALLOWED (boundary pinned).
     """
-    mapping = os.environ if env is None else env
-    raw = mapping.get(PULL_ALL_SETTLE_ENV, "")
     token = raw.strip()
-    if not token:
-        return DEFAULT_PULL_ALL_SETTLE_IST
     match = _SETTLE_SHAPE.match(token)
     if match is None:
         raise ValueError(
@@ -120,6 +125,77 @@ def resolve_settle_time(env: Mapping[str, str] | None = None) -> time:
 
 
 @dataclass(frozen=True, slots=True)
+class SettleResolution:
+    """One settle resolution: the value + WHICH tier decided + honest provenance.
+
+    ``source`` ∈ ``{"env", "evidence", "default"}``; ``provenance`` is the
+    fully-formed parenthetical clause the ``before_settle`` deferral detail
+    renders (the DEFAULT arm's clause is byte-identical to the pre-#1792
+    wording — the verbatim UNMEASURED honesty label; Golden Rule #10 both
+    directions: a measured value never reads UNMEASURED, an override never
+    claims conservatism the operator replaced).
+    """
+
+    value: time
+    source: str
+    provenance: str
+
+
+def resolve_settle_resolution(env: Mapping[str, str] | None = None) -> SettleResolution:
+    """Resolve the settle time ONCE via the three-tier law — fail-loud, floored.
+
+    Tier 1 — a set (non-blank) :data:`PULL_ALL_SETTLE_ENV` parses strictly
+    (:func:`_parse_settle_token`; junk raises) and SHORT-CIRCUITS: the
+    evidence channel is never read (the ``--settle-ist`` flag rides this tier
+    via the CLI's env_map merge, so the flag ALWAYS wins over a present
+    evidence file). Tier 2 — a validated committed evidence artifact
+    (:func:`~brutex.calendars.settle_evidence.evidence_settle`; an explicit
+    junk ``BRUTEX_SETTLE_EVIDENCE_PATH`` raises out — the resolve_* law;
+    default-path corruption WARNs once and falls through). Tier 3 —
+    :data:`DEFAULT_PULL_ALL_SETTLE_IST` with the verbatim UNMEASURED
+    provenance. Resolved once per invocation — never mid-run.
+    """
+    mapping = os.environ if env is None else env
+    raw = mapping.get(PULL_ALL_SETTLE_ENV, "")
+    if raw.strip():
+        return SettleResolution(
+            value=_parse_settle_token(raw),
+            source="env",
+            provenance=f"operator override {PULL_ALL_SETTLE_ENV}",
+        )
+    evidence = evidence_settle(mapping)
+    if evidence is not None:
+        return SettleResolution(
+            value=evidence.adopted,
+            source="evidence",
+            provenance=(
+                f"measured — probe evidence: earliest all-pass "
+                f"{evidence.earliest_all_pass} IST + {evidence.margin_minutes} min "
+                f"margin over {evidence.distinct_trading_days} trading days; "
+                f"override {PULL_ALL_SETTLE_ENV}"
+            ),
+        )
+    return SettleResolution(
+        value=DEFAULT_PULL_ALL_SETTLE_IST,
+        source="default",
+        provenance=(
+            f"conservative — the vendor's true settle time is "
+            f"UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; "
+            f"override {PULL_ALL_SETTLE_ENV}"
+        ),
+    )
+
+
+def resolve_settle_time(env: Mapping[str, str] | None = None) -> time:
+    """The settle VALUE — a thin wrapper over :func:`resolve_settle_resolution`.
+
+    Signature + name unchanged (every consumer — the scheduler, both cli.py
+    call sites — rides the three-tier law with zero mechanical churn).
+    """
+    return resolve_settle_resolution(env).value
+
+
+@dataclass(frozen=True, slots=True)
 class AutoGateVerdict:
     """One ``--auto`` gate decision: allowed + the machine reason + human text."""
 
@@ -138,8 +214,8 @@ def auto_pull_allowed(
     """The whole ``--auto`` decision — pure given an injected *now*.
 
     *now* defaults to the live :func:`~brutex.calendars.nse.now_ist`; *env* is
-    parsed ONCE via :func:`resolve_settle_time` (junk RAISES out — the caller
-    fails loud BEFORE any lock/vendor work). Decision order:
+    parsed ONCE via :func:`resolve_settle_resolution` (junk RAISES out — the
+    caller fails loud BEFORE any lock/vendor work). Decision order:
 
     1. not a trading day → ``non_trading_day`` (the NON-raising
        :func:`~brutex.calendars.nse.is_trading_day`: every listed Muhurat
@@ -151,7 +227,10 @@ def auto_pull_allowed(
        unlisted holiday costs bounded EMPTY churn, never wrong data);
     2. :func:`~brutex.calendars.nse.has_muhurat_session` → ``muhurat_deferral``
        (the belt for a future TRADING-day Muhurat listing);
-    3. ``now.time() < resolve_settle_time(env)`` → ``before_settle``;
+    3. ``now.time() < resolve_settle_resolution(env).value`` →
+       ``before_settle`` (the three-tier law: env > validated committed
+       evidence > the conservative 17:30 default; the deferral detail carries
+       the resolved tier's honest provenance);
     4. not :func:`~brutex.calendars.market_hours.pull_allowed_default` →
        ``market_hours_blocked`` (a BELT — structurally unreachable while the
        settle floor is ≥ 15:35 = ``BLOCK_END``, since every in-window minute
@@ -159,7 +238,7 @@ def auto_pull_allowed(
        never open a hole);
     5. else ``ok``.
     """
-    settle = resolve_settle_time(env)
+    res = resolve_settle_resolution(env)
     ist_now = now_ist() if now is None else now
     d = ist_now.date()
     if not is_trading_day(d):
@@ -188,16 +267,13 @@ def auto_pull_allowed(
                 f"regular trading day (evening-session settle behavior unverified)"
             ),
         )
-    if ist_now.time() < settle:
+    if ist_now.time() < res.value:
+        # The provenance clause is per-tier (Golden Rule #10): the DEFAULT
+        # arm's rendered detail is BYTE-IDENTICAL to the pre-#1792 wording.
         return AutoGateVerdict(
             allowed=False,
             reason="before_settle",
-            detail=(
-                f"waiting for post-close settle time {settle:%H:%M} IST "
-                f"(conservative — the vendor's true settle time is "
-                f"UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; "
-                f"override {PULL_ALL_SETTLE_ENV})"
-            ),
+            detail=(f"waiting for post-close settle time {res.value:%H:%M} IST ({res.provenance})"),
         )
     if not pull_allowed_default(now=ist_now):
         return AutoGateVerdict(

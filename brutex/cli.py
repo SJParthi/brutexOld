@@ -980,10 +980,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "UNATTENDED (cron/launchd) mode: pull only on an NSE trading day, "
-            "only after the post-close settle time (default 17:30 IST — "
-            "conservative, UNMEASURED; BRUTEX_PULL_ALL_SETTLE_IST overrides), "
-            "never on a Muhurat day; every deferral prints one line and exits 0 "
-            "(cron-green)"
+            "only after the post-close settle time (operator override "
+            "BRUTEX_PULL_ALL_SETTLE_IST > committed probe evidence "
+            "docs/groww/probe/settle_evidence.json when valid > the "
+            "conservative 17:30 IST default — UNMEASURED until the #1775 "
+            "probe evidence lands), never on a Muhurat day; every deferral "
+            "prints one line and exits 0 (cron-green)"
         ),
     )
     pull_all_spot.add_argument(
@@ -3687,6 +3689,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # itself is best-effort (a fault logs and the dashboard still binds —
     # the button then runs without the auto-arm surface).
     from brutex.calendars.auto_pull_gate import resolve_settle_time
+    from brutex.calendars.settle_evidence import evidence_settle
     from brutex.dashboard.auto_pull_scheduler import (
         AutoPullScheduler,
         AutoPullStateStore,
@@ -3700,6 +3703,14 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # as per-tick gate errors on an ARMED dashboard (the scheduler never
         # fired) — fail loud HERE like the tick env, the same clean one-liner.
         resolve_settle_time()
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with BRUTEX_PULL_ALL_SETTLE_IST set, resolve_settle_time's
+        # tier-1 short-circuit never reads the evidence, so a junk EXPLICIT
+        # BRUTEX_SETTLE_EVIDENCE_PATH would otherwise pass boot and detonate
+        # later as per-poll "unknown" text once the operator unsets the settle
+        # env. A default-path corrupt file WARNs + proceeds (never a boot
+        # failure — the r6/r7 posture).
+        evidence_settle()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -6308,6 +6319,7 @@ def cmd_pull_all_spot(
         auto_pull_allowed,
         resolve_settle_time,
     )
+    from brutex.calendars.settle_evidence import evidence_settle
     from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS, strict_gate_enabled
     from brutex.dashboard.pull_scope import (
         SCOPE_SPOT_ONLY,
@@ -6330,6 +6342,12 @@ def cmd_pull_all_spot(
         env_map = {**os.environ, PULL_ALL_SETTLE_ENV: settle_ist}
     try:
         resolve_settle_time(env_map)
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with --settle-ist / the settle env set, the tier-1
+        # short-circuit means resolve_settle_time never reads the evidence —
+        # a junk EXPLICIT BRUTEX_SETTLE_EVIDENCE_PATH must still fail loud
+        # HERE, pre-lock (a default-path corrupt file WARNs + proceeds).
+        evidence_settle(env_map)
         # Probe only — the binding re-resolves (the cmd_nightly precedent,
         # cli.py `strict_gate_enabled()` in its pre-chain fail-loud try):
         # junk BRUTEX_PIPELINE_STRICT_GATE previously escaped as a raw
