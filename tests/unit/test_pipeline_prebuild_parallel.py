@@ -182,6 +182,11 @@ def test_parallel_include_spot_false_runs_fno_phases_only(
     # The by-design note itself rides the internal spot PhasePrebuildReport
     # (the SAME COMMON constant on both paths) — note-shape pinned at the
     # gated_prebuild level, where the report is the public surface.
+    # [refuter round 1] The parallel path calls the SAME `_warn_if_all_no_source`
+    # over its assembled report — the empty no-op spot phase must not fire a
+    # spurious count=0 all-no-source WARN (the `and phase.attempted` guard's
+    # killing pin, sequential↔parallel parity).
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
 
 
 def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_path: Path) -> None:

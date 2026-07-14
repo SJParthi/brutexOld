@@ -189,6 +189,11 @@ def test_prebuild_include_spot_false_runs_fno_phases_only() -> None:
     phase_done = [e for e in logs if e["event"] == "pipeline.prebuild.phase_done"]
     assert phase_done[0]["phase"] == "spot"
     assert phase_done[0]["attempted"] == 0  # the note shape is pinned in test_gated_prebuild
+    # [refuter round 1] The empty no-op spot phase (attempted=()) must NOT read
+    # as "all no-source" — dropping the `and phase.attempted` guard in
+    # `_warn_if_all_no_source` fires a spurious count=0 WARN on every fno-only
+    # run (0 == 0 satisfies the length equality); this pin kills that mutant.
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
 
 
 def test_prebuild_include_spot_default_true_is_byte_identical() -> None:
