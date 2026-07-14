@@ -568,15 +568,24 @@ class BackgroundPullJob:
         ``False`` (a no-op) when a pull is already running. O(1).
 
         When *cross_process_lock* is ``False`` the cross-process guards (layer 2
-        below) are SKIPPED for this run — the sanctioned use is a ZERO-WRITE run
-        (the dashboard's dry-run Greeks-backfill scan,
+        below) are SKIPPED for this run — the sanctioned uses are (a) a
+        ZERO-WRITE run (the dashboard's dry-run Greeks-backfill scan,
         DEC-GREEKS-BULK-REENRICH-001 fix round 2): a read-only report has no
         writes to protect and no vendor calls to rate-guard, so it must never
         exclude a REAL pull on the same lake for its whole O(files) scan (the
         CLI ``--dry-run`` lock-free posture, kept behaviourally equal across the
-        two surfaces). The IN-process single-flight (layer 1) still applies — a
-        second click on the same job is refused either way. Default ``True``
-        keeps every existing caller byte-identical.
+        two surfaces); and (b) a run whose CALLEE owns its own cross-process
+        lock discipline on the SAME flock file(s) — the crossverify route (the
+        runner's ``default_seams`` takes the account→lake→lease trio itself,
+        DEC-CROSSVERIFY-PRODUCER-001) and the SWEEP route (``cmd_sweep_all``
+        takes the G10 lake read-guard ``LOCK_SH`` across the bar PRELOAD only +
+        the G6 sweep single-flight — DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): a
+        job-level second acquire of the same file would SELF-CONFLICT (flock is
+        per open file description), and a whole-run EX hold would lock the
+        daily pull/crossverify out for the callee's wall time. The IN-process
+        single-flight (layer 1) still applies — a second click on the same job
+        is refused either way. Default ``True`` keeps every existing caller
+        byte-identical.
 
         Two single-flight layers (DEC-ACCOUNT-PULL-SINGLEFLIGHT-001):
 
