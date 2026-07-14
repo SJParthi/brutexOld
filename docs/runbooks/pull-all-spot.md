@@ -132,7 +132,7 @@ ticks — its deferrals log `auto_pull.deferred` once per (day, reason):
 |-----------------------|--------------------------------------------------|-------------------------------------------------------------------|
 | `non_trading_day`     | weekend / listed NSE holiday (incl. Muhurat days) | `<date> is not an NSE trading day — nothing new to pull`           |
 | `muhurat_deferral`    | a (hypothetical) trading-day Muhurat listing      | `<date> has a Muhurat session — deferred to the next regular trading day (evening-session settle behavior unverified)` |
-| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (conservative — the vendor's true settle time is UNMEASURED; …)` — HH:MM is the ACTUAL resolved settle (default or override) |
+| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (…)` — HH:MM is the ACTUAL resolved settle and the parenthetical names the resolved TIER (DEC-SETTLE-EVIDENCE-ADOPTION-001): default → `(conservative — the vendor's true settle time is UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override BRUTEX_PULL_ALL_SETTLE_IST)` (byte-identical to pre-#1793); env/flag → `(operator override BRUTEX_PULL_ALL_SETTLE_IST)`; committed evidence → `(measured — probe evidence: earliest all-pass HH:MM IST + N min margin over D trading days; override BRUTEX_PULL_ALL_SETTLE_IST)` |
 | `market_hours_blocked`| structural belt (unreachable while settle ≥ 15:35)| `inside the NSE market-hours pull window — deferred`               |
 
 Contention under `--auto` (another pull holds the lake single-flight) also
@@ -163,16 +163,49 @@ are never dropped on an exit-0 run; a crashed prebuild also gets its own
 `prebuild: CRASHED (ErrorType)` line. Junk `BRUTEX_PIPELINE_STRICT_GATE` is
 a clean exit-1 refusal before any lock (like the settle/market-hours knobs).
 
-## 3. The settle time is a GUESS — measure it, then tighten
+## 3. The settle time — measured when evidence exists, a guess until then
 
-`BRUTEX_PULL_ALL_SETTLE_IST` defaults to **17:30 IST** — a NAMED CONSERVATIVE
-guess: the vendor's post-close settle time is **UNMEASURED** (the #1775 probe
-was never run; 17:30 is the probe's last slot). Run
-`docs/groww/probe/postclose_settle_probe.py` per
-`docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md`, then set the env (or
-`--settle-ist HH:MM`) to the measured slot + margin. Strict `HH:MM`, fail-loud
-on junk, structurally refused below 15:35 (the market-hours guard's BLOCK_END —
-an earlier "settle" would just bounce off the untouched guard).
+The settle time resolves through the THREE-TIER law
+(DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793):
+
+1. **Explicit `BRUTEX_PULL_ALL_SETTLE_IST`** (or `--settle-ist HH:MM`, which
+   rides the same strict resolver) — ALWAYS wins, evidence never read. Strict
+   `HH:MM`, fail-loud on junk, structurally refused below 15:35 (the
+   market-hours guard's BLOCK_END — an earlier "settle" would just bounce off
+   the untouched guard).
+2. **Validated committed probe evidence** —
+   `docs/groww/probe/settle_evidence.json` (schema 1; override the location
+   with `BRUTEX_SETTLE_EVIDENCE_PATH`; `off` disables the channel). A junk
+   EXPLICIT path fails loud at boot / pre-lock; a corrupt file at the DEFAULT
+   repo path degrades to tier 3 with one `settle_evidence.invalid` WARN (a
+   bad commit must die in CI's committed-file test, never brick fleet boots).
+3. **The conservative 17:30 IST default** — a NAMED CONSERVATIVE guess: until
+   the evidence file is committed the vendor's post-close settle time stays
+   **UNMEASURED** (17:30 is the #1775 probe's last slot).
+
+**The operator flow that replaces the guess** (all of it reviewed, none of it
+code): run the probe on ≥5 REGULAR trading days per
+`docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md`, then
+
+```bash
+python docs/groww/probe/postclose_settle_probe.py \
+  --summarize docs/groww/probe/ \
+  --emit-evidence docs/groww/probe/settle_evidence.json --margin-minutes 15
+```
+
+review the emitted per-day matrix + margin, commit the evidence + its
+transcripts in ONE PR (CI's committed-file test validates it), then `git pull`
++ restart (or wait one scheduler tick on a running dashboard) and verify the
+`settle_evidence.valid` INFO plus the "measured — probe evidence" deferral /
+`next_eligible` text. A >180-day-old evidence file still ADOPTS with a
+`settle_evidence.stale` WARN — re-probe and re-commit when it fires.
+
+Why the probe and not production self-learning (the censoring note):
+production "settled-by-T" observations are CENSORED at the very observation
+schedule being tuned — every gate-pass is seen at/after the current settle
+time, so passive evidence can never legitimately LOWER it (and the #1774
+gate-pass time is parse-blind to the raw 6-vs-7 row shape only the probe's
+`rows_all_len7` measures).
 
 Data safety either way: a too-early pull's still-settling TODAY bars are
 withheld by the today-completeness gate (#1774) and the end bound is the
