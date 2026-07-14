@@ -438,6 +438,55 @@ def test_e2e_old_stored_bars_with_empty_pull_today_not_no_source(tmp_path: Path)
     assert (lake / "bars" / "NSE" / "CASH" / "RELIANCE" / "1day").is_dir()
 
 
+def test_e2e_zero_row_parquet_completes_as_zero_bar_success(tmp_path: Path) -> None:
+    """[refuter round 3 — the executed truth behind residual (2)] a
+    hand-planted schema-complete 0-ROW 1-minute parquet passes the
+    existence-only ``has_stored_1m_bars`` arm and the REAL prebuild then
+    COMPLETES the symbol as a 0-bar SUCCESS: neither ``no_source`` nor
+    ``failed``, the warm unaffected — byte-identical to main's pre-change
+    behavior on the same plant (executed on merge-base 349b1a9 too). The
+    diff's earlier "fails the prebuild LOUDLY (fail-open)" residual wording
+    was FALSE and is corrected to this pin; the shape that DOES still fail
+    loudly is a schema-BROKEN plant, via the per-symbol data-error
+    quarantine (the round-1 R2 executed repro + the ComputeError pins in
+    ``test_gated_prebuild.py``). The 0-row shape is out-of-band: production
+    writers never render 0-row files and the #1594 heal quarantine-MOVES a
+    wholly-removed partition."""
+    import polars as pl
+    from brutex.data.timeframe_materialize import has_stored_1m_bars
+
+    lake = tmp_path / "lake"
+    part = lake / "bars" / "NSE" / "CASH" / "ZERO" / "1minute" / "2024"
+    part.mkdir(parents=True)
+    pl.DataFrame(
+        schema={
+            "timestamp": pl.Datetime("us", "UTC"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+        }
+    ).write_parquet(part / "01.parquet")
+    assert has_stored_1m_bars(lake, "NSE", "CASH", "ZERO") is True
+    zero = _instrument("ZERO", InstrumentType.EQ, 77)
+    adapter = _RecordingAdapter(empty_symbols=frozenset({"ZERO"}))
+    chain = _Chain(lake, [_nifty(), zero], adapter=adapter, real_prebuild=True)
+    report, note = chain.run()
+    assert report.ok is True
+    assert report.prebuild_no_source == ()  # existence-only: the plant IS "stored"
+    assert report.prebuild_no_source_count == 0
+    assert report.prebuild_failed == ()  # a VALID 0-row read is not a data error
+    assert report.prebuild_crashed is None
+    assert report.prebuild_built == 2  # ZERO counts as built at 0 bars (pre-existing)
+    assert chain.warm_calls == 1  # the warm is unaffected
+    # The silent shape, honestly pinned: no skip clause, no failure wording,
+    # no ZERO token anywhere on the operator note.
+    assert "ZERO" not in note
+    assert "symbol(s) skipped — no stored 1-minute data" not in note
+    assert "prebuild failures" not in note
+
+
 def test_e2e_stale_derived_1day_no_source_note_never_claims_warm_exclusion(
     tmp_path: Path,
 ) -> None:

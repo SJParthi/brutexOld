@@ -880,8 +880,16 @@ def has_stored_1m_bars(lake_root: Path, exchange: str, segment: str, symbol: str
     reader AND every future probe consumer; §11 COMMON). O(dir entries),
     short-circuits at the first parquet; ZERO Parquet opens. Deliberately
     blind to WHY the partition is empty (vendor-empty vs never-pulled vs
-    heal-emptied) and to a 0-ROW parquet (passes here, then fails the
-    prebuild LOUDLY exactly as today — fail-open, never a silent drop).
+    heal-emptied) and to a 0-ROW parquet: a hand-planted schema-complete
+    0-row file passes here and the prebuild then COMPLETES the symbol as a
+    0-bar SUCCESS (neither no_source nor failed; warm unaffected) —
+    EXECUTED, byte-identical to main's pre-change behavior on the same
+    plant (refuter round 3, pinned by
+    ``test_e2e_zero_row_parquet_completes_as_zero_bar_success``). The shape
+    is out-of-band — production writers never render 0-row files and the
+    #1594 heal quarantine-MOVES a wholly-removed partition — while a
+    schema-BROKEN plant still fails the prebuild loudly via the per-symbol
+    data-error quarantine (the round-1 R2 executed ComputeError pin).
     """
     base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
     return base.is_dir() and any(base.rglob("*.parquet"))
