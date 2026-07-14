@@ -146,8 +146,11 @@ from brutex.dashboard.lake_census_holder import (
     LakeCensusHolder,
 )
 from brutex.dashboard.lake_revision import (
+    RevisionProbeMemo,
     cascade_report_revision,
     lake_revision,
+    registry_revision,
+    resolve_revision_probe_ttl,
     sweep_results_revision,
 )
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
@@ -1217,6 +1220,7 @@ def build_app(
     census_clock: Callable[[], float] | None = None,
     loop_watchdog: LoopWatchdog | None = None,
     crossverify_runner: Callable[[Any], Any] | None = None,
+    revision_probe_memo: RevisionProbeMemo | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1393,6 +1397,16 @@ def build_app(
         existing ``build_app()`` caller is byte-identical. Production binds
         one in ``cli.cmd_dashboard`` behind the fail-loud
         ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
+    revision_probe_memo
+        Optional :class:`~brutex.dashboard.lake_revision.RevisionProbeMemo`
+        (DEC-O1-GUARANTEE-HARDEN-001 H2) bounding the two per-poll O(dirs)
+        freshness probes — the oneclick runs-listing manifest-stat walk and
+        the ``/results`` ``sweep_results_revision`` scandir digest — to one
+        sweep per TTL window (default 1 s via
+        ``BRUTEX_REVISION_PROBE_TTL_S``; ``0`` disables = byte-identical
+        per-poll probes). ``None`` (the default) constructs a fresh memo with
+        the env-resolved TTL; tests inject one with an explicit ``ttl_s`` +
+        clock for deterministic pins.
 
     Returns
     -------
@@ -1752,6 +1766,33 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
+    # The /db F&O REGISTRY count cache (DEC-O1-GUARANTEE-HARDEN-001 H1): the
+    # registry pagers' FILTERED COUNT(*) totals + the nav-badge counts dict are
+    # paging-invariant, so they are memoised per registry CONTENT — keyed by the
+    # `registry_revision` stat token (registry.duckdb + its .wal sibling,
+    # digested to the generation via `revision_generation`), the #867
+    # `candle_count_key` idiom on a DEDICATED instance. A repeat/paging click
+    # within one registry revision is an O(1) hit; a metadata pull's write
+    # moves the file token → recount (never stale); a probe OUTAGE (token
+    # None) computes fresh UNCACHED (the lake_revision-family posture). The
+    # page DATA queries stay per-click LIMIT/OFFSET SELECTs — already O(page).
+    _registry_count_cache = MoversSnapshotCache()
+    # The revision-probe TTL memo (DEC-O1-GUARANTEE-HARDEN-001 H2): bounds the
+    # two per-poll O(dirs) probe sweeps (oneclick runs listing + the /results
+    # sweep_results_revision digest) to ONE sweep per TTL window (default 1 s,
+    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud HERE at build_app for
+    # non-CLI embedders (review round 1 MINOR-1), and `cmd_dashboard` validates
+    # the SAME env FIRST with the clean `[brutex]` one-liner + EXIT_USER_ERROR,
+    # the loop-watchdog sibling idiom (review round 2); 0 disables).
+    # Staleness ≤ TTL, far under the 120 s adaptive-floor norm; a post-TTL
+    # poll always re-probes (no permanent-staleness state, pinned). The eager
+    # resolve keeps the memo's own lazy first-use path intact (an injected
+    # memo validates itself).
+    _revision_probe_memo = (
+        RevisionProbeMemo(ttl_s=resolve_revision_probe_ttl())
+        if revision_probe_memo is None
+        else revision_probe_memo
+    )
     # The /coverage/windows counts + page-row caches (DEC-COVERAGE-WINDOWS-O1-001 +
     # DEC-WINDOWS-MIDPULL-FLOOR-001): the `GROUP BY market, status` bucketed counts
     # AND the projected row page over the window ledger are invariant within one
@@ -7594,7 +7635,14 @@ def build_app(
             ``<lake>/sweeps`` scan / rank ONLY on a miss
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
-            rev = sweep_results_revision(lake_root)
+            # DEC-O1-GUARANTEE-HARDEN-001 H2: the sweeps digest is an O(sweep
+            # dirs) scandir sweep per poll — memoise the token for the short
+            # TTL (one sweep per window; an outage `None` is never memoised,
+            # so the outage arm below re-derives per poll exactly as before).
+            rev = _revision_probe_memo.get(
+                f"sweep_results|{lake_root}",
+                lambda: sweep_results_revision(lake_root),
+            )
             # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the cascade report is
             # atomically OVERWRITTEN in place per sweep — the rewrite moves NO
             # directory mtime the sweeps digest sees, so its DEDICATED file
@@ -7822,7 +7870,15 @@ def build_app(
             if root is None:
                 return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
             results_root: Path = root
-            probe = oneclick_artifacts.runs_revision_probe(results_root)
+            # DEC-O1-GUARANTEE-HARDEN-001 H2: the probe is an UNCAPPED O(run
+            # dirs) manifest-stat walk per poll (the F5 ruling) — memoise the
+            # RESULT for the short TTL so N polls within one window pay ONE
+            # walk (staleness ≤ TTL; absence/outage verdicts never memoised).
+            probe = _revision_probe_memo.get(
+                f"oc_runs|{results_root}",
+                lambda: oneclick_artifacts.runs_revision_probe(results_root),
+                cacheable=lambda p: p.token is not None,
+            )
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_runs_payload(
@@ -8982,11 +9038,26 @@ def build_app(
         registry_path = registry_path_for(store_path)
 
         def _load() -> dict[str, Any]:
-            """Read the expiry grid + registry counts off the event loop."""
+            """Read the expiry grid + registry counts off the event loop.
+
+            DEC-O1-GUARANTEE-HARDEN-001 H1: the paging-invariant COUNTs ride
+            the dedicated registry count cache keyed by the registry-content
+            stat token; a probe outage (token ``None``) computes fresh
+            UNCACHED — never a stale total, never a fabricated one.
+            """
+            token = registry_revision(registry_path)
+            cache = None if token is None else _registry_count_cache
+            gen = 0 if token is None else revision_generation(token)
             payload = list_registry_expiries(
-                registry_path, exch=exch, underlying=underlying, limit=limit, offset=offset
+                registry_path,
+                exch=exch,
+                underlying=underlying,
+                limit=limit,
+                offset=offset,
+                count_cache=cache,
+                generation=gen,
             )
-            payload["counts"] = registry_counts(registry_path)
+            payload["counts"] = registry_counts(registry_path, count_cache=cache, generation=gen)
             return payload
 
         try:
@@ -9028,7 +9099,14 @@ def build_app(
         registry_path = registry_path_for(store_path)
 
         def _load() -> dict[str, Any]:
-            """Read the contract grid + registry counts off the event loop."""
+            """Read the contract grid + registry counts off the event loop.
+
+            DEC-O1-GUARANTEE-HARDEN-001 H1 — the expiries route's cache law,
+            applied to the contracts pager's FILTERED leg count.
+            """
+            token = registry_revision(registry_path)
+            cache = None if token is None else _registry_count_cache
+            gen = 0 if token is None else revision_generation(token)
             payload = list_registry_contracts(
                 registry_path,
                 exch=exch,
@@ -9036,8 +9114,10 @@ def build_app(
                 expiry_date=expiry_date,
                 limit=limit,
                 offset=offset,
+                count_cache=cache,
+                generation=gen,
             )
-            payload["counts"] = registry_counts(registry_path)
+            payload["counts"] = registry_counts(registry_path, count_cache=cache, generation=gen)
             return payload
 
         try:

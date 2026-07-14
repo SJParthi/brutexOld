@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 —
+_Last updated: 2026-07-13 (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 —
+the O(1)-guarantee verification + hardening pass: `docs/O1_GUARANTEE_AUDIT.md`
+becomes the AUTHORITATIVE honest per-path complexity classification (51 rows —
+the six Golden-Rule-#5 engine hot paths · the DB/lake dashboard reads · the
+frontend; the anti-illusion rule applied to every row — no bare O(1) claim
+where the FIRST read is O(files)/O(rows)); the reported M4-Pro
+ResultsStore.get "1.87×" strict-tier failure is triaged
+VERIFIED-NOT-A-REGRESSION (a one-line dict probe, measured flat
+51.7/53.5/51.7 ns at 1k/10k/100k rows; the #1301 cache-tier 3.0× re-gate
+already absorbs the dict-probe physics band; NEW 100k-deep pin); FIVE
+hardenings land (the last 3 unbounded-body poller templates ride the NEW
+COMMON `BXUI.fetchTextBounded`; the oneclick timeline gains a dup-tick
+skip token + a NAMED newest-500 render cap + the 200 ms search debounce;
+universe.html's seven interval loaders ride ONE bounded latest-wins helper;
+the /db registry pagers' filtered COUNT gains an O(1)-on-repeat memo on the
+NEW `registry_revision` stat token; the leaderboard + oneclick-runs O(dirs)
+freshness probes are TTL-bounded by the NEW `RevisionProbeMemo` — a ≤1 s
+DISCLOSED staleness window, kill switch `BRUTEX_REVISION_PROBE_TTL_S=0`)
++ EIGHT bench gates close the audit's missing-gate findings. READ-side
+dashboard + tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1791 — this header carries the
+one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 —
 the brute-force ENGINE is SPOT-ONLY by operator directive: the ADR-0012 /
 DEC-NIFTY-DYNAMIC-STRATEGY-001 NIFTY-futures engine authorization + the
 DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface are CONSCIOUSLY
@@ -2480,7 +2503,68 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/engine-spot-only` (**DEC-ENGINE-SPOT-ONLY-001,
+- **Active branch:** `claude/o1-guarantee-harden` (**DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791** —
+  the O(1)-guarantee verification + hardening pass. THE RECORD: NEW `docs/O1_GUARANTEE_AUDIT.md` — the
+  authoritative honest per-path complexity classification (51 rows: the six Golden-Rule-#5 engine hot paths ·
+  the DB/lake dashboard read paths · the frontend), every row carrying its honest class
+  (genuine-O(1) / O(1)-on-repeat / O(page) / O(rows)-O(files) / O(n log n)), its first-read/worst-case/error-path
+  cost and its bench gate or an explicit "none" — under the anti-illusion rule: NO path claims bare O(1) where its
+  FIRST read is O(files)/O(rows) (the #1528 posture, product-wide), and the enforcement split is stated plainly
+  (the merge-blocking guarantee is the shared-CI ROBUST tier — the whole tests/bench dir every push at 3–10×
+  ceilings — 123 bench files (measured 2026-07-13 at the post-QUAD merged tree; the QUAD fold raised the round-1
+  census 121 → 123 — sub-split unchanged): 75 ratio / 19 cache-tier / 2 metadata-sweep / 10 M4PRO_ABS-gated; the strict 1.1× M4-Pro
+  tier + absolute floors run post-merge, non-required + non-blocking BY DESIGN per #382 + #1753). THE TRIAGE: the
+  reported M4-Pro ResultsStore.get "1.87×" strict-tier failure is VERIFIED NOT A REGRESSION — the path is a
+  one-line dict probe (`results_store.py:692`), measured dead flat (51.7/53.5/51.7 ns at 1k/10k/100k rows;
+  re-measured 0.994×/0.962×), "1.87" has NO trace in the repo, the ledgered history is the #1301 1.134× cache-tier
+  singleton (rerouted to `cache_tier_ceiling` → 3.0× strict; the DEC-O1-CACHE-TIER-001 M4-Pro calibration bounds
+  the dict band at 2.11×) — a 1.87× reading PASSES today's gate with headroom while the O(1) oracle keeps teeth;
+  NEW deep-depth pin `test_get_ratio_is_o1_deep_depth` (100k-vs-1k) carries the triage note in-test. THE FIVE
+  HARDENINGS: (F1) the headers-then-stalled-body poller wedge closed on its LAST THREE carriers —
+  coverage/spot_coverage/expired_options ride the NEW COMMON `BXUI.fetchTextBounded` (abort armed THROUGH
+  `r.text()`; same TimeoutError shape, degrades byte-identical; `TestBoundedTickFetch` widened 2 → ALL FIVE
+  templates + a node-EXECUTED stalled-body golden; fetch_windows/completeness deliberately KEEP their
+  self-contained local copies — they do not load bx-ui.js, documented); (F2) the bx-oneclick timeline render
+  bounded — a dup-only events tick renders NOTHING (`ringMutations` skip token), the render caps at the NEWEST 500
+  with the truncation NAMED on-screen, the search input gains the 200 ms house debounce (killing the 5,000-node
+  teardown+rebuild every ~3 s / per keystroke; node-executed goldens); (F3) universe.html's `refreshWindowsLine` +
+  six integrity loaders ride ONE `boundedLatestJson` (the EXISTING `gbFetchJson` body-armed abort + a per-loader
+  generation claim — stale late responses never repaint; renders byte-identical, poll-hygiene pins pass
+  unmodified; the 2026-07-13 merge-reconcile folded main's #1763 client-belt NO-OVERLAP guard into the SAME
+  helper — a tick whose prior fetch is in flight is skipped, and #1763's interim inline `guardedPollJson`
+  AbortController copy is superseded by the gbFetchJson-delegating helper); (H1) the /db registry pagers — the ONE wholly-uncached /db pager — gain an O(1)-on-repeat
+  filtered-COUNT memo: NEW `lake_revision.registry_revision` (base + `.wal` stat token; probe fault → uncached
+  legacy, never stale) + `db_view.registry_count_key` (repr-folded, collision-proof) + optional
+  `count_cache`/`generation` on both pagers + `registry_counts` (None = byte-identical legacy), page DATA
+  untouched (O(page) LIMIT/OFFSET); (H2) the per-poll O(dirs) freshness-probe tax TTL-bounded at the two named
+  sites — NEW `lake_revision.RevisionProbeMemo` (default-ON TTL 1.0 s, `BRUTEX_REVISION_PROBE_TTL_S`; `0` =
+  byte-identical legacy; junk fails LOUD; single-flight; a None probe is never memoised + evicts the prior entry —
+  outage recovery immediate) wrapping EXACTLY the leaderboard `sweep_results_revision` + oneclick
+  `runs_revision_probe` calls via `build_app(revision_probe_memo=)`, with the conftest hermeticity belt
+  (`REVISION_PROBE_TTL_ENV` setdefault "0" — the #1692/#1774 precedent). THE EIGHT BENCH GATES (all green this
+  session, shared tier): the deep-depth pin + `test_registry_count_cache_o1.py` (4 clicks → 1 COUNT; generation
+  move → exactly +1; cached click flat 2000-vs-200 legs) + `test_db_tables_swr_o1.py` (5 polls → 1 sweep;
+  master-revision move → +1) + `test_preopen_export_memo_o1.py` (warm click = ZERO further read_parquet
+  statements, bytes identical) + `test_window_ledger_degrade_memo_o1.py` (degrade arm: one parse per stamp) +
+  `test_revision_probe_ttl_o1.py` (6 polls → 1 sweep per route; post-TTL → exactly one re-probe) +
+  `test_sweep_cache_bloom_rebuild_cost.py` (resume rebuild LINEAR: 10k→61.0 ms / 100k→78.0 ms = 1.28× vs the 20×
+  ceiling) + the `test_blake3_combo_hash_o1.py` payload pins (measured: `roll_schedule` 80 ordinals → 3.54× base,
+  pinned < 8×; 10.66× bytes → 10.59× time = LINEAR — flat-vs-payload is physics-impossible, honestly NOT
+  claimed). HONEST ENVELOPES: the TTL memo INTRODUCES a ≤1 s freshness-detection staleness window (disclosed +
+  kill-switched; the walk itself stays O(run dirs) per fresh probe — the F5 uncapped ruling stands, FREQUENCY
+  bounded not the walk); the registry cache is O(1)-on-repeat — the FIRST click per revision pays the O(filtered
+  rows) COUNT; frontend caps are NAMED on-screen, never silent truncation; the SummaryCache `revision_probe` path
+  is deliberately NOT wrapped (scoped to the two named sites). DELIBERATELY NOT CHANGED (named follow-ups):
+  MoversSnapshotCache negative-result backoff = DEC-MOVERS-CACHE-ERROR-BACKOFF-001; movers LRU eviction churn
+  under hostile coordinate churn (capacity 256 — note only); `OptionDedupIndex._add_locked` Bloom-first ordering
+  (the pre-existing in-source Rule-11 follow-up); `ResultsStore.top_k` O(n log n) (documented; the #1533 route
+  cache is the enforcement). GATES: db_view ci.yml-EXACT stanza 100.00% (1659/536, 764 passed); lake_revision
+  100.00% (139/36) via the coverage_gate_discovery per-module gate; frontend six-suite 195 passed + the 44-file
+  battery 988 passed + the backend 12-file suite 125 passed; ruff/ruff-format clean; `mypy --strict` clean on
+  touched files (0 new); pyright 0 new vs the origin/main baseline; `node --check` clean. READ-side dashboard +
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/engine-spot-only` (**DEC-ENGINE-SPOT-ONLY-001,
   MIGRATION.md #1790** — the brute-force ENGINE is SPOT-ONLY (operator
   directive 2026-07-13, "wipe off the future, only spots alone"): the
   NIFTY-futures series alias `NSE-NIFTY-FUT` is RETIRED from engine sweep
@@ -2654,7 +2738,11 @@ hostile-review pass._
   (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
   full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
   #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
-  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard) · **#1441** docs
+  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard [MECHANISM
+  SUPERSEDED at the 2026-07-13 #1791 merge-reconcile: the belt's no-overlap guard is folded
+  into `boundedLatestJson` — the gbFetchJson-delegating helper carrying the same body-armed
+  abort — and the interim inline `guardedPollJson` copy was deleted; the belt's INTENT stands])
+  · **#1441** docs
   club DEC-EAP-FEEDBACK-INDEX-001 #1764 (+ the Zerodha 10y feasibility record + the market
   one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
   `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
@@ -6514,7 +6602,26 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/engine-spot-only`
+- **Active feature branch:** `claude/o1-guarantee-harden`
+  (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 — the O(1)-guarantee
+  verification + hardening pass: NEW `docs/O1_GUARANTEE_AUDIT.md` is the
+  authoritative honest per-path complexity classification (51 rows across
+  the engine hot paths / DB-lake reads / frontend; no bare-O(1) claim where
+  the first read is O(files); the merge-blocking vs post-merge enforcement
+  split stated plainly); the M4-Pro ResultsStore.get "1.87×" report triaged
+  VERIFIED-NOT-A-REGRESSION (one-line dict probe, measured flat at 100×
+  depth; the #1301 cache-tier re-gate absorbs the physics band; NEW
+  deep-depth pin); five hardenings (the NEW COMMON `BXUI.fetchTextBounded`
+  on the last 3 unbounded-body poller templates; the oneclick timeline
+  dup-tick skip token + NAMED newest-500 render cap + 200 ms search
+  debounce; universe.html's seven loaders on ONE bounded latest-wins
+  helper; the /db registry filtered-COUNT memo on the NEW
+  `registry_revision` token; the NEW `RevisionProbeMemo` TTL-bounding the
+  leaderboard + oneclick-runs O(dirs) probes — ≤1 s disclosed staleness,
+  kill switch) + eight bench gates; READ-side dashboard + tests + docs
+  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; matches §1's Active branch line)
+  Earlier: `claude/engine-spot-only`
   (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 — the brute-force ENGINE is
   SPOT-ONLY: `NSE-NIFTY-FUT` RETIRED from engine sweep scope, every
   production sweep entry refuses it loudly citing the DEC + "the engine is
@@ -7140,7 +7247,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4975-4976` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5011-5012` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |

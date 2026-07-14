@@ -33,6 +33,11 @@ from tests.bench._o1_tiers import cache_tier_ceiling
 
 _SMALL = 1_000
 _LARGE = 10_000
+#: The DEEP-depth pin's row count (DEC-O1-GUARANTEE-HARDEN-001 H3): 100× the
+#: small store, so a genuine O(n) scan reads ~100× — no cache-tier allowance
+#: can absorb it — while the honest dict probe stays flat (measured 51.7 ns at
+#: BOTH 1k and 100k in the 2026-07-13 audit sandbox).
+_DEEP = 100_000
 
 
 def _rid(seed: int) -> str:
@@ -116,6 +121,54 @@ class TestGetIsO1:
             f"ResultsStore.get ratio {ratio:.2f}× (10k vs 1k) exceeds 5× — "
             f"lookup may have regressed to a scan. "
             f"t_1k={t_small:.0f}ns, t_10k={t_large:.0f}ns."
+        )
+
+    def test_get_ratio_is_o1_deep_depth(self) -> None:
+        """`get` latency at 100k / 1k rows stays O(1) — the DEEP-depth pin.
+
+        DEC-O1-GUARANTEE-HARDEN-001 (H3). TRIAGE NOTE for the next
+        strict-tier ratio report on this path (write it here so the next
+        "1.87×" ticket resolves at the test, not in a fresh investigation):
+
+        * ``ResultsStore.get`` is a ONE-LINE in-memory ``dict.get``
+          (results_store.py) — there is no parse/scan/I/O to creep. Measured
+          in the 2026-07-13 audit sandbox at 51.7 ns (1k) / 53.5 ns (10k) /
+          51.7 ns (100k): dead flat at 100× depth (ratios 1.034× / 0.999×).
+        * a sub-3× strict-tier reading (e.g. the ledgered 1.134× of
+          MIGRATION.md #1301, DEC-O1-CACHE-TIER-MARGINAL-001, or a
+          hypothetical 1.87×) is dict-probe CACHE-TIER physics — the large
+          store's bucket array + row objects spill L2/SLC into DRAM, the
+          DEC-O1-CACHE-TIER-001 calibration measured the dict-lookup band at
+          up to 2.11× on the real M4-Pro — and PASSES today's gate
+          (``cache_tier_ceiling`` → 3.0× strict / 5.0× shared, the #1301
+          reroute). A red on an older head predating that reroute is stale
+          evidence: confirm the failing job's head imports
+          ``cache_tier_ceiling`` in this file before triaging further.
+        * a GENUINE scan regression reads ≥10× at 10k-vs-1k and ≥100× here —
+          far above every tier; this 100×-depth pin exists so such a
+          regression cannot hide inside the cache-tier allowance at the
+          shallower 10× spread.
+        """
+
+        def _time(n: int, *, iterations: int = 5_000) -> float:
+            store = _filled(n)
+            probe = _rid(n // 2)
+            for _ in range(50):  # warm
+                store.get(probe)
+            t0 = time.perf_counter_ns()
+            for _ in range(iterations):
+                store.get(probe)
+            t1 = time.perf_counter_ns()
+            return (t1 - t0) / iterations
+
+        t_small = _time(_SMALL)
+        t_deep = _time(_DEEP)
+        ratio = t_deep / max(t_small, 1.0)
+        assert ratio < cache_tier_ceiling(5.0), (
+            f"ResultsStore.get ratio {ratio:.2f}× (100k vs 1k) exceeds the tier — "
+            f"a genuine scan reads ~100× here; a sub-3× reading is cache-tier "
+            f"physics (see the triage note). "
+            f"t_1k={t_small:.0f}ns, t_100k={t_deep:.0f}ns."
         )
 
 
