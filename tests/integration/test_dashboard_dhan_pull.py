@@ -382,7 +382,9 @@ class TestDhanGrowwInterplayNegativePins:
     def test_dhan_route_source_has_no_auto_arm_or_scheduler_reference(self) -> None:
         # Structural pin: the Dhan block (banner → the pull_intent resume block)
         # references neither the scheduler nor the auto_arm token.
-        source = Path(app_module.__file__).read_text(encoding="utf-8")
+        app_file = app_module.__file__
+        assert app_file is not None  # a regular (non-namespace) module always has one
+        source = Path(app_file).read_text(encoding="utf-8")
         start = source.index("# DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001")
         end = source.index("if pull_intent_store is not None:", start)
         dhan_block = source[start:end]

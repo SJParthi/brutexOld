@@ -602,8 +602,8 @@ jobs:
           else
             echo "(brutex.adapters.dhan.scrip_master test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_token_store.py" > /dev/null; then
-            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store.py
+          if compgen -G "tests/unit/test_dhan_token_store_aws.py" > /dev/null; then
+            pytest --cov=brutex.adapters.dhan.token_store_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_token_store_aws.py
           else
             echo "(brutex.adapters.dhan.token_store_aws test file not present yet — gate inactive)"
           fi
@@ -642,8 +642,8 @@ jobs:
           else
             echo "(brutex.adapters.dhan.ingest test file not present yet — gate inactive)"
           fi
-          if compgen -G "tests/unit/test_dhan_credentials_aws.py" > /dev/null; then
-            pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dhan_credentials_aws.py
+          if compgen -G "tests/unit/test_credentials_dhan_aws.py" > /dev/null; then
+            pytest --cov=brutex.config.credentials_dhan_aws --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_credentials_dhan_aws.py
           else
             echo "(brutex.config.credentials_dhan_aws test file not present yet — gate inactive)"
           fi
