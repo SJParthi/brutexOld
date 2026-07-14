@@ -296,7 +296,11 @@ def validate_evidence_payload(payload: object, *, path: str) -> SettleEvidence:
     if not isinstance(payload, dict):
         _fail(path, f"root is not a JSON object (got {type(payload).__name__})")
     schema = payload.get("schema")
-    if isinstance(schema, bool) or schema != SETTLE_EVIDENCE_SCHEMA:
+    # Exact-INT schema (refuter r3 F-R3a-1): bool refused FIRST (True == 1),
+    # then the type gate — a JSON float ``1.0`` == 1 numerically and would
+    # sail through bare equality (the ``_require_int`` law mirrored) — then
+    # the exact value.
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema != SETTLE_EVIDENCE_SCHEMA:
         _fail(path, f"schema must be exactly {SETTLE_EVIDENCE_SCHEMA}, got {schema!r}")
     kind = payload.get("kind")
     if kind != SETTLE_EVIDENCE_KIND:

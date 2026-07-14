@@ -236,6 +236,10 @@ class TestValidateEvidencePayload:
             ({"schema": True}, "schema must be exactly 1"),
             ({"schema": "1"}, "schema must be exactly 1"),
             ({"schema": 2}, "schema must be exactly 1"),
+            # Refuter r3 F-R3a-1: a JSON float 1.0 == 1 numerically — the
+            # pre-fix guard refused bool but not float (unlike _require_int),
+            # so 1.0 (and 1e0) VALIDATED; the exact-int guard refuses it.
+            ({"schema": 1.0}, "schema must be exactly 1"),
             ({"schema": None}, "schema must be exactly 1"),
             ({"kind": "something-else"}, "kind must be"),
             ({"earliest_all_pass_ist": None}, "earliest_all_pass_ist must be a string"),
@@ -492,6 +496,25 @@ class TestEvidenceSettleDefaultTier:
         assert token in str(warns[0]["detail"])
         assert "17:30" in str(warns[0]["fallback"])
 
+    def test_float_schema_full_valid_file_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """[refuter r3 F-R3a-1] the executed end-to-end repro shape: an
+        otherwise fully VALID artifact whose ``"schema"`` is the JSON float
+        ``1.0`` (``json.loads`` yields a float; numerically == 1) VALIDATED
+        and was ADOPTED end-to-end at the pre-fix head — the exact-int guard
+        now takes the default tier's corrupt path: ONE WARN + the
+        conservative 17:30 fallback, never adoption."""
+        target = write_evidence(tmp_path / "e.json", schema=1.0)
+        assert json.loads(target.read_text(encoding="utf-8"))["schema"] == 1.0
+        env = self._bind_default(monkeypatch, target)
+        with capture_logs() as logs:
+            assert evidence_settle(env) is None
+        warns = [e for e in logs if e["event"] == "settle_evidence.invalid"]
+        assert len(warns) == 1
+        assert "schema must be exactly 1, got 1.0" in str(warns[0]["detail"])
+        assert "17:30" in str(warns[0]["fallback"])
+
     def test_nesting_bomb_warns_and_falls_back(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -699,6 +722,17 @@ class TestEvidenceSettleExplicitTier:
         # The memoized degenerate token re-raises the SAME wrapped refusal.
         with pytest.raises(ValueError, match=SETTLE_EVIDENCE_PATH_ENV):
             evidence_settle(env)
+
+    def test_float_schema_explicit_raises_naming_env(self, tmp_path: Path) -> None:
+        """[refuter r3 F-R3a-1] the explicit-path twin of the float-schema
+        repro — the same full otherwise-valid ``"schema": 1.0`` file fails
+        LOUD with a ValueError naming the env var."""
+        target = write_evidence(tmp_path / "e.json", schema=1.0)
+        env = {SETTLE_EVIDENCE_PATH_ENV: str(target)}
+        with pytest.raises(ValueError, match="schema must be exactly 1") as excinfo:
+            evidence_settle(env)
+        assert SETTLE_EVIDENCE_PATH_ENV in str(excinfo.value)
+        assert "got 1.0" in str(excinfo.value)
 
     def test_valid_explicit_adopts(self, tmp_path: Path) -> None:
         target = write_evidence(tmp_path / "e.json")
