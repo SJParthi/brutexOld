@@ -145,7 +145,7 @@ def test_before_settle_detail_renders_actual_resolved_settle(
         "vendor's true settle time is UNMEASURED; see "
         "docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override "
         "BRUTEX_PULL_ALL_SETTLE_IST)"
-    )  # BYTE-IDENTICAL to the pre-#1792 wording
+    )  # BYTE-IDENTICAL to the pre-#1793 wording
 
 
 # ── auto_pull_allowed ────────────────────────────────────────────────────
@@ -590,7 +590,7 @@ def test_resolution_no_evidence_is_byte_identical(
 ) -> None:
     """THE PARITY ORACLE: with the channel off OR the default path absent,
     ``resolve_settle_time`` over the full env matrix (default + every
-    valid/junk token) equals the pre-#1792 values — this PR changes NOTHING
+    valid/junk token) equals the pre-#1793 values — this PR changes NOTHING
     until an evidence file lands."""
     from brutex.calendars import settle_evidence
 

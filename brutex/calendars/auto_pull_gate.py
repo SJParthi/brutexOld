@@ -15,7 +15,7 @@ composed, never edited. The belt honors the guard's OWN
 governs the shared-account protection family; hostile-review r1 ruling).
 
 Settle resolution is the THREE-TIER law (DEC-SETTLE-EVIDENCE-ADOPTION-001,
-MIGRATION.md #1792): explicit ``BRUTEX_PULL_ALL_SETTLE_IST`` (fail-loud,
+MIGRATION.md #1793): explicit ``BRUTEX_PULL_ALL_SETTLE_IST`` (fail-loud,
 strict HH:MM — the tier-1 short-circuit, evidence never read) > VALIDATED
 committed probe evidence (:mod:`brutex.calendars.settle_evidence` — the
 #1775 probe's ``--emit-evidence`` artifact) > the conservative 17:30 default.
@@ -130,7 +130,7 @@ class SettleResolution:
 
     ``source`` ∈ ``{"env", "evidence", "default"}``; ``provenance`` is the
     fully-formed parenthetical clause the ``before_settle`` deferral detail
-    renders (the DEFAULT arm's clause is byte-identical to the pre-#1792
+    renders (the DEFAULT arm's clause is byte-identical to the pre-#1793
     wording — the verbatim UNMEASURED honesty label; Golden Rule #10 both
     directions: a measured value never reads UNMEASURED, an override never
     claims conservatism the operator replaced).
@@ -273,7 +273,7 @@ def auto_pull_allowed(
         )
     if ist_now.time() < res.value:
         # The provenance clause is per-tier (Golden Rule #10): the DEFAULT
-        # arm's rendered detail is BYTE-IDENTICAL to the pre-#1792 wording.
+        # arm's rendered detail is BYTE-IDENTICAL to the pre-#1793 wording.
         return AutoGateVerdict(
             allowed=False,
             reason="before_settle",

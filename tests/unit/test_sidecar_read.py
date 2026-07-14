@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=none
 """``brutex.data.sidecar_read`` — the COMMON regular-file-only sidecar loader.
 
-DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792): the loader MOVED
+DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the loader MOVED
 VERBATIM out of ``brutex/dashboard/pull_intent.py`` (which re-exports it
 byte-compatibly — the #1715 leaf+shim precedent). This is the DIRECT shape
 matrix for the moved defs — ``test_pull_intent.py`` keeps its STORE-level

@@ -148,7 +148,7 @@ defers a still-forming day and re-pulls.
   not actually trade a full session — check the NSE calendar / the observed-sessions
   overlay before blaming the vendor.
 
-## Emit + adopt the evidence (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792)
+## Emit + adopt the evidence (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793)
 
 Once ≥ 5 REGULAR probe days exist, fold them into the machine-readable
 settle-evidence artifact the auto-pull gate ADOPTS:

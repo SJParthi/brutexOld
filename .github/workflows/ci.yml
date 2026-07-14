@@ -1843,7 +1843,7 @@ jobs:
           else
             echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
           fi
-          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792): the measured-settle
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
           # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
           # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
           # from the start.

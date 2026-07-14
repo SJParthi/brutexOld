@@ -1,6 +1,6 @@
 """Committed measured-settle EVIDENCE — schema validator + hardened loader.
 
-DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792). The #1775 post-close
+DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793). The #1775 post-close
 settle probe's ``--summarize --emit-evidence`` folds ≥ 5 REGULAR trading days
 of transcripts into ONE machine-readable artifact
 (``docs/groww/probe/settle_evidence.json``, schema 1, committed BESIDE its

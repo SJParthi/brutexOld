@@ -34,7 +34,7 @@ Usage
     python docs/groww/probe/postclose_settle_probe.py --summarize docs/groww/probe/
 
     # ... and emit the machine-readable settle-evidence artifact the auto-pull
-    # gate ADOPTS (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792) —
+    # gate ADOPTS (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793) —
     # review the per-day matrix + margin, then commit it BESIDE its transcripts:
     python docs/groww/probe/postclose_settle_probe.py \
         --summarize docs/groww/probe/ \
@@ -314,7 +314,7 @@ def _emit_evidence(
 ) -> int:
     """Fold the transcript records into the settle-evidence artifact — or refuse.
 
-    DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792). The evidence law is
+    DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793). The evidence law is
     deliberately STRONGER than the pooled stdout verdict above: the earliest
     all-pass slot must be OBSERVED on >= 5 distinct REGULAR trading days and
     pass every check on EVERY such day (per-day presence required — the stdout

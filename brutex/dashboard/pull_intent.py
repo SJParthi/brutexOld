@@ -80,7 +80,7 @@ from brutex.adapters.groww.pull_singleflight import (
 )
 from brutex.data.atomic_io import atomic_write_simple
 
-# DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792): the round-7 P-1/P-2
+# DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the round-7 P-1/P-2
 # regular-file-only loader MOVED VERBATIM to the COMMON leaf
 # brutex/data/sidecar_read.py (the calendars-layer settle-evidence loader must
 # not import the dashboard package; a copy is refused by CLAUDE.md §11 — the

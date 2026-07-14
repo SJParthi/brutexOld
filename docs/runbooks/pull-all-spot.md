@@ -132,7 +132,7 @@ ticks — its deferrals log `auto_pull.deferred` once per (day, reason):
 |-----------------------|--------------------------------------------------|-------------------------------------------------------------------|
 | `non_trading_day`     | weekend / listed NSE holiday (incl. Muhurat days) | `<date> is not an NSE trading day — nothing new to pull`           |
 | `muhurat_deferral`    | a (hypothetical) trading-day Muhurat listing      | `<date> has a Muhurat session — deferred to the next regular trading day (evening-session settle behavior unverified)` |
-| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (…)` — HH:MM is the ACTUAL resolved settle and the parenthetical names the resolved TIER (DEC-SETTLE-EVIDENCE-ADOPTION-001): default → `(conservative — the vendor's true settle time is UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override BRUTEX_PULL_ALL_SETTLE_IST)` (byte-identical to pre-#1792); env/flag → `(operator override BRUTEX_PULL_ALL_SETTLE_IST)`; committed evidence → `(measured — probe evidence: earliest all-pass HH:MM IST + N min margin over D trading days; override BRUTEX_PULL_ALL_SETTLE_IST)` |
+| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (…)` — HH:MM is the ACTUAL resolved settle and the parenthetical names the resolved TIER (DEC-SETTLE-EVIDENCE-ADOPTION-001): default → `(conservative — the vendor's true settle time is UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override BRUTEX_PULL_ALL_SETTLE_IST)` (byte-identical to pre-#1793); env/flag → `(operator override BRUTEX_PULL_ALL_SETTLE_IST)`; committed evidence → `(measured — probe evidence: earliest all-pass HH:MM IST + N min margin over D trading days; override BRUTEX_PULL_ALL_SETTLE_IST)` |
 | `market_hours_blocked`| structural belt (unreachable while settle ≥ 15:35)| `inside the NSE market-hours pull window — deferred`               |
 
 Contention under `--auto` (another pull holds the lake single-flight) also
@@ -166,7 +166,7 @@ a clean exit-1 refusal before any lock (like the settle/market-hours knobs).
 ## 3. The settle time — measured when evidence exists, a guess until then
 
 The settle time resolves through the THREE-TIER law
-(DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792):
+(DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793):
 
 1. **Explicit `BRUTEX_PULL_ALL_SETTLE_IST`** (or `--settle-ist HH:MM`, which
    rides the same strict resolver) — ALWAYS wins, evidence never read. Strict

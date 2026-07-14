@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-14 (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md
-#1792 — the measured-settle evidence adoption channel: the #1775 probe's
+#1793 — the measured-settle evidence adoption channel: the #1775 probe's
 `--summarize --emit-evidence` → committed `docs/groww/probe/settle_evidence.json`
 (schema 1, reviewed beside its transcripts) → the validated three-tier
 resolution env > evidence > the conservative 17:30 default (the tier-1
@@ -30,7 +30,7 @@ loader, MOVED to COMMON `brutex/data/sidecar_read.py` with a byte-compatible
 pull_intent shim); ships the CHANNEL, ships NO measured number — every
 production resolution is byte-identical until the operator's evidence PR
 lands (parity-pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
-per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1792 —
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1793 —
 this header carries the one-line summary, never the story.)
 Earlier: 2026-07-13 (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md
 #1785, branch `claude/sweep-lock-pull-concurrency` — the dashboard sweep route
@@ -2567,7 +2567,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/settle-evidence-adoption` (**DEC-SETTLE-EVIDENCE-ADOPTION-001,
-  MIGRATION.md #1792** — the measured-settle EVIDENCE-FILE adoption channel, closing the
+  MIGRATION.md #1793** — renumbered #1792 → #1793 at the 2026-07-14 second merge-reconcile
+  (main took #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001; DEC-IDs are the stable
+  handles per DEC-LEDGER-RENUMBER-001) — the measured-settle EVIDENCE-FILE adoption channel, closing the
   #1779 standing promise "re-derive when the probe lands" MECHANICALLY. The #1775 probe
   gains `--summarize --emit-evidence PATH [--margin-minutes N]`: a per-day × canonical-slot
   fold of ≥5 REGULAR trading days of transcripts (non-trading/Muhurat days excluded +
@@ -2619,7 +2621,7 @@ hostile-review pass._
   DEC-SETTLE-PROD-EVIDENCE-RECORDER-001 (crossverify recorder + default_too_early
   raise-guard — diagnostics, deliberately out) + the evidence COMMIT itself.
   HOSTILE-REVIEW ROUND folded (4× SHIP — the per-item record lives in MIGRATION.md
-  #1792): honesty docstrings (`default_evidence_path` drops its `.resolve()` — the
+  #1793): honesty docstrings (`default_evidence_path` drops its `.resolve()` — the
   resolver's "no I/O" claim made literally true; the per-poll one-stat probe cost
   disclosed), repr conventions (the stale WARN's `generated_at_utc` field + `_fail`'s
   path — the #907 source-repr law), `generated_at_utc` tightened to tz-UTC-exact, the
@@ -6974,7 +6976,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/settle-evidence-adoption`
-  (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1792 — the measured-settle
+  (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793 — the measured-settle
   EVIDENCE-FILE adoption channel: the #1775 probe's `--summarize
   --emit-evidence PATH [--margin-minutes N]` folds ≥5 REGULAR probe days into
   the committed schema-1 `docs/groww/probe/settle_evidence.json`, and the
@@ -6996,7 +6998,7 @@ hostile-review pass._
   (parity-pinned) and the measured value is operator work (probe → emit →
   review → commit → CI validates → adopt); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1792 for the full blurb)
+  MIGRATION.md #1793 for the full blurb)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — the dashboard
   sweep route + the nightly sweep leg stop holding the LAKE pull flock through

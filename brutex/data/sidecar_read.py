@@ -1,6 +1,6 @@
 """The COMMON bounded, regular-file-only sidecar loader (moved from pull_intent).
 
-DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792): :class:`SidecarReadResult`
+DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): :class:`SidecarReadResult`
 and :func:`read_sidecar_bytes` are MOVED **VERBATIM** here from
 ``brutex/dashboard/pull_intent.py`` (which keeps byte-compatible re-exports —
 the #1715 ``sweep_identity.py`` leaf+shim precedent), so the calendars-layer

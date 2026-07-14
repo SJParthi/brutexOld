@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=none
 """``brutex.calendars.settle_evidence`` — the measured-settle evidence channel.
 
-DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1792): the schema-1 validator
+DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the schema-1 validator
 (the §6 truth table), the stat-token-memoized loader over the r7-hardened
 regular-file-only reader (explicit-path junk fails LOUD — the resolve_* law;
 default-path corruption WARNs once + falls back to the conservative 17:30),
@@ -966,7 +966,7 @@ class TestProbeEmitterRoundtrip:
         day while a strictly LATER slot fails on some day prints ONE
         informational note naming day+slot — the adopted value + the evidence
         schema are UNCHANGED, and the note lives in the EMIT path only (a
-        plain ``--summarize`` keeps its pre-#1792 note-free stdout)."""
+        plain ``--summarize`` keeps its pre-#1793 note-free stdout)."""
         _write_transcripts(tmp_path)  # clean from 15:45 on all 5 days
         day, slot = "2026-07-16", "16:30"
         rows = [
