@@ -270,15 +270,26 @@ failure — `PrebuildOutcome.ok` stays True and the DASHBOARD spot-movers warm
 FIRES over the healthy set (pre-#1792 the symbol read `prebuild failures:
 <SYM>` and withheld the warm run-wide). The symbol is COUNTED + NAMED in the
 headline and the CLI structured block (`N symbol(s) skipped — no stored
-1-minute data (vendor-empty or never pulled), excluded from timeframe build
-+ movers warm: <SYM> …`) — never silently dropped, and never warmed into a
-fabricated snapshot (warm discovery is parquet-file-gated, so a
-zero-stored-bars symbol is structurally absent from every snapshot).
+1-minute data (vendor-empty or never pulled), excluded from timeframe
+build: <SYM> …`) — never silently dropped, and never warmed into a
+fabricated snapshot (warm discovery is parquet-file-gated per dataset: a
+symbol with NO parquet in ANY timeframe is structurally absent from every
+snapshot; a surviving previously stored DERIVED timeframe — e.g. a legacy
+vendor-fetched `1day` — legitimately keeps the symbol in the snapshot,
+serving genuine stored bars, which is why the clause claims only the
+timeframe-build exclusion — refuter round 2, MIGRATION.md #1792).
 Operator action for a delisted / never-traded name: NONE. A symbol you
-EXPECTED data for reading no-source means the vendor served nothing over the
-pulled range (or the spot was never pulled — the probe cannot distinguish;
-cause attribution is the named follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001)
-— verify on `/coverage/windows` (settled SKIPPED, `bars=0`). The law is
+EXPECTED data for reading no-source means ZERO stored 1-minute bars at
+derive time — usually the vendor served nothing over the pulled range, or
+the spot was never pulled (the probe cannot distinguish; cause attribution
+is the named follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001) — verify on
+`/coverage/windows` (settled SKIPPED, `bars=0`). If `/coverage/windows`
+instead shows settled SUCCESS with `bars>0` for a no-source symbol, the
+stored 1-minute bars were removed AFTER the pull (e.g. a lake-heal
+quarantine MOVE of a poisoned partition — the heal moves files and never
+rewrites the window ledger) — inspect `<lake>/.quarantine/` and restore or
+re-pull (the third probe-blind shape; refuter round 2, MIGRATION.md
+#1792). The law is
 deliberately NON-TIERED (refuter round 1, MIGRATION.md #1792): a brute-force
 ENGINE index (NIFTY/BANKNIFTY/SENSEX) reading no-source gets the SAME INFO +
 named skip clause and the warm still fires — that shape means the engine's

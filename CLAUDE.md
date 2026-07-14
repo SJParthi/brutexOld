@@ -2564,7 +2564,11 @@ hostile-review pass._
   `prebuild_no_source`/`prebuild_no_source_count` payload keys + the CLI
   `no-source:` line + per-symbol INFO + the all-no-source WARN — never
   silently dropped, never a fabricated snapshot (warm discovery is
-  parquet-file-gated; re-pinned with real-lake evidence). VERDICT = LAKE
+  parquet-file-gated per dataset — structural absence holds when NO
+  timeframe holds parquet, re-pinned with real-lake evidence; a surviving
+  previously stored DERIVED timeframe legitimately keeps the symbol
+  discoverable, serving genuine stored bars — the refuter-round-2
+  scoping). VERDICT = LAKE
   truth by construction — no report field participates (the #1779 `no_data`
   trap is dead structurally; the healthy-incremental-re-run trap twin is the
   permanent regression net); a mixed no_source + REAL failure still reads
@@ -2585,7 +2589,19 @@ hostile-review pass._
   disclosure above + the `_warn_if_all_no_source` empty-phase guard's
   surviving mutant killed (WARN-absence pins on BOTH fno-only paths — a
   guard-dropped mutant fired a spurious count=0 all_no_source WARN on every
-  ▶ Pull F&O run and passed the whole 87-test battery pre-pin). Default path
+  ▶ Pull F&O run and passed the whole 87-test battery pre-pin). REFUTER
+  ROUND 2 folded (2 MINOR, both executed-repro-validated then fixed —
+  per-finding record in MIGRATION.md #1792): the note clause's
+  "+ movers warm" exclusion tail DROPPED (an overclaim — a symbol whose 1m
+  partition was emptied post-pull while a previously DERIVED 1day survives
+  classifies no_source yet legitimately stays in warm discovery off the
+  stored 1day; the five structural-absence claim sites scoped to
+  no-parquet-in-ANY-timeframe; NEW stale-derived e2e twin, fails on the
+  pre-fix wording) + the runbook §7 remediation gains the heal-emptied
+  THIRD-shape branch (post-pull removal reads settled SUCCESS bars>0 on
+  /coverage/windows — never the vendor-empty "settled SKIPPED bars=0"
+  signature §7 alone prescribed; inspect `<lake>/.quarantine/`, restore or
+  re-pull). Default path
   byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
   zero added I/O — the classification rides an exception that only exists on
   the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
@@ -6902,8 +6918,11 @@ hostile-review pass._
   worker kind-gated; months-bounded arm stays plain ValueError), counted +
   named on the note + emit-on-nonzero payload keys + the CLI `no-source:`
   line; `PrebuildOutcome.ok` unaffected so the movers warm fires over the
-  healthy majority (the warm-side exclusion itself is structural — discovery
-  is parquet-file-gated, re-pinned); the inherited e2e pin consciously
+  healthy majority (the warm-side exclusion is structural when NO timeframe
+  holds parquet — discovery is parquet-file-gated, re-pinned; a surviving
+  stored DERIVED timeframe legitimately keeps a symbol discoverable — the
+  refuter-round-2 scoping, the "+ movers warm" note tail dropped); the
+  inherited e2e pin consciously
   flipped + the healthy-incremental-re-run trap twin is the permanent
   regression net; a mixed no_source + REAL failure still withholds the warm;
   default path byte-identical (note/wire/stdout literal-pinned); named
