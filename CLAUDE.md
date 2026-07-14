@@ -2610,8 +2610,8 @@ hostile-review pass._
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ZERO new
   vendor calls; `market_hours.py` byte-untouched; new env var BRUTEX_SETTLE_EVIDENCE_PATH
   (+ the conftest hermeticity belt, off-by-default in tests only). GATES:
-  `settle_evidence.py` 100.00% line+branch standalone (212/90, 104 tests incl. the
-  subprocess emitter round-trip golden — r1 re-measure) + `sidecar_read.py` 100.00%
+  `settle_evidence.py` 100.00% line+branch standalone (212/90, 111 tests incl. the
+  subprocess emitter round-trip golden — refuter-r3 re-measure) + `sidecar_read.py` 100.00%
   (34/6) on their NEW ci.yml stanzas; `auto_pull_gate.py` (93/30) ·
   `auto_pull_scheduler.py` (253/56) · `pull_intent.py` (225/50 on its mapped trio)
   re-measured 100.00%; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new vs
