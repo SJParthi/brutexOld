@@ -72,7 +72,7 @@ A clean run reaches all three and reports ``stopped_after = None``.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Final
@@ -506,6 +506,19 @@ class PipelinePullReport:
         The prebuild's failing symbol names (capped at 10 by the producer —
         :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`); empty when
         the phase did not run or had no failures.
+    prebuild_no_source
+        The prebuild's NO-SOURCE spot-target names — ZERO stored 1-minute
+        bars at derive time, nothing to derive (vendor-empty or never pulled;
+        DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — capped at 10 by the
+        producer, exactly the ``quarantined_symbols``/``quarantined_count``
+        template; empty when the phase did not run or every target had
+        stored data. NOT failures: the movers warm still fires, and each
+        no-source symbol is structurally absent from the warmed snapshots
+        (no parquet ⇒ no discovery row) — counted + NAMED in the note
+        instead of silently vanishing (Golden Rule #1).
+    prebuild_no_source_count
+        The TRUE (uncapped) no-source total — the note's ``(+K more)``
+        remainder derives from it, so the cap never lies.
     prebuild_crashed
         The error TYPE NAME (e.g. ``"ValueError"``) when the guarded prebuild
         CRASHED whole-run instead of completing
@@ -577,6 +590,11 @@ class PipelinePullReport:
     #: numbers, and the movers warm was consequently skipped (gated on
     #: ``PrebuildOutcome.ok``).
     prebuild_disk_guarded: bool = False
+    #: The no-source spot targets (capped names + TRUE count — the
+    #: quarantined_symbols/quarantined_count template;
+    #: DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, see the docstring above).
+    prebuild_no_source: tuple[str, ...] = ()
+    prebuild_no_source_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -597,7 +615,7 @@ class PipelinePullReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/pull-pipeline`` route + panel."""
-        return {
+        payload: dict[str, Any] = {
             "ok": self.ok,
             "stopped_after": self.stopped_after,
             "note": self.note,
@@ -618,6 +636,13 @@ class PipelinePullReport:
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
         }
+        if self.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — the
+            # #1539/#1649b emit-on-non-default precedent): the default
+            # all-stored-data payload stays byte-identical.
+            payload["prebuild_no_source"] = list(self.prebuild_no_source)
+            payload["prebuild_no_source_count"] = self.prebuild_no_source_count
+        return payload
 
 
 def _spot_stop_note(report: BulkSpotReport) -> str:
@@ -679,6 +704,24 @@ def _movers_note_clause(
 _NOTE_FAILURE_NAMES = 3
 
 
+def format_capped_names(
+    names: Sequence[str], true_count: int, cap: int = _NOTE_FAILURE_NAMES
+) -> str:
+    """``"A, B, C (+K more)"`` — capped names + the honest remainder from the TRUE count.
+
+    The ONE capped-names note formatter (CLAUDE.md §11 COMMON,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): shows up to *cap* of *names* and
+    appends ``(+K more)`` from *true_count* — the producer may have already
+    capped *names* (e.g. :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`),
+    so the remainder derives from the UNCAPPED total, never the shown tuple
+    (Golden Rule #1). Shared by the prebuild-failures clause, the no-source
+    clause, and the ``brutex pull-all-spot`` stdout line — zero drift.
+    """
+    shown = ", ".join(names[:cap])
+    more = true_count - min(cap, len(names))
+    return f"{shown} (+{more} more)" if more > 0 else shown
+
+
 def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     """Build the ``, timeframes pre-built …`` note clause from the prebuild outcome.
 
@@ -691,7 +734,11 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     clause naming up to :data:`_NOTE_FAILURE_NAMES` symbols with the TRUE
     remainder count (``failed_count`` — the producer caps
     :attr:`PrebuildOutcome.failed` at 10 names, so the remainder uses the
-    uncapped total; Golden Rule #1).
+    uncapped total; Golden Rule #1). A non-zero ``no_source_count``
+    (vendor-empty / never-pulled spot targets,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) renders its own DISTINCT
+    counted+named clause BEFORE the failures clause (benign class first) —
+    both via the ONE :func:`format_capped_names` formatter.
     """
     if prebuild is None:
         return ""
@@ -717,11 +764,22 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # daily open fell back to a non-09:15 first minute — full-history,
         # recomputed per run). Zero keeps the note byte-identical.
         clause += f", {prebuild.opens_substituted} daily open(s) substituted"
+    if prebuild.no_source_count:
+        # DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: the benign no-source class
+        # renders BEFORE the failure class — counted + named (capped), wording
+        # deliberately distinct from "quarantined" (healthy vendor behavior,
+        # not a failure) and from "prebuild failures" (nothing failed), and
+        # naming BOTH causes honestly (the probe cannot prove the vendor arm).
+        # Zero keeps the note byte-identical.
+        clause += (
+            f", {prebuild.no_source_count} symbol(s) skipped — no stored 1-minute data "
+            "(vendor-empty or never pulled), excluded from timeframe build + movers warm: "
+            f"{format_capped_names(prebuild.no_source, prebuild.no_source_count)}"
+        )
     if prebuild.failed:
-        shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
-        more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
-        suffix = f" (+{more} more)" if more > 0 else ""
-        clause += f", prebuild failures: {shown}{suffix}"
+        clause += (
+            f", prebuild failures: {format_capped_names(prebuild.failed, prebuild.failed_count)}"
+        )
     if prebuild.fs_note is not None:
         # DEC-LAKE-FS-PROBE-001: a COARSE-allocation lake volume is named in the
         # headline too — the slack is spent by exactly this phase's tiny files.
@@ -1199,7 +1257,13 @@ def run_full_pipeline(
     #    warming over them would cache a wrong snapshot. The `fetch_clean`
     #    arm is DROPPED (DEC-PREBUILD-CLEANSET-001): on a dirty-fetch day the
     #    movers warm over the freshly-derived CLEAN symbols, honestly
-    #    omitting the quarantined ones the note names.
+    #    omitting the quarantined ones the note names. A vendor-empty
+    #    NO-SOURCE spot target does NOT withhold the warm
+    #    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive AND
+    #    structurally absent from warm discovery (no parquet ⇒ no dataset
+    #    row, db_view._walk_candle_datasets' any-parquet gate) — counted +
+    #    named in the note instead. The gate EXPRESSION below is unchanged —
+    #    the behavioral flip is entirely `ok` now staying True.
     segment_movers_warmed: dict[str, int] = {}
     segment_movers_failed: dict[str, int] = {}
     if prebuild is not None and prebuild.ok:
@@ -1264,6 +1328,8 @@ def run_full_pipeline(
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
+        prebuild_no_source=prebuild.no_source if prebuild is not None else (),
+        prebuild_no_source_count=(prebuild.no_source_count if prebuild is not None else 0),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
         prebuild_disk_guarded=prebuild.disk_guard_blocked if prebuild is not None else False,

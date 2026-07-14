@@ -848,16 +848,57 @@ def _last_ist_date(df_1m: pl.DataFrame) -> str | None:
     return None if last is None else last.date().isoformat()
 
 
+class NoStored1mBarsError(ValueError):
+    """The symbol's WHOLE 1-minute partition holds ZERO stored parquet files.
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: subclasses :class:`ValueError` so
+    every existing catcher (``gated_prebuild._per_symbol_data_errors``, the
+    doctor/preflight callers, every ``pytest.raises(ValueError)`` pin) is
+    behavior-identical; the prebuild's SPOT phase catches it FIRST to classify
+    the vendor-empty / never-pulled shape as ``no_source`` instead of a
+    warm-withholding failure. Raised ONLY by the whole-partition arm of
+    :func:`make_lake_read_1m` — the months-bounded arm (the heal-recall path)
+    keeps plain ``ValueError``: a months-scoped absence is NOT vendor-empty.
+    """
+
+
+def spot_1m_partition_dir(lake_root: Path, exchange: str, segment: str, symbol: str) -> Path:
+    """The symbol's 1-minute lake partition dir — the ONE base-path law (§11 COMMON).
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: extracted from
+    :func:`make_lake_read_1m`'s inline expression so the reader and every
+    probe consumer share one spelling of ``bars/<exch>/<seg>/<sym>/1minute``.
+    """
+    return lake_root / "bars" / exchange / segment / symbol / "1minute"
+
+
+def has_stored_1m_bars(lake_root: Path, exchange: str, segment: str, symbol: str) -> bool:
+    """``True`` iff the partition holds >=1 stored 1-minute parquet file — lake truth NOW.
+
+    The EXACT existence predicate :func:`make_lake_read_1m`'s whole-tree arm
+    gates on (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — ONE predicate for the
+    reader AND every future probe consumer; §11 COMMON). O(dir entries),
+    short-circuits at the first parquet; ZERO Parquet opens. Deliberately
+    blind to WHY the partition is empty (vendor-empty vs never-pulled vs
+    heal-emptied) and to a 0-ROW parquet (passes here, then fails the
+    prebuild LOUDLY exactly as today — fail-open, never a silent drop).
+    """
+    base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
+    return base.is_dir() and any(base.rglob("*.parquet"))
+
+
 __all__ = [
     "DAILY_CUTOFF_GROUNDED_ENV",
     "DAILY_TF_LABEL",
     "INTRADAY_TF_INTERVALS",
     "MATERIALIZABLE_TFS",
     "MaterializeResult",
+    "NoStored1mBarsError",
     "PrebuildKind",
     "daily_cutoff_grounding_enabled",
     "daily_resample_fn_for",
     "frame_to_candle_bars",
+    "has_stored_1m_bars",
     "intraday_resampler_for",
     "make_lake_read_1m",
     "make_lake_write_tf",
@@ -865,6 +906,7 @@ __all__ = [
     "materialize_timeframes",
     "month_partition_files",
     "prebuild_kind_for",
+    "spot_1m_partition_dir",
 ]
 
 
@@ -919,26 +961,33 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         columns = (*columns, "open_interest")
 
     def _read() -> pl.DataFrame:
-        base = lake_root / "bars" / exchange / segment / symbol / "1minute"
+        base = spot_1m_partition_dir(lake_root, exchange, segment, symbol)
         if months is not None:
             # Month-bounded read (DEC-TF-REBUILD-MONTH-BOUND-001): the explicit
             # existing-file list replaces the whole-tree glob. Sound because an
             # NSE session never crosses a UTC month (see month_partition_files).
+            # Deliberately plain ValueError, NEVER NoStored1mBarsError
+            # (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a months-scoped
+            # absence (the heal-recall path) says nothing about the WHOLE
+            # partition — it must stay a quarantining prebuild failure.
             source: str | list[str] = month_partition_files(base, months)
             if not source:
                 raise ValueError(
                     f"no stored 1minute bars for {exchange}/{segment}/{symbol} in the "
                     "requested months — pull the 1-minute first, then derive timeframes"
                 )
-        elif base.is_dir() and any(base.rglob("*.parquet")):
+        elif has_stored_1m_bars(lake_root, exchange, segment, symbol):
             source = base.as_posix() + "/**/*.parquet"
         else:
             # Shape-matched remediation (refuter round 1, r3 F-2 — the #1649a
             # precedent): this reader cannot tell WHY the partition is empty,
             # and "pull the spot first" is the WRONG advice for a symbol the
             # vendor cleanly returned NO data for (settled EMPTY — there is
-            # nothing to pull), so BOTH candidate causes are named.
-            raise ValueError(
+            # nothing to pull), so BOTH candidate causes are named. The typed
+            # subclass (message bytes UNCHANGED) lets the prebuild's spot
+            # phase classify this shape as ``no_source`` instead of a
+            # warm-withholding failure (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001).
+            raise NoStored1mBarsError(
                 f"no stored 1minute bars for {exchange}/{segment}/{symbol} — "
                 "nothing to derive: if the 1-minute spot was never pulled, "
                 "pull it first, then derive timeframes; if the vendor cleanly "
