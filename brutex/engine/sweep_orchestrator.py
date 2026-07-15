@@ -77,7 +77,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import blake3
 import structlog
@@ -296,30 +296,8 @@ class SweepGridConfig:
     #: enumerations) — digests, checkpoints, cache keys and store paths stay
     #: byte-identical for in-scope grids (regression-pinned).
     unsafe_allow_out_of_scope_instruments: bool = False
-    #: The global fill mode (DEC-FILL-WORST-CASE-001): the PRODUCTION default
-    #: is the WORST_CASE anti-illusion floor; PRECISE is the legacy exact-fill
-    #: mode. Threaded to every tuple's :class:`SweepRunConfig` (and thence
-    #: into every mask run-identity via ``canonical_trade_params``) and
-    #: folded EMIT-ON-NON-PRECISE into all three grid/tuple identity
-    #: surfaces — ``grid_identity`` / ``tuple_cache_key`` (supervisor) and
-    #: :func:`_tuple_digest` (store address) — so a PRECISE grid keeps every
-    #: historical digest byte-identical while a WORST_CASE grid re-keys
-    #: (a resume can never serve one mode's stores as the other's).
-    fill_mode: FillMode = FillMode.WORST_CASE
 
     def __post_init__(self) -> None:
-        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a junk fill_mode string
-        # would compare `is FillMode.PRECISE` False in every identity fold and
-        # silently re-key the grid as if worst-case while each tuple's
-        # SweepRunConfig later rejects (or worse, a future consumer prices
-        # PRECISE) — fail LOUD at the grid boundary (the FuturesTradeInput
-        # isinstance-guard precedent; the cast defeats mypy's
-        # annotation-trusting "unreachable" narrowing).
-        if not isinstance(cast("object", self.fill_mode), FillMode):
-            raise ValueError(
-                f"SweepGridConfig.fill_mode {self.fill_mode!r} is not a FillMode member; "
-                f"allowed: {sorted(m.value for m in FillMode)}"
-            )
         # Order-preserving de-dup of every axis (set semantics, deterministic
         # order) so a repeated axis value never yields a duplicate tuple.
         object.__setattr__(self, "instruments", _dedup_seq(self.instruments))
@@ -559,7 +537,6 @@ class SweepTuple:
             min_hits=grid.min_hits,
             overfit=grid.overfit,
             roll_schedule=roll_schedule,
-            fill_mode=grid.fill_mode,
         )
 
 
@@ -818,12 +795,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
-    if grid.fill_mode is not FillMode.PRECISE:
-        # DEC-FILL-WORST-CASE-001 (default-elision, the selection/gate
-        # template): a non-PRECISE mode changes every stored fill price, so
-        # it re-keys the store address; PRECISE emits NOTHING — every
-        # pre-mode on-disk store keeps its address byte-identically.
-        descriptor["fill_mode"] = grid.fill_mode.value
+    # DEC-FILL-WORST-CASE-ONLY-001: the store address carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key — the exact mirror of
+    # canonical_trade_params' unconditional emit. Eliding it would alias
+    # worst-case store addresses with the frozen precise-era addresses, so a
+    # resume could silently adopt precise-priced tuple stores.
+    descriptor["fill_mode"] = FillMode.WORST_CASE.value
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).

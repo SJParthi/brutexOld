@@ -371,12 +371,11 @@ def _grid_descriptor(grid: SweepGridConfig) -> dict[str, Any]:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
-    if grid.fill_mode is not FillMode.PRECISE:
-        # DEC-FILL-WORST-CASE-001 (default-elision): a non-PRECISE grid is a
-        # DIFFERENT sweep (every fill price moves), so its checkpoint must
-        # never resume PRECISE work — and vice versa. PRECISE emits NOTHING,
-        # keeping every historical grid identity byte-identical.
-        descriptor["fill_mode"] = grid.fill_mode.value
+    # DEC-FILL-WORST-CASE-ONLY-001: the grid identity carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key (the canonical_trade_params
+    # mirror) — eliding it would alias worst-case checkpoints with the frozen
+    # precise-era grid identities, so a resume could adopt precise work.
+    descriptor["fill_mode"] = FillMode.WORST_CASE.value
     return descriptor
 
 
@@ -462,13 +461,11 @@ def _tuple_cache_params(tuple_: SweepTuple, grid: SweepGridConfig) -> dict[str, 
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         params["gate_config"] = gate_config
-    if grid.fill_mode is not FillMode.PRECISE:
-        # DEC-FILL-WORST-CASE-001: the fill mode is tuple-identity — a
-        # cache-skip keyed without it would falsely skip a WORST_CASE tuple
-        # as already-done PRECISE work (the fib_anchor precedent). PRECISE
-        # emits NOTHING (default-elision — the frozen tuple_cache_key golden
-        # stays byte-identical).
-        params["fill_mode"] = grid.fill_mode.value
+    # DEC-FILL-WORST-CASE-ONLY-001: the tuple cache key carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key — a cache-skip keyed
+    # without it would falsely skip a worst-case tuple as already-done
+    # precise-era work (the fib_anchor precedent, elision retired).
+    params["fill_mode"] = FillMode.WORST_CASE.value
     return params
 
 

@@ -99,13 +99,11 @@ from brutex.engine.sweep_run import (
     mask_run_id,
     ranked_combo_to_result_row,
 )
-from brutex.engine.trade_sim import FillPolicy
 from brutex.engine.trial_stats import (
     trial_stats_sidecar_path,
     tuple_trial_stats_from_sharpes,
     write_tuple_trial_stats,
 )
-from brutex.execution.fill_mode import FillMode
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
 from brutex.ranking import RankedCombo
@@ -317,10 +315,6 @@ def recover_survivor_cell(
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
             roll_schedule=roll_schedule,
-            # A WORST_CASE row's run_id folds "fill_mode" (emit-on-non-PRECISE,
-            # DEC-FILL-WORST-CASE-001) — the re-derivation must carry the SAME
-            # mode or no grid cell reproduces the identity.
-            fill_mode=grid.fill_mode,
         )
         candidate = mask_run_id(
             mask=row.mask_bits,
@@ -392,7 +386,6 @@ def _make_evaluator(
     side: Side,
     tf_minutes: int,
     start_equity_paisa: int,
-    fill_mode: FillMode,
     reference_stamper: TradeReferenceStamper | None,
 ) -> Evaluator:
     """Bind one survivor's FULL-backtest evaluator over the TRAIN slice (condition 7).
@@ -414,7 +407,6 @@ def _make_evaluator(
             stop_loss_paisa=sl_paisa,
             take_profit_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
-            policy=FillPolicy(fill_mode=fill_mode),
             reference_stamper=reference_stamper,
         )
 
@@ -724,7 +716,6 @@ def run_stage3_pass(
                     side=side,
                     tf_minutes=tf.minutes,
                     start_equity_paisa=grid.start_equity_paisa,
-                    fill_mode=grid.fill_mode,
                     reference_stamper=reference_stamper,
                 ),
                 budget=budget,
@@ -748,7 +739,6 @@ def run_stage3_pass(
                         start_equity_paisa=grid.start_equity_paisa,
                         fib_anchor=fib_anchor,
                         roll_schedule=roll_schedule,
-                        fill_mode=grid.fill_mode,
                     ),
                     data_snapshot_hash=train_hash,
                     indicator_version=grid.indicator_version,
@@ -777,7 +767,6 @@ def run_stage3_pass(
                     # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the refined
                     # row's re-simulation feeds the PERSISTED cell store.
                     reference_stamper=reference_stamper,
-                    fill_mode=grid.fill_mode,
                 )
                 cell = SweepTuple(
                     instrument=row.instrument,
@@ -954,7 +943,6 @@ def cascade_specs_for_refined_cells(
             rows=ResultsStore.load(cell.path).rows(),
             top_k=None,
             fib_anchor=tuple_.fib_anchor,
-            fill_mode=grid.fill_mode,
         )
         if spec is not None:
             specs.append(spec)
