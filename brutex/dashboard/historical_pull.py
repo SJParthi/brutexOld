@@ -362,10 +362,13 @@ class HistoricalPullReport:
     outside the caller's ``step_filter`` (DEC-STAGED-SEQUENCER-SEAMS-001 —
     the ADR-0021 Decision 3 F&O-spine ``step_filter`` seam: a futures-only /
     options-only STAGE invocation reuses this one spine). A filtered leg is
-    honestly ABSENT from the pull — zero vendor calls, zero ledger rows, no
-    window planned, never marked complete, NEVER fake-settled — and re-joins
-    whichever invocation selects its step. 0 for every ``step_filter=None``
-    caller (the byte-identical default)."""
+    honestly ABSENT from pull EXECUTION — zero vendor calls, zero ledger
+    rows, no window planned, never marked complete, NEVER fake-settled — and
+    re-joins whichever invocation selects its step. It is NAMED here, never
+    silently subtracted: :attr:`contracts_selected` deliberately stays the
+    PRE-filter selection-grammar count (filtered legs included — the
+    ``step_filter`` scopes execution, not the selection accounting). 0 for
+    every ``step_filter=None`` caller (the byte-identical default)."""
     class_unresolved: int = 0
     """Contract legs whose index/stock ORDERING class could not be resolved from
     the caller's ``underlying_kinds`` map (DEC-PULL-SIX-STEP-ORDER-001) — each
@@ -2258,10 +2261,13 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         no second spine, no copied loop; Golden Rule #11). A contract whose
         bucket's step is OUTSIDE the filter is EXCLUDED from this invocation
         BEFORE any planning: zero vendor calls, zero ledger rows, no window
-        planned, never marked complete — honestly ABSENT from the report
-        (counted in ``contracts_step_filtered`` + ONE ``fno.step_filtered``
-        INFO, NEVER fake-settled) — and re-joins whichever invocation selects
-        its step (the ledger's settled windows make the split idempotent).
+        planned, never marked complete — honestly ABSENT from pull EXECUTION
+        and NAMED in ``contracts_step_filtered`` + ONE ``fno.step_filtered``
+        INFO, NEVER fake-settled (``contracts_selected`` deliberately stays
+        the PRE-filter selection-grammar count, filtered legs included — the
+        filter scopes execution, not the selection accounting) — and
+        re-joins whichever invocation selects its step (the ledger's settled
+        windows make the split idempotent).
         ``None`` (every existing caller) runs ALL steps, byte-identical;
         NO production caller passes a filter in WS-B — the stage binders are
         WS-C/WS-D. An EMPTY filter is a typed refusal (a stage invocation
@@ -2424,10 +2430,14 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         by_bucket.setdefault(bucket_key, []).append((row, contract))
     if contracts_step_filtered:
         # Prune the excluded legs from the window plan + the selection set so
-        # NOTHING downstream (window planning, ledger seeding, the pipeline
-        # reconcile, completion stamps, the report's start_dates — and thereby
-        # the sequencer's quarantine derivation) ever sees them: honestly
-        # ABSENT, never fake-settled and never falsely quarantined.
+        # the EXECUTION surfaces (window planning, ledger seeding, the
+        # pipeline reconcile, completion stamps, the report's start_dates —
+        # and thereby the sequencer's quarantine derivation) never see them:
+        # honestly absent from execution, never fake-settled and never
+        # falsely quarantined. Deliberately NOT pruned: the report's
+        # `contracts_selected` — the PRE-filter selection-grammar count —
+        # still counts them; the exclusion is NAMED in
+        # `contracts_step_filtered`, never silently subtracted.
         minute_windows = {
             symbol: window
             for symbol, window in minute_windows.items()
