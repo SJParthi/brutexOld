@@ -688,7 +688,7 @@ class TestDeadWallTimeEvidence:
         assert body["flow_state"] == "idle"
         assert body["req_per_sec_achieved"] == 0.0
         assert body["bridge_source"] == "unverified"
-        assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+        assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS | _LAST_PULL_KEYS
 
     def test_nan_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
         self._publish_raw(tmp_path, "NaN")  # json.loads parses NaN by default
