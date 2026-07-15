@@ -18,7 +18,17 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (Club G docs merge vehicle, branch
+_Last updated: 2026-07-15 (DEC-SCOPE-MINIMAL-CORE-001, MIGRATION.md #1835 —
+the minimal-core SCOPE DECISION pack, ADR-0024 + DEC #1835–#1839: engine +
+lake = NIFTY/BANKNIFTY/SENSEX + NSE-INDIAVIX reference-only; index F&O
+retained in the lake; the ~750-stock universe · single-stock F&O ingest ·
+the crossverify S3 producer · the backup S3/B2 remote proposed RETIRED
+(backup goes LOCAL-ONLY restic); SSM auth STAYS — "no S3" ≠ "no AWS".
+PROPOSED — DOCS-ONLY, zero code/behavior change; acceptance = the operator's
+merge of the draft PR; code narrowing lands in Phase B after the merge train
+drains. This header carries the pointer, never the story — the record lives
+in the §1 Active-branch blurb + MIGRATION.md #1835–#1839.)
+Earlier: 2026-07-15 (Club G docs merge vehicle, branch
 `integration/club-g-docs` — the docs-only fold of TWO PRs as ONE merge
 event off main tip d6ac9f85: #1506 DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md
 #1780 — the summarize-only GDFL vendor-docs archive + the definitive
@@ -2674,7 +2684,29 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-g-docs` (**Club G docs merge
+- **Active branch:** `claude/scope-minimal-core` (**DEC-SCOPE-MINIMAL-CORE-001
+  + DEC-UNIVERSE-INDEX-VIX-ONLY-001 + DEC-STOCK-FNO-INGEST-RETIRE-001 +
+  DEC-CROSSVERIFY-S3-RETIRE-001 + DEC-BACKUP-LOCAL-ONLY-001, MIGRATION.md
+  #1835–#1839 / ADR-0024** — the Phase-A DOCS-ONLY minimal-core scope
+  decision PR: records the PROPOSED minimal reproducible backtest core —
+  engine + lake = the 3 indices + NSE-INDIAVIX (reference-only), index F&O
+  RETAINED in the lake, and the ~750-stock universe (#1836, superseding
+  MIGRATION.md #694) + single-stock F&O ingest (#1837, superseding #200) +
+  the crossverify S3 producer incl. the TickVault CSV handoff (#1838,
+  superseding #1776–#1778/#1788–#1789) + the backup S3/B2 remote (#1839,
+  superseding-in-part #1596 — LOCAL-ONLY restic retained) proposed RETIRED;
+  SSM auth RETAINED ("no S3" ≠ "no AWS", MIGRATION.md #1065/#1072);
+  vocabulary sibling-owned, ZERO vocabulary files touched. Provenance:
+  operator directive 2026-07-15 (relayed via the coordinator session;
+  operator-confirmed in-session 2026-07-15); acceptance = the operator's
+  merge of the DRAFT PR. Code lands ONLY in Phase B after the merge train
+  drains (PR-1 crossverify → PR-2 backup local-only → PR-3 ATOMIC universe
+  narrowing with the VIX-admission + index-F&O pullability pins → PR-4
+  stock-arm leaf cleanup); lake DATA untouched (the operator wipes stored
+  partitions directly). DOCS-ONLY — ZERO code/behavior change; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change
+  in this PR; the full record lives in MIGRATION.md #1835–#1839 + ADR-0024.)
+  Earlier: `integration/club-g-docs` (**Club G docs merge
   vehicle** — the docs-only fold of TWO PRs as ONE merge event off main tip
   d6ac9f85: **#1506** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780 — the
   SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
@@ -7224,6 +7256,31 @@ hostile-review pass._
    scope guard; an F&O-eligible name that is ALSO an NTM constituent stays
    tradable, `reference_only=FALSE`). On a network miss with no cache the load
    degrades honestly to the F&O-eligible base set, never invents constituents.
+
+   **AMENDMENT — the PROPOSED minimal-core decree (DEC-SCOPE-MINIMAL-CORE-001,
+   2026-07-15, MIGRATION.md #1835 / ADR-0024; the historical text above is
+   kept verbatim per the supersession convention):** the operator directive
+   of 2026-07-15 (relayed via the coordinator session; operator-confirmed
+   in-session 2026-07-15) PROPOSES narrowing the LAKE/ingest scope of this
+   rule to a minimal reproducible backtest core — fetch/lake universe =
+   exactly the 3 indices + NSE-INDIAVIX (reference-only)
+   (DEC-UNIVERSE-INDEX-VIX-ONLY-001, MIGRATION.md #1836 — consciously
+   superseding DEC-NTM-GROWW-REPOINT-001 #694, so the NTM re-amendment
+   above retires), single-stock F&O ingest retired while INDEX F&O stays in
+   the lake (DEC-STOCK-FNO-INGEST-RETIRE-001, MIGRATION.md #1837 —
+   consciously superseding the DEC-P0-063 #200 expansion above), the
+   crossverify S3 producer retired (DEC-CROSSVERIFY-S3-RETIRE-001,
+   MIGRATION.md #1838) and the backup remote gone local-only
+   (DEC-BACKUP-LOCAL-ONLY-001, MIGRATION.md #1839). NOT changed by the
+   proposal: the ENGINE surface (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md
+   #1790, stands verbatim), India VIX's reference-only stamping (this
+   rule's VIX clause), the 60-condition vocabulary (sibling-owned), the
+   SSM auth broker (MIGRATION.md #1065/#1072), and the 2020-01-01 floor.
+   STATUS: PROPOSED — acceptance = the operator's merge of the draft
+   Phase-A PR; code narrowing lands in Phase B after the merge train
+   drains, so until those PRs land the historical text above remains the
+   LIVE behavior description (never a silent scope change, Golden Rule #3).
+
 4. **Reproducibility first.** Every run is identified by `blake3(
    strategy_mask ‖ direction ‖ instrument ‖ tf ‖ mode ‖ canonical_params
    ‖ data_snapshot_hash ‖ indicator_version ‖ code_commit_hash)`. No
@@ -7407,7 +7464,18 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-g-docs`
+- **Active feature branch:** `claude/scope-minimal-core`
+  (DEC-SCOPE-MINIMAL-CORE-001 + DEC-UNIVERSE-INDEX-VIX-ONLY-001 +
+  DEC-STOCK-FNO-INGEST-RETIRE-001 + DEC-CROSSVERIFY-S3-RETIRE-001 +
+  DEC-BACKUP-LOCAL-ONLY-001, MIGRATION.md #1835–#1839 / ADR-0024 — the
+  Phase-A DOCS-ONLY minimal-core scope decision PR: engine + lake =
+  NIFTY/BANKNIFTY/SENSEX + NSE-INDIAVIX reference-only, index F&O retained;
+  stock universe / stock F&O / crossverify S3 / backup remote proposed
+  RETIRED; SSM auth stays; PROPOSED — acceptance = the operator's merge of
+  the draft PR; zero code/behavior change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1835–#1839 for the full blurb)
+  Earlier: `integration/club-g-docs`
   (Club G docs merge vehicle — the docs-only fold of #1506
   DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780) + #1508
   DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781); DOCS-ONLY — zero

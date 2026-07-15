@@ -4,6 +4,13 @@
 Accepted (2026-07-06). Implements `docs/REMOTE_CONTROL_AND_ZERO_TOUCH_COMPARISON.md:304`
 (checklist item 8), matrix rows 28/30 (`:156,:158`), dead-man keystone (`:27-31,:287`).
 
+**Status note (2026-07-15, append-only):** supersession-in-part proposed by
+DEC-BACKUP-LOCAL-ONLY-001 (MIGRATION.md #1839) — pending operator merge. The
+proposal retires the REMOTE (S3 Object-Lock / B2) target + the remote-side
+manual-acceptance rows (M2/M8) and retains the restic engine, dead-man check,
+restore drill and scheduling against a LOCAL `BRUTEX_BACKUP_REPO`; see
+ADR-0024 (`docs/adr/0024-minimal-reproducible-backtest-core.md`).
+
 ## Context
 Sweeps + the hash-chained audit logs are NOT re-pullable (Golden Rules #4/#8); the ~8 TB lake
 is re-pullable only at multi-day vendor cost. Ransomware / `rm -rf` / SSD death currently
