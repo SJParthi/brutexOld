@@ -31,7 +31,15 @@ payload keys + the results.html gate column/dropdown; fix round: the refuter-SUR
 L2 cache-key INJECTION closed structurally — every user-controlled key leg
 percent-encoded (`quote`, safe='') AND `rank_by` keyed by its RESOLVED column via the
 NEW public `resolve_rank_by_param`, so a must-400 request can never alias a cached 200
-(regression + gate∘preset∘filter composition + 0-row fold-boundary pins added). ENGINE
+(regression + gate∘preset∘filter composition + 0-row fold-boundary pins added).
+SAME-BRANCH SECOND DEC (2026-07-15 merge-reconcile of main through #1794):
+DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the rehearsal-scoped Stage-4
+Monte-Carlo permutation budget (NEW fail-loud `BRUTEX_SWEEP_MC_PERMUTATIONS`
+through the `cascade_config_for_sweep(overrides=…)` seam; env unset =
+byte-identical production default 1000, pinned) + the R38 fixture's MC=25 +
+scoped INFO logging bound — closing the SYSTEMIC
+`test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns (main itself failed
+at 452.6 s, run 29249947445); the 300.0 s ceiling stands. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
 frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass
 UNMODIFIED; touched modules 100% line+branch.)
@@ -2629,7 +2637,24 @@ hostile-review pass._
   `rank_by` enters the key as its RESOLVED effective column (NEW public
   `sweep_results_view.resolve_rank_by_param`, ONE source of truth with the rank-time fall-back) —
   a must-400 request can never alias a cached 200; regression + gate∘preset∘filter composition +
-  the 0-row token-unrecoverable fold-boundary pins added. ENGINE UNCHANGED —
+  the 0-row token-unrecoverable fold-boundary pins added. SAME-BRANCH SECOND DEC (2026-07-15
+  merge-reconcile of main through #1794, semantic /results coexistence with #1473's
+  Cascade/CPCV/Composite columns — both features fully coexist, both suites green):
+  **DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795** — the rehearsal-scoped Stage-4
+  Monte-Carlo permutation budget: NEW fail-loud env knob `BRUTEX_SWEEP_MC_PERMUTATIONS`
+  (`cascade_wire.resolve_mc_permutations`, the `resolve_diffcheck_k` idiom — junk/`<1`
+  refuses loud, resolved EAGERLY in `cmd_sweep_all`) threaded through the EXISTING
+  `cascade_config_for_sweep(overrides=…)` seam into the manifest-stored config (manual
+  replay exact, pinned); env unset threads NO override — the production
+  `mc_n_permutations=1000` default is byte-identical (config-equality + manifest pins);
+  the R38 rehearsal fixture sets MC=25 (the `BRUTEX_SWEEP_DIFFCHECK_K=8` idiom) + a
+  `reset_configuration`-fenced INFO logging bound (the #1630 dispatch-guard posture its
+  direct `cmd_sweep_all` calls bypass) — closing the SYSTEMIC commit-seed-dependent
+  `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns at root cause (an expensive
+  per-commit seed draw sent candidates into cascade filter #9's 1000-permutation
+  pure-Python re-simulation with unconfigured-DEBUG rendering; main itself failed at
+  452.6 s — run 29249947445; this PR's check at 304.2 s/318.0 s); the 300.0 s ceiling +
+  the production 1000 default are UNTOUCHED. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the frozen
   `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass UNMODIFIED; touched
   modules 100% line+branch.)
@@ -7191,8 +7216,13 @@ hostile-review pass._
   #1724 → #1758 to the drain-steward reservation) — gate-scoped `/results`
   serving + the row/store gate-provenance carrier + the d1 L2 cache-key
   injection fix (percent-encoded key legs + the RESOLVED `rank_by` leg via
-  the NEW public `resolve_rank_by_param`); see §1 Active branch for the full
-  blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  the NEW public `resolve_rank_by_param`); + the same-branch second DEC
+  DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the rehearsal-scoped
+  Stage-4 MC permutation budget knob `BRUTEX_SWEEP_MC_PERMUTATIONS`
+  (fail-loud; env unset = the byte-identical production 1000 default) + the
+  R38 fixture's MC=25 + scoped INFO logging bound, closing the systemic
+  rehearsal 300 s overruns with the ceiling untouched; see §1 Active branch
+  for the full blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/bulk-spot-completeness-flag`
   (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794 — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles, main took
