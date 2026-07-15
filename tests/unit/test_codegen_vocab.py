@@ -39,6 +39,9 @@ def test_manifest_loads_and_is_valid() -> None:
     # forever) and the Supertrend pair 64/65 is declared LAYOUT-ONLY (the math
     # lands in a later PR). CPR (60..63) is implemented.
     assert m.implemented_mask == ((1 << 64) - 1) ^ (1 << 52) ^ (1 << 53)
+    # RETIRED_MASK = exactly the tombstoned VWAP pair, disjoint from IMPLEMENTED.
+    assert m.retired_mask == (1 << 52) | (1 << 53)
+    assert m.retired_mask & m.implemented_mask == 0
     for c in m.conditions:
         if 54 <= c.bit <= 63:
             assert c.implemented is True
@@ -150,6 +153,9 @@ def test_render_python_has_banner_and_constants() -> None:
     assert "TOTAL_CONDITIONS: Final[int] = 66" in py
     assert "MASK_WIDTH: Final[int] = 128" in py
     assert "IMPLEMENTED_MASK: Final[int] = 18433233274827440127" in py
+    # TOMB-01: the tombstone mask is emitted so renderers can suffix retired
+    # bits without a hand-kept copy (0x30000000000000 = bits 52|53).
+    assert f"RETIRED_MASK: Final[int] = {(1 << 52) | (1 << 53)}" in py
     # TOMB-04: RETIRED vs LAYOUT-ONLY rendered distinctly in the mask prose.
     assert "RETIRED (tombstone, never gets math): bit 52" in py
     assert "LAYOUT-ONLY (math in a later PR): bit 64" in py
@@ -165,7 +171,12 @@ def test_render_python_exports_public_masks_in_all() -> None:
     """
     py = cg.render_python(_manifest())
     assert "__all__ = [" in py
-    for name in ("IMPLEMENTED_MASK", "APPLIES_TO_1DAY_MASK", "BIT_CLOSE_ABOVE_VWAP"):
+    for name in (
+        "IMPLEMENTED_MASK",
+        "APPLIES_TO_1DAY_MASK",
+        "RETIRED_MASK",
+        "BIT_CLOSE_ABOVE_VWAP",
+    ):
         assert f'    "{name}",' in py
     # The ``__all__`` block carries ruff's RUF022 isort-style natural sort (so
     # ``ruff check brutex`` stays green): FIB_0 < FIB_50 < FIB_100 < FIB_200.

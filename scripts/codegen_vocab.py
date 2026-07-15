@@ -96,6 +96,18 @@ class Manifest:
         """Bitmask of the bits valid on the 1day timeframe (ADR-0012 D12)."""
         return sum(1 << c.bit for c in self.conditions if c.applies_to_1day)
 
+    @property
+    def retired_mask(self) -> int:
+        """Bitmask of the RETIRED tombstone bits (``reserved = true``).
+
+        Positions held forever, evaluator emits 0, NO later PR ever supplies
+        math. Disjoint from ``implemented_mask`` by the manifest law (a
+        reserved bit is never implemented); the remaining declared-but-
+        unimplemented bits (``implemented = false``, ``reserved = false``)
+        are LAYOUT-ONLY, not retired.
+        """
+        return sum(1 << c.bit for c in self.conditions if c.reserved)
+
 
 class ManifestError(Exception):
     """Raised when the manifest violates an invariant (dense bits, dup name…)."""
@@ -277,6 +289,7 @@ def render_python(manifest: Manifest) -> str:
         "IMPLEMENTED_MASK",
         "MASK_WIDTH",
         "NAME_TO_BIT",
+        "RETIRED_MASK",
         "TOTAL_CONDITIONS",
     ]
     lines.append("__all__ = [")
@@ -308,6 +321,14 @@ def render_python(manifest: Manifest) -> str:
                 f"#: LAYOUT-ONLY (math in a later PR): bit {c.bit} ``BIT_{c.name.upper()}``."
             )
     lines.append(f"IMPLEMENTED_MASK: Final[int] = {manifest.implemented_mask}")
+    lines.append("")
+    lines.append("#: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).")
+    lines.append("#: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever")
+    lines.append("#: supplies math. Disjoint from ``IMPLEMENTED_MASK``; the declared-but-")
+    lines.append("#: unimplemented remainder (``implemented = false``, ``reserved = false``) is")
+    lines.append("#: LAYOUT-ONLY, not retired. Python-only export (no Rust consumer exists yet;")
+    lines.append("#: the manifest stays the single source — TOMB-01 renderer support).")
+    lines.append(f"RETIRED_MASK: Final[int] = {manifest.retired_mask}")
     lines.append("")
     # The cleared-bit prose is DERIVED from the manifest (never a hand-kept
     # literal list, so it can never go stale again): enumerate every condition

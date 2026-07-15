@@ -936,6 +936,13 @@ def _project_row(row: ResultRow, rank: int, *, snapshot_era: str) -> dict[str, A
         "direction": row.direction,
         "mode": row.mode,
         "mask_bits": row.mask_bits,
+        # Wire hygiene (G-SIGNBI-01): ``mask_bits`` above stays the raw JSON
+        # number for back-compat, but a u128 mask past 2**53 (bit 63 —
+        # ``narrow_cpr_day`` — is a VALID mask bit today) silently loses low
+        # bits in any IEEE-double JSON consumer. ``mask_hex`` is the exact
+        # lossless form (the top100 ``mask:%032x`` convention) — clients
+        # should prefer it.
+        "mask_hex": f"{row.mask_bits:032x}",
         "conditions": row.condition_names,
         "net_pnl": format_inr(row.net_pnl_paisa),
         "net_pnl_rupees": float(paisa_to_rupees(row.net_pnl_paisa)),
