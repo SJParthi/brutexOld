@@ -690,8 +690,10 @@ class TestWithAggHelper:
 
 
 class TestSchemaVersionPin:
-    def test_schema_version_is_one(self) -> None:
-        assert TOP100_SCHEMA_VERSION == 1
+    def test_schema_version_is_two(self) -> None:
+        # Bumped 1→2 by the resilience annotation (each entry now carries a
+        # top-level ``resilience`` block); an old top100.json reads absent.
+        assert TOP100_SCHEMA_VERSION == 2
 
 
 class TestLoadsObjectBelt:

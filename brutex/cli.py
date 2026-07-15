@@ -63,7 +63,7 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 if TYPE_CHECKING:
     from brutex.data.greeks_enrich import GreeksEnrichTarget
@@ -10074,6 +10074,81 @@ _RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
 _RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
 _RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
 
+#: How many top-100 finalists get a losing-streak resilience line on the CLI.
+_RESILIENCE_REPORT_TOP_K: Final[int] = 5
+
+
+def _print_resilience_lines(
+    *,
+    out_root: Path,
+    grid: Any,
+    report: Any,
+    printer: Callable[[str], None] = print,
+) -> None:
+    """Print the per-finalist losing-streak resilience summary lines (top-K).
+
+    Reads the ``top100.json`` the pass just wrote (its ``resilience`` block per
+    entry — the sibling sidecar surface) and prints one
+    :func:`brutex.engine.resilience_streaks.render_resilience_line` per entry,
+    with an honesty footer naming the rows whose stats were NULL (parity-failed
+    or no trades). Additive DISPLAY only — annotation, never a re-rank.
+
+    Fenced: a resilience-surface failure NEVER changes the sweep exit path
+    (mirrors the pass fence); ``KeyboardInterrupt``/``SystemExit``/
+    ``MemoryError`` always re-raise raw.
+    """
+    import structlog
+
+    from brutex.engine.resilience_streaks import (
+        RESILIENCE_ANNOTATION_KEY,
+        render_resilience_line,
+    )
+    from brutex.engine.sweep_supervisor import grid_identity
+    from brutex.engine.top100_artifact import load_top100
+    from brutex.engine.trade_store import sweep_run_dir
+
+    if not report.top100_written:
+        return
+    try:
+        run_id = grid_identity(grid)
+        runs_dir = sweep_run_dir(out_root, run_id).parent
+        artifact = load_top100(runs_dir, run_id)
+        if artifact is None:
+            printer(
+                "[brutex] resilience — top100 unreadable for the summary lines "
+                "(the artifact rebuilds on the next 'brutex sweep-all')"
+            )
+            return
+        entries = artifact.entries[:_RESILIENCE_REPORT_TOP_K]
+        if not entries:
+            return
+        printer(
+            "[brutex] resilience — top strategies' losing-streak endurance "
+            "(signal-only, gross, per-unit):"
+        )
+        null_rows = 0
+        for entry in entries:
+            # render_resilience_line fail-loud validates that resilience is a
+            # Mapping; a raise here is caught by the fence below (never fails
+            # the sweep), so post-render the cast is sound.
+            printer(render_resilience_line(entry))
+            block = cast("Mapping[str, object]", entry[RESILIENCE_ANNOTATION_KEY])
+            if not block["stats_live"]:
+                null_rows += 1
+        if null_rows:
+            printer(
+                f"  ⚠ {null_rows} of {len(entries)} shown had NO resilience stats "
+                "(parity-failed or no trades)"
+            )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:  # fenced display surface — never fails the sweep
+        structlog.get_logger("brutex.cli").warning(
+            "cli.resilience_line.skipped",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
 
 def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
     *,
@@ -10249,12 +10324,14 @@ def _run_results_depth_adapter(
         f"[brutex] results-depth — tuples={report.tuples_processed} "
         f"skipped_current={report.tuples_skipped_current} "
         f"missing_store={report.tuples_missing_store} errored={report.tuples_errored} "
+        f"resilience_errored={report.resilience_errored} "
         f"captured={report.combos_captured} parity_failed={report.combos_parity_failed} "
         f"pool={report.pool} gate_passers={report.gate_passers} "
         f"baselines={report.baselines_written} "
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
+    _print_resilience_lines(out_root=out_root, grid=grid, report=report)
     return True
 
 

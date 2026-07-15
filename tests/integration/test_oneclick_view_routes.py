@@ -306,6 +306,8 @@ class TestOneclickSections:
             "r1_dsr",
             "r1_cpcv",
             "r1_vix_band",
+            "r1_worst_streak_pct",
+            "r1_uw_days",
             "actual_enumerated",
             "actual_tested",
             "actual_skipped",
@@ -418,6 +420,35 @@ class TestScreenerPage:
         assert 'id="bxTickerStrip"' in html
         assert _AWAITING in html
 
+    def test_resilience_columns_in_the_shared_config(self) -> None:
+        """The losing-streak resilience columns ride the ONE COLUMNS config
+        (dotted resilience.* / metrics.* keys — generic render, null → "—")."""
+        js = (_STATIC / "bx-screener.js").read_text(encoding="utf-8")
+        for key in (
+            "metrics.max_consecutive_losses",
+            "resilience.losing_streak_p95",
+            "resilience.worst_streak_len",
+            "resilience.worst_streak_pnl_paisa",
+            "resilience.longest_underwater_days",
+            "resilience.worst_loss_month_count",
+            "resilience.win_rate_year_spread",
+        ):
+            assert f'key: "{key}"' in js, key
+        # The worst-streak ₹ column formats via the money path (display 2dp).
+        assert (
+            '"resilience.worst_streak_pnl_paisa", label: "Worst streak ₹", type: "num", money: true'
+            in js
+        )
+        # FIX 1 (R4): the conflation is dead on /screener too. The by-COUNT
+        # column reads CLEARLY by count ("Longest streak (count)"), the worst
+        # streak BY ₹ carries its OWN run length ("Worst streak len") in the
+        # column immediately beside its ₹ — so a trader can never read "the
+        # longest streak (N losses) cost ₹X". The old bare, ambiguous "Worst
+        # streak" by-count label (which invited exactly that read) is GONE.
+        assert '"metrics.max_consecutive_losses", label: "Longest streak (count)"' in js
+        assert '"resilience.worst_streak_len", label: "Worst streak len"' in js
+        assert 'label: "Worst streak",' not in js
+
 
 class TestStrategyPage:
     def test_chart_first_layout_markers(self) -> None:
@@ -493,6 +524,45 @@ class TestStrategyPage:
         html = _template("strategy.html")
         assert 'id="stVixBand"' in html
         assert "window.BXOneclick.vixBandText(row.vix_band)" in html
+
+    def test_resilience_hero_panel_present_and_wired(self) -> None:
+        """The losing-streak resilience panel: every cell hook, the self-locate
+        input, and the ONE shared builder wiring (textContent-only)."""
+        html = _template("strategy.html")
+        assert 'aria-label="Losing-streak resilience"' in html
+        for hook in (
+            "stResWorstStreak",
+            "stResCost",
+            "stResUnderwater",
+            "stResWorstMonth",
+            "stResWinSpread",
+            "stResGuide",
+            "stResLossesIn",  # the pure-client "you are N losses in" input
+            "stResLocate",
+        ):
+            assert f'id="{hook}"' in html, hook
+        # The MAX reads from metrics; every other cell from the sibling block —
+        # via the ONE shared pure builders (no second copy).
+        assert "window.BXOneclick.resilienceCells(row, money)" in html
+        assert "window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow)" in html
+        # The honest signal-only / gross / per-unit caveat is on the panel.
+        assert "gross of brokerage &amp; taxes · per-unit (no sizing)" in html
+        # MINOR-1 (display honesty): the two cost/streak cells are DISTINCT runs
+        # — the by-COUNT cell keeps "Worst cold streak", the by-₹ cell is
+        # relabeled "Worst streak (by ₹)" (matching the CLI fix). The old
+        # anaphoric "That streak cost" header (which implied the longest-by-count
+        # streak cost the worst ₹) is GONE from every surface.
+        assert "Worst cold streak" in html
+        assert "Worst streak (by ₹)" in html
+        assert "That streak cost" not in html
+        # data-explain hooks so every cell hovers to its R27 line.
+        for key in (
+            "max_consecutive_losses",
+            "worst_streak_pnl",
+            "longest_underwater",
+            "win_rate_year_spread",
+        ):
+            assert f'data-explain="{key}"' in html, key
         js = (_STATIC / "bx-oneclick.js").read_text(encoding="utf-8")
         assert "works when VIX between" in js
         assert "VIX band not stamped for this run" in js

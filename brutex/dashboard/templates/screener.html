@@ -212,6 +212,12 @@
          reads "not stamped" (R31 honest NULL), never "null–null". */
       return window.BXOneclick.vixBandCellText(v);
     }
+    if (col.key === 'resilience.win_rate_year_spread') {
+      /* The ONE shared win-rate-spread law (broker-grade percentage points at
+         2dp) — the SAME string the /strategy panel renders, never a raw IEEE
+         fraction ("0.15000000000000002"); null → "—". */
+      return window.BXOneclick.winRateSpreadText(v);
+    }
     if (v === null || v === undefined) { return '—'; }
     if (col.money) { return money(v); }
     return String(v); // full precision — metrics are NEVER re-rounded (R27)

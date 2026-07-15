@@ -86,6 +86,35 @@
   .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
   .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
     border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
+  .story-cell .sub { font-size:11px; color:var(--muted); margin-top:4px; overflow-wrap:anywhere; }
+  .story-cell .badge-bad { color:var(--red); font-weight:700; }
+  .story-cell .badge-ok { color:var(--green); }
+  .resilience-locate { margin-top:12px; padding:8px 12px; border:1px solid var(--border-strong);
+    border-radius:8px; font-size:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .resilience-locate input { width:96px; font:inherit; font-size:12px; padding:4px 6px;
+    border:1px solid var(--border-strong); border-radius:6px; background:var(--surface-2); color:var(--text); }
+  .resilience-verdict { font-weight:700; }
+  .resilience-verdict.ok { color:var(--green); }
+  .resilience-verdict.warn { color:var(--yellow); }
+  .resilience-verdict.bad { color:var(--red); }
+  .resilience-verdict.na { color:var(--muted); }
+  /* Broker-grade polish, PANEL-SCOPED (#stResilienceSection only — the shared
+     .story-cell idiom on the combo card above is untouched): the coloured TRUTH
+     states read as designed status pills and the cells lift subtly on hover.
+     Transform/opacity only (no JS, no new polling); every honest "—" /
+     "unavailable" surface stays fully visible. */
+  #stResilienceSection .story-cell { transition:transform .12s ease, border-color .12s ease; }
+  #stResilienceSection .story-cell:hover { transform:translateY(-1px); border-color:var(--muted); }
+  #stResilienceSection .badge-ok, #stResilienceSection .badge-bad {
+    display:inline-block; margin-top:6px; padding:2px 9px; border-radius:999px;
+    font-size:11px; letter-spacing:.02em; }
+  #stResilienceSection .badge-ok { background:rgba(38,217,176,0.12); border:1px solid var(--green-dim); }
+  #stResilienceSection .badge-bad { background:rgba(255,92,92,0.12); border:1px solid var(--red); }
+  #stResilienceSection .resilience-verdict {
+    display:inline-block; padding:2px 10px; border-radius:999px; border:1px solid var(--border-strong); }
+  #stResilienceSection .resilience-verdict.ok { background:rgba(38,217,176,0.12); border-color:var(--green-dim); }
+  #stResilienceSection .resilience-verdict.warn { background:rgba(255,183,77,0.12); border-color:var(--yellow); }
+  #stResilienceSection .resilience-verdict.bad { background:rgba(255,92,92,0.12); border-color:var(--red); }
   .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
   .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
     padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
@@ -111,6 +140,7 @@
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-format.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -253,6 +283,50 @@
     <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
   </section>
 
+  <!-- Losing-streak resilience hero panel (the sibling sidecar block →
+       row.resilience.* + the max from row.metrics.max_consecutive_losses).
+       Every value is textContent-rendered; a NULL/absent record reads "—". -->
+  <section aria-label="Losing-streak resilience" id="stResilienceSection">
+    <h3>🥶 Losing-streak resilience — can you hold this strategy through a cold run?</h3>
+    <div class="story-grid">
+      <div class="story-cell" data-explain="max_consecutive_losses">
+        <div class="k">Worst cold streak</div>
+        <div class="v" id="stResWorstStreak">—</div>
+        <div class="sub" id="stResWorstStreakSub"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_streak_pnl">
+        <div class="k">Worst streak (by ₹)</div>
+        <div class="v" id="stResCost">—</div>
+        <div class="sub" id="stResCostSub"></div>
+      </div>
+      <div class="story-cell" data-explain="longest_underwater">
+        <div class="k">Longest underwater</div>
+        <div class="v" id="stResUnderwater">—</div>
+        <div class="sub" id="stResUnderwaterBadge"></div>
+      </div>
+      <div class="story-cell" data-explain="worst_loss_month">
+        <div class="k">Worst month</div>
+        <div class="v" id="stResWorstMonth">—</div>
+        <div class="sub" id="stResWorstMonthSub"></div>
+      </div>
+      <div class="story-cell" data-explain="win_rate_year_spread">
+        <div class="k">Win-rate stability</div>
+        <div class="v" id="stResWinSpread">—</div>
+      </div>
+      <div class="story-cell" data-explain="resilience_guide">
+        <div class="k">Hold-through guide</div>
+        <div class="sub" id="stResGuide">—</div>
+      </div>
+    </div>
+    <div class="resilience-locate">
+      <label for="stResLossesIn">Where am I now?</label>
+      <input id="stResLossesIn" type="number" min="0" step="1" inputmode="numeric" placeholder="losses in a row">
+      <span>losses in →</span>
+      <span id="stResLocate" class="resilience-verdict na">enter a number</span>
+    </div>
+    <div class="note">Signal-only backtest · gross of brokerage &amp; taxes · per-unit (no sizing).</div>
+  </section>
+
   <div id="bxTip" hidden></div>
 
 <script>
@@ -275,6 +349,7 @@
     interval: null,
     trades: [],
     candles: [],
+    resilienceRow: null, // the loaded row, for the pure self-locate verdict
     equity: [], // stored minute-path points (item 4C — empty ⇒ per-trade fallback)
     equityTotal: null,
     // ok-verdict-but-zero-rows sidecar (hostile-round fold): distinguishes
@@ -652,6 +727,7 @@
         var reg = row.regime && typeof row.regime === 'object' ? row.regime : {};
         byId('stTrendSplit').textContent = window.BXOneclick.trendSplitText(reg.by_trend, money);
         byId('stRegimeWonder').textContent = window.BXOneclick.regimeWonderText(reg.one_regime_wonder, reg.regime_wonder_axis);
+        fillResilience(row);
         /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined cascade verdict.
            status_text is SERVER-built (never composed here); the deep line
            appends the verdict's own detail/rank/provisional caveat via
@@ -676,6 +752,42 @@
         loadEquity();
       }
     );
+  }
+
+  /* Fill the losing-streak resilience panel from the sibling block (pure
+     BXOneclick.resilienceCells; money via the shared exact converter). Every
+     value reaches the DOM via textContent — never a string-to-HTML sink. */
+  function fillResilience(row) {
+    state.resilienceRow = row;
+    var c = window.BXOneclick.resilienceCells(row, money);
+    byId('stResWorstStreak').textContent = c.worstStreak;
+    byId('stResWorstStreakSub').textContent = c.worstStreakSub;
+    byId('stResCost').textContent = c.cost;
+    byId('stResCostSub').textContent = c.costSub;
+    byId('stResUnderwater').textContent = c.underwater;
+    var badge = byId('stResUnderwaterBadge');
+    badge.textContent = c.underwaterBadge;
+    badge.className = 'sub' + (c.badgeLevel === 'bad' ? ' badge-bad' : c.badgeLevel === 'ok' ? ' badge-ok' : '');
+    byId('stResWorstMonth').textContent = c.worstMonth;
+    byId('stResWorstMonthSub').textContent = c.worstMonthSub;
+    byId('stResWinSpread').textContent = c.winSpread;
+    byId('stResGuide').textContent = c.guide;
+    updateSelfLocate();
+  }
+
+  /* The pure "you are N losses in" self-locate verdict — zero backend, only
+     the shipped numbers (P95 + max). Colour tracks the verdict level. */
+  function updateSelfLocate() {
+    var out = byId('stResLocate');
+    var raw = byId('stResLossesIn').value;
+    if (!state.resilienceRow || raw === '') {
+      out.textContent = 'enter a number';
+      out.className = 'resilience-verdict na';
+      return;
+    }
+    var v = window.BXOneclick.resilienceSelfLocate(Number(raw), state.resilienceRow);
+    out.textContent = v.symbol + ' ' + v.text;
+    out.className = 'resilience-verdict ' + v.level;
   }
 
   function loadManifestSymbol(next) {
@@ -712,6 +824,7 @@
       state.tradeIdx = null;
       loadTrades();
     });
+    byId('stResLossesIn').addEventListener('input', updateSelfLocate);
     function go() {
       byId('stRunId').textContent = state.runId;
       loadManifestSymbol(loadRow);

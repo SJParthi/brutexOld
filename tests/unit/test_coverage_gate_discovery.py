@@ -229,6 +229,25 @@ class TestDiscoverTouchedModules:
         #     stem match, 100.00% with the pair; the static whole-engine gate runs
         #     tests/unit/test_engine_*.py together at 100%
         #     (DEC-SWEEP-RUST-TRADESIM-WIRE-001).
+        #   * brutex/engine/resilience_streaks.py — the losing-streak resilience
+        #     module (fold + sidecar + annotation), covered by the CURATED
+        #     three-file suite test_resilience_streaks.py +
+        #     test_resilience_sidecar.py + tests/integration/
+        #     test_resilience_end_to_end.py; the stem file alone tops out at
+        #     ~62.94% (the fold/annotation/backfill branches live in the
+        #     differently-stemmed sidecar + integration files), so the
+        #     discovery gate's one-stem mapping is a structural mismatch. Its
+        #     real 100% gate is the dedicated static per-module gate in ci.yml
+        #     (that exact three-file suite at --cov-fail-under=100) + the
+        #     whole-package floor (DEC-RESILIENCE-STREAKS-001).
+        #   * brutex/engine/results_depth_pass.py — gains the adoption-backfill
+        #     + resilience-fence path whose branches are exercised by the
+        #     differently-stemmed test_resilience_sidecar.py + the integration
+        #     test_resilience_end_to_end.py; test_engine_results_depth_pass.py
+        #     alone tops out at ~94.88% — the sweep_driver.py shape. Its real
+        #     100% gate is the dedicated static per-module gate in ci.yml (the
+        #     three-file suite at --cov-fail-under=100) + the whole-package
+        #     floor (DEC-RESILIENCE-STREAKS-001).
         # Keep it tiny + justified.
         assert (
             frozenset(
@@ -240,6 +259,8 @@ class TestDiscoverTouchedModules:
                     "brutex/dashboard/movers_snapshot.py",
                     "brutex/config/credentials.py",
                     "brutex/engine/sweep_driver.py",
+                    "brutex/engine/resilience_streaks.py",
+                    "brutex/engine/results_depth_pass.py",
                 }
             )
             == gate.COVERAGE_DISCOVERY_EXCLUDE
