@@ -2317,7 +2317,9 @@ class TestOptionsContiguityGoldens:
             bars=[
                 # The 2024-11-01 Diwali Muhurat evening session's last bar —
                 # the 1-minute-native baseline (DEC-OPTIONS-PREBUILD-RETIRE-001).
-                _min_bar(hour=18, minute=59, close="100", volume=10, oi=1000, day=date(2024, 11, 1)),
+                _min_bar(
+                    hour=18, minute=59, close="100", volume=10, oi=1000, day=date(2024, 11, 1)
+                ),
                 _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
                 _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
             ],
