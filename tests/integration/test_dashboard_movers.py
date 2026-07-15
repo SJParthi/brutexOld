@@ -43,6 +43,7 @@ from brutex.dashboard.movers_snapshot import (
     _read_daily_bars,
     _read_session_bars,
     filter_to_ist_minute,
+    resolve_prev_close,
     run_movers_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -417,6 +418,139 @@ class TestPrevDayClose:
             )
             is None
         )
+
+
+# ── resolve_prev_close: the CE/PE 1-minute-native gate ────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as
+# relayed via the coordinator — ADR-0021 RULING B, draft PR #1555): option
+# contracts never receive derived-timeframe prebuild any more, so a STORED
+# option ``1day`` partition is frozen at retirement eve. Reading it FIRST
+# would serve a stale prev-close (and a wrong %CHNG) forever — the resolver
+# must skip the 1day read entirely for CE/PE and go straight to the bounded
+# 1-minute prior-session walk-back. SPOT + FUT stay byte-identical
+# (1day-first), pinned below.
+
+
+_CE_SYMBOL = "NSE-NIFTY-27Jun24-20000-CE"
+_FUT_SYMBOL = "NSE-NIFTY-27Jun24-FUT"
+
+
+def _write_fno(tmp_path: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange=_EXCHANGE, segment="FNO", symbol=symbol, interval=interval, bars=bars
+    )
+
+
+class TestOptionPrevCloseOneMinuteNative:
+    def _seed_stale_1day_fresh_minute(self, tmp_path: Path, symbol: str) -> None:
+        """A FROZEN (stale) stored ``1day`` beside a FRESH 1-minute prior session.
+
+        The retirement-eve shape: the stored 1day's 2024-06-12 close (100 —
+        derived before later 06-12 minutes were pulled) diverges from the TRUE
+        06-12 last 1-minute close (123.45).
+        """
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                _min_bar(hour=9, minute=15, close="120", volume=5, day=date(2024, 6, 12)),
+                _min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12)),
+            ],
+        )
+
+    def test_option_prev_close_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the resolver read the frozen option
+        1day FIRST and served the stale close 100; the gate must serve the
+        TRUE 1-minute prior-session close 123.45."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_option_prev_close_never_opens_the_1day_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read spy: the CE baseline resolve performs ZERO 1day-partition reads."""
+        from brutex.dashboard import movers_snapshot as ms
+
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        calls: list[str] = []
+        real = ms._read_daily_partition
+
+        def _spy(lake_root: Path, **kwargs: Any) -> Any:
+            calls.append(str(kwargs.get("symbol")))
+            return real(lake_root, **kwargs)
+
+        monkeypatch.setattr(ms, "_read_daily_partition", _spy)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert calls == []  # the option 1day is never opened
+
+    def test_fut_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so the FUT baseline still reads the stored 1day FIRST even
+        when a diverging 1-minute prior session exists."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _FUT_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_FUT_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("100")  # the stored 1day close — 1day-first
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_spot_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """SPOT byte-identity pin: the gate is CE/PE-only — a spot symbol with a
+        diverging 1-minute prior session still serves the stored 1day close."""
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        )
+        assert got.value == Decimal("100")
+
+    def test_option_prev_close_equal_when_both_sources_fresh(self, tmp_path: Path) -> None:
+        """Equivalence pin: when the stored option 1day IS fresh (its close ==
+        the session's last 1-minute close, the derive law) the gate changes
+        nothing — the walk-back recovers the byte-equal value."""
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="120", close="123.45", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
 
 
 # ── run_movers_snapshot (direct, every branch) ────────────────────────────

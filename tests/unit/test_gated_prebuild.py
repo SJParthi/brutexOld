@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from brutex.dashboard.fno_cascade import FnoContract, build_fno_cascade
 from brutex.dashboard.gated_prebuild import (
+    OPTIONS_PREBUILD_SKIPPED_NOTE,
     PREBUILD_PHASE_ORDER,
     GatedPrebuildReport,
     PhasePrebuildReport,
@@ -395,12 +396,17 @@ def test_futures_genuine_bug_propagates() -> None:
         )
 
 
-# ── the REAL options phase (DEC-PIPELINE-AUTOPREBUILD-001) ─────────────────
+# ── the options phase: the by-design no-op is the PRODUCTION shape ─────────
+# (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+# relayed via the coordinator, ADR-0021 RULING B, draft PR #1555: options are
+# 1-minute-native; the injected arm below is RETAINED STRUCTURAL.)
 
 
 class TestOptionsPhase:
     def test_options_noop_when_callables_not_injected(self) -> None:
-        """Back-compat: no options callables ⇒ an explicit, REPORTED no-op."""
+        """No options callables (the PRODUCTION shape since the retirement) ⇒
+        the explicit REPORTED by-design no-op: nothing attempted, zero work,
+        the honest law-naming note — never a fake "0 contracts found"."""
         report = run_gated_prebuild(
             underlyings=[_spot("NSE-NIFTY")],
             materialize_spot=lambda _i: _ok(3),
@@ -409,10 +415,13 @@ class TestOptionsPhase:
         )
         options = report.phases[-1]
         assert options.phase == "options"
-        assert options.attempted == ("NSE-NIFTY",)
+        assert options.attempted == ()  # nothing is in scope BY DESIGN
         assert options.succeeded == ()
+        assert options.failed == ()
         assert options.total_bars == 0
-        assert "not injected" in options.note
+        assert options.note == OPTIONS_PREBUILD_SKIPPED_NOTE
+        assert "1-minute-native" in options.note
+        assert "DEC-OPTIONS-PREBUILD-RETIRE-001" in options.note
 
     def test_options_noop_when_only_discovery_injected(self) -> None:
         """EITHER callable missing ⇒ the no-op (never a half-wired crash)."""
@@ -424,7 +433,7 @@ class TestOptionsPhase:
             options_contracts_for=lambda _i: ["OPT-1"],
             materialize_option=None,
         )
-        assert "not injected" in report.phases[-1].note
+        assert report.phases[-1].note == OPTIONS_PREBUILD_SKIPPED_NOTE
 
     def test_options_contract_quarantine_continues_phase(self) -> None:
         """One bad option contract never aborts the options stage."""
