@@ -14,7 +14,9 @@ expired options only). These pins make the ABSENCE structural:
    derived-TF lake label (the canonical ``LAKE_INTERVAL_LABELS`` vocabulary).
 2. **AST pin** — the rolling pull production modules (the dashboard rolling
    module + the rolling spine + every ``rolling_option_*`` module + the rolling
-   ``/db`` view) and the cli.py Dhan arms import NO materialize/prebuild symbol
+   ``/db`` view), the cli.py Dhan arms AND the app.py rolling ROUTE functions
+   (per-function scan — never whole-module, the spot launcher legitimately
+   imports materialize machinery) import NO materialize/prebuild symbol
    (the ``test_gpu_gate_drift_pin.py`` / vix-stamper-binding AST-pin idiom).
 3. **Spot stays** — the pin cannot be satisfied by deleting the SPOT prebuild:
    ``brutex/dashboard/dhan_pull.py`` must still import
@@ -28,8 +30,11 @@ expired options only). These pins make the ABSENCE structural:
 
 Honest envelope (the GPU-pin residual class): static imports are AST-detected;
 a COMPUTED import (``importlib.import_module("brutex.data." + name)``) is not —
-the literal import shapes are the ones a real prebuild-wiring PR writes, and the
-behavior pin (1) catches the outcome regardless of the wiring shape.
+the literal import shapes are the ones a real prebuild-wiring PR writes. The
+behavior pin (1) catches a prebuild that runs in the PULL's happy path; a
+flag-gated default-off / route-level / computed-import prebuild is the
+disclosed residual (the AST pins over the rolling modules + the rolling route
+handler + the cli Dhan arms are the net for the route-level shapes).
 """
 
 from __future__ import annotations
@@ -53,15 +58,27 @@ from brutex.data.timeframes import LAKE_INTERVAL_LABELS
 _FROZEN_TODAY = date(2026, 7, 15)
 
 #: The forbidden prebuild/materialize import surface for the ROLLING modules —
-#: the module that owns derived-TF materialization plus the spot-side prebuild
-#: entry points a mis-wiring would reach for.
-_FORBIDDEN_MODULES = frozenset({"brutex.data.timeframe_materialize"})
+#: the module that owns derived-TF materialization, the Groww pipeline/gated
+#: prebuild orchestration modules, plus the prebuild entry-point names (Dhan
+#: spot + pipeline/gated) a mis-wiring would reach for.
+_FORBIDDEN_MODULES = frozenset(
+    {
+        "brutex.data.timeframe_materialize",
+        "brutex.dashboard.pipeline_prebuild",
+        "brutex.dashboard.gated_prebuild",
+    }
+)
 _FORBIDDEN_NAMES = frozenset(
     {
         "materialize_lake_timeframes",
         "materialize_timeframes",
         "run_dhan_prebuild",
+        "run_pipeline_prebuild",
+        "run_pipeline_prebuild_parallel",
+        "run_pipeline_prebuild_guarded",
+        "run_gated_prebuild",
         "PrebuildKind",
+        "PrebuildOutcome",
         "MaterializeResult",
     }
 )
@@ -157,18 +174,45 @@ def test_rolling_modules_import_no_prebuild_symbol() -> None:
         assert hits == [], f"{module_path.name} imports prebuild machinery: {hits}"
 
 
+def _named_functions(tree: ast.AST, wanted: frozenset[str]) -> dict[str, ast.AST]:
+    """Find the *wanted* (async or sync, possibly nested) function nodes in *tree*."""
+    found: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in wanted:
+            found[node.name] = node
+    return found
+
+
 def test_cli_dhan_arms_import_no_prebuild_symbol() -> None:
     # The cli.py Dhan arms use function-local imports — scan exactly those bodies.
     cli_tree = ast.parse((_REPO / "brutex" / "cli.py").read_text(encoding="utf-8"))
-    wanted = {"cmd_fetch_dhan", "_run_dhan_fetch", "cmd_enrich_greeks_dhan"}
-    found: dict[str, ast.FunctionDef] = {}
-    for node in ast.walk(cli_tree):
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            found[node.name] = node
-    assert set(found) == wanted, f"cli Dhan arms missing/renamed: {wanted - set(found)}"
+    wanted = frozenset({"cmd_fetch_dhan", "_run_dhan_fetch", "cmd_enrich_greeks_dhan"})
+    found = _named_functions(cli_tree, wanted)
+    assert set(found) == set(wanted), f"cli Dhan arms missing/renamed: {set(wanted) - set(found)}"
     for name, fn in found.items():
         hits = _forbidden_imports(fn)
         assert hits == [], f"cli.{name} imports prebuild machinery: {hits}"
+
+
+def test_rolling_route_functions_import_no_prebuild_symbol() -> None:
+    """The rolling ROUTE path in app.py imports no prebuild machinery — scanned
+    PER FUNCTION (the cli-arm idiom), deliberately NEVER whole-module: app.py
+    legitimately imports materialize machinery for the SPOT launcher."""
+    app_tree = ast.parse((_REPO / "brutex" / "dashboard" / "app.py").read_text(encoding="utf-8"))
+    wanted = frozenset(
+        {
+            "_launch_dhan_rolling_pipeline",
+            "api_universe_pull_rolling_options_dhan",
+            "_default_dhan_rolling_option_pull_production",
+        }
+    )
+    found = _named_functions(app_tree, wanted)
+    assert set(found) == set(wanted), (
+        f"rolling route functions missing/renamed: {set(wanted) - set(found)}"
+    )
+    for name, fn in found.items():
+        hits = _forbidden_imports(fn)
+        assert hits == [], f"app.{name} imports prebuild machinery: {hits}"
 
 
 # ── 3. spot stays: the pin cannot be satisfied by deleting the SPOT prebuild ──
