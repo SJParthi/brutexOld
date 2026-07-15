@@ -108,7 +108,8 @@ def is_cost_bearing(instrument: Instrument) -> bool:
     """Return True iff *instrument* carries the full transaction-cost stack.
 
     The exact complement of :func:`is_cost_free`: every stock (spot / future /
-    option) and every index OPTION bears brokerage + STT + slippage + liquidity +
-    best/avg/worst-case fills. O(1).
+    option) and every index OPTION bears brokerage + STT + slippage + liquidity,
+    on top of the ONE worst-case fill law every instrument prices under
+    (DEC-FILL-WORST-CASE-ONLY-001). O(1).
     """
     return not is_cost_free(instrument)

@@ -89,6 +89,14 @@ with mode threading.
   printed range (extreme + tick) — the honest adverse floor, not a
   printable price; on a FLAT bar the fills equal the retired open±tick
   values exactly, so worst-case can never flatter.
+- **Exit-bar MAE fold (hostile-review N2):** on a forced / pending / signal
+  exit bar the MAE/MFE excursion fold sees (open, open) while the fill takes
+  the bar's adverse extreme, so annotation-layer MAE can understate the
+  realized adverse move on that ONE bar — inherited byte-identical from the
+  absorbed #1522 worst-case arm, Python + Rust mirrored, annotation-only
+  (never P&L, never run identity). Named follow-up, if wanted: fold the exit
+  bar's true extreme into the excursion (a results-depth annotation change
+  only).
 - Precise-era sweep trees are NOT migrated — they refuse; the remediation
   is a re-run (the run identity re-keys via the unconditional token
   anyway, so no precise-era result was reusable).
