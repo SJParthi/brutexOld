@@ -485,6 +485,10 @@ jobs:
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
+            "brutex/acceptance/model.py:tests/unit/test_acceptance_model.py:" \
+            "brutex/acceptance/sampling.py:tests/unit/test_acceptance_sampling.py:" \
+            "brutex/acceptance/independent.py:tests/unit/test_acceptance_independent.py:" \
+            "brutex/acceptance/report.py:tests/unit/test_acceptance_report.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \

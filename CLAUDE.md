@@ -278,6 +278,48 @@ bench regression is caught POST-merge on the self-hosted runner, never a
 merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
 blurb + MIGRATION.md #1753.)
+Earlier: 2026-07-11 (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 —
+`brutex verify-acceptance`: the ONE operator-runnable acceptance verifier — 7 composed
+checks (uniqueness census · derived-TF correctness incl. the NEW 1day compare · zero-vendor-call
+incremental-pull re-plan idempotence · disk-provable rate evidence · movers page-vs-DB truth via
+the ONE AST-FENCED independent recompute · stored-data sanity · on-box latency probes) over the
+REAL lake, PASS/FAIL/ABSTAIN(named-reason) with mandatory evidence blocks + required coverage{}
+disclosure, a GATING <10 s teeth smoke (3 planted poisons on a real-writer twin — a verifier that
+cannot demonstrate detection withholds ALL real-lake verdicts, exit 2) + the CI-mandatory 20-poison
+full battery, the frozen `brutex-acceptance-report-v1` machine+human report under
+`<lake>/acceptance/<run_id>/` (atomic LATEST pointer + SweepAuditWriter hash chain + run-over-run
+deltas/abstain streaks carried in the report chain), verify-family exits 0/1/2/3/4 (precedence
+2>3>4>0; structural abstains {no_per_call_persistence, no_per_call_log, no_oi_compare_seam,
+no_rate_log_configured — the last splits an ABSENT rotating-log sink (headless / dashboard never
+run) from a present-but-silent one so a healthy headless lake never goes permanently amber} are
+budget/streak-EXEMPT so the standing by-design gaps never turn the nightly permanently amber).
+ADDITIVE ONLY — NEW `brutex/acceptance/` package + thin CLI shim + ci.yml/mutation.yml gates;
+ZERO edits to serving paths/engine/pull/movers/db_view/ledger/doctor; compose-never-reimplement
+(the fenced movers leg is the single sanctioned exception, DEC-SURFACE-TRIAL-001 precedent).
+HONEST: rate.per_call_history is a PERMANENT named ABSTAIN (no per-call record persists — F3
+needs an operator ruling); tf.oi stands ABSTAIN until F2; sampled PASSes say so on the verdict
+line. HOSTILE-REVIEW ROUND 1 folded pre-merge (refuter-confirmed findings fixed: the §12.7
+TOCTOU law WIRED for real · per-day Muhurat 1day handling · the full moneyness sentinel
+grammar · expiry-capped covered-span replan · instruments.duckdb opened READ-ONLY only ·
+glob=False oracle reads · bounded 16 MiB evidence tails, chain-verify dropped from the
+evidence sub · `--months` made real for tf.daily/sanity + the census scoped to sampled
+coordinates — the per-round record lives in MIGRATION.md #1756, never this header).
+HOSTILE-REVIEW ROUND 2 folded pre-merge (the coverage-gate test-stem BLOCKER renamed ·
+the registry.duckdb schema-drift ABSTAIN guard · the replan oracle's correct-or-abstain
+non-default-window-shape routing (explicit-dates F&O + overlapping-anchor false-FAILs dead,
+the out-of-coverage double-fetch FAIL kept) · the pull TOCTOU retry genuinely re-reads ·
+Muhurat-date 1day bars disclosed UNVERIFIED + counted once · the instrument-master read
+became an in-memory SNAPSHOT so the in-process #1482/#1646 drift ladder stays live ·
+seed-rotated F&O contract sampling + bounded/pruned coverage ledger — per-round record in
+MIGRATION.md #1756, never this header).
+HOSTILE-REVIEW ROUND 3 folded pre-merge (stdout-pure `--json`/table via the #1630 logging
+seam · the evidence-tree symlink refusal hoisted before the audit write · BOTH serving-path
+residuals disclosed (registry + `.manifest/`) · the engine set made code-true (INDIAVIX +
+NSE-NIFTY-*-FUT dirs full-history) · off-chain `--out` · loud SUSPECT on a failed report
+write · report.txt renders limits/routed/Muhurat — per-round record in MIGRATION.md #1756,
+never this header).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1756.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -3552,6 +3594,114 @@ hostile-review pass._
   blocker, unchanged here). CI-gate script + redteam tests + docs only;
   ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no scope/vocab/rate change.)
+  Earlier: `claude/verify-acceptance` (**DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756** —
+  the operator acceptance verifier `brutex verify-acceptance`: NEW ADDITIVE `brutex/acceptance/` package
+  (model/report/context/sampling/independent/selftest/run + checks/{unique,tf,pull,rate,movers,sanity,latency})
+  + a thin `# pragma: no cover` cli shim + ci.yml per-module 100% gates + 4 modules in the weekly mutmut loop.
+  Three structural laws: one-verdict-one-evidence-block (empty evidence REFUSED at the model), no-verdict-without-work
+  (`units_checked == 0` ⇒ forced ABSTAIN(nothing_to_check) in the constructor — the #935/#1014 dormant-feature trap
+  closed), and teeth-before-trust (the always-on smoke plants 3 poisons in a real-writer twin lake and requires the
+  COMPOSED checks to catch each; TEETH_FAILED ⇒ exit 2 with real-lake verdicts WITHHELD; the 20-poison full battery is
+  CI-mandatory per merge with a comparator-INVERSION tooth). Compose-never-reimplement: the census fold, the
+  sweep-preflight TF seam + the NEW 1day compare composition, the REAL `plan_windows`/`plan_contract_windows` re-plan
+  on a pinned-clock copy (anti-vacuous planner tail tooth included; explicitly NOT `brutex fetch --dry-run`),
+  disk-only rate evidence (constants pin · #1692 market-hours conformance · bridge point sample · rotating-log window
+  · audit pair-bound trend under an ALWAYS-ABSTAIN verdict · the PERMANENT structural
+  ABSTAIN(no_per_call_persistence)), the AST-FENCED `independent.py` movers leg (raw parquet + hand IST/#1601
+  bucket-anchor/Fraction %CHNG/half-up-2dp/HLC3-paisa/hand calendar back-walk; fence = a red BUILD), the
+  price/bad-tick/tick-grid/session/interior-gap/VIX-silent-empty/completeness sanity battery, and best-of-N-MIN
+  latency probes vs on-box absolute budgets (never the CI 1.1x tier). Daily-rotating seeded sampling (engine set —
+  3 indexes + INDIAVIX + the NSE-NIFTY-*-FUT engine-track contract dirs — ALWAYS in scope: unique.engine scans them
+  full-history, tf force-includes the engine futures contracts; coverage{} REQUIRED per check; coverage ledger makes
+  accumulation visible). Report:
+  `<lake>/acceptance/<run_id>/report.json` schema-self-validated before writing + report.txt (ABSTAINs FIRST) +
+  evidence spill + LATEST + the SweepAuditWriter hash chain verified by the EXISTING `brutex audit verify`; deltas +
+  abstain streaks carried in the report chain. Exits 0/1/2/3/4 (2>3>4>0). HOSTILE-REVIEW ROUND 1 folded
+  (same branch, pre-merge — 3-refuter panel, every CONFIRMED finding fixed with a fails-before regression;
+  refuted claims got no code change): the §12.7 stat-fingerprint retry-once TOCTOU law is WIRED into
+  unique/tf/pull/sanity (`checks.run_fingerprinted_check` — a mid-check real-writer append retries once then
+  ABSTAINs `input_moved_during_check`, never a PASS over a torn read); tf.daily skips Muhurat sessions PER-DAY
+  (counted `muhurat_days_skipped`; a multi-year engine lake keeps a real 1day verdict — the whole-history
+  abstain/exit-4-forever knock-on is dead); the movers moneyness grammar admits the FULL production vocabulary
+  incl. the honest `?`/`—`/bare-ITM/OTM sentinels; the pull replan threads production's expiry-capped
+  `contract_windows` + re-plans per MERGED covered span (disjoint operator ranges never false-FAIL; all-expired
+  lakes read `no_tail_eligible_series`) with the tail tooth reusing the ONE replan copy; `checks=()` is refused
+  in the core; the decorative `pull.progress_snapshot` PASS is DELETED (counters = replan evidence); market-hours
+  folds only `dry_run is False` journal records (heartbeats never count); instruments.duckdb is opened READ-ONLY
+  only (older-schema stores survive byte-identical; RW-held/foreign ⇒ named ABSTAIN); oracle reads ride
+  `glob=False`; report.txt repr()s vendor-influenceable cells; BRUTEX_LAKE_ROOT is run-scoped + restored;
+  rotating-log/audit evidence reads are bounded 16 MiB tails with the full-chain verify DROPPED from the
+  evidence-only sub; RecursionError bombs fold, MemoryError re-raises raw; `--months` genuinely bounds
+  tf.daily/sanity and the census scans sampled coordinates × months (never the whole-tree glob); enumerations
+  memoised per run; latency's first call relabeled `first_call_ms` (never claimed cold); the report golden
+  regenerated as a reviewed act. HOSTILE-REVIEW ROUND 2 folded (same branch, pre-merge — 3-refuter panel,
+  every CONFIRMED finding fixed with a fails-before regression): the coverage_gate_discovery BLOCKER killed
+  (the 7 checks-package test files RENAMED `test_acceptance_check_*` → `test_acceptance_checks_*` per the
+  discovery grammar + the ci.yml pairings repointed — never an exclude entry); the movers options leg probes
+  registry.duckdb READ-ONLY first — a schema-version drift ABSTAINs `registry_schema_drift` BEFORE the
+  route's write-capable `RegistryStore.open` can drop/restamp it (absent = proceed, empirically pinned the
+  route creates nothing; matching = proceed, the no-net-bytes residual disclosed in limits+runbook); the
+  replan oracle goes correct-or-abstain — the hard replan==0 law binds DEFAULT-law series only, while
+  explicit-dates F&O rows / overlapping-anchor ranges / in-coverage re-tiling mismatches route to the named
+  `non_default_window_shape` (both refuter false-FAIL repros dead; a key ESCAPING the covered spans still
+  hard-FAILs — the double-fetch tooth pinned); the pull TOCTOU retry genuinely RE-READS the ledger
+  (`on_retry=drop_ledger_memo` — the void `retried:True` stamp over a memoised snapshot is dead); Muhurat
+  1day bars are counted ONCE per distinct IST date and disclosed UNVERIFIED (`muhurat_days_unverified` +
+  the limits/runbook line — corruption on those ~6 dates is honestly out of scope); the instrument master is
+  read as a short-lived in-memory SNAPSHOT (no held file handle — the in-process DuckDB same-file
+  config-conflict that silently degraded the #1482/#1646 movers drift ladder is dead, leg A is the
+  production wire again); the F&O contract sample seed-ROTATES (`sample_fno_contracts` — the fixed head-6
+  is dead) and contracts join the coverage-ledger population (capped 5000, truncation disclosed); the
+  coverage ledger read is bounded 16 MiB + pruned-on-save to the live population; NITs: symlinked
+  `<lake>/acceptance` write refusal, BaseException-safe env restore in ctx.close, the vacuous-tail
+  O(eligible×records) note, the moneyness grammar tightened to `[1-9]\d*` depths.
+  HOSTILE-REVIEW ROUND 3 folded (same branch, pre-merge — every CONFIRMED finding fixed with a
+  fails-before regression): the CLI dispatch runs the #1630 logging seam for `verify-acceptance`
+  (unconfigured structlog's stdout PrintLogger buried the human table + broke `--json`; logs now
+  STDERR, stdout = exactly the table/JSON — the round-2 test that sliced from `{` fixed to full-stdout
+  parse); ONE evidence-tree symlink refusal HOISTED before ANY write (the audit JSONL no longer writes
+  through a symlinked `<lake>/acceptance` before the report-side guard); the read-only headline
+  discloses BOTH serving-path residuals (registry re-stamp + a possible `<lake>/.manifest/`
+  discovery-cache refresh, exactly as production); the engine set is code-true (C-F1 — INDIAVIX +
+  every `NSE-NIFTY-*-FUT` contract dir join unique.engine full-history, tf force-includes the engine
+  futures contracts; `sampling.engine_futures_contracts` via the canonical `parse_fno_symbol`);
+  `--out` reports are OFF-CHAIN (LATEST/deltas/streaks track only the default chain — the dangling
+  pointer + silent streak reset are dead); a report-write failure restamps overall SUSPECT/exit-2 +
+  one loud stderr line (the "→ exit 0" table on a 2-exit process is dead); `--sample < 0` refused at
+  CLI AND core; report.txt renders every limits line + the routed non_default_window_shape count +
+  the Muhurat-unverified dates (the ABSTAIN-prominence law extended); the open_by_design fold's
+  future-dated-phantom scope + the never-planned-window merged-span twin are named in limits.
+  HOSTILE-REVIEW ROUND 4 folded (same branch, pre-merge — every CONFIRMED finding fixed with a
+  fails-before regression): the cross-process single-flight flock for the WHOLE run
+  (`<lake>/.locks/acceptance_singleflight.lock`, the house `_flock_singleflight` shape — two
+  CONCURRENT runs previously corrupted the audit hash chain PERMANENTLY; the second run now
+  refuses SUSPECT exit 2 naming the holder); the `pull.partition_presence` half-open-span fix
+  (the old `we − 1day` end fed `[d, d)` for a production 1-day window — a HEALTHY lake read
+  exit 3, and battery poisons 6-8 rode the false positive: a net_new_law sabotage SURVIVED
+  TEETH_PROVEN, measured — the fixed span makes those teeth real again, sabotage-flip
+  battery-pinned); the symlink refusal extended to the fixed audit CHILD paths
+  (`acceptance/audit` + the chain file — the `sym_inner` write-through is dead); TWO per-leg
+  unique battery teeth on a non-engine CASH twin symbol (`census_nonengine_dup` +
+  `engine_oldmonth_dup` — an always-PASS sabotage of either leg now flips the battery) + the
+  movers comparator-seam teeth scope disclosed (the composed-wiring killer is the unit gate's
+  `TestMoversRealWire::test_tamper_tooth_volume_cell`); the `streak_carry` report block (a
+  subset/TEETH_FAILED run carries absent sub-checks' streaks forward VERBATIM — the measured
+  3→1 streak reset that suppressed the exit-4 law is dead); the package-wide zero-vendor-call
+  AST pin now EXISTS (sanctioned planning/constants imports only — the runbook's "AST-pinned"
+  claim is mechanical); `--json` emits a minimal JSON error object on the early-SUSPECT paths;
+  the pyright `base.update` annotation fix.
+  447 tests; every module re-measured 100.00%
+  line+branch on the ci.yml-exact gates; full battery 20/20 detected, 0 false FAILs on the clean twin;
+  ruff/ruff-format clean; `mypy --strict` clean (the one pre-existing env-specific cma stub note aside, 0 new);
+  pyright 0 errors on the new package (HONEST baseline correction, round-4 C-F1: the earlier
+  "net −12 on the touched test files" compared against this branch's OWN round-1 interim state,
+  not origin/main — every error in a new file is new; after the round-4 `base: dict[str, object]`
+  annotation fix the FULL `pyright brutex tests` run measures 0 errors at this head under
+  pyright 1.1.411, so the branch adds 0 vs origin/main — the round-4 refuter's 1-error main
+  reading at test_window_ledger.py:990 did not reproduce at the fixed head, and that file is
+  byte-untouched by this branch). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+  change; the per-item record lives in MIGRATION.md #1756.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -7452,6 +7602,33 @@ hostile-review pass._
   caught post-merge on the self-hosted runner); CI-gate script + redteam
   tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line)
+  Earlier: `claude/verify-acceptance`
+  (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 — the operator acceptance verifier
+  `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
+  verdicts + evidence blocks, the gating teeth smoke + CI 20-poison battery, the frozen
+  `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
+  hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
+  grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
+  tails · --months made real — per-round record in MIGRATION.md #1756);
+  hostile-review round 2 folded pre-merge (coverage-gate test-stem rename · registry schema-drift
+  ABSTAIN guard · correct-or-abstain non-default-window-shape replan · pull retry re-reads ·
+  Muhurat-date 1day bars disclosed unverified · in-memory master snapshot keeps the drift ladder
+  live · seed-rotated F&O sampling + bounded/pruned coverage ledger — per-round record in
+  MIGRATION.md #1756);
+  hostile-review round 3 folded pre-merge (stdout-pure --json/table via the #1630 logging seam ·
+  evidence-tree symlink refusal hoisted before the audit write · both serving-path residuals
+  disclosed (registry + .manifest/) · engine set made code-true (INDIAVIX + NSE-NIFTY-*-FUT dirs
+  full-history) · off-chain --out · loud SUSPECT on a failed report write · report.txt renders
+  limits/routed/Muhurat — per-round record in MIGRATION.md #1756);
+  hostile-review round 4 folded pre-merge (whole-run single-flight flock — concurrent runs no
+  longer corrupt the audit hash chain · the pull.partition_presence half-open-span fix (healthy
+  1-day windows read exit 3; battery poisons 6-8 made real teeth again) · symlink refusal
+  extended to the audit child paths · per-leg unique battery teeth on a non-engine twin symbol ·
+  the streak_carry block (subset/TEETH_FAILED runs never reset streaks) · the package-wide
+  zero-vendor-call AST pin · --json on early-SUSPECT paths · the pyright baseline honesty
+  correction — per-round record in MIGRATION.md #1756);
+  additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
@@ -7968,7 +8145,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5114-5115` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5245-5246` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
