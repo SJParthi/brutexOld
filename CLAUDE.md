@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758
+_Last updated: 2026-07-15 (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795, branch
+`claude/dedup-gate-provenance-serving` — the branch's SAME-BRANCH SECOND DEC, folded
+at the 2026-07-15 merge-reconcile of main through #1794: the rehearsal-scoped Stage-4
+Monte-Carlo permutation budget (NEW fail-loud `BRUTEX_SWEEP_MC_PERMUTATIONS`
+through the `cascade_config_for_sweep(overrides=…)` seam; env unset =
+byte-identical production default 1000, pinned) + the R38 fixture's MC=100
+(the smallest budget whose p-value floor 1/101 still admits a filter-#9 PASS
+at mc_alpha=0.01) + scoped INFO logging bound — closing the SYSTEMIC
+`test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns (main itself failed
+at 452.6 s, run 29249947445); the 300.0 s ceiling stands. ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
+frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass
+UNMODIFIED; touched modules 100% line+branch. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb + MIGRATION.md #1795.)
+Earlier: 2026-07-11 (DEC-SWEEP-SERVING-GATE-PROVENANCE-001, MIGRATION.md #1758
 (renumbered #1724 → #1758 to the drain-steward reservation), branch
 `claude/dedup-gate-provenance-serving` — gate-scoped `/results` serving + the row/store
 gate-provenance carrier: `ResultRow.gate_provenance` (the Ruling-5 optional-column law —
@@ -32,18 +46,8 @@ L2 cache-key INJECTION closed structurally — every user-controlled key leg
 percent-encoded (`quote`, safe='') AND `rank_by` keyed by its RESOLVED column via the
 NEW public `resolve_rank_by_param`, so a must-400 request can never alias a cached 200
 (regression + gate∘preset∘filter composition + 0-row fold-boundary pins added).
-SAME-BRANCH SECOND DEC (2026-07-15 merge-reconcile of main through #1794):
-DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the rehearsal-scoped Stage-4
-Monte-Carlo permutation budget (NEW fail-loud `BRUTEX_SWEEP_MC_PERMUTATIONS`
-through the `cascade_config_for_sweep(overrides=…)` seam; env unset =
-byte-identical production default 1000, pinned) + the R38 fixture's MC=100
-(the smallest budget whose p-value floor 1/101 still admits a filter-#9 PASS
-at mc_alpha=0.01) + scoped INFO logging bound — closing the SYSTEMIC
-`test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns (main itself failed
-at 452.6 s, run 29249947445); the 300.0 s ceiling stands. ENGINE
-UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
-frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass
-UNMODIFIED; touched modules 100% line+branch.)
+ENGINE semantics UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in
+the §1 Active-branch blurb + MIGRATION.md #1758.)
 Earlier: 2026-07-14 (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md
 #1794 (renumbered #1792 → #1793 → #1794 across the 2026-07-14
 merge-reconciles — main took #1792 for

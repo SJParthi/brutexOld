@@ -1123,11 +1123,14 @@ _GATE_DETAIL_MAX_LEN: Final[int] = 64
 def _sanitize_gate_token(token: str) -> str:
     """Bound + strip a user ``?gate=`` token for safe reflection in a 400 detail.
 
-    Control characters (``ord < 0x20`` plus DEL) are dropped so a token cannot
+    Non-printable characters are dropped per :meth:`str.isprintable` — every
+    character in the Unicode "Other" (Cc/Cf/Cs/Co/Cn) or "Separator"
+    (Zs/Zl/Zp) categories except the ASCII space, a BROADER drop than the
+    bare ASCII control set (``ord < 0x20`` plus DEL) — so a token cannot
     smuggle newlines/escape sequences into a log line or error body, and the
-    result is truncated to :data:`_GATE_DETAIL_MAX_LEN` (with a trailing ``…``
-    marker when it overflows) so an 8000-char hostile token cannot spam the
-    wire. The full raw token is never reflected — only this bounded, printable
+    result is truncated to :data:`_GATE_DETAIL_MAX_LEN` (with a trailing
+    ``…`` marker when it overflows) so an 8000-char hostile token cannot
+    spam the wire. The full raw token is never reflected — only this bounded, printable
     form (the ``store_error_payload`` sibling suppresses ``str(exc)`` entirely;
     the gate 400 must still name the offending coordinate, so it reflects this
     sanitised slice rather than nothing).
