@@ -92,6 +92,13 @@ pub mod enum_kernel;
 /// (Python wrapper `brutex/engine/sweep_core.py`).
 pub mod sweep_core;
 
+/// DEC-SWEEP-CORE-RUST-001 (#1739): the GENERATED frozen fold vectors —
+/// the corpus's in-crate arm (same numbers as
+/// `tests/golden/fixtures/sweep_core_fold_corpus.json`, minted by
+/// `scripts/dev/mint_sweep_core_fold_corpus.py`). Test-only consts.
+#[cfg(test)]
+pub(crate) mod sweep_core_vectors;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -174,6 +181,21 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // whoever lands second reconciles trivially.)
     m.add_class::<sweep_core::ResidentSweepCore>()?;
     m.add_class::<sweep_core::ResidentSweepCoreU128>()?;
+    // The fold ABI handshake consts (design §2.1): the layout golden pins
+    // the Python wrapper's literal tuples equal to these exports.
+    m.add("SWEEP_CORE_ABI_VERSION", sweep_core::SWEEP_CORE_ABI_VERSION)?;
+    m.add(
+        "SWEEP_CORE_FOLD_INT_FIELDS",
+        pyo3::types::PyTuple::new(m.py(), sweep_core::FOLD_INT_FIELDS)?,
+    )?;
+    m.add(
+        "SWEEP_CORE_FOLD_FLOAT_FIELDS",
+        pyo3::types::PyTuple::new(m.py(), sweep_core::FOLD_FLOAT_FIELDS)?,
+    )?;
+    m.add(
+        "SWEEP_CORE_FOLD_WORK_CEILING_CELLS",
+        sweep_core::FOLD_WORK_CEILING_CELLS,
+    )?;
     // ── end DEC-SWEEP-CORE-RUST-001 block ──
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     Ok(())
