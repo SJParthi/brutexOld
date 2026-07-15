@@ -128,6 +128,53 @@ def test_from_groww_exception_classifies_generic_by_code_and_message(
     assert type(e.from_groww_exception(exc)) is expected
 
 
+@pytest.mark.parametrize("code", ["²", "①"])
+def test_unicode_no_digit_code_maps_generic_never_raises(code: str) -> None:
+    """A No-category Unicode digit ``code`` maps to the terminal base, never raises.
+
+    DEC-GROWW-ERRORCODE-ASCII-GUARD-001 regression — ``'²'.isdigit()`` is True but
+    ``int('²')`` raises, so pre-fix the raw ``ValueError`` ESCAPED
+    ``from_groww_exception`` out of ``GrowwClient._call`` into ``run_ingest``'s
+    non-BruteXError contract and killed the WHOLE pull (sync AND async producer).
+    Post-fix the non-ASCII digit falls through to message sniffing like any other
+    unknown code (the house ``isascii() and isdigit()`` idiom).
+    """
+    mapped = e.from_groww_exception(_GenericGrowwAPIException("vendor blew up", code=code))
+    assert type(mapped) is e.GrowwError
+
+
+def test_nonascii_nd_digit_code_rides_generic_arm() -> None:
+    """An Nd-category non-ASCII digit-string ``code`` rides the generic arm.
+
+    Sanctioned narrowing (DEC-GROWW-ERRORCODE-ASCII-GUARD-001): ``int('٤٢٩')``
+    coerced fine pre-fix (Nd digits never raised), but the ASCII guard deliberately
+    routes EVERY non-ASCII code through message sniffing — no vendor payload has
+    been observed carrying Arabic-Indic status digits, and a real throttle is still
+    caught by the rate-limit message hints even beside a non-ASCII code.
+    """
+    weird = e.from_groww_exception(_GenericGrowwAPIException("weird", code="١٢٣"))
+    assert type(weird) is e.GrowwError
+    narrowed = e.from_groww_exception(_GenericGrowwAPIException("weird", code="٤٢٩"))
+    assert type(narrowed) is e.GrowwError
+    sniffed = e.from_groww_exception(
+        _GenericGrowwAPIException("Rate limit has breached for your request.", code="٤٢٩")
+    )
+    assert type(sniffed) is e.GrowwRateLimitError
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("429", e.GrowwRateLimitError),
+        ("500", e.GrowwServerError),
+        (" 429 ", e.GrowwRateLimitError),  # int() strips whitespace — parity preserved
+    ],
+)
+def test_ascii_digit_code_mapping_parity_unchanged(code: str, expected: type[e.GrowwError]) -> None:
+    """ASCII digit-string codes map byte-identically to the pre-guard behaviour."""
+    assert type(e.from_groww_exception(_GenericGrowwAPIException("failed", code=code))) is expected
+
+
 @pytest.mark.parametrize(
     "message",
     [

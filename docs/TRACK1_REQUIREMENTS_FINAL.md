@@ -115,7 +115,7 @@
 | L-13 | Audit JSONL hash chain integrity | `brutex/orchestrator/audit.py:470-527` + property tests |
 | L-14 | `safe_message` discipline (Groww/quota errors) | `auth.py`, `quota_tracker.py` use `safe_message=` (the old `ssrf_guard.py` was removed with the prior vendor — see L-12) |
 | L-15 | DEC-P0-033 through DEC-P0-038 merged | git log: `1e2f3a0`, `20d5ccc`, `ec3cc09`, `a31d623`, `1470f9d`, `0f824d7` |
-| L-16 | Pyright strict project-wide | `pyproject.toml:351` `typeCheckingMode = "strict"`; CI runs `pyright brutex tests` |
+| L-16 | Pyright strict project-wide | `pyproject.toml:385` `typeCheckingMode = "strict"`; CI runs `pyright brutex tests` |
 | L-17 | 92-chunk first-run math (CLAUDE.md form) | TRACK1_DATA_INGEST_DESIGN.md:458 derivation correct |
 
 ---

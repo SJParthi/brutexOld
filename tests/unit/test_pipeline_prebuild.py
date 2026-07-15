@@ -156,6 +156,76 @@ def test_prebuild_empty_instruments_is_clean_zero() -> None:
     )
 
 
+# ── the fno-only spot-exclusion arm (round-6 two-button split) ──────────────
+
+
+def test_prebuild_include_spot_false_runs_fno_phases_only() -> None:
+    """[round-6] ``include_spot=False``: the SPOT phase is a REPORTED no-op
+    (zero spot materialise calls, the by-design note) while the F&O contract
+    phases run for REAL over the same instruments-driven discovery — the
+    spot-exclusion mirror of the spot-only empty-cascade arm."""
+    mat = _FakeMaterializer()
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            materialize=mat,
+            include_spot=False,
+        )
+    # 1 future + 2 options, each 4 bars — NO spot target ever materialised.
+    assert outcome == PrebuildOutcome(
+        symbols_built=3, total_bars=12, failed=(), failed_count=0, ok=True
+    )
+    assert [t.kind for t in mat.targets] == [
+        PrebuildKind.FUTURES,
+        PrebuildKind.OPTIONS,
+        PrebuildKind.OPTIONS,
+    ]
+    # The started log reports the honest zero spot scope; the by-design note
+    # is the gated spine's REPORTED no-op (never a silent skip).
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["spot_symbols"] == 0
+    assert started[0]["futures_contracts"] == 1
+    phase_done = [e for e in logs if e["event"] == "pipeline.prebuild.phase_done"]
+    assert phase_done[0]["phase"] == "spot"
+    assert phase_done[0]["attempted"] == 0  # the note shape is pinned in test_gated_prebuild
+    # [refuter round 1] The empty no-op spot phase (attempted=()) must NOT read
+    # as "all no-source" — dropping the `and phase.attempted` guard in
+    # `_warn_if_all_no_source` fires a spurious count=0 WARN on every fno-only
+    # run (0 == 0 satisfies the length equality); this pin kills that mutant.
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
+
+
+def test_prebuild_include_spot_default_true_is_byte_identical() -> None:
+    """The default arm is byte-identical to the pre-round-6 prebuild."""
+    mat_default = _FakeMaterializer()
+    default_outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")], cascade=_cascade(), materialize=mat_default
+    )
+    mat_explicit = _FakeMaterializer()
+    explicit_outcome = run_pipeline_prebuild(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade=_cascade(),
+        materialize=mat_explicit,
+        include_spot=True,
+    )
+    assert default_outcome == explicit_outcome
+    assert [t.symbol for t in mat_default.targets] == [t.symbol for t in mat_explicit.targets]
+
+
+def test_guarded_prebuild_forwards_include_spot_sequential() -> None:
+    """The guard forwards ``include_spot`` to the sequential path."""
+    mat = _FakeMaterializer()
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=mat,
+        include_spot=False,
+    )
+    assert outcome.symbols_built == 3
+    assert all(t.kind is not PrebuildKind.SPOT for t in mat.targets)
+
+
 # ── the clean-set exclusion (DEC-PREBUILD-CLEANSET-001) ─────────────────────
 
 
@@ -303,6 +373,91 @@ def test_prebuild_global_stop_propagates_unguarded() -> None:
     mat = _FakeMaterializer(fail={"NSE-NIFTY": LakeWriteHalt("disk_full")})
     with pytest.raises(LakeWriteHalt, match="disk_full"):
         run_pipeline_prebuild(instruments=[_spot("NSE-NIFTY")], cascade=_cascade(), materialize=mat)
+
+
+# ── the vendor-empty no-source outcome (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) ──
+
+
+def _no_stored(symbol: str) -> Exception:
+    from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+    return NoStored1mBarsError(f"no stored 1minute bars for NSE/CASH/{symbol} — …")
+
+
+def test_prebuild_no_source_target_counted_ok_true() -> None:
+    """T10 [fails-before] — a zero-stored-bars spot target lands in
+    ``no_source`` (count 1), ``ok`` stays True (the movers-warm gate opens),
+    ``symbols_built`` excludes it, and the done-log carries the count."""
+    instruments = [_spot("NSE-BANKNIFTY"), _spot("NSE-EMPTY")]
+    mat = _FakeMaterializer(fail={"NSE-EMPTY": _no_stored("NSE-EMPTY")})
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=instruments, cascade=build_fno_cascade([]), materialize=mat
+        )
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.ok is True
+    assert outcome.failed == ()
+    assert outcome.failed_count == 0
+    assert outcome.symbols_built == 1  # the healthy symbol only
+    done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
+    assert done[0]["no_source"] == 1
+    # A partial no-source run is NOT the all-no-source degenerate — no WARN.
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
+
+
+def test_prebuild_no_source_names_capped_at_ten_with_true_count() -> None:
+    """T12 — the cap law (the ``failed``/``failed_count`` template): 12
+    empties → 10 names, TRUE count 12."""
+    instruments = [_spot(f"U{i:02d}") for i in range(12)]
+    mat = _FakeMaterializer(fail={f"U{i:02d}": _no_stored(f"U{i:02d}") for i in range(12)})
+    outcome = run_pipeline_prebuild(
+        instruments=instruments, cascade=build_fno_cascade([]), materialize=mat
+    )
+    assert len(outcome.no_source) == MAX_REPORTED_FAILURES  # names capped at 10
+    assert outcome.no_source_count == 12  # the TRUE total survives
+    assert outcome.ok is True
+    assert outcome.symbols_built == 0
+
+
+def test_prebuild_mixed_no_source_and_real_failure_failure_wins() -> None:
+    """T13 — a REAL failure beside a no-source target still flips ``ok``
+    False (the warm stays withheld), and BOTH classes are surfaced."""
+    instruments = [_spot("NSE-EMPTY"), _spot("NSE-BAD"), _spot("NSE-GOOD")]
+    mat = _FakeMaterializer(
+        fail={
+            "NSE-EMPTY": _no_stored("NSE-EMPTY"),
+            "NSE-BAD": ValueError("poisoned partition"),
+        }
+    )
+    outcome = run_pipeline_prebuild(
+        instruments=instruments, cascade=build_fno_cascade([]), materialize=mat
+    )
+    assert outcome.ok is False  # the failure wins — warm withheld, unchanged law
+    assert outcome.failed == ("NSE-BAD",)
+    assert outcome.failed_count == 1
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.symbols_built == 1
+
+
+def test_prebuild_all_no_source_warns_once_ok_true() -> None:
+    """T13b — EVERY attempted spot target no-source: ONE
+    ``pipeline.prebuild.all_no_source`` WARN (the ``all_excluded`` degrade
+    twin), still an honest ``ok=True`` 0-built outcome."""
+    instruments = [_spot("NSE-E1"), _spot("NSE-E2")]
+    mat = _FakeMaterializer(fail={"NSE-E1": _no_stored("NSE-E1"), "NSE-E2": _no_stored("NSE-E2")})
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild(
+            instruments=instruments, cascade=build_fno_cascade([]), materialize=mat
+        )
+    assert outcome.ok is True
+    assert outcome.symbols_built == 0
+    assert outcome.no_source_count == 2
+    warns = [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
+    assert len(warns) == 1
+    assert warns[0]["count"] == 2
+    assert warns[0]["log_level"] == "warning"
 
 
 # ── loud structured logs (emitted from the pure module — testable) ─────────

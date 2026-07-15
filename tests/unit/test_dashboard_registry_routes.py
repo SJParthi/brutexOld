@@ -254,3 +254,90 @@ def test_corrupt_registry_contracts_malformed_date_still_400_not_unreadable(
     r = client.get("/api/v1/db/registry/contracts?expiry_date=2020/01/30")
     assert r.status_code == 400
     assert "expiry_date" in r.json()["detail"]
+
+
+# ── H1 route-level count cache (DEC-O1-GUARANTEE-HARDEN-001) ────────────────
+
+
+def _count_spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count every real ``COUNT(*)`` the routes trigger, per store method."""
+    calls = {"expiries": 0, "contracts": 0}
+    real_exp = RegistryStore.count_expiries
+    real_con = RegistryStore.count_contracts
+
+    def _spy_exp(self: RegistryStore, **kwargs: object) -> int:
+        calls["expiries"] += 1
+        return real_exp(self, **kwargs)  # type: ignore[arg-type]
+
+    def _spy_con(self: RegistryStore, **kwargs: object) -> int:
+        calls["contracts"] += 1
+        return real_con(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(RegistryStore, "count_expiries", _spy_exp)
+    monkeypatch.setattr(RegistryStore, "count_contracts", _spy_con)
+    return calls
+
+
+def test_registry_expiries_repeat_click_counts_once(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeat/paging clicks within one registry revision run ONE COUNT pair.
+
+    DEC-O1-GUARANTEE-HARDEN-001 H1: the filtered total + the nav-badge counts
+    are memoised on the registry-content stat token — the pre-fix route ran
+    a store open + three COUNTs on EVERY click.
+    """
+    _seed_registry(tmp_path)
+    calls = _count_spies(monkeypatch)
+    first = client.get("/api/v1/db/registry/expiries").json()
+    assert first["total"] == 1
+    baseline = dict(calls)
+    for offset in (0, 0, 1):
+        page = client.get(f"/api/v1/db/registry/expiries?offset={offset}").json()
+        assert page["total"] == 1
+        assert page["counts"]["expiries"] == 1
+    assert calls == baseline  # zero further COUNTs — O(1)-on-repeat
+
+
+def test_registry_contracts_repeat_click_counts_once(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_registry(tmp_path)
+    calls = _count_spies(monkeypatch)
+    first = client.get("/api/v1/db/registry/contracts?underlying=NIFTY").json()
+    assert first["total"] == 2
+    baseline = dict(calls)
+    for _ in range(3):
+        page = client.get("/api/v1/db/registry/contracts?underlying=NIFTY").json()
+        assert page["total"] == 2
+    assert calls == baseline
+
+
+def test_registry_write_moves_the_token_and_recounts(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry WRITE (new expiry) is seen on the next click — never stale."""
+    _seed_registry(tmp_path)
+    assert client.get("/api/v1/db/registry/expiries").json()["total"] == 1
+    with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+        reg.upsert_expiry("NSE", "NIFTY", date(2020, 2, 27), run_id="r2", fetched_at=_NOW)
+    fresh = client.get("/api/v1/db/registry/expiries").json()
+    assert fresh["total"] == 2
+    assert fresh["counts"]["expiries"] == 2
+
+
+def test_registry_probe_outage_serves_uncached_legacy(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``registry_revision`` outage (None) computes fresh UNCACHED per click."""
+    _seed_registry(tmp_path)
+    # String-target setattr — avoids re-importing brutex.dashboard.app with
+    # BOTH `import` and `from … import` styles (CodeQL py/import-and-import-from).
+    monkeypatch.setattr("brutex.dashboard.app.registry_revision", lambda path: None)
+    calls = _count_spies(monkeypatch)
+    for _ in range(2):
+        page = client.get("/api/v1/db/registry/expiries").json()
+        assert page["total"] == 1
+    # Legacy per-click behaviour: each click pays its own COUNT pair
+    # (1 filtered expiries + the nav-badge expiries+contracts pair).
+    assert calls == {"expiries": 4, "contracts": 2}

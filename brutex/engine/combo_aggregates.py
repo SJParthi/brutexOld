@@ -260,6 +260,7 @@ class ComboAggregate:
     exits_signal: int
     exits_forced_1520: int
     exits_end_of_data: int
+    exits_session_gap: int
     max_consecutive_losses: int
     max_consecutive_wins: int
     composite_score: float | None
@@ -290,6 +291,7 @@ class ComboAggregate:
             self.exits_signal,
             self.exits_forced_1520,
             self.exits_end_of_data,
+            self.exits_session_gap,
         )
         if any(count < 0 for count in exits) or sum(exits) != self.n_trades:
             raise ComboAggregateError(
@@ -347,6 +349,7 @@ class ComboAggregate:
             "exits_signal": self.exits_signal,
             "exits_forced_1520": self.exits_forced_1520,
             "exits_end_of_data": self.exits_end_of_data,
+            "exits_session_gap": self.exits_session_gap,
             "max_consecutive_losses": self.max_consecutive_losses,
             "max_consecutive_wins": self.max_consecutive_wins,
             "composite_score": self.composite_score,
@@ -614,6 +617,7 @@ def aggregate_combo(
         exits_signal=exit_tally["signal"],
         exits_forced_1520=exit_tally["forced_1520"],
         exits_end_of_data=exit_tally["end_of_data"],
+        exits_session_gap=exit_tally["session_gap"],
         max_consecutive_losses=max_losses,
         max_consecutive_wins=max_wins,
         composite_score=composite_score,
