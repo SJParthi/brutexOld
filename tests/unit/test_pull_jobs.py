@@ -1791,6 +1791,73 @@ class TestRunningJobKind:
         captured[0]()
         assert job.running_job_kind is None
 
+    def test_last_pull_state_survives_a_later_sweep(self) -> None:
+        """DEC-OPERATOR-HEALTH-TRUTH-001 (hostile-review M2): the last PULL
+        run's terminal snapshot is RETAINED with its run id — a later SWEEP
+        (whose ``PullProgress.start`` resets the shared tracker) must never
+        wipe a halted pull's red outcome into a masked green."""
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.last_pull_state() is None  # nothing has ever run
+
+        def _halting_work(_h: ProgressHook) -> None:
+            raise RuntimeError("LakeWriteHalt-shaped failure")
+
+        assert job.start(_halting_work, total=1, pull_id="pull-run-1") is True
+        assert job.last_pull_state() is not None  # LIVE while running (pull-kind)
+        captured.pop()()  # drain → error terminal
+        retained = job.last_pull_state()
+        assert retained is not None
+        assert retained.snapshot.state == STATE_ERROR
+        assert "RuntimeError" in retained.snapshot.detail
+        assert retained.pull_id == "pull-run-1"
+
+        # A SWEEP reuses the slot and resets the shared tracker — the retained
+        # PULL terminal must survive both while it runs and after it finishes.
+        assert job.start(lambda _h: None, total=1, job_kind=pull_jobs.JOB_KIND_SWEEP) is True
+        mid_sweep = job.last_pull_state()
+        assert mid_sweep is not None
+        assert mid_sweep.snapshot.state == STATE_ERROR
+        captured.pop()()
+        assert job.snapshot().state == STATE_DONE  # the shared tracker is the sweep's
+        after_sweep = job.last_pull_state()
+        assert after_sweep is not None
+        assert after_sweep.snapshot.state == STATE_ERROR
+        assert after_sweep.pull_id == "pull-run-1"
+
+    def test_last_pull_state_live_while_a_pull_runs(self) -> None:
+        """While a PULL-kind run is in flight the state is the LIVE snapshot."""
+        captured: list[Callable[[], None]] = []
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=captured.append,
+        )
+        assert job.start(lambda _h: None, total=3, pull_id="pull-live") is True
+        live = job.last_pull_state()
+        assert live is not None
+        assert live.snapshot.state == STATE_RUNNING
+        assert live.pull_id == "pull-live"
+        captured.pop()()
+        done = job.last_pull_state()
+        assert done is not None
+        assert done.snapshot.state == STATE_DONE
+
+    def test_retain_pull_terminal_ignores_a_sweep_kind_attempt(self) -> None:
+        """A refused/deferred SWEEP attempt never masquerades as a pull outcome."""
+        job = BackgroundPullJob(
+            progress=PullProgress(clock=_ticking_clock()),
+            spawn=_sync_spawn,
+        )
+        job._retain_pull_terminal(job_kind=pull_jobs.JOB_KIND_SWEEP)
+        assert job.last_pull_state() is None
+        job._retain_pull_terminal(job_kind=pull_jobs.JOB_KIND_PULL)
+        retained = job.last_pull_state()
+        assert retained is not None
+        assert retained.pull_id == ""  # no run was ever minted
+
 
 # ── Cooperative stop flag (DEC-AUTO-RESUME-ZERO-SURPRISES-001) ───────────────
 
