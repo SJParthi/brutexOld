@@ -110,26 +110,32 @@ _PER_DAY = 12
 _CI_K_SAMPLES = 8
 #: The PINNED run-identity commit sha (DEC-R38-REHEARSAL-DETERMINISM-001
 #: #1798) — a deliberately synthetic 40-hex constant, chosen by MEASURING the
-#: rehearsal under three candidate constants (full matrix in the #1798 ledger
-#: entry; same sandbox, INFO log guard active): ``"0"*40`` → 3.41 s and
-#: ``"5eedc0de"*5`` → 3.28 s both draw a DSR-KILLED candidate pool (the
-#: statistical cascade legs never run — less chain coverage), while THIS
-#: constant (``"deadbeef"*5``) → 14.87 s draws ONE candidate through the DSR
-#: gate and exercises the ENTIRE statistical cascade — walk-forward, CPCV,
-#: PBO, SPA/reality-check, Romano-Wolf, lockbox AND the 1000-permutation
-#: Monte-Carlo filter (which kills it: ``stage_survivors.deflated_sharpe ==
-#: 1``, ``monte_carlo == 0``) — the most faithful "full chain in miniature"
-#: (R38) of the three. Margin to the 300 s budget, both measured on the same
-#: 4-vCPU sandbox (Golden Rule #10): ~20× WITHOUT coverage (14.87 s — the
-#: figure quoted in #1798's pin matrix) and ~6× UNDER ``--cov=brutex
-#: --cov-branch`` (50.53 s — ≈ the WITH-COVERAGE unit job's context, the arm
-#: whose pre-fix failures the ledger records). The MC leg is
-#: BOUNDED here because the pinned seed's candidate is signal-LIGHT and the
-#: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered — the
-#: unlucky pre-pin seeds drew signal-DENSE candidates (~663 entries per
-#: permutation) whose MC re-simulation plus 2.78 M DEBUG renders measured
-#: 310–321 s under coverage on CI.
-_PINNED_CODE_COMMIT_SHA: Final[str] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+#: rehearsal so ONE candidate rides the DSR gate and exercises the ENTIRE
+#: statistical cascade (the R38 "full chain in miniature"). CONSCIOUS RE-PIN
+#: (club O #1545, ``trading_core`` 0.3.1 → 0.3.2): the original pin
+#: ``"deadbeef"*5`` was measured against the crate at 0.3.1; merging main
+#: forward bumped the shared ``trading_core`` crate to 0.3.2, which folds into
+#: ``cli._indicator_version()`` (``brutex-<v>+trading_core-<v>``) and thus into
+#: the Golden-Rule-#4 run identity — re-keying the Stage-3/cascade seeds so
+#: ``"deadbeef"*5`` reverted to a DSR-KILLED fast path (the statistical legs
+#: never run), EXACTLY the identity-re-key rot ``test_r38_cascade_genuinely_
+#: ran`` was built to fail LOUD on (NOT a cascade regression — club O touched
+#: no cascade/stage3/DSR/metrics math; the run-identity engine goldens are
+#: byte-unchanged vs main). Re-measured under 0.3.2 (same 4-vCPU sandbox, INFO
+#: log guard active): ``"deadbeef"*5`` → 3.46 s and ``"abad1dea"*5`` → 2.80 s
+#: both now draw a DSR-KILLED pool, while THIS constant (``"feedface"*5``) →
+#: 18.56 s draws ONE candidate through the DSR gate and exercises the ENTIRE
+#: statistical cascade — walk-forward, CPCV, PBO, SPA/reality-check,
+#: Romano-Wolf, lockbox AND the 1000-permutation Monte-Carlo filter (which
+#: kills it: ``stage_survivors.deflated_sharpe == 1``, ``monte_carlo == 0`` —
+#: the SAME full-cascade shape the prior 0.3.1 pin produced, so the guard's
+#: expected dict is byte-UNCHANGED, its teeth fully armed). Margin to the
+#: 300 s budget, both measured on the same 4-vCPU sandbox (Golden Rule #10):
+#: ~16× WITHOUT coverage (18.56 s) and ~4.5× UNDER ``--cov=brutex --cov-branch``
+#: (67.25 s — ≈ the WITH-COVERAGE unit job's context). The MC leg is BOUNDED
+#: because the pinned seed's candidate is signal-LIGHT and the
+#: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered.
+_PINNED_CODE_COMMIT_SHA: Final[str] = "feedfacefeedfacefeedfacefeedfacefeedface"
 
 
 def _trading_days(start: date, n: int) -> list[date]:
