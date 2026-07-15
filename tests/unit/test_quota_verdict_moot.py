@@ -43,7 +43,7 @@ _PACKAGE_ROOT = Path(brutex.__file__).resolve().parent
 
 #: The ONE sanctioned production ``DailyQuotaTracker`` construction site — the
 #: Dhan feed's session factory (DEC-DHAN-SPOT-PULL-001 / ADR-0022; MIGRATION.md
-#: entry #1794). Dhan, unlike Groww, HAS a real vendor-documented Data-API cap
+#: entry #1797). Dhan, unlike Groww, HAS a real vendor-documented Data-API cap
 #: (100,000 req/day — ``DHAN_DAILY_QUOTA``), so its tracker is a REAL quota not
 #: a phantom: the Groww MOOT proof chain below is untouched (the Groww
 #: controller build sites still wire NO tracker), and a Dhan

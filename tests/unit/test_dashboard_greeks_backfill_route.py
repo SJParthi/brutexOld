@@ -432,7 +432,7 @@ class TestFlockRootAlignment:
         build_app(DashboardState(), instrument_store=store)
         # The pull job + the backfill job + the cross-verify job
         # (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776) + the DHAN pull
-        # job (DEC-DHAN-SPOT-PULL-001, MIGRATION.md #1794 — an
+        # job (DEC-DHAN-SPOT-PULL-001, MIGRATION.md #1797 — an
         # intent-preserved pin update: EVERY job keys its flock resolver on
         # the store-derived WRITE root; the Dhan job's root is the NESTED
         # ``<write root>/feeds/dhan/`` feed subtree per DEC-FEED-LAKE-ROOT-001,

@@ -1,6 +1,6 @@
 # ADR-0022 — Dhan read-only SPOT feed track (standalone, `feeds/dhan/`)
 
-**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1794, umbrella),
+**Decision IDs:** `DEC-DHAN-SPOT-FEED-001` (MIGRATION.md entry #1797, umbrella),
 `DEC-DHAN-READONLY-AUTH-001`, `DEC-DHAN-SPOT-PULL-001`,
 `DEC-DHAN-PULL-SURFACE-001`, `DEC-DHAN-FEED-BINDING-001`,
 `DEC-DHAN-GUARD-RETIRE-002`, `DEC-DHAN-HONEST-DEGRADE-001`
@@ -326,7 +326,7 @@ the live candle query route are the deferred follow-up `DEC-DHAN-ROLLING-DB-VIEW
 
 ## 8. Amendment (2026-07-14, the merge-forward delta) — rolling floor · error map · terminal halt · token ops
 
-### §floor — the rolling history-floor LAW (`DEC-DHAN-ROLLING-FLOOR-001`, MIGRATION.md entry #1795)
+### §floor — the rolling history-floor LAW (`DEC-DHAN-ROLLING-FLOOR-001`, MIGRATION.md entry #1798)
 
 Operator ruling 2026-07-14: a Dhan pull must NEVER request data before roughly
 `today − 5 years` (the documented intraday depth is the ROLLING "last 5 years" —

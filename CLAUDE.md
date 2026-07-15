@@ -18,7 +18,22 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
+_Last updated: 2026-07-15 (Club X merge vehicle, branch
+`integration/club-x-dhan` — the GATED-LAST fold of the dhan/feeds pack as ONE
+merge event off main d6ac9f85: PR #1492 DEC-DHAN-SPOT-FEED-001 (MIGRATION.md
+#1797, umbrella) + DEC-DHAN-ROLLING-FLOOR-001 (#1798), carrying the parked
+PR #1482 feed-interface pack verbatim (DEC-FEED-INTERFACE-001 #1795 +
+DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — diff-verified fully contained, #1482
+recommended closed as superseded) · PR #1501 DEC-DHAN-ROLLING-OPTIONS-001
+(#1799). The three colliding ledger rows were renumbered to the free
+consecutive #1795–#1799 block (DEC-IDs are the stable handles per
+DEC-LEDGER-RENUMBER-001). NOTE: the club carries #1492's retirement of the
+`no-dhan-guard` CI gate (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) — an
+operator/coordinator POLICY land, so the club PR stays parked-DRAFT until that
+ruling. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; each member's full record
+lives in its §1 Active-branch blurb + its MIGRATION.md entry — this header
+carries pointers, never the story.)
+Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
 `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
@@ -2625,11 +2640,11 @@ hostile-review pass._
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `integration/club-x-dhan` (**Club X — dhan/feeds merge vehicle,
   GATED-LAST in the drain queue** — the fold of PR #1492 (DEC-DHAN-SPOT-FEED-001,
-  MIGRATION.md #1794 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #1795 — the standalone
+  MIGRATION.md #1797 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #1798 — the standalone
   read-only Dhan v2 SPOT feed track, ADR-0022; it CARRIES the parked PR #1482
-  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #1792 + DEC-FEED-LAKE-ROOT-001
-  #1793, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
-  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #1764 — the Dhan rolling-ATM
+  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #1795 + DEC-FEED-LAKE-ROOT-001
+  #1796, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
+  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #1799 — the Dhan rolling-ATM
   expired-options + Greeks track) as ONE merge event off main d6ac9f85. NOTE: #1492
   retires the `no-dhan-guard` CI gate under its own DEC-DHAN-GUARD-RETIRE-002
   (ADR-0022) — an operator/coordinator POLICY land, so this club stays parked-DRAFT
@@ -2637,8 +2652,8 @@ hostile-review pass._
   record lives in its own MIGRATION.md entry + ADR — this line carries pointers,
   never the story.)
   Earlier: `claude/dhan-spot-feed`
-  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1794 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
-  #1795** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
+  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1798** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
   onto main 43e8ca93 with the delta: the SECOND historical feed nests its whole lake at
   `<lake_root>/feeds/dhan/` (the ADR-0021 feed-root law — Groww top-root byte-identical by
   object identity; engine + dashboards structurally blind); pulls EXACTLY 4 indices —
@@ -2651,7 +2666,7 @@ hostile-review pass._
   pull-halt (`is_terminal_pull_stop` → the CRITICAL Telegram alert); the `no-dhan-guard`
   is RETIRED; probe kit (incl. `--floor-edge`) shipped UNRUN — every `*.dhan.co` host is
   egress-blocked, zero Dhan facts flipped. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  the full record lives in MIGRATION.md #1794/#1795 + ADR-0022; Dhan facts table in §6b.)
+  the full record lives in MIGRATION.md #1797/#1798 + ADR-0022; Dhan facts table in §6b.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -7258,16 +7273,16 @@ hostile-review pass._
 
 - **Active feature branch:** `integration/club-x-dhan`
   (Club X — dhan/feeds merge vehicle, GATED-LAST: PR #1492 DEC-DHAN-SPOT-FEED-001
-  MIGRATION.md #1794 + DEC-DHAN-ROLLING-FLOOR-001 #1795 (carrying the parked
-  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #1792 +
-  DEC-FEED-LAKE-ROOT-001 #1793, ADR-0021 — verified fully contained) + PR #1501
-  DEC-DHAN-ROLLING-OPTIONS-001 #1764, folded as ONE merge event; the
+  MIGRATION.md #1797 + DEC-DHAN-ROLLING-FLOOR-001 #1798 (carrying the parked
+  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #1795 +
+  DEC-FEED-LAKE-ROOT-001 #1796, ADR-0021 — verified fully contained) + PR #1501
+  DEC-DHAN-ROLLING-OPTIONS-001 #1799, folded as ONE merge event; the
   `no-dhan-guard` retirement (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) is an
   operator POLICY land — the club stays parked-DRAFT until that ruling; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
   Earlier: `claude/dhan-spot-feed`
-  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1794 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
-  #1795 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
+  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1797 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1798 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
   onto main with the delta: the second historical feed at `<lake_root>/feeds/dhan/`
   (ADR-0021 nesting law; Groww top-root byte-identical by object identity), exactly 4
   indices (NIFTY/BANKNIFTY/SENSEX + INDIA VIX REFERENCE_ONLY, 1-minute only), read-only
@@ -7276,7 +7291,7 @@ hostile-review pass._
   over both SDK remark spellings + the terminal auth/subscription pull halt, the
   drop_bars_after tail belt + absent-volume tolerance, the no-dhan-guard retirement,
   and the UNRUN `--floor-edge` probe stage; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
-  matches §1's Active branch line — the full record lives in MIGRATION.md #1794/#1795)
+  matches §1's Active branch line — the full record lives in MIGRATION.md #1797/#1798)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
@@ -8079,8 +8094,8 @@ bruteX/
 
 ## 6b. Verified Dhan Facts (second historical feed — SPOT indices, REFERENCE lake `feeds/dhan/`)
 
-> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #1794, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
-> (#1795):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
+> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #1797, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
+> (#1798):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
 > presented as fact): **VERIFIED-SDK** = the official `dhanhq` 2.2.0 wheel read from
 > source in-session; **VERIFIED-docs(mirror)** = a verbatim community mirror of the
 > official docs (dhanhq.co/docs/v2/ — original URL cited in `dhan_api_research.md`);

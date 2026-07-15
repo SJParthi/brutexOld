@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`brutex.feeds.binding` (DEC-FEED-INTERFACE-001, #1792).
+"""Unit tests for :mod:`brutex.feeds.binding` (DEC-FEED-INTERFACE-001, #1795).
 
 100% line + branch. Covers the frozen dataclasses' ``__post_init__`` refusal
 matrix and the ONE sanctioned sink constructor — proving a ``feedx`` write lands

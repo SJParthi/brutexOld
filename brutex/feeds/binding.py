@@ -1,6 +1,6 @@
 """``FeedBinding`` — the wiring record around the existing fetch waist.
 
-DEC-FEED-INTERFACE-001 (MIGRATION.md #1792). A historical feed is defined by
+DEC-FEED-INTERFACE-001 (MIGRATION.md #1795). A historical feed is defined by
 COMPOSITION over the EXISTING
 :class:`~brutex.adapters.protocol.MarketAdapter` — its
 ``fetch_ohlcv(*, symbol, exchange, interval, start, end) -> list[CandleBar]``

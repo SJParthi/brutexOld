@@ -1,6 +1,6 @@
 """``build_groww_binding`` — the default feed's thin, identity-pinned binding.
 
-DEC-FEED-INTERFACE-001 (MIGRATION.md #1792), Decision 3. The default feed proves
+DEC-FEED-INTERFACE-001 (MIGRATION.md #1795), Decision 3. The default feed proves
 :class:`~brutex.feeds.binding.FeedBinding` conformance WITHOUT retrofitting the
 ingest spine: this shim assembles the binding from the EXACT live objects the
 spine already imports — the window-tiling policy, the error triple, the

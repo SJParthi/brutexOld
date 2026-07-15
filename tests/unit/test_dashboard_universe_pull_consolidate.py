@@ -229,7 +229,7 @@ def test_pull_all_spot_button_wired_scope_chip_and_verify_row() -> None:
     )
     # The wiring slice ends at the DHAN button const (the next handler on the
     # page) — the standalone Dhan feed button legitimately reuses the date
-    # pickers (DEC-DHAN-PULL-SURFACE-001, MIGRATION.md entry #1794), so the
+    # pickers (DEC-DHAN-PULL-SURFACE-001, MIGRATION.md entry #1797), so the
     # spot-only full-range pin must scope to the ▶ Pull Spot handler alone.
     wiring = html.split('getElementById("pullAllSpotBtn")', 1)[1].split(
         'getElementById("pullDhanBtn")'

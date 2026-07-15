@@ -1,6 +1,6 @@
 """Feed-tagged lake-root resolution — the feed-root nesting law (leaf).
 
-DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1793). Track 1 stores every historical
+DEC-FEED-LAKE-ROOT-001 (MIGRATION.md #1796). Track 1 stores every historical
 feed's bars under the SAME canonical lake layout
 (``bars/<exchange>/<segment>/<symbol>/<interval>/<yyyy>/<mm>.parquet``,
 :mod:`brutex.data.partition`), but a NON-default feed's entire tree nests under
