@@ -2731,7 +2731,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832** —
+- **Active branch:** `claude/staged-sequencer-seams` (ships via the replacement branch `claude/staged-sequencer-seams-r2`, draft PR #1568 — the #1580 replacement-branch remedy for a `+`-scoped commit subject; tree byte-identical to c40566d6f, re-authored as 10031269a) (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832** —
   the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
   AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
   (`docs/adr/0021-dual-vendor-pull-orchestration.md` @ 5e0bad43, draft
@@ -7618,7 +7618,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/staged-sequencer-seams`
+- **Active feature branch:** `claude/staged-sequencer-seams` (ships via the replacement branch `claude/staged-sequencer-seams-r2`, draft PR #1568 — the #1580 replacement-branch remedy for a `+`-scoped commit subject; tree byte-identical to c40566d6f, re-authored as 10031269a)
   (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832 — the staged sequencer
   seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design
   contract + the coordinator-relayed operator rulings: additive staged
