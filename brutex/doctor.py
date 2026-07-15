@@ -367,6 +367,14 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     Any drift — a stale table left behind by a 1m backfill, or a
     pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
 
+    CE/PE OPTION contract partitions are EXCLUDED from the verdicts
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555): the
+    derived option TFs are retired (options are 1-minute-native), so a
+    stored legacy option TF is FROZEN by design and its inevitable staleness
+    must never red the doctor. SPOT + FUT verdicts are unchanged (the gate
+    is the COMMON :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
     polars is unavailable.
@@ -381,6 +389,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     try:
         import polars as pl
 
+        from brutex.data.fno_candle_lake import is_option_contract_coords
         from brutex.data.tf_autoderive import compare_derived_freshness, read_lake_bars_frame
         from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
         from brutex.data.timeframes import parse_label
@@ -396,6 +405,13 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             )
 
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
+            # The path shape is bars/<exchange>/<segment>/<symbol>: exclude
+            # CE/PE option contract dirs (DEC-OPTIONS-PREBUILD-RETIRE-001 —
+            # their derived TFs are retired + frozen, never re-derived, so
+            # comparing them against a fresh re-derivation is meaningless
+            # and would red the doctor on a healthy lake).
+            if is_option_contract_coords(symbol_dir.parent.name, symbol_dir.name):
+                continue
             base = symbol_dir / "1minute"
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
                 continue
