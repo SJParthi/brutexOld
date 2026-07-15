@@ -26,9 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Final, Literal, cast, get_args
-
-from brutex.execution.fill_mode import FillMode
+from typing import Final, Literal, get_args
 
 __all__ = [
     "Broker",
@@ -251,22 +249,18 @@ class TradeInput:
         Required only when ``trade_outcome`` is ``EXPIRY_EXERCISE``
         or ``EXPIRY_ASSIGN``. Intrinsic value × n_shares. Track 2
         always uses 0 (never expires).
-    fill_mode : FillMode
-        The global :class:`~brutex.execution.fill_mode.FillMode`
-        (DEC-FILL-WORST-CASE-001). APPENDED, DEFAULTED PRECISE — every
-        pre-existing construction is byte-identical (the additive-defaulted
-        field pattern, mirroring ``FuturesTradeInput``); the WORST_CASE
-        production default is applied at the options-EXECUTOR config layer,
-        never silently here.
     entry_bar_high_paisa, entry_bar_low_paisa, exit_bar_high_paisa, exit_bar_low_paisa : int | None
-        The fill bars' extremes in paisa — the WORST_CASE fill anchors
+        The fill bars' extremes in paisa — the worst-case fill anchors
         (the option's OWN minute bar; ``OptionBar`` carries high/low).
-        Defaulted ``None`` (PRECISE never reads them); a WORST_CASE input
-        REQUIRES all four (fail-loud — never a silent PRECISE degrade).
-        When present each pair must bracket its bar's open (``low <= open
-        <= high``); positivity/tick floors on the extremes are deliberately
-        NOT demanded — a degenerate sub-tick LOW is absorbed by the fill
-        floor in ``_apply_slippage``, never a sim crash.
+        REQUIRED — all four (DEC-FILL-WORST-CASE-ONLY-001: worst-case is
+        the ONLY fill law, so an input without its adverse anchors is
+        unpriceable and refuses fail-loud; the ``| None`` typing survives
+        only so the refusal is a validated ``ValueError``, never a silent
+        keyword omission). Each pair must bracket its bar's open
+        (``low <= open <= high``); positivity/tick floors on the extremes
+        are deliberately NOT demanded — a degenerate sub-tick LOW is
+        absorbed by the fill floor in ``_apply_slippage``, never a sim
+        crash.
     """
 
     entry_dt_ist: datetime
@@ -283,7 +277,6 @@ class TradeInput:
     gst_split: GstSplit = "intra_state"
     trade_outcome: TradeOutcome = "NORMAL_CLOSE"
     intrinsic_value_paisa_at_expiry: int = 0
-    fill_mode: FillMode = FillMode.PRECISE
     entry_bar_high_paisa: int | None = None
     entry_bar_low_paisa: int | None = None
     exit_bar_high_paisa: int | None = None
@@ -324,34 +317,26 @@ class TradeInput:
             if value not in allowed:
                 msg = f"{field_name} {value!r} is not a valid value; allowed: {sorted(allowed)}"
                 raise ValueError(msg)
-        # DEC-FILL-WORST-CASE-001 (the FuturesTradeInput mirror): a junk
-        # fill_mode string would compare `is FillMode.WORST_CASE` False and
-        # SILENTLY price PRECISE — the same typo'd-enum trap the Literal loop
-        # above closes. The cast defeats mypy's annotation-trusting narrowing
-        # so the guard is not "unreachable".
-        if not isinstance(cast("object", self.fill_mode), FillMode):
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the four adverse-anchor extremes are REQUIRED unconditionally — an
+        # input without them cannot be priced and refuses fail-loud (never a
+        # silent open-anchored fill; the retired PRECISE law is deleted).
+        missing = [
+            name
+            for name in (
+                "entry_bar_high_paisa",
+                "entry_bar_low_paisa",
+                "exit_bar_high_paisa",
+                "exit_bar_low_paisa",
+            )
+            if getattr(self, name) is None
+        ]
+        if missing:
             msg = (
-                f"fill_mode {self.fill_mode!r} is not a FillMode member; "
-                f"allowed: {sorted(m.value for m in FillMode)}"
+                f"the worst-case fill law needs the fill-bar extremes; missing {missing} "
+                f"(worst-case is the ONLY fill law — DEC-FILL-WORST-CASE-ONLY-001)"
             )
             raise ValueError(msg)
-        if self.fill_mode is FillMode.WORST_CASE:
-            missing = [
-                name
-                for name in (
-                    "entry_bar_high_paisa",
-                    "entry_bar_low_paisa",
-                    "exit_bar_high_paisa",
-                    "exit_bar_low_paisa",
-                )
-                if getattr(self, name) is None
-            ]
-            if missing:
-                msg = (
-                    f"fill_mode=worst_case needs the fill-bar extremes; missing {missing} "
-                    f"(never silently priced PRECISE — DEC-FILL-WORST-CASE-001)"
-                )
-                raise ValueError(msg)
         for label, open_p, high, low in (
             (
                 "entry",

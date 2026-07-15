@@ -58,11 +58,7 @@ from brutex.engine.stage1a import (
     build_bar_bits,
     build_walk_forward_schedule,
 )
-from brutex.engine.trade_sim import (
-    DEFAULT_FILL_POLICY,
-    FillPolicy,
-    simulate_trades_with_exit_indices,
-)
+from brutex.engine.trade_sim import simulate_trades_with_exit_indices
 from brutex.feed.errors import LookAheadError
 from brutex.feed.lookahead import LookAheadBarrier, LookAheadReport, verify_with_barrier
 
@@ -278,7 +274,6 @@ def metrics_for_mask(
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
     start_equity_paisa: int,
-    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> ResultMetrics:
     """Project one mask onto pre-built ``bar_bits`` → its metrics (the shared core).
@@ -290,12 +285,9 @@ def metrics_for_mask(
     those callers need not duplicate the chain (CLAUDE.md §11 COMMON). The
     walker's certified exit indices are threaded into the metrics tail
     (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) — a pure fast-path hint, results
-    byte-identical with or without it. ``policy`` carries the
-    :class:`~brutex.engine.trade_sim.FillPolicy` — incl. the global
-    ``fill_mode`` (DEC-FILL-WORST-CASE-001) — into the walk; the library
-    default (:data:`~brutex.engine.trade_sim.DEFAULT_FILL_POLICY`, PRECISE)
-    keeps every legacy caller byte-identical, and every production
-    re-deriver threads the mode from the SAME config it sources sl/tp from.
+    byte-identical with or without it. Every fill follows the ONE hardcoded
+    worst-case adverse-max law (DEC-FILL-WORST-CASE-ONLY-001) — the retired
+    ``FillPolicy`` threading is deleted with its modes.
     """
     trades, exit_indices = _simulate_window(
         bars,
@@ -305,7 +297,6 @@ def metrics_for_mask(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
         reference_stamper=reference_stamper,
     )
     return metrics_from_trades(
@@ -326,7 +317,6 @@ def _simulate_window(
     tf_minutes: int,
     stop_loss_paisa: int | None,
     take_profit_paisa: int | None,
-    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> tuple[list[ClosedTrade], list[int] | None]:
     """Project a mask onto ``bar_bits`` and simulate the trades (the shared seam).
@@ -347,7 +337,6 @@ def _simulate_window(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
-        policy=policy,
         reference_stamper=reference_stamper,
     )
 

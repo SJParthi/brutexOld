@@ -1,9 +1,10 @@
-"""Global fill-mode vocabulary — the worst-case anti-illusion floor (stdlib-only leaf).
+"""Global fill vocabulary — WORST-CASE is the ONLY fill law (stdlib-only leaf).
 
-DEC-FILL-WORST-CASE-001 (MIGRATION.md #1786). Every entry/exit across the
-spot/index engine (and, in Stage 2, the futures/options executors) fills at
-the bar's WORST price by DEFAULT, so the backtest can only UNDERSTATE — the
-operator-approved anti-illusion floor. The precise semantics are the
+DEC-FILL-WORST-CASE-ONLY-001 (operator directive 2026-07-15: "real live should
+be completely reproducible; backtests never more optimistic than reality").
+Every entry/exit across the spot/index engine AND the futures/options
+executors fills at the bar's WORST price — there is no other mode, no env
+knob, no CLI flag, no per-call parameter. The precise semantics are the
 **adverse-max law** (never naive bar extremes):
 
 * BUY fill on bar ``B`` = ``max(B.high, trigger_level)`` when a triggered
@@ -13,26 +14,32 @@ operator-approved anti-illusion floor. The precise semantics are the
 * Open-anchored events (entry, forced 15:20, next-open exits, signal exits):
   the pure adverse extreme of the fill bar (no level).
 * ``end_of_data`` / ``session_gap``: the adverse extreme of the last stored
-  bar (PRECISE uses its close).
+  bar.
 
 Why ``max``/``min`` with the level (two proven counterexamples): a long TP on
 a gap-up bar entirely ABOVE the target (``low > tp``) must fill at
-``min(tp, low) == tp`` — a naive sell-at-low would OVERSTATE vs today's
-at-level fill; and a flat futures/options bar (``high == open``) must carry
-the ``+tick`` on the extreme (Stage 2) or the bare ``high < open + tick``
-would be BETTER than today.
+``min(tp, low) == tp`` — a naive sell-at-low would OVERSTATE vs an at-level
+fill; and a flat futures/options bar (``high == open``) must carry the
+``+tick`` on the extreme or the bare ``high < open + tick`` would be BETTER
+than the retired precise fill.
 
-This module is the ONE vocabulary + env-resolution home (CLAUDE.md §11
-COMMON): a deliberately stdlib-only leaf (``enum`` + ``os`` + ``Mapping``)
-so every consumer — the engine walker, the Rust-kernel seam, the sweep
-config/identity layer, the CLI — imports the SAME two-member enum without
-pulling any heavy dependency into its import chain.
+This module is the ONE vocabulary home (CLAUDE.md §11 COMMON): a deliberately
+stdlib-only leaf (``enum`` + ``os`` + ``Mapping``) so every consumer — the
+identity layer, the sweep-verify refusal, the cascade manifest — imports the
+SAME single-member enum without pulling any heavy dependency into its import
+chain.
 
-Identity law (Golden Rule #4): :data:`FillMode.PRECISE` is the LEGACY mode —
-``canonical_trade_params`` emits NO ``fill_mode`` key for it, so every
-historical run identity is byte-identical; :data:`FillMode.WORST_CASE`
-(the production default, :data:`DEFAULT_FILL_MODE`) emits the key and
-re-keys the run.
+Identity law (Golden Rule #4): ``canonical_trade_params`` emits
+``{"fill_mode": "worst_case"}`` UNCONDITIONALLY — removing the key would
+alias worst-case run_ids with the frozen precise-era identities the retired
+emit-on-non-PRECISE elision protected (DEC-FILL-WORST-CASE-001, superseded).
+
+Knob-refusal law (the fail-loud posture, DEC-SWEEP-LOG-VOLUME-GUARD-001
+precedent): the historical ``$BRUTEX_FILL_MODE`` env knob is REMOVED, and a
+launch that finds it SET refuses LOUDLY via
+:func:`require_fill_mode_env_unset` — even ``worst_case`` refuses, because
+the knob itself no longer exists and silently tolerating it would let a
+stale ``precise`` deployment config read as "still honoured".
 """
 
 from __future__ import annotations
@@ -43,81 +50,74 @@ from collections.abc import Mapping
 from typing import Final
 
 __all__ = [
-    "DEFAULT_FILL_MODE",
     "FILL_MODE_ENV",
     "FillMode",
-    "resolve_fill_mode",
+    "FillModeRemovedError",
+    "require_fill_mode_env_unset",
 ]
 
 
 class FillMode(enum.Enum):
-    """How a fill PRICE is chosen once an event's fill bar is decided.
+    """The typed fill-law token — a SINGLE member by design.
 
-    The mode moves ONLY the fill price — entry/exit TIMING (signal bar ``N``
-    → fill bar ``N+1``), the inclusive SL/TP trigger comparisons, the
-    SL-first same-bar tie, exit reasons, and the excursion fold are all
-    UNCHANGED between modes. SL/TP LEVELS anchor on the ACTUAL entry fill,
-    so under :data:`WORST_CASE` they anchor on the adverse-extreme entry —
-    the honest simulation of the worst realized entry; trigger timing can
-    therefore differ between modes (documented, accepted).
+    Worst-case is the only fill law (DEC-FILL-WORST-CASE-ONLY-001): the enum
+    survives purely as the typed vocabulary token the identity layer / the
+    audit wire / the cascade manifest spell ``"worst_case"`` from — never a
+    configuration surface. The retired ``PRECISE`` member (DEC-FILL-WORST-
+    CASE-001's byte-identical legacy opt-out) is DELETED, not deprecated.
     """
 
     #: The adverse-max law (module docstring): every fill assumes the worst
-    #: price the fill bar printed — the anti-illusion floor. The PRODUCTION
-    #: default (:data:`DEFAULT_FILL_MODE`).
+    #: price the fill bar printed — the anti-illusion floor. The ONLY law.
     WORST_CASE = "worst_case"
-    #: The legacy exact-fill conventions (next-bar OPEN entry, at-LEVEL SL/TP,
-    #: OPEN-anchored forced/next-open exits, CLOSE-anchored end-of-data /
-    #: session-gap). The LIBRARY-level default on direct constructions
-    #: (byte-identical legacy behaviour + run identities).
-    PRECISE = "precise"
 
 
-#: The PRODUCTION default (DEC-FILL-WORST-CASE-001): the worst-case floor.
-#: Applied at the production CONFIG layer (``SweepRunConfig`` /
-#: ``SweepGridConfig`` / the CLI launch) — the engine-library default on a
-#: bare ``FillPolicy()`` stays :data:`FillMode.PRECISE` so direct
-#: constructions are byte-identical legacy.
-DEFAULT_FILL_MODE: Final[FillMode] = FillMode.WORST_CASE
-
-#: The operator env knob :func:`resolve_fill_mode` reads (fail-loud on junk).
+#: The REMOVED operator env knob — retained ONLY so the launch-time refusal
+#: guard (:func:`require_fill_mode_env_unset`) can name the stale variable it
+#: refuses. Nothing resolves a mode from it any more.
 FILL_MODE_ENV: Final[str] = "BRUTEX_FILL_MODE"
 
 
-def resolve_fill_mode(env: Mapping[str, str] | None = None) -> FillMode:
-    """Resolve the launch fill mode from ``$BRUTEX_FILL_MODE`` (fail-loud).
+class FillModeRemovedError(ValueError):
+    """A launch found the removed ``$BRUTEX_FILL_MODE`` knob still SET.
+
+    DEC-FILL-WORST-CASE-ONLY-001: fill mode is no longer configurable —
+    worst-case only. Raised (never warned) so a stale deployment config that
+    still exports the variable — including a redundant ``worst_case`` —
+    fails LOUD at launch instead of silently pretending the knob is honoured
+    (fail-loud beats silent tolerance; the ``BRUTEX_LOG_LEVEL`` precedent).
+    """
+
+
+def require_fill_mode_env_unset(env: Mapping[str, str] | None = None) -> None:
+    """Refuse LOUDLY when the removed ``$BRUTEX_FILL_MODE`` knob is set.
+
+    Wired at sweep/executor LAUNCH (the CLI ``sweep-all`` launch resolution +
+    the cascade manual replay — exactly where the retired resolver used to
+    read the env), so the refusal fires before any compute.
 
     Parameters
     ----------
     env
         The environment mapping to read (defaults to ``os.environ`` — the
-        injection seam keeps the resolver pure for tests).
-
-    Returns
-    -------
-    FillMode
-        ``worst_case`` / ``precise`` (case-insensitive, whitespace-trimmed);
-        unset or blank → :data:`DEFAULT_FILL_MODE` (the worst-case floor).
+        injection seam keeps the guard pure for tests).
 
     Raises
     ------
-    ValueError
-        On any other value — a junk env var must fail LOUD at launch
-        (the ``BRUTEX_LOG_LEVEL`` fail-loud precedent,
-        DEC-SWEEP-LOG-VOLUME-GUARD-001), never silently fall back to a mode
-        the operator did not choose.
+    FillModeRemovedError
+        When the variable is present with ANY non-empty value —
+        ``worst_case`` included: the knob itself is removed
+        (DEC-FILL-WORST-CASE-ONLY-001), and accepting the spelling that
+        happens to match the one law would silently bless stale configs.
+        An UNSET or empty-string variable passes (empty = the common
+        ``VAR= cmd`` unset idiom; nothing was configured).
     """
     source = os.environ if env is None else env
     raw = source.get(FILL_MODE_ENV, "")
-    token = raw.strip().lower()
-    if not token:
-        return DEFAULT_FILL_MODE
-    try:
-        return FillMode(token)
-    except ValueError:
-        valid = ", ".join(mode.value for mode in FillMode)
-        raise ValueError(
-            f"invalid ${FILL_MODE_ENV}={raw!r} — expected one of: {valid} "
-            f"(case-insensitive), or unset for the default "
-            f"({DEFAULT_FILL_MODE.value})"
-        ) from None
+    if raw.strip():
+        raise FillModeRemovedError(
+            f"${FILL_MODE_ENV}={raw!r} is set, but fill mode is no longer "
+            f"configurable — worst-case only (DEC-FILL-WORST-CASE-ONLY-001). "
+            f"Unset the variable; the removed knob is refused for EVERY value, "
+            f"including 'worst_case'."
+        )

@@ -380,10 +380,6 @@ def _build_tuple_sidecars(
             minute_index=context.minute_index,
             stamper=stamper,
             start_equity_paisa=grid.start_equity_paisa,
-            # The parity tooth re-simulates under the run's OWN fill mode
-            # (DEC-FILL-WORST-CASE-001) — sourced from the SAME grid the
-            # sl/tp knobs come from, never from env.
-            fill_mode=grid.fill_mode,
         )
         if capture.parity_ok:
             tallies.combos_captured += 1

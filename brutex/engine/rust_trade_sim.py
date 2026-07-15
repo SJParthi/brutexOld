@@ -74,12 +74,14 @@ oracle instead, LOUDLY (one structlog WARNING, never silent):
   fall back to the oracle, warn-once ``wheel_missing_u128`` (reachable only
   from a monkeypatched/hand-imported stale module: the shim's import-time
   handshake makes a genuinely stale ``.so`` fail at ``import fno_math``).
-  Likewise a WORST_CASE batch (``policy.fill_mode``,
-  DEC-FILL-WORST-CASE-001) over a wheel predating the ``worst_case``
-  kernel kwarg demotes to the oracle with warn-once
-  ``fill_mode_kernel_missing`` (signature-inspected, never a TypeError
-  probe — see :func:`_kernel_accepts_worst_case`); PRECISE batches keep
-  the historical 7-argument kernel call byte-identically on every wheel.
+  Likewise a batch over a wheel PREDATING the worst-case-only kernel
+  (DEC-FILL-WORST-CASE-ONLY-001 — a stale kernel whose ``simulate_masks``
+  still carries the retired ``worst_case`` / ``sl_next_open`` /
+  ``tp_next_open`` / ``tp_first`` mode flags, whose DEFAULTS priced the
+  retired PRECISE law) demotes to the bit-exact worst-case oracle with
+  warn-once ``fill_law_kernel_stale`` (signature-inspected, never a
+  TypeError probe — see :func:`_kernel_fill_law_current`); wheel state can
+  therefore never change results, only the serving engine.
   Every per-call WARNING is emitted ONCE per ``(instance, reason)`` — the
   production sweep calls ``simulate_masks`` once per bounded chunk (up to
   thousands of chunks per tuple), so a sticky-reason warning on EVERY chunk
@@ -127,14 +129,7 @@ from brutex.engine.exit_index import bars_strictly_increasing
 # :mod:`brutex.engine.trade_sim` uses (CLAUDE.md §11 COMMON), so the resident Rust
 # kernel's int64 inputs match the Python walker's bit-for-bit.
 from brutex.engine.stage1a import _price_to_paisa  # pyright: ignore[reportPrivateUsage]
-from brutex.engine.trade_sim import (
-    DEFAULT_FILL_POLICY,
-    FillPolicy,
-    LevelFill,
-    SameBarTie,
-    TradeSimWalker,
-)
-from brutex.execution.fill_mode import FillMode
+from brutex.engine.trade_sim import TradeSimWalker
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -359,29 +354,41 @@ def _call_fallback_reason(
     return None
 
 
-def _kernel_accepts_worst_case(kernel: object) -> bool:
-    """``True`` iff *kernel*'s batch entry accepts the ``worst_case`` kwarg.
+#: The retired kernel mode flags (DEC-FILL-WORST-CASE-ONLY-001): a kernel
+#: whose ``simulate_masks`` signature still carries ANY of them predates the
+#: worst-case-only law — its flagless call would price the retired PRECISE
+#: defaults, so the seam demotes such a wheel to the worst-case oracle.
+_STALE_KERNEL_FLAGS: Final[tuple[str, ...]] = (
+    "worst_case",
+    "sl_next_open",
+    "tp_next_open",
+    "tp_first",
+)
 
-    The FEATURE-DETECTION half of the DEC-FILL-WORST-CASE-001 kernel seam
-    (the lazy-promotion / ``wheel_missing_u128`` style): an installed wheel
-    that PREDATES the flag must never be handed a WORST_CASE batch — the
-    8th argument would raise ``TypeError`` at the FFI edge, and catching that
-    broadly could mask a genuine marshalling bug — so the seam inspects the
-    kernel's ``simulate_masks`` signature ONCE (PyO3 emits
-    ``__text_signature__``, so :func:`inspect.signature` resolves it) and
-    routes an unsupported WORST_CASE batch to the bit-exact Python oracle
-    instead (reason ``fill_mode_kernel_missing`` — never a wrong kernel
-    answer, never a crash). A signature that cannot be inspected at all
-    (``ValueError`` on a C callable without ``__text_signature__``) reads as
-    UNSUPPORTED — the conservative arm: the oracle serves the batch
-    correctly either way. PRECISE batches never consult this (their call is
-    byte-identical to the pre-flag seam, so old wheels keep serving them).
+
+def _kernel_fill_law_current(kernel: object) -> bool:
+    """``True`` iff *kernel*'s batch entry implements the worst-case-only law.
+
+    The FEATURE-DETECTION half of the DEC-FILL-WORST-CASE-ONLY-001 kernel
+    seam (the lazy-promotion / ``wheel_missing_u128`` style): an installed
+    wheel that PREDATES the worst-case-only kernel still exposes the retired
+    mode flags (``worst_case`` / ``sl_next_open`` / ``tp_next_open`` /
+    ``tp_first``) whose DEFAULTS price the retired PRECISE law — handing it
+    the new flagless call would SILENTLY produce precise fills, the exact
+    illusion this DEC deletes. So the seam inspects the kernel's
+    ``simulate_masks`` signature ONCE (PyO3 emits ``__text_signature__``, so
+    :func:`inspect.signature` resolves it) and routes every batch on a stale
+    wheel to the bit-exact worst-case Python oracle instead (reason
+    ``fill_law_kernel_stale`` — never a wrong kernel answer, never a crash).
+    A signature that cannot be inspected at all (``ValueError`` on a C
+    callable without ``__text_signature__``) reads as STALE — the
+    conservative arm: the oracle serves the batch correctly either way.
     """
     try:
         signature = inspect.signature(type(kernel).simulate_masks)  # type: ignore[attr-defined]
     except (AttributeError, TypeError, ValueError):
         return False
-    return "worst_case" in signature.parameters
+    return not any(flag in signature.parameters for flag in _STALE_KERNEL_FLAGS)
 
 
 def _monotonic(exit_indices: Sequence[int]) -> bool:
@@ -499,7 +506,6 @@ class ResidentTradeSim:
         "_tf_minutes",
         "_ts_certified",
         "_wide_unavailable",
-        "_worst_case_supported",
     )
 
     def __init__(
@@ -568,11 +574,6 @@ class ResidentTradeSim:
         self._rust_wide: object | None = None
         self._wide_unavailable = False
         self._rust_is_wide = False
-        # Memoised worst_case-kwarg feature verdict (DEC-FILL-WORST-CASE-001):
-        # ``None`` = not yet probed; probed at most once per instance, on the
-        # first WORST_CASE batch (both kernel widths ship in ONE wheel, so one
-        # verdict covers the u128 promotion too). PRECISE batches never probe.
-        self._worst_case_supported: bool | None = None
 
         open_p, high_p, low_p, close_p, forced, session_days = self._derive_kernel_inputs()
         # Kernel-envelope guard (module docstring): an out-of-envelope window —
@@ -624,6 +625,16 @@ class ResidentTradeSim:
                     )
             except (ImportError, AttributeError):
                 reason = "wheel_missing"
+        if self._rust is not None and not _kernel_fill_law_current(self._rust):
+            # Stale-wheel demotion (DEC-FILL-WORST-CASE-ONLY-001): the built
+            # kernel still exposes the retired mode flags, so its flagless
+            # call would price the retired PRECISE defaults — the WHOLE
+            # object serves the bit-exact worst-case Python oracle instead
+            # (wheel state can never change results). Probed ONCE here; the
+            # u128 promotion shares the wheel, so one verdict covers it too
+            # (the promotion is unreachable off the oracle arm).
+            self._rust = None
+            reason = "fill_law_kernel_stale"
         if self._rust is None:
             # The width reason additionally NAMES the offending word (value +
             # bit) — spec PR-1, DEC-SWEEP-RUST-WIRE-001 part 1; other reasons
@@ -842,7 +853,6 @@ class ResidentTradeSim:
         direction: Side,
         stop_loss_paisa: int | None = None,
         take_profit_paisa: int | None = None,
-        policy: FillPolicy = DEFAULT_FILL_POLICY,
     ) -> list[list[ClosedTrade]]:
         """Simulate a BATCH of masks over the resident window → per-mask trades.
 
@@ -858,7 +868,6 @@ class ResidentTradeSim:
                 direction=direction,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
-                policy=policy,
             )
         ]
 
@@ -869,15 +878,17 @@ class ResidentTradeSim:
         direction: Side,
         stop_loss_paisa: int | None = None,
         take_profit_paisa: int | None = None,
-        policy: FillPolicy = DEFAULT_FILL_POLICY,
     ) -> list[tuple[list[ClosedTrade], list[int] | None]]:
         """Simulate a BATCH of masks → per-mask ``(trades, exit_indices)`` pairs.
 
         ``out[j]`` is ``(trades, exit_indices)`` for ``masks[j]`` (signal-only
-        spot; next-bar-open entry, SL/TP, 15:20 forced exit). The trades are
-        bit-identical to ``[simulate_trades(bars, mask_to_entry_signals(
-        bar_bits, m), ...) for m in masks]`` — the Rust path and the fallback
-        both honour the same fill policy and direction. Empty ``masks`` → ``[]``.
+        spot; the worst-case adverse-max fill law — the ONLY law,
+        DEC-FILL-WORST-CASE-ONLY-001 — next-bar entry at the adverse extreme,
+        level-clamped SL/TP, 15:20 forced exit at the adverse extreme). The
+        trades are bit-identical to ``[simulate_trades(bars,
+        mask_to_entry_signals(bar_bits, m), ...) for m in masks]`` — the Rust
+        path and the fallback walk the same hardcoded law and direction.
+        Empty ``masks`` → ``[]``.
 
         ``exit_indices`` (DEC-SWEEP-EXIT-INDEX-FASTPATH-001) is each trade's
         exit BAR INDEX in the resident window, emitted only under a DOUBLE
@@ -905,9 +916,6 @@ class ResidentTradeSim:
         stop_loss_paisa, take_profit_paisa
             Stop / target distances from entry in paisa (``> 0``), or ``None`` to
             disable that leg.
-        policy
-            The :class:`~brutex.engine.trade_sim.FillPolicy` (defaults to the
-            conservative :data:`~brutex.engine.trade_sim.DEFAULT_FILL_POLICY`).
 
         Returns
         -------
@@ -937,7 +945,6 @@ class ResidentTradeSim:
             return []
 
         rust = self._rust
-        worst_case = policy.fill_mode is FillMode.WORST_CASE
         if rust is not None:
             # Per-call kernel-envelope guard (module docstring): a beyond-u128
             # mask or an SL/TP distance beyond the kernel's #1090 ceiling
@@ -955,16 +962,6 @@ class ResidentTradeSim:
                 rust = self._promote_wide_kernel()
                 if rust is None:
                     call_reason = "wheel_missing_u128"
-            if call_reason is None and worst_case:
-                # DEC-FILL-WORST-CASE-001 feature detection: a wheel predating
-                # the worst_case kwarg DEMOTES the WORST_CASE batch to the
-                # bit-exact Python oracle (which honours the full FillPolicy)
-                # — never a wrong kernel answer, never a TypeError crash.
-                # Probed once per instance (memo below); PRECISE never probes.
-                if self._worst_case_supported is None:
-                    self._worst_case_supported = _kernel_accepts_worst_case(rust)
-                if not self._worst_case_supported:
-                    call_reason = "fill_mode_kernel_missing"
             if call_reason is not None:
                 if call_reason not in self._call_fallback_warned:
                     self._call_fallback_warned.add(call_reason)
@@ -996,7 +993,6 @@ class ResidentTradeSim:
                     tf_minutes=self._tf_minutes,
                     stop_loss_paisa=stop_loss_paisa,
                     take_profit_paisa=take_profit_paisa,
-                    policy=policy,
                     reference_stamper=self._reference_stamper,
                 )
                 trades, exit_indices = walker.run_with_exit_indices(
@@ -1005,36 +1001,16 @@ class ResidentTradeSim:
                 out.append((trades, exit_indices if self._ts_certified else None))
             return out
 
-        # Rust path — map the FillPolicy to the kernel's boolean flags. A
-        # PRECISE batch deliberately keeps the historical 7-argument call
-        # (byte-identical on every wheel vintage — an old wheel keeps serving
-        # PRECISE); a WORST_CASE batch appends the feature-detected 8th flag
-        # (DEC-FILL-WORST-CASE-001 — support proven above, else this line is
-        # unreachable: the batch demoted to the oracle).
-        sl_next_open = policy.stop_loss is LevelFill.NEXT_OPEN
-        tp_next_open = policy.take_profit is LevelFill.NEXT_OPEN
-        tp_first = policy.same_bar is SameBarTie.TP_FIRST
-        if worst_case:
-            raw = rust.simulate_masks(  # type: ignore[attr-defined]
-                list(masks),
-                direction is Side.BUY,
-                stop_loss_paisa,
-                take_profit_paisa,
-                sl_next_open,
-                tp_next_open,
-                tp_first,
-                True,
-            )
-        else:
-            raw = rust.simulate_masks(  # type: ignore[attr-defined]
-                list(masks),
-                direction is Side.BUY,
-                stop_loss_paisa,
-                take_profit_paisa,
-                sl_next_open,
-                tp_next_open,
-                tp_first,
-            )
+        # Rust path — the flagless worst-case-only kernel call
+        # (DEC-FILL-WORST-CASE-ONLY-001: the retired mode flags are DELETED
+        # from the FFI; a stale flag-carrying wheel was demoted to the oracle
+        # at construction, so this call is provably the current kernel).
+        raw = rust.simulate_masks(  # type: ignore[attr-defined]
+            list(masks),
+            direction is Side.BUY,
+            stop_loss_paisa,
+            take_profit_paisa,
+        )
         # HOISTED converter input (DEC-VIX-STAMP-WIRE-001): the stamper is read
         # ONCE per batch call — not once per trade — and threaded into the
         # per-record converter, which post-stamps each Rust trade Python-side.

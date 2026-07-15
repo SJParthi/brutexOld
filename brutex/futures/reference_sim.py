@@ -18,13 +18,11 @@ executor's pricing logic: it never imports
 :func:`~brutex.futures.executor.materialize_futures_trade`. The fill/P&L
 arithmetic below is re-derived from scratch in exact :class:`~decimal.Decimal`
 RUPEES (production computes in int64 paisa) — two different number pipelines
-that must land on the same integer. The one further shared import is the
-:class:`~brutex.execution.fill_mode.FillMode` VOCABULARY enum
-(DEC-FILL-WORST-CASE-001) — shared mode-selection DATA, not pricing logic:
-the worst-case fill LAW itself is independently RE-STATED below (entry HIGH
+that must land on the same integer. The worst-case fill LAW — the ONLY law,
+DEC-FILL-WORST-CASE-ONLY-001 — is independently RE-STATED below (entry HIGH
 + 0.05 / exit LOW − 0.05 for a bull; the exact mirror for a bear; every
-fill floored at one tick), never imported, so the differential compares
-same-mode vs same-mode without becoming a tautology.
+fill floored at one tick), never imported, so the differential stays a
+genuine cross-derivation, not a tautology.
 
 ## Scope (honest)
 
@@ -41,7 +39,6 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Final
 
 from brutex.calendars.nse import IST
-from brutex.execution.fill_mode import FillMode
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from brutex.options.strike_rules import TradeDirection
 from brutex.universe import BRUTE_FORCE_INDEX_UNDERLYINGS
@@ -77,8 +74,8 @@ class DifferentialReport:
         How many samples were arithmetically compared (policy-skipped samples
         excluded).
     n_skipped_policy
-        Samples excluded because production rejected them on an OPT-IN POLICY
-        gate (``STALE_BAR``) the naive path deliberately does not model —
+        Samples excluded because production rejected them on the STALE_BAR
+        POLICY gate the naive path deliberately does not model —
         counted openly, never silently absorbed.
     """
 
@@ -98,21 +95,19 @@ def naive_reference_futures_pnl(
     resolver: FrontMonthResolver,
     source: FuturesBarSource,
     n_lots: int = 1,
-    fill_mode: FillMode = FillMode.PRECISE,
 ) -> int | None:
     """Naively re-price one signal; net P&L in paisa, or ``None`` if unpriceable.
 
     The from-scratch re-derivation: resolve the front month through the shared
     reader seam, read the exact entry/exit bars, fill ± one tick adverse
-    (floored at one tick) around the mode's anchor — the bar OPEN under
-    ``PRECISE``, the bar's ADVERSE EXTREME under ``WORST_CASE``
-    (DEC-FILL-WORST-CASE-001, independently RE-STATED here: bull buys at
-    entry HIGH + 0.05 and sells at exit LOW − 0.05; bear mirrored — sells at
-    entry LOW − 0.05, covers at exit HIGH + 0.05), P&L = (sell − buy) × lot
-    × n_lots — all in exact Decimal rupees, converted to paisa only at the
-    very end. Costs are zero (cost-free index scope); anything outside that
-    scope, or any missing lot/contract/bar, returns ``None`` (production
-    rejects those trades).
+    (floored at one tick) around the bar's ADVERSE EXTREME — the ONLY fill
+    law (DEC-FILL-WORST-CASE-ONLY-001, independently RE-STATED here: bull
+    buys at entry HIGH + 0.05 and sells at exit LOW − 0.05; bear mirrored —
+    sells at entry LOW − 0.05, covers at exit HIGH + 0.05), P&L =
+    (sell − buy) × lot × n_lots — all in exact Decimal rupees, converted to
+    paisa only at the very end. Costs are zero (cost-free index scope);
+    anything outside that scope, or any missing lot/contract/bar, returns
+    ``None`` (production rejects those trades).
 
     Parameters
     ----------
@@ -122,9 +117,6 @@ def naive_reference_futures_pnl(
         The SHARED primitive reader seams.
     n_lots
         Lots traded (must match the production run's).
-    fill_mode
-        The production run's mode — the differential compares same-mode vs
-        same-mode. Defaults PRECISE (legacy callers byte-identical).
 
     Returns
     -------
@@ -146,17 +138,12 @@ def naive_reference_futures_pnl(
     )
     if window is None:
         return None
-    worst = fill_mode is FillMode.WORST_CASE
     if signal.direction == TradeDirection.BULL:
-        buy_anchor = window.entry_bar.high if worst else window.entry_bar.open
-        sell_anchor = window.exit_bar.low if worst else window.exit_bar.open
-        buy = max(buy_anchor + _NAIVE_TICK, _NAIVE_TICK)
-        sell = max(sell_anchor - _NAIVE_TICK, _NAIVE_TICK)
+        buy = max(window.entry_bar.high + _NAIVE_TICK, _NAIVE_TICK)
+        sell = max(window.exit_bar.low - _NAIVE_TICK, _NAIVE_TICK)
     else:
-        sell_anchor = window.entry_bar.low if worst else window.entry_bar.open
-        buy_anchor = window.exit_bar.high if worst else window.exit_bar.open
-        sell = max(sell_anchor - _NAIVE_TICK, _NAIVE_TICK)
-        buy = max(buy_anchor + _NAIVE_TICK, _NAIVE_TICK)
+        sell = max(window.entry_bar.low - _NAIVE_TICK, _NAIVE_TICK)
+        buy = max(window.exit_bar.high + _NAIVE_TICK, _NAIVE_TICK)
     pnl_rupees = (sell - buy) * lot * n_lots
     # Bars are 2dp-snapped at the lake-write boundary and the tick is 2dp, so
     # ×100 is exact — no rounding decision hides here.
@@ -171,7 +158,6 @@ def differential_spot_check(
     source: FuturesBarSource,
     n_lots: int = 1,
     policy_skipped: Sequence[bool] | None = None,
-    fill_mode: FillMode = FillMode.PRECISE,
 ) -> DifferentialReport:
     """Compare production per-signal nets against the naive reference (R45).
 
@@ -182,12 +168,10 @@ def differential_spot_check(
     production
         The production executor's per-signal net P&L (``None`` = rejected),
         aligned 1:1 with *sample*.
-    resolver, source, n_lots, fill_mode
-        Threaded to :func:`naive_reference_futures_pnl` (*fill_mode* MUST be
-        the mode production simulated under — same-mode vs same-mode,
-        DEC-FILL-WORST-CASE-001).
+    resolver, source, n_lots
+        Threaded to :func:`naive_reference_futures_pnl`.
     policy_skipped
-        Optional 1:1 flags marking samples production rejected on the OPT-IN
+        Optional 1:1 flags marking samples production rejected on the
         ``STALE_BAR`` policy — those are excluded from the arithmetic compare
         and counted in ``n_skipped_policy``.
 
@@ -221,9 +205,7 @@ def differential_spot_check(
         if policy_skipped is not None and policy_skipped[i]:
             n_skipped += 1
             continue
-        naive = naive_reference_futures_pnl(
-            signal, resolver=resolver, source=source, n_lots=n_lots, fill_mode=fill_mode
-        )
+        naive = naive_reference_futures_pnl(signal, resolver=resolver, source=source, n_lots=n_lots)
         n_checked += 1
         if naive != produced:
             mismatches.append(

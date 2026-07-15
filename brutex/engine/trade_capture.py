@@ -62,8 +62,7 @@ from brutex.engine.minute_path import (
     trade_excursions_1m,
 )
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
-from brutex.engine.trade_sim import EXIT_REASONS, FillPolicy, TradeDetail, simulate_trades
-from brutex.execution.fill_mode import FillMode
+from brutex.engine.trade_sim import EXIT_REASONS, TradeDetail, simulate_trades
 from brutex.models import BruteXError
 from brutex.money import paisa_to_rupees
 from brutex.strategies.types import Side
@@ -261,7 +260,6 @@ def capture_combo(
     minute_index: MinuteIndex | None,
     stamper: TradeReferenceStamper | None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
-    fill_mode: FillMode = FillMode.PRECISE,
 ) -> ComboCapture:
     """Re-simulate one stored finalist and capture its full trade depth.
 
@@ -277,14 +275,10 @@ def capture_combo(
     tf_minutes, sl_paisa, tp_paisa
         The tuple's trade-sim knobs — must match the sweep's so the oracle
         reproduces the stored trades exactly (the
-        ``ranked_combo_to_result_row`` contract).
-    fill_mode
-        The run's :class:`~brutex.execution.fill_mode.FillMode`
-        (DEC-FILL-WORST-CASE-001) — the PARITY TOOTH's fourth knob: a
-        WORST_CASE store re-captured PRECISE would fail parity on every
-        combo, so the caller threads it from the SAME grid config it
-        sources sl/tp from (never independently from env). Default PRECISE
-        keeps legacy callers byte-identical.
+        ``ranked_combo_to_result_row`` contract). The fill law is NOT a knob:
+        worst-case is the only fill model (DEC-FILL-WORST-CASE-ONLY-001), so
+        the parity re-capture prices under the same hardcoded adverse-max law
+        the sweep did by construction.
     minute_index
         The instrument's 1-minute :class:`~brutex.engine.minute_path.MinuteIndex`
         for the window, or ``None`` when no 1m data exists — every trade then
@@ -319,7 +313,6 @@ def capture_combo(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
-        policy=FillPolicy(fill_mode=fill_mode),
         reference_stamper=stamper,
         detail_sink=detail_sink,
     )

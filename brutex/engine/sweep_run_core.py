@@ -859,20 +859,15 @@ class RunCoreHandles:
         if k_per_run <= 0:
             return None
         from brutex.engine.sweep_driver import build_equity_curve
-        from brutex.engine.trade_sim import FillPolicy, simulate_trades
+        from brutex.engine.trade_sim import simulate_trades
         from brutex.metrics.compute import _drawdown_stats
         from brutex.metrics.types import ClosedTrade
         from brutex.strategies.types import Side
 
-        # The production leg simulates under the RUN'S OWN fill mode (the
-        # grid's), and the hook threads the SAME grid.fill_mode into the
-        # naive reference's independently re-stated worst-case arm — the R45
-        # differential compares same-mode vs same-mode under BOTH modes
-        # (DEC-FILL-WORST-CASE-001 Stage 2; the Stage-1 bridge that SKIPPED
-        # non-PRECISE runs with a loud disabled-for-fill-mode WARN is
-        # REMOVED — its regression test now pins the event token GONE from
-        # this module's source, so this comment deliberately never spells it).
-        production_policy = FillPolicy(fill_mode=self._grid.fill_mode)
+        # DEC-FILL-WORST-CASE-ONLY-001: the ONE hardcoded worst-case fill law
+        # prices BOTH legs — the production trade sim here and the naive
+        # reference's independently re-stated worst-case arm — so the R45
+        # differential is always a same-law compare with no mode plumbing.
 
         def _production_simulate(
             bars: Sequence[Any],
@@ -890,7 +885,6 @@ class RunCoreHandles:
                 tf_minutes=tf_minutes,
                 stop_loss_paisa=stop_loss_paisa,
                 take_profit_paisa=take_profit_paisa,
-                policy=production_policy,
                 # DEC-VIX-STAMP-WIRE-001 (Golden Rule #3): the production leg
                 # mirrors the run's own VIX binding — the CLI late-binds the
                 # launch stamper via bind_reference_stamper, read here at CALL
