@@ -92,7 +92,7 @@ from brutex.strategies.errors import StrategyRegistrationError
 # one enum, CLAUDE.md §11) so every existing ``fib_definitions.FibAnchorKind``
 # reference is unchanged.
 from brutex.strategies.types import FibAnchorKind
-from brutex.vocabulary.bits import IMPLEMENTED_MASK, NAME_TO_BIT
+from brutex.vocabulary.bits import IMPLEMENTED_MASK, NAME_TO_BIT, RETIRED_MASK
 
 #: NSE/BSE intraday forced-exit clock (ADR-0012 D5; CLAUDE.md §7 "15:20 IST").
 FORCED_EXIT_IST: Final[time] = time(15, 20)
@@ -228,7 +228,11 @@ class StrategyDefinition:
     condition_scope
         The candidate vocabulary condition NAMES (``bits.py`` ``NAME_TO_BIT`` keys)
         the brute-force sweep searches masks WITHIN. ``frozenset()`` means "any
-        implemented condition" — the full vocabulary is the candidate set.
+        implemented condition" — the full vocabulary is the candidate set. Every
+        named condition must itself be IMPLEMENTED: a RETIRED tombstone (the
+        VWAP bits 52/53) or a declared-only LAYOUT bit (the SuperTrend bits
+        64/65) is refused at construction, keeping :attr:`candidate_mask` a
+        true subset of ``IMPLEMENTED_MASK``.
     description
         Optional human-readable one-liner.
     """
@@ -269,6 +273,29 @@ class StrategyDefinition:
             raise ValueError(
                 f"condition_scope has unknown vocabulary condition(s) {sorted(unknown)!r} "
                 f"(strategy {self.name!r}); valid names are the bits.py NAME_TO_BIT keys"
+            )
+        # A KNOWN name whose bit is outside IMPLEMENTED_MASK would break the
+        # candidate_mask "always a subset of IMPLEMENTED_MASK" invariant and
+        # sweep a bit the evaluator emits 0 for forever — refuse loudly, naming
+        # each entry + its status (the parse_condition_ids wording family).
+        dead = sorted(
+            name for name in self.condition_scope if not (IMPLEMENTED_MASK >> NAME_TO_BIT[name]) & 1
+        )
+        if dead:
+            statuses = "; ".join(
+                f"{name!r} (bit {NAME_TO_BIT[name]}) is "
+                + (
+                    "RETIRED — a tombstone whose math was deleted"
+                    if (RETIRED_MASK >> NAME_TO_BIT[name]) & 1
+                    else "declared but NOT YET implemented (LAYOUT-ONLY)"
+                )
+                for name in dead
+            )
+            raise ValueError(
+                f"condition_scope names unimplemented vocabulary condition(s): {statuses} "
+                f"(strategy {self.name!r}). The evaluator emits 0 for such bits, so "
+                "sweeping them is dead compute; drop them from the scope — only "
+                "IMPLEMENTED_MASK bits are candidates"
             )
 
     @property
