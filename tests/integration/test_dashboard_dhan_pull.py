@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import importlib
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -25,6 +26,8 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
+from brutex.adapters.groww.pull_singleflight import PullAlreadyRunningError
+from brutex.config.credentials_types import CredentialsError, DhanCredentials
 from brutex.dashboard.app import (
     DashboardState,
     _dhan_feed_root_resolver,
@@ -43,6 +46,7 @@ from brutex.data.models import CandleBar
 from brutex.data.timeframe_materialize import MaterializeResult
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 app_module = importlib.import_module("brutex.dashboard.app")
 
@@ -529,3 +533,169 @@ class TestDhanGrowwInterplayNegativePins:
         # No meter was registered by the Dhan pull: the achieved slot reads the
         # honest meter-absent shape, never a fabricated "flowing".
         assert body.get("meter_present") in (False, None)
+
+
+class _KeyScopedAccountLocks:
+    """A key-scoped ACCOUNT-lock double: entering an already-held KEY refuses.
+
+    Simulates ``account_pull_singleflight_lock``'s semantics (ONE lock per
+    credential STRING) deterministically in-process, so the assertions isolate
+    the ACCOUNT lock — each test gives the lake flock its own (or a disjoint)
+    root, so the account key is the ONLY possible contention source.
+    """
+
+    def __init__(self, *, held: set[str] | None = None) -> None:
+        self.held: set[str] = set(held or ())
+        self.keys_requested: list[str] = []
+
+    def __call__(self, key: str) -> AbstractContextManager[None]:
+        self.keys_requested.append(key)
+        locks = self
+
+        class _Guard(AbstractContextManager[None]):
+            def __enter__(self) -> None:
+                if key in locks.held:
+                    raise PullAlreadyRunningError(Path("/locks") / f"{key}.flock")
+                locks.held.add(key)
+
+            def __exit__(self, *exc: object) -> None:
+                locks.held.discard(key)
+
+        return _Guard()
+
+
+def _patch_dhan_creds(monkeypatch: pytest.MonkeyPatch, client_id: str = "1000000003") -> None:
+    """Stub the AWS-only Dhan credential loader (no SSM / boto3 / network)."""
+
+    def _load(*, client: Any = None) -> DhanCredentials:
+        _ = client
+        return DhanCredentials(client_id=client_id, access_token="jwt-not-a-real-token")
+
+    monkeypatch.setattr("brutex.config.credentials_dhan_aws.load_dhan_aws_credentials", _load)
+
+
+class TestDhanAccountLockIsolation:
+    """DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 — the Dhan jobs key the ACCOUNT flock on
+    the Dhan client-id, never the Groww api-key (found by the ADR-0021 §5/§12
+    review 2026-07-15)."""
+
+    def test_resolver_returns_dhan_client_id_never_consults_groww(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_dhan_creds(monkeypatch)
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover — must not run
+            raise AssertionError("the GROWW credential source must never be consulted")
+
+        monkeypatch.setattr("brutex.config.credentials.resolve_groww_aws_credentials", _boom)
+        assert app_module._dhan_account_key_resolver() == "1000000003"
+
+    def test_resolver_maps_credentials_error_to_none_with_loud_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Mirrors the Groww default's failure posture: CredentialsError -> None
+        # (graceful account-lock skip) + exactly ONE loud skip line naming the feed.
+        def _fail(*, client: Any = None) -> DhanCredentials:
+            _ = client
+            raise CredentialsError("ssm unreachable (test)")
+
+        monkeypatch.setattr("brutex.config.credentials_dhan_aws.load_dhan_aws_credentials", _fail)
+        with capture_logs() as logs:
+            assert app_module._dhan_account_key_resolver() is None
+        skips = [e for e in logs if e.get("event") == "pull_job.account_lock_skipped"]
+        assert len(skips) == 1
+        assert skips[0]["feed"] == "dhan"
+
+    def test_both_dhan_jobs_bind_the_dhan_account_key_resolver(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # KILLING TEST (fails on the unfixed tree): capture every BackgroundPullJob
+        # construction the REAL build_app performs and assert BOTH Dhan jobs (the
+        # spot job + the rolling-options job — identified by their feeds/dhan lock
+        # root) bind account_key_resolver=_dhan_account_key_resolver, while the
+        # Groww-rooted jobs are untouched (default resolver / explicit backfill None).
+        captured: list[dict[str, Any]] = []
+        orig_init = app_module.BackgroundPullJob.__init__
+
+        def _spy_init(self: Any, **kwargs: Any) -> None:
+            captured.append(dict(kwargs))
+            orig_init(self, **kwargs)
+
+        monkeypatch.setattr(app_module.BackgroundPullJob, "__init__", _spy_init)
+        build_app(DashboardState(), instrument_store=store)
+
+        def _root(kwargs: dict[str, Any]) -> Path | None:
+            resolver = kwargs.get("lake_root_resolver")
+            result = resolver() if callable(resolver) else None
+            return result if isinstance(result, Path) else None
+
+        dhan_jobs = [k for k in captured if (r := _root(k)) and r.parts[-2:] == ("feeds", "dhan")]
+        assert len(dhan_jobs) == 2, f"expected the 2 Dhan jobs, saw {len(dhan_jobs)}"
+        for kwargs in dhan_jobs:
+            assert kwargs.get("account_key_resolver") is app_module._dhan_account_key_resolver
+        groww_pull_jobs = [
+            k
+            for k in captured
+            if (r := _root(k)) and r.parts[-2:] != ("feeds", "dhan") and "on_run_end" in k
+        ]
+        # The Groww pull + crossverify jobs keep the DEFAULT (Groww api-key) resolver.
+        assert groww_pull_jobs
+        assert all("account_key_resolver" not in k for k in groww_pull_jobs)
+
+    def test_dhan_start_not_refused_while_groww_account_lock_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # KILLING TEST: a live Groww pull holds ITS account key; a wet Dhan start
+        # must NOT be refused for account contention (pre-fix the Dhan job resolved
+        # the GROWW api-key and would have contended on exactly that held key).
+        _patch_dhan_creds(monkeypatch)
+        locks = _KeyScopedAccountLocks(held={"groww-api-key-A"})
+        dhan_root = tmp_path / "feeds" / "dhan"
+        dhan_root.mkdir(parents=True)
+        spawned: list[Callable[[], None]] = []
+        job = app_module.BackgroundPullJob(
+            spawn=spawned.append,
+            lake_root_resolver=lambda: dhan_root,
+            account_singleflight_factory=locks,
+            account_key_resolver=app_module._dhan_account_key_resolver,
+        )
+        started = job.start(lambda _h: None, total=1)
+        assert started is True  # NOT refused — the Groww account lock is not ours
+        assert locks.keys_requested == ["1000000003"]  # the DHAN client-id, never the Groww key
+        spawned[0]()  # run the worker -> clean LIFO release
+        assert "1000000003" not in locks.held
+        assert "groww-api-key-A" in locks.held  # the Groww holder is untouched
+
+    def test_two_dhan_pulls_sharing_the_client_id_contend_on_the_account_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Two Dhan jobs share ONE read-only account (5 r/s + 100k/day budget):
+        # the second wet start while the first holds the client-id key is REFUSED —
+        # on DIFFERENT lake roots, so the account key is the only contention source.
+        _patch_dhan_creds(monkeypatch)
+        locks = _KeyScopedAccountLocks()
+        spawned: list[Callable[[], None]] = []
+        root_a = tmp_path / "a" / "feeds" / "dhan"
+        root_b = tmp_path / "b" / "feeds" / "dhan"
+        root_a.mkdir(parents=True)
+        root_b.mkdir(parents=True)
+        job_a = app_module.BackgroundPullJob(
+            spawn=spawned.append,
+            lake_root_resolver=lambda: root_a,
+            account_singleflight_factory=locks,
+            account_key_resolver=app_module._dhan_account_key_resolver,
+        )
+        job_b = app_module.BackgroundPullJob(
+            spawn=spawned.append,
+            lake_root_resolver=lambda: root_b,
+            account_singleflight_factory=locks,
+            account_key_resolver=app_module._dhan_account_key_resolver,
+        )
+        assert job_a.start(lambda _h: None, total=1) is True  # holds the client-id key
+        assert job_b.start(lambda _h: None, total=1) is False  # SAME Dhan account -> refused
+        assert len(spawned) == 1  # no second worker spawned — the account budget protected
+        assert "PullAlreadyRunningError" in job_b.snapshot().detail
+        assert locks.keys_requested == ["1000000003", "1000000003"]
+        spawned[0]()  # finish A -> releases the shared key
+        assert job_b.start(lambda _h: None, total=1) is True  # now admitted
+        spawned[-1]()
