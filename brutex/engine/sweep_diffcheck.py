@@ -792,6 +792,7 @@ class DiffCheckGridLike(Protocol):
         """Starting equity for the simulation, in paisa."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
+
 class ProductionTradeLike(Protocol):
     """The compare surface of a production ``ClosedTrade`` (ints + datetimes)."""
 
