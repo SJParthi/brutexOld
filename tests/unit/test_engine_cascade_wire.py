@@ -2589,6 +2589,24 @@ class TestWinnersHexTwin:
         with pytest.raises(cw.CascadeWireError, match="winners_hex does not match winners"):
             cw.manifest_from_json(tampered)
 
+    def test_diverging_hex_twin_above_bit63_refuses_as_corrupt(self) -> None:
+        # A divergence confined to bits >= 64 (legal at TOTAL_CONDITIONS=66 —
+        # bit 65 is the declared close_below_supertrend position) must ALSO
+        # refuse: the winners_hex is tampered to the mask's LOW-u64 truncation,
+        # so every bit < 64 agrees and only the u128-range limb diverges. This
+        # proves the %032x cross-check catches u64-limb truncation (a lossy
+        # non-u128 rewriter), not just the >2**53 IEEE-double case.
+        import json as _json
+
+        mask = (1 << 65) | (1 << 63) | 0b101
+        truncated = mask & ((1 << 64) - 1)
+        assert truncated != mask
+        payload = _json.loads(cw.manifest_to_json(self._manifest(mask)))
+        payload["specs"][0]["winners_hex"] = [[_rid(1), f"{truncated:032x}"]]
+        tampered = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(cw.CascadeWireError, match="winners_hex does not match winners"):
+            cw.manifest_from_json(tampered)
+
     def test_legacy_manifest_without_hex_parses(self) -> None:
         import json as _json
 

@@ -63,7 +63,8 @@ the flag ON a ``>= 64`` bit raises
 GRACEFULLY skips that tuple (TUPLE_FAILED) rather than crashing on a raw
 ``ValueError`` if the flag is ever left ON over a future u128 vocabulary (unset
 the flag to use the byte-identical brute-force path, which has no bit-width
-limit). Today's vocabulary is 60 bits, so production is unaffected.
+limit). Today's ACTIVE vocabulary is 62 bits, all ``< 64``, so production is
+unaffected.
 
 ## The deterministic mask·bar breaker (pure integer, MODELED limit)
 
@@ -83,7 +84,7 @@ env BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS default 1_159_200_000_000,
 MODELED/UNVERIFIED-on-M4 per Golden Rule #10) is evaluated on the WHOLE RAW
 per-level candidate count at the k==1 target level, every intermediate level
 2..k−1, and the final level k; for k≥2 the level-1 singleton count |C₁| =
-n_unique ≤ 60 is DELIBERATELY NOT budget-checked (trivially bounded, provably
+n_unique ≤ 62 is DELIBERATELY NOT budget-checked (trivially bounded, provably
 non-runaway). Each AUTHORITATIVE check runs the instant that level's raw
 candidate list is complete — the singleton set when ``k == 1`` IS the target
 level, the raw join output ``|C_j|`` at each intermediate level ``j in 2..k-1``
@@ -128,7 +129,7 @@ candidate-LIST memory below — it is a proxy that trips before a candidate set
 large enough to make the backtest infeasible is fully materialised (the
 incremental :data:`_BUDGET_CHECK_STRIDE` check compares the RUNNING count times
 ``n_bars``). The generator's own join CPU is bounded in practice only by
-``n = len(unique bits) <= 60``.
+``n = len(unique bits) <= 62`` (the active vocabulary width).
 
 ## The parity-completion caveat (Golden Rule #10)
 

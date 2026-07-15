@@ -82,7 +82,10 @@ class TestReasonAssembly:
     def test_three_bit_mask_joins_in_ascending_bit_order(self) -> None:
         mask = (1 << 13) | (1 << 8) | (1 << 52)
         reason = reason_for_mask(mask)
-        assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap"
+        # The tombstoned bit 52 reads the describe.condition_display_name
+        # display form ("<name> (retired)") on the technical leg too — the
+        # ONE suffix authority, identical on both surfaces (TOMB-01).
+        assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap (retired)"
         # G-RETROT-01: a mask carrying the tombstoned bit 52 (an OLD
         # artifact) renders the RETIRED prose — never skipped silently,
         # never live-sounding text.

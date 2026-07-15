@@ -407,8 +407,10 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     # The Rust hot kernel is u64-native. If any mask OR bar uses a bit >= 64
     # (the u128 headroom) the kernel would silently truncate it — so route to the
     # bit-exact two-limb numpy reference instead (no high bit is ever dropped).
-    # Today's vocabulary (bits 0-59) fits u64, so the fast Rust path is the norm;
-    # the >=64-bit branch is the correctness guard for future growth.
+    # Today's vocabulary's live bits (0-63, incl. bit 63 narrow_cpr_day) fit
+    # u64, so the fast Rust path is the norm; the >=64-bit branch is the
+    # correctness guard for the declared-only SuperTrend bits 64/65 (which
+    # need the second limb) and any future growth.
     if any(m > U64_MASK for m in masks) or any(b > U64_MASK for b in bar_bits):
         return count_supermasks_reference(bar_bits, masks)
     return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))

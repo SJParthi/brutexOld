@@ -39,7 +39,7 @@ Each `evaluate_atoms()` call performs:
 
 Operator decree 2026-05-16: COMMON · DYNAMIC · SCALABLE · AUTOMATED.
 This module satisfies all 5 (DEC-SHARED-CORE-001 #441 — the condition
-logic (52 conditions then, 60 now) lives ONCE, in the Rust `trading-core` crate, which BruteX
+logic (52 conditions then, 66 declared / 62 active now) lives ONCE, in the Rust `trading-core` crate, which BruteX
 reaches via the `trading_core` PyO3 wheel and TickVault links natively):
 - COMMON: the *same compiled core* serves backtest + live (not just an
   identical class — literally one Rust implementation, bit-identical)

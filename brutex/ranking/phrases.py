@@ -21,6 +21,17 @@ against the generated :data:`brutex.vocabulary.bits.NAME_TO_BIT` (the
 ``describe._check_group_invariants`` precedent), so a vocabulary
 renumber/rename can never silently desynchronise the phrases.
 
+## ONE vocabulary, two surfaces
+
+The technical leg must list exactly the names
+:mod:`brutex.vocabulary.describe` decodes, in the same order — so
+:func:`reason_for_mask` routes every fired bit's technical token through
+the ONE :func:`brutex.vocabulary.describe.condition_display_name`
+authority (a RETIRED tombstone bit reads ``"<name> (retired)"``, TOMB-01),
+never a second copy of the suffix rule. The TABLE keeps the RAW
+vocabulary names (the import-time ``NAME_TO_BIT`` cross-pin demands the
+exact generated token); the suffix is applied at assembly time.
+
 Bits at or above ``TOTAL_CONDITIONS`` (reserved u128 headroom) are IGNORED
 by :func:`reason_for_mask` — the :mod:`brutex.vocabulary.describe`
 forward-compatibility contract, verbatim. A mask with ZERO fired bits reads
@@ -33,6 +44,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from brutex.vocabulary.bits import NAME_TO_BIT, TOTAL_CONDITIONS
+from brutex.vocabulary.describe import condition_display_name
 
 __all__ = [
     "PHRASE_TABLE",
@@ -268,9 +280,14 @@ _CONDITION_MASK: Final[int] = (1 << TOTAL_CONDITIONS) - 1
 def reason_for_mask(mask: int) -> ReasonText:
     """Assemble the dual-language reason for *mask* — pure lookup, O(k) fired bits.
 
-    ``technical`` joins the vocabulary names with ``" ∧ "`` in ascending bit
-    order; ``plain`` joins the hand-written phrases with ``"; and "`` (the
-    design B7 assembly law). Bits ``>= TOTAL_CONDITIONS`` are ignored
+    ``technical`` joins the vocabulary DISPLAY names with ``" ∧ "`` in
+    ascending bit order — each name via the ONE
+    :func:`brutex.vocabulary.describe.condition_display_name` authority, so
+    a RETIRED tombstone bit (e.g. the VWAP bits 52/53 an OLD artifact's mask
+    may carry) reads ``"<name> (retired)"`` exactly as
+    ``describe.matched_condition_names`` decodes it (one vocabulary, two
+    surfaces); ``plain`` joins the hand-written phrases with ``"; and "``
+    (the design B7 assembly law). Bits ``>= TOTAL_CONDITIONS`` are ignored
     (reserved headroom — the ``describe`` forward-compat contract); a mask
     with zero fired condition bits returns two empty strings.
 
@@ -287,7 +304,7 @@ def reason_for_mask(mask: int) -> ReasonText:
     while fired:
         bit = (fired & -fired).bit_length() - 1
         entry = PHRASE_TABLE[bit]
-        names.append(entry.name)
+        names.append(condition_display_name(bit))
         plains.append(entry.plain)
         fired &= fired - 1
     return ReasonText(technical=" ∧ ".join(names), plain="; and ".join(plains))

@@ -41,7 +41,12 @@ def test_r33_reference_assembly_locked() -> None:
     # PDH-cross + above-R2 + above-VWAP as one dual-language sentence pair.
     mask = (1 << 13) | (1 << 8) | (1 << 52)
     reason = reason_for_mask(mask)
-    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap"
+    # DELIBERATE RE-PIN (the retired-suffix authority fix): the technical
+    # leg now routes through describe.condition_display_name, so the
+    # tombstoned bit 52 reads "close_above_vwap (retired)" — matching
+    # matched_condition_names exactly (one vocabulary, two surfaces).
+    # Old pinned string: "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap".
+    assert reason.technical == "near_pivot_r2 ∧ close_above_pdh ∧ close_above_vwap (retired)"
     # The VWAP member (a RETIRED tombstone an OLD artifact's mask may carry)
     # renders the retired prose — never silently skipped, never live-sounding.
     assert reason.plain == (
