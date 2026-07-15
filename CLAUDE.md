@@ -1365,6 +1365,49 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
+Earlier: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1712 —
+Phase P1 of the one-click institutional sweep: the R4 hard data preflight (real
+NSE calendar coverage, DISK-verified 1-minute months, G1 derived-freshness reuse,
+lake-invariant/quarantine check, sweep-vs-pull exclusion probe, futures-execution
+coverage via P5's shipped `preflight_futures_months`, India-VIX coverage arm,
+free-disk refusal) + the R20 live pre-run estimator (true trial count
+`Σ C(60,k)·other_axes`, VWAP dead-bits 60-vs-58 flag-and-run annotation, the
+calibrated/provisional discriminator, a new `estimator_calibration.json`
+schema+reader — P1 owns reads, no writer on `main` yet so every estimate is
+honestly "provisional") in ONE `{ok, refusals, clamps, estimator}` verdict
+(`brutex/engine/sweep_oneclick_preflight.py` + `sweep_estimator.py` +
+`estimator_calibration.py`). THE FLIP (gap-hunt BLOCKER #1): `build_sweep_kwargs`
+now pins the INSTITUTIONAL defaults (`overfit_gate=True`, `stage3_enable=True`,
+`top=1000`, `allow_missing_slices=False`, `k<=3`, a 3×3 on-grid SL/TP paisa
+grid) — the one-click button launches the institutional sweep, never the
+retired light research one. SLA-acknowledge wiring (`acknowledge_sla_overrun`
+threads to `cmd_sweep_all`'s existing param, ruling 2) + the multi-symbol/
+SENSEX fan-out (`group_symbols_by_exchange` + `resolve_oneclick_sweep_plan`,
+ONE logical `sweep_run_id` wrapping N per-exchange engine runs, ruling 9) round
+out `brutex/dashboard/sweep_runner.py`; two NEW dashboard routes
+(`GET/POST /api/v1/sweep/oneclick/{preflight,run}`) — the existing
+`/api/v1/sweep/run` single-exchange surface stays contract-unchanged.
+DISCOVERED CONSTRAINT + THE R54 RESOLUTION: `stage3_enable=True`
+structurally forbids a `None`/off-Mode-A-grid SL/TP leg (`SweepGridConfig.__post_init__`,
+ADR-0007 condition 3); the round-11 pass originally REFUSED any such leg with
+a clear 400. The binding operator ruling R54 (2026-07-08, folded 2026-07-10)
+RESOLVED the R19 4th-arm question: `none`-carrying legs (whole-`none` AND
+mixed CSV cells) are first-class RUNNABLE — the derived
+`SweepRunRequest.stage3_enable` downgrades that launch's EFFECTIVE Stage-3 to
+OFF (the engine accepts `None` legs with Stage-3 off, so the launch stays
+provably runnable — R16 preserved), disclosed via ONE
+`sweep_runner.none_leg_stage3_downgrade` WARN per exchange-group kwargs
+build + a requested→applied `stage3_enable` Clamp row per downgraded group +
+the `stage3_enable` echo on the run payload; an OFF-GRID non-none leg under
+the effective stage3-ON posture is STILL refused with a clear 400 (the
+round-11 deep-crash class stays closed; full wording in MIGRATION.md #1712's
+R54 addendum). VWAP exclude-vs-flag and the exact
+multi-exchange run semantics stay DEFAULT flag-and-run per the two pre-declared
+operator UNDECIDED items. P1 ownership zone ONLY — zero P2/P3/P4/P5/P6 files
+touched (calls P5's shipped `brutex/futures/preflight.py`, never edits it).
+100.00% line+branch on all 4 touched/new modules; ruff/mypy --strict/pyright
+clean. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX + the ADR-0012 NIFTY-futures
+track; no vocab/rate/lake-schema change.)
 Earlier: 2026-07-08 (DEC-VIX-STAMP-WIRE-001, MIGRATION.md #1645 —
 India-VIX trade stamping wired end-to-end: `vix_at_entry`/`vix_at_exit` on
 every OBSERVABLE production trade + the persisted nullable
