@@ -1,7 +1,8 @@
 """Dhan rolling options are 1-MINUTE-NATIVE — the NO-PREBUILD absence pins (the teeth).
 
-DEC-DHAN-OPTIONS-NO-PREBUILD-001 (MIGRATION.md #1803, ruling relayed via
-coordinator 2026-07-15) + DEC-DHAN-NO-FUTURES-001 (MIGRATION.md #1802): on the
+DEC-DHAN-OPTIONS-NO-PREBUILD-001 (MIGRATION.md #1803, implementing
+DEC-SCOPE-MINIMAL-CORE-001 — the operator-authorized scope decision) +
+DEC-DHAN-NO-FUTURES-001 (MIGRATION.md #1802): on the
 Dhan feed, derived-timeframe materialization is SPOT-ONLY — the rolling-ATM
 option track is stored + served 1-minute-native BY DESIGN (option fills resolve
 on the next 1-minute bar worst-case, so a derived option TF is cost without

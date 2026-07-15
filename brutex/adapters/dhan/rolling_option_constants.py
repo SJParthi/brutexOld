@@ -48,7 +48,8 @@ DHAN_ROLLING_INSTRUMENT_OPTIDX_UNVERIFIED: Final[str] = "OPTIDX"
 
 #: The SDK interval code for 1-minute rolling-option candles (SDK ``interval=1``).
 #: The rolling-ATM track is stored + served 1-MINUTE-NATIVE **by design**
-#: (DEC-DHAN-OPTIONS-NO-PREBUILD-001, ruling relayed via coordinator 2026-07-15):
+#: (DEC-DHAN-OPTIONS-NO-PREBUILD-001, implementing DEC-SCOPE-MINIMAL-CORE-001 —
+#: the operator-authorized scope decision):
 #: derived-timeframe materialization is deliberately NOT built for options — on
 #: the Dhan feed the prebuild stage is SPOT-ONLY. Option fills resolve on the
 #: next 1-minute bar worst-case, so a derived option TF is cost without benefit;
@@ -175,8 +176,9 @@ DHAN_ROLLING_COVERAGE_MARKET: Final[str] = "dhan-option"
 DHAN_ROLLING_HISTORY_FLOOR: Final[date | None] = None
 
 #: The operator's REQUESTED reachable-today start (research-supported PARTIAL) —
-#: since DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (ruling relayed via coordinator
-#: 2026-07-15) the REQUESTED-START TERM of the unified rolling-options floor law
+#: since DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (implementing
+#: DEC-SCOPE-MINIMAL-CORE-001 — the operator-authorized scope decision) the
+#: REQUESTED-START TERM of the unified rolling-options floor law
 #: ``dhan_rolling_options_floor(today) = max(dhan_history_floor(today), THIS)``
 #: (:func:`~brutex.adapters.dhan.constants.dhan_rolling_options_floor`). At
 #: adoption the resolved floor equals this date byte-for-byte (the rolling term

@@ -197,7 +197,8 @@ def dhan_history_floor(today: date) -> date:
 def dhan_rolling_options_floor(today: date) -> date:
     """The UNIFIED rolling-OPTIONS effective floor: ``max(rolling law, requested start)``.
 
-    DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (ruling relayed via coordinator 2026-07-15):
+    DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (implementing DEC-SCOPE-MINIMAL-CORE-001,
+    the operator-authorized scope decision):
     the rolling-ATM options track's effective floor is
     ``max(dhan_history_floor(today), DHAN_ROLLING_HISTORY_FLOOR_REQUESTED)`` —
     the SPOT rolling today−5y(+margin) law (DEC-DHAN-ROLLING-FLOOR-001) unified

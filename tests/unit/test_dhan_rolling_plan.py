@@ -99,9 +99,10 @@ def test_plan_strike_offset_law_atm_pm10_and_full_cartesian() -> None:
     21 offsets × {CALL, PUT} = 1008 keys — each combination exactly once. This is
     also the SOLE derivative-history plan surface of the Dhan feed
     (DEC-DHAN-NO-FUTURES-001, two distinct claims split honestly): the SCOPE
-    ruling — no futures leg — is the operator directive 2026-07-15; the
-    VENDOR-capability claim — Dhan serves no expired index futures history — is
-    documented-as-unsupported, probes unrun."""
+    decision — no futures leg — implements DEC-SCOPE-MINIMAL-CORE-001 (the
+    operator-authorized scope decision); the VENDOR-capability claim — Dhan
+    serves no expired index futures history — is documented-as-unsupported,
+    probes unrun."""
     keys = enumerate_rolling_option_keys()
     # The offset law: exactly ATM−10..ATM+10, ATM inclusive — 21 labels.
     expected_offsets = (
