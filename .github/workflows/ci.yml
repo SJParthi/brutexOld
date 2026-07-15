@@ -2570,6 +2570,19 @@ jobs:
           else
             echo "(brutex.engine.results_depth_pass test file not present yet — gate inactive)"
           fi
+          # DEC-RANKING-RUST-001 slice-4 PR-1 (review round 7, R7.3): the ONE
+          # COMMON parity wrapper core ships with its OWN dedicated standalone
+          # gate (the slice-4 design's "100% line+branch, standalone ci.yml
+          # gate" clause — the oneclick_artifacts.py precedent), not only the broad
+          # brutex.engine package gate. Its sibling binding
+          # brutex/ranking/rust_ranking.py rides the brutex.ranking PACKAGE
+          # gate at 19i2 above (a dotted --cov=brutex.ranking.<module> spec
+          # trips the numpy double-import documented there).
+          if compgen -G "tests/unit/test_engine_rust_parity_core.py" > /dev/null; then
+            pytest --cov=brutex.engine.rust_parity_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_rust_parity_core.py
+          else
+            echo "(brutex.engine.rust_parity_core test file not present yet — gate inactive)"
+          fi
           # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (MIGRATION.md #1749): the ONE
           # pure cascade-report → display-join law (flattener/validator shared
           # by the top-100 writer and the /results loader) + the read-time

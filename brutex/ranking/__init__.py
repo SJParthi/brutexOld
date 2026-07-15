@@ -607,6 +607,19 @@ def rank_combos(
         offending mask(s) named (DEC-RANKING-TIEBREAK-001) — a deterministic,
         auditable error instead of latent nondeterminism.
     """
+    # ── The ONE flag-gated Rust dispatch seam (slice 4 PR-1;
+    # ``BRUTEX_RANKING_RUST``, default OFF — :mod:`brutex.ranking.rust_ranking`).
+    # Imported lazily so the (default) OFF arm costs one cached-module import
+    # + one env probe (OFF-cost bench-pinned) and the module graph stays
+    # cycle-free; a ``None`` return (wheel missing/stale) falls through to
+    # the verbatim Python pipeline below, byte-identical by construction.
+    from brutex.ranking.rust_ranking import rank_combos_via_rust, ranking_rust_enabled
+
+    if ranking_rust_enabled():
+        rust_ranked = rank_combos_via_rust(candidates, overfit=overfit)
+        if rust_ranked is not None:
+            return rust_ranked
+
     survivors = [(mask, m) for mask, m in candidates if passes_gates(m)]
 
     # ``# pragma: no mutate`` (DEC-MUTATION-GATE-RANKING-002): a local-variable

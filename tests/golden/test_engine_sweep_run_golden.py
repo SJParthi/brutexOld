@@ -440,6 +440,45 @@ def test_golden_rust_metrics_domain_valid_poison_moves_the_hash_past_burn_in(
     reset_self_check_for_tests()  # never leak the exhausted budget to siblings
 
 
+def test_golden_ranking_rust_on_arm_is_byte_identical_and_engages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice-4 PR-1: ``BRUTEX_RANKING_RUST=1`` reproduces the frozen
+    pre-conversion store hash byte-for-byte AND genuinely runs the ranking
+    kernels (exactly one ``engaged`` per pow-free family — the
+    vacuous-gate trap, Golden Rule #10). The hash equality is
+    UNCONDITIONAL on every host: the (b*) families' always-on differential
+    ships the Python oracle's bits on any libm divergence (such a
+    divergence is a LOUD ``ranking.composite``/``ranking.dsr_z``
+    autorevert, never a byte delta — asserted below)."""
+    pytest.importorskip("polars")  # flush needs the [data] extra; skips the .[dev]-only job
+    from brutex.ranking.rust_ranking import reset_ranking_rust_for_tests
+
+    monkeypatch.setenv("BRUTEX_RANKING_RUST", "0")
+    wired = _run(tmp_path, "a")  # explicit OFF — the reference bytes
+    monkeypatch.setenv("BRUTEX_RANKING_RUST", "1")
+    reset_ranking_rust_for_tests()
+    with capture_logs() as logs:
+        rust_arm = _run(tmp_path, "b")
+    engaged = [e["family"] for e in logs if e["event"] == "rust_parity.engaged"]
+    assert engaged.count("ranking.gates") == 1  # the ranking kernels actually served
+    assert engaged.count("ranking.order") == 1
+    for event in (e for e in logs if e["event"] == "rust_parity.autoreverted"):
+        # Legal ONLY as the loud (b*) host-libm arm — never a wire delta.
+        assert event["family"] in {"ranking.composite", "ranking.dsr_z"}
+        assert event["reason"] == "divergence"
+    assert wired.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert rust_arm.store_content_hash == _GOLDEN_CONTENT_HASH
+    assert (rust_arm.enumerated, rust_arm.evaluated, rust_arm.ranked, rust_arm.persisted) == (
+        wired.enumerated,
+        wired.evaluated,
+        wired.ranked,
+        wired.persisted,
+    )
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+    reset_ranking_rust_for_tests()  # never leak burn-in/latch state to siblings
+
+
 def test_golden_rust_metrics_domain_valid_poison_in_burn_in_is_autoreverted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
