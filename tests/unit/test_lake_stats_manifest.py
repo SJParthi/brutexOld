@@ -26,6 +26,7 @@ import json
 import os
 import re
 import signal
+import threading
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -2692,3 +2693,269 @@ class TestSeedDatasetStats:
         )
         with pytest.raises(LakeWriteHalt):
             lsm.seed_dataset_stats(tmp_path, kind=lsm.KIND_BARS, key=BARS_KEY, files=[row])
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Read-side stat deadline (DEC-DASHBOARD-COLD-IO-DEADLINE-001, BUG-2a)
+# ────────────────────────────────────────────────────────────────────────
+#
+# REVERSION-GATE DISCIPLINE (ci.yml validate_bugfix_reversion.py): the new
+# names (load_valid_dataset_stats_guarded, StatsConsult, bounded_token_sweep,
+# TOKEN_SWEEP_* — reached via the module-object ``lsm.`` attribute or imported
+# function-locally) never appear in this file's module-level imports, so the
+# file still COLLECTS against the merge-base tree and W3 fails with its
+# GENUINE watchdog-caught HANG shape rather than a collection error.
+
+
+@contextmanager
+def _wedged_os_stat(
+    monkeypatch: pytest.MonkeyPatch, dataset_root: Path
+) -> Generator[threading.Event, None, None]:
+    """Monkeypatch ``os.stat`` to BLOCK (on a test Event) for *dataset_root* files.
+
+    Everything else delegates to the captured real ``os.stat`` (locally
+    captured INSIDE the test — never a module-level capture, the bench
+    stat-spy law). The Event is released in the ``finally`` so any abandoned
+    guard daemon drains at teardown (zombie hygiene) and the merge-base
+    fails-before run is un-wedged after the watchdog fires.
+    """
+    release = threading.Event()
+    real_stat = os.stat
+    prefix = str(dataset_root)
+
+    def _wedge(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(path, (str, Path)) and str(path).startswith(prefix):
+            release.wait(30.0)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _wedge)
+    try:
+        yield release
+    finally:
+        release.set()
+
+
+def test_consult_deadline_bounds_wedged_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W3 — a WEDGED per-file stat no longer hangs the consult (bounded < 2 s).
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2a): the clause-3
+    D-stat loop's ``os.stat`` on a stalled volume blocked the /db reader's
+    MAIN thread forever. Fails-before shape: at the merge-base the wedged
+    ``load_valid_dataset_stats`` call blocks until ``_hang_watchdog(5)``
+    raises — a clean LOUD failure, never a suite hang (the wedge Event is
+    released in the fixture's ``finally``). Pass-after: the (thin-wrapped)
+    consult returns ``None`` well inside the watchdog with ONE NAMED
+    ``consult_deadline`` fallback + ONE ``stat_gate.deadline_exceeded`` WARN,
+    a SECOND consult while wedged fails fast with NO second guard daemon,
+    and the released zombie recovers the gate (ONE ``stat_gate.recovered``
+    INFO; the next consult revalidates normally with no fallback log).
+    """
+    lake = tmp_path
+    _seed_bars(lake)
+    # The literal env name (not an ``lsm`` attribute): the knob lives in the
+    # stat_deadline leaf, and this file must still collect at the merge-base.
+    monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+    root = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY)
+    with _wedged_os_stat(monkeypatch, root) as release:
+        with capture_logs() as logs, _hang_watchdog(5):
+            first = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert first is None
+        assert _fallback_clauses(logs) == ["consult_deadline"]
+        gate_warns = [e for e in logs if e["event"] == "stat_gate.deadline_exceeded"]
+        assert len(gate_warns) == 1
+        assert gate_warns[0]["key"] == str(lake)
+        # A SECOND consult while wedged: instant guarded verdict, NO second
+        # daemon (the gate seam counts), NO second gate WARN.
+        guard_calls = {"n": 0}
+        original_gate_run = lsm._SWEEP_GATE.run
+
+        def _counting_run(*args: Any, **kwargs: Any) -> Any:
+            guard_calls["n"] += 1
+            return original_gate_run(*args, **kwargs)
+
+        monkeypatch.setattr(lsm._SWEEP_GATE, "run", _counting_run)
+        with capture_logs() as logs2:
+            consult = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert consult.stats is None
+        assert consult.timed_out is True
+        assert _fallback_clauses(logs2) == ["consult_deadline"]
+        assert [e for e in logs2 if e["event"] == "stat_gate.deadline_exceeded"] == []
+        assert guard_calls["n"] == 1  # run() invoked; its LATCH refused a daemon
+        assert lsm._SWEEP_GATE.wedged(str(lake))
+        release.set()
+    # Post-release: the zombie clears the latch (ONE recovered INFO), then a
+    # fresh consult revalidates the intact shard with NO fallback log.
+    deadline = _monotonic_deadline(5.0)
+    while lsm._SWEEP_GATE.wedged(str(lake)) and not deadline():
+        pass
+    assert not lsm._SWEEP_GATE.wedged(str(lake))
+    with capture_logs() as logs3:
+        recovered = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+    assert recovered.stats is not None
+    assert recovered.timed_out is False
+    assert _fallback_clauses(logs3) == []
+
+
+def _monotonic_deadline(seconds: float) -> Any:
+    """A zero-arg 'expired?' probe — the bounded-poll rail (never an assertion sleep)."""
+    import time
+
+    end = time.monotonic() + seconds
+
+    def _expired() -> bool:
+        time.sleep(0.005)
+        return time.monotonic() >= end
+
+    return _expired
+
+
+class TestStatsConsultShapes:
+    def test_thin_wrapper_equivalence(self, tmp_path: Path) -> None:
+        """``load_valid_dataset_stats(...) ≡ load_valid_dataset_stats_guarded(...).stats``.
+
+        The back-compat pin: the thin public wrapper NEVER raises a new type
+        and returns exactly the guarded consult's stats — for a validating
+        shard AND for a drift fallback.
+        """
+        lake = tmp_path
+        _seed_bars(lake)
+        direct = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        guarded = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert direct == guarded.stats
+        assert direct is not None
+        assert guarded.timed_out is False
+        # Drift both ways: a touched file fails validation identically.
+        dest = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY) / "2026/07.parquet"
+        os.utime(dest, ns=(1, 1))
+        with capture_logs() as logs:
+            assert lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY) is None
+        assert _fallback_clauses(logs) == ["stat_token"]
+        drifted = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert drifted.stats is None
+        assert drifted.timed_out is False  # data drift is NOT a timeout verdict
+
+    def test_kill_switch_returns_consult_none_with_zero_gate_calls(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Kill switch off ⇒ silent ``StatsConsult(None)`` — no gate, no log."""
+        lake = tmp_path
+        _seed_bars(lake)
+        monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, lsm.STATS_MANIFEST_OFF)
+        calls = {"n": 0}
+        original = lsm._SWEEP_GATE.run
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(lsm._SWEEP_GATE, "run", _counting)
+        with capture_logs() as logs:
+            consult = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert consult == lsm.StatsConsult(None)
+        assert consult.timed_out is False
+        assert calls["n"] == 0
+        assert logs == []
+
+    def test_malformed_key_raises_eagerly_on_the_caller(self, tmp_path: Path) -> None:
+        """The ValueError programming-error contract is EAGER — before any guarded I/O."""
+        with pytest.raises(ValueError, match="unknown stats-manifest kind"):
+            lsm.load_valid_dataset_stats_guarded(tmp_path, kind="nope", key={})
+
+    def test_guard_invocation_constant_in_dataset_depth(self, tmp_path: Path) -> None:
+        """ONE gate run per consult regardless of D (the anti-per-file pin).
+
+        A 6-month dataset must cost exactly as many gate invocations as a
+        2-month one: 1. Kills the 'wrap each file_token_matches' mutant class
+        (which would spawn D daemons per consult).
+        """
+        lake = tmp_path
+        months = tuple((2026, m) for m in range(1, 7))
+        _seed_bars(lake, months=months)
+        calls = {"n": 0}
+        original = lsm._SWEEP_GATE.run
+
+        def _counting(*args: Any, **kwargs: Any) -> Any:
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(lsm._SWEEP_GATE, "run", _counting)
+            consult = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert consult.stats is not None
+        assert len(consult.stats.files) == 6
+        assert calls["n"] == 1
+
+
+class TestBoundedTokenSweep:
+    def test_clean_pass_is_ok(self, tmp_path: Path) -> None:
+        lake = tmp_path
+        _seed_bars(lake)
+        stats = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None
+        root = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY)
+        assert lsm.bounded_token_sweep(lake, root, stats.files) == (lsm.TOKEN_SWEEP_OK, None)
+
+    def test_moved_returns_first_rel_in_iteration_order(self, tmp_path: Path) -> None:
+        """The FIRST moved rel in the GIVEN order — today's exact byte-preserved payload."""
+        lake = tmp_path
+        _seed_bars(lake)
+        stats = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None
+        root = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY)
+        for rel in ("2026/06.parquet", "2026/07.parquet"):
+            os.utime(root / rel, ns=(7, 7))  # move BOTH tokens
+        verdict, rel = lsm.bounded_token_sweep(lake, root, stats.files)
+        assert (verdict, rel) == (lsm.TOKEN_SWEEP_MOVED, "2026/06.parquet")
+        # Reversed input order → the OTHER file is first (order preserved).
+        verdict2, rel2 = lsm.bounded_token_sweep(lake, root, tuple(reversed(stats.files)))
+        assert (verdict2, rel2) == (lsm.TOKEN_SWEEP_MOVED, "2026/07.parquet")
+
+    def test_wedged_sweep_times_out(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wedged re-stat pass yields TIMEOUT (bounded), sharing the consult's latch."""
+        lake = tmp_path
+        _seed_bars(lake)
+        stats = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None
+        monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+        root = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY)
+        with _wedged_os_stat(monkeypatch, root):
+            with _hang_watchdog(5):
+                verdict, rel = lsm.bounded_token_sweep(lake, root, stats.files)
+            assert (verdict, rel) == (lsm.TOKEN_SWEEP_TIMEOUT, None)
+            # The SAME gate + key latched: a consult now fails fast too — a
+            # mid-request wedge never pays a second daemon.
+            consult = lsm.load_valid_dataset_stats_guarded(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+            assert consult == lsm.StatsConsult(None, timed_out=True)
+        deadline = _monotonic_deadline(5.0)
+        while lsm._SWEEP_GATE.wedged(str(lake)) and not deadline():
+            pass
+        assert not lsm._SWEEP_GATE.wedged(str(lake))
+
+    def test_dynamic_os_stat_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sweep resolves ``os.stat`` DYNAMICALLY (the bench stat-spy law).
+
+        ``test_click_fs_ops_flat_in_lake_size`` monkeypatches ``os.stat``
+        process-globally; a module-level ``real_stat = os.stat`` capture in
+        the new code would blind the spy. Prove the sweep sees a patched
+        stat: a spy counting the dataset files' stats must observe D calls.
+        """
+        lake = tmp_path
+        _seed_bars(lake)
+        stats = lsm.load_valid_dataset_stats(lake, kind=lsm.KIND_BARS, key=BARS_KEY)
+        assert stats is not None
+        root = lsm.dataset_dir(lake, lsm.KIND_BARS, BARS_KEY)
+        counted = {"n": 0}
+        real_stat = os.stat
+
+        def _spy(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(path, (str, Path)) and str(path).startswith(str(root)):
+                counted["n"] += 1
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", _spy)
+        assert lsm.bounded_token_sweep(lake, root, stats.files) == (lsm.TOKEN_SWEEP_OK, None)
+        assert counted["n"] == len(stats.files)

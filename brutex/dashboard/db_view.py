@@ -98,10 +98,12 @@ from brutex.data.lake_stats_manifest import (
     FALLBACK_REL_LOG_CAP,
     KIND_BARS,
     KIND_OPTIONS,
+    TOKEN_SWEEP_MOVED,
+    TOKEN_SWEEP_OK,
     DatasetStats,
     StatsFileRow,
-    file_token_matches,
-    load_valid_dataset_stats,
+    bounded_token_sweep,
+    load_valid_dataset_stats_guarded,
     parse_rel_month,
     rel_month_bounds,
     scan_dataset_rels,
@@ -2387,6 +2389,7 @@ class _StatsReadContext:
     effective: tuple[tuple[StatsFileRow, int], ...] = ()
     straddlers: tuple[StatsFileRow, ...] = ()
     served: bool = False
+    consult_timed_out: bool = False
 
     @property
     def should_seed(self) -> bool:
@@ -2394,9 +2397,16 @@ class _StatsReadContext:
 
         ``True`` only when the shard failed validation outright (absent /
         corrupt / stale) — a mid-request degrade keeps the existing shard (the
-        next request revalidates it; the writers keep it fresh).
+        next request revalidates it; the writers keep it fresh). A TIMED-OUT
+        consult (DEC-DASHBOARD-COLD-IO-DEADLINE-001) suppresses the seed: the
+        volume is WEDGED, so launching ``_seed_stats_manifest``'s three
+        unbounded stat sweeps + grouped scan against it would re-create the
+        very hang the deadline just bounded — and because no ``statseed|``
+        latch entry is written, a genuinely-absent shard still seeds on the
+        next HEALTHY click (recovery not poisoned; the suppression is
+        timeout-scoped, never drift-scoped).
         """
-        return self.stats is None
+        return self.stats is None and not self.consult_timed_out
 
     @property
     def total(self) -> int:
@@ -2500,7 +2510,10 @@ def _stats_read_context(
     no fallback is logged, no seed will run — byte-identical legacy behaviour.
 
     Otherwise the shard goes through the FULL anti-illusion validation
-    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`) and,
+    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`
+    — deadline-bounded per DEC-DASHBOARD-COLD-IO-DEADLINE-001: a
+    wedged-volume timeout builds a ``consult_timed_out`` context whose
+    ``should_seed`` is suppressed) and,
     when it holds, every file is classified against the bounds via the ONE
     shared :func:`_stats_file_verdict`; each straddler pays ONE bounded
     ``COUNT(DISTINCT …)`` over ONLY its own file (the identical WHERE the
@@ -2510,7 +2523,8 @@ def _stats_read_context(
     """
     if not use_stats_manifest or not stats_manifest_enabled():
         return None
-    stats = load_valid_dataset_stats(lake_root, kind=kind, key=key)
+    consult = load_valid_dataset_stats_guarded(lake_root, kind=kind, key=key)
+    stats = consult.stats
     ctx = _StatsReadContext(
         conn=conn,
         lake_root=lake_root,
@@ -2519,6 +2533,7 @@ def _stats_read_context(
         base=base,
         identity=identity,
         stats=stats,
+        consult_timed_out=consult.timed_out,
     )
     if stats is None:
         return ctx
@@ -2618,23 +2633,38 @@ def _stats_tokens_intact(ctx: _StatsReadContext, planned: Sequence[StatsFileRow]
 
     Re-stats the pruned page sublist (*planned*) AND the straddler-counted
     files (their live bounded counts fed the manifest total, so a straddler
-    replaced between its ``COUNT`` and the response must degrade too). ANY
-    moved token logs the ``stat_token_moved`` fallback clause, flips
-    ``ctx.served`` off (the whole-request degrade law), and returns ``False``
-    — the caller discards the pruned result and re-runs on the legacy path.
+    replaced between its ``COUNT`` and the response must degrade too) via ONE
+    deadline-bounded
+    :func:`~brutex.data.lake_stats_manifest.bounded_token_sweep` pass
+    (DEC-DASHBOARD-COLD-IO-DEADLINE-001 — same gate + key as the consult, so
+    a mid-request wedge that latched the consult fails this fast with no
+    second daemon). ANY moved token logs the ``stat_token_moved`` fallback
+    clause (payload byte-preserved — the FIRST moved rel in today's exact
+    iteration order); a wedged-volume timeout logs ``restat_deadline`` (NO
+    ``rel`` key — never a fabricated field). Either flips ``ctx.served`` off
+    (the whole-request degrade law) and returns ``False`` — the caller
+    discards the pruned result and re-runs on the legacy path.
     """
-    for row in (*planned, *ctx.straddlers):
-        if not file_token_matches(ctx.base / row.rel, row):
-            _LOG.info(
-                _STATS_FALLBACK_EVENT,
-                kind=ctx.kind,
-                key=dict(ctx.key),
-                clause="stat_token_moved",
-                rel=row.rel,
-            )
-            ctx.served = False
-            return False
-    return True
+    verdict, rel = bounded_token_sweep(ctx.lake_root, ctx.base, (*planned, *ctx.straddlers))
+    if verdict == TOKEN_SWEEP_OK:
+        return True
+    if verdict == TOKEN_SWEEP_MOVED:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="stat_token_moved",
+            rel=rel,
+        )
+    else:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="restat_deadline",
+        )
+    ctx.served = False
+    return False
 
 
 def _stats_pruned_page(
@@ -4096,7 +4126,7 @@ def _bars_file_windows(
     files that can hold their rows:
 
     * **Manifest arm** — a VALIDATED stats shard
-      (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`,
+      (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`,
       full anti-illusion validation; kill switch off / absent / stale shard
       → the grammar arm) gives each file's EXACT stamped ``[min_ts, max_ts]``
       (hi made exclusive with +1µs); rows are already strictly-increasing
@@ -4107,10 +4137,14 @@ def _bars_file_windows(
       canonical UTC-month name
       (:func:`~brutex.data.lake_stats_manifest.rel_month_bounds` — the
       partition law: a month file holds only its own UTC month's bars). ONE
-      O(files) listing, ZERO footer opens.
+      O(files) listing, ZERO footer opens. A TIMED-OUT consult
+      (DEC-DASHBOARD-COLD-IO-DEADLINE-001) returns ``None`` BEFORE this arm —
+      the wedged volume must not pay the next O(files) ``rglob`` listing
+      against itself.
 
     ``None`` = cannot bound (a non-canonical filename in the tree / a listing
-    fault) — the caller degrades to the legacy whole-glob bind, byte-identical
+    fault / a wedged-volume consult timeout) — the caller degrades to the
+    legacy whole-glob bind, byte-identical
     behaviour. HONEST envelope (Golden Rule #10): the grammar arm's bounds
     assume the UTC-month partition invariant; a month-invariant-VIOLATING lake
     (foreign rows — the ``lake_invariants``/``lake_heal`` finding class) may
@@ -4118,16 +4152,23 @@ def _bars_file_windows(
     month-bounds validation refuses such a shard; the invariant scanners are
     the remediation, not this reader.
     """
-    stats = load_valid_dataset_stats(
+    consult = load_valid_dataset_stats_guarded(
         lake_root,
         kind=KIND_BARS,
         key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
     )
+    stats = consult.stats
     if stats is not None:
         return [
             ((base / row.rel).as_posix(), row.min_ts, row.max_ts + timedelta(microseconds=1))
             for row in stats.files
         ]
+    if consult.timed_out:
+        # The volume is WEDGED: falling through to the grammar arm would run
+        # the O(files) ``base.rglob`` listing against the SAME wedged volume
+        # (the D1 hole). ``None`` is this function's existing "cannot bound →
+        # legacy whole-glob bind" contract.
+        return None
     try:
         listed = sorted(base.rglob("*.parquet"))
     except OSError:

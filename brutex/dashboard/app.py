@@ -274,7 +274,7 @@ from brutex.dashboard.spot_cascade import (
     build_spot_cascade,
     symbol_to_json,
 )
-from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache
+from brutex.dashboard.summary_cache import OPTIONS, SPOT, SummaryCache, SummaryColdWaitTimeout
 from brutex.dashboard.sweep_progress_cache import SweepProgressCache
 
 if TYPE_CHECKING:  # runtime import is LAZY inside build_app — anyio is [ui]-only
@@ -2238,6 +2238,31 @@ def build_app(
                 "error": "instrument store unavailable — retry shortly",
                 "error_type": "store_outage",
                 **extra,
+            },
+            status_code=503,
+        )
+
+    def _summary_warming_response(kind: str) -> JSONResponse:
+        """Honest 503 for a cold summary whose FIRST scan blew the wait budget.
+
+        DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-1), the
+        :func:`_store_outage_response` structural twin: a truly COLD kind has
+        NOTHING last-known, so a labeled empty 200 would fabricate an empty
+        lake (the ``_store_outage_response`` Golden-Rule-#1 argument,
+        verbatim) — the honest degrade is a machine-readable "first scan
+        still running — retry shortly" at 503. Reachable ONLY cold + past the
+        ``BRUTEX_SUMMARY_COLD_WAIT_S`` budget (previously an indefinite
+        threadpool-worker hang). The body is byte-STABLE across polls
+        (constant strings — the skip-render poller discipline); the pollers
+        already treat a non-ok tick as a counted failure + backoff
+        (DEC-PULL-UI-STALENESS-001), so no JS edits ride this.
+        """
+        return JSONResponse(
+            {
+                "available": False,
+                "error": "first lake summary scan still running — retry shortly",
+                "error_type": "summary_scan_pending",
+                "kind": kind,
             },
             status_code=503,
         )
@@ -6220,7 +6245,13 @@ def build_app(
                 SPOT, build_spot_coverage_payload(rows, spot_window_rollup(lake))
             )
 
-        return JSONResponse(await _run_lake(_rows_and_rollup))
+        try:
+            return JSONResponse(await _run_lake(_rows_and_rollup))
+        except SummaryColdWaitTimeout:
+            # COLD + first scan past the wait budget: nothing last-known
+            # exists — the honest 503, never a fabricated empty lake
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
 
     @app.get("/api/v1/completeness/scoreboard")
     async def api_completeness_scoreboard() -> JSONResponse:
@@ -6241,7 +6272,12 @@ def build_app(
         pulled-counts + stability, never an invented percentage. No lake root wired → an
         empty (well-shaped) scoreboard, never a 500.
         """
-        return JSONResponse(await _completeness_board())
+        try:
+            return JSONResponse(await _completeness_board())
+        except SummaryColdWaitTimeout:
+            # The scoreboard rides the SAME cached SPOT scan — the same honest
+            # cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("spot")
 
     # Per-app fingerprint gate for the reconcile diagnostic (DEC-TELEMETRY-RECONCILE-
     # LEDGERSAVE-001): suppresses byte-identical repeats of the mismatch WARNING / the
@@ -6365,7 +6401,17 @@ def build_app(
         -underlying DETAIL) so the operator can answer "how many indices vs equities have the
         full set?" in Excel. READ-ONLY; an empty (well-shaped) report when no lake is wired.
         """
-        content = await _completeness_csv()
+        try:
+            content = await _completeness_csv()
+        except SummaryColdWaitTimeout:
+            # A fake-EMPTY CSV would fabricate an empty lake for a one-shot
+            # curl/Excel reader — the honest text/plain 503 instead
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return Response(
+                "first lake summary scan still running — retry shortly",
+                status_code=503,
+                media_type="text/plain",
+            )
         return Response(
             content=content,
             media_type="text/csv; charset=utf-8",
@@ -6427,6 +6473,11 @@ def build_app(
             per_symbol = await _run_lake(_cached_per_symbol)
         except UniverseStoreOutageError:
             return _store_outage_response()
+        except SummaryColdWaitTimeout:
+            # The per-symbol map rides the SAME cached SPOT scan — the same
+            # honest cold degrade (DEC-DASHBOARD-COLD-IO-DEADLINE-001);
+            # narrower store-outage arm kept BESIDE this one.
+            return _summary_warming_response("spot")
         return JSONResponse(per_symbol)
 
     def _build_mapping_integrity_report() -> MappingIntegrityReport:
@@ -7013,7 +7064,12 @@ def build_app(
             # thread (DEC-DASHBOARD-FASTREAD-001).
             return summarize_option_datasets(store.connection, lake)
 
-        rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        try:
+            rows = await _run_lake(_summary_cache.get_or_refresh, OPTIONS, recompute=_recompute)
+        except SummaryColdWaitTimeout:
+            # COLD + first OPTIONS scan past the wait budget — the honest 503
+            # (DEC-DASHBOARD-COLD-IO-DEADLINE-001).
+            return _summary_warming_response("options")
         # Honest freshness stamp (DEC-COMPLETENESS-PULL-DUTY-DEGRADE-001) —
         # mirrors /coverage/spot: a pull-time stale serve is visible, never silent.
         return JSONResponse(
