@@ -6405,7 +6405,7 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     spanning several ≥2 s delta flushes (a time bound, never a stamp-count
     bound), logged (``movers_cache.stale_served``) on the ``ledger-records``
     key that served it — and the first read past the floor projects the
-    on-disk truth immediately (no rows-floor lag to compose). True O(page)
+    on-disk truth immediately (no rows-floor lag to compose); true O(page)
     totals need a write-time manifest, NOT claimed (the #867/#1025 envelope).
     """
     from brutex.data.window_ledger import ledger_record_row
