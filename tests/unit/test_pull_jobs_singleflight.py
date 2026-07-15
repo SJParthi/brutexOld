@@ -754,6 +754,123 @@ def test_default_lease_factory_writes_and_clears_the_lease(tmp_path: Path) -> No
     assert read_pull_lease(tmp_path) is None  # cleared on the clean finish
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Sweep-kind lock posture (DEC-SWEEP-JOB-LOCK-POSTURE-001, MIGRATION.md #1770)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def test_sweep_kind_job_skips_the_pull_writer_guards(tmp_path: Path) -> None:
+    """A ``JOB_KIND_SWEEP`` start takes NO cross-process pull-writer guard.
+
+    THE BUG (fails-before): the sweep-kind job held the lake pull EX flock for
+    its whole run, so ``cmd_sweep_all``'s own G10 ``lake_read_guard``
+    (``LOCK_SH | LOCK_NB`` on the SAME lock file, from a second fd) failed
+    against the job's OWN held EX → every real one-click dashboard sweep died
+    at launch with ``LakeBusyError``. Now: neither the lake flock nor the
+    account lock nor the cross-host lease factory is consulted for a sweep-kind
+    start, and the run's OWN G10 shared read-guard acquires freely (the exact
+    self-conflict mechanism, pinned with the REAL guard).
+    """
+    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+    from brutex.engine.sweep_singleflight import lake_read_guard
+
+    lake_calls: list[Path] = []
+    account_calls: list[str] = []
+    lease_calls: list[Path] = []
+    reader_guard_ok: dict[str, bool] = {}
+
+    def lake_factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover
+        lake_calls.append(root)
+        return _SpyGuard()
+
+    def account_factory(key: str) -> AbstractContextManager[None]:  # pragma: no cover
+        account_calls.append(key)
+        return _SpyGuard()
+
+    def lease_factory(root: Path) -> AbstractContextManager[None]:  # pragma: no cover
+        lease_calls.append(root)
+        return _SpyGuard()
+
+    def work(on_progress: ProgressHook) -> None:
+        # The sweep body's REAL G10 shared read-guard must acquire freely —
+        # no EX holder exists because the job wrapper no longer takes one.
+        with lake_read_guard(tmp_path):
+            reader_guard_ok["ok"] = True
+        on_progress("X", 1, False, False)
+
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lake_factory,
+        account_singleflight_factory=account_factory,
+        account_key_resolver=lambda: "key-A",
+        lease_factory=lease_factory,
+    )
+    assert job.start(work, total=1, job_kind=JOB_KIND_SWEEP) is True
+    assert job.snapshot().state == STATE_DONE
+    assert reader_guard_ok == {"ok": True}
+    assert lake_calls == [] and account_calls == [] and lease_calls == []
+
+
+def test_explicit_pull_kind_still_takes_the_writer_guards(tmp_path: Path) -> None:
+    """``JOB_KIND_PULL`` (passed explicitly) keeps the EX-flock posture byte-identical."""
+    from brutex.dashboard.pull_jobs import JOB_KIND_PULL
+
+    spy = _SpyGuard()
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=_sync_spawn,
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy,
+        account_key_resolver=lambda: None,
+        market_hours_guard=lambda: False,
+    )
+    assert (
+        job.start(
+            lambda on_progress: on_progress("X", 1, False, False),
+            total=1,
+            job_kind=JOB_KIND_PULL,
+        )
+        is True
+    )
+    assert job.snapshot().state == STATE_DONE
+    assert spy.entered == 1 and spy.exited == 1  # taken + released exactly as before
+
+
+def test_pull_start_refused_while_sweep_kind_job_runs(tmp_path: Path) -> None:
+    """The in-process single-flight still excludes a PULL start during a sweep run.
+
+    The fix removes only the sweep-kind job's pull-WRITER flock — the layer-1
+    ``_running`` refusal (one job at a time on this shared object) is
+    unchanged: a pull click while the sweep-kind job runs returns ``False``,
+    and once the sweep worker exits a pull start succeeds again.
+    """
+    from brutex.dashboard.pull_jobs import JOB_KIND_PULL, JOB_KIND_SWEEP
+
+    spy = _SpyGuard()
+    workers: list[Callable[[], None]] = []
+    job = BackgroundPullJob(
+        progress=PullProgress(clock=_ticking_clock()),
+        spawn=workers.append,  # capture-only: the sweep worker stays "running"
+        lake_root_resolver=lambda: tmp_path,
+        singleflight_factory=lambda _root: spy,
+        account_key_resolver=lambda: None,
+        market_hours_guard=lambda: False,
+    )
+    assert job.start(lambda _h: None, total=1, job_kind=JOB_KIND_SWEEP) is True
+    assert job.running is True
+    # A pull click mid-sweep is refused by the in-process flag (no work spawned).
+    assert job.start(lambda _h: None, total=1, job_kind=JOB_KIND_PULL) is False
+    assert len(workers) == 1
+    assert spy.entered == 0  # the refused pull never reached the writer guards
+    workers[0]()  # the sweep worker exits
+    assert job.running is False
+    # The job is free again — a real pull start now takes the writer guard.
+    assert job.start(lambda _h: None, total=1, job_kind=JOB_KIND_PULL) is True
+    assert spy.entered == 1
+
+
 def test_lease_release_is_best_effort_and_swallows_errors(tmp_path: Path) -> None:
     """A raising lease-guard __exit__ never crashes the worker; the run completes."""
 

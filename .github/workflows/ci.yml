@@ -2207,6 +2207,11 @@ jobs:
           # tests/unit/test_pull_jobs_beat_channel.py (stem-matched for the
           # discovery gate), which MUST join this gate so its coverage of
           # those lines registers (without it the module reads 96.95%).
+          # DEC-SWEEP-JOB-LOCK-POSTURE-001 (#1770): the REAL-path one-click
+          # sweep regression (the unfaked route → cmd_sweep_all chain that
+          # exposed the sweep-kind job's pull-EX self-deadlock) is co-run in
+          # tests/integration/test_dashboard_sweep_run_real.py so the
+          # fixture-blindspot closer stays co-located with the module gate.
           if compgen -G "tests/unit/test_pull_jobs.py" > /dev/null; then
             pytest --cov=brutex.dashboard.pull_jobs --cov-branch --cov-report=term-missing --cov-fail-under=100 \
               tests/unit/test_pull_jobs.py \
@@ -2216,7 +2221,8 @@ jobs:
               tests/unit/test_pull_jobs_progress_honesty.py \
               tests/unit/test_dashboard_pull_stall.py \
               tests/integration/test_dashboard_responsive_under_write.py \
-              tests/integration/test_dashboard_e2e.py
+              tests/integration/test_dashboard_e2e.py \
+              tests/integration/test_dashboard_sweep_run_real.py
           else
             echo "(brutex.dashboard.pull_jobs test file not present yet — gate inactive)"
           fi
