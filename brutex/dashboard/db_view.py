@@ -6631,7 +6631,7 @@ def _window_counts_since(
     return _fold_status_counts(cursor.fetchall())
 
 
-#: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
+#: The canonical 17-column ledger row projection, in ``LedgerRowTuple`` order
 #: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
 #: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
 #: this module deliberately carries no module-level ``window_ledger_store``
@@ -6649,6 +6649,7 @@ _LEDGER_ROW_COLUMNS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "failed_streak",
 )
 
 
@@ -6682,6 +6683,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         bars_net_new,
         empty_retries,
         transient_retries,
+        failed_streak,
     ) = raw
     required = (
         market,
@@ -6695,6 +6697,10 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         first_seen_at,
         empty_streak,
         in_pull_fetches,
+        # failed_streak is legacy-DERIVABLE (absent column → the honest running-
+        # counter 0, DEC-AUTO-RESUME-ZERO-SURPRISES-001) — a NULL cell defers to
+        # the legacy parse per this projection's derivation-rule law.
+        failed_streak,
     )
     if any(cell is None for cell in required):
         raise ValueError(
@@ -6718,6 +6724,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         None if bars_net_new is None else int(bars_net_new),
         None if empty_retries is None else int(empty_retries),
         None if transient_retries is None else int(transient_retries),
+        int(failed_streak),
     )
 
 
@@ -6798,7 +6805,7 @@ def query_window_ledger_page(
         def _ensure_full_schema(c: Any) -> None:
             """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
             ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
-            the /db grid projects ALL 16 columns, so ANY absent optional column
+            the /db grid projects ALL 17 columns, so ANY absent optional column
             defers to the legacy parse, whose per-row derivation rules this
             query deliberately does not duplicate. Metadata-only LIMIT 0
             describe over the BASE file ONLY — never the union_by_name'd delta

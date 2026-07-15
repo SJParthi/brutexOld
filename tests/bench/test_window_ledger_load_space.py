@@ -161,6 +161,10 @@ def _build_rows(n: int, seed: int = 42) -> list[tuple[Any, ...]]:
                     rng.choice((None, 0, bars)),
                     rng.choice((None, 0, 1, 2)),
                     rng.choice((None, 0, 1)),
+                    # failed_streak — the 17th on-disk column (appended LAST,
+                    # DEC-AUTO-RESUME-ZERO-SURPRISES-001): a sub-threshold run
+                    # on FAILED rows, the reset 0 everywhere else.
+                    rng.randrange(0, 3) if status == "FAILED" else 0,
                 )
             )
     return rows

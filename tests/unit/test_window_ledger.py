@@ -2755,6 +2755,7 @@ class TestStreakExemptDemotion:
                     None,
                     None,
                     None,
+                    0,  # failed_streak — the 17th field (DEC-AUTO-RESUME-ZERO-SURPRISES-001)
                 )
             ],
             threshold=3,

@@ -107,7 +107,12 @@ def test_junk_revision_probe_ttl_env_fails_loud_before_bind(
     assert "ran" not in probes  # uvicorn.run never reached
     assert "loop_watchdog" not in probes  # refused BEFORE build_app
     err = capsys.readouterr().err
-    assert err.startswith("[brutex] ")  # the clean one-liner, not a traceback
+    # The clean one-liner, not a traceback — asserted LINE-level: the F2 boot
+    # markers ("[brutex boot +…]" stderr lines, DEC-LAKE-HEAL-STARTUP-EPOCH-001
+    # #1800a) legitimately precede the refusal on stderr, so stream-position
+    # startswith would false-fail on the instrumented boot.
+    assert any(line.startswith("[brutex] ") for line in err.splitlines())
+    assert "Traceback" not in err
     assert "BRUTEX_REVISION_PROBE_TTL_S" in err
 
 

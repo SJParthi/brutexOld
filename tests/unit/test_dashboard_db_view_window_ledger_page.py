@@ -176,7 +176,7 @@ class _NoneCountConn(_SpyConn):
 
 
 def test_ledger_row_columns_pinned_to_the_store_schema() -> None:
-    """The 16-column projection MUST equal the store's ``_COLUMNS`` exactly
+    """The 17-column projection MUST equal the store's ``_COLUMNS`` exactly
     (the ``_WINDOW_KEY_COLUMNS`` precedent — pinned, never imported)."""
     assert wls._COLUMNS == _LEDGER_ROW_COLUMNS
 
@@ -297,7 +297,7 @@ class TestDegradeLaw:
     def test_null_derivable_cell_defers_wholesale(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A NULL ``empty_streak`` cell (all 16 columns PRESENT) trips the row
+        """A NULL ``empty_streak`` cell (all 17 columns PRESENT) trips the row
         projection's ValueError → the whole request defers to the legacy parse,
         which derives the cell from ``(status, attempts)`` — output identical."""
         import pyarrow.parquet as pq
@@ -322,6 +322,7 @@ class TestDegradeLaw:
             None,
             None,
             None,
+            0,  # failed_streak — the 17th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001)
         )
         path = wls.ledger_path(tmp_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,6 +465,8 @@ class TestLedgerPageRow:
         3,
         2,
         1,
+        # failed_streak — the 17th column (DEC-AUTO-RESUME-ZERO-SURPRISES-001).
+        2,
     )
 
     def test_full_row_coerces_all_cells(self) -> None:
