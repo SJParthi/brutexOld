@@ -128,6 +128,10 @@ def test_run_identity_goldens_are_unmoved() -> None:
     )
 
     assert _GOLDEN_RUN_ID == "f588194f3f107bec68ee48975171041dd77c8f5ceec7e0625534b352d2d5921a"
+    # Mirror literal refreshed at the 2026-07-15 club-O integration merge: main
+    # re-locked _GOLDEN_CONTENT_HASH (its own reviewed re-lock) between this
+    # DEC's base and the fold; the pin's LAW is unchanged — the resilience
+    # annotation pass must mirror whatever the canonical frozen value is.
     assert (
-        _GOLDEN_CONTENT_HASH == "2387cc884944768ee271fad117edb953f538d4d6d2d3b3c1c4b9ca3f4bd4d147"
+        _GOLDEN_CONTENT_HASH == "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
     )
