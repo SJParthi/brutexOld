@@ -1988,7 +1988,11 @@ class TestStopStartLinearization:
         job = _job()
         assert job.request_stop() is False
         seen: list[bool] = []
-        assert job.start(lambda _h: seen.append(job.stop_requested), total=1) is True
+        # The `seen.append` lambda is hoisted OUT of the assert statement
+        # (CodeQL py/side-effect-in-assert — a side-effecting expression
+        # lexically inside an assert is skipped wholesale under `python -O`).
+        started = job.start(lambda _h: seen.append(job.stop_requested), total=1)
+        assert started is True
         assert seen == [False]
 
     def test_boot_resume_interleave_stop_kills_the_reloop_end_to_end(self, tmp_path: Path) -> None:

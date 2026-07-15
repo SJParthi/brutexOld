@@ -4157,7 +4157,12 @@ class TestRunStartupSweep:
         # content, holds no `*.parquet`) legitimately lands even on a refused
         # sweep (it precedes the scan by the pairing rule); exclude it from the
         # byte pin — every LAKE byte must be untouched.
-        assert after.pop(EPOCH_RELPATH, None) is not None  # the seed landed
+        # Hoist the mutating `.pop` OUT of the assert (CodeQL
+        # py/side-effect-in-assert — under `python -O` the assert body is
+        # skipped, so a side-effecting assert changes behaviour; the
+        # `attempt_stamp` sibling below is the same idiom).
+        epoch_seed = after.pop(EPOCH_RELPATH, None)
+        assert epoch_seed is not None  # the seed landed
         # DEC-LAKE-INVARIANTS-PREINDEX-001: the refused sweep ALSO stamps the
         # ONE `.lake_heal/` ATTEMPT sidecar (metadata, a lake-data sibling);
         # the DATA tree itself stays byte-identical — not one lake byte moved.
