@@ -1,4 +1,4 @@
-"""60-atomic-condition vocabulary.
+"""The 66-declared (62-active) atomic-condition vocabulary.
 
 Per `docs/TRACK1_VOCABULARY.md` (grown 52 → 60 by DEC-VOCAB-U128-CODEGEN-001 /
 ADR-0012 PR-1):

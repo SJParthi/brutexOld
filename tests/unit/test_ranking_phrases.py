@@ -1,6 +1,6 @@
 """Unit suite for :mod:`brutex.ranking.phrases` (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-Pins the 60-entry table's structural invariants (bit==index, names cross-pinned
+Pins the 66-entry table's structural invariants (bit==index, names cross-pinned
 against the generated vocabulary), every :func:`check_phrase_invariants` raise
 branch via tampered tables, the mechanical assembly for k=1/3/5 masks, the
 honest-empty mask-0 answer, the reserved-headroom ignore contract and the

@@ -71,7 +71,7 @@ class PhraseEntry:
     plain: str
 
 
-#: The FIXED 60-entry phrase table (R33) — ``bit == index``, import-validated.
+#: The FIXED 66-entry phrase table (R33) — ``bit == index``, import-validated.
 PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     # ── EMA Position (bits 0-5) ──
     PhraseEntry(0, "close_above_ema20", "the candle closed above its 20-period average price"),

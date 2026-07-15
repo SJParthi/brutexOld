@@ -4,7 +4,8 @@ Per ADR-0012 D11 (``DEC-NIFTY-ROLL-METADATA-001``, builds on
 ``DEC-NIFTY-DYNAMIC-STRATEGY-001``) the brute-force engine runs on a
 **per-contract** NIFTY futures series — NOT a back-adjusted continuous
 contract. Back-adjustment shifts every absolute price level and would corrupt
-pivots / Fibonacci / VWAP versus what a trader actually saw. Each monthly
+pivots / Fibonacci / every price-anchored level versus what a trader actually
+saw. Each monthly
 contract is its own series; this module resolves *which* contract a trade
 entering on a given IST date would use.
 
@@ -21,8 +22,9 @@ entering on a given IST date would use.
   contract is gone), so the front→next-month basis gap (typically 20-60 pts) is
   **never inside a trade** and is never treated as a price move. There is no
   cross-roll level comparison — every session/level indicator recomputes
-  per-contract (the roll boundary is a hard reset, mirroring the VWAP
-  ``session_key`` reset of D12).
+  per-contract (the roll boundary is a hard reset — the Stage-1A
+  ``session_key`` roll-reset mechanism of D11/D12, which outlived its
+  original ``VwapState`` consumer, retired with the bits-52/53 tombstone).
 
 ## Holiday-shifted expiry (NSE rule)
 
@@ -109,8 +111,10 @@ class FuturesContract:
         """A stable, hashable identity for the per-contract series.
 
         Used as the engine ``session_key`` reset token (D11/D12): a change of
-        this key is a roll boundary, so VWAP / pivots / Fib never span two
-        contracts. Format: ``"<UNDERLYING>-FUT-<YYYY-MM-DD expiry>"``.
+        this key is a roll boundary, so no session/level indicator (pivots /
+        Fib / EMA / market structure — historically the since-retired VWAP
+        too) ever spans two contracts.
+        Format: ``"<UNDERLYING>-FUT-<YYYY-MM-DD expiry>"``.
         """
         return f"{self.underlying.value}-FUT-{self.expiry.isoformat()}"
 

@@ -1,7 +1,9 @@
 """Per-bit unit tests for `brutex.vocabulary.evaluator`.
 
-Tests every one of the 52 atomic conditions in isolation:
-- 9 indicator groups
+Tests every ACTIVE atomic condition in isolation (62 active of the
+66-declared layout — the RETIRED VWAP tombstones 52/53 and the declared-only
+SuperTrend bits 64/65 are pinned inert instead):
+- the manifest's indicator groups (``bits.GROUP_RANGES``)
 - Each bit verified to fire / not-fire on hand-built scenarios
 - Look-ahead invariant
 - Conflict-pair generator pruning

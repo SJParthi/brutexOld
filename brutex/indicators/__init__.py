@@ -1,14 +1,15 @@
-"""52 atomic boolean conditions + supporting indicator computations.
+"""Supporting indicator computations for the 66-declared (62-active) vocabulary.
 
-Per `docs/TRACK1_VOCABULARY.md` — 9 indicator groups:
-- price-action
-- indicator-crossover (EMA 20, EMA 200 crosses)
-- Bollinger
-- regime
-- breakout
-- divergence
-- anchor (Static Daily Fib + Standard Pivots + PDH/PDL + Day Hi/Lo)
-- candle
+Per `docs/TRACK1_VOCABULARY.md` the atomic boolean conditions (66 declared on
+the u128 layout; 62 ACTIVE — the VWAP bits 52/53 are RETIRED tombstones and
+the SuperTrend bits 64/65 are declared layout-only) are evaluated in the
+shared Rust ``trading_core`` crate; this package supplies the Python-side
+indicator STATE those conditions consume:
+- anchors (Static Daily Fib + Standard Pivots + PDH/PDL + Day Hi/Lo +
+  the rolling-weekly / weekly-static Fib anchors)
+- EMA 20 / EMA 200 position + crossover state
+- market structure (BOS/CHoCH signal container)
+- candle / day-structure inputs
 
 Modules:
 - `fib_levels`     — Static Daily Fib (21 levels), bullish + bearish stored
@@ -23,7 +24,10 @@ Modules:
   was RETIRED with the bits-52/53 tombstone).
 - `day_extremes`   — Running Day High / Day Low from session open.
 - `prev_day_ohlc`  — Previous Day OHLC anchors (calendar-aware).
-- `conditions`     — Vocabulary: 52 boolean conditions per bar (TBD).
+
+The per-bar condition VOCABULARY itself (66 declared / 62 active boolean
+conditions) lives in :mod:`brutex.vocabulary` (bits + evaluator shim), never
+here.
 """
 
 from brutex.indicators.day_extremes import (
