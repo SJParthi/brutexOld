@@ -144,7 +144,10 @@ def _open_anchored_pnl(
     return sign * (exit_ref - entry_ref)
 
 
-@given(case=_feed_and_params())
+_CASES = _feed_and_params()
+
+
+@given(case=_CASES)
 @settings(max_examples=300, deadline=None)
 def test_worst_case_never_overstates_the_open_anchored_price(
     case: tuple[list[CandleBar], list[bool], Side, int | None, int | None],
@@ -161,7 +164,7 @@ def test_worst_case_never_overstates_the_open_anchored_price(
         )
 
 
-@given(case=_feed_and_params())
+@given(case=_CASES)
 @settings(max_examples=300, deadline=None)
 def test_entry_fill_is_the_adverse_extreme_side_correct(
     case: tuple[list[CandleBar], list[bool], Side, int | None, int | None],
@@ -184,7 +187,7 @@ def test_entry_fill_is_the_adverse_extreme_side_correct(
         )
 
 
-@given(case=_feed_and_params())
+@given(case=_CASES)
 @settings(max_examples=150, deadline=None)
 def test_one_law_is_deterministic(
     case: tuple[list[CandleBar], list[bool], Side, int | None, int | None],

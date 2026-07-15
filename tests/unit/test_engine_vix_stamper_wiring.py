@@ -1224,7 +1224,14 @@ class TestStage3WireSeam:
 
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             report = stage3_mod.run_stage3_pass(
-                _grid(stage3_enable=True, stage3_max_fevals=4, stage3_max_restarts=1),
+                # stage3 requires Mode-A grid sl/tp ints (ADR-0007 condition 3).
+                _grid(
+                    stage3_enable=True,
+                    stage3_max_fevals=4,
+                    stage3_max_restarts=1,
+                    stop_losses=[30],
+                    take_profits=[50],
+                ),
                 results_root=tmp_path / "empty",  # no persisted stores → zero survivors
                 bars_for=_bars_for,
                 audit=audit,

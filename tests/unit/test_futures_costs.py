@@ -565,22 +565,29 @@ class TestExtremesRequired:
     def test_missing_extremes_refuse_fail_loud(self) -> None:
         # An input without its adverse anchors is unpriceable — the refusal
         # names the DEC and the missing fields (never a silent open fill).
-        base: dict[str, object] = {
-            "entry_dt_ist": _ENTRY,
-            "exit_dt_ist": _EXIT,
-            "instrument": "NIFTY",
-            "contract_symbol": "NSE-NIFTY-30Jan25-FUT",
-            "expiry_date": _EXPIRY,
-            "entry_bar_open_paisa": 2_200_000,
-            "exit_bar_open_paisa": 2_210_000,
-            "side": "long",
-            "lot_size": 75,
-        }
         with pytest.raises(ValueError, match="DEC-FILL-WORST-CASE-ONLY-001"):
-            FuturesTradeInput(**base)  # type: ignore[arg-type]
+            FuturesTradeInput(
+                entry_dt_ist=_ENTRY,
+                exit_dt_ist=_EXIT,
+                instrument="NIFTY",
+                contract_symbol="NSE-NIFTY-30Jan25-FUT",
+                expiry_date=_EXPIRY,
+                entry_bar_open_paisa=2_200_000,
+                exit_bar_open_paisa=2_210_000,
+                side="long",
+                lot_size=75,
+            )
         with pytest.raises(ValueError, match="missing .'exit_bar_low_paisa'"):
-            FuturesTradeInput(  # type: ignore[arg-type]
-                **base,
+            FuturesTradeInput(
+                entry_dt_ist=_ENTRY,
+                exit_dt_ist=_EXIT,
+                instrument="NIFTY",
+                contract_symbol="NSE-NIFTY-30Jan25-FUT",
+                expiry_date=_EXPIRY,
+                entry_bar_open_paisa=2_200_000,
+                exit_bar_open_paisa=2_210_000,
+                side="long",
+                lot_size=75,
                 entry_bar_high_paisa=2_201_000,
                 entry_bar_low_paisa=2_199_000,
                 exit_bar_high_paisa=2_211_000,
