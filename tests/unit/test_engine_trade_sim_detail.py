@@ -58,7 +58,16 @@ _A_SIGNALS = [True, False, False, True, False, False, True, False, False, False]
 
 
 def test_exit_reasons_vocabulary_is_the_contract_set() -> None:
-    assert EXIT_REASONS == ("stop_loss", "take_profit", "forced_1520", "signal", "end_of_data")
+    # APPEND-ONLY: session_gap joined LAST (DEC-TRADESIM-OPEN-SESSION-GUARD-001);
+    # the first five members are byte-frozen in this order (P3→P4 wire contract).
+    assert EXIT_REASONS == (
+        "stop_loss",
+        "take_profit",
+        "forced_1520",
+        "signal",
+        "end_of_data",
+        "session_gap",
+    )
 
 
 def test_sink_captures_tp_sl_forced_reasons_and_fills() -> None:
@@ -114,6 +123,43 @@ def test_sink_captures_end_of_data_exit() -> None:
     simulate_trades(bars, [True, False, False], direction=Side.BUY, tf_minutes=1, detail_sink=sink)
     assert [d.exit_reason for d in sink] == ["end_of_data"]
     assert sink[0].exit_fill_paisa == 9_995  # last bar's CLOSE
+
+
+def test_sink_captures_session_gap_exit() -> None:
+    """DEC-TRADESIM-OPEN-SESSION-GUARD-001: the boundary close is a named detail.
+
+    A position still open when the feed steps to the NEXT IST session date
+    (day-1's stored tail never reached a forced-exit bar) closes retroactively
+    at day-1's last stored bar's CLOSE — ``exit_reason == "session_gap"``,
+    ``exit_fill_paisa`` = the PRIOR session's close, never a next-session fill.
+    """
+    next_day = date(2024, 1, 3)
+    gap_ts = datetime(next_day.year, next_day.month, next_day.day, 9, 15, tzinfo=IST).astimezone(
+        UTC
+    )
+    bars = [
+        _bar(11, 10, "100", "100", "100", "100"),
+        _bar(11, 11, "100.00", "100.20", "99.80", "100.05"),
+        _bar(11, 12, "100.00", "100.10", "99.90", "99.95"),  # day-1's LAST stored bar
+        CandleBar(
+            timestamp=gap_ts,
+            open=Decimal("600"),
+            high=Decimal("601"),
+            low=Decimal("599"),
+            close=Decimal("600"),
+            volume=0,
+            open_interest=None,
+        ),
+    ]
+    sink: list[TradeDetail] = []
+    trades = simulate_trades(
+        bars, [True, False, False, False], direction=Side.BUY, tf_minutes=1, detail_sink=sink
+    )
+    assert [d.exit_reason for d in sink] == ["session_gap"]
+    assert sink[0].exit_fill_paisa == 9_995  # day-1's last stored CLOSE — not the gap bar
+    assert sink[0].trade is trades[0]
+    assert trades[0].pnl_paisa == 9_995 - 10_000
+    assert trades[0].exit_ts == bars[2].timestamp
 
 
 def test_output_identical_with_and_without_sink() -> None:

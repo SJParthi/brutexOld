@@ -14,9 +14,11 @@ injected I/O makes the whole control flow offline-testable.
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
@@ -252,6 +254,240 @@ def test_months_with_include_daily_raises(tmp_path: Path) -> None:
             include_daily=True,
             months=[(2021, 1)],
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The zero-stored-bars probe + the typed whole-partition refusal
+# (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestHasStored1mBars:
+    """T1 — the ONE lake-truth existence predicate + the base-path law."""
+
+    def test_spot_1m_partition_dir_path_law(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import spot_1m_partition_dir
+
+        assert spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE") == (
+            tmp_path / "bars" / "NSE" / "CASH" / "RELIANCE" / "1minute"
+        )
+
+    def test_absent_dir_is_false(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import has_stored_1m_bars
+
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_dir_with_zero_parquet_is_false(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "notes.txt").write_bytes(b"not a parquet")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_nested_year_month_parquet_is_true(self, tmp_path: Path) -> None:
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        f = base / "2024" / "01.parquet"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"stub")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is True
+
+    def test_directory_named_parquet_is_true(self, tmp_path: Path) -> None:
+        """``rglob("*.parquet")``-parity pin (refuter round 4): the original
+        spelling matched a dataset-style DIRECTORY plant (``…/01.parquet/``)
+        too, so the walk-based probe must keep that verdict — a semantics
+        drift here would silently reclassify the #1558-round-8 shape."""
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        (base / "2024" / "01.parquet").mkdir(parents=True)  # a DIR named *.parquet
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is True
+
+    def test_file_at_partition_path_is_false(self, tmp_path: Path) -> None:
+        """A FILE planted at the ``1minute`` path (out-of-band: nothing can be
+        stored under a file) reads ``False`` — the pre-fix branch verdict for
+        the non-directory shape, preserved (refuter round 4)."""
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "RELIANCE")
+        base.parent.mkdir(parents=True)
+        base.write_bytes(b"not a directory")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_file_component_mid_path_is_false(self, tmp_path: Path) -> None:
+        """A FILE at the symbol dir makes ``os.stat(base)`` raise
+        ``NotADirectoryError`` — folded into the benign ``False`` arm
+        (refuter round 4)."""
+        from brutex.data.timeframe_materialize import has_stored_1m_bars
+
+        symbol_dir = tmp_path / "bars" / "NSE" / "CASH" / "RELIANCE"
+        symbol_dir.parent.mkdir(parents=True)
+        symbol_dir.write_bytes(b"a file where the symbol dir should be")
+        assert has_stored_1m_bars(tmp_path, "NSE", "CASH", "RELIANCE") is False
+
+    def test_unenumerable_partition_raises_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[fails-before, refuter round 4] a permission-broken POPULATED
+        partition must raise LOUDLY, never read as *empty*: CPython pathlib
+        SUPPRESSES ``PermissionError`` during glob traversal, so the original
+        ``is_dir() and any(rglob(...))`` spelling returned ``False`` here —
+        reclassifying a real fault as the benign ``no_source``
+        ("vendor-empty or never pulled": both causes false) with ``ok=True``
+        and the movers warm firing, where the merge-base classified the
+        identical lake state a loud warm-withholding FAILURE. The propagated
+        ``PermissionError`` is an ``OSError`` — a ``parquet_read_skip_errors``
+        member — restoring the per-symbol-FAILURE classification."""
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "PERM")
+        (base / "2024").mkdir(parents=True)
+        (base / "2024" / "01.parquet").write_bytes(b"stub")  # data provably EXISTS
+
+        monkeypatch.setattr(os, "scandir", _deny_scandir_under(base))
+        with pytest.raises(PermissionError):
+            has_stored_1m_bars(tmp_path, "NSE", "CASH", "PERM")
+
+    def test_unenumerable_subtree_raises_permission_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """[refuter round 4] a fault DEEPER than the base dir (an unreadable
+        year subdir hiding the only parquet) is loud too — the walk descends
+        with the same OSError-propagating ``onerror`` at every level."""
+        from brutex.data.timeframe_materialize import (
+            has_stored_1m_bars,
+            spot_1m_partition_dir,
+        )
+
+        base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "PERM")
+        sub = base / "2024"
+        sub.mkdir(parents=True)
+        (sub / "01.parquet").write_bytes(b"stub")
+
+        monkeypatch.setattr(os, "scandir", _deny_scandir_under(sub))
+        with pytest.raises(PermissionError):
+            has_stored_1m_bars(tmp_path, "NSE", "CASH", "PERM")
+
+
+def _deny_scandir_under(denied: Path) -> Any:
+    """An ``os.scandir`` stand-in raising EACCES for paths at/under *denied*.
+
+    The uid-independent, CI-safe twin of a real ``chmod 000`` on the dir
+    (refuter round 4 — the executed real-permissions A/B ran under a dropped
+    uid 65534; CI runs unprivileged, so the probe is simulated here).
+    """
+    real_scandir = os.scandir
+
+    def _scandir(path: Any = ".") -> Any:
+        p = os.fspath(path)
+        if isinstance(p, str) and p.startswith(str(denied)):
+            raise PermissionError(13, "Permission denied", p)
+        return real_scandir(path)
+
+    return _scandir
+
+
+def test_unreadable_populated_partition_propagates_oserror_never_no_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[fails-before, refuter round 4] the READER classification boundary: an
+    unreadable-but-POPULATED partition propagates ``PermissionError`` out of
+    :func:`materialize_lake_timeframes` — NEVER the benign
+    :class:`NoStored1mBarsError` — so the prebuild's spot phase lands it in
+    ``failed`` (WARNING, ``ok=False``, movers warm withheld: the merge-base
+    fail-safe classification; the honest counterpart of the pre-fix
+    "vendor-empty or never pulled" wording, both of whose causes were false
+    for this shape)."""
+    from brutex.data.timeframe_materialize import (
+        PrebuildKind,
+        materialize_lake_timeframes,
+        spot_1m_partition_dir,
+    )
+
+    base = spot_1m_partition_dir(tmp_path, "NSE", "CASH", "PERM")
+    (base / "2024").mkdir(parents=True)
+    (base / "2024" / "01.parquet").write_bytes(b"stub")
+
+    monkeypatch.setattr(os, "scandir", _deny_scandir_under(base))
+    with pytest.raises(PermissionError):
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="PERM",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+        )
+
+
+def test_empty_partition_raises_typed_no_stored_1m_bars_error(tmp_path: Path) -> None:
+    """T2 [fails-before] — the whole-partition zero-stored-bars refusal is the
+    typed :class:`NoStored1mBarsError` (a ``ValueError`` subclass, so every
+    existing catcher is behavior-identical) with the two-cause message bytes
+    UNCHANGED (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)."""
+    from brutex.data.timeframe_materialize import (
+        NoStored1mBarsError,
+        PrebuildKind,
+        materialize_lake_timeframes,
+    )
+
+    with pytest.raises(NoStored1mBarsError) as exc:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+        )
+    assert isinstance(exc.value, ValueError)  # back-compat pin — subclass, never a sibling
+    assert str(exc.value) == (
+        "no stored 1minute bars for NSE/CASH/RELIANCE — "
+        "nothing to derive: if the 1-minute spot was never pulled, "
+        "pull it first, then derive timeframes; if the vendor cleanly "
+        "returned no data for this symbol (windows settled EMPTY), "
+        "there is nothing to derive — no action needed"
+    )
+
+
+def test_months_bounded_absence_stays_plain_value_error(tmp_path: Path) -> None:
+    """T3 — the months-bounded arm (the heal-recall path) keeps plain
+    ``ValueError`` and is NEVER the typed no-source class: a months-scoped
+    absence says nothing about the whole partition (kills the
+    retype-both-arms mutant; DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001)."""
+    from brutex.data.timeframe_materialize import (
+        NoStored1mBarsError,
+        PrebuildKind,
+        materialize_lake_timeframes,
+    )
+
+    with pytest.raises(ValueError, match="in the requested months") as exc:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            kind=PrebuildKind.SPOT,
+            months=[(2030, 1)],
+        )
+    assert not isinstance(exc.value, NoStored1mBarsError)
 
 
 # ────────────────────────────────────────────────────────────────────────

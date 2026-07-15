@@ -75,14 +75,24 @@ zero store loads + zero audit reads; a repeat poll is an O(1) cache hit.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
+import json
+import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 import structlog
 
+from brutex.dashboard.composite_join import COMPOSITE_STATE_ABSENT, CompositeIndex
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
+from brutex.dashboard.oneclick_view import cascade_status_text
+from brutex.engine.cascade_join import (
+    CascadeJoin,
+    CascadeJoinError,
+    build_cascade_join,
+    cascade_report_path,
+)
 from brutex.engine.results_store import (
     VIX_FIELDS,
     ResultRow,
@@ -103,6 +113,7 @@ from brutex.ranking.presets import PRESET_NAMES, PRESETS, RankRecord, sort_by_pr
 _LOG = structlog.get_logger("brutex.dashboard.sweep_results_view")
 
 __all__ = [
+    "CASCADE_REPORT_MAX_BYTES",
     "DEFAULT_RANK_BY",
     "DEFAULT_TOP_N",
     "MAX_TOP_N",
@@ -112,10 +123,12 @@ __all__ = [
     "SNAPSHOT_ERA_UNKNOWN",
     "STORE_ERROR_PUBLIC_DETAIL",
     "SWEEPS_DIRNAME",
+    "CascadeJoinLoad",
     "RollupServe",
     "SweepLeaderboard",
     "SweepScan",
     "build_sweep_leaderboard",
+    "load_cascade_join_file",
     "load_sweep_scan",
     "load_sweep_scan_tree",
     "load_sweep_scan_via_rollup",
@@ -169,6 +182,131 @@ SNAPSHOT_ERA_AMBIGUOUS: Final[str] = "ambiguous"
 #: row's ``mask_bits`` popcount — the sweep enumerates exactly-k-of-bits masks).
 _EraKey = tuple[str, str, str, str, int]
 
+#: Hard byte cap on one cascade-report read (DEC-RESULTS-CASCADE-VERDICT-
+#: JOIN-001): a real report is a few KiB–MiB; an out-of-band multi-GB file
+#: fails closed as ``oversized`` WITHOUT being read whole (the
+#: ``lake_stats_manifest`` bounded-shard-read precedent).
+CASCADE_REPORT_MAX_BYTES: Final[int] = 16 * 1024 * 1024
+
+#: ``CascadeJoinLoad.state`` tokens (the /results-side degrade vocabulary).
+_CASCADE_LOAD_JOINED: Final[str] = "joined"
+_CASCADE_LOAD_ABSENT: Final[str] = "absent"
+_CASCADE_LOAD_UNREADABLE: Final[str] = "unreadable"
+_CASCADE_LOAD_MALFORMED: Final[str] = "malformed"
+_CASCADE_LOAD_OVERSIZED: Final[str] = "oversized"
+
+
+@dataclass(frozen=True, slots=True)
+class CascadeJoinLoad:
+    """One cascade-report file-load verdict for the ``/results`` join.
+
+    ``state`` ∈ ``joined | absent | unreadable | malformed | oversized``;
+    ``join`` is non-``None`` ONLY for ``joined``; ``token`` echoes the stat
+    token the load was memoised under (``None`` = uncached read).
+    ``absent`` is the byte-identity state: the caller emits ZERO new payload
+    keys (a no-report lake's ``/results`` payload is byte-identical to
+    pre-change — pinned).
+    """
+
+    join: CascadeJoin | None
+    state: str
+    token: str | None
+
+
+#: Single-entry cascade-join memo keyed by the report's stat token (the
+#: #1665 equity-memo precedent): ONE parse + ONE failed-load WARN per
+#: revision, never per poll. Guarded by ``_JOIN_MEMO_LOCK`` (poll threads).
+_JOIN_MEMO: CascadeJoinLoad | None = None
+_JOIN_MEMO_LOCK = threading.Lock()
+
+
+def _memo_get(token: str) -> CascadeJoinLoad | None:
+    """The memoised load for *token*, or ``None`` on a memo miss."""
+    with _JOIN_MEMO_LOCK:
+        memo = _JOIN_MEMO
+    if memo is not None and memo.token == token:
+        return memo
+    return None
+
+
+def _memo_put(load: CascadeJoinLoad) -> None:
+    """Store *load* as the single memo entry (token non-``None`` only)."""
+    global _JOIN_MEMO  # noqa: PLW0603 — the documented single-entry memo
+    with _JOIN_MEMO_LOCK:
+        _JOIN_MEMO = load
+
+
+def load_cascade_join_file(results_root: Path, *, token: str | None = None) -> CascadeJoinLoad:
+    """Load + flatten ``<results_root>/cascade/cascade-report.json`` for /results.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — the READ-time consumer of the ONE
+    :func:`brutex.engine.cascade_join.build_cascade_join` law (the top-100
+    writer consumes the same law in-memory). Guard map (each a NAMED state,
+    never a raise/500): missing file → ``absent`` (NO log — the ordinary
+    pre-cascade lake); any other :class:`OSError` → ``unreadable``;
+    ``size > CASCADE_REPORT_MAX_BYTES`` → ``oversized`` (the file is never
+    read whole); JSON/encoding/nesting damage or a structural
+    :class:`~brutex.engine.cascade_join.CascadeJoinError` → ``malformed``.
+
+    *token* is the report's ``cascade_report_revision`` stat token: a
+    non-``None`` token memoises the parsed load in the module's single-entry
+    memo, so a repeat poll pays ZERO parses and a failed load WARNs ONCE per
+    revision (never per poll); ``None`` (a probe outage / an unwired caller)
+    reads fresh and caches NOTHING (the ``lake_revision`` doctrine).
+    """
+    if token is not None:
+        memoised = _memo_get(token)
+        if memoised is not None:
+            return memoised
+    path = cascade_report_path(results_root)
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        load = CascadeJoinLoad(join=None, state=_CASCADE_LOAD_ABSENT, token=token)
+        if token is not None:
+            _memo_put(load)
+        return load
+    except OSError as exc:
+        return _failed_load(_CASCADE_LOAD_UNREADABLE, path, token, exc)
+    if size > CASCADE_REPORT_MAX_BYTES:
+        return _failed_load(
+            _CASCADE_LOAD_OVERSIZED,
+            path,
+            token,
+            ValueError(f"{size} bytes > the {CASCADE_REPORT_MAX_BYTES}-byte cap"),
+        )
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return _failed_load(_CASCADE_LOAD_UNREADABLE, path, token, exc)
+    try:
+        join = build_cascade_join(json.loads(raw))
+    except (ValueError, UnicodeDecodeError, RecursionError, CascadeJoinError) as exc:
+        # json.JSONDecodeError is a ValueError; a nesting bomb raises
+        # RecursionError; a structural report defect raises CascadeJoinError
+        # — every arm is the SAME honest "malformed" degrade.
+        return _failed_load(_CASCADE_LOAD_MALFORMED, path, token, exc)
+    load = CascadeJoinLoad(join=join, state=_CASCADE_LOAD_JOINED, token=token)
+    if token is not None:
+        _memo_put(load)
+    return load
+
+
+def _failed_load(state: str, path: Path, token: str | None, exc: BaseException) -> CascadeJoinLoad:
+    """One WARN + the memoised failed load (once per revision, never per poll)."""
+    _LOG.warning(
+        "sweep_results.cascade_report_load_failed",
+        state=state,
+        path=str(path),
+        error_type=type(exc).__name__,
+        error=str(exc),
+    )
+    load = CascadeJoinLoad(join=None, state=state, token=token)
+    if token is not None:
+        _memo_put(load)
+    return load
+
+
 #: The columns a caller may rank the leaderboard by. A strict allow-list (NOT
 #: free-form) so an unknown ``rank_by`` is a clean honest fall-back to the default,
 #: never an engine error reaching the page. These mirror
@@ -191,6 +329,28 @@ RANKABLE_COLUMNS: Final[tuple[str, ...]] = (
     "winning_trades",
     "losing_trades",
 )
+
+
+# ── R30 ranking-preset inert-axes disclosure ────────────────────────────────
+
+#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
+#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
+#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
+#: through to the next preset key, ultimately ``run_id`` ASC), surfaced on the
+#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
+#: axes discriminated (Golden Rule #10). Since
+#: DEC-RESULTS-CASCADE-VERDICT-JOIN-001 this is the STATIC WORST-CASE set: the
+#: ``composite_score`` axis ACTIVATES dynamically when the read-time composite
+#: index (:mod:`brutex.dashboard.composite_join` over the newest run's aggs
+#: sidecars) joined non-empty — the build then discloses the EFFECTIVE axes via
+#: ``SweepLeaderboard.inert_axes`` (``composite_score`` removed), closing the
+#: /results read-time half of HIGH #40; ``max_consecutive_losses`` stays inert
+#: (still not persisted anywhere readable per-row — the persist half is the
+#: named follow-up DEC-CASCADE-ROW-PERSIST-002).
+PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+
+#: The effective inert axes once the composite index joined non-empty.
+_INERT_AXES_COMPOSITE_ACTIVE: Final[tuple[str, ...]] = ("max_consecutive_losses",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +405,18 @@ class SweepLeaderboard:
         DEC-SWEEP-RESULTS-DEPTH-001, gap-register ruling 10). When set, the
         ordering came ENTIRELY from the preset; ``rank_by`` is echoed unchanged
         for the page's dropdown state but did NOT order the rows.
+    inert_axes
+        The EFFECTIVE preset-inert axes for THIS build
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``composite_score`` leaves
+        the set IFF the composite index joined non-empty, so the
+        ``?preset=composite`` axis is disclosed honestly ACTIVE for scored
+        rows); defaults to the full :data:`PRESET_INERT_AXES`.
+    cascade_join_meta, composite_join_meta, cascade_flagged
+        The ADDITIVE payload meta (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) —
+        each ``None`` when its loader did not run OR read the honest
+        ``absent`` state, keeping a no-report lake's payload BYTE-IDENTICAL
+        to pre-change (pinned). ``cascade_flagged`` counts the cascade-FAIL
+        rows on the RANKED page (the header chip — flagged, never excluded).
     """
 
     rows: tuple[dict[str, Any], ...]
@@ -260,17 +432,24 @@ class SweepLeaderboard:
     mixed_snapshot_eras: bool
     run_id_conflicts: int
     preset: str | None = None
+    inert_axes: tuple[str, ...] = PRESET_INERT_AXES
+    cascade_join_meta: dict[str, Any] | None = None
+    composite_join_meta: dict[str, Any] | None = None
+    cascade_flagged: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serialisable payload for the ``/api/v1/sweep/leaderboard`` route.
 
-        With no preset applied the payload is BYTE-IDENTICAL to the pre-preset
-        shape (no new keys — the absent/blank arm of gap-register ruling 10 is
+        With no preset applied AND no cascade/composite join meta the payload
+        is BYTE-IDENTICAL to the pre-preset shape (no new keys — the
+        absent/blank arm of gap-register ruling 10 + the
+        DEC-RESULTS-CASCADE-VERDICT-JOIN-001 no-report byte-identity are BOTH
         pinned by test). A preset-ranked payload gains exactly TWO additive
         keys: ``preset`` (the applied token) and ``preset_inert_axes`` (the
-        honest names of the :class:`~brutex.ranking.presets.RankRecord` axes
-        that are NOT persisted on :class:`~brutex.engine.results_store.ResultRow`
-        and were therefore constant-filled — see :func:`_preset_rank_record`).
+        EFFECTIVE inert axes of THIS build — see :attr:`inert_axes`). The
+        cascade/composite joins add their EMIT-ON-PRESENT meta keys
+        (``cascade_join`` / ``composite_join`` / ``cascade_flagged``) only
+        when the respective loader ran AND found something to report.
         """
         payload: dict[str, Any] = {
             "available": self.available,
@@ -288,7 +467,13 @@ class SweepLeaderboard:
         }
         if self.preset is not None:
             payload["preset"] = self.preset
-            payload["preset_inert_axes"] = list(PRESET_INERT_AXES)
+            payload["preset_inert_axes"] = list(self.inert_axes)
+        if self.cascade_join_meta is not None:
+            payload["cascade_join"] = dict(self.cascade_join_meta)
+        if self.composite_join_meta is not None:
+            payload["composite_join"] = dict(self.composite_join_meta)
+        if self.cascade_flagged is not None:
+            payload["cascade_flagged"] = self.cascade_flagged
         return payload
 
 
@@ -438,17 +623,7 @@ def _clamp_top_n(top_n: int) -> int:
 # THIN by design: every ordering law lives in brutex.ranking.presets (the ONE
 # preset home, CLAUDE.md §11 COMMON); this surface only VALIDATES the query
 # token and PROJECTS a persisted ResultRow onto the preset's RankRecord.
-
-#: The :class:`~brutex.ranking.presets.RankRecord` axes NOT persisted on
-#: :class:`~brutex.engine.results_store.ResultRow` — constant-filled by
-#: :func:`_preset_rank_record` so they are INERT for every row (ordering falls
-#: through to the next preset key, ultimately ``run_id`` ASC). Surfaced on the
-#: payload (``preset_inert_axes``) so a preset-ranked view never pretends those
-#: axes discriminated (Golden Rule #10): notably the ``composite`` preset
-#: currently orders by ``run_id`` alone — the recomputed composite lives in the
-#: (row ⋈ aggregate) top-100 artifact build, and joining the aggregate sidecars
-#: here is merge-integration work, NOT silently faked per-row values.
-PRESET_INERT_AXES: Final[tuple[str, ...]] = ("composite_score", "max_consecutive_losses")
+# (PRESET_INERT_AXES itself is declared above SweepLeaderboard — its default.)
 
 
 def resolve_preset_param(preset: str | None) -> str | None:
@@ -474,22 +649,28 @@ def resolve_preset_param(preset: str | None) -> str | None:
     raise ValueError(f"unknown ranking preset {token!r}; valid presets: {', '.join(PRESET_NAMES)}")
 
 
-def _preset_rank_record(row: ResultRow) -> RankRecord:
+def _preset_rank_record(
+    row: ResultRow, composite_of: Mapping[str, float] | None = None
+) -> RankRecord:
     """Project one persisted :class:`ResultRow` onto the preset rank inputs.
 
     The persisted full-precision metrics map 1:1 (NEVER rounded — CLAUDE.md §4;
-    raw floats, no coercion). The two :data:`PRESET_INERT_AXES` fields are NOT
-    persisted on ``ResultRow``: they are filled with the CONSTANT no-signal
-    values (``None`` composite — the presets module's honest "unscored" state —
-    and ``0`` consecutive losses), IDENTICAL for every row, so they can never
-    reorder anything; ties fall through to the store's ``run_id``-ASC law
-    inside :func:`~brutex.ranking.presets.sort_by_preset`. Constants are not
+    raw floats, no coercion). ``max_consecutive_losses`` is NOT persisted on
+    ``ResultRow``: it is filled with the CONSTANT no-signal ``0``, IDENTICAL
+    for every row, so it can never reorder anything; ties fall through to the
+    store's ``run_id``-ASC law inside
+    :func:`~brutex.ranking.presets.sort_by_preset`. ``composite_score``
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) reads the JOINED ranking composite
+    from *composite_of* (the newest run's aggs-sidecar index) when supplied —
+    an unscored row (or ``composite_of=None``, every pre-change caller) keeps
+    the presets module's honest ``None`` "unscored" state (the existing
+    None-after-scored ordering law — never a fabricated 0). Constants are not
     fabricated per-row data — they are never displayed, only ordering-inert.
     """
     return RankRecord(
         run_id=row.run_id,
         max_drawdown_pct=row.max_drawdown_pct,
-        composite_score=None,
+        composite_score=None if composite_of is None else composite_of.get(row.run_id),
         max_consecutive_losses=0,
         profit_factor=row.profit_factor,
         win_rate=row.win_rate,
@@ -934,17 +1115,68 @@ def load_sweep_scan_via_rollup(lake_root: Path, *, rev: str, log_gate: LogGate) 
     )
 
 
-# ═══ P2 VERDICT-JOIN SEAM (gap-register ruling 10 — documented, NOT built) ═══
-# P2 (run-core) delivers gap G8 as a PURE verdict-marker function in a
-# P2-owned module: it marks stage3-ungated / cascade-rejected rows so /results
-# can never co-rank them silently as institutional winners. At
-# merge-integration, P3 IMPORTS that function HERE and folds its marker into
-# `_project_row` as an additive per-row key — exactly the `snapshot_era`
-# pattern (marker, never exclusion). Until that lands, rows carry NO verdict
-# field: absence means "not yet joined", never a fabricated verdict (Golden
-# Rule #1). P4 consumes the JSON only. DO NOT implement the verdict logic in
-# this module — it is P2's zone; only the import + per-row fold belong here.
+# ═══ CASCADE VERDICT JOIN (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — BUILT) ═══
+# The former P2 verdict-join seam is now implemented: the Stage-4 cascade's
+# per-candidate verdicts join onto /results rows by EXACT run_id equality
+# (the Rule-4 identity — a verdict can only attach to the byte-identical run
+# it was judged for; the pool-relative context is disclosed via the payload's
+# cascade_join.sweep_id meta + the provisional/pool honesty stamps), folded
+# into the row projection as ADDITIVE EMIT-ON-PRESENT keys — exactly the
+# `snapshot_era` pattern (marker, never exclusion: a cascade-FAILED row stays
+# RANKED and is red-flagged client-side). Absence still means "not judged by
+# the latest cascade", never a fabricated verdict (Golden Rule #1).
 # ═════════════════════════════════════════════════════════════════════════════
+
+
+def _cascade_row_keys(run_id: str, load: CascadeJoinLoad | None) -> dict[str, Any]:
+    """One row's ADDITIVE cascade keys (EMIT-ON-PRESENT — {} when unjoined).
+
+    A matched verdict emits ``cascade_status`` (``pass | provisional_pass |
+    fail``) + the server-built ``cascade_status_text`` (the ONE
+    :func:`~brutex.dashboard.oneclick_view.cascade_status_text` builder — no
+    status prose in JS) + ``cascade_provisional``, plus ``cascade_composite``
+    (pass only — the CASCADE composite, labelled "Cascade score" client-side,
+    never conflated with the ranking ``composite_score``),
+    ``cascade_rejected_at``/``cascade_detail`` (fail only, verbatim) and
+    ``cpcv_pass_pct`` (``rate * 100.0``, exact float — only when measured).
+    A DUPLICATE candidate_id emits ONLY the status text ("not validated ·
+    duplicate verdict" — ambiguous evidence, nothing else displayed); an
+    unmatched row emits NOTHING (the client renders "not validated" from the
+    payload meta's ``joined`` state).
+    """
+    if load is None or load.join is None or load.state != _CASCADE_LOAD_JOINED:
+        return {}
+    join = load.join
+    if run_id in join.ambiguous_ids:
+        return {
+            "cascade_status_text": cascade_status_text(
+                "not_validated", reason="duplicate_candidate_id"
+            )
+        }
+    verdict = join.by_candidate.get(run_id)
+    if verdict is None:
+        return {}
+    status = ("provisional_pass" if verdict.provisional else "pass") if verdict.passed else "fail"
+    keys: dict[str, Any] = {
+        "cascade_status": status,
+        "cascade_status_text": cascade_status_text(
+            status, rejected_at=verdict.rejected_at, provisional=verdict.provisional
+        ),
+        "cascade_provisional": verdict.provisional,
+    }
+    if verdict.passed:
+        if verdict.cascade_composite is not None:
+            keys["cascade_composite"] = verdict.cascade_composite
+    else:
+        if verdict.rejected_at is not None:
+            keys["cascade_rejected_at"] = verdict.rejected_at
+        if verdict.detail:
+            keys["cascade_detail"] = verdict.detail
+    if verdict.cpcv_pass_rate is not None:
+        # The display alias — an EXACT float unit projection (rate * 100.0),
+        # never a rounding (CLAUDE.md §4); absent when unmeasured ⇒ "—".
+        keys["cpcv_pass_pct"] = verdict.cpcv_pass_rate * 100.0
+    return keys
 
 
 def build_sweep_leaderboard(
@@ -957,6 +1189,8 @@ def build_sweep_leaderboard(
     top_n: int = DEFAULT_TOP_N,
     scan: SweepScan | None = None,
     preset: str | None = None,
+    cascade: CascadeJoinLoad | None = None,
+    composite: CompositeIndex | None = None,
 ) -> SweepLeaderboard:
     """Build the ranked sweep leaderboard for the ``/results`` page.
 
@@ -997,6 +1231,21 @@ def build_sweep_leaderboard(
         ``run_id``-ASC deterministic ties, the exact ``ResultsStore.top_k``
         two-pass idiom); an unknown token raises ``ValueError`` naming the
         valid values (the route maps it to a clean 400).
+    cascade
+        The cascade-report load (:func:`load_cascade_join_file`) or ``None``
+        (every pre-change caller — byte-identical payload). A ``joined``
+        load annotates matched rows (EMIT-ON-PRESENT keys, see
+        :func:`_cascade_row_keys`) + emits the payload meta; an ``absent``
+        load emits NOTHING (byte-identity); a failed load emits ONLY the
+        meta naming its state (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 —
+        annotation, never exclusion/rerank).
+    composite
+        The newest run's ranking-composite index
+        (:func:`brutex.dashboard.composite_join.load_composite_index`) or
+        ``None``. A non-empty ``joined`` index feeds every scored row's
+        ``composite_score`` (display) AND activates the preset composite
+        axis honestly (:attr:`SweepLeaderboard.inert_axes`); ``absent``
+        emits nothing.
 
     Returns
     -------
@@ -1026,6 +1275,14 @@ def build_sweep_leaderboard(
             "filtered leaderboards must use the legacy full scan"
         )
 
+    # The joined ranking-composite map (DEC-RESULTS-CASCADE-VERDICT-JOIN-001)
+    # — non-None ONLY when the index joined non-empty: it then feeds BOTH the
+    # per-row display key and the preset composite axis (the honest dynamic
+    # inert-axes disclosure).
+    composite_of: Mapping[str, float] | None = None
+    if composite is not None and composite.state == "joined" and composite.by_run_id:
+        composite_of = composite.by_run_id
+
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
     ]
@@ -1039,14 +1296,60 @@ def build_sweep_leaderboard(
         # THIN preset adapter (ruling 10): the ENTIRE ordering law — key,
         # direction, run_id-ASC tie pre-sort — lives in brutex.ranking.presets;
         # this call site only projects the persisted rows (raw full-precision
-        # values, see _preset_rank_record) and never re-derives a ranking rule.
+        # values, see _preset_rank_record — the composite axis reads the
+        # joined index when one exists) and never re-derives a ranking rule.
         ordered = list(
-            sort_by_preset(filtered, preset=PRESETS[resolved_preset], record_of=_preset_rank_record)
+            sort_by_preset(
+                filtered,
+                preset=PRESETS[resolved_preset],
+                record_of=lambda r: _preset_rank_record(r, composite_of),
+            )
         )
-    rows = tuple(
-        _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
-        for rank, r in enumerate(ordered[:depth], start=1)
-    )
+    rows_list: list[dict[str, Any]] = []
+    matched_rows = 0
+    flagged = 0
+    for rank, r in enumerate(ordered[:depth], start=1):
+        projected = _project_row(r, rank, snapshot_era=_row_snapshot_era(r, scan.eras))
+        cascade_keys = _cascade_row_keys(r.run_id, cascade)
+        if cascade_keys:
+            projected.update(cascade_keys)
+        if "cascade_status" in cascade_keys:
+            matched_rows += 1
+            if cascade_keys["cascade_status"] == "fail":
+                flagged += 1
+        if composite_of is not None:
+            score = composite_of.get(r.run_id)
+            if score is not None:
+                # The RANKING composite (label "Composite") — distinct from
+                # the cascade's own composite (label "Cascade score").
+                projected["composite_score"] = score
+        rows_list.append(projected)
+    rows = tuple(rows_list)
+
+    # EMIT-ON-PRESENT meta (byte-identity law): an ``absent`` load/index —
+    # or an un-run loader — contributes NOTHING; every other state is named.
+    cascade_meta: dict[str, Any] | None = None
+    flagged_out: int | None = None
+    if cascade is not None and cascade.state != _CASCADE_LOAD_ABSENT:
+        join = cascade.join
+        cascade_meta = {
+            "state": cascade.state,
+            "sweep_id": None if join is None else join.sweep_id,
+            "n_input": None if join is None else join.n_input,
+            "n_survived": None if join is None else join.n_survived,
+            "matched_rows": matched_rows,
+            "skipped_groups": 0 if join is None else join.skipped_groups,
+            "skipped_verdicts": 0 if join is None else join.skipped_verdicts,
+            "duplicate_ids": 0 if join is None else len(join.ambiguous_ids),
+        }
+        flagged_out = flagged
+    composite_meta: dict[str, Any] | None = None
+    if composite is not None and composite.state != COMPOSITE_STATE_ABSENT:
+        composite_meta = {
+            "state": composite.state,
+            "run_id": composite.run_id,
+            "scored_rows": composite.scored_rows,
+        }
 
     return SweepLeaderboard(
         rows=rows,
@@ -1065,4 +1368,10 @@ def build_sweep_leaderboard(
         mixed_snapshot_eras=len(scan.snapshot_hashes) > 1,
         run_id_conflicts=scan.run_id_conflicts,
         preset=resolved_preset,
+        inert_axes=(
+            _INERT_AXES_COMPOSITE_ACTIVE if composite_of is not None else PRESET_INERT_AXES
+        ),
+        cascade_join_meta=cascade_meta,
+        composite_join_meta=composite_meta,
+        cascade_flagged=flagged_out,
     )

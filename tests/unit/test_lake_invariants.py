@@ -495,15 +495,21 @@ class TestScanFindings:
         assert report.findings == ()
         assert report.files_scanned == 1
 
-    def test_missing_price_columns_file_is_skipped(self, tmp_path: Path) -> None:
-        """A bar file WITHOUT the OHLC columns is honestly SKIPPED (not dup-scanned).
+    def test_missing_price_columns_file_emits_alien_finding(self, tmp_path: Path) -> None:
+        """A bar file WITHOUT the OHLC columns is SKIPPED and now carries a FINDING.
 
-        DEC-STORED-DATA-VALIDATION-001 behavior change, documented in the
-        module docstring: the scan now reads BAR_SCAN_COLUMNS (timestamp +
-        OHLC) in ONE pass; a file violating the canonical 7-column schema
-        cannot satisfy the read and is counted ``files_skipped`` with the
-        ``lake.invariant.scan_skip`` WARNING — never silently ignored.
+        DEC-ALIEN-SCHEMA-READ-HEAL-001 behavior change (supersedes the
+        DEC-STORED-DATA-VALIDATION-001 bare-WARN pin this test previously
+        carried): a file violating the canonical 7-column schema cannot
+        satisfy the BAR_SCAN_COLUMNS read — it is still counted
+        ``files_skipped``, but the skip now emits a real
+        :class:`SchemaAlienFile` finding (the healer quarantines it) with the
+        ``lake.invariant.schema_alien_file`` WARNING instead of the
+        finding-less ``scan_skip`` that left the schema-poisoned file in
+        place forever while the dashboard read side skipped it per poll.
         """
+        from brutex.data.lake_invariants import SchemaAlienFile
+
         dest = _dest(tmp_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         pl.DataFrame({"timestamp": _series([_ts(1)])}).write_parquet(dest)
@@ -511,7 +517,13 @@ class TestScanFindings:
             report = scan_lake_invariants(tmp_path)
         assert report.files_scanned == 0
         assert report.files_skipped == 1
-        assert len(_events(logs, "lake.invariant.scan_skip")) == 1
+        aliens = [f for f in report.findings if isinstance(f, SchemaAlienFile)]
+        assert len(aliens) == 1
+        assert aliens[0].path == dest
+        assert aliens[0].coords is not None
+        assert "missing column(s)" in aliens[0].reason
+        assert len(_events(logs, "lake.invariant.schema_alien_file")) == 1
+        assert not _events(logs, "lake.invariant.scan_skip")
 
     def test_utc_month_rule_no_false_flag_1day(self, tmp_path: Path) -> None:
         # A derived 1day bar is stamped midnight IST = 18:30 UTC of the PREVIOUS
@@ -703,6 +715,155 @@ class TestScanBounds:
         assert report.findings == ()
         assert report.option_files_scanned == 0
         assert calls == []
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The per-series streaming walk (DEC-LAKE-INVARIANTS-PREINDEX-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestStreamingWalk:
+    """Walk-equivalence pins: the ``bars/`` tree is streamed ONE SERIES AT A
+    TIME (the series key IS the directory structure) with the REPORT byte-
+    compatible with the pre-streaming whole-tree pre-index scanner — same
+    counters, same finding order, same ``first_skipped_path`` law, same
+    scope semantics."""
+
+    def test_first_skipped_prefers_parse_failure_over_read_failure(self, tmp_path: Path) -> None:
+        """The pre-streaming scanner noted every PATH-parse failure during
+        its whole-tree pre-index pass — BEFORE any read skip anywhere — so a
+        parse skip beats a read skip even when the walk visits the unreadable
+        file FIRST (CASH sorts before INDEX here; a naive walk-order note
+        would name the unreadable file)."""
+        garbage = _dest(tmp_path, segment="CASH", symbol="AAA")
+        garbage.parent.mkdir(parents=True, exist_ok=True)
+        garbage.write_bytes(b"not a parquet file at all")
+        stray = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "no-year" / "06.parquet"
+        _plant_raw(stray, [_ts(1)])
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 0
+        assert report.files_skipped == 2
+        assert report.first_skipped_path == str(stray)
+
+    def test_empty_and_stray_dirs_streamed_past(self, tmp_path: Path) -> None:
+        """Empty interval/year dirs, a non-dir at an intermediate level, and
+        an off-depth parquet are all invisible — exactly like the old
+        fixed-depth glob — and never crash the walk."""
+        _write_bars(tmp_path, [_bar(_ts(1))])
+        (tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "5minute").mkdir(parents=True)
+        (tmp_path / "bars" / "NSE" / "INDEX" / "BANKNIFTY" / "1minute" / "2024").mkdir(parents=True)
+        (tmp_path / "bars" / "NSE" / "INDEX" / "stray.txt").write_text("x", encoding="utf-8")
+        loose = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "loose.parquet"
+        loose.write_bytes(b"junk")  # interval depth — below the */*.parquet leaf
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 1
+        assert report.files_skipped == 0
+        assert report.series_scanned == 1
+        assert report.findings == ()
+
+    def test_scoped_out_month_still_feeds_drift_detection(self, tmp_path: Path) -> None:
+        """``symbol_dirs`` is fed on PARSE, not on read: a drifted legacy dir
+        whose ONLY file lies OUTSIDE the L2 months scope still surfaces
+        ``LegacyKeyDrift`` (the pre-index fed it before the scope check)."""
+        _write_bars(tmp_path, [_bar(_ts(1))], segment="CASH", symbol="M&M")
+        _write_bars(tmp_path, [_bar(_ts(1, month=7))], segment="CASH", symbol="NSE-M&M")
+        report = scan_lake_invariants(tmp_path, months={(2024, 6)})
+        assert report.files_scanned == 1  # the July drifted file was never read
+        drifts = [f for f in report.findings if isinstance(f, LegacyKeyDrift)]
+        assert len(drifts) == 1
+        assert drifts[0].drifted_symbol == "NSE-M&M"
+
+    def test_multi_series_order_and_counters_preserved(self, tmp_path: Path) -> None:
+        """Findings arrive in series-tuple order (component-sorted walk ≡ the
+        old ``sorted(per_series)``), numeric month order within a series."""
+        _plant_raw(_dest(tmp_path, symbol="NIFTY"), [_ts(1), _ts(1)])
+        _plant_raw(_dest(tmp_path, symbol="BANKNIFTY"), [_ts(2), _ts(2)])
+        _plant_raw(_dest(tmp_path, symbol="BANKNIFTY", month=7), [_ts(3, month=7), _ts(3, month=7)])
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 3
+        assert report.series_scanned == 2
+        dups = [f for f in report.findings if isinstance(f, IntraFileDup)]
+        assert [d.path for d in dups] == [
+            _dest(tmp_path, symbol="BANKNIFTY"),
+            _dest(tmp_path, symbol="BANKNIFTY", month=7),
+            _dest(tmp_path, symbol="NIFTY"),
+        ]
+
+    def test_child_dir_stat_fault_keeps_siblings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fold (MINOR): ONE child's ``is_dir()`` OSError (EACCES /
+        EIO / ESTALE — the errnos 3.12 pathlib re-raises) skips THAT entry
+        only, never the whole level — the reviewer's repro: EIO on sibling B
+        must yield [A, C] (pre-fix the whole-comprehension guard returned
+        ``[]``, silently dropping the entire level; the old glob dropped only
+        the offending entry)."""
+        import errno
+
+        parent = tmp_path / "bars"
+        for name in ("A", "B", "C"):
+            (parent / name).mkdir(parents=True)
+        real_is_dir = Path.is_dir
+
+        def flaky_is_dir(self: Path, **kwargs: bool) -> bool:
+            if self.name == "B" and self.parent == parent:
+                raise OSError(errno.EIO, "Input/output error", str(self))
+            return real_is_dir(self, **kwargs)
+
+        monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+        assert li._child_dirs(parent, None) == [parent / "A", parent / "C"]
+        # The name filter still applies over the surviving entries.
+        assert li._child_dirs(parent, "C") == [parent / "C"]
+
+    def test_child_dirs_vanished_parent_yields_empty(self, tmp_path: Path) -> None:
+        """The whole-parent-listing guard is untouched by the per-child fold:
+        a vanished parent still yields ``[]`` (the old ``base.exists()``
+        guard generalised per level)."""
+        assert li._child_dirs(tmp_path / "bars" / "gone", None) == []
+
+    def test_streaming_resident_is_per_series_not_per_lake(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mutant-killing memory-shape pin: the scan never materialises an
+        all-series index — while series B is being read, series A's candidate
+        list has already been dropped. Proven via a read spy that inspects
+        the live candidate objects the generator yielded (gc-refcount-free:
+        the spy records which series' lists are still referenced)."""
+        import gc
+        import weakref
+        from collections.abc import Iterator
+
+        class _TrackedList(list[Path]):  # a list SUBCLASS is weakref-able
+            pass
+
+        _write_bars(tmp_path, [_bar(_ts(1))], symbol="AAA")
+        _write_bars(tmp_path, [_bar(_ts(2))], symbol="BBB")
+        refs: list[weakref.ref[_TrackedList]] = []
+        real_iter = li._iter_series_candidates
+
+        def spying_iter(lake_root: Path, **filters: str | None) -> Iterator[list[Path]]:
+            for candidates in real_iter(lake_root, **filters):
+                tracked = _TrackedList(candidates)
+                refs.append(weakref.ref(tracked))
+                yield tracked
+
+        monkeypatch.setattr(li, "_iter_series_candidates", spying_iter)
+        alive_during_second: list[int] = []
+        real_read = li._read_key_columns
+
+        def spy(path: Path, columns: Sequence[str]) -> pl.DataFrame:
+            if "BBB" in str(path):
+                gc.collect()
+                alive_during_second.append(sum(1 for r in refs if r() is not None))
+            return real_read(path, columns)
+
+        monkeypatch.setattr(li, "_read_key_columns", spy)
+        report = scan_lake_invariants(tmp_path)
+        assert report.files_scanned == 2
+        assert report.series_scanned == 2
+        # While series BBB was being read, ONLY its own candidate list was
+        # alive — AAA's was already collected (streaming, not pre-indexed).
+        assert alive_during_second == [1]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1360,36 +1521,69 @@ class TestOptionForeignScan:
         (both empirically verified) — so a newline/ESC series name forged
         log lines through ``error=`` while the paired ``path=`` field was
         already escaped (the round-16 ``partition_error`` channel). The
-        ``error=`` field now rides ``repr()`` at the glob-loop site."""
+        ``error=`` field now rides ``repr()`` at the glob-loop site.
+
+        MERGE RECONCILE (DEC-ALIEN-SCHEMA-READ-HEAL-001 ∪
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): a keyless VALID parquet — the
+        original fixture — is now the deterministic alien-schema class and
+        emits a :class:`SchemaAlienFile` finding whose ``partition`` payload
+        rides the SAME repr() escape; the glob-loop ``scan_skip`` else-arm
+        keeps the repr()'d ``error=`` for a genuinely unreadable file."""
         import pyarrow as pa
         import pyarrow.parquet as pq
+        from brutex.data.lake_invariants import SchemaAlienFile
 
         bad = tmp_path / "options" / "SER\x1b\nIES" / "2024-06.parquet"
         bad.parent.mkdir(parents=True, exist_ok=True)
-        # A VALID parquet with neither key column: the 2-key-column read
-        # raises ColumnNotFoundError whose message embeds the raw path.
+        # A VALID parquet with neither key column: the alien-schema class
+        # (the 2-key-column read raises ColumnNotFoundError whose message
+        # embeds the raw path; the footer probe proves the columns missing).
         pq.write_table(pa.table({"x": pa.array([1], type=pa.int64())}), bad)
+        # A footer-corrupt sibling: NOT the alien class — the plain
+        # transient-tolerant scan_skip with the repr()'d error payload.
+        corrupt = bad.parent / "2024-07.parquet"
+        corrupt.write_bytes(b"not a parquet file at all")
         with capture_logs() as logs:
             report = scan_lake_invariants(tmp_path)
-        assert report.findings == ()
-        assert report.option_files_skipped == 1
+        (alien,) = report.findings
+        assert isinstance(alien, SchemaAlienFile)
+        assert alien.path == bad
+        assert alien.series == "SER\x1b\nIES"  # RAW dataclass value (machine surface)
+        assert report.option_files_skipped == 2
+        (alien_event,) = _events(logs, "lake.invariant.schema_alien_file")
+        partition = alien_event["partition"]
+        assert isinstance(partition, str)
+        # Pre-fix class: the raw ESC + newline from the series name would
+        # ride into the rendered payload — repr()-escaped, never dropped.
+        assert "\x1b" not in partition
+        assert "\n" not in partition
+        assert "\\x1b" in partition
         (skip,) = _events(logs, "lake.invariant.scan_skip")
+        assert skip["path"] == repr(str(corrupt))
         error = skip["error"]
         assert isinstance(error, str)
-        # Pre-fix: the raw ESC + newline from the path rode into the payload.
         assert "\x1b" not in error
         assert "\n" not in error
-        # The path IS in the message — escaped by repr(), never dropped.
-        assert "\\x1b" in error
+        # repr()-wrapped: a str repr always renders quoted.
+        assert error.startswith(("'", '"'))
 
     def test_canonical_sibling_scan_skip_error_payload_repr_guarded(self, tmp_path: Path) -> None:
         """The round-17 twin for the TARGETED canonical-sibling read
         (``_canonical_option_keys``): an unreadable July sibling inside a
         newline/ESC-named series dir renders its read-error message
-        ``repr()``-escaped on BOTH ``scan_skip`` emissions (the glob loop's
-        and the targeted read's), and the finding still abstains honestly."""
+        ``repr()``-escaped on the targeted read's ``scan_skip``, and the
+        finding still abstains honestly.
+
+        MERGE RECONCILE (DEC-ALIEN-SCHEMA-READ-HEAL-001 ∪
+        DEC-LAKE-HEAL-OPTIONS-FOREIGN-001): the GLOB-loop encounter with the
+        keyless July file now emits a :class:`SchemaAlienFile` finding (no
+        glob-loop ``scan_skip``); the targeted sibling read keeps the plain
+        repr()-escaped ``scan_skip`` — the alien classification is a
+        glob-loop-only concern (the targeted read abstains, never
+        quarantines)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
+        from brutex.data.lake_invariants import SchemaAlienFile
 
         series = tmp_path / "options" / "SER\x1b\nIES2"
         _plant_option_raw(
@@ -1404,9 +1598,12 @@ class TestOptionForeignScan:
         foreigns = [f for f in report.findings if isinstance(f, OptionForeignMonthRows)]
         assert len(foreigns) == 1
         assert foreigns[0].overlap_rows is None  # honest abstain preserved
+        aliens = [f for f in report.findings if isinstance(f, SchemaAlienFile)]
+        assert [a.path for a in aliens] == [july]  # the glob-loop arm
         skips = _events(logs, "lake.invariant.scan_skip")
-        # One from the main glob loop, one from the targeted sibling read.
-        assert [s["path"] for s in skips] == [repr(str(july))] * 2
+        # ONLY the targeted sibling read skips now (the glob loop emitted the
+        # alien finding for the keyless file instead).
+        assert [s["path"] for s in skips] == [repr(str(july))]
         for skip in skips:
             error = skip["error"]
             assert isinstance(error, str)
@@ -2143,6 +2340,7 @@ class TestCensusToDict:
             "overlap_files",
             "drift_dirs",
             "price_files",
+            "alien_files",
         }
 
     def test_stats_and_sweep_folded(self, tmp_path: Path) -> None:

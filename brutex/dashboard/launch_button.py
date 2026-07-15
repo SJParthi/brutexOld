@@ -191,8 +191,12 @@ LOCKED_TOP: Final[int] = 20
 #: Worker count exported to the detached CLI process (CLAUDE.md §8 envelope).
 LOCKED_SWEEP_WORKERS: Final[str] = "8"
 
-#: Rank-region byte budget exported to the child (audit delta, W07_m4_oom_table:
-#: the divisor=1 worker OOM was live-proven and the 1 GiB arm bit-identical).
+#: Rank-region byte budget exported to the child. The divisor=1 worker-OOM gap
+#: this pin originally mitigated (audit delta, W07_m4_oom_table — live-proven,
+#: 1 GiB arm bit-identical) is CLOSED by DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001
+#: (MIGRATION.md #1671 — the engine now divides the derived budget across
+#: workers itself); this 1 GiB export REMAINS a deliberate PER-WORKER pin,
+#: passed undivided per the #1352 env-override contract.
 #: Verified against main's real env name (`sweep_mem_budget.MEM_BUDGET_ENV`) and
 #: its fail-loud positive-int parser (`resolve_mem_budget_bytes` accepts this
 #: literal).
@@ -212,8 +216,14 @@ K6_FOLLOWON_NOTE: Final[str] = "k=6 runs as a documented follow-on delta run"
 #: implies 21 productive timeframes.
 GRID_HONESTY_NOTE: Final[str] = "20 trade-bearing TFs + 1day (no trades by design)"
 
-#: The honest futures-card dependency note shown while the alias is absent.
-FUTURES_DEPENDENCY_NOTE: Final[str] = "futures layer not merged yet — PR #1264"
+#: The honest futures-card note shown while the alias is scope-refused
+#: (DEC-ENGINE-SPOT-ONLY-001 — the pre-flip "PR #1264 not merged yet" note
+#: became FALSE the day the alias layer merged; the card is now disabled
+#: because the engine is spot-only, and the probe's dynamic reason carries
+#: the classifier's own law citation alongside this note).
+FUTURES_DEPENDENCY_NOTE: Final[str] = (
+    "futures track retired from engine scope — DEC-ENGINE-SPOT-ONLY-001 (the engine is spot-only)"
+)
 
 #: The whole-series futures symbol PR #1264's alias layer resolves.
 FUTURES_SYMBOL: Final[str] = "NSE-NIFTY-FUT"
@@ -420,10 +430,12 @@ def probe_futures_alias() -> FuturesAvailability:
 
     Calls the REAL scope classifier
     (:func:`brutex.universe.classify_engine_sweep_target`) at request time —
-    never a hardcoded assumption. On main (pre-#1264) the alias is refused;
-    the moment PR #1264's alias layer merges (+ dashboard restart) this reads
-    available with zero code change here. A missing/reshaped classifier
-    (guarded import) degrades to "unavailable", never a crash.
+    never a hardcoded assumption. Under DEC-ENGINE-SPOT-ONLY-001 the alias is
+    scope-refused (the engine is spot-only), so this reads unavailable with
+    the classifier's own law citation; were the scope law ever re-widened by
+    a future DEC, this would read available with zero code change here. A
+    missing/reshaped classifier (guarded import) degrades to "unavailable",
+    never a crash.
     """
     try:
         universe = importlib.import_module("brutex.universe")

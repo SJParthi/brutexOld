@@ -21,9 +21,111 @@ from brutex.data.errors import ResampleInputError
 from brutex.data.price_sanity import (
     PRICE_SANITY_COLUMNS,
     count_price_violations,
+    price_row_insane,
     price_violation_expr,
     validate_frame_price_sanity,
 )
+from hypothesis import given
+from hypothesis import strategies as st
+
+
+class TestPriceRowInsaneScalar:
+    """The scalar :func:`price_row_insane` — the twin of :func:`price_violation_expr`."""
+
+    def test_clean_row_is_sane(self) -> None:
+        assert price_row_insane(*_CLEAN) is False
+
+    def test_degenerate_flat_row_is_sane(self) -> None:
+        assert price_row_insane(50.0, 50.0, 50.0, 50.0) is False
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param((0.0, 101.0, 0.0, 100.5), id="zero-open-low"),
+            pytest.param((100.0, 101.0, 99.0, 0.0), id="zero-close"),
+            pytest.param((-5.0, -1.0, -10.0, -2.0), id="negative-but-ordered"),
+            pytest.param((100.0, 1.0, 50.0, 100.5), id="high-below-low"),
+            pytest.param((102.0, 101.0, 99.0, 100.5), id="open-above-high"),
+            pytest.param((98.0, 101.0, 99.0, 100.5), id="open-below-low"),
+            pytest.param((100.0, 101.0, 99.0, 102.0), id="close-above-high"),
+            pytest.param((100.0, 101.0, 99.0, 98.0), id="close-below-low"),
+            pytest.param((None, 101.0, 99.0, 100.5), id="null-open"),
+            pytest.param((100.0, None, 99.0, 100.5), id="null-high"),
+            pytest.param((100.0, 101.0, None, 100.5), id="null-low"),
+            pytest.param((100.0, 101.0, 99.0, None), id="null-close"),
+        ],
+    )
+    def test_each_violation_kind_is_insane(
+        self, row: tuple[float | None, float | None, float | None, float | None]
+    ) -> None:
+        assert price_row_insane(*row) is True
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_nan_price_is_insane_in_each_field(self, field: int) -> None:
+        """The scalar NaN arm (round-2 refuter): a NaN price in ANY field is insane.
+
+        DELIBERATE scalar-vs-vector asymmetry — the vectorized
+        ``price_violation_expr`` is NaN-blind (every NaN comparison is False),
+        but the engine's CandleBar constructor raises decimal.InvalidOperation
+        on NaN, so without this arm the dashboard would SERVE what the engine
+        REFUSES.
+        """
+        row: list[float] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = float("nan")
+        assert price_row_insane(*row) is True
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_str_price_is_insane_in_each_field_never_raises(self, field: int) -> None:
+        """Non-numeric guard (round-4 fold): a str price cell (DuckDB
+        union_by_name VARCHAR promotion — lake writers never produce it) is
+        INSANE, never a TypeError — pre-fix ``math.isnan(str)`` raised through
+        screen_rows into a /db page 500."""
+        row: list[object] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = "101.5"
+        assert price_row_insane(*row) is True  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("field", [0, 1, 2, 3], ids=["open", "high", "low", "close"])
+    def test_bool_price_is_insane_in_each_field(self, field: int) -> None:
+        """A bool "price" is junk (round-4 fold): ``isinstance(True, int)`` is
+        True, so without the explicit bool exclusion ``True`` would coerce to a
+        1.0 price — deliberately classified insane instead (documented in the
+        docstring)."""
+        row: list[object] = [100.0, 101.0, 99.0, 100.5]
+        row[field] = True
+        assert price_row_insane(*row) is True  # type: ignore[arg-type]
+
+    # NaN is DELIBERATELY excluded from this parity pin's input space
+    # (allow_nan=False): the scalar is STRICTER on NaN by design (see
+    # price_row_insane's deliberate-asymmetry note) — outcome-parity holds
+    # because the engine refuses NaN downstream at CandleBar construction.
+    @given(
+        rows=st.lists(
+            st.tuples(
+                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
+                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
+                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
+                st.one_of(st.none(), st.floats(-1e6, 1e6, allow_nan=False, allow_infinity=False)),
+            ),
+            min_size=1,
+            max_size=25,
+        )
+    )
+    def test_scalar_equals_vector_row_wise(
+        self, rows: list[tuple[float | None, float | None, float | None, float | None]]
+    ) -> None:
+        """ANTI-DIVERGENCE (scalar==vector): the scalar twin matches the expr row-wise."""
+        frame = pl.DataFrame(
+            {
+                "open": [r[0] for r in rows],
+                "high": [r[1] for r in rows],
+                "low": [r[2] for r in rows],
+                "close": [r[3] for r in rows],
+            }
+        )
+        vector = frame.select(price_violation_expr().alias("bad")).get_column("bad").to_list()
+        scalar = [price_row_insane(*r) for r in rows]
+        assert scalar == vector
+
 
 _T0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
 

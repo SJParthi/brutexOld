@@ -41,8 +41,16 @@
 #   c. Check that the `CI OK (aggregate gate)` check run is success.
 #   d. Check GitHub mergeability — refuse `dirty` (conflict) / `behind`
 #      (stale base) / `mergeable == false` (DEC-AUTOMERGE-SAFETY-001 / G1,
-#      per docs/MERGE_READINESS_GUARANTEE.md §3).
-#   e. Squash-merge + delete branch + post audit comment.
+#      per docs/MERGE_READINESS_GUARANTEE.md §3). Since DEC-MERGE-QUEUE-001
+#      (MIGRATION.md #1784) `blocked` is tolerated IFF a merge_queue rule is
+#      live-detected on main (queue-normal for a green PR); otherwise it
+#      refuses exactly as before.
+#   e. QUEUE-AWARE merge (DEC-MERGE-QUEUE-001): first attempt to ENABLE
+#      auto-merge (squash) — on a merge-queue-ruled main that ENQUEUES the
+#      PR and the queue completes the merge; when enabling is not applicable
+#      (no queue + repo auto-merge disallowed, or the PR is already clean)
+#      fall back to the pre-queue direct squash-merge + delete branch +
+#      post audit comment.
 #
 # If any precondition fails the workflow exits cleanly — never
 # half-merges.
@@ -104,7 +112,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout the BASE repo's trusted tree (for pre-merge-check.sh)
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # DEC-CI-FORK-PR-HARDEN-001: the rollup-gate step below executes
           # scripts/ci/pre-merge-check.sh. Pin the checkout to the base
@@ -449,12 +457,42 @@ jobs:
           fi
           case "${state}" in
             dirty|behind|blocked|unknown)
+              # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): `blocked` becomes
+              # the NORMAL state of a fully-green PR once a merge queue rules
+              # main (direct merges are refused by the queue, so GitHub
+              # reports the PR blocked even with every check green — the
+              # denylist would otherwise strand EVERY PR after the queue
+              # flips). Tolerate `blocked` IFF a `merge_queue` rule is ACTIVE
+              # on main, feature-detected LIVE from the rules-for-branch
+              # endpoint (readable with the default token, no admin scope; a
+              # probe failure reads 0 rules → refuse as before, fail-closed).
+              # Honest limit (MIGRATION.md #1784): the probe reads the RULESETS
+              # endpoint, so only a RULESET-configured merge queue is visible —
+              # a classic branch-protection-checkbox queue stays invisible and
+              # `blocked` keeps refusing (fail-closed; the shipped flip path IS
+              # the ruleset, so this is by design).
+              # Red checks still cannot reach here — the ci-check step above
+              # refuses ANY failing/incomplete run — and the rollup-gate
+              # below still re-checks the complete live rollup. dirty /
+              # behind / unknown — and `blocked` WITHOUT a queue — refuse
+              # exactly as before.
+              if [[ "${state}" == "blocked" ]]; then
+                queue_rules=$(gh api "repos/${REPO}/rules/branches/main" \
+                  --jq '[.[] | select(.type == "merge_queue")] | length' 2>/dev/null || echo 0)
+                if [[ "${queue_rules}" -ge 1 ]]; then
+                  echo "PR #${PR_NUMBER} mergeable_state=blocked BUT a merge_queue rule is active on main — queue-normal; proceeding to the enqueue path"
+                  echo "queue_active=true" >> "$GITHUB_OUTPUT"
+                  echo "safe=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              fi
               echo "::error::PR #${PR_NUMBER} mergeable_state=${state}; refusing to merge (conflict / stale base / blocked)"
               echo "safe=false" >> "$GITHUB_OUTPUT"
               exit 0
               ;;
           esac
           echo "PR #${PR_NUMBER} is mergeable (mergeable=true, state=${state})"
+          echo "queue_active=false" >> "$GITHUB_OUTPUT"
           echo "safe=true" >> "$GITHUB_OUTPUT"
 
       - name: Final live-rollup gate (pre-merge-check.sh, fail-closed)
@@ -505,6 +543,36 @@ jobs:
           echo "Merging PR #${PR_NUMBER} (ci-ok green + live rollup gate passed)"
           HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" \
             --json headRefOid --jq .headRefOid)
+          # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): QUEUE-AWARE merge. FIRST
+          # attempt to ENABLE GitHub auto-merge (squash) — `gh pr merge --auto`
+          # calls the GraphQL enablePullRequestAutoMerge mutation, which on a
+          # merge-queue-ruled base ENQUEUES the PR (that mutation IS GitHub's
+          # enqueue API); the queue then builds the merge group, re-runs the
+          # required checks on its speculative merge commit, and completes the
+          # squash-merge itself. Needs contents:write + pull-requests:write —
+          # both already declared at the workflow level. On a repo where
+          # enabling auto-merge is NOT applicable — auto-merge disallowed in
+          # repo settings, no queue, or the PR already in clean status — the
+          # mutation errors and we FALL BACK to the pre-queue direct
+          # squash-merge below, preserving today's behavior byte-for-byte, so
+          # this change is safe to land BEFORE any merge-queue ruleset flips.
+          # (--delete-branch is not combined with --auto; queue-completed
+          # merges rely on the repo's auto-delete-head-branches setting — an
+          # honest limit recorded in MIGRATION.md #1784.)
+          auto_err="$(mktemp)"
+          if gh pr merge "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --auto \
+            --squash \
+            --subject "$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json title --jq .title) (#${PR_NUMBER})" \
+            2> "${auto_err}"; then
+            echo "::notice::auto-merge (squash) ENABLED for PR #${PR_NUMBER} — on a merge-queue-ruled main this enqueues the PR; GitHub completes the merge when the queue's required checks pass."
+            gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body \
+              "🤖 Auto-merge (squash) enabled on head commit ${HEAD_SHA} — the merge completes via GitHub (the merge queue when one rules main; plain auto-merge otherwise). DEC-MERGE-QUEUE-001."
+            exit 0
+          fi
+          cat "${auto_err}" >&2
+          echo "::notice::enable-auto-merge not applicable (see stderr above) — falling back to the direct squash-merge (pre-queue behavior; DEC-MERGE-QUEUE-001 fallback)."
           # A CONCURRENT merge can win the race: a second auto-merge run from a
           # later push, or the operator clicking Merge. GitHub then returns
           # "Merge already in progress" / "Pull request is not mergeable"

@@ -488,6 +488,23 @@
 
   var lastData = null;
 
+  // Page fan-out (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): a
+  // template that ALSO renders /api/v1/pull/rate data (e.g. the v29 heartbeat
+  // pull slot) subscribes via `(window.__bxPullRateSubs ||= []).push(fn)` —
+  // its inline script may run BEFORE this deferred file, so the arrays are
+  // read at CALL time, never captured — instead of owning a SECOND poller on
+  // the same endpoint. Failure twins ride __bxPullRateFailSubs. A throwing
+  // subscriber is isolated (it can never break this widget's poll chain).
+  // This file stays dependency-free by design, so the tiny fan-out helper is
+  // local (bx-liveproof.js carries the same-shape twin — deliberate, ledgered).
+  function notifyPageSubs(listName, arg) {
+    var subs = window[listName];
+    if (!subs || !subs.length) { return; }
+    for (var i = 0; i < subs.length; i++) {
+      try { subs[i](arg); } catch (e) { /* subscriber isolation */ }
+    }
+  }
+
   // ── Self-recovering poll state (DEC-PULL-UI-STALENESS-001) ──
   var pollFailures = 0;
   var lastPollOkMs = null;  // CLIENT clock of the last SUCCESSFUL poll
@@ -643,6 +660,11 @@
         if (!data || typeof data !== "object") { throw new Error("malformed payload"); }
         render(data);
         pollFailures = 0;
+        // Fan the ONE /api/v1/pull/rate poll out to page subscribers
+        // (DEC-FRONTEND-LATENCY-HARDENING-001) — never a second poller. After
+        // the pinned render+reset block: the widget's own render always wins
+        // the ordering race with a page subscriber's.
+        notifyPageSubs("__bxPullRateSubs", data);
         lastPollOkMs = nowMs();   // the CLIENT staleness stamp
         lastPollOkWallMs = Date.now();  // wall twin (suspend guard — see renderAge)
         renderAge();              // stale marking clears on the very next success
@@ -653,6 +675,7 @@
         // place FOREVER. Every failure now feeds the staleness clock + backs off 3s->30s.
         if (seq !== pollSeq) { return; }
         pollFailures += 1;
+        notifyPageSubs("__bxPullRateFailSubs", pollFailures);
         renderAge();
         schedulePoll(backoffDelayMs(pollFailures));
       });

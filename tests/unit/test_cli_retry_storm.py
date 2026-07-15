@@ -2515,3 +2515,82 @@ def test_cmd_fetch_real_pull_controller_receives_smooth_pacing_mode(
     assert rc == cli.EXIT_OK
     # The unset default resolves ADAPTIVE and the CLI controller RECEIVED it.
     assert captured == [SMOOTH_PACING_ADAPTIVE]
+
+
+def _spy_ingest_today_gate(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Wrap the real spot ingest-with-retry, recording the today_completeness_gate kwarg."""
+    run_ingest = importlib.import_module("brutex.adapters.groww.run_ingest")
+    captured: list[Any] = []
+    real = run_ingest.run_groww_spot_ingest_with_retry
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs.get("today_completeness_gate"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_ingest, "run_groww_spot_ingest_with_retry", _spy)
+    return captured
+
+
+def test_cmd_fetch_arms_today_gate_not_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001 CLI arm site: a REAL (non-dry) pull
+    resolves the env kill switch ONCE beside ``market_closed`` and threads the
+    flag into the ingest spine."""
+    from brutex.data.parquet_writer import ParquetWriter
+    from brutex.data.sink import ParquetBarSink
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+    from brutex.universe import BRUTE_FORCE_INDICES
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+    captured = _spy_ingest_today_gate(monkeypatch)
+    instruments = [cli._synthetic_index_instrument(BRUTE_FORCE_INDICES[0])]
+    monkeypatch.setattr(cli, "_resolve_brute_force_instruments", lambda lake: instruments)
+    credentials = importlib.import_module("brutex.config.credentials")
+    monkeypatch.setattr(credentials, "groww_credentials_error", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_build_live_groww_spot",
+        lambda lake, catalog=None: (
+            _RealVendorSpotAdapter(bars_per_window=2),
+            ParquetBarSink(writer=ParquetWriter(lake_root=lake), catalog=catalog),
+        ),
+    )
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=False,
+        inspect=False,
+        rows_per_chunk=2,
+        auto_retry=False,
+    )
+    assert rc == cli.EXIT_OK
+    assert captured
+    assert all(flag is True for flag in captured)
+
+
+def test_cmd_fetch_dry_run_threads_today_gate_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--dry-run`` threads ``False`` WITHOUT touching the env — junk env
+    must never crash a dry-run (the resolve is short-circuited away)."""
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+    captured = _spy_ingest_today_gate(monkeypatch)
+    rc = cli.cmd_fetch(
+        tmp_path,
+        "2024-01-02",
+        "2024-01-03",
+        "1m",
+        window_days=None,
+        dry_run=True,
+        inspect=False,
+        rows_per_chunk=2,
+    )
+    assert rc == cli.EXIT_OK
+    assert captured
+    assert all(flag is False for flag in captured)

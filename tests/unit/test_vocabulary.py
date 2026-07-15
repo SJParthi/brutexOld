@@ -880,3 +880,103 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
     # And 1day never enables a bit the evaluator does not implement.
     assert B.APPLIES_TO_1DAY_MASK & ~B.IMPLEMENTED_MASK == 0
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Frozen-ABI level projections (DEC-STAGE1A-RUST-BATCH-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# `pivot_levels_list` / `fib_levels_list` are the extracted, SHARED marshal
+# projections `evaluate_atoms` delegates its inline builds to — the SAME code
+# the batch prepass's day tables use. These pin (a) the frozen order,
+# field-for-field, and (b) the delegation equality (evaluate_atoms is
+# byte-identical to the pre-extraction inline build by construction — the
+# frozen 400-case golden re-pins it end-to-end).
+
+from datetime import date as _pl_date  # noqa: E402
+
+import trading_core as _tc  # noqa: E402
+from brutex.vocabulary.evaluator import fib_levels_list, pivot_levels_list  # noqa: E402
+
+
+def test_pivot_levels_list_frozen_order_and_length() -> None:
+    pv = compute_pivot_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00, 24_000_00)
+    levels = pivot_levels_list(pv)
+    assert len(levels) == _tc.PIVOT_LEVELS_LEN == 12
+    assert levels == [
+        pv.p_paisa,
+        pv.r1_paisa,
+        pv.r2_paisa,
+        pv.r3_paisa,
+        pv.s1_paisa,
+        pv.s2_paisa,
+        pv.s3_paisa,
+        pv.pdh_paisa,
+        pv.pdl_paisa,
+        pv.pdc_paisa,
+        pv.r5_paisa,
+        pv.s5_paisa,
+    ]
+
+
+def test_fib_levels_list_frozen_order_and_length() -> None:
+    fib = compute_fib_levels(_pl_date(2026, 5, 13), 24_050_00, 23_950_00)
+    levels = fib_levels_list(fib)
+    assert len(levels) == _tc.FIB_LEVELS_LEN == 15
+    assert levels == [
+        fib.retrace_level_at_pdh_paisa,
+        fib.retrace_23_paisa,
+        fib.retrace_38_paisa,
+        fib.retrace_50_paisa,
+        fib.retrace_62_paisa,
+        fib.retrace_78_paisa,
+        fib.retrace_level_at_pdl_paisa,
+        fib.ext_up_127_paisa,
+        fib.ext_up_162_paisa,
+        fib.ext_up_200_paisa,
+        fib.ext_up_262_paisa,
+        fib.ext_down_127_paisa,
+        fib.ext_down_162_paisa,
+        fib.ext_down_200_paisa,
+        fib.ext_down_262_paisa,
+    ]
+    # The bullish-retrace tail (FIB_COMPUTE_LIST_LEN = 19) is deliberately
+    # ABSENT — the evaluator ABI stays the frozen 15.
+    assert fib.retrace_bull_23_paisa not in (None,)  # field exists on the dataclass
+    assert len(levels) != 19
+
+
+def test_evaluate_atoms_delegates_to_the_shared_projections() -> None:
+    # Delegation equality: hand-marshalling through the projections into the
+    # raw FFI reproduces evaluate_atoms exactly (same code path — the pin
+    # that the extraction changed nothing).
+    s = _make_snapshot()
+    prox = _default_proximity()
+    prior = PriorBarHistory(prior_n=3, flags=[True, False, True])
+    via_shim = evaluate_atoms(s, prox, prior)
+    ts = s.timestamp_ist
+    via_raw = _tc.evaluate_with_levels(
+        int(_tc.seconds_of_day(ts.hour, ts.minute, ts.second)),
+        s.open_paisa,
+        s.high_paisa,
+        s.low_paisa,
+        s.close_paisa,
+        s.ema20_paisa,
+        s.ema200_paisa,
+        s.vwap_paisa,
+        pivot_levels_list(s.pivots),
+        fib_levels_list(s.fib),
+        s.day_high_paisa,
+        s.day_low_paisa,
+        s.open_of_day_paisa,
+        prox.pivot_proximity_bps,
+        prox.pdh_pdl_proximity_bps,
+        prox.fib_proximity_bps,
+        prior.prior_n,
+        prior.flags,
+        s.market_structure.bos_bullish,
+        s.market_structure.bos_bearish,
+        s.market_structure.choch_bullish,
+        s.market_structure.choch_bearish,
+    )
+    assert via_shim == via_raw

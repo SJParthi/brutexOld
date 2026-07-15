@@ -44,6 +44,22 @@
 //! The session identity of bar `i` derives from bar `i`'s own timestamp, so it
 //! is knowable at bar `i` (P-06: no look-ahead).
 //!
+//! ## No cross-session OPEN position (the session_gap guard)
+//!
+//! The open-position twin of the entry gate
+//! (DEC-TRADESIM-OPEN-SESSION-GUARD-001): a position never survives a
+//! `session_idx` change either. On the first pushed bar whose session differs
+//! from the position's entry session — the prior session's stored bars ended
+//! before any forced-exit-window bar (a session-tail data hole / stitched-
+//! series roll gap) — the walker closes the position retroactively at the
+//! PRIOR session's last stored bar's CLOSE (`pos.last_close_paisa` at
+//! `pos.last_idx` — the `finish()` pricing: no excursion fold from the
+//! boundary bar), clears any pending next-open exit (subsumed), and the
+//! boundary bar never arms a new entry (the step-(C) `closed.is_none()` gate).
+//! Mirrors the Python walker's (A2) guard bit-for-bit; the Python detail sink
+//! names the close `session_gap` — the kernel's `TradeRecord` carries no
+//! reason, so the numerics ARE the parity surface.
+//!
 //! ## Exit precedence (the traps, from the hostile port review)
 //!
 //! Per managed bar the order is **pending-next-open → forced-15:20 → SL/TP →
@@ -107,17 +123,28 @@ struct FillPolicy {
 pub type TradeRecord = (i64, i64, i64, u64, u64, u64);
 
 /// Mutable per-trade state while a position is open (int64 paisa). Mirrors the
-/// Python `_OpenPosition`; `last_bar` is replaced by `last_idx` since the kernel
-/// holds the resident price columns and reads `close[last_idx]` directly.
+/// Python `_OpenPosition`; `last_bar` is replaced by `last_idx` +
+/// `last_close_paisa` since the kernel holds resident price columns (the
+/// `Walker` itself never sees them, so the last managed bar's close is carried
+/// on the position for the `finish()`-idiom session-boundary close —
+/// DEC-TRADESIM-OPEN-SESSION-GUARD-001).
 #[derive(Clone, Copy)]
 struct OpenPosition {
     entry_idx: usize,
     entry_price_paisa: i64,
+    /// The `session_idx` of the entry fill bar — the open-position session
+    /// guard closes the position the moment a pushed bar's session differs
+    /// (mirrors the Python `_OpenPosition.entry_day_ist`).
+    entry_session: i64,
     sl_level_paisa: Option<i64>,
     tp_level_paisa: Option<i64>,
     mfe_paisa: i64,
     mae_paisa: i64,
     last_idx: usize,
+    /// The last MANAGED bar's close (paisa) — the retroactive session-boundary
+    /// fill price (pre-update state: refreshed by `manage_position` alongside
+    /// `last_idx`, so at the guard it still names the PRIOR session's bar).
+    last_close_paisa: i64,
 }
 
 /// Below this many `mask · bar` ops, run the batch SERIALLY. Mirrors the supermask
@@ -261,17 +288,24 @@ impl Walker {
 
     /// Open a position at `open[idx]` (the next-bar-open entry fill). Mirrors
     /// `_open_position`. No excursion update at open — the entry bar's high/low is
-    /// folded by the same-bar `manage_position` call (step 3).
-    fn open_position(&mut self, open_paisa: i64, idx: usize) {
+    /// folded by the same-bar `manage_position` call (step 3). `session` is the
+    /// fill bar's `session_idx` (the open-position guard's key); `close_paisa`
+    /// initialises `last_close_paisa` deterministically — it is never read
+    /// before the same-push `manage_position` refreshes it (the guard cannot
+    /// fire between open and first manage: `entry_session` equals THIS bar's
+    /// session by construction).
+    fn open_position(&mut self, open_paisa: i64, idx: usize, session: i64, close_paisa: i64) {
         let (sl_level, tp_level) = self.levels(open_paisa);
         self.position = Some(OpenPosition {
             entry_idx: idx,
             entry_price_paisa: open_paisa,
+            entry_session: session,
             sl_level_paisa: sl_level,
             tp_level_paisa: tp_level,
             mfe_paisa: 0,
             mae_paisa: 0,
             last_idx: idx,
+            last_close_paisa: close_paisa,
         });
     }
 
@@ -368,17 +402,23 @@ impl Walker {
     /// value (the caller `take()`s it from `self.position`); still-open branches
     /// write it back, closing branches consume it. Precedence is EXACTLY the
     /// Python order.
+    #[allow(clippy::too_many_arguments)]
     fn manage_position(
         &mut self,
         mut pos: OpenPosition,
         open_paisa: i64,
         high_paisa: i64,
         low_paisa: i64,
+        close_paisa: i64,
         idx: usize,
         forced: bool,
         exit_signal: bool,
     ) -> Option<TradeRecord> {
+        // Mirrors Python `_manage_position`'s top-of-body `last_idx/last_bar`
+        // refresh — the (A2) guard reads the PRE-update state, so it runs in
+        // `push` BEFORE this method is entered.
         pos.last_idx = idx;
+        pos.last_close_paisa = close_paisa;
 
         // (1) A next-open exit scheduled on a prior bar fills at THIS bar's open —
         // BEFORE forced is checked (pending beats forced).
@@ -426,12 +466,16 @@ impl Walker {
     }
 
     /// Advance one bar — mirrors `push`. Returns a trade iff a position closed.
+    /// `close_paisa` is bar `idx`'s CLOSE — carried onto the open position per
+    /// managed bar so the (A2) session-boundary guard can price the
+    /// `finish()`-idiom retroactive close (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
     #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         open_paisa: i64,
         high_paisa: i64,
         low_paisa: i64,
+        close_paisa: i64,
         idx: usize,
         forced_raw: bool,
         session: i64,
@@ -448,31 +492,55 @@ impl Walker {
         // fill and is DROPPED, R2-OC-2) and never on a forced bar (cannot open
         // at/after the session's forced-exit instant). The pending flag is
         // cleared UNCONDITIONALLY. Mirrors the Python (A) branch exactly.
+        // (A) and (A2) below are mutually exclusive by state invariant: step
+        // (C) arms only while flat and (A) clears the flag before opening, so
+        // `pending_entry` is false whenever a position is open — one push runs
+        // (A) xor (A2), never both (DEC-TRADESIM-OPEN-SESSION-GUARD-001 §2.2).
         if self.position.is_none() && self.pending_entry {
             self.pending_entry = false;
             let same_session = session == self.pending_entry_session;
             if !forced && same_session {
-                self.open_position(open_paisa, idx);
+                self.open_position(open_paisa, idx, session, close_paisa);
             }
         }
 
         // (B) Manage an open position on this bar (including one just opened in A).
         let mut closed: Option<TradeRecord> = None;
         if let Some(pos) = self.position.take() {
-            closed = self.manage_position(
-                pos,
-                open_paisa,
-                high_paisa,
-                low_paisa,
-                idx,
-                forced,
-                exit_signal,
-            );
+            if session != pos.entry_session {
+                // (A2) Session-boundary guard — DEC-TRADESIM-OPEN-SESSION-GUARD-001.
+                // Mirrors the Python walker: close at the PRIOR session's last
+                // stored bar's close (the finish() idiom — pre-update
+                // `last_close_paisa` / `last_idx`, no excursion fold from THIS
+                // bar); a pending next-open exit is subsumed (cleared — a flat
+                // walker never carries a stale pending exit into the new
+                // session). A just-opened position (same push, step (A))
+                // carries THIS bar's session, so it can never trip the guard;
+                // the inequality compare fires exactly once even across a
+                // multi-session hole. The Python detail sink names this close
+                // `session_gap`; the record's numerics are the parity surface.
+                self.pending_exit = false;
+                closed = Some(self.close(pos, pos.last_close_paisa, pos.last_idx));
+            } else {
+                closed = self.manage_position(
+                    pos,
+                    open_paisa,
+                    high_paisa,
+                    low_paisa,
+                    close_paisa,
+                    idx,
+                    forced,
+                    exit_signal,
+                );
+            }
         }
 
         // (C) While flat (and NOT on a bar a trade just closed — the exit bar
         // consumes the entry signal), arm the next entry, recording THIS bar's
         // session — the fill gate for (A). Knowable at bar `idx` (no look-ahead).
+        // The `closed.is_none()` gate also means a session_gap boundary bar
+        // never arms: earliest re-arm is the boundary bar's successor
+        // (DEC-TRADESIM-OPEN-SESSION-GUARD-001 §2.2 pinned law).
         if self.position.is_none() && closed.is_none() && entry_signal {
             self.pending_entry = true;
             self.pending_entry_session = session;
@@ -616,8 +684,10 @@ fn build_columns(
     // is provably panic-free (see the ceiling's derivation doc). One-time
     // O(N_bars) scan at construction — NOT on the hot loop. `is_forced`
     // (bool), `bar_bits` (u64/u128, only `&`-compared against masks) and
-    // `session_idx` (i64 day ordinal, only `==`-compared for the R2-OC-2
-    // same-session entry gate) do no arithmetic and need no bound.
+    // `session_idx` (i64 day ordinal, compared for equality ONLY — by the
+    // R2-OC-2 same-session entry gate's `==` and the open-position
+    // session-boundary guard's `!=`, DEC-TRADESIM-OPEN-SESSION-GUARD-001)
+    // do no arithmetic and need no bound.
     check_price_column(label, "open", &open)?;
     check_price_column(label, "high", &high)?;
     check_price_column(label, "low", &low)?;
@@ -659,6 +729,7 @@ fn simulate_one_core<W: MaskWord>(
             cols.open[i],
             cols.high[i],
             cols.low[i],
+            cols.close[i],
             i,
             cols.is_forced[i],
             cols.session_idx[i],
@@ -1206,11 +1277,13 @@ mod tests {
         OpenPosition {
             entry_idx: 0,
             entry_price_paisa: entry,
+            entry_session: 0,
             sl_level_paisa: None,
             tp_level_paisa: None,
             mfe_paisa: 0,
             mae_paisa: 0,
             last_idx: 0,
+            last_close_paisa: entry,
         }
     }
 
@@ -1635,6 +1708,209 @@ mod tests {
         assert_eq!(out.len(), 1);
         let (_pnl, _mfe, _mae, _holding, entry_idx, _exit_idx) = out[0];
         assert_eq!(entry_idx, 3); // opened at bar3 (session 1), NOT bar2
+    }
+
+    // ── cross-session OPEN-position close (DEC-TRADESIM-OPEN-SESSION-GUARD-001) ──
+
+    #[test]
+    fn cross_session_open_position_closes_at_prior_session_last_close() {
+        // Directed hand-computed boundary close: signal bar0 → entry
+        // open[1]=10000 (session 0). bar1 folds (10120, 9950) → fav 120 /
+        // adv 50; bar2 folds (10150, 9960) → fav 150 / adv 40 → mfe 150,
+        // mae 50. bar3 is SESSION 1 → the guard closes retroactively at
+        // close[2]=10100 with exit_idx = last_idx = 2 (the finish() idiom):
+        // pnl = 10100 − 10000 = 100, holding = 2. The +1800 gap bar's range
+        // never enters pnl or the excursions. Pre-fix the walker held through
+        // the gap and closed end-of-data at close[3]=11900 (pnl +1900).
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 10010, 11900],
+            vec![10100, 10120, 10150, 12000],
+            vec![9900, 9950, 9960, 11800],
+            vec![10000, 10050, 10100, 11900],
+            vec![false, false, false, false],
+            vec![0, 0, 0, 1],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out, vec![(100i64, 150i64, 50i64, 2u64, 1u64, 2u64)]);
+    }
+
+    #[test]
+    fn cross_session_boundary_clears_pending_exit_no_next_open_fill() {
+        // A NEXT_OPEN stop armed on session 0's LAST stored bar is SUBSUMED by
+        // the boundary close — never filled at session 1's open. Entry
+        // open[1]=10000, sl 50 → level 9950; bar2 low 9940 hits → pending
+        // next-open. bar3 is session 1: guard closes at close[2]=9980
+        // (pnl −20), NOT at open[3]=11900 (the pre-fix +1900 gap fill).
+        // bar1 folds (10060, 9960) → 60/40; bar2 folds (10000, 9940) → 60/60.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 9990, 11900, 11910],
+            vec![10050, 10060, 10000, 12000, 12010],
+            vec![9900, 9960, 9940, 11800, 11810],
+            vec![10000, 10010, 9980, 11900, 11910],
+            vec![false, false, false, false, false],
+            vec![0, 0, 0, 1, 1],
+            vec![1, 0, 0, 0, 0],
+        )
+        .unwrap();
+        let policy = FillPolicy {
+            stop_loss: LevelFill::NextOpen,
+            ..policy_default()
+        };
+        let out = s.simulate_one(1, true, Some(50), None, policy);
+        assert_eq!(out, vec![(-20i64, 60i64, 60i64, 2u64, 1u64, 2u64)]);
+    }
+
+    #[test]
+    fn cross_session_stale_pending_exit_never_reaches_a_new_position() {
+        // The pending_exit CLEAR has teeth: after the boundary close, a NEW
+        // session-1 position must ride normally — under a fix that forgot the
+        // clear, the stale pending would close it instantly at its first
+        // managed bar's open. Session-0 pending armed on bar2 (NEXT_OPEN SL);
+        // boundary close at bar3; signal bar4 → entry open[5]=11920; rides
+        // bar6 → end-of-data close at close[6]=11940 (pnl +20, holding 2).
+        // Session-1 lows stay ABOVE the second trade's own 11870 stop level
+        // (entry 11920 − 50), so only a stale pending exit could close it
+        // before the end of data.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 9990, 11900, 11910, 11920, 11930],
+            vec![10050, 10060, 10000, 12000, 12010, 12020, 12030],
+            vec![9900, 9960, 9940, 11880, 11890, 11900, 11910],
+            vec![10000, 10010, 9980, 11900, 11910, 11920, 11940],
+            vec![false; 7],
+            vec![0, 0, 0, 1, 1, 1, 1],
+            vec![1, 0, 0, 0, 1, 0, 0],
+        )
+        .unwrap();
+        let policy = FillPolicy {
+            stop_loss: LevelFill::NextOpen,
+            ..policy_default()
+        };
+        let out = s.simulate_one(1, true, Some(50), None, policy);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (-20i64, 60i64, 60i64, 2u64, 1u64, 2u64));
+        let (pnl, _mfe, _mae, holding, entry_idx, exit_idx) = out[1];
+        assert_eq!(entry_idx, 5);
+        assert_eq!(exit_idx, 6); // end-of-data — NOT an instant stale-pending close
+        assert_eq!(pnl, 20); // close[6]=11940 − open[5]=11920
+        assert_eq!(holding, 2);
+    }
+
+    #[test]
+    fn cross_session_boundary_bar_does_not_arm_earliest_rearm_next_bar() {
+        // §2.2 pinned law: the boundary bar EMITS the session_gap close, so the
+        // step-(C) `closed.is_none()` gate suppresses arming on it — a signal
+        // on the boundary bar (bar3) produces NO trade from it; the earliest
+        // re-arm is bar i+1 (bar4's signal) and the earliest new fill is bar
+        // i+2 (open[5]).
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 10010, 11900, 11910, 11920, 11930],
+            vec![10100, 10120, 10150, 12000, 12010, 12020, 12030],
+            vec![9900, 9950, 9960, 11800, 11810, 11820, 11830],
+            vec![10000, 10050, 10100, 11900, 11910, 11920, 11940],
+            vec![false; 7],
+            vec![0, 0, 0, 1, 1, 1, 1],
+            vec![1, 0, 0, 1, 1, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], (100i64, 150i64, 50i64, 2u64, 1u64, 2u64));
+        let (_pnl, _mfe, _mae, _holding, entry_idx, exit_idx) = out[1];
+        assert_eq!(entry_idx, 5); // bar4's signal fills at bar5 — never bar3/bar4
+        assert_eq!(exit_idx, 6);
+    }
+
+    #[test]
+    fn cross_session_boundary_close_equals_finish_numerics() {
+        // The finish()-equivalence law: the SAME session-0 prefix closed by
+        // (a) the boundary guard when the feed continues into session 1 vs
+        // (b) `finish()` when the feed truncates at session 0's last stored
+        // bar must emit bit-equal records (same fill price / indices /
+        // excursions — suffix independence by construction).
+        let prefix_open = vec![10000i64, 10000, 10010];
+        let prefix_high = vec![10100i64, 10120, 10150];
+        let prefix_low = vec![9900i64, 9950, 9960];
+        let prefix_close = vec![10000i64, 10050, 10100];
+        let continued = ResidentSweepSim::build(
+            [prefix_open.clone(), vec![11900]].concat(),
+            [prefix_high.clone(), vec![12000]].concat(),
+            [prefix_low.clone(), vec![11800]].concat(),
+            [prefix_close.clone(), vec![11900]].concat(),
+            vec![false; 4],
+            vec![0, 0, 0, 1],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let truncated = ResidentSweepSim::build(
+            prefix_open,
+            prefix_high,
+            prefix_low,
+            prefix_close,
+            vec![false; 3],
+            vec![0, 0, 0],
+            vec![1, 0, 0],
+        )
+        .unwrap();
+        let boundary = continued.simulate_one(1, true, None, None, policy_default());
+        let finished = truncated.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(boundary, finished);
+        assert_eq!(boundary.len(), 1);
+    }
+
+    #[test]
+    fn cross_session_backward_session_ordinal_still_closes_boundary() {
+        // The (A2) compare is an EQUALITY law: ANY session-ordinal CHANGE
+        // closes the open position — either direction, not only forward.
+        // `build_columns` admits any i64 `session_idx` (the ordinal is
+        // "compared for equality ONLY" — no monotonicity check), so a
+        // DECREASING ordinal is API-reachable; production sweep feeds are
+        // chronological (Catalog/ReplayFeed sorted), hence LOW — which is
+        // exactly why the r8 mutation sweep found the `!=`→`>` mutant (M14)
+        // surviving BOTH language nets: no prior test fed a backward session
+        // change to an OPEN position. (The Python walker carries the same
+        // law's defense-in-depth twin on its IST-date compare.)
+        // Signal bar0 → entry open[1]=10000 (session 5); bar1 folds
+        // (10120, 9950) → mfe 120 / mae 50, last close 10110. bar2 DROPS to
+        // session 4 → the guard closes retroactively at close[1]=10110 with
+        // exit_idx = last_idx = 1 (pnl 110, holding 1). Under the `>` mutant
+        // 4 > 5 is false, so the backward bar folds into the position and it
+        // rides to the end-of-data close[3]=9610 (pnl −390) — the killer.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 9500, 9600],
+            vec![10100, 10120, 9550, 9650],
+            vec![9900, 9950, 9400, 9500],
+            vec![10000, 10110, 9500, 9610],
+            vec![false, false, false, false],
+            vec![5, 5, 4, 4],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        assert_eq!(out, vec![(110i64, 120i64, 50i64, 1u64, 1u64, 1u64)]);
+    }
+
+    #[test]
+    fn same_session_multi_bar_hold_does_not_close_early() {
+        // The `!=`→`==` mutant killer on the guard's session compare (the
+        // `same_session_pending_entry_still_fills` pattern): a multi-bar hold
+        // whose bars ALL share one NON-ZERO session ordinal must ride to the
+        // end-of-data close — under the mutated compare (or a session-field
+        // stamping bug) the guard would fire on the first managed bar instead.
+        let s = ResidentSweepSim::build(
+            vec![10000, 10000, 10010, 10020],
+            vec![10100, 10120, 10150, 10160],
+            vec![9900, 9950, 9960, 9970],
+            vec![10000, 10050, 10100, 10140],
+            vec![false; 4],
+            vec![5, 5, 5, 5],
+            vec![1, 0, 0, 0],
+        )
+        .unwrap();
+        let out = s.simulate_one(1, true, None, None, policy_default());
+        // Entry open[1]=10000; rides bar1..bar3; end-of-data at close[3]=10140.
+        assert_eq!(out, vec![(140i64, 160i64, 50i64, 3u64, 1u64, 3u64)]);
     }
 
     // ── next-open fills ──

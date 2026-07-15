@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="BruteX — exhaustive brute-force backtesting for Indian index markets. Research tooling, not investment advice.">
+<title>BruteX — Exhaustive Brute-Force Backtesting</title>
+<style>
+/* ============================================================
+   BruteX market one-pager — fully self-contained.
+   No external fonts, images, scripts, or stylesheets.
+   ============================================================ */
+:root{
+  --bg:#07090f;
+  --bg-2:#0b0f1a;
+  --ink:#e8ecf4;
+  --ink-dim:#9aa4b8;
+  --ink-faint:#79839a;
+  --accent:#5b8cff;
+  --accent-2:#8a5bff;
+  --accent-3:#2dd4bf;
+  --gold:#f0b45a;
+  --card:rgba(255,255,255,.045);
+  --card-border:rgba(255,255,255,.10);
+  --radius:18px;
+  --maxw:1080px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+::selection{background:rgba(91,140,255,.35)}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 22px}
+section{padding:72px 0}
+h2{font-size:clamp(1.5rem,3.4vw,2.2rem);letter-spacing:-.02em;margin-bottom:.4em}
+.kicker{
+  display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--accent-3);margin-bottom:14px;
+}
+.sub{color:var(--ink-dim);max-width:640px;margin-bottom:34px}
+
+/* ---------- hero ---------- */
+.hero{
+  position:relative;min-height:92vh;display:flex;align-items:center;
+  padding:96px 0 72px;
+  background:
+    radial-gradient(1100px 620px at 78% -12%, rgba(138,91,255,.28), transparent 62%),
+    radial-gradient(900px 560px at 8% 8%, rgba(91,140,255,.22), transparent 60%),
+    radial-gradient(760px 500px at 55% 108%, rgba(45,212,191,.12), transparent 60%),
+    linear-gradient(180deg,#0a0e1a 0%,var(--bg) 100%);
+}
+.hero::after{ /* subtle grid */
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background-image:
+    linear-gradient(rgba(255,255,255,.030) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.030) 1px,transparent 1px);
+  background-size:56px 56px;
+  mask-image:radial-gradient(ellipse 85% 70% at 50% 30%,#000 40%,transparent 100%);
+  -webkit-mask-image:radial-gradient(ellipse 85% 70% at 50% 30%,#000 40%,transparent 100%);
+}
+.hero .wrap{position:relative;z-index:1}
+.badge{
+  display:inline-flex;align-items:center;gap:8px;
+  border:1px solid var(--card-border);border-radius:999px;
+  padding:6px 14px;font-size:.78rem;color:var(--ink-dim);
+  background:rgba(255,255,255,.04);backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
+  margin-bottom:26px;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--accent-3);
+  box-shadow:0 0 10px var(--accent-3);animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+h1{
+  font-size:clamp(2rem,5.6vw,3.6rem);line-height:1.12;letter-spacing:-.03em;
+  font-weight:800;max-width:840px;
+}
+h1 .grad{
+  background:linear-gradient(92deg,var(--accent) 0%,var(--accent-2) 55%,var(--accent-3) 110%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero p.lede{color:var(--ink-dim);font-size:clamp(1rem,2vw,1.15rem);max-width:640px;margin-top:20px}
+
+/* funnel stats */
+.funnel{
+  display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:48px;
+}
+.stat{
+  position:relative;border:1px solid var(--card-border);border-radius:var(--radius);
+  background:var(--card);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  padding:20px 18px 18px;overflow:hidden;
+}
+.stat::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--accent),var(--accent-2),transparent);
+  opacity:.7;
+}
+.stat .num{font-size:clamp(1.4rem,3vw,2rem);font-weight:800;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums}
+.stat .lbl{font-size:.8rem;color:var(--ink-dim);margin-top:4px;line-height:1.45}
+.stat .arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+  color:var(--ink-faint);font-size:1.1rem;opacity:.7}
+.stat:last-child .num{
+  background:linear-gradient(92deg,var(--gold),var(--accent-3));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.approx-note{margin-top:14px;font-size:.75rem;color:var(--ink-faint)}
+
+/* ---------- reveal ---------- */
+.js .reveal{opacity:0;transform:translateY(26px);
+  transition:opacity .8s cubic-bezier(.2,.7,.2,1),transform .8s cubic-bezier(.2,.7,.2,1)}
+.js .reveal.in{opacity:1;transform:none}
+.js .reveal.d1{transition-delay:.08s}
+.js .reveal.d2{transition-delay:.16s}
+.js .reveal.d3{transition-delay:.24s}
+.js .reveal.d4{transition-delay:.32s}
+
+/* ---------- pyramid ---------- */
+.pyramid{display:flex;flex-direction:column;align-items:center;gap:10px;margin-top:36px}
+.tier{
+  position:relative;border-radius:14px;padding:16px 20px;text-align:center;
+  border:1px solid var(--card-border);
+  background:var(--card);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  width:var(--w,100%);
+  transform-origin:center bottom;
+}
+.js .pyramid .tier{opacity:0;transform:scaleX(.35) translateY(14px);
+  transition:opacity .7s ease,transform .85s cubic-bezier(.2,.75,.25,1)}
+.js .pyramid.in .tier{opacity:1;transform:none}
+.js .pyramid.in .t1{transition-delay:.05s}
+.js .pyramid.in .t2{transition-delay:.2s}
+.js .pyramid.in .t3{transition-delay:.35s}
+.js .pyramid.in .t4{transition-delay:.5s}
+.tier .t-head{font-weight:700;font-size:.95rem}
+.tier .t-sub{font-size:.8rem;color:var(--ink-dim);margin-top:2px}
+.t1{--w:100%;background:linear-gradient(180deg,rgba(91,140,255,.10),rgba(255,255,255,.03))}
+.t2{--w:78%;background:linear-gradient(180deg,rgba(138,91,255,.12),rgba(255,255,255,.03))}
+.t3{--w:54%;background:linear-gradient(180deg,rgba(45,212,191,.12),rgba(255,255,255,.03))}
+.t4{--w:32%;min-width:250px;
+  background:linear-gradient(180deg,rgba(240,180,90,.16),rgba(255,255,255,.04));
+  border-color:rgba(240,180,90,.45);
+  box-shadow:0 0 34px rgba(240,180,90,.12);
+}
+.t4 .t-head{color:var(--gold)}
+
+/* ---------- cards ---------- */
+.grid{display:grid;gap:16px}
+.grid.c3{grid-template-columns:repeat(3,1fr)}
+.grid.c2{grid-template-columns:repeat(2,1fr)}
+.card{
+  border:1px solid var(--card-border);border-radius:var(--radius);
+  background:var(--card);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  padding:22px;
+  transition:transform .35s ease,border-color .35s ease,background .35s ease;
+}
+.card:hover{transform:translateY(-4px);border-color:rgba(91,140,255,.4);
+  background:rgba(255,255,255,.06)}
+.card .icon{
+  width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,rgba(91,140,255,.22),rgba(138,91,255,.22));
+  border:1px solid rgba(91,140,255,.3);margin-bottom:14px;
+}
+.card .icon svg{width:20px;height:20px;stroke:var(--accent);fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round}
+.card h3{font-size:1rem;margin-bottom:6px;letter-spacing:-.01em}
+.card p{font-size:.86rem;color:var(--ink-dim)}
+.card .big{font-size:1.35rem;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
+
+/* layered copy: plain-English lead + trader-grade sub-line */
+.card p.plain{font-size:.92rem;color:var(--ink);margin-bottom:8px}
+.card p.pro{font-size:.78rem;color:var(--ink-faint)}
+.hero p.lede-pro{color:var(--ink-faint);font-size:.95rem;max-width:640px;margin-top:12px}
+.limits .plain-lead{color:var(--ink-dim);font-size:.95rem;margin-top:4px}
+
+/* rigor cards accent */
+.rigor .card .icon{background:linear-gradient(135deg,rgba(45,212,191,.2),rgba(91,140,255,.16));
+  border-color:rgba(45,212,191,.35)}
+.rigor .card .icon svg{stroke:var(--accent-3)}
+
+/* ---------- honest limits ---------- */
+.limits{
+  border:1px solid rgba(240,180,90,.35);border-radius:var(--radius);
+  background:linear-gradient(180deg,rgba(240,180,90,.07),rgba(255,255,255,.02));
+  padding:28px;
+}
+.limits h2{color:var(--gold)}
+.limits ul{list-style:none;margin-top:14px;display:grid;gap:12px}
+.limits li{display:flex;gap:12px;align-items:flex-start;font-size:.92rem;color:var(--ink-dim)}
+.limits li::before{content:"—";color:var(--gold);flex:0 0 auto;font-weight:700}
+.limits li strong{color:var(--ink)}
+
+/* ---------- table ---------- */
+.tbl-scroll{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--card-border);
+  -webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;min-width:720px;
+  background:rgba(255,255,255,.025);font-size:.86rem}
+th,td{padding:13px 16px;text-align:left;border-bottom:1px solid rgba(255,255,255,.07);
+  vertical-align:top}
+thead th{
+  font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-dim);
+  background:rgba(255,255,255,.04);position:sticky;top:0;
+}
+tbody th{color:var(--ink);font-weight:600;white-space:nowrap}
+td{color:var(--ink-dim)}
+td.bx{color:var(--ink);font-weight:600;
+  background:linear-gradient(180deg,rgba(91,140,255,.10),rgba(138,91,255,.05))}
+thead th.bx{color:var(--accent);background:rgba(91,140,255,.12)}
+tbody tr:last-child th,tbody tr:last-child td{border-bottom:none}
+.tbl-hint{font-size:.72rem;color:var(--ink-faint);margin-top:10px;display:none}
+
+/* ---------- footer ---------- */
+footer{
+  padding:56px 0 64px;border-top:1px solid rgba(255,255,255,.07);
+  background:linear-gradient(180deg,transparent,rgba(91,140,255,.05));
+  text-align:center;
+}
+footer .flag{font-size:1rem;font-weight:700;letter-spacing:-.01em}
+footer p{color:var(--ink-dim);font-size:.85rem;max-width:560px;margin:10px auto 0}
+footer .rule{width:64px;height:3px;border-radius:2px;margin:0 auto 22px;
+  background:linear-gradient(90deg,var(--accent),var(--accent-2),var(--accent-3))}
+
+/* ---------- responsive ---------- */
+@media (max-width:860px){
+  .grid.c3{grid-template-columns:repeat(2,1fr)}
+  .funnel{grid-template-columns:repeat(2,1fr)}
+  .funnel .stat:last-child{grid-column:1/-1}
+  .stat .arrow{display:none}
+}
+@media (max-width:560px){
+  section{padding:56px 0}
+  .grid.c3,.grid.c2{grid-template-columns:1fr}
+  .funnel{grid-template-columns:1fr}
+  .t2{--w:88%}.t3{--w:72%}.t4{--w:58%;min-width:0}
+  .tbl-hint{display:block}
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{animation:none !important;transition:none !important}
+  .js .reveal,.js .pyramid .tier{opacity:1 !important;transform:none !important}
+}
+
+/* ---------- print: clean static light copy ---------- */
+@media print{
+  :root{--ink:#111;--ink-dim:#444;--ink-faint:#666;--card:#fff;--card-border:#ccc}
+  body{background:#fff;color:#111}
+  .hero{min-height:0;background:#fff;padding:24px 0}
+  .hero::after{display:none}
+  h1 .grad{color:#1a3fa8;background:none;-webkit-text-fill-color:initial}
+  *,*::before,*::after{animation:none !important;transition:none !important;
+    backdrop-filter:none !important;-webkit-backdrop-filter:none !important;
+    box-shadow:none !important;text-shadow:none !important}
+  .js .reveal,.js .pyramid .tier{opacity:1 !important;transform:none !important}
+  .stat,.card,.tier,.limits,.tbl-scroll{background:#fff !important;border-color:#bbb !important}
+  .stat .num,.t4 .t-head,.limits h2{color:#1a3fa8 !important;background:none !important;
+    -webkit-text-fill-color:initial !important}
+  td.bx,thead th.bx{background:#eef2ff !important;color:#1a3fa8 !important}
+  table{min-width:0;font-size:.75rem}
+  th,td{padding:8px 10px;border-bottom:1px solid #ddd}
+  thead th{background:#f3f4f6;position:static}
+  section{padding:20px 0;page-break-inside:avoid}
+  .tbl-scroll{overflow:visible}
+  .badge .dot{background:#1a3fa8}
+  footer{background:#fff;border-top:1px solid #ccc}
+  .card:hover{transform:none}
+}
+</style>
+</head>
+<body>
+<script>document.body.className += ' js';</script>
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <div class="wrap">
+    <div class="badge"><span class="dot"></span>Systematic research engine · Indian index markets</div>
+    <h1>BruteX: <span class="grad">exhaustive brute-force backtesting</span> almost nobody in India runs.</h1>
+    <p class="lede">Backtesting means testing a trading idea against years of past market data — before risking a single rupee.</p>
+    <p class="lede-pro">From 23-crore-plus demat accounts down to a handful of operators searching the full combinatorial space with institutional depth — this page shows where BruteX sits, and why the rigor matters more than the search.</p>
+
+    <div class="funnel" id="funnel">
+      <div class="stat reveal">
+        <div class="num"><span class="cnt" data-target="23" data-suffix=" crore+">23 crore+</span></div>
+        <div class="lbl">demat accounts in India (NSDL + CDSL, June 2026)</div>
+        <div class="arrow">&#8595;</div>
+      </div>
+      <div class="stat reveal d1">
+        <div class="num">~<span class="cnt" data-target="4.6" data-suffix=" crore">4.6 crore</span></div>
+        <div class="lbl">active investors — traded at least once in the past 12 months (NSE active clients, March 2026)</div>
+        <div class="arrow">&#8595;</div>
+      </div>
+      <div class="stat reveal d2">
+        <div class="num">~<span class="cnt" data-target="1.1" data-suffix=" crore">1.1 crore</span></div>
+        <div class="lbl">individual F&amp;O traders (SEBI study, FY22&ndash;24) — 9 in 10 lost money. BruteX exists to find rules that survive that math.</div>
+        <div class="arrow">&#8595;</div>
+      </div>
+      <div class="stat reveal d3">
+        <div class="num">a few thousand</div>
+        <div class="lbl">running genuinely systematic, statistically validated strategies (our estimate — see note)</div>
+        <div class="arrow">&#8595;</div>
+      </div>
+      <div class="stat reveal d4">
+        <div class="num">a handful</div>
+        <div class="lbl">searching every possible combination at institutional depth (our estimate)</div>
+      </div>
+    </div>
+    <div class="approx-note">Data as of June&ndash;July 2026 — sources: NSDL&middot;CDSL depository statistics (demat), NSE active-client data (Mar 2026), SEBI equity-F&amp;O studies (FY22&ndash;24, FY25). Tiers marked &ldquo;our estimate&rdquo; are derived from public proxies, not official counts.</div>
+  </div>
+</header>
+
+<!-- ================= PYRAMID ================= -->
+<section>
+  <div class="wrap">
+    <span class="kicker reveal">The market pyramid</span>
+    <h2 class="reveal">Where the crowd thins out</h2>
+    <p class="sub reveal d1">Every step up trades noise for method. The apex is not about money — it is about how the search is run.</p>
+
+    <div class="pyramid" id="pyramid">
+      <div class="tier t1">
+        <div class="t-head">~4.6 crore active retail investors</div>
+        <div class="t-sub">discretionary trades, tips, indicators-by-eye (NSE active clients, Mar 2026)</div>
+      </div>
+      <div class="tier t2">
+        <div class="t-head">Lakhs algo-curious</div>
+        <div class="t-sub">have tried no-code algo/backtesting tools; only tens of thousands automate live (platform-reported user counts)</div>
+      </div>
+      <div class="tier t3">
+        <div class="t-head">Thousands, at institutional rigor</div>
+        <div class="t-sub">prop desks &amp; quant funds — teams and crores of infra (dozens of SEBI-registered quant PMS/AIF schemes; a handful of major HFT firms)</div>
+      </div>
+      <div class="tier t4">
+        <div class="t-head">Apex: searching everything + proving it isn&rsquo;t luck</div>
+        <div class="t-sub">BruteX territory — exhaustive search with statistical deflation; single operator, one workstation</div>
+      </div>
+    </div>
+    <div class="approx-note">Tier sizes are order-of-magnitude estimates grounded in public data: at India&rsquo;s largest retail broker, fewer than 0.05% of customers used trading APIs (2021); SEBI-registered quant PMS schemes number in the dozens.</div>
+  </div>
+</section>
+
+<!-- ================= WHAT BRUTEX DOES ================= -->
+<section>
+  <div class="wrap">
+    <span class="kicker reveal">The engine</span>
+    <h2 class="reveal">What BruteX does</h2>
+    <p class="sub reveal d1">Most traders test a handful of hunches. BruteX defines the full language of market conditions — then tests every combination.</p>
+
+    <div class="grid c3">
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h13"/></svg></div>
+        <div class="big">60 conditions</div>
+        <h3>Market vocabulary</h3>
+        <p class="plain">Sixty simple building blocks — like &ldquo;price is above yesterday&rsquo;s high&rdquo; — that combine into every strategy the engine tests.</p>
+        <p class="pro">A structured vocabulary of 60 atomic market conditions — pivots, Fibonacci levels, VWAP position, market structure, day types — combined mechanically, not by intuition.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg></div>
+        <div class="big">730B &#8594; 33B</div>
+        <h3>Searches everything — in stages</h3>
+        <p class="plain">Instead of trusting a handful of hunches, BruteX tries every possible combination of its rules — billions of them.</p>
+        <p class="pro">A staged funnel takes the raw 730-billion candidate space down to ~33 billion (3,300 crore) hot-path backtests: contradictory condition pairs are pruned upfront (~50% of masks — a pattern that can never fire is never run) and every trial is O(1)-deduplicated. Every surviving candidate is backtested to completion — never early-stopped.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-5 4 4 6-8 3 3"/></svg></div>
+        <div class="big">3 indices</div>
+        <h3>NIFTY · BANKNIFTY · SENSEX</h3>
+        <p class="plain">India&rsquo;s three flagship market indices, studied minute by minute from 2020 to today.</p>
+        <p class="pro">Spot index data at 1-minute resolution, across 21 timeframes derived from one canonical minute stream.</p>
+      </div>
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9z"/></svg></div>
+        <div class="big">Rust core</div>
+        <h3>Deterministic engine</h3>
+        <p class="plain">Ask the same question twice and you get exactly the same answer — the engine is built to be exact, never approximate.</p>
+        <p class="pro">A Rust-accelerated hot kernel with a deterministic, bit-exact evaluation path — the same inputs always produce the same results.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></div>
+        <div class="big">21 timeframes</div>
+        <h3>One minute to one day</h3>
+        <p class="plain">Every chart view — from one minute to a full day — is built from a single trusted stream of data.</p>
+        <p class="pro">All intraday timeframes and the daily anchor are derived deterministically from stored 1-minute bars — never mixed vendor feeds.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="7"/><path d="M12 13V9M9 3h6"/></svg></div>
+        <div class="big">2–4 days</div>
+        <h3>Full sweep, one workstation</h3>
+        <p class="plain">The entire search is designed to run on one desktop-class machine in two to four days — no cluster, no cloud bill.</p>
+        <p class="pro">The ~33-billion-trial sweep is sized to complete in 2–4 days on a single Apple&nbsp;M4&nbsp;Pro — the locked engineering SLA.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= RIGOR MOAT ================= -->
+<section class="rigor">
+  <div class="wrap">
+    <span class="kicker reveal">The rigor moat</span>
+    <h2 class="reveal">What even most pros skip</h2>
+    <p class="sub reveal d1">Searching billions of combinations guarantees you will find things that look great by pure luck. The moat is the machinery that kills those illusions.</p>
+
+    <div class="grid c3">
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <h3>Catches lucky flukes</h3>
+        <p class="plain">A rule that only <em>looked</em> good by luck gets caught and thrown out.</p>
+        <p class="pro">Overfitting guards built into the pipeline — Deflated Sharpe (DSR) gates the leaderboard, and a nine-filter statistical cascade (CPCV, SPA, PBO, walk-forward, lockbox, Monte-Carlo among them) runs automatically on every sweep&rsquo;s winners.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 1 3 6.2"/><path d="M4 18v-6h6"/></svg></div>
+        <h3>Same answer, every time</h3>
+        <p class="plain">Run it again next year — you get the exact same answer, provably.</p>
+        <p class="pro">Every run is hash-keyed (blake3) on its exact inputs — data, code and parameters. Re-run it and get identical results, byte for byte.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8a3 3 0 1 0 0 8M17 8a3 3 0 1 1 0 8M9.5 11h5M9.5 13h5"/></svg></div>
+        <h3>Everything on the record</h3>
+        <p class="plain">Every action the system takes is written down in a ledger no one can quietly edit.</p>
+        <p class="pro">Every material action appends one line to a tamper-evident, hash-chained JSONL audit log. Breaking the chain fails the build.</p>
+      </div>
+      <div class="card reveal">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M8 15h4"/></svg></div>
+        <h3>Bad data gets rejected</h3>
+        <p class="plain">If the data looks wrong, it&rsquo;s thrown out loudly — never quietly patched.</p>
+        <p class="pro">Correct-or-absent, fail-loud: a corrupt bar fails the run rather than slipping through; suspect values are shown absent rather than wrong. Nothing is interpolated, nothing is fabricated.</p>
+      </div>
+      <div class="card reveal d1">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v.01"/><path d="M12 12v4"/></svg></div>
+        <h3>Never peeks at the future</h3>
+        <p class="plain">The engine can never peek at tomorrow&rsquo;s prices — tested, not promised.</p>
+        <p class="pro">Look-ahead-proof: at every bar the engine can only see the past — enforced by runtime guards and property tests, not by promise.</p>
+      </div>
+      <div class="card reveal d2">
+        <div class="icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h9"/><circle cx="18" cy="18" r="2.5"/></svg></div>
+        <h3>Honest cost labeling</h3>
+        <p class="plain">If a result ignores trading costs, it says so — right on the label.</p>
+        <p class="pro">Signal-only results are clearly marked signal-only. No quietly ignoring costs and calling it edge.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= HONEST LIMITS ================= -->
+<section>
+  <div class="wrap">
+    <div class="limits reveal">
+      <span class="kicker">Honest limits</span>
+      <h2>What BruteX does not claim</h2>
+      <p class="plain-lead">Every tool has edges. These are BruteX&rsquo;s — stated plainly, not buried in fine print.</p>
+      <ul>
+        <li><strong>Signal-only P&amp;L today.</strong> Current results measure raw signal quality; the options-translation track models real trading costs.</li>
+        <li><strong>Bounded vocabulary.</strong> 60 conditions is deep, not infinite — patterns outside the vocabulary are outside the search.</li>
+        <li><strong>Data from 2020.</strong> Roughly 6.5 years of minute history — long enough for statistics, short of a full multi-decade cycle.</li>
+        <li><strong>Past patterns ≠ future returns.</strong> Every surviving strategy still requires forward validation before any live use.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================= COMPARISON ================= -->
+<section>
+  <div class="wrap">
+    <span class="kicker reveal">Side by side</span>
+    <h2 class="reveal">How the tiers actually differ</h2>
+    <p class="sub reveal d1">Not a scoreboard of who wins — a map of what each tier can and cannot verify.</p>
+
+    <div class="tbl-scroll reveal d2">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col"><span class="visually-hidden">Dimension</span></th>
+            <th scope="col">Typical retail</th>
+            <th scope="col">Algo-retail</th>
+            <th scope="col">Institutional desk</th>
+            <th scope="col" class="bx">BruteX</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">How many ideas it tests</th>
+            <td>gut feel</td>
+            <td>a few dozen combos</td>
+            <td>hundreds–thousands</td>
+            <td class="bx">billions — all of them</td>
+          </tr>
+          <tr>
+            <th scope="row">Checks it isn&rsquo;t just lucky?</th>
+            <td>no</td>
+            <td>no</td>
+            <td>sometimes</td>
+            <td class="bx">yes — built in (DSR + CPCV)</td>
+          </tr>
+          <tr>
+            <th scope="row">Same answer every re-run?</th>
+            <td>no</td>
+            <td>rarely</td>
+            <td>internal</td>
+            <td class="bx">yes — bit-for-bit</td>
+          </tr>
+          <tr>
+            <th scope="row">Spots bad data?</th>
+            <td>screenshots</td>
+            <td>vendor-as-is</td>
+            <td>cleaned</td>
+            <td class="bx">refused loudly + audit trail</td>
+          </tr>
+          <tr>
+            <th scope="row">Runs by itself?</th>
+            <td>manual</td>
+            <td>semi</td>
+            <td>team-run</td>
+            <td class="bx">yes — zero-click nightly</td>
+          </tr>
+          <tr>
+            <th scope="row">What it costs</th>
+            <td>&#8776;free</td>
+            <td>cheap</td>
+            <td>crores</td>
+            <td class="bx">one workstation</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tbl-hint">Swipe sideways to see all columns &#8594;</div>
+  </div>
+</section>
+
+<!-- ================= FOOTER ================= -->
+<footer>
+  <div class="wrap">
+    <div class="rule"></div>
+    <div class="flag">Built in India.</div>
+    <p>Research tooling — not investment advice. Numbers are engineering facts about the system, never profit promises.</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  var reduced = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---- scroll reveal ---- */
+  var revealables = [].slice.call(document.querySelectorAll(".reveal"));
+  var pyramid = document.getElementById("pyramid");
+  if (pyramid) revealables.push(pyramid);
+
+  function showAll(){
+    revealables.forEach(function(el){ el.classList.add("in"); });
+  }
+
+  if (reduced || !("IntersectionObserver" in window)) {
+    showAll();
+  } else {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) {
+          e.target.classList.add("in");
+          io.unobserve(e.target);
+        }
+      });
+    }, {threshold: 0.15, rootMargin: "0px 0px -8% 0px"});
+    revealables.forEach(function(el){ io.observe(el); });
+  }
+
+  /* ---- count-up numbers ----
+     Final values are already present in the markup, so no-JS,
+     reduced-motion and print all show the finished figures. */
+  function countUp(el){
+    var raw = el.getAttribute("data-target") || "";
+    var target = parseFloat(raw);
+    var suffix = el.getAttribute("data-suffix") || "";
+    if (!isFinite(target)) return;
+    /* format to exactly the decimals the target carries (23 -> "23",
+       4.6 -> "4.6") so the final animated text equals the static text */
+    var dot = raw.indexOf(".");
+    var decimals = dot >= 0 ? raw.length - dot - 1 : 0;
+    var dur = 1400, t0 = null;
+    function fmt(v){ return v.toFixed(decimals); }
+    function frame(ts){
+      if (t0 === null) t0 = ts;
+      var p = Math.min((ts - t0) / dur, 1);
+      var eased = 1 - Math.pow(1 - p, 3); /* easeOutCubic */
+      el.textContent = fmt(eased * target) + suffix;
+      if (p < 1) requestAnimationFrame(frame);
+      else el.textContent = fmt(target) + suffix;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  if (!reduced && "IntersectionObserver" in window &&
+      typeof requestAnimationFrame === "function") {
+    var counters = document.querySelectorAll(".cnt");
+    var cio = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) {
+          countUp(e.target);
+          cio.unobserve(e.target);
+        }
+      });
+    }, {threshold: 0.4});
+    counters.forEach(function(el){ cio.observe(el); });
+  }
+
+  /* keep static copy intact for print */
+  if (window.matchMedia) {
+    var printMql = window.matchMedia("print");
+    printMql.addEventListener && printMql.addEventListener("change", function(m){
+      if (m.matches) showAll();
+    });
+  }
+  window.addEventListener("beforeprint", showAll);
+})();
+</script>
+</body>
+</html>
