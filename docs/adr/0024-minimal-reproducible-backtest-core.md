@@ -190,6 +190,8 @@ Golden Rule #3):**
 | DEC-NTM-GROWW-REPOINT-001 (~750 NTM reference universe) | MIGRATION.md #694 | #1836 |
 | The crossverify family (producer · S3 posture · day-derive · spot-only · withheld-regate) | MIGRATION.md #1776–#1778, #1788–#1789 | #1838 |
 | DEC-BACKUP-OFFBOX-001 / ADR-0017 (offbox restic) — IN PART (remote target only) | MIGRATION.md #1596 | #1839 |
+| The F&O-stock mapping/economics-integrity audit family (DEC-MAPPING-INTEGRITY-RECONCILE-001 · DEC-MAPPING-INTEGRITY-EXPORT-001 · DEC-INSTRUMENT-MASTER-INTEGRITY-001 · DEC-INSTRUMENT-ECONOMICS-INTEGRITY-001) — retires with the stock arm in Phase-B PR-4; `economics_integrity.py`'s fate (retire vs retain-trivial over the 3 indices) is decided at PR-4 | MIGRATION.md #870 · #873 · #874 · #875 | #1837 |
+| The legacy UNMERGED branch `claude/s3-reference-export` (bf3ff327; PR #1289 closed-unmerged 2026-07-09; DEC-REFERENCE-EXPORT-S3-001/#1605 exists only branch-side — zero main-side code or ledger residue; functionally superseded by the landed crossverify producer #1776) — NEVER MERGE; the remote branch is deleted in Phase-B PR-1 | branch-side only (no main ledger entry) | #1838 |
 | Building on (not superseding): DEC-ENGINE-SPOT-ONLY-001 | MIGRATION.md #1790 | #1835 |
 
 **Accepted losses (stated plainly):**
@@ -199,7 +201,8 @@ Golden Rule #3):**
   objects afterwards. Also lost: the crossverify same-day priority-pull path
   (its `pull_leg.py` performs a real vendor pull) — the nightly remains the
   only automated pull.
-- **(9) INDEX fold-class drift recovery.** Deleting `spot_drift.py` also
+- **(b) INDEX fold-class drift recovery (the removal report's item 9).**
+  Deleting `spot_drift.py` also
   removes the only case/space/hyphen FOLD-class drift recovery for INDEX spot
   dirs (`brutex/data/lake_keys.py:36-41`); the alias ladder covers only the
   alias class. Not an observed production class (writers use canonical keys)

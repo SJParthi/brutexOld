@@ -7257,7 +7257,7 @@ hostile-review pass._
    tradable, `reference_only=FALSE`). On a network miss with no cache the load
    degrades honestly to the F&O-eligible base set, never invents constituents.
 
-   **AMENDMENT — the PROPOSED minimal-core decree (DEC-SCOPE-MINIMAL-CORE-001,
+   **AMENDMENT — the PROPOSED minimal-core scope pack (DEC-SCOPE-MINIMAL-CORE-001,
    2026-07-15, MIGRATION.md #1835 / ADR-0024; the historical text above is
    kept verbatim per the supersession convention):** the operator directive
    of 2026-07-15 (relayed via the coordinator session; operator-confirmed
