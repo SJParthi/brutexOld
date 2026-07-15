@@ -63,13 +63,43 @@ documented options-lake materialisation cost (a MEASURED multiple of the
 fallback per DEC-LAKE-FOOTPRINT-MEASURED-001; the older "~2-3×" wording was
 already retired in-tree — `brutex/dashboard/gated_prebuild.py:553-558`).
 
+**RULING C (Dhan NATIVE daily — operator ruling 2026-07-15 via the
+coordinator, confirmed by the Dhan track; arrived AFTER authoring, folded
+at the same-day input fold):** Dhan 1-DAY spot is pulled **NATIVELY** from
+Dhan's daily endpoint (`POST /v2/charts/historical`; depth = instrument
+inception) and runs **FIRST** — Dhan NEVER derives `1day`. Default window
+2020-01-01 → today; the daily endpoint's depth reaches instrument
+inception — the ~5y rolling cap is INTRADAY-only (§1.3 item 5). The Dhan
+prebuild derives **INTRADAY TFs ONLY**: `include_daily` is structurally
+OFF for the Dhan tree — a NEW PINNED INVARIANT (the native Dhan `1day`
+partition is never derived and never prebuild-overwritten; the seam
+already exists — `materialize_lake_timeframes(include_daily=...)`,
+`brutex/data/timeframe_materialize.py`). Groww is UNCHANGED — it still
+derives `1day` per DEC-1MINUTE-ONLY-DERIVE-1DAY-001, which becomes
+EXPLICITLY a PER-VENDOR law (Groww-only — a conscious, ledgered SCOPING
+note, §4.1 supersession 5; NOT a retirement). NEW capability dimension:
+`daily_source = native | derived` (Decision 4). The Dhan track records its
+side as its OWN DEC in a dedicated PR, which also carries a
+tolerance-banded OBSERVE-ONLY daily-vs-1min consistency check (WARN past a
+documented tolerance, never rewriting either side) — theirs, unlanded.
+
+**SEQUENCER RULING on RULING C (this design's own, already communicated to
+the Dhan track):** the Dhan spot phase is **TWO stage callables**
+(`run_spot_daily` → `run_spot`), NOT sub-steps of one — each gets its own
+gate, its own stage event, and its own `stopped_after` token, so a
+native-daily failure halts the chain BEFORE any 1-minute vendor calls,
+observably. `daily_source=native` declares the extra stage;
+`daily_source=derived` (Groww) simply never binds `run_spot_daily`.
+
 **FINAL RULED GRAPHS:**
 
 - **Groww:** SPOT (2020-01-01 → today, rolling) → SPOT PREBUILD → index
   FUTURES → FUTURES PREBUILD → per-contract OPTIONS (1-minute-native, NO
-  prebuild) → GREEKS.
-- **Dhan:** SPOT (rolling ~5y floor law) → SPOT PREBUILD → rolling ATM±10
-  OPTIONS (1-minute-native, NO prebuild) → GREEKS.
+  prebuild) → GREEKS. (`daily_source=derived` — no SPOT-DAILY node.)
+- **Dhan:** NATIVE 1-DAY SPOT (the vendor daily endpoint, depth to
+  inception — RULING C) → 1-MINUTE SPOT (rolling ~5y floor law,
+  intraday-only) → SPOT PREBUILD (INTRADAY TFs ONLY — `include_daily`
+  OFF) → rolling ATM±10 OPTIONS (1-minute-native, NO prebuild) → GREEKS.
 
 **RULED IMPLEMENTATION ITEM OWNED BY THIS TRACK:** today's Groww pipeline
 prebuild MATERIALIZES option timeframes (DEC-PIPELINE-AUTOPREBUILD-001 —
@@ -158,7 +188,11 @@ code at WS-D binding time; UNVERIFIED items are marked.
    (being implemented by them now). **TRUE 1-minute depth is UNVERIFIED**
    (vendor docs say 5y, the SDK docstring says 5 days — an operator probe is
    pending); the sequencer must NOT hard-assume 5y works (Decision 4 makes
-   the floor resolver adapter-owned and honest-degrade).
+   the floor resolver adapter-owned and honest-degrade). **Scope note
+   (RULING C fold):** the rolling ~5y law governs the INTRADAY (1-minute)
+   pull ONLY — the NATIVE DAILY pull's depth reaches instrument inception
+   (default window 2020-01-01 → today), so the Dhan `1day` series is NOT
+   bounded by the intraday cap.
 6. **NO DURABLE WINDOW LEDGER on the Dhan spine yet** (their gap G4):
    per-window outcomes are in-memory; a re-run re-issues vendor calls
    whole-range (the keep-first dedup absorbs the writes — see §1.4 lake
@@ -366,10 +400,10 @@ corrected in place):
   `DEC-CI-OK-NODHAN-GATE-001`, which is a workflow-side citation, not a
   bare ledger-header entry). **This ADR is guard-safe under `docs/adr/`.**
   Dhan-named ORCHESTRATION code in `brutex/` later requires the guard's
-  amendment/retirement under its own DEC (§17 prerequisite 1, joint with
-  the adapter sibling — their club PR #1551 may already handle it on their
-  branch; this ADR names the prerequisite without claiming how they
-  satisfy it).
+  retirement — HANDLED BY THE DHAN TRACK'S LINEAGE (input fold, 2026-07-15;
+  §15 prerequisite 1: their `DEC-DHAN-GUARD-RETIRE-002`, retirement code
+  shipped in their club member #1492 under the umbrella
+  `DEC-DHAN-SPOT-FEED-001`; this track does NO guard work).
 - **ADR numbering:** highest on disk is 0019 (with legacy duplicate pairs at
   0016 and 0017); ADR-0020 is SPOKEN FOR by in-flight PR #1435 (coordinator
   ruling) → this file takes ADR-0021.
@@ -404,12 +438,17 @@ declaration, §1.3 item 1) as the orchestration-layer law.
   The ENGINE reads the PRIMARY tree ONLY (Golden Rule #4 determinism via
   `data_snapshot_hash`; Dhan-as-engine-input/failover is explicitly an
   out-of-scope future DEC — open question Q4).
-- **BINDING INVARIANT:** every Dhan byte lands under
-  `<lake_root>/feeds/dhan/**` (rolling options at
-  `feeds/dhan/rolling_options/**`; the exact sub-layout — including where
-  Dhan spot 1-minute lands — is the Dhan track's ownership UNDER this
-  invariant). The top-level `bars/` + `options/` trees remain
-  Groww-exclusive.
+- **BINDING INVARIANT — CONFIRMED BY THE DHAN TRACK (2026-07-15; upgraded
+  from asked/assumed at the input fold):** every Dhan byte lands under
+  `<lake_root>/feeds/dhan/**` — their club-member-#1492 "feed-root nesting
+  law": every Dhan byte INCLUDING its own `bars/`, catalog, `.manifest/`
+  and `.locks/` nests under `feeds/dhan/` (rolling options at
+  `feeds/dhan/rolling_options/**`; Dhan SPOT 1-minute CONFIRMED under the
+  feed root, never the primary tree), with Groww byte-identity structurally
+  pinned in THEIR club test battery — their attribution and their pin, not
+  this track's own byte-check. The exact sub-layout remains the Dhan
+  track's ownership UNDER this invariant. The top-level `bars/` +
+  `options/` trees remain Groww-exclusive.
 
 ### 2.1 Rationale rows
 
@@ -499,7 +538,9 @@ state; §1.4 backup row — a WS-D obligation).
 The canonical stage order that every vendor's chain is a SUBSET of:
 
 ```
-SPOT → SPOT-PREBUILD → [METADATA] → FUTURES → FUTURES-PREBUILD
+SPOT-DAILY (capability-bound: daily_source=native only — RULING C)
+     → SPOT-1M → SPOT-PREBUILD (include_daily per capability)
+     → [METADATA] → FUTURES → FUTURES-PREBUILD
      → OPTIONS (1-minute-native, NO prebuild — RULING B) → GREEKS
 ```
 
@@ -507,7 +548,8 @@ A vendor's chain = exactly the stages its declared capability binds
 (Decision 4). An absent capability produces NO node — not a skipped node,
 not a flagged node; the stage simply does not exist on that vendor's graph
 (Dhan: no metadata stage, no futures stage — dropped entirely per the
-operator ruling).
+operator ruling; Groww: no SPOT-DAILY stage — `daily_source=derived`, its
+`1day` is produced by SPOT-PREBUILD per DEC-1MINUTE-ONLY-DERIVE-1DAY-001).
 
 ### 3.1 The Groww graph
 
@@ -515,7 +557,11 @@ Note on METADATA (review fold): the operator's FINAL ruled graph text omits
 a METADATA node; it is inserted here as the structural prerequisite of the
 ruled per-contract options capability (`get_expiries` → `get_contracts` is
 the addressing RULING A itself names) — a refinement of the ruled text, not
-a deviation.
+a deviation. Note on SPOT-DAILY (input fold): the Groww profile declares
+`daily_source=derived`, so the canonical SPOT-DAILY stage is ABSENT from
+this graph (no `run_spot_daily` binding) — the Groww `1day` is produced by
+SPOT PREBUILD per DEC-1MINUTE-ONLY-DERIVE-1DAY-001, now explicitly
+Groww-only (§4.1 supersession 5).
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
@@ -560,20 +606,32 @@ a deviation.
   │ <lake_root>/feeds/dhan/ · NO market-hours guard — the Dhan track's   │
   │ declared contract, §1.3 items 3/4/8)                                 │
   └──────────────────────────────────────────────────────────────────────┘
+   NATIVE 1-DAY SPOT  (POST /v2/charts/historical — the vendor's DAILY
+   │      endpoint; depth = instrument inception; default window
+   │      2020-01-01 → today; Dhan NEVER derives 1day — RULING C.
+   │      Runs FIRST as its OWN stage callable `run_spot_daily` with its
+   │      own gate + stopped_after token: a native-daily failure halts
+   │      BEFORE any 1-minute vendor calls, observably)
+   ├─ G1 gate
+   ▼
    SPOT  (NIFTY/BANKNIFTY/SENSEX + INDIAVIX; 1minute; rolling floor
    │      dhan_history_floor(today) = today − 5y + 7d — their
-   │      `DEC-DHAN-ROLLING-FLOOR-001`; TRUE depth UNVERIFIED, probe
+   │      `DEC-DHAN-ROLLING-FLOOR-001`; the ~5y cap is INTRADAY-only,
+   │      RULING C; TRUE 1-minute depth UNVERIFIED, probe
    │      pending — the sequencer never hard-assumes 5y; INDIAVIX
    │      availability itself UNVERIFIED on Dhan — probe-gated,
    │      degrades to 3 symbols, §1.3 item 10)
-   ├─ G1 gate
-   ▼
-   SPOT PREBUILD  (derived TFs inside the Dhan write domain)
    ├─ G2 gate
+   ▼
+   SPOT PREBUILD  (derived INTRADAY TFs ONLY inside the Dhan write
+   │      domain — include_daily structurally OFF, the RULING C pinned
+   │      invariant: the native 1day is never derived, never
+   │      prebuild-overwritten)
+   ├─ G3 gate
    ▼
    ROLLING ATM±10 OPTIONS  (their rolling pull; 1-minute-native;
    │                        feeds/dhan/rolling_options/**; NO prebuild)
-   ├─ G3 gate
+   ├─ G4 gate
    ▼
    GREEKS  (callable seam over the COMMON kernel; CLI-only today —
             the seam is this design's ask, §1.3 item 9)
@@ -601,10 +659,21 @@ a deviation.
   DEC-PULL-SIX-STEP-ORDER-001) is retained per vendor unchanged.
 - **Cross-vendor: fully parallel.** Disjoint lock domains, separate
   controllers, separate jobs; the two vendors' PREBUILDS may overlap in
-  time — the Dhan prebuild invocation must key `derive_write_lock` on the
-  DHAN feed root, not the primary root (an implementation invariant for
-  WS-D; the lock is lake-root-keyed today,
-  `brutex/dashboard/pipeline_prebuild.py:801`).
+  time. The derive-lock invariant — the Dhan prebuild keys
+  `derive_write_lock` on the DHAN feed root, never the primary root — is
+  **VERIFIED-AS-BUILT by the Dhan track (2026-07-15 — their verification,
+  not this track's own byte-check):** their `run_dhan_prebuild` binds
+  `materialize_lake_timeframes(lake_root=dhan_root)` whose
+  `derive_write_lock` resolves under the FEED root →
+  `feeds/dhan/.locks/derive.lock`, leaving the primary root's `.locks/`
+  untouched by a Dhan prebuild — the two vendors' spot prebuilds never
+  serialize on one derive lock. Pinned by their
+  `test_spot_prebuild_derive_lock_keys_on_dhan_feed_root` (asserts the
+  lock file appears under `feeds/dhan/.locks/` and the primary root stays
+  clean) in their follow-up PR (branch `claude/dhan-options-native-floor`,
+  locally complete, push held for their merge slot; a sub-clause of their
+  `DEC-DHAN-OPTIONS-NO-PREBUILD-001`, unlanded). The lock is
+  lake-root-keyed today (`brutex/dashboard/pipeline_prebuild.py:801`).
 - **Movers warm:** PRIMARY (Groww) chain only, unchanged
   (DEC-PIPELINE-AUTOPREBUILD-001 lineage). The Dhan chain skips it — there
   is no dashboard read surface over the Dhan domain yet (§2.4).
@@ -616,9 +685,12 @@ a deviation.
 Extend `run_full_pipeline` (`brutex/dashboard/pipeline_pull.py:967`) with
 ADDITIVE optional staged callables:
 
-- `run_prebuild_spot`, `run_futures`, `run_prebuild_futures`, `run_options`,
-  `run_greeks` — beside the existing `run_spot` / `run_metadata` /
-  `run_prebuild` (terminal) / movers seams.
+- `run_spot_daily` (RULING C — the native-daily stage, bound ONLY where the
+  profile declares `daily_source=native`; its own gate + stage event +
+  `stopped_after` token per the §1.1 sequencer ruling), `run_prebuild_spot`,
+  `run_futures`, `run_prebuild_futures`, `run_options`, `run_greeks` —
+  beside the existing `run_spot` / `run_metadata` / `run_prebuild`
+  (terminal) / movers seams.
 - A `None` staged callable = the stage is ABSENT from this vendor's graph —
   logged honestly with the capability reason (never a silent skip; the
   `_run_options_noop_phase` honesty posture,
@@ -672,6 +744,15 @@ ADDITIVE optional staged callables:
    ok ∧ the options stage settled (there is no terminal prebuild to gate
    on) — a supersession-in-part of the DEC-PIPELINE-AUTOPREBUILD-001 warm
    arm, pinned in WS-B.
+5. **DEC-1MINUTE-ONLY-DERIVE-1DAY-001 is SCOPED PER-VENDOR — Groww-only
+   (RULING C, input fold; a conscious, ledgered SCOPING note, NOT a
+   retirement):** the "1-minute is the ONLY fetched granularity; `1day` is
+   DERIVED from it" law remains byte-true for the Groww chain (its graph,
+   prebuild and goldens are untouched); the Dhan chain fetches its `1day`
+   NATIVELY by operator ruling and NEVER derives it (`include_daily`
+   structurally OFF on the Dhan tree — the pinned invariant). Another
+   capability-declared difference (`daily_source = native | derived`,
+   Decision 4); the scoping is recorded in the ledger entry at sign-off.
 
 ---
 
@@ -685,6 +766,7 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | `vendor` token | `"groww"` | `"dhan"` | orchestration |
 | Lake write domain | primary root (`bars/` + `options/`) | `<lake_root>/feeds/dhan/` | orchestration invariant (Decision 1) |
 | Capability set | `{spot, futures, options: per_contract, metadata}` | `{spot, options: rolling_atm}` | operator ruling A |
+| Daily (`1day`) source | `derived` — SPOT-PREBUILD derives `1day` from stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, Groww-only per §4.1 supersession 5) | `native` — the vendor daily endpoint, depth to inception, runs FIRST as `run_spot_daily`; prebuild `include_daily` structurally OFF (the RULING C pinned invariant) | operator ruling C |
 | History-floor resolvers | const `GROWW_HISTORY_FLOOR` = 2020-01-01 (CLAUDE.md §2 Rule 3) | rolling `today − 5y + 7d` + unified options floor (`DEC-DHAN-ROLLING-FLOOR-001`; TRUE depth UNVERIFIED) | adapter |
 | Paging profile | interval-tier chunks (CLAUDE.md §6 chunk row) | 90d spot / 30d rolling tiles (§1.3 item 3) | adapter |
 | Rate factory | ONE `SessionRateController`, 8 r/s ceiling + 500/min governor (DEC-GROWW-RATE-CEILING-8-002, DEC-GROWW-RATE-PERMIN-001) | ONE `SessionRateController` + `DailyQuotaTracker`, 5 r/s + 100k/day, no per-minute cap (§1.3 item 3) | adapter (numbers), orchestration (one-instance-per-chain law) |
@@ -698,9 +780,12 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 
 The BINDER derives WHICH staged callables to pass to the ONE sequencer from
 the capability set — this is how capability-driven graphs stay STRUCTURAL
-without a graph engine: no capability ⇒ no callable ⇒ no node. The Groww
-profile binds today's spines byte-identically. The Dhan profile binds the
-Dhan track's spines (their implementation, against this interface — §12).
+without a graph engine: no capability ⇒ no callable ⇒ no node.
+`daily_source=native` additionally binds `run_spot_daily` as the FIRST
+stage; `derived` never binds it (RULING C + the §1.1 sequencer ruling). The
+Groww profile binds today's spines byte-identically. The Dhan profile binds
+the Dhan track's spines (their implementation, against this interface —
+§12).
 
 **Ownership collision to broker BEFORE WS-C (review fold — Golden Rule #11
 COMMON):** `dhan-track-state.md` records that club PR #1551 already carries
@@ -727,7 +812,7 @@ never two silent parallel abstractions.
 | Auth | Groww TOTP/daily-token SSM re-read (CLAUDE.md §6) | Dhan 24h JWT SSM re-read (§1.3 item 7) | separate credentials + separate reauth machinery; account single-flight keys per vendor account | none |
 | Locks | account + lake-root + lease trio at the primary root | ONE feed-root flock at `feeds/dhan/` | disjoint files by construction (Decision 1 rationale (c)); per-partition flocks are path-keyed (`partition_lock.py:339`) so they never collide across domains | HONEST ASYMMETRY (review fold): Dhan declares NO account-level single-flight and NO cross-host lease — flock is single-host, yet §9 discloses TickVault CO-TENANCY on the Dhan account (shared 100k/day budget). Two hosts sharing the Dhan account have no account exclusion/cross-host detection. Accepted for v1 under the single-box envelope (CLAUDE.md §8) + named as a Dhan-track follow-up (the DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 / DEC-ACCOUNT-LEASE-CROSSHOST-001 parity gap) — never claimed equivalent to the Groww posture |
 | Pull-OBSERVABILITY singletons (review fold — the previously missing row) | the ONE `RateLimitPanel` (`brutex/dashboard/app.py:446`) fed by `make_rate_observer`/`RatePanelSampler` over the app's ONE `_session_rate` (:2268, :3779); `GET /api/v1/pull/rate` + the DEC-RATE-METER-LIFECYCLE-001 meter registration (`register_pull_meter`, `pull_controller.py:1140` — the "no in-process pull running ⇒ no meter registered" process invariant, with its documented eviction blast radius); the DEC-OPERATOR-HEALTH-TRUTH-001 health-hub pull lane + `last_pull` retained terminal keyed on the ONE `_pull_job` slot (app.py:3094; `pull_jobs.py:1561`); the process-global `MetricRegistry` pull-health gauges | **DARK in v1 — a NAMED gap** (the pull-plumbing twin of the §2.4 lake-read invisibility): the Dhan chain surfaces NONE of these Groww-slot readouts | **WS-D PIN:** the Dhan chain NEVER registers into the Groww panel / pull-rate meter / health-hub pull lane — registering would blend/evict the Groww readout, break the meter-lifecycle invariant, and mis-color the health-hub pull lane (three DECs of readout honesty). Per-vendor observability surfaces land in WS-E | the Dhan chain is observably dark on these surfaces until WS-E (disclosed; its own job snapshot + structlog stage events are the interim visibility) |
-| Prebuild derive lock | `derive_write_lock(primary root)` | `derive_write_lock(dhan feed root)` — WS-D invariant | lake-root-keyed lock (`pipeline_prebuild.py:801`) → per-domain keys → the two prebuilds may overlap | host CPU (below) |
+| Prebuild derive lock | `derive_write_lock(primary root)` | `derive_write_lock(dhan feed root)` — VERIFIED-AS-BUILT by the Dhan track (2026-07-15: `feeds/dhan/.locks/derive.lock`, primary `.locks/` untouched; their pin `test_spot_prebuild_derive_lock_keys_on_dhan_feed_root`, §3.3) | lake-root-keyed lock (`pipeline_prebuild.py:801`) → per-domain keys → the two prebuilds may overlap | host CPU (below) |
 | Failure domain | per-vendor job thread/process; `MarketHoursHalt` / throttle / auth expiry / mass-empty halt the GROWW chain only | per-vendor job thread/process; quota exhaustion / JWT expiry halt the DHAN chain only | fail-closed within a vendor (§3.3); no shared exception path | the honest shared residuals below |
 | Scheduling lane | dashboard job OR the nightly/CLI lane | dashboard job OR the nightly/CLI lane | the nightly/CLI lane MAY run the two chains as TWO OS PROCESSES for hard process isolation | — |
 
@@ -885,21 +970,32 @@ for OPTION contracts (DEC-PIPELINE-AUTOPREBUILD-001 —
     one, however, keeps being listed/served — another reason the
     disposition below is not optional.
 - **Already-stored derived option TFs (written by the pre-ruling prebuild)
-  are NOT zero-risk to leave inert** (the review fold falsified the earlier
-  "leave INERT — zero risk" recommendation; Q1 rewritten accordingly).
-  WS-A must ship ONE disposition:
-  - **(a) RECOMMENDED — quarantine-move (or delete) every option-contract
-    derived-TF + derived-`1day` partition at retirement.** Derived data is
+  are NOT zero-risk to leave inert UN-GATED** (the review fold falsified
+  the earlier "leave INERT — zero risk" recommendation; Q1 rewritten
+  accordingly). WS-A must ship ONE disposition — the DESIGN'S
+  RECOMMENDATION is (a); the operator decides at Q1:
+  - **(a) RECOMMENDED — reader-gate + leave the stored TFs inert:** gate
+    the movers baseline resolvers
+    (`resolve_prev_close` / `resolve_prev_oi`) to the 1-minute fallback
+    for FNO CE/PE contracts — a READ-SIDE change, NO data destruction —
+    leaving the stored bytes inert on disk, AND exclude CE/PE symbol dirs
+    from the doctor freshness walk under the superseding DEC (with its own
+    pin) so the doctor stays green. The frozen-baseline hazard (A) dies at
+    the READ side. Trade-offs, disclosed: frozen bytes stay on disk
+    permanently and `/db` keeps listing/serving them (a display-honesty
+    residual over explicitly-stale derived data); two reader gates to pin
+    instead of one migration step.
+  - **(b) Quarantine-move (or delete) every option-contract derived-TF +
+    derived-`1day` partition at retirement:** the hazard dies STRUCTURALLY,
+    the doctor stays green with NO walk exclusion, and `/db` stops serving
+    frozen TFs. Trade-offs: a destructive migration step — derived data is
     re-derivable from the stored 1-minute (nothing irreplaceable is
-    destroyed; the quarantine-move keeps the house
-    data-never-destroyed posture — the DEC-LAKE-HEAL-001 before-image
-    pattern), the frozen-baseline hazard (A) dies structurally, the
-    doctor stays green, and `/db` stops serving frozen TFs.
-  - **(b) Leave stored bytes inert + gate every reader:** the baseline
-    resolvers take the 1-minute fallback for FNO CE/PE (or
-    freshness-check the `1day` before serving), AND the doctor freshness
-    walk excludes CE/PE dirs under the superseding DEC. More moving parts,
-    permanent frozen bytes on disk; kept as the fallback option only.
+    destroyed; the quarantine-move keeps the house data-never-destroyed
+    posture — the DEC-LAKE-HEAL-001 before-image pattern).
+  - **(c) Freshness-check the `1day` before serving** (compare against the
+    1-minute tail on every baseline resolve): the most moving parts + a
+    per-read cost, and it leaves the doctor question unanswered; listed as
+    an alternative only.
   - Leaving the bytes inert WITHOUT reader gating is REJECTED — it serves
     wrong %CHNG (A) and a recurring doctor FAIL.
 - The Dhan side pins its own options-prebuild ABSENCE in its own PR (their
@@ -927,9 +1023,14 @@ OPTIONS phase is **REQUIRED before any nightly/auto-armed Dhan chain**.
 Hence: whole-range re-issue is tolerable for SPOT interim, **categorically
 NOT for the nightly OPTIONS phase**.
 
-**Mechanism is the Dhan track's choice:** the deferred Groww-parity durable
-window-ledger spine (their `DEC-FEED-SPINE-GENERALIZE-001`) OR a cheaper
-lake-tail-derived `from_date` per key. The sequencer:
+**ACCEPTED by the Dhan track (2026-07-15, after this ruling was
+communicated — the input fold):** they build `incremental_from` per rolling
+key BEFORE any auto-arm. Their likely mechanism ORDER: (1) the cheap
+lake-tail-derived `from_date` per key FIRST (walk each key's newest stored
+partition → resume from its tail), with (2) the durable Groww-parity
+window-ledger spine (their `DEC-FEED-SPINE-GENERALIZE-001`) as the LATER
+upgrade; manual runs stay allowed with the request cost disclosed. The
+sequencer:
 
 - exposes a per-phase `incremental_from` seam (§12), and
 - treats incrementality as a **CAPABILITY FLAG**: absent ⇒ the chain
@@ -971,7 +1072,10 @@ misorder) — and **OBSERVABLY**:
 - The chain logs its capability-derived PLANNED stage list at start (so an
   absent capability is visible as "not on this vendor's graph", never a
   silent hole).
-- The per-vendor `stopped_after` vocabulary extends with the staged names.
+- The per-vendor `stopped_after` vocabulary extends with the staged names —
+  INCLUDING `spot_daily` (RULING C: a native-daily failure reads
+  `stopped_after=spot_daily`, observably BEFORE any 1-minute vendor call —
+  the §1.1 sequencer ruling's own-gate/own-token requirement).
 - Per-vendor pull-progress job surfaces (already job-scoped —
   `BackgroundPullJob` snapshots). Precision (review fold): job-scoped
   covers the SNAPSHOTS only — the single-slot rate panel /
@@ -1019,7 +1123,10 @@ def run_full_pipeline(
     run_metadata: Callable[[], MetadataPullReport] | None = None,
     run_historical: ... ,                    # legacy combined F&O phase (default chain)
     run_prebuild: ... | None = None,         # legacy TERMINAL prebuild (default chain)
-    # NEW staged callables (None = stage ABSENT from this vendor's graph):
+    # NEW staged callables (None = stage ABSENT from this vendor's graph;
+    # each returns a StageOutcome-satisfying report — the structural
+    # protocol in invariant 4 below):
+    run_spot_daily: Callable[[], StageOutcome] | None = None,   # RULING C: native-daily stage (daily_source=native binds it)
     run_prebuild_spot: Callable[[], PrebuildOutcome] | None = None,
     run_futures: Callable[[], CompositePullReport] | None = None,   # F&O spine, step_filter={INDICES_FUTURES,...}
     run_prebuild_futures: Callable[[], PrebuildOutcome] | None = None,
@@ -1035,7 +1142,8 @@ def run_full_pipeline(
 class VendorPullProfile:
     vendor: str                              # "groww" | "dhan"
     write_domain: Path                       # primary root | <root>/feeds/dhan
-    capabilities: VendorCapability           # {spot, futures?, options_shape, metadata?}
+    capabilities: VendorCapability           # {spot, futures?, options_shape, metadata?, daily_source}
+    daily_source: Literal["native", "derived"]  # RULING C — native binds run_spot_daily FIRST
     history_floor: Callable[[date], date]    # adapter-owned depth law
     paging: PagingProfile                    # adapter-owned chunk/tile law
     rate_factory: Callable[[], SessionRateController]   # ONE per chain
@@ -1075,7 +1183,8 @@ otherwise have to guess):**
   token — the key `incremental_from` resolves coverage for;
   `VendorCapability` = a frozen set-like declaration
   `{spot: bool, futures: bool, options_shape: per_contract|rolling_atm|None,
-  metadata: bool}`; `LockDomain` = the vendor's lock recipe
+  metadata: bool, daily_source: native|derived}`; `LockDomain` = the
+  vendor's lock recipe
   (`trio_at_primary_root` | `feed_root_flock(path)`); `PagingProfile` = the
   adapter's chunk/tile law (`max_days_per_request` per phase kind);
   `IncrementalityCapability` = HOW `incremental_from` is derived
@@ -1091,11 +1200,22 @@ enforces at review time):**
    vendor's.
 3. Halts are HONEST typed exceptions (the vendor's global-stop family);
    stage callables NEVER swallow `LakeWriteHalt`.
-4. Stage callables return the EXISTING report shapes
-   (`BulkSpotReport` / `MetadataPullReport` / `CompositePullReport` /
-   `PrebuildOutcome` / `GreeksEnrichOutcome`) so the sequencer's gate
-   predicates (`spot_phase_ok` family, `pipeline_pull.py:149-218`) apply
-   unchanged.
+4. **The stage-callable contract is a STRUCTURAL protocol, NOT the concrete
+   Groww report types** (the Dhan track's interface improvement, adopted at
+   the 2026-07-15 input fold): each stage callable returns an object
+   satisfying a `StageOutcome`-shaped protocol naming the REQUIRED
+   fields/semantics — an `ok` verdict, failed/still-failed counts, halt
+   propagation (a vendor-halt / `LakeWriteHalt` is RAISED, never swallowed
+   into the outcome — invariant 3), and a stopped-reason token. Groww's
+   existing report shapes (`BulkSpotReport` / `MetadataPullReport` /
+   `CompositePullReport` / `PrebuildOutcome` / `GreeksEnrichOutcome`)
+   already satisfy it, so the sequencer's gate predicates (`spot_phase_ok`
+   family, `pipeline_pull.py:149-218`) generalize over the protocol
+   unchanged for Groww; Dhan's stage reports are `DhanWindowOutcome`-based
+   (NOT `BulkSpotReport`) and satisfy the protocol directly or via THIN
+   adapters. Their Dhan Greeks CLI pass is exposed as a callable seam
+   returning a gate-compatible outcome shape (their commitment, §1.3
+   item 9).
 5. Stage-event tokens (`vendor=`, `stage=`) are emitted by the SEQUENCER,
    not re-minted per spine (§10).
 
@@ -1117,6 +1237,11 @@ enforces at review time):**
   honestly (adapter-owned floor resolver). Dhan INDIA VIX availability +
   securityId are likewise UNVERIFIED (§1.3 item 10 — probe-gated, honest
   3-symbol degrade).
+- RULING C's Dhan native-daily depth ("instrument inception") is the ruled
+  vendor shape as confirmed by the Dhan track — like every §1.3 row it is
+  re-confirmed at WS-D; the tolerance-banded OBSERVE-ONLY daily-vs-1min
+  consistency check is the Dhan track's dedicated-PR deliverable (theirs,
+  unlanded), not this design's.
 - The WS-A retirement carries REAL reader consequences until its
   disposition ships (§7.2): the movers options prev-day baselines read the
   derived option `1day` FIRST, and the doctor's freshness walk covers CE/PE
@@ -1146,29 +1271,36 @@ enforces at review time):**
 
 ## 15. Prerequisites
 
-1. The `no-dhan-guard` amendment/retirement under its OWN DEC before
-   Dhan-named ORCHESTRATION code lands in `brutex/` (joint with the adapter
-   sibling; their club PR #1551 may already handle it on their branch —
-   named, not claimed). This ADR itself is guard-safe under `docs/adr/`
-   (the guard's scan scope, §1.4).
+1. The `no-dhan-guard` retirement is **HANDLED BY THE DHAN TRACK'S
+   LINEAGE — this track does NO guard work** (input fold, 2026-07-15;
+   supersedes this section's earlier "joint prerequisite" framing): the
+   retirement code shipped in their club member #1492 under the umbrella
+   `DEC-DHAN-SPOT-FEED-001` (their club entry #1797 sub-item (e); the
+   retirement's own ledger entry lands as their #1801) — cited
+   `DEC-DHAN-GUARD-RETIRE-002` (backticked; their lineage, not on main
+   yet). By the time orchestration code lands in `brutex/`, club PR #1551
+   will have retired the gate. This ADR itself is guard-safe under
+   `docs/adr/` (the guard's scan scope, §1.4).
 2. Coordinator reservations: the MIGRATION.md entry number for
    `DEC-DUAL-VENDOR-PIPELINE-001` + the ADR-0021 slot (this file).
 3. The Dhan track's contract values landing via club PR #1551 + follow-ups.
 
 ## 16. Open questions for operator sign-off (numbered, answerable)
 
-- **Q1 (REWRITTEN at the review fold — the earlier "leave INERT, zero
-  risk" was FALSE):** stored derived option TFs already on disk feed the
-  movers prev-close/OI baselines `1day`-FIRST and sit in the doctor's
-  freshness walk (§7.2) — leaving them inert un-gated serves a FROZEN
-  retirement-eve prev-close (wrong %CHNG until contract expiry) and a
-  recurring doctor FAIL. Choose the disposition: **(a)
-  quarantine-move/delete the option-contract derived partitions at
-  retirement (RECOMMENDED — re-derivable from stored 1-minute, doctor
-  stays green, hazard dies structurally)** vs (b) leave bytes inert +
-  gate the baseline resolvers to the 1-minute fallback for FNO CE/PE +
-  exclude CE/PE from the doctor freshness walk (fallback option; frozen
-  bytes stay on disk)?
+- **Q1 (REWRITTEN at the review fold; recommendation set at the input
+  fold — the earlier "leave INERT, zero risk" was FALSE):** stored derived
+  option TFs already on disk feed the movers prev-close/OI baselines
+  `1day`-FIRST and sit in the doctor's freshness walk (§7.2) — leaving
+  them inert UN-GATED serves a FROZEN retirement-eve prev-close (wrong
+  %CHNG until contract expiry) and a recurring doctor FAIL. Choose the
+  disposition: **(a) gate the baseline resolvers to the 1-minute fallback
+  for FNO CE/PE + exclude CE/PE from the doctor freshness walk, leaving
+  the stored bytes inert (RECOMMENDED — read-side, no data destruction;
+  disclosed residuals: frozen bytes stay on disk and `/db` keeps listing
+  them)** vs (b) quarantine-move/delete the option-contract derived
+  partitions at retirement (the hazard dies structurally; re-derivable
+  from stored 1-minute) vs (c) freshness-check the `1day` before serving
+  (per-read cost; listed only)?
 - **Q2** — Any Dhan-side pull-window / intra-day quota-budget policy,
   despite no inherited market-hours guard? (Context: TickVault co-tenancy
   on the Dhan account + the shared 100k/day budget, §9.) Default: none.
@@ -1187,20 +1319,30 @@ enforces at review time):**
   absence pin (pipeline AND heal paths) + the stored-option-TF disposition
   (Q1) keeping the movers baselines honest and the doctor green + the
   reader audit + the superseding DEC entry (§7).
-- **WS-B:** staged sequencer seams — additive `run_full_pipeline` params +
-  the F&O spine `step_filter`; byte-identical defaults PINNED.
-- **WS-C:** `VendorPullProfile` / capability registry + per-vendor job
-  slots + per-vendor guard binding.
+- **WS-B:** staged sequencer seams — additive `run_full_pipeline` params
+  (incl. `run_spot_daily`, RULING C) + the `StageOutcome` structural
+  protocol (§12 invariant 4) + the F&O spine `step_filter`; byte-identical
+  defaults PINNED.
+- **WS-C:** `VendorPullProfile` / capability registry (incl.
+  `daily_source`) + per-vendor job slots + per-vendor guard binding.
 - **WS-D:** the Dhan chain binding against the profile (with the Dhan
-  track): feed-root derive-lock domain, `incremental_from` seam, greeks
-  seam.
+  track): feed-root derive-lock domain (VERIFIED-AS-BUILT by the Dhan
+  track, §3.3 — WS-D consumes their pin, it does not re-verify),
+  `run_spot_daily` + `incremental_from` seams, greeks seam.
 - **WS-E:** nightly/CLI dual-vendor lanes (two-process isolation) +
   stage-event observability surfaces.
 
 ## 18. References
 
-- Operator directives + RULINGS A/B — 2026-07-15, via coordinator + the
-  Dhan feed track (§1.1).
+- Operator directives + RULINGS A/B/C — 2026-07-15, via coordinator + the
+  Dhan feed track (§1.1; RULING C — the Dhan native daily — arrived
+  post-authoring and was folded the same day at the input fold, together
+  with this design's own sequencer ruling on it).
+- The Dhan track's 2026-07-15 input-fold answers: the feed-root nesting
+  confirmation (Decision 1) · the derive-lock VERIFIED-AS-BUILT report +
+  pin name (§3.3 / Decision 5) · the guard-retirement lineage (§15
+  prerequisite 1) · the Decision 7 acceptance + mechanism order · the
+  structural stage-outcome protocol (§12 invariant 4).
 - The Dhan adapter contract — the Dhan feed track's declarations,
   2026-07-15; club PR #1551, `integration/club-x-dhan` @ `b6341fc3`; the
   team memory files `dhan-api-verified-facts.md` + `dhan-track-state.md`
@@ -1222,12 +1364,15 @@ enforces at review time):**
   DEC-CLI-GREEKS-ENRICH-001 · DEC-GREEKS-CORRECTNESS-AUDIT-001 ·
   DEC-PULL-SCOPED-ALL-ONECLICK-001 · DEC-PREBUILD-CLEANSET-001 ·
   DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 · DEC-LAKE-HEAL-001 ·
-  DEC-RATE-METER-LIFECYCLE-001 · DEC-OPERATOR-HEALTH-TRUTH-001.
+  DEC-RATE-METER-LIFECYCLE-001 · DEC-OPERATOR-HEALTH-TRUTH-001 ·
+  DEC-1MINUTE-ONLY-DERIVE-1DAY-001 (now scoped per-vendor Groww-only,
+  §4.1 supersession 5).
 - Future / not-yet-landed ids (backticked by convention):
   `DEC-DUAL-VENDOR-PIPELINE-001` (this design, at sign-off) ·
-  `DEC-FEED-SPINE-GENERALIZE-001` + `DEC-DHAN-ROLLING-FLOOR-001` (the Dhan
-  lineage, not on main) · `DEC-CI-OK-NODHAN-GATE-001` (the guard's ci-ok
-  wiring citation).
+  `DEC-FEED-SPINE-GENERALIZE-001` + `DEC-DHAN-ROLLING-FLOOR-001` +
+  `DEC-DHAN-OPTIONS-NO-PREBUILD-001` + `DEC-DHAN-GUARD-RETIRE-002` +
+  `DEC-DHAN-SPOT-FEED-001` (the Dhan lineage, not on main) ·
+  `DEC-CI-OK-NODHAN-GATE-001` (the guard's ci-ok wiring citation).
 - Verified source files: `brutex/dashboard/pipeline_pull.py` ·
   `brutex/dashboard/pipeline_prebuild.py` ·
   `brutex/dashboard/gated_prebuild.py` ·
