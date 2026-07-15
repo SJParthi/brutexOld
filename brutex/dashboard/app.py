@@ -8217,9 +8217,7 @@ def build_app(
             # "de-inerting forces a conscious decision" class the rollup
             # design named — decided at the merge-reconcile: preset-ordered
             # polls stay LEGACY while the composite index is active.
-            composite_active = (
-                composite_index.state == "joined" and bool(composite_index.by_run_id)
-            )
+            composite_active = composite_index.state == "joined" and bool(composite_index.by_run_id)
             # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
             # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
             # tf / direction all ABSENT — an empty-string param is a
