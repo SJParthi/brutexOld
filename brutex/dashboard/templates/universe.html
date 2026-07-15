@@ -568,6 +568,28 @@
     </div>
   </div>
 
+  <!-- ── DHAN SPOT feed (DEC-DHAN-PULL-SURFACE-001 / DEC-DHAN-SPOT-FEED-001):
+       a SEPARATE, standalone read-only Dhan feed track for the 3 spot indices
+       (NIFTY / BANKNIFTY / SENSEX 1-minute + INDIA VIX reference-only). It writes
+       into its OWN feeds/dhan/ lake namespace — independent of Groww, own read-only
+       AWS-SSM auth, no options / no expired futures. Reuses the SAME from/to date
+       picker above (pipelineDateQuery). Honest degradation (Golden Rule #1): the
+       per-index depth + servability are UNVERIFIED until a credentialed probe
+       transcript lands — the pull attempts each index and records honest EMPTY
+       windows for a not-yet-servable span; it never fabricates a bar. ── -->
+  <div style="margin:6px 24px 4px;">
+    <button class="pull-everything-btn" id="pullDhanBtn"
+            style="background:linear-gradient(135deg, rgba(38,166,154,.16), rgba(38,166,154,.05)); border-color:var(--teal, #26a69a);"
+            title="Standalone read-only Dhan SPOT feed: pull NIFTY / BANKNIFTY / SENSEX 1-minute (+ INDIA VIX reference-only) into a SEPARATE feeds/dhan/ lake. Own Dhan read-only AWS-SSM auth (never mints). Reuses the from/to dates above. SPOT only — no options, no expired futures.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b>Pull (Dhan) · spot feed</b>
+        <span class="pe-sub">NIFTY / BANKNIFTY / SENSEX 1-minute → feeds/dhan/ · read-only SSM auth · honest-empty until probe-verified</span>
+      </span>
+    </button>
+    <div class="loadmsg" id="dhanpullmsg" style="margin:6px 2px 0; font-size:12px; color:var(--muted);"></div>
+  </div>
+
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
        border:1px solid var(--yellow); border-radius:14px;">
@@ -1733,6 +1755,41 @@ async function refreshAutoPullChip() {
   } catch (e) { /* chip keeps its last state; the poller self-recovers */ }
 }
 refreshAutoPullChip();
+
+/* ── DHAN SPOT feed pull (DEC-DHAN-PULL-SURFACE-001): posts the standalone Dhan
+   route (feeds/dhan/), reusing the from/to picker. It does NOT drive the shared
+   Groww progress panel (that polls the Groww _pull_job) — the Dhan job carries its
+   own progress; wiring it into the shared panel is a named follow-up (not yet
+   ledgered). So this shows a one-line textContent status instead.
+   textContent-only (no innerHTML of any response value) — XSS-safe. ── */
+const DHAN_BTN = document.getElementById("pullDhanBtn");
+if (DHAN_BTN) {
+  DHAN_BTN.onclick = async () => {
+    const msg = document.getElementById("dhanpullmsg");
+    const dq = pipelineDateQuery();
+    const url = dq
+      ? "/api/v1/universe/pull-pipeline-dhan?" + dq.slice(1)
+      : "/api/v1/universe/pull-pipeline-dhan";
+    if (msg) msg.textContent = "Starting Dhan spot pull…";
+    DHAN_BTN.disabled = true;
+    try {
+      const resp = await fetch(url, { method: "POST" });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 503 credential refusal / 400 bad date — relay the server's own fix text.
+        if (msg) msg.textContent = "Dhan pull refused (" + resp.status + "): " + (body.detail || "see logs");
+      } else if (body.started) {
+        if (msg) msg.textContent = "Dhan spot pull started — " + body.total + " index series → feeds/dhan/ (poll ~30 min).";
+      } else {
+        if (msg) msg.textContent = "A Dhan pull is already running (single-flight) — try again after it finishes.";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "Dhan pull request failed — check connectivity and retry.";
+    } finally {
+      DHAN_BTN.disabled = false;
+    }
+  };
+}
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
    tick several rows → the ▶ Pull F&O button scopes its pull to them (the round-6

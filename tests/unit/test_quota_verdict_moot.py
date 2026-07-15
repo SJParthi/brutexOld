@@ -41,6 +41,17 @@ from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariant
 
 _PACKAGE_ROOT = Path(brutex.__file__).resolve().parent
 
+#: The ONE sanctioned production ``DailyQuotaTracker`` construction site — the
+#: Dhan feed's session factory (DEC-DHAN-SPOT-PULL-001 / ADR-0022; MIGRATION.md
+#: entry #1794). Dhan, unlike Groww, HAS a real vendor-documented Data-API cap
+#: (100,000 req/day — ``DHAN_DAILY_QUOTA``), so its tracker is a REAL quota not
+#: a phantom: the Groww MOOT proof chain below is untouched (the Groww
+#: controller build sites still wire NO tracker), and a Dhan
+#: ``DailyQuotaExceeded`` raise phone-alerts with zero new code via the
+#: retained raise-path net (``is_pull_halt`` → ``emit_pull_halt_alert``, #889 —
+#: pinned by ``test_is_pull_halt_still_matches_quota_raises``).
+_SANCTIONED_QUOTA_TRACKER_SITES = frozenset({"adapters/dhan/live_controller.py"})
+
 
 @pytest.fixture(autouse=True)
 def _disable_account_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,19 +79,29 @@ class TestQuotaVerdictMootPins:
     """The inertness proof chain, pinned link by link (DEC-QUOTA-VERDICT-MOOT-001)."""
 
     def test_no_production_quota_tracker_construction(self) -> None:
-        """AST pin (the G3 #1492 idiom): NO brutex/ module constructs a tracker.
+        """AST pin (the G3 #1492 idiom): NO GROWW-path module constructs a tracker.
 
-        The root of the whole proof: with zero construction sites,
+        The root of the whole proof: with zero Groww-path construction sites,
         ``RateController.quota_exhausted()`` is constant ``False`` (pinned by
         ``test_default_factory_builds_a_real_controller``) and the quota
-        exceptions have zero raise sites, so the ``quota_exhausted`` verdict is
-        unreachable from any live pull.
+        exceptions have zero Groww raise sites, so the ``quota_exhausted``
+        verdict is unreachable from any live Groww pull. The ONE sanctioned
+        exception is the Dhan feed's session factory
+        (``_SANCTIONED_QUOTA_TRACKER_SITES`` — Dhan has a REAL documented
+        100k/day cap, DEC-DHAN-SPOT-PULL-001); the pin additionally asserts
+        that sanctioned site still constructs one, so a stale carve-out cannot
+        silently widen the allowlist.
         """
         offenders: list[str] = []
+        sanctioned_seen: list[str] = []
         for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             if _constructs_daily_quota_tracker(tree):
-                offenders.append(str(path.relative_to(_PACKAGE_ROOT)))
+                rel = path.relative_to(_PACKAGE_ROOT).as_posix()
+                if rel in _SANCTIONED_QUOTA_TRACKER_SITES:
+                    sanctioned_seen.append(rel)
+                else:
+                    offenders.append(rel)
         assert offenders == [], (
             f"production modules construct DailyQuotaTracker: {offenders} — a tracker "
             "has been re-wired, so the quota-verdict MOOT decision "
@@ -88,6 +109,11 @@ class TestQuotaVerdictMootPins:
             "stop_quota brake + the quota_exhausted verdict come back to life, and "
             "the raise-path phone alert (is_pull_halt → emit_pull_halt_alert, #889) "
             "covers the DailyQuotaExceeded raise automatically."
+        )
+        assert sorted(sanctioned_seen) == sorted(_SANCTIONED_QUOTA_TRACKER_SITES), (
+            "the sanctioned Dhan tracker site list is stale — "
+            f"expected {sorted(_SANCTIONED_QUOTA_TRACKER_SITES)}, saw {sorted(sanctioned_seen)}; "
+            "trim the allowlist if the Dhan factory moved or was deleted."
         )
 
     def test_until_clean_none_hook_never_stops_on_quota(self) -> None:

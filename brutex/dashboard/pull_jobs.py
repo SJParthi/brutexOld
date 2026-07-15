@@ -229,7 +229,10 @@ def is_pull_halt(exc: BaseException) -> bool:
     vendor-down error-storm + dead-credential stops, ``GrowwCredentialDeadError`` being
     the TERMINAL auth escalation the predicate also matches / the Greeks-enrichment
     pool-broken halt ``GreeksEnrichPoolBroken`` — a worker process died abruptly,
-    DEC-GREEKS-PARALLEL-001). The error classes are
+    DEC-GREEKS-PARALLEL-001 / the DHAN terminal pull-stop family — terminal auth,
+    still-stale SSM token, inactive Data-API subscription — consulted via
+    :func:`~brutex.adapters.dhan.errors.is_terminal_pull_stop`,
+    DEC-DHAN-SPOT-FEED-001). The error classes are
     imported INSIDE the call — not at module top — so
     :mod:`brutex.dashboard.pull_jobs` stays wheel-free at import (``quota_tracker`` is
     part of the heavy PyO3 chain), and this check only runs on the rare
@@ -243,35 +246,45 @@ def is_pull_halt(exc: BaseException) -> bool:
     (the CRITICAL Telegram alert below) instead of being swallowed into a
     benign "built 0" outcome.
     """
+    from brutex.adapters.dhan.errors import is_terminal_pull_stop as _dhan_terminal_pull_stop
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import VendorDownError
     from brutex.adapters.groww.errors import is_terminal_auth_failure
     from brutex.data.errors import GreeksEnrichPoolBroken, LakeWriteHalt, MarketHoursHalt
     from brutex.orchestrator.quota_tracker import DailyQuotaExceeded, QuotaInvariantError
 
-    return isinstance(
-        exc,
-        (
-            LakeWriteHalt,
-            # DEC-GROWW-MARKET-HOURS-GUARD-001: a pull crossed into the NSE
-            # market-hours window and halted to free the shared Groww account for
-            # TickVault's live feed — a pull-wide graceful stop, alerted like a
-            # LakeWriteHalt if it escapes to the job layer.
-            MarketHoursHalt,
-            # The two quota classes are DORMANT under Groww (no daily quota, no
-            # tracker constructed anywhere — DEC-QUOTA-VERDICT-MOOT-001) but
-            # deliberately KEPT: they are the raise-path phone-alert net that
-            # covers a future capped vendor's re-wired tracker with zero new code.
-            DailyQuotaExceeded,
-            QuotaInvariantError,
-            MassEmptySettleHalt,
-            VendorDownError,
-            # DEC-GREEKS-PARALLEL-001: a Greeks pool worker died abruptly —
-            # a HOST-resource condition (OOM SIGKILL / crash, honestly not
-            # distinguishable), alerted like a LakeWriteHalt.
-            GreeksEnrichPoolBroken,
-        ),
-    ) or is_terminal_auth_failure(exc)
+    return (
+        isinstance(
+            exc,
+            (
+                LakeWriteHalt,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: a pull crossed into the NSE
+                # market-hours window and halted to free the shared Groww account for
+                # TickVault's live feed — a pull-wide graceful stop, alerted like a
+                # LakeWriteHalt if it escapes to the job layer.
+                MarketHoursHalt,
+                # The two quota classes are DORMANT under Groww (no daily quota, no
+                # tracker constructed anywhere — DEC-QUOTA-VERDICT-MOOT-001) but
+                # deliberately KEPT: they are the raise-path phone-alert net that
+                # covers a future capped vendor's re-wired tracker with zero new code.
+                DailyQuotaExceeded,
+                QuotaInvariantError,
+                MassEmptySettleHalt,
+                VendorDownError,
+                # DEC-GREEKS-PARALLEL-001: a Greeks pool worker died abruptly —
+                # a HOST-resource condition (OOM SIGKILL / crash, honestly not
+                # distinguishable), alerted like a LakeWriteHalt.
+                GreeksEnrichPoolBroken,
+            ),
+        )
+        or is_terminal_auth_failure(exc)
+        # DEC-DHAN-SPOT-FEED-001 (design §3): the Dhan terminal pull-stop family —
+        # terminal auth (re-read budget exhausted) / still-stale SSM token /
+        # inactive Data-API subscription. The spine re-raises the FIRST occurrence
+        # past its per-window quarantine; this arm makes the job layer alert it
+        # CRITICAL (the same emit_pull_halt_alert path, zero further wiring).
+        or _dhan_terminal_pull_stop(exc)
+    )
 
 
 class _Invalidatable(Protocol):

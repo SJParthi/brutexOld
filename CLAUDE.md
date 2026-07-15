@@ -2623,7 +2623,36 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
+- **Active branch:** `integration/club-x-dhan` (**Club X — dhan/feeds merge vehicle,
+  GATED-LAST in the drain queue** — the fold of PR #1492 (DEC-DHAN-SPOT-FEED-001,
+  MIGRATION.md #1794 umbrella + DEC-DHAN-ROLLING-FLOOR-001 #1795 — the standalone
+  read-only Dhan v2 SPOT feed track, ADR-0022; it CARRIES the parked PR #1482
+  feed-interface pack verbatim: DEC-FEED-INTERFACE-001 #1792 + DEC-FEED-LAKE-ROOT-001
+  #1793, ADR-0021 — diff-verified fully contained, #1482 recommended closed as
+  superseded) + PR #1501 (DEC-DHAN-ROLLING-OPTIONS-001 #1764 — the Dhan rolling-ATM
+  expired-options + Greeks track) as ONE merge event off main d6ac9f85. NOTE: #1492
+  retires the `no-dhan-guard` CI gate under its own DEC-DHAN-GUARD-RETIRE-002
+  (ADR-0022) — an operator/coordinator POLICY land, so this club stays parked-DRAFT
+  until that ruling. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; each member's full
+  record lives in its own MIGRATION.md entry + ADR — this line carries pointers,
+  never the story.)
+  Earlier: `claude/dhan-spot-feed`
+  (**DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1794 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1795** — the standalone READ-ONLY Dhan v2 SPOT feed track (ADR-0022), merged forward
+  onto main 43e8ca93 with the delta: the SECOND historical feed nests its whole lake at
+  `<lake_root>/feeds/dhan/` (the ADR-0021 feed-root law — Groww top-root byte-identical by
+  object identity; engine + dashboards structurally blind); pulls EXACTLY 4 indices —
+  NIFTY/BANKNIFTY/SENSEX 1-minute + INDIA VIX REFERENCE_ONLY — via the lean Dhan spot
+  spine + a Dhan-scoped prebuild; read-only AWS-SSM auth (never mints; DH-901 → the
+  single-flight SSM re-read); the ROLLING today−5y(+7d) history floor (operator ruling
+  2026-07-14 — `dhan_history_floor(today)`, ONE plan chokepoint, route 400 for a wholly
+  pre-floor pick, retention: pre-floor stored bars NEVER deleted); the full documented
+  error-code map over BOTH SDK remark-key spellings + the terminal auth/subscription
+  pull-halt (`is_terminal_pull_stop` → the CRITICAL Telegram alert); the `no-dhan-guard`
+  is RETIRED; probe kit (incl. `--floor-edge`) shipped UNRUN — every `*.dhan.co` host is
+  egress-blocked, zero Dhan facts flipped. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  the full record lives in MIGRATION.md #1794/#1795 + ADR-0022; Dhan facts table in §6b.)
+  Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
   only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
@@ -2885,8 +2914,7 @@ hostile-review pass._
   `gated_prebuild.py` (143/26) + `prebuild_parallel.py` (85/16) +
   `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
   line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
-  clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)
-  Earlier: `claude/sweep-lock-pull-concurrency`
+  clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)  Earlier: `claude/sweep-lock-pull-concurrency`
   (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
   CLI parity: `cmd_sweep_all` OWNS the sweep-vs-pull exclusion — the G10 lake read-guard
@@ -7228,7 +7256,28 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/operator-health-truth`
+- **Active feature branch:** `integration/club-x-dhan`
+  (Club X — dhan/feeds merge vehicle, GATED-LAST: PR #1492 DEC-DHAN-SPOT-FEED-001
+  MIGRATION.md #1794 + DEC-DHAN-ROLLING-FLOOR-001 #1795 (carrying the parked
+  PR #1482 feed-interface pack — DEC-FEED-INTERFACE-001 #1792 +
+  DEC-FEED-LAKE-ROOT-001 #1793, ADR-0021 — verified fully contained) + PR #1501
+  DEC-DHAN-ROLLING-OPTIONS-001 #1764, folded as ONE merge event; the
+  `no-dhan-guard` retirement (DEC-DHAN-GUARD-RETIRE-002, ADR-0022) is an
+  operator POLICY land — the club stays parked-DRAFT until that ruling; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/dhan-spot-feed`
+  (DEC-DHAN-SPOT-FEED-001, MIGRATION.md #1794 (umbrella) + DEC-DHAN-ROLLING-FLOOR-001
+  #1795 — the standalone read-only Dhan v2 SPOT feed track (ADR-0022) merged forward
+  onto main with the delta: the second historical feed at `<lake_root>/feeds/dhan/`
+  (ADR-0021 nesting law; Groww top-root byte-identical by object identity), exactly 4
+  indices (NIFTY/BANKNIFTY/SENSEX + INDIA VIX REFERENCE_ONLY, 1-minute only), read-only
+  SSM auth (never mints), the rolling today−5y+7d floor (operator ruling 2026-07-14;
+  ONE plan chokepoint + route 400 + retention property), the documented error-code map
+  over both SDK remark spellings + the terminal auth/subscription pull halt, the
+  drop_bars_after tail belt + absent-volume tolerance, the no-dhan-guard retirement,
+  and the UNRUN `--floor-edge` probe stage; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — the full record lives in MIGRATION.md #1794/#1795)
+  Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
   completed cleanly" on `flow_state === 'done'` is KILLED — the pull-rate
@@ -7306,8 +7355,7 @@ hostile-review pass._
   default path byte-identical (note/wire/stdout literal-pinned); named
   follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 (cause attribution); ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
-  §1 + MIGRATION.md #1792 for the full blurb)
-  Earlier: `claude/sweep-lock-pull-concurrency`
+  §1 + MIGRATION.md #1792 for the full blurb)  Earlier: `claude/sweep-lock-pull-concurrency`
   (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — the dashboard
   sweep route + the nightly sweep leg stop holding the LAKE pull flock through
   the sweep: `cross_process_lock=False` at the sweep route's job start + the
@@ -8028,6 +8076,37 @@ bruteX/
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |
+
+## 6b. Verified Dhan Facts (second historical feed — SPOT indices, REFERENCE lake `feeds/dhan/`)
+
+> **DEC-DHAN-SPOT-FEED-001 (MIGRATION.md #1794, ADR-0022) + DEC-DHAN-ROLLING-FLOOR-001
+> (#1795):** the standalone READ-ONLY Dhan v2 SPOT feed. Evidence lanes (weakest never
+> presented as fact): **VERIFIED-SDK** = the official `dhanhq` 2.2.0 wheel read from
+> source in-session; **VERIFIED-docs(mirror)** = a verbatim community mirror of the
+> official docs (dhanhq.co/docs/v2/ — original URL cited in `dhan_api_research.md`);
+> **VERIFIED-docs(snippet)** = official-domain search snippet; **COMMUNITY** =
+> third-party code only; **UNVERIFIED** = a live-probe gate (`docs/runbooks/feed-probe/`,
+> UNRUN — every `*.dhan.co` host egress-blocked in-sandbox). The ENGINE is UNCHANGED —
+> Dhan bars enter no vocabulary and no run identity.
+
+| Fact | Value | Source | Status |
+|------|-------|--------|--------|
+| Vendor / transport | **DhanHQ API v2 — `dhanhq` Python SDK 2.2.0** (injected SDK via `DhanSdkRefresher`; no raw HTTP) | SDK `dhan_http.py` (base `https://api.dhan.co/v2`); `adapters/dhan/reauth.py` | VERIFIED-SDK |
+| Intraday endpoint | `POST /v2/charts/intraday` via `intraday_minute_data(security_id, exchange_segment, instrument_type, from_date, to_date, interval=1, oi=False)`; intervals 1/5/15/25/60 min — BruteX fetches **1minute ONLY** (19 TFs + 1day DERIVED by the Dhan-scoped prebuild, §2 Rule 3) | SDK `_historical_data.py` (the official wheel, read in-session); mirror `17-historical-data.md`; `adapters/dhan/adapter.py` | VERIFIED-SDK + docs(mirror) |
+| Response shape | Parallel **COLUMN arrays** `{open[], high[], low[], close[], volume[], timestamp[]}` — NOT row arrays; unequal lengths = chunk-rejecting `DhanVendorDriftError` | mirror `17-historical-data.md`; `adapters/dhan/parser.py` | VERIFIED-docs(mirror) |
+| Timestamp semantics | Unix **epoch seconds** (UTC POSIX), stored UTC via `datetime.fromtimestamp(epoch, tz=UTC)` (host-TZ-invariant), rendered IST +05:30 | SDK `dhanhq.py` `convert_to_date_time`; `parser.py::parse_epoch_utc` | VERIFIED-SDK; epoch = bar **OPEN** time UNVERIFIED (probe gate G-I) |
+| Window cap | **90 days per intraday request** (`DHAN_INTRADAY_WINDOW_DAYS`), tiled by the COMMON `plan_windows` | mirror `17-historical-data.md`; `adapters/dhan/chunks.py` | VERIFIED-docs(mirror+snippet); 91-day behaviour UNVERIFIED (gate G-H) |
+| History floor (intraday) | Docs: minute data "for the **last 5 years**" — a ROLLING window. THE LAW: `dhan_history_floor(today) = today−5y + 7d margin` (DEC-DHAN-ROLLING-FLOOR-001, operator ruling 2026-07-14; Feb-29 rounds FORWARD; ONE clamp chokepoint `plan_dhan_work`; pre-floor stored bars NEVER deleted). **Groww's fixed `GROWW_HISTORY_FLOOR=2020-01-01` is a DIFFERENT law — never conflate** | mirror `17-historical-data.md` + support snippet; `adapters/dhan/constants.py::dhan_history_floor` | VERIFIED-docs(mirror+snippet) for the 5y depth; exact edge/margin UNVERIFIED (gates G-A/G-B — the `--floor-edge` probe) |
+| `toDate` semantics | Daily endpoint: "End date, **non-inclusive**" (docs). Intraday boundary at day resolution UNVERIFIED (probe gate #13) — the ingest tail's `drop_bars_after` BELT covers BOTH readings (a bar past the last servable day is never stored) | mirror `17-historical-data.md`; `adapters/dhan/ingest.py::_process_item` | VERIFIED-docs(mirror) daily; intraday UNVERIFIED (the belt is the cover) |
+| Rate limits — Data APIs | **5 req/s + 100,000 req/day; NO per-minute/hour governor** (`DHAN_RATE_LIMIT_RPS=5.0`, `DHAN_DAILY_QUOTA=100_000`, `DHAN_RATE_LIMIT_PER_MIN=None` — honestly none); own account, never touches the Groww governor | mirror `01-introduction.md` + support snippet; `adapters/dhan/live_controller.py` | VERIFIED-docs(mirror+snippet); HTTP-429 pairing UNVERIFIED (gate G-E) |
+| Data-API subscription | **PAID: ₹499+taxes/month** (auto-debited), includes Historical + Intraday; **FREE with 25 executed trades in the last 30 days**; enforcement = error 806/DH-902 (a terminal `DhanSubscriptionError` pull-halt naming the fix) | dhan.co support snippet; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-docs(snippet) |
+| securityIds (IDX_I) | **NIFTY = 13 (VERIFIED-SDK — the official README's own example)**; BANKNIFTY = 25, SENSEX = 51, INDIA VIX = 21 (**COMMUNITY-UNVERIFIED** — multiple independent third-party codebases; NOT in official docs); hardcoded map `DHAN_INDEX_SECURITY_IDS`, unknown symbol = loud skip, never a blind id | SDK README; `adapters/dhan/constants.py:121-126`; community sources in `dhan_api_research.md §5` | NIFTY VERIFIED-SDK(example); 25/51/21 COMMUNITY-UNVERIFIED (gate G-C — scrip-master cross-check) |
+| INDIA VIX servability | NO official statement that VIX has `/charts/*` candles (community projects fetch id 21 successfully — encouraging, not proof) | mirror `17-historical-data.md` (absence); `dhan_api_research.md §8` | UNVERIFIED — **HARD gate G-D** (the ADR-0009 VIX-gate precedent) |
+| Auth | `access-token` (JWT) + `client-id` headers per request; creds **AWS-SSM READ-ONLY** (`/tickvault/prod/dhan/{client-id,access-token}`; BruteX NEVER mints — DH-901 → the single-flight SSM RE-READ; a same-dead-token re-read = the `DhanTokenStillStaleError` pull-wide stop). Token lifetime: docs say 24 h; the official support page says SELECTABLE 8 h–30 d — **CONFLICTING official sources** | SDK `dhan_http.py` (the per-request header dict); mirror `02-authentication.md`; `adapters/dhan/{reauth,token_store_aws}.py` | VERIFIED-SDK headers; lifetime CONFLICTING-official (probe gate #10; WHO-mints = a pre-first-wet-pull ops gate, ADR-0022 §8) |
+| Error envelope | SDK failure = `{"status":"failure","remarks":{...}}` with **snake_case** keys (`error_code`/`error_type`/`error_message` — the LIVE shape); raw-HTTP docs shape is camelCase — the classifier reads BOTH; full numeric (800-814) + DH-9xx code table mapped (805/DH-904 throttle · 806/DH-902 subscription · 807-810/DH-901 auth · 804/811-814/DH-905/DH-907 bad request · 800/DH-908/DH-909 server) | SDK `dhan_http.py::_parse_response`; mirror `20-annexure.md`; `adapters/dhan/errors.py` | VERIFIED-SDK envelope + VERIFIED-docs(mirror) codes |
+| Static IP | Whitelisting documented for **Order APIs only** (eff. 2026-04-01); no doc statement binds it to Data/historical APIs — this read-only feed hits no order endpoint | mirror `22-releases.md`; ADR-0022 §8 | VERIFIED-docs(mirror) for Order APIs; Data-API exemption UNVERIFIED (probe gate #12 — confirm on first credentialed run) |
+
+---
 
 ## 7. Verified Indian Market Microstructure Facts
 
