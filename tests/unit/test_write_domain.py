@@ -138,6 +138,26 @@ class TestPrimaryDomainRefusals:
         with pytest.raises(WriteDomainError, match="OUTSIDE the lake root"):
             assert_write_domain(tmp_path / "elsewhere/x.parquet", primary_write_domain(root))
 
+    def test_feeds_prefix_exclusion_is_case_sensitive(self, tmp_path: Path) -> None:
+        """The documented case-sensitivity limit, PINNED as current behavior.
+
+        The ``feeds/`` component compare is byte/case-SENSITIVE: a
+        mixed-case ``FeedS/`` dest is NOT treated as the feeds subtree, so
+        it PASSES the primary domain here (on a case-insensitive filesystem
+        it would alias the on-disk ``feeds/`` dir — the module docstring's
+        defense-in-depth caveat; the production writers only ever mint the
+        lowercase ``FEEDS_COMPONENT``). A silent switch to a casefolded
+        compare — a behavior change needing its own design pass — fails
+        this pin and forces a conscious decision.
+        """
+        root = _lake(tmp_path)
+        domain = primary_write_domain(root, registered_feed_subtrees=(_FEED,))
+        # Mixed case ≠ the excluded lowercase component: primary-domain PASS.
+        assert_write_domain(root / "FeedS" / "vendor2" / "bars" / "x.parquet", domain)
+        # The lowercase literal still refuses (the exclusion itself intact).
+        with pytest.raises(WriteDomainError, match="PRIMARY write domain"):
+            assert_write_domain(root / FEEDS_COMPONENT / "vendor2/bars/x.parquet", domain)
+
 
 class TestFeedsDomainRefusals:
     """The feeds profile: own subtree passes; primary trees + foreign feeds refuse."""
@@ -241,3 +261,96 @@ class TestSymlinkAndMountShapes:
         root-level sidecar write passes the primary check."""
         root = _lake(tmp_path)
         assert_write_domain(root / ".pull_intent.json", primary_write_domain(root))
+
+
+class TestFeedsComponentSwapRail:
+    """The round-6 IN-LAKE swap rail (the assurance NG4E-2 MAJOR fold).
+
+    The FAIL-OPEN direction the original battery never exercised: the
+    existing symlink fixtures link primary-tree paths INTO feeds/ (the
+    fail-CLOSED direction), never the ``<root>/feeds`` component itself.
+    Swapping THAT component resolves the ``feeds`` token away, so pre-fold a
+    PRIMARY-domain write addressed under ``feeds/<vendor>/`` PASSED the
+    primary check (empirically reproduced) while physically landing in the
+    feed vendor's real bytes — and the feeds profile mis-refused its own
+    tree with the generic cross-domain message. The ported
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-6 rail refuses BOTH directions,
+    naming the symlinked component.
+    """
+
+    @staticmethod
+    def _swapped_lake(tmp_path: Path) -> Path:
+        """A lake whose ``feeds`` component is a SYMLINK to an in-lake dir."""
+        root = tmp_path / "lake"
+        for sub in ("bars/NSE/INDEX/NIFTY/1minute/2024", "other/vendor2/bars"):
+            (root / sub).mkdir(parents=True)
+        (root / FEEDS_COMPONENT).symlink_to(root / "other", target_is_directory=True)
+        return root
+
+    def test_swapped_feeds_component_refused_for_primary(self, tmp_path: Path) -> None:
+        """The empirical fail-open repro (fails-before): a PRIMARY write to
+        ``feeds/vendor2/bars/x.parquet`` under the swap PASSED pre-fold —
+        the resolved path reads ``other/...`` so the literal-prefix
+        exclusion never fired. The rail refuses, naming the component."""
+        root = self._swapped_lake(tmp_path)
+        domain = primary_write_domain(root, registered_feed_subtrees=(_FEED,))
+        with pytest.raises(WriteDomainError, match="component under the lake root is a SYMLINK"):
+            assert_write_domain(root / _FEED / "bars/x.parquet", domain)
+
+    def test_swapped_feeds_component_refused_for_feeds_profile(self, tmp_path: Path) -> None:
+        """The mirror direction: the feeds profile's OWN tree has been
+        swapped out — refused with the component NAMED (pre-fold it
+        mis-refused with the generic cross-domain message)."""
+        root = self._swapped_lake(tmp_path)
+        domain = feeds_write_domain(root, _FEED)
+        with pytest.raises(WriteDomainError, match="component under the lake root is a SYMLINK"):
+            assert_write_domain(root / _FEED / "bars/x.parquet", domain)
+
+    def test_swapped_target_addressed_directly_refused(self, tmp_path: Path) -> None:
+        """A dest addressed DIRECTLY at the swap's in-lake target aliases the
+        feed vendor's real bytes — the rail refuses it too (fail-closed:
+        containment is judged on the RESOLVED path either way)."""
+        root = self._swapped_lake(tmp_path)
+        domain = primary_write_domain(root)
+        with pytest.raises(WriteDomainError, match="component under the lake root is a SYMLINK"):
+            assert_write_domain(root / "other/vendor2/bars/x.parquet", domain)
+
+    def test_bars_dest_away_from_swap_target_still_passes(self, tmp_path: Path) -> None:
+        """The rail is SCOPED: a primary bars-tree write away from the swap
+        target is unaffected by the rogue ``feeds`` symlink."""
+        root = self._swapped_lake(tmp_path)
+        domain = primary_write_domain(root)
+        assert_write_domain(root / "bars/NSE/INDEX/NIFTY/1minute/2024/01.parquet", domain)
+
+    def test_control_real_feeds_dir_same_write_still_refused(self, tmp_path: Path) -> None:
+        """KILL-gate Case B (control): with a REAL ``feeds/`` directory the
+        SAME primary-domain write refuses via the ORDINARY structural
+        exclusion (not the swap rail) — proving the rail is additive, never
+        the thing carrying the everyday exclusion."""
+        root = _lake(tmp_path)  # real feeds/ dirs
+        domain = primary_write_domain(root, registered_feed_subtrees=(_FEED,))
+        with pytest.raises(WriteDomainError, match="PRIMARY write domain"):
+            assert_write_domain(root / _FEED / "bars/x.parquet", domain)
+
+    def test_mount_root_symlink_not_treated_as_swap(self, tmp_path: Path) -> None:
+        """KILL-gate scoping pin: ONLY the in-lake ``feeds`` component gets
+        the rail — ancestors above it (the lake ROOT reached via a symlink,
+        the legitimate mount shape) are deliberately UNPROBED. A legitimate
+        primary write through the symlinked root PASSES; a future over-broad
+        rail that probes the root ancestry fails this test."""
+        real_root = _lake(tmp_path)  # real feeds/ dirs, root itself real
+        mount = tmp_path / "mnt-lake"
+        mount.symlink_to(real_root, target_is_directory=True)
+        domain = primary_write_domain(mount, registered_feed_subtrees=(_FEED,))
+        assert_write_domain(mount / "bars/NSE/INDEX/NIFTY/1minute/2024/01.parquet", domain)
+
+    def test_unprobeable_feeds_component_is_typed_refusal(self, tmp_path: Path) -> None:
+        """A ``feeds`` component the rail cannot RESOLVE (a symlink self-loop)
+        is the same typed fail-closed refusal — never a bare RuntimeError
+        (the R5 guarded idiom on the rail's own probe)."""
+        root = tmp_path / "lake"
+        (root / "bars").mkdir(parents=True)
+        (root / FEEDS_COMPONENT).symlink_to(root / FEEDS_COMPONENT)
+        domain = primary_write_domain(root)
+        with pytest.raises(WriteDomainError, match="cannot probe the"):
+            assert_write_domain(root / "bars/x.parquet", domain)

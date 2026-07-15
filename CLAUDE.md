@@ -38,13 +38,20 @@ protocol (leaf `dashboard/stage_outcome.py` — the five shipped Groww report
 shapes are satisfying instances via additive `.ok` properties the
 `spot_phase_ok`-family gates now delegate to); the F&O spine gains the
 additive `step_filter` bucket selection (futures-only / options-only stage
-invocations reuse the ONE spine — filtered buckets honestly ABSENT, never
-fake-settled); NEW leaf `data/write_domain.py` ships the Pin D1-1 primitive
+invocations reuse the ONE spine — filtered buckets honestly ABSENT from
+execution + NAMED `contracts_step_filtered`, never fake-settled;
+`contracts_selected` stays the pre-filter selection-grammar count); NEW
+leaf `data/write_domain.py` ships the Pin D1-1 primitive
 (`WriteDomain` = allowed-subtree SET + the structural whole-`feeds/`-prefix
 primary exclusion, registration-independent; `assert_write_domain` = the
-typed cross-domain refusal, R6 mount-shape law; negative-pin battery incl.
+typed cross-domain refusal, mount-shape law + the round-6 in-lake
+`feeds`-component swap rail ported at the assurance NG4E-2 MAJOR fold
+(fails-before-pinned); the component compare is
+byte/case-SENSITIVE, a documented + pinned defense-in-depth limit;
+negative-pin battery incl.
 nested-root + unregistered-feeds fixtures; the NG4E-1 maintenance-lane
-scoping + the NG4E-2 restore-ordering proposal documented). ALL-None
+scoping + the NG4E-2 restore-ordering law documented SETTLED per the
+coordinator-relayed operator ruling of 2026-07-15). ALL-None
 defaults BYTE-IDENTICAL (frozen-parity + origin/main A/B pinned); NO
 production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
@@ -2751,8 +2758,10 @@ hostile-review pass._
   refusal; the §4.1-supersession-4 staged movers-warm law (spot-prebuild ∧
   futures-prebuild ∧ options each settled-or-absent). ALL-None defaults
   BYTE-IDENTICAL — the existing suites pass UNMODIFIED, the frozen
-  report-dict parity test + the EXECUTED origin/main A/B (5 representative
-  chains, all report dicts equal) pin it. (2) the STRUCTURAL `StageOutcome`
+  report-dict parity test + the EXECUTED origin/main A/B on the all-None
+  LEGACY arm (report dicts equal — the byte-parity claim covers exactly
+  that arm; independently re-verified at the hostile review, delegation
+  shapes included) pin it. (2) the STRUCTURAL `StageOutcome`
   protocol (NEW leaf `dashboard/stage_outcome.py`, the `pipeline_verdict`
   placement): read-only `ok: bool | None` + the ONE gate law
   `stage_outcome_ok` (only an explicit False fails; None = ran-but-nothing-
@@ -2766,9 +2775,13 @@ hostile-review pass._
   PullStep bucket selection so futures-only ({3,4}) / options-only ({5,6})
   stage invocations REUSE the one spine; filtered contracts are excluded
   BEFORE any planning — zero vendor calls, zero ledger rows, never marked
-  complete, honestly ABSENT from the report (the additive
+  complete, honestly ABSENT from pull EXECUTION and NAMED (the additive
   `contracts_step_filtered` count + ONE `fno.step_filtered` INFO +
-  emit-on-nonzero note clause), NEVER fake-settled; default None
+  emit-on-nonzero note clause), NEVER fake-settled; `contracts_selected`
+  deliberately stays the PRE-filter selection-grammar count (filtered legs
+  included — the filter scopes execution, not the selection accounting;
+  the relationship test-pinned, the review MINOR-1 wording-narrowing
+  fold); default None
   byte-identical (pinned); an empty filter is a typed refusal. (4) the
   `WriteDomain` + Pin D1-1 primitive (NEW leaf `data/write_domain.py`): the
   ALLOWED-SUBTREE-SET + foreign-domain-exclusion typing (the NG-3 law — the
@@ -2776,20 +2789,45 @@ hostile-review pass._
   domain excludes the ENTIRE `feeds/` path-component prefix STRUCTURALLY,
   registration-INDEPENDENT (fold #4 NG3-EDGE); `assert_write_domain` raises
   the typed `WriteDomainError` on a cross-domain dest — never keep-first;
-  the R6 `_assert_options_containment` resolution idiom (root resolved ONCE
+  the `_assert_options_containment` resolution idiom (root resolved ONCE
   at registration, subtree components literal — the mount-shape
-  symlinked-root case passes; guarded resolve); the REQUIRED negative-pin
-  battery (26 tests: nested-root · unregistered-feeds both profiles · both
-  directions · symlink escape/loop · mount-shape pass · typed refusal);
+  symlinked-root case passes; guarded resolve) — since the assurance NG4E-2
+  MAJOR fold INCLUDING the precedent's round-6 IN-LAKE component-swap rail
+  (empirically reproduced fail-open: a symlinked `<root>/feeds` component
+  resolved the `feeds` token away, so a primary write to `feeds/<vendor>/`
+  PASSED while landing in the feed vendor's real bytes; the ported rail
+  probes the component and refuses both directions NAMING it,
+  fails-before-pinned 4/5; the sub-call probe→write TOCTOU is the disclosed
+  out-of-scope residual per the #1594 envelope); the component compare is
+  byte/case-SENSITIVE — the documented defense-in-depth limit (a
+  differently-cased `Feeds/` dest on a case-insensitive filesystem would
+  not be excluded; the production writers only ever mint the lowercase
+  `feeds` literal) with the current behavior test-pinned so a casefold can
+  never land silently; the REQUIRED negative-pin
+  battery (34 tests: nested-root · unregistered-feeds both profiles · both
+  directions · symlink escape/loop · mount-shape pass · typed refusal ·
+  the case-sensitivity pin · the 7-test swap-rail battery incl. the
+  KILL-gate real-feeds control + the mount-root-unprobed scoping pin);
   NG4E-1 scoping documented (profile-bound vendor-chain writers ONLY —
-  maintenance/restore lanes profile-FREE by design) + the NG4E-2
-  dual-ledger restore-ordering proposal recorded (each domain's ledger
-  strictly LAST within its domain, primary ledger last overall — flagged
-  for assurance review). HONEST WS-B envelope: seams + primitives ONLY — NO
+  maintenance/restore lanes profile-FREE by design; the assurance MINOR
+  fold names today's OTHER profile-free writers — lake_heal, Greeks
+  enrich + backfill, prebuild derive, crossverify staging — UNASSIGNED
+  with no masquerade pin; the real close is the WS-C-owned masquerade
+  pin, deliberately not built here) + the NG4E-2
+  dual-ledger restore-ordering law recorded SETTLED (per the operator
+  ruling of 2026-07-15 as relayed via the coordinator: per-domain
+  ledger-strictly-LAST is the MECHANICAL correctness law, carrying the
+  per-domain `window_ledger/deltas/` clear (each domain clears its own
+  manifest-extraneous deltas before its own base ledger copy — the
+  nightly Phase C generalized);
+  primary-ledger-last-overall is a labeled completion-sentinel CONVENTION,
+  not a correctness requirement; the real guarantee is the QUIESCED-BOX
+  precondition — no pulls in flight in any domain).
+  HONEST WS-B envelope: seams + primitives ONLY — NO
   production caller binds them (profile registry/writer wiring/Pin D1-3
   read twin = WS-C; the second-vendor binding = WS-D). GATES:
   `pipeline_pull.py` (325/114) · `stage_outcome.py` (22/0) ·
-  `write_domain.py` (55/16) · `historical_pull.py` (551/130) ·
+  `write_domain.py` (67/20) · `historical_pull.py` (551/130) ·
   `pull_controller.py` (600/132) · `metadata_pull.py` (204/44) ·
   `composite_pull.py` (85/20) ALL 100.00% line+branch on their exact ci
   gates (discovery gate executed green); ruff/ruff-format clean; `mypy

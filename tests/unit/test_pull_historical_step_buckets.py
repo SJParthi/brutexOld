@@ -939,8 +939,11 @@ class TestStepFilter:
     ADR-0021 Decision 3: a FUTURES-only / OPTIONS-only STAGE invocation reuses
     this ONE spine via a PullStep bucket selection — default ``None`` = every
     step, BYTE-IDENTICAL (pinned); a filtered bucket is honestly ABSENT from
-    the pull + report (zero vendor calls, zero ledger rows, never marked
-    complete — NEVER fake-settled).
+    pull EXECUTION (zero vendor calls, zero ledger rows, never marked
+    complete — NEVER fake-settled) and NAMED in ``contracts_step_filtered``;
+    ``contracts_selected`` stays the PRE-filter selection-grammar count
+    (filtered legs included — pinned below so neither semantic drifts
+    silently).
     """
 
     def _pull(
@@ -988,7 +991,13 @@ class TestStepFilter:
         )
         assert report_a.to_dict() == report_b.to_dict()
         assert sdk_a.candle_symbols == sdk_b.candle_symbols
-        assert sink_a.appends == sink_b.appends
+        # SORTED multiset equality, deliberately not order equality: the live
+        # (dry_run=False) pull hands each contract's write tail to the async
+        # fetch pipeline's BACKGROUND consumer, so the append ORDER between
+        # two independent runs is thread-scheduling nondeterminism (observed
+        # flaking pre-fold) — the parity claim is the SET of durable appends
+        # (the fetch order itself stays strictly pinned above).
+        assert sorted(sink_a.appends) == sorted(sink_b.appends)
         assert report_a.contracts_step_filtered == 0
         # The default payload carries NO step-filter key (EMIT-ON-NONZERO).
         assert "contracts_step_filtered" not in report_a.to_dict()
@@ -1032,6 +1041,34 @@ class TestStepFilter:
         assert report.contracts_step_filtered == 2
         assert set(report.phase1_complete) == {_NIFTY_CE, _ADANI_CE}
         assert set(report.start_dates) == {_NIFTY_CE, _ADANI_CE}
+
+    def test_contracts_selected_stays_pre_filter_selection_count(self, tmp_path: Path) -> None:
+        """MINOR-1 pin: the SELECTION vs EXECUTION accounting relationship.
+
+        ``contracts_selected`` is the PRE-filter selection-grammar count —
+        filtered legs stay COUNTED there (the ``step_filter`` scopes
+        execution, never the selection accounting) — and the exclusion is
+        NAMED in ``contracts_step_filtered``. Fails if EITHER semantic
+        silently drifts: subtracting the filtered legs from
+        ``contracts_selected`` (the reviewer's option (a) — a conscious
+        change needing its own pass) or mis-tallying the pruned count.
+        """
+        sdk_all, sink_all = _FakeSDK(), _RecordingSink()
+        unfiltered = self._pull(tmp_path / "all", sdk=sdk_all, sink=sink_all, step_filter=None)
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        report = self._pull(
+            tmp_path / "fut",
+            sdk=sdk,
+            sink=sink,
+            step_filter=frozenset({PullStep.INDICES_FUTURES, PullStep.STOCKS_FUTURES}),
+        )
+        # The unfiltered selection over _FOUR_BUCKET_LEGS is 4 legs; the
+        # futures-only invocation prunes the 2 option legs from EXECUTION.
+        assert unfiltered.contracts_selected == 4
+        assert report.contracts_selected == unfiltered.contracts_selected
+        assert report.contracts_step_filtered == 2
+        # And execution honestly covered only the selected-minus-filtered set.
+        assert report.contracts_completed == report.contracts_selected - 2
 
     def test_filtered_legs_never_marked_complete_in_registry(self, tmp_path: Path) -> None:
         """The registry completion stamp covers ONLY the pulled buckets."""

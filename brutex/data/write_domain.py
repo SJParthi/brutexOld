@@ -32,20 +32,49 @@ partition grammar carries no vendor dimension and the keep-first writer does
 NOT raise on a cross-domain dest — the stored bar would silently win, an
 irreversible provenance loss; ADR-0021 Pin D1-1 "why RUNTIME").
 
-## Path resolution (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 R6 precedent)
+## Path resolution (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 precedent — the
+## round-2 escape rail + the R5 guarded resolve + the round-6 in-lake
+## component-swap rail, all three ported)
 
 The containment test mirrors
-:meth:`~brutex.data.option_parquet_writer.OptionParquetWriter._assert_options_containment`
-exactly: the lake ROOT is resolved ONCE at registration and the domain's
-subtree components are appended LITERALLY — the final path components
-(``feeds``, the vendor dir, ``bars``, …) are deliberately NOT
-symlink-resolved, because resolving them would re-anchor the containment
-root to wherever a swapped-in symlink points (re-opening the hole); the DEST
-side IS fully resolved (``dest.resolve()``, guarded — a symlink-loop /
-unresolvable dest is the same typed refusal, the R5 fold), so an
-escape-by-symlink dest is caught while a lake ROOT reached via a symlink (the
-legitimate mount shape) still passes — BOTH sides resolve the root
-consistently (test-pinned, the mount-shape fixture).
+:meth:`~brutex.data.option_parquet_writer.OptionParquetWriter._assert_options_containment`:
+the lake ROOT is resolved ONCE at registration and the domain's subtree
+components are appended LITERALLY — the final path components (``feeds``,
+the vendor dir, ``bars``, …) are deliberately NOT symlink-resolved, because
+resolving them would re-anchor the containment root to wherever a swapped-in
+symlink points (re-opening the hole); the DEST side IS fully resolved
+(``dest.resolve()``, guarded — a symlink-loop / unresolvable dest is the
+same typed refusal, the R5 fold), so an escape-by-symlink dest is caught
+while a lake ROOT reached via a symlink (the legitimate mount shape) still
+passes — BOTH sides resolve the root consistently (test-pinned, the
+mount-shape fixture). ADDITIONALLY (the precedent's ROUND-6 in-lake swap
+rail, ported at the assurance NG4E-2 MAJOR fold): the resolved-path
+judgment alone FAILS OPEN when ``<root>/feeds`` itself is swapped to a
+symlink — the ``feeds`` token resolves AWAY, so a primary-profile write
+addressed under ``feeds/<vendor>/`` would pass the literal-prefix exclusion
+while physically landing in the feed vendor's real bytes (empirically
+reproduced; the feeds profile simultaneously mis-refused its own tree).
+:func:`assert_write_domain` therefore probes the root's ``feeds`` component
+with ``is_symlink()`` and refuses any dest whose RESOLVED path sits under
+the swapped component's target, naming the symlinked component (fail-closed
+both directions; a bars-tree dest away from the swap target still passes).
+Honest limit (the precedent's stated envelope, Golden Rule #10): a symlink
+swap BETWEEN the rail probe and the actual write inside one call would need
+dirfd-relative I/O to close — out of scope, not claimed.
+
+## Case sensitivity (honest documented limit)
+
+Every path-component compare in this module — the ``feeds/`` prefix
+exclusion included — is byte/case-SENSITIVE (``rel_parts[:1] ==
+(FEEDS_COMPONENT,)``): on a case-INSENSITIVE filesystem (macOS default APFS)
+a differently-cased ``Feeds/`` dest aliases the same on-disk directory yet
+would NOT be excluded from the primary domain. This is a defense-in-depth
+caveat, not a live hole — the production writers only ever mint the
+lowercase literal ``feeds`` (:data:`FEEDS_COMPONENT`), so no production dest
+carries another casing. The current behavior is deliberately test-pinned
+(mixed-case ``FeedS/`` is NOT the feeds subtree); switching to a casefolded
+compare would be a behavior change needing its own design pass on
+case-insensitive-filesystem semantics, never a silent edit.
 
 ## Scoping (the coordinator-relayed WS-B obligation NG4E-1)
 
@@ -58,28 +87,56 @@ verify-everything-then-write law) and the off-box restic restore
 whole lake root, feed subtrees included; wrapping them in a per-vendor
 domain would break whole-lake disaster recovery for zero isolation gain
 (they never race a vendor chain — the restore runbooks stop the pulls
-first).
+first). HONEST ENUMERATION (the assurance MINOR fold): the restore lanes
+are not the only profile-free writers today — the lake healer
+(:mod:`brutex.data.lake_heal`), the Greeks enrich pass + bulk backfill
+(:mod:`brutex.data.greeks_enrich_pass` / :mod:`brutex.data.greeks_backfill`),
+the prebuild timeframe derive (:mod:`brutex.data.timeframe_materialize`) and
+the crossverify staging writer (:mod:`brutex.crossverify`) all write with NO
+profile and NO masquerade pin — they are UNASSIGNED, not exempted-by-law.
+The real close is the WS-C masquerade pin (a writer without a profile must
+not be able to silently write under ``feeds/``) — WS-C-owned, deliberately
+NOT built here.
 
 ## Restore ordering across dual window ledgers (the coordinator-relayed WS-B
-## obligation NG4E-2 — PROPOSED + DOCUMENTED here, flagged for assurance
-## review at the WS-B review)
+## obligation NG4E-2 — SETTLED per the operator ruling of 2026-07-15 as
+## relayed via the coordinator)
 
 When a second vendor's window ledger lands under its feed subtree (ADR-0021
-Pin D1-2), a whole-lake restore involves TWO ledgers. Proposed ordering law,
-generalizing the shipped single-ledger law ("`ledger.parquet` strictly LAST"
-— DEC-SWEEP-NIGHTLY-AUTOMATION-001's restore-order rationale: the ledger is
-the pull's skip authority, so it must never claim coverage of bars that were
-not yet restored): **each domain's window ledger restores strictly LAST
-WITHIN its own domain's files, and the PRIMARY ledger restores last
-overall** — i.e. restore primary bars/options → feed-subtree bars → the feed
-ledger → the primary ledger. Rationale: within a domain the ledger-last law
-is the existing correctness argument verbatim (per-domain, since each ledger
-only describes its own domain's bars); across domains the primary ledger is
-the one surface the PRIMARY (engine-feeding) chain resumes from, so it lands
-last — a crash mid-restore then leaves the primary chain conservatively
-re-verifying (idempotent keep-first re-pull) rather than skipping. This is a
-PROPOSAL recorded for the assurance review — no restore lane consumes it in
-WS-B (the wiring is WS-C+, alongside Pin D1-2's backup-allowlist add).
+Pin D1-2), a whole-lake restore involves TWO ledgers. The settled ordering
+law, generalizing the shipped single-ledger law ("`ledger.parquet` strictly
+LAST" — DEC-SWEEP-NIGHTLY-AUTOMATION-001's restore-order rationale: the
+ledger is the pull's skip authority, so it must never claim coverage of bars
+that were not yet restored), has three parts:
+
+(a) **Per-domain ledger-strictly-LAST is the MECHANICAL correctness law**:
+each write domain restores its own data files FIRST and its window ledger
+strictly LAST — that ordering is what makes a partially-restored domain
+self-consistent and re-pullable (the ledger never claims coverage of bars
+its own domain has not yet restored; a crash mid-restore leaves that
+domain's chain conservatively re-verifying via the idempotent keep-first
+re-pull, never skipping). The clause CARRIES the per-domain
+``window_ledger/deltas/`` clear (the assurance adjudication's required
+addendum): the nightly restore's Phase C clears manifest-EXTRANEOUS delta
+files BEFORE the base ledger copy so post-snapshot deltas cannot fold
+latest-wins over the restored base — generalized per-domain exactly like
+the ledger-last clause: each domain clears its OWN deltas before its OWN
+base ledger copy, ledger strictly last.
+
+(b) **Primary-ledger-last-overall is a labeled completion-sentinel
+CONVENTION, not a correctness requirement**: restoring the PRIMARY ledger
+after every other domain gives the operator one "the whole restore
+finished" sentinel — useful, but correctness is carried entirely by (a)
+within each domain.
+
+(c) **The real guarantee is the QUIESCED-BOX precondition**: restore runs
+ONLY on a quiesced box — no pulls in flight in ANY domain (the restore
+runbooks stop the pulls first). The ordering laws above reason about
+crash-DURING-restore shapes; they never license restoring under a live
+vendor chain.
+
+No restore lane consumes this in WS-B (the wiring is WS-C+, alongside Pin
+D1-2's backup-allowlist add).
 
 ## WS-B envelope (honest limits)
 
@@ -87,8 +144,9 @@ This module ships the PRIMITIVE + its negative-pin battery ONLY. NO writer
 consults it yet — wiring :func:`assert_write_domain` into the staged
 vendor-chain writers (and the Pin D1-3 read-side twin on the Greeks
 spot-join) is WS-C, alongside the ``VendorPullProfile`` registry that
-constructs the domains. Cost: one guarded ``Path.resolve`` + O(subtrees)
-tuple-prefix compares per asserted dest — O(1) in lake size.
+constructs the domains. Cost: one guarded ``Path.resolve`` + one ``lstat``
+swap-rail probe + O(subtrees) tuple-prefix compares per asserted dest —
+O(1) in lake size.
 """
 
 from __future__ import annotations
@@ -267,6 +325,52 @@ def _is_under(rel_parts: tuple[str, ...], subtree_parts: tuple[str, ...]) -> boo
     return rel_parts[: len(subtree_parts)] == subtree_parts
 
 
+def _assert_feeds_component_not_swapped(dest: Path, resolved: Path, domain: WriteDomain) -> None:
+    """The round-6 IN-LAKE component-swap rail (the assurance NG4E-2 MAJOR fold).
+
+    The resolved-path judgment in :func:`assert_write_domain` FAILS OPEN when
+    ``<root>/feeds`` itself is a symlink: the ``feeds`` token resolves away,
+    so a PRIMARY-profile dest addressed under ``feeds/<vendor>/`` passes the
+    literal-prefix exclusion while physically landing in the feed vendor's
+    real bytes (empirically reproduced — ``(root/'feeds').symlink_to(
+    root/'other')``), and the feeds profile simultaneously mis-refuses its
+    own tree. Ported from the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 round-6 rail
+    (:meth:`~brutex.data.option_parquet_writer.OptionParquetWriter._assert_options_containment`):
+    probe the root's ``feeds`` component with ``is_symlink()`` — a REAL
+    ``feeds`` dir (or none at all) is a no-op — and refuse, NAMING the
+    symlinked component, any dest whose RESOLVED path sits under the swapped
+    component's resolved target (fail-closed BOTH directions: the primary
+    fail-open repro AND the feeds profile's swapped-out own tree). Ancestors
+    ABOVE the root are deliberately unprobed — a symlinked lake ROOT (the
+    legitimate mount shape) keeps passing; only the in-lake ``feeds``
+    component gets the rail. A dest away from the swap target (a bars-tree
+    write while ``feeds`` is swapped) still passes. The probe + the target
+    resolve are GUARDED (the R5 idiom) — an unprobeable / unresolvable
+    ``feeds`` component is the same typed fail-closed refusal, never a bare
+    ``RuntimeError``. Cost: one ``lstat`` per asserted dest (+ one guarded
+    resolve ONLY when the component is actually a symlink).
+    """
+    feeds_component = domain.resolved_root / FEEDS_COMPONENT
+    try:
+        if not feeds_component.is_symlink():
+            return
+        swapped_target = feeds_component.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WriteDomainError(
+            f"cannot probe the '{FEEDS_COMPONENT}/' component under "
+            f"{domain.resolved_root} for the {domain.name!r} write-domain check: "
+            f"{exc} — refusing to touch {dest}"
+        ) from exc
+    if resolved.is_relative_to(swapped_target):
+        raise WriteDomainError(
+            f"the '{FEEDS_COMPONENT}/' component under the lake root is a SYMLINK "
+            f"(-> {swapped_target}) — the feed tree has been swapped out, and write "
+            f"dest {dest} (resolved {resolved}) sits under its target; refused for "
+            f"the {domain.name!r} domain (the DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 "
+            "round-6 in-lake swap rail; ADR-0021 Pin D1-1)"
+        )
+
+
 def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
     """The Pin D1-1 runtime pin: refuse a *dest* outside *domain* — typed, loud.
 
@@ -278,6 +382,11 @@ def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
     :class:`WriteDomainError` naming both sides:
 
     * dest unresolvable (symlink loop / OS error);
+    * ANY domain × a dest under a SWAPPED ``<root>/feeds`` symlink component
+      (the round-6 in-lake swap rail, :func:`_assert_feeds_component_not_swapped`
+      — the assurance NG4E-2 MAJOR fold: without it the primary exclusion
+      FAILS OPEN when the ``feeds`` token resolves away; the refusal names
+      the symlinked component, both directions);
     * dest outside the lake root entirely;
     * PRIMARY domain × ANY ``feeds/``-prefixed dest — registered or NOT (the
       fold-#4 NG3-EDGE law; the nested-root false-pass class);
@@ -287,9 +396,17 @@ def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
       (the belt arm — structurally subsumed by the two rules above for
       today's shapes, kept for future non-``feeds/`` domains).
 
-    O(1) in lake size: one resolve + O(subtrees) tuple-prefix compares.
+    O(1) in lake size: one resolve + one ``lstat`` swap-rail probe +
+    O(subtrees) tuple-prefix compares.
     NEVER keep-first, never a log-and-continue — the writer must not touch
     the dest (ADR-0021 Pin D1-1).
+
+    Honest limit: every component compare here is byte/case-SENSITIVE — a
+    differently-cased ``Feeds/`` dest is NOT the feeds subtree to this check
+    even on a case-insensitive filesystem where it aliases the same
+    directory (see the module docstring's case-sensitivity section; the
+    production writers only ever mint the lowercase :data:`FEEDS_COMPONENT`,
+    and the behavior is test-pinned so a casefold is never a silent edit).
     """
     try:
         resolved = dest.resolve()
@@ -298,6 +415,11 @@ def assert_write_domain(dest: Path, domain: WriteDomain) -> None:
             f"cannot resolve write dest {dest} for the {domain.name!r} "
             f"write-domain check: {exc} — refusing to touch it"
         ) from exc
+    # The round-6 in-lake swap rail runs FIRST (before the relative_to
+    # judgment) so a swapped `feeds` component gets the NAMED refusal on
+    # both profiles — including the out-of-lake-target shape, which would
+    # otherwise fall into the generic outside-the-root arm.
+    _assert_feeds_component_not_swapped(dest, resolved, domain)
     try:
         rel_parts = resolved.relative_to(domain.resolved_root).parts
     except ValueError as exc:
