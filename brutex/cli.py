@@ -8122,29 +8122,55 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # keep-awake · flight recorder · tripwires · manifest · G12 checkpoint
     # pre-load · progress reset) wraps the UNTOUCHED body; every hook is
     # fail-soft and results stay byte-identical (the I-1 proof test).
-    with (
-        sweep_run_core(
-            results_root=out_root,
-            grid=grid,
-            alerter=alerter,
-            entry_label="brutex sweep-all",
-            total_tuples=count_sweep_tuples(grid),
-            workers=workers,
-            progress_path=progress_path,
-            checkpoint_store=checkpoint,
-            cli_chain_path=audit_path,
-            selection_extra={
-                "start": start,
-                "end": end,
-                "exchange": exchange,
-                "segment": segment,
-            },
-            inner_on_tuple=_on_tuple,
-            tripwire_config=tripwire_config,
-            diffcheck_k=diffcheck_k,
-        ) as core,
-        sweep_abort_alert(_emit_pull_halt_alert),
-    ):
+    # RES-5 (restored — was dropped in the DEC-SWEEP-UNKILLABLE-CORE-001 run-core
+    # refactor): a SECOND concurrent sweep-all over this output root hits the G6
+    # single-flight flock, the FIRST thing ``sweep_run_core`` enters (BEFORE any
+    # chain writer + OUTSIDE ``sweep_abort_alert``). ``main()`` catches that one
+    # launch refusal for the CLI path, but a DIRECT caller — the dashboard sweep
+    # route (``run_sweep_from_request`` → ``cmd_sweep_all``) and the RES-5 test —
+    # bypasses ``main()``, so without an internal catch it would surface a RAW
+    # uncaught ``SweepAlreadyRunningError``. Catch it HERE, at the run-core enter
+    # boundary, into a clean ``EXIT_USER_ERROR`` refusal. The flock is contended
+    # BEFORE any state is set up, so the refusal needs no cleanup, and — acquired
+    # outside the abort-alert span — it fires NO false CRITICAL halt alert (a
+    # concurrent-sweep refusal is a user error, not an infra abort). Entered via
+    # an ExitStack so the untouched body below keeps its indentation and
+    # ``sweep_run_core.__exit__`` still runs on every normal/abort exit path.
+    from brutex.engine.sweep_singleflight import SweepAlreadyRunningError
+
+    _run_core_stack = contextlib.ExitStack()
+    try:
+        core = _run_core_stack.enter_context(
+            sweep_run_core(
+                results_root=out_root,
+                grid=grid,
+                alerter=alerter,
+                entry_label="brutex sweep-all",
+                total_tuples=count_sweep_tuples(grid),
+                workers=workers,
+                progress_path=progress_path,
+                checkpoint_store=checkpoint,
+                cli_chain_path=audit_path,
+                selection_extra={
+                    "start": start,
+                    "end": end,
+                    "exchange": exchange,
+                    "segment": segment,
+                },
+                inner_on_tuple=_on_tuple,
+                tripwire_config=tripwire_config,
+                diffcheck_k=diffcheck_k,
+            )
+        )
+    except SweepAlreadyRunningError:
+        print(
+            "[brutex] another sweep is already running on this output dir "
+            f"(single-flight lock held for {out_root}); refusing to start a second one",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    with _run_core_stack:
+        _run_core_stack.enter_context(sweep_abort_alert(_emit_pull_halt_alert))
         core.stage("sweep")
         # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
         # launch from the lake's NSE/INDEX/INDIAVIX partitions over the swept

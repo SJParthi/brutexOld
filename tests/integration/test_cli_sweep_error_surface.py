@@ -324,6 +324,67 @@ def test_second_concurrent_sweep_refuses_while_first_holds_the_lock_then_reruns(
     assert "sweep-all done" in capsys.readouterr().out
 
 
+def test_dashboard_sweep_route_direct_call_refuses_cleanly_on_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RES-5 dashboard path: the sweep-route caller (``run_sweep_from_request`` →
+    ``cmd_sweep_all``) bypasses ``main()``'s catch, so this proves the DIRECT
+    caller gets the SAME clean ``EXIT_USER_ERROR`` refusal (never a raw uncaught
+    ``SweepAlreadyRunningError``) when a peer holds the sweep single-flight lock.
+
+    This is the exact regression the run-core refactor introduced: only ``main()``
+    caught the launch refusal, so the dashboard route path surfaced a raw error.
+    """
+    from brutex.dashboard.sweep_runner import SweepRunRequest, run_sweep_from_request
+
+    lake_root, _catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    results_root.mkdir(parents=True, exist_ok=True)
+    fired: list[Exception] = []
+    monkeypatch.setattr(cli, "_emit_pull_halt_alert", fired.append)
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+
+    request = SweepRunRequest(
+        symbols=_SYMBOL,
+        intervals=_INTERVAL,
+        directions="BUY",
+        k="2",
+        sl="none",
+        tp="none",
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        start="2024-01-02",
+        end="2024-01-03",
+        mode="A",
+        top=10,
+    )
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_SWEEP_LOCK_SRC, str(results_root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "held"  # peer holds the sweep lock
+
+        rc = run_sweep_from_request(request, lake_root=lake_root, results_root=results_root)
+
+        assert rc == cli.EXIT_USER_ERROR  # a clean refusal, not a raw traceback
+        captured = capsys.readouterr()
+        assert "another sweep is already running on this output dir" in captured.err
+        assert "sweep-all done" not in captured.out  # the route's sweep never ran
+        assert fired == []  # a concurrent-sweep refusal is NOT a false abort alert
+    finally:
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=30)
+        if child.stdin is not None:
+            child.stdin.close()
+        if child.stdout is not None:
+            child.stdout.close()
+
+
 # ──────────────────── RES-4 (daemon checkpoint consumer) ────────────────────
 
 
