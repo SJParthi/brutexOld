@@ -656,6 +656,17 @@ class ParquetWriter:
             year=year,
             month=month,
         )
+        # WRITE-DOMAIN BINDING SITE (deliberately NOT bound in this pass —
+        # DEC-VENDOR-PROFILE-REGISTRY-001, WS-C scaffold): the minted `dest`
+        # above is where a PROFILE-BOUND vendor-chain writer will consult
+        # `brutex.data.write_domain.assert_write_domain(dest, profile.write_domain)`
+        # (ADR-0021 Pin D1-1) BEFORE any directory/lock/byte is touched, and
+        # where the profile-FREE masquerade pin (a domain-less writer must not
+        # silently write under `feeds/`) will live. GATE: the caller binding —
+        # and the masquerade pin with it — lands only after/with explicit user
+        # approval on the WS-B containment CLEAR (the permission boundary this
+        # session recorded); until then NO writer consults the primitive
+        # (the WS-B "NO writer consults it yet" envelope stands).
         # First-creating a BRAND-NEW partition directory on a full volume raises a raw
         # OSError(ENOSPC) (`exist_ok=True` keeps the re-pull no-op free). Wrap it in
         # `lake_write_guard()` so a disk-full here maps to a `LakeWriteHalt("disk_full")`
