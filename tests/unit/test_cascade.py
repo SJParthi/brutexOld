@@ -926,6 +926,8 @@ class TestCpcvRateCapture:
 
         v = CandidateVerdict(candidate_id="x", passed=False, rejected_at=None, detail="d")
         assert v.cpcv_pass_rate is None
+
+
 # ── DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected DSR is
 # RETAINED on every verdict whose filter-#2 evaluation succeeded — pass AND
 # reject alike — instead of being discarded on the pass path. ──────────────

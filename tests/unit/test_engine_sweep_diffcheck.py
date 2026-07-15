@@ -1286,6 +1286,8 @@ class TestExecutedPopulation:
         )
         assert report == DiffCheckReport(checked=2, mismatches=0, masks_mismatched=())
         assert report.skipped_empty is False
+
+
 # ── DEC-FILL-WORST-CASE-001 — the independently re-stated worst-case arm ────
 
 

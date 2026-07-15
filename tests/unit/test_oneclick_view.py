@@ -666,6 +666,8 @@ class TestTop100PayloadCascadeJoin:
         result = Top100Result("ok", (), "", "1:2", "min_dd_first")
         payload = ov.build_top100_payload("r1", result, fixture_root_active=False)
         assert payload["cascade_join"] is None
+
+
 class TestBuildBaselinePayload:
     """B1 (DEC-RESULTS-TRUST-HONESTY-001): the stored series served VERBATIM."""
 

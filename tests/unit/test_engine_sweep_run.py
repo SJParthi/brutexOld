@@ -3798,6 +3798,8 @@ class TestOnMaskPopulation:
         assert len(warns) == 1
         assert warns[0]["log_level"] == "warning"
         assert warns[0]["error_type"] == "RuntimeError"
+
+
 # ────── The WORST_CASE finalist-projection threading pin (fix round 2) ──────
 
 

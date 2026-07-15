@@ -22,8 +22,8 @@ pytest.importorskip("polars", reason="the reader loads per-tuple Parquet stores 
 import brutex.engine.cascade_wire as cw
 from brutex.dashboard.sweep_results_view import (
     SweepScan,
-    _verdict_marker_row_keys,
     _temporal_row_keys,
+    _verdict_marker_row_keys,
     build_sweep_leaderboard,
     load_sweep_scan,
     store_error_payload,
@@ -222,7 +222,9 @@ class TestCascadeRowKeys:
         assert _verdict_marker_row_keys(None) == {}
 
     def test_passed_and_provisional(self) -> None:
-        passed = _verdict_marker_row_keys(VerdictMarker(passed=True, rejected_at=None, provisional=False))
+        passed = _verdict_marker_row_keys(
+            VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        )
         assert passed["cascade_verdict"] == "passed"
         assert passed["cascade_provisional"] is False
         provisional = _verdict_marker_row_keys(
@@ -270,7 +272,9 @@ class TestCascadeRowKeys:
         assert keys["cascade_dsr"] == 0.0031218374618234
         assert keys["cascade_dsr_n_trials"] == 8_400_000
         assert keys["cascade_dsr_n_source"] == "leaderboard"
-        bare = _verdict_marker_row_keys(VerdictMarker(passed=True, rejected_at=None, provisional=False))
+        bare = _verdict_marker_row_keys(
+            VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        )
         assert bare["cascade_dsr"] is None
         assert bare["cascade_dsr_n_trials"] is None
         assert bare["cascade_dsr_n_source"] is None

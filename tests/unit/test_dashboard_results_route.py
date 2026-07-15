@@ -517,6 +517,8 @@ class TestLeaderboardCascadeJoin:
         ).write_parquet(sibling / "bull_k1_bbbbbbbbbbbbbbbb.aggs.parquet")
         assert client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 2
         assert calls["n"] == 2
+
+
 class TestServeFilterParams:
     """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the serving-side floor params."""
 

@@ -2512,6 +2512,7 @@ class TestBridgeCascade:
         assert "beyond the" in result.detail
         assert all("cascade" not in row for row in result.rows)
 
+
 # ── The B1 stored buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001) ──
 
 

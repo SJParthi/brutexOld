@@ -493,6 +493,8 @@ class TestRenderCaps:
             " return [a.rows.length, a.null_vix_excluded]; })()"
         )
         assert out == [5000, 0]
+
+
 class TestTrustFilterFloors:
     """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the min_trades / min_dsr floors."""
 
