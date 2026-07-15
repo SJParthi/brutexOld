@@ -617,6 +617,25 @@ proptest! {
         prop_assert_eq!(cpr_pos.count_ones(), 1, "CPR position bits = {:#05b}", cpr_pos);
     }
 
+    /// The CPR band is ORDERED post-canonicalization (G-CPRCOR-07): for ANY
+    /// prev-day anchor triple — including the roughly-half of real days whose
+    /// RAW pair inverts (tc_raw < bc_raw) — `compute_cpr_levels` returns
+    /// tc >= bc, the precondition the 60/61/62 trichotomy above stands on.
+    #[test]
+    fn cpr_band_is_ordered(
+        p in 1i64..=1_000_000_000_000i64,
+        pdh in 1i64..=1_000_000_000_000i64,
+        pdl in 1i64..=1_000_000_000_000i64,
+    ) {
+        let cpr = trading_core::compute_cpr_levels(p, pdh, pdl);
+        prop_assert!(
+            cpr.tc_paisa >= cpr.bc_paisa,
+            "canonicalized CPR must satisfy tc >= bc, got tc={} bc={}",
+            cpr.tc_paisa,
+            cpr.bc_paisa
+        );
+    }
+
     /// At most one Group-8 time-of-day bucket fires (the `else if` chain).
     #[test]
     fn at_most_one_time_bucket((s, p, prior) in arb_scenario()) {
