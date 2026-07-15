@@ -185,25 +185,34 @@ _PRICE_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 
 
 #: The intermediate Decimal scale used to parse the float's ``str()`` repr LOSSLESSLY
-#: (DEC-LAKE-WRITE-VECTORIZE-001). A Python ``str(float)`` carries at most 17 SIGNIFICANT
-#: digits, so 17 FRACTIONAL digits can never truncate the repr — whatever the integer
-#: part. With ``precision=38`` that leaves room for up to 21 integer digits (≫ any real
-#: price), and the cast is byte-exact equal to ``Decimal(str(x))`` across the realistic
-#: price range. A *smaller* scale (the original ``scale=10``) silently ROUNDS an 11-17
-#: digit repr to 10 places BEFORE the half-up step — a double-rounding the legacy
-#: ``Decimal(str(x))`` never performs — which flips the 2dp answer for long-tail floats
-#: near a ``.xx5`` boundary (e.g. ``0.00499999999`` → wrong ``0.01`` vs legacy ``0.00``).
-#: That is exactly the class of value a legacy raw-float partition carries, so the full
-#: scale is load-bearing, not cosmetic. A value so large that ``x * 100`` exhausts the
-#: precision-38 headroom (``|x| ≳ 1e19`` — empirically the cast overflows between 1e18 and
-#: 1e19, still ~10^15x above any tradable price) raises a polars error, caught by the
-#: per-row fallback in :meth:`ParquetWriter._read_existing_bars` (correctness over speed).
-_SNAP_PARSE_SCALE: Final[int] = 17
+#: (DEC-LAKE-WRITE-VECTORIZE-001). A shortest-round-trip float repr carries at most 17
+#: SIGNIFICANT digits, but a sub-1 value in FIXED notation additionally spends leading
+#: FRACTIONAL zeros that are not significant: for ``|x| >= 1e-4`` (at most 3 leading
+#: zeros after the point) the repr carries up to ``3 + 17 = 20`` FRACTIONAL digits, so
+#: scale 20 — not 17 — is the lossless ceiling. The two are NOT interchangeable: the
+#: round-3 review MAJOR (DEC-PREBUILD-FRAME-WRITE-001) proved ``scale=17`` silently
+#: ROUNDED an 18-20-fractional-digit repr at digit 17 BEFORE the half-up step — a
+#: double-rounding the legacy ``Decimal(str(x))`` never performs — flipping the 2dp
+#: answer across a half-paisa boundary (``0.004999999999999996`` → wrong ``0.01`` vs
+#: legacy ``0.00``); the original ``scale=10`` had the same bug one class earlier
+#: (11-17-digit reprs, e.g. ``0.00499999999``). At scale 20 the parse equals
+#: ``Decimal(str(x))`` EXACTLY for every ``|x| >= 1e-4``; below 1e-4 (polars prints
+#: fixed notation — ``"0.0000999"`` — where Python ``str`` goes scientific) the parse
+#: may still round at digit 20, but the perturbation (``<= 5e-21``) is ~17 orders of
+#: magnitude smaller than the distance to the nearest half-paisa boundary
+#: (``>= 0.005 - 1e-4``), so the snapped 2dp answer is PROVABLY unchanged — value-lossy,
+#: snap-exact. With ``precision=38`` scale 20 leaves 18 integer digits (≫ any real
+#: price); a value so large that ``x * 100`` exhausts the headroom (``|x| ≳ 1e16`` —
+#: empirically the cast overflows between 1e15 and 1e16, still ~10^10x above any
+#: tradable price and ~10^3x above the fast lane's G4 bound) raises a polars error,
+#: caught by the per-row fallback in :meth:`ParquetWriter._read_existing_bars`
+#: (correctness over speed).
+_SNAP_PARSE_SCALE: Final[int] = 20
 
 
 #: G4 magnitude admission bound of the FRAME-DIRECT lane
 #: (DEC-PREBUILD-FRAME-WRITE-001): a price at/above this degrades to legacy.
-#: Far below the ``_snap_price_expr`` precision-38 overflow (``≳ 1e19``) AND
+#: Far below the ``_snap_price_expr`` precision-38 overflow (``≳ 1e16``) AND
 #: the ``Decimal(38,2) → Float64`` injectivity bound; the cast golden
 #: (``tests/golden/test_writer_decimal_cast_golden.py``) pins the cast law up
 #: to exactly this bound, so every ADMITTED price is inside the proven
@@ -227,14 +236,20 @@ def _snap_price_expr(column: str) -> pl.Expr:
        where Python emits ``"1e-05"`` — but ``Decimal("0.00001") == Decimal("1e-05")``,
        so the parsed value is identical; no realistic price is in scientific notation
        anyway.) It is then cast to ``Decimal(scale=_SNAP_PARSE_SCALE)`` — a scale
-       (17) wide enough to hold EVERY fractional digit of a ``str(float)`` (≤ 17
-       significant digits) WITHOUT truncation, so the parsed value equals
-       ``Decimal(str(op))`` EXACTLY with no binary-float drift AND no intermediate
-       rounding (a direct ``Float64 -> Decimal`` cast would carry the binary
-       representation, e.g. ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer;
-       and a too-SMALL scale would round an 11-17-digit repr like ``0.00499999999``
-       up to ``0.005`` BEFORE the half-up step → the WRONG ``0.01`` — the ``str``
-       round-trip at FULL scale is what keeps the half boundary on the legacy side).
+       (20) wide enough to hold EVERY FRACTIONAL digit of a fixed-notation repr
+       down to ``|x| >= 1e-4`` (≤ 17 SIGNIFICANT digits + up to 3 leading
+       fractional zeros — the distinction the round-3 review MAJOR caught: 17
+       alone rounds an 18-20-fractional-digit sub-0.1 repr) WITHOUT truncation,
+       so the parsed value equals ``Decimal(str(op))`` EXACTLY with no
+       binary-float drift AND no intermediate rounding (a direct
+       ``Float64 -> Decimal`` cast would carry the binary representation, e.g.
+       ``100.005`` -> ``100.00499…`` -> the WRONG half-up answer; a too-SMALL
+       scale rounds a longer repr BEFORE the half-up step — scale 10 flipped
+       ``0.00499999999`` and scale 17 flipped ``0.004999999999999996``, both to
+       the WRONG ``0.01`` — the ``str`` round-trip at FULL scale is what keeps
+       the half boundary on the legacy side; below ``1e-4`` the parse may still
+       round at digit 20, a ``<= 5e-21`` perturbation that provably cannot reach
+       any half-paisa boundary — see ``_SNAP_PARSE_SCALE``).
     2. Half-away-from-zero to 2dp via integer arithmetic on the Decimal column:
        ``floor(d*100 + 0.5)/100`` for ``d >= 0`` and ``ceil(d*100 - 0.5)/100`` for
        ``d < 0``. ``floor``/``ceil`` (not a ``cast(Int64)``, which ROUNDS) give exact
@@ -247,8 +262,10 @@ def _snap_price_expr(column: str) -> pl.Expr:
     ``float(...)`` (the value :meth:`ParquetWriter._render_bytes` writes) is the SAME
     float (so the stored Parquet bytes are byte-identical for every NON-NEGATIVE price —
     the only kind a bar carries). Proven across the realistic price range incl. exact
-    ``.005`` half-boundaries, long-tail floats near a boundary (``0.00499999999`` …),
-    negatives, zeros, large strikes, and 4dp vendor noise in
+    ``.005`` half-boundaries, long-tail floats near a boundary — the 11-17-fractional-
+    digit class (``0.00499999999`` …) AND the 18-20-fractional-digit sub-0.1 class
+    (``0.004999999999999996`` …, the round-3 review MAJOR) — negatives, zeros, large
+    strikes, and 4dp vendor noise in
     ``tests/golden/test_writer_vectorized_snap_parity.py``.
 
     Known, unreachable edges (honest envelope, Golden Rule #10):
@@ -260,7 +277,7 @@ def _snap_price_expr(column: str) -> pl.Expr:
       positive OHLC; nothing writes a negative price). The numeric ``Decimal``/``float``
       values still compare EQUAL.
     * **Cast overflow.** A value whose ``x * 100`` exhausts the ``precision=38`` headroom
-      (``|x| ≳ 1e19`` — empirically between 1e18 and 1e19) raises a polars error;
+      (``|x| ≳ 1e16`` — empirically between 1e15 and 1e16) raises a polars error;
       :meth:`ParquetWriter._read_existing_bars` catches it and falls back to the exact
       per-row ``Decimal(str(x))`` reconstruction. UNREACHABLE for any tradable price.
     """
@@ -958,7 +975,7 @@ class ParquetWriter:
 
         # G1–G4 (shape / order / domain / magnitude) — cheap vectorized
         # pre-lock checks — then G5, the UNCONDITIONAL vectorized 2dp snap
-        # (V3 C1; a snap overflow — PolarsError at |x| ≳ 1e19, unreachable
+        # (V3 C1; a snap overflow — PolarsError at |x| ≳ 1e16, unreachable
         # for a price and already excluded by G4 — degrades, mirroring the
         # `_read_existing_bars` per-row-fallback precedent). Any failure
         # routes the WHOLE partition to legacy.
@@ -1274,7 +1291,7 @@ class ParquetWriter:
             return _frame_gate.DegradeReason.DOMAIN_VIOLATION
 
         # G4 — magnitude: far below the `_snap_price_expr` precision-38
-        # overflow (≳1e19) AND the Decimal→Float64 injectivity bound; the
+        # overflow (≳1e16) AND the Decimal→Float64 injectivity bound; the
         # cast golden pins the law up to this bound.
         for price_column in _PRICE_COLUMNS:
             magnitude = frame.get_column(price_column).abs().max()
@@ -2206,7 +2223,7 @@ class ParquetWriter:
 
         Correctness fallback: the vectorized snap is BYTE-EXACT for every realistic price
         (see :func:`_snap_price_expr`), but a value whose ``x * 100`` overflows the
-        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e19``, unreachable for a bar
+        intermediate ``Decimal(precision=38)`` (``|x| ≳ 1e16``, unreachable for a bar
         price) raises a ``PolarsError`` from the snap. That is NOT corruption, so it is
         NOT quarantined — it falls back to the exact per-row ``Decimal(str(x))`` +
         ``_tick_round`` reconstruction (:meth:`_reconstruct_bars_per_row`), the proven
@@ -2221,7 +2238,7 @@ class ParquetWriter:
             # Overflow / non-finite fallback: exact per-row Decimal(str(x)) path.
             # The raw frame is decoded a SECOND time here (Seam E split,
             # DEC-PREBUILD-FRAME-WRITE-001) — this path is unreachable for any
-            # real price (|x| ≳ 1e19 overflow — the `_snap_price_expr` honest
+            # real price (|x| ≳ 1e16 overflow — the `_snap_price_expr` honest
             # envelope), so the extra decode never runs in production; the
             # reconstruction output is byte-identical either way.
             df = ParquetWriter._decode_partition_frame(dest, existing_bytes)
@@ -2326,7 +2343,7 @@ class ParquetWriter:
         CORRECTNESS fallback for the vectorized :func:`_snap_price_expr`
         (DEC-LAKE-WRITE-VECTORIZE-001): it is invoked ONLY when the columnar snap raises
         (a value whose ``x * 100`` overflows the intermediate ``Decimal(precision=38)``,
-        ``|x| ≳ 1e19`` — unreachable for a real price). Column-wise ``Series.to_list``
+        ``|x| ≳ 1e16`` — unreachable for a real price). Column-wise ``Series.to_list``
         extraction (one list per column, no per-row dict) keeps it allocation-lean.
 
         A genuinely-corrupt NON-FINITE (inf/NaN) price reaches this path too: building a

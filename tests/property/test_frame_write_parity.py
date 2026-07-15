@@ -79,7 +79,22 @@ _price = st.one_of(
         min_value="0.01", max_value="99999.99", places=2, allow_nan=False, allow_infinity=False
     ).map(float),
     st.floats(min_value=0.001, max_value=99999.0, allow_nan=False, allow_infinity=False),
-    st.sampled_from([100.005, 14020.7999, 2.675, 0.00499999999, 999999.995]),
+    st.sampled_from(
+        [
+            100.005,
+            14020.7999,
+            2.675,
+            0.00499999999,
+            999999.995,
+            # The 18-20-fractional-digit sub-0.1 class (round-3 review MAJOR):
+            # a scale-17 snap parse rounds these across the half-paisa boundary
+            # BEFORE the half-up step — the frame lane stored 0.01/0.02 where
+            # legacy stores 0.00/0.01. Kept in the differential net forever.
+            0.004999999999999996,
+            0.014999999999999996,
+            0.024999999999999998,
+        ]
+    ),
 )
 
 

@@ -41,12 +41,13 @@ lanes (`_frame_from_bars` + `_render_frame_bytes`, legacy render bytes
 FROZEN as a golden BEFORE any production change); vendor `write()`/`append()`
 signatures byte-untouched — NEW siblings `write_frame`/`append_frame` + ONE
 call-site branch in `make_lake_write_tf._write`; byte-identical lake output
-proven by the 13-case whole-tree A/B corpus + op-count bench gates; NO
+proven by the 14-case whole-tree A/B corpus + op-count bench gates; NO
 speedup claimed (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³
 bars). Run identity / `data_snapshot_hash` / the 1-minute lake untouched;
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
 change. This header carries the pointer, never the story — the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1795.)Earlier: 2026-07-14 (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md
+lives in the §1 Active-branch blurb + MIGRATION.md #1795.)
+Earlier: 2026-07-14 (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md
 #1794 (renumbered #1792 → #1793 → #1794 across the 2026-07-14
 merge-reconciles — main took #1792 for
 DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, then #1793 for
@@ -80,7 +81,8 @@ pull_intent shim); ships the CHANNEL, ships NO measured number — every
 production resolution is byte-identical until the operator's evidence PR
 lands (parity-pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
 per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1793 —
-this header carries the one-line summary, never the story.)Earlier: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
+this header carries the one-line summary, never the story.)
+Earlier: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
 MIGRATION.md #1792 — vendor-empty spot symbols (zero stored 1-minute bars)
 classify NO-SOURCE at the prebuild read (the retyped whole-partition
 `NoStored1mBarsError` arm — lake truth, never the #1779-rejected report
@@ -2667,7 +2669,7 @@ hostile-review pass._
   golden; the wheel-free `brutex/config/env_flags.py` leaf promotes
   `env_flag_tristate` out of `engine/sweep_lookahead.py` (identity-pinned
   re-export — `brutex.data` must not import `brutex.engine`). PROOF: the
-  13-case whole-tree A/B integration corpus proves ON≡OFF trees byte-identical
+  14-case whole-tree A/B integration corpus proves ON≡OFF trees byte-identical
   per case; hypothesis differentials (frame↔bars parity ·
   dict-merge≡frame-merge · month grouping · OI mapping · eq_missing); op-count
   bench gates (fsync/replace/flock/render counts EQUAL both lanes; ZERO
@@ -2716,7 +2718,24 @@ hostile-review pass._
   the stale `_TRUTHY`/`_FALSY` docstring attributions in
   rust_metrics/rust_stage1a reconciled to the promoted
   `brutex.config.env_flags` home — docstring/comment-only, ENGINE
-  UNCHANGED.)
+  UNCHANGED. REVIEW ROUND 3 folded (2026-07-15 — the per-finding record
+  lives in MIGRATION.md #1795): the refuter-confirmed MAJOR — the fresh
+  fast-lane snap's `_SNAP_PARSE_SCALE=17` conflated SIGNIFICANT with
+  FRACTIONAL digits, so an 18-20-fractional-digit sub-0.1 repr just below a
+  half-paisa boundary (`0.004999999999999996`) rounded ACROSS the boundary
+  before the half-up step and `write_frame` stored `0.01` flag-ON vs the
+  legacy `0.00` (reproduced end-to-end, distinct parquet sha256) — FIXED at
+  root cause: scale 17 → 20, the proven lossless ceiling for every
+  `|x| >= 1e-4` fixed-notation repr (sub-1e-4 stays value-lossy ≤ 5e-21,
+  provably snap-exact — disclosed), the precision-38 overflow moving
+  ≳1e19 → ≳1e16 (same per-row fallback; every stale figure reconciled +
+  the inherited #1023 claim corrected in place); TEETH all fails-before
+  verified at scale 17 — the snap-parity + Decimal-cast goldens gain the
+  killing class, the hypothesis `_price` differential samples the killers
+  permanently, and the A/B corpus grows CASE 14 (the killers raw-planted
+  as a legacy off-grid 1m source, steady-mode whole-tree sha256 A/B); plus
+  the NIT: the four branch-introduced `)Earlier:` joined-line sites in
+  this file split back to the Earlier:-begins-a-new-line convention.)
   Earlier: `claude/bulk-spot-completeness-flag`
   (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took
@@ -2833,7 +2852,8 @@ hostile-review pass._
   (34/6) on their NEW ci.yml stanzas; `auto_pull_gate.py` (93/30) ·
   `auto_pull_scheduler.py` (253/56) · `pull_intent.py` (225/50 on its mapped trio)
   re-measured 100.00%; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new vs
-  the pre-change baseline.)  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  the pre-change baseline.)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
   (**DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792** — the
   #1779 vendor-EMPTY × prebuild × movers-warm residual CLOSED: a spot symbol
   with ZERO stored 1-minute bars (vendor-empty or never pulled — the reader
@@ -7289,7 +7309,7 @@ hostile-review pass._
   vendor `write()`/`append()` byte-untouched — NEW siblings
   `write_frame`/`append_frame` + ONE call-site branch in
   `make_lake_write_tf._write`; byte-identical lake output proven by the
-  13-case whole-tree A/B corpus + op-count bench gates; NO speedup claimed
+  14-case whole-tree A/B corpus + op-count bench gates; NO speedup claimed
   (tiny symbols measure SLOWER flag-ON; crossover ≈ few×10³ bars); run
   identity / `data_snapshot_hash` / the 1-minute lake untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
@@ -7339,7 +7359,8 @@ hostile-review pass._
   (parity-pinned) and the measured value is operator work (probe → emit →
   review → commit → CI validates → adopt); ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1793 for the full blurb)  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  MIGRATION.md #1793 for the full blurb)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
   (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — the #1779
   vendor-EMPTY × prebuild × movers-warm residual CLOSED: zero-stored-bars
   spot symbols classify NO-SOURCE at the prebuild read (the retyped

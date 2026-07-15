@@ -9,11 +9,13 @@ legacy path calls Python ``float(Decimal)`` per row. This file freezes that
 cast law BIT-for-bit (IEEE-754 pattern compare via ``struct.pack``) over:
 
 * exact ``.005`` half-up boundaries (post-snap grid points);
-* long-tail float reprs near a boundary (``0.00499999999`` — the
-  ``_SNAP_PARSE_SCALE`` class);
+* long-tail float reprs near a boundary — BOTH the 11-17-fractional-digit
+  class (``0.00499999999``) and the 18-20-fractional-digit sub-0.1 class the
+  round-3 review MAJOR caught (``0.004999999999999996`` — lossy at the old
+  ``_SNAP_PARSE_SCALE=17``, lossless at 20);
 * legacy off-grid vendor noise (``14020.7999``);
 * max-realistic magnitudes up to the fast lane's G4 admission bound
-  (``< 1e12``) — far below the documented ``≳ 1e19`` snap-expression
+  (``< 1e12``) — far below the documented ``≳ 1e16`` snap-expression
   overflow;
 * the exhaustive sub-₹20 cent grid + a seeded random grid sample ≤ ₹10⁷.
 
@@ -61,6 +63,13 @@ _EDGE_FLOATS: list[float] = [
     0.0,
     0.005,
     0.00499999999,
+    # The 18-20-fractional-digit sub-0.1 class (round-3 review MAJOR): lossy
+    # at the old scale-17 parse (fast lane stored 0.01 vs legacy 0.00),
+    # lossless at scale 20.
+    0.004999999999999996,
+    0.014999999999999996,
+    0.024999999999999998,
+    0.005000000000000001,
     0.015,
     1.005,
     1.004,

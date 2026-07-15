@@ -117,7 +117,7 @@ open_interest  INT64                   NULL      -- always NULL for spot indexes
 - **O(1) lookup:** catalog routes to one partition; polars binary-search inside
 - **Hash:** `raw_hash = sha256(parquet_bytes)`
 - **Idempotence:** atomic tempfile + rename; same bytes = no-op; different bytes = `WriterError`
-- **Code:** `brutex/data/parquet_writer.py:280-300`, `brutex/data/models.py:31-88`
+- **Code:** `brutex/data/parquet_writer.py:296-320`, `brutex/data/models.py:31-88`
 
 ### 3.2 DuckDB `partitions` (catalog)
 

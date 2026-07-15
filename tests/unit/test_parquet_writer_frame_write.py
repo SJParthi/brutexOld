@@ -1059,7 +1059,7 @@ class TestSeamESplit:
         assert snapped.schema["timestamp"] == pl.Datetime(time_unit="us", time_zone="UTC")
 
     def test_snap_frame_prices_overflow_returns_none(self) -> None:
-        """The REAL G5 except arm: a |x| ≳ 1e19 frame overflows the snap select.
+        """The REAL G5 except arm: a |x| ≳ 1e16 frame overflows the snap select.
 
         Production-unreachable BEHIND G4 (the 1e12 bound) — pinned by a
         direct call on the private, the honest way to keep the branch alive.
@@ -1075,7 +1075,7 @@ class TestSeamESplit:
         assert snapped.schema["open"] == pl.Decimal(precision=38, scale=2)
 
     def test_decode_and_snap_overflow_returns_none(self, tmp_path: Path) -> None:
-        """A stored |x| ≳ 1e19 overflows the snap → None (the per-row trigger)."""
+        """A stored |x| ≳ 1e16 overflows the snap → None (the per-row trigger)."""
         df = pl.DataFrame(
             {
                 "timestamp": [_T0],

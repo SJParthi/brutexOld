@@ -31,6 +31,10 @@ both arms (V3 C8/C16):
     ``rechunk`` pins the byte law (graft G-C);
 13. a SEEDED stats-manifest shard → hook-parity (same upsert count + same
     rows/raw_hash arguments) on both arms (graft G-D);
+14. sub-paisa 18-20-FRACTIONAL-digit long-tail floats just below a half-paisa
+    boundary (``0.004999999999999996`` …) raw-planted in the 1m source — the
+    round-3 review MAJOR: the old scale-17 snap parse stored 0.01 flag-ON vs
+    0.00 flag-OFF (fails-before verified);
 plus the DEFAULTS negative pin: flag UNSET in PR-1 ⇒ zero fast-lane code
 executes (spies on ``append_frame``/``write_frame``) and the tree equals the
 explicit flag-``0`` tree. (Corpus case 6 — the empty-frame no-write law — is
@@ -657,6 +661,53 @@ def test_case13_seeded_stats_shard_hook_parity(
     # Hook parity: the SAME upsert count with the SAME rows + raw_hash args.
     assert upserts["off"] == upserts["on"]
     assert len(upserts["off"]) >= 1  # the tracked shard genuinely re-stamped
+
+
+# ── 14. sub-paisa 18-20-fractional-digit long-tail floats (round-3 MAJOR) ──
+
+
+def test_case14_subpaisa_long_tail_boundary_floats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round-3 review MAJOR class: sub-0.1 floats whose shortest repr
+    carries 18-20 FRACTIONAL digits just below a half-paisa boundary.
+
+    The old ``_SNAP_PARSE_SCALE=17`` fresh-lane parse ROUNDED these across the
+    boundary BEFORE the half-up step, so the STEADY fast lane stored 0.01/0.02
+    where legacy ``round_money(Decimal(str(x)))`` stores 0.00/0.01 — distinct
+    parquet sha256 per arm (fails-before verified at scale 17). Raw-planted
+    (a legacy off-grid lake shape — the production writer would snap them);
+    steady mode so the fast lane genuinely serves its OWN bytes.
+    """
+
+    def seed(root: Path) -> None:
+        killers = [
+            0.004999999999999996,  # 18 frac digits → 0.00 (scale-17 gave 0.01)
+            0.014999999999999996,  # → 0.01 (scale-17 gave 0.02)
+            0.024999999999999998,  # nextafter(0.025, 0) → 0.02 (scale-17 gave 0.03)
+            0.004999999999999999,  # nextafter(0.005, 0) → 0.00
+            0.005000000000000001,  # nextafter(0.005, 1) → 0.01 (no over-correction)
+            9.989999999999999e-05,  # 21 frac digits (polars fixed repr) → 0.00
+        ]
+        n = 12
+        prices = [killers[i % len(killers)] for i in range(n)]
+        _plant_raw_1m(
+            root,
+            "NIFTY",
+            {
+                "timestamp": [_SESSION_OPEN_UTC + timedelta(minutes=i) for i in range(n)],
+                # o == h == l == c per row keeps the G3 ordering law while the
+                # VALUE sits exactly on the lossy-parse class.
+                "open": prices,
+                "high": prices,
+                "low": prices,
+                "close": prices,
+                "volume": [10 + i for i in range(n)],
+                "open_interest": [0] * n,
+            },
+        )
+
+    _assert_ab_identical(tmp_path, monkeypatch, seed, symbol="NIFTY")
 
 
 # ── DEFAULTS negative pin: PR-1 unset flag ⇒ zero fast-lane code ───────────
