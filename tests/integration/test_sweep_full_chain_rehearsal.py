@@ -35,9 +35,11 @@ guard (DEC-SWEEP-LOG-VOLUME-GUARD-001) — every simulated trade emitted two
 structlog DEBUG events on an UNCONFIGURED logger. Together those made the
 300 s wall-clock ceiling below commit-seed-dependent (main itself failed it
 at 452.6 s — actions run 29249947445). The ``_rehearsal_env`` bound fixes
-both at the fixture: ``BRUTEX_SWEEP_MC_PERMUTATIONS=25`` (the SAME idiom as
-the ``BRUTEX_SWEEP_DIFFCHECK_K=8`` budget above — MC keeps real teeth, the
-worst-case draw is bounded) + a scoped INFO logging bound (the dispatch
+both at the fixture: ``BRUTEX_SWEEP_MC_PERMUTATIONS=100`` (the SAME idiom as
+the ``BRUTEX_SWEEP_DIFFCHECK_K=8`` budget above — the smallest budget whose
+p-value floor ``1/101`` still admits a PASS at the production
+``mc_alpha=0.01``, so filter #9 keeps teeth in both directions while the
+worst-case draw is bounded 10×) + a scoped INFO logging bound (the dispatch
 guard's posture, ``reset_configuration``-fenced so no other test is
 affected). The 300.0 s ceiling + the production default 1000 are UNTOUCHED.
 """
@@ -107,11 +109,14 @@ _PER_DAY = 12
 _CI_K_SAMPLES = 8
 #: Rehearsal-sized Stage-4 Monte-Carlo permutation budget
 #: (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the diffcheck-K idiom):
-#: enough permutations for the p-value filter to keep real teeth in the
-#: miniature chain, small enough that an expensive commit-seed draw (every
-#: surviving candidate reaching filter #9) stays well inside the 300 s
-#: ceiling. Production keeps ``CascadeConfig.mc_n_permutations = 1000``.
-_CI_MC_PERMUTATIONS = 25
+#: the SMALLEST budget at which filter #9 keeps teeth in BOTH directions at
+#: the production ``mc_alpha = 0.01`` — the permutation p-value law is
+#: ``(1 + n_beaten) / (n_permutations + 1)``, so 100 permutations put the
+#: floor at ``1/101 < 0.01`` (a genuinely superior candidate can still PASS;
+#: any smaller budget makes the filter a constant-reject) while bounding an
+#: expensive commit-seed draw's worst case at a 10× cut vs the production
+#: ``CascadeConfig.mc_n_permutations = 1000`` (which stays untouched).
+_CI_MC_PERMUTATIONS = 100
 
 
 @contextlib.contextmanager
@@ -122,9 +127,10 @@ def _rehearsal_env() -> Iterator[None]:
     all restored on exit so no other test in the process is affected:
 
     * ``BRUTEX_SWEEP_DIFFCHECK_K=8`` — the pre-existing R45 diffcheck budget;
-    * ``BRUTEX_SWEEP_MC_PERMUTATIONS=25`` — the Stage-4 MC permutation
+    * ``BRUTEX_SWEEP_MC_PERMUTATIONS=100`` — the Stage-4 MC permutation
       budget (resolved fail-loud by ``cmd_sweep_all`` through the
-      ``cascade_config_for_sweep(overrides=…)`` seam);
+      ``cascade_config_for_sweep(overrides=…)`` seam; see
+      ``_CI_MC_PERMUTATIONS`` for the both-directions-teeth floor);
     * a scoped ``configure_logging(level="INFO")`` — this fixture calls
       ``cli.cmd_sweep_all`` DIRECTLY, bypassing the ``main()``-dispatch
       log-volume guard (DEC-SWEEP-LOG-VOLUME-GUARD-001), so without it every

@@ -36,8 +36,9 @@ SAME-BRANCH SECOND DEC (2026-07-15 merge-reconcile of main through #1794):
 DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the rehearsal-scoped Stage-4
 Monte-Carlo permutation budget (NEW fail-loud `BRUTEX_SWEEP_MC_PERMUTATIONS`
 through the `cascade_config_for_sweep(overrides=…)` seam; env unset =
-byte-identical production default 1000, pinned) + the R38 fixture's MC=25 +
-scoped INFO logging bound — closing the SYSTEMIC
+byte-identical production default 1000, pinned) + the R38 fixture's MC=100
+(the smallest budget whose p-value floor 1/101 still admits a filter-#9 PASS
+at mc_alpha=0.01) + scoped INFO logging bound — closing the SYSTEMIC
 `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns (main itself failed
 at 452.6 s, run 29249947445); the 300.0 s ceiling stands. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
@@ -2647,7 +2648,9 @@ hostile-review pass._
   `cascade_config_for_sweep(overrides=…)` seam into the manifest-stored config (manual
   replay exact, pinned); env unset threads NO override — the production
   `mc_n_permutations=1000` default is byte-identical (config-equality + manifest pins);
-  the R38 rehearsal fixture sets MC=25 (the `BRUTEX_SWEEP_DIFFCHECK_K=8` idiom) + a
+  the R38 rehearsal fixture sets MC=100 (the `BRUTEX_SWEEP_DIFFCHECK_K=8` idiom;
+  the smallest budget whose p-value floor `1/101` still admits a filter-#9 PASS
+  at the production `mc_alpha=0.01` — smaller budgets are constant-reject) + a
   `reset_configuration`-fenced INFO logging bound (the #1630 dispatch-guard posture its
   direct `cmd_sweep_all` calls bypass) — closing the SYSTEMIC commit-seed-dependent
   `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns at root cause (an expensive
@@ -7220,7 +7223,8 @@ hostile-review pass._
   DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the rehearsal-scoped
   Stage-4 MC permutation budget knob `BRUTEX_SWEEP_MC_PERMUTATIONS`
   (fail-loud; env unset = the byte-identical production 1000 default) + the
-  R38 fixture's MC=25 + scoped INFO logging bound, closing the systemic
+  R38 fixture's MC=100 (the smallest both-directions-teeth budget at
+  mc_alpha=0.01) + scoped INFO logging bound, closing the systemic
   rehearsal 300 s overruns with the ceiling untouched; see §1 Active branch
   for the full blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/bulk-spot-completeness-flag`
