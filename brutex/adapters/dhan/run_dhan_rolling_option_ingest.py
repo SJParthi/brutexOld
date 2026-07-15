@@ -26,6 +26,14 @@ spans (NOT flagged suspicious — unlike the spot all-empty scan, an empty rolli
 the norm). A DH-905 whole-track servability refusal (UNVERIFIED) surfaces as a
 per-window FAILED with the DH-905 error type + zero bars, re-pullable. Neither is ever
 a fabricated bar.
+
+**Terminal pull-stop carve-out (DEC-DHAN-ROLLING-TERMINAL-STOP-001).** A
+:func:`~brutex.adapters.dhan.errors.is_terminal_pull_stop` failure — terminal auth,
+a still-stale SSM token after the re-read, an inactive Data-API subscription — means
+every later window of this pull would fail identically, so the FIRST occurrence
+RE-RAISES past the per-window quarantine (the spot spine's exact behaviour,
+``ingest.py``): the remaining windows are never burned against the 100k/day quota and
+the job layer's ``is_pull_halt`` fires the CRITICAL Telegram pull-halt alert.
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ from brutex.adapters.dhan.constants import (
     dhan_history_floor,
     dhan_rolling_options_floor,
 )
-from brutex.adapters.dhan.errors import DhanError, is_retryable
+from brutex.adapters.dhan.errors import DhanError, is_retryable, is_terminal_pull_stop
 from brutex.adapters.dhan.rolling_option_adapter import RollingOptionAdapter
 from brutex.adapters.dhan.rolling_option_chunks import window_days_for_rolling_interval
 from brutex.adapters.dhan.rolling_option_constants import (
@@ -261,6 +269,16 @@ def _process_item(
             bars=kept,
         )
     except DhanError as exc:
+        # The pull-wide global-stop carve-out (the SPOT spine's exact mirror —
+        # ingest.py::_process_item, DEC-DHAN-ROLLING-TERMINAL-STOP-001): a terminal
+        # auth / still-stale-token / subscription failure means EVERY later window of
+        # this pull would fail identically, so the FIRST occurrence re-raises past the
+        # per-window quarantine — the remaining ~1008-key window fan-out is never
+        # burned against the 100k/day Dhan quota, and the job layer's is_pull_halt
+        # fires the CRITICAL Telegram pull-halt alert (design §3,
+        # DEC-DHAN-SPOT-FEED-001; the errors.py docstrings PROMISE this carve-out).
+        if is_terminal_pull_stop(exc):
+            raise
         retryable = is_retryable(exc)
         _LOG.warning(
             "dhan.rolling_option.window_failed",
@@ -310,10 +328,15 @@ def run_dhan_rolling_option_ingest_with_retry(
 
     Plans the work (:func:`plan_rolling_option_work` — the unified rolling-options
     floor clamp of DEC-DHAN-ROLLING-FLOOR-UNIFY-001 lives there), then processes
-    each window; a RETRYABLE failure (throttle / empty body / timeout /
-    token-stale) is re-processed in a later round up to *max_rounds* (a terminal
-    failure — DH-905 subscription, vendor drift, unknown — is left FAILED,
-    re-pullable by a future pull). Returns the aggregated
+    each window; a RETRYABLE failure (throttle / empty body / timeout) is
+    re-processed in a later round up to *max_rounds*, and a PER-WINDOW terminal
+    failure (a DH-905 servability refusal, vendor drift, unknown) is left FAILED,
+    re-pullable by a future pull. A
+    :func:`~brutex.adapters.dhan.errors.is_terminal_pull_stop` failure (terminal
+    auth / still-stale SSM token / inactive Data-API subscription) PROPAGATES on its
+    first occurrence — the whole pull stops instead of burning every remaining window
+    (the job layer alerts it CRITICAL; the spot spine's exact behaviour,
+    DEC-DHAN-ROLLING-TERMINAL-STOP-001). Returns the aggregated
     :class:`RollingOptionIngestReport`.
 
     Parameters
