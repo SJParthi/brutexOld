@@ -182,3 +182,71 @@ class TestDefaultRunnerArm:
         assert payload["entries"] == []
         assert payload["source"]["reasons_wired"] is True
         assert payload["source"]["margin_roi_wired"] is True
+
+
+class TestCascadeReportThreading:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the in-memory report → join → pass."""
+
+    def test_report_flattened_and_threaded_to_the_pass(self, tmp_path: Path) -> None:
+        from brutex.engine.cascade_wire import CascadeWireReport
+        from brutex.metrics.cascade import CandidateVerdict, CascadeReport
+
+        inner = CascadeReport(
+            verdicts=(
+                CandidateVerdict(
+                    candidate_id="a" * 64,
+                    passed=True,
+                    rejected_at=None,
+                    detail="survived all Stage-4 filters",
+                    composite_score=1.0,
+                    cpcv_pass_rate=0.75,
+                ),
+            ),
+            survivor_ids=("a" * 64,),
+            n_input=1,
+            n_survived=1,
+            stage_survivors={},
+        )
+        report = CascadeWireReport(sweep_id="s" * 64, groups=(("NIFTY", "1minute", inner),))
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        ok = _call(tmp_path, _runner, cascade_report=report)
+        assert ok is True
+        join = captured["cascade_join"]
+        assert join is not None
+        assert join.sweep_id == "s" * 64
+        assert join.by_candidate["a" * 64].cpcv_pass_rate == 0.75
+        assert join.by_candidate["a" * 64].survivor_rank == 1
+
+    def test_none_report_threads_none(self, tmp_path: Path) -> None:
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        assert _call(tmp_path, _runner) is True
+        assert captured["cascade_join"] is None
+
+    def test_join_error_belt_logs_and_never_fails_the_sweep(self, tmp_path: Path) -> None:
+        # A structurally-unusable report (empty sweep_id) trips the
+        # CascadeJoinError belt: WARN + None threaded, the pass still runs.
+        from brutex.engine.cascade_wire import CascadeWireReport
+
+        bad = CascadeWireReport(sweep_id="", groups=())
+        captured: dict[str, Any] = {}
+
+        def _runner(**kwargs: Any) -> ResultsDepthReport:
+            captured.update(kwargs)
+            return _report()
+
+        with capture_logs() as logs:
+            ok = _call(tmp_path, _runner, cascade_report=bad)
+        assert ok is True
+        assert captured["cascade_join"] is None
+        (warn,) = [e for e in logs if e["event"] == "cli.results_depth.cascade_join_failed"]
+        assert warn["error_type"] == "CascadeJoinError"

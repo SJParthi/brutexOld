@@ -23,6 +23,19 @@
      fetchWithTimeout(url, ms, o)  fetch with an AbortController deadline
                                    (default 12000ms). Timeout rejects with an
                                    Error{name:"TimeoutError", timeout:true}.
+                                   The timer clears at the HEADERS — the body
+                                   read is the caller's own risk (poll ticks
+                                   should use fetchTextBounded instead).
+     fetchTextBounded(url, ms)     bounded TEXT fetch: the abort timer stays
+                                   ARMED through the BODY read, so a
+                                   headers-then-stalled-body response aborts
+                                   too (DEC-O1-GUARANTEE-HARDEN-001 — the
+                                   #1720 fetch_windows/completeness bound,
+                                   made COMMON). Resolves {ok, status, text};
+                                   a timeout rejects with the SAME
+                                   Error{name:"TimeoutError", timeout:true}
+                                   shape as fetchWithTimeout so callers keep
+                                   their timed-out copy.
      skeleton(panel, rows, cols, o)   shimmer ghost grid; optional honesty
                                    watchdog {watchdogMs, watchdogText} appends
                                    a caption if STILL pending after N ms.
@@ -117,6 +130,49 @@
         throw err;
       }
     );
+  }
+
+  /* Bounded TEXT fetch for poll ticks (DEC-O1-GUARANTEE-HARDEN-001): unlike
+     fetchWithTimeout — whose timer clears at the HEADERS — the abort timer
+     stays ARMED through the BODY read (browsers have no body-read timeout),
+     so a headers-then-stalled-body response aborts within the bound instead
+     of leaving the caller pending forever. Under BXPoll's one-in-flight
+     scheduling an unresolved tick would never reschedule (the frozen-tab
+     class the #1720 fetch_windows/completeness fix closed on 2 of the 5
+     sibling templates — this is that bound made COMMON for the other 3).
+     Resolves {ok, status, text}; a timeout rejects with the SAME
+     Error{name:"TimeoutError", timeout:true} shape as fetchWithTimeout. */
+  function fetchTextBounded(url, ms) {
+    var timeoutMs = (typeof ms === "number" && ms > 0) ? ms : 12000;
+    var ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var timedOut = false;
+    var init = {};
+    if (ctrl) { init.signal = ctrl.signal; }
+    var timer = setTimeout(function () {
+      timedOut = true;
+      if (ctrl) { ctrl.abort(); }
+    }, timeoutMs);
+    return fetch(url, init)
+      .then(function (r) {
+        /* timer deliberately still armed through the body read */
+        return r.text().then(function (txt) {
+          return { ok: r.ok, status: r.status, text: txt };
+        });
+      })
+      .then(
+        function (res) { clearTimeout(timer); return res; },
+        function (err) {
+          clearTimeout(timer);
+          if (timedOut) {
+            var e = new Error("request timed out after " + timeoutMs +
+              "ms — the server may be busy (a pull/prebuild may be running)");
+            e.name = "TimeoutError";
+            e.timeout = true;
+            throw e;
+          }
+          throw err;
+        }
+      );
   }
 
   /* Shimmer skeleton grid. Optional honesty watchdog: if the skeleton is
@@ -292,6 +348,7 @@
     el: el,
     clear: clear,
     fetchWithTimeout: fetchWithTimeout,
+    fetchTextBounded: fetchTextBounded,
     skeleton: skeleton,
     stateCard: stateCard,
     errorCard: errorCard,

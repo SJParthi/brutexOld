@@ -31,7 +31,7 @@ from brutex.engine.trade_sim import simulate_trades_with_exit_indices
 from brutex.metrics.compute import _drawdown_stats  # pyright: ignore[reportPrivateUsage]
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 # pyright: reportCallIssue=false
@@ -113,6 +113,58 @@ def _scenarios(
     return bars, entry, direction, tf_minutes, sl, tp
 
 
+#: One drawn scenario — (bars, entry_fires, direction, tf_minutes, sl, tp).
+_Scenario = tuple[list[CandleBar], list[bool], Side, int, int | None, int | None]
+
+
+def _flat_bar(ts: datetime) -> CandleBar:
+    return _bar_at(ts, 9_950, 9_950, 0, 0)
+
+
+#: CI-pinned falsifying examples (DEC-TRADESIM-OPEN-SESSION-GUARD-001,
+#: MIGRATION.md #1743 CI round): the 2026-07-12 "Property tests (hypothesis)"
+#: run (hypothesis 6.156.6, actions run 29173045547) generated ``two_day``
+#: cross-session shapes with an OPEN position riding the overnight gap —
+#: the pre-#1743 reference closed it ``end_of_data`` on the NEW session's
+#: bars while the guard-law answer closes at the day-1 last stored bar.
+#: Pinned as explicit ``@example``s, hypothesis-version-independent (a
+#: committed ``@reproduce_failure`` blob is version-bound AND fails
+#: ``DidNotReproduce`` by design once the defect is fixed).
+_CI_PIN_N_TRADES: _Scenario = (
+    [_flat_bar(_DAY1_UTC + timedelta(minutes=i)) for i in range(3)]
+    + [_flat_bar(_DAY2_UTC + timedelta(minutes=i)) for i in range(3)],
+    [False, True, False, False, True, False],
+    Side.BUY,
+    1,
+    None,
+    None,
+)
+_CI_PIN_GAP_PRICING: _Scenario = (
+    [
+        _flat_bar(_DAY1_UTC),
+        _flat_bar(_DAY1_UTC + timedelta(minutes=1)),
+        # Day-1 last stored bar closes 99.51 — the session_gap fill price;
+        # the day-2 bars close 99.50, so gap-riding pricing diverges by 1.
+        _bar_at(_DAY1_UTC + timedelta(minutes=2), 9_950, 9_951, 0, 0),
+        _flat_bar(_DAY2_UTC),
+        _flat_bar(_DAY2_UTC + timedelta(minutes=1)),
+    ],
+    [False, True, False, False, False],
+    Side.BUY,
+    1,
+    None,
+    None,
+)
+_CI_PIN_HOLDING: _Scenario = (
+    [_flat_bar(_DAY1_UTC), _flat_bar(_DAY1_UTC + timedelta(minutes=1)), _flat_bar(_DAY2_UTC)],
+    [True, False, False],
+    Side.BUY,
+    1,
+    None,
+    None,
+)
+
+
 def _assert_field_for_field(
     prod: list[ClosedTrade], prod_exit_indices: list[int] | None, ref: list[RefTrade]
 ) -> None:
@@ -133,6 +185,9 @@ def _assert_field_for_field(
 
 @settings(max_examples=100, deadline=None)
 @given(_scenarios())
+@example(scenario=_CI_PIN_N_TRADES)
+@example(scenario=_CI_PIN_GAP_PRICING)
+@example(scenario=_CI_PIN_HOLDING)
 def test_r45_reference_equals_production_field_for_field(
     scenario: tuple[list[CandleBar], list[bool], Side, int, int | None, int | None],
 ) -> None:
@@ -159,6 +214,9 @@ def test_r45_reference_equals_production_field_for_field(
 
 @settings(max_examples=100, deadline=None)
 @given(_scenarios())
+@example(scenario=_CI_PIN_N_TRADES)
+@example(scenario=_CI_PIN_GAP_PRICING)
+@example(scenario=_CI_PIN_HOLDING)
 def test_r45_reference_drawdown_equals_production_bit_for_bit(
     scenario: tuple[list[CandleBar], list[bool], Side, int, int | None, int | None],
 ) -> None:

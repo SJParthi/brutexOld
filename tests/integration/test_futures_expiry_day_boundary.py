@@ -7,12 +7,17 @@ mechanism is the EXISTING engine contract, exercised here over a REAL
 * every roll boundary is a session-DATE boundary (ownership is IST-date
   granular), and the trade-sim walker **DROPS a pending entry whose fill bar
   lands on a later session date** — R2-OC-2, the feed-contract rule cited at
-  ``brutex/engine/trade_sim.py:213-226`` ("a pending entry whose fill bar
+  ``brutex/engine/trade_sim.py:290-310`` ("a pending entry whose fill bar
   lands on a LATER session date … is DROPPED, never filled at the next
   session's open");
 * a position still open on expiry day is closed by the session-aware forced
   exit (#1019) at session close − 10 min (15:20 IST on the regular expiry
-  session) ON the expiring contract — entry AND exit inside its bars;
+  session) ON the expiring contract — entry AND exit inside its bars; when
+  the expiry session's stored bars END before the forced-exit window (a
+  session-tail hole), the open-position session guard closes it at the
+  expiring contract's LAST stored bar instead
+  (DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the roll-basis gap never enters
+  pnl/mfe/mae);
 * the loader's IST-date ownership cut keeps every next-contract bar with an
   IST date ≤ the expiry OUT of the stitched slice (the ``>=`` law — the
   expiry day belongs to the EXPIRING contract);
@@ -156,7 +161,7 @@ def test_entry_armed_on_expiry_days_last_usable_bar_produces_no_trade(
     An entry signal armed on the expiry day's LAST bar would fill at the next
     bar's open — but the next bar in the stitched stream is the NEXT session
     on the NEXT contract, so the walker DROPS the pending entry
-    (``trade_sim.py:213-226``): no trade exists, and in particular no fill at
+    (``trade_sim.py:290-310``): no trade exists, and in particular no fill at
     the post-roll session's basis-gapped open.
     """
     bars, _ = stitched
@@ -227,3 +232,83 @@ def test_first_post_roll_bar_mask_carries_no_prior_day_anchor_bits(
     post_roll_masks = [m for d, m in by_date if d == _POST_ROLL]
     assert post_roll_masks
     assert all((m & ANCHOR_DEPENDENT_MASK) == 0 for m in post_roll_masks)
+
+
+@pytest.fixture(scope="module")
+def stitched_tail_hole(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[list[CandleBar], tuple[int, ...]]:
+    """A stitched Jun→Jul roll whose EXPIRY-day stored bars END before 15:20.
+
+    The Jun contract's expiry-day tail is TRUNCATED at 15:14 IST (5 bars,
+    15:10-15:14 — a session-tail data hole: no bar ever reaches the forced-exit
+    window), and the next stitched bar is the Jul contract's first owned day —
+    the DEC-TRADESIM-OPEN-SESSION-GUARD-001 expiry-day shape.
+    """
+    root = tmp_path_factory.mktemp("expiry_tail_hole_lake")
+    writer = ParquetWriter(lake_root=root)
+    sink = ParquetBarSink(writer=writer)
+    jun_bars = _day(_DAY_BEFORE, _JUN_BASE) + [
+        _tail_bar(_EXPIRY, m, _JUN_BASE + 10)
+        for m in range(5)  # 15:10..15:14 ONLY
+    ]
+    jul_bars = _day(_POST_ROLL, _JUL_BASE)
+    sink.append(
+        exchange="NSE", segment="FNO", symbol=_JUN_CONTRACT, interval="1minute", bars=jun_bars
+    )
+    sink.append(
+        exchange="NSE", segment="FNO", symbol=_JUL_CONTRACT, interval="1minute", bars=jul_bars
+    )
+    res = resolve_futures_series(root, start=_DAY_BEFORE, end=_POST_ROLL)
+    with Catalog.open(root / "catalog.duckdb") as cat:
+        bars = load_sweep_slice(
+            cat=cat,
+            lake_root=root,
+            exchange="NSE",
+            segment="FNO",
+            symbol=_ALIAS,
+            interval="1minute",
+            start=datetime(2025, 6, 25, 0, 0, tzinfo=_TZ),
+            end=datetime(2025, 6, 27, 23, 59, tzinfo=_TZ),
+            resolution=res,
+        )
+    return bars, res.roll_schedule
+
+
+def test_expiry_day_tail_hole_closes_open_position_at_last_stored_jun_bar(
+    stitched_tail_hole: tuple[list[CandleBar], tuple[int, ...]],
+) -> None:
+    """DEC-TRADESIM-OPEN-SESSION-GUARD-001 at the roll seam: a position open on
+    the expiring contract whose stored bars end BEFORE 15:20 closes at the
+    expiring contract's LAST stored bar under ``session_gap`` — the roll-basis
+    gap (Jun ~110 plane → Jul ~140 plane) never enters pnl/mfe/mae, and no bar
+    of the successor contract ever touches the trade."""
+    from brutex.engine.trade_sim import TradeDetail
+
+    bars, _ = stitched_tail_hole
+    assert len(bars) == _BARS_PER_DAY + 5 + _BARS_PER_DAY
+    expiry_indices = [i for i, b in enumerate(bars) if _ist_date(b) == _EXPIRY]
+    assert len(expiry_indices) == 5  # the truncated tail really is 5 bars
+    first_expiry_index = expiry_indices[0]
+    signals = [False] * len(bars)
+    signals[first_expiry_index] = True  # fills at the NEXT bar's open (15:11 IST)
+    sink: list[TradeDetail] = []
+    trades = simulate_trades(bars, signals, direction=Side.BUY, tf_minutes=1, detail_sink=sink)
+    assert len(trades) == 1
+    trade = trades[0]
+    # Entry AND exit inside the expiry session, on the EXPIRING contract.
+    assert _ist_date_of(trade.entry_ts) == _EXPIRY
+    assert _ist_date_of(trade.exit_ts) == _EXPIRY
+    exit_ist = trade.exit_ts.astimezone(IST)
+    assert (exit_ist.hour, exit_ist.minute) == (15, 14)  # the LAST stored Jun bar
+    assert [d.exit_reason for d in sink] == ["session_gap"]
+    # Fills on the Jun plane (base 110): entry = 15:11 open 111.00, exit =
+    # 15:14 close 115.00 — the ~+30-point roll-basis gap is NOT in the pnl.
+    assert sink[0].entry_fill_paisa == 11_100
+    assert sink[0].exit_fill_paisa == 11_500
+    assert trade.pnl_paisa == 400
+    # Excursions bounded by the Jun contract's own bars (never the Jul plane):
+    # per-bar high = close + 1 → best high 116.00 → MFE = 500; every low ≥
+    # open − 1 → MAE ≤ 100. A Jul-plane leak would read thousands of paisa.
+    assert trade.mfe_paisa == 500
+    assert trade.mae_paisa == 100

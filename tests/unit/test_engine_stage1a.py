@@ -839,3 +839,123 @@ def test_muhurat_day_excluded_from_rolling_weekly_daily_history() -> None:
     prev = builder._prev_day_ohlc
     assert prev is not None
     assert (prev.high_paisa, prev.low_paisa, prev.close_paisa) == (11000, 9000, 10500)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# collect_batch_inputs — the batch-Rust prepass (DEC-STAGE1A-RUST-BATCH-001)
+# ────────────────────────────────────────────────────────────────────────
+#
+# The prepass duplicates push()'s steps 1-4 and drives the builder's OWN
+# roll/day/anchor methods; the field-for-field marshal parity lives in
+# tests/unit/test_engine_rust_stage1a.py (the oracle-probe pin). These tests
+# cover the prepass's OWN branch matrix: empty input, the spot constant key,
+# cold-day placeholders, the three fib anchors, EMA segment restarts at
+# rolls, and the G-7 beyond-schedule raise.
+
+from brutex.engine.stage1a import (  # noqa: E402
+    _PLACEHOLDER_FIB,  # pyright: ignore[reportPrivateUsage]
+    _PLACEHOLDER_PIVOTS,  # pyright: ignore[reportPrivateUsage]
+)
+from brutex.vocabulary.evaluator import fib_levels_list, pivot_levels_list  # noqa: E402
+
+
+def test_collect_batch_inputs_empty_bars_yield_empty_columns() -> None:
+    inputs = Stage1AMatrixBuilder().collect_batch_inputs([])
+    assert inputs.open_paisa == []
+    assert inputs.day_has_pivot == []
+    assert inputs.day_pivot_levels == []
+    assert inputs.ema20_paisa == []
+
+
+def test_collect_batch_inputs_spot_constant_key_and_no_resets() -> None:
+    day1 = [_minute_bar(datetime(2024, 1, 2), i, "100", "110", "90", "105") for i in range(2)]
+    day2 = [_minute_bar(datetime(2024, 1, 3), i, "106", "112", "104", "108") for i in range(2)]
+    inputs = Stage1AMatrixBuilder().collect_batch_inputs(day1 + day2)
+    assert inputs.session_key == [0, 0, 0, 0]  # _DEFAULT_SESSION_KEY
+    assert inputs.contract_reset == [False, False, False, False]
+    assert inputs.day_index == [0, 0, 1, 1]
+    assert inputs.day_has_pivot == [False, True]
+    assert inputs.day_has_fib == [False, True]  # prev-day fib warms with pivots
+    # Day-1 (cold) rows carry the placeholder levels; day-2 rows are real.
+    assert inputs.day_pivot_levels[:12] == pivot_levels_list(_PLACEHOLDER_PIVOTS)
+    assert inputs.day_fib_levels[:15] == fib_levels_list(_PLACEHOLDER_FIB)
+    assert inputs.day_pivot_levels[12:] != pivot_levels_list(_PLACEHOLDER_PIVOTS)
+
+
+def test_collect_batch_inputs_cold_weekly_fib_keeps_warm_pivots() -> None:
+    # ROLLING_WEEKLY needs 5 completed sessions; a 3-day feed keeps the fib
+    # anchor COLD on every day while day-2+ pivots are warm (R-2) — the fib
+    # rows stay the placeholder, the pivot rows go real.
+    from brutex.strategies.fib_definitions import FibAnchorKind
+
+    days = [_date(2024, 1, 2), _date(2024, 1, 3), _date(2024, 1, 4)]
+    bars = [
+        _minute_bar(datetime(d.year, d.month, d.day), 0, "100", "110", "90", "105") for d in days
+    ]
+    inputs = Stage1AMatrixBuilder(fib_anchor=FibAnchorKind.ROLLING_WEEKLY).collect_batch_inputs(
+        bars
+    )
+    assert inputs.day_has_pivot == [False, True, True]
+    assert inputs.day_has_fib == [False, False, False]  # cold week
+    assert inputs.day_fib_levels[15:30] == fib_levels_list(_PLACEHOLDER_FIB)
+    assert inputs.day_pivot_levels[12:24] != pivot_levels_list(_PLACEHOLDER_PIVOTS)
+
+
+@pytest.mark.parametrize("anchor_name", ["prev_day", "rolling_weekly", "weekly_static"])
+def test_collect_batch_inputs_all_three_anchors_produce_valid_tables(anchor_name: str) -> None:
+    from brutex.strategies.fib_definitions import FibAnchorKind
+
+    anchor = FibAnchorKind(anchor_name)
+    days = [_date(2024, 1, d) for d in (2, 3, 4, 5, 8, 9, 10, 11)]  # 8 trading days
+    bars = [
+        _minute_bar(datetime(d.year, d.month, d.day), m, "100", "110", "90", "105")
+        for d in days
+        for m in range(2)
+    ]
+    inputs = Stage1AMatrixBuilder(fib_anchor=anchor).collect_batch_inputs(bars)
+    n_days = len(inputs.day_has_pivot)
+    assert n_days == len(days)
+    assert len(inputs.day_pivot_levels) == 12 * n_days
+    assert len(inputs.day_fib_levels) == 15 * n_days
+    assert inputs.day_index == [i for i in range(n_days) for _ in range(2)]
+    # Every anchor family eventually warms its fib on this 8-session feed.
+    assert inputs.day_has_fib[-1] is True
+
+
+def test_collect_batch_inputs_ema_segments_restart_at_rolls() -> None:
+    # 25 bars per contract day with a roll between: the EMA(20) column must
+    # warm within each segment and RESTART (None) after the roll — exactly
+    # the streaming builder's per-contract EMA recreation.
+    d1, d2 = _date(2025, 6, 26), _date(2025, 6, 27)
+    schedule = (d1.toordinal(), _date(2025, 7, 31).toordinal())
+    bars = [
+        _minute_bar(datetime(d.year, d.month, d.day), m, "100", "110", "90", "105")
+        for d in (d1, d2)
+        for m in range(25)
+    ]
+    inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
+    assert inputs.contract_reset[25] is True
+    assert sum(inputs.contract_reset) == 1
+    # Pre-roll: warm at bar 19 (the 20th bar of segment A).
+    assert inputs.ema20_paisa[18] is None
+    assert inputs.ema20_paisa[19] is not None
+    # Post-roll: the warm-up restarts — None until 20 bars into segment B.
+    assert inputs.ema20_paisa[25 + 18] is None
+    assert inputs.ema20_paisa[25 + 19] is not None
+    # The owning-expiry ordinals key the sessions per contract.
+    assert set(inputs.session_key[:25]) == {d1.toordinal()}
+    assert set(inputs.session_key[25:]) == {_date(2025, 7, 31).toordinal()}
+
+
+def test_collect_batch_inputs_beyond_schedule_raises_the_push_message() -> None:
+    # G-7: the ONE duplicated f-string raises identically from both walks.
+    bars = [
+        _minute_bar(datetime(2024, 1, 2), 0, "100", "110", "90", "105"),
+        _minute_bar(datetime(2024, 1, 3), 0, "100", "110", "90", "105"),
+    ]
+    schedule = (_date(2024, 1, 2).toordinal(),)
+    with pytest.raises(ValueError, match="beyond the last roll_schedule expiry") as prepass_exc:
+        Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
+    with pytest.raises(ValueError, match="beyond the last roll_schedule expiry") as push_exc:
+        Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
+    assert str(prepass_exc.value) == str(push_exc.value)

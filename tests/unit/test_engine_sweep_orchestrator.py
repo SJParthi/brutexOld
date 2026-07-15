@@ -205,12 +205,22 @@ class TestSweepGridConfig:
         grid = _grid(instruments=["INDIAVIX"], unsafe_allow_out_of_scope_instruments=True)
         assert list(grid.instruments) == ["INDIAVIX"]
 
-    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NSE-NIFTY-FUT"])
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX"])
     def test_in_scope_instruments_construct_by_default(self, symbol: str) -> None:
-        # The futures track is addressed by the ONE pinned series alias
-        # (DEC-FUTURES-ADDRESSING-PIN-001) — the two pre-launch shapes moved to
-        # the retired-refusal test below.
+        # DEC-ENGINE-SPOT-ONLY-001: exactly the 3 spot indexes construct by
+        # default — the ADR-0012 series alias moved to the refusal test below.
         assert list(_grid(instruments=[symbol]).instruments) == [symbol]
+
+    def test_futures_series_alias_refused_at_construction_spot_only(self) -> None:
+        # FLIPPED by DEC-ENGINE-SPOT-ONLY-001 (was: allowed at Layer 1 per
+        # DEC-FUTURES-ADDRESSING-PIN-001): the engine is spot-only, so even
+        # PROGRAMMATIC construction refuses the alias with the law citation
+        # + the remediation — never a silent admit.
+        with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
+            _grid(instruments=["NSE-NIFTY-FUT"])
+        assert "DEC-ENGINE-SPOT-ONLY-001" in str(exc.value)
+        assert "spot-only" in str(exc.value)
+        assert "lake/REFERENCE_ONLY" in str(exc.value)
 
     @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
     def test_retired_futures_shapes_refused_naming_the_alias(self, symbol: str) -> None:
@@ -223,7 +233,7 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
             _grid(instruments=[symbol])
         assert "NSE-NIFTY-FUT" in str(exc.value)
-        assert "DEC-FUTURES-ADDRESSING-PIN-001" in str(exc.value)
+        assert "DEC-ENGINE-SPOT-ONLY-001" in str(exc.value)
 
     def test_scope_flag_is_identity_safe(self) -> None:
         """Regression pin (DEC-ENGINE-SCOPE-GUARD-001): the new field enters NO identity.
@@ -413,7 +423,9 @@ class TestToRunConfig:
     def test_threads_roll_schedule_for_the_futures_alias(self) -> None:
         # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the per-tuple schedule
         # is argument-plumbed into the SweepRunConfig, never a grid field.
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: the futures machinery below the gate is
+        # RETAINED — exercised via the sanctioned research escape flag.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         t = _tuple(instrument="NSE-NIFTY-FUT")
         cfg = t.to_run_config(grid, roll_schedule=_FUT_SCHEDULE)
         assert cfg.roll_schedule == _FUT_SCHEDULE
@@ -1054,7 +1066,9 @@ class TestRunSweepGridRollSchedule:
     def test_futures_grid_threads_the_schedule_and_runs(self, tmp_path: Path) -> None:
         pytest.importorskip("polars")
         bars = _trending_bars(n_days=4)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: below-the-gate futures machinery test —
+        # the research escape flag is the sanctioned construction path.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_sweep_grid(
                 grid,
@@ -1072,7 +1086,7 @@ class TestRunSweepGridRollSchedule:
         # SweepRunConfig invariant propagates (a genuine wiring bug, never a
         # silent constant-key sweep).
         bars = _trending_bars(n_days=2)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="roll_schedule is required for"),

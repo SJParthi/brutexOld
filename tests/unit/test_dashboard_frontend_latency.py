@@ -33,10 +33,20 @@ HONEST envelope (Golden Rule #10):
   is an explicit standing pin
   (test_dashboard_halfup_format.py::test_template_loads_shared_formatter_before_inline_script)
   whose intent stands.
+
+DEC-O1-GUARANTEE-HARDEN-001 additions (this suite also hosts the widened
+bounds): the #1720 body-armed tick bound is extended from 2 to ALL FIVE
+sibling poller templates through the NEW shared ``BXUI.fetchTextBounded``
+(node-EXECUTED stalled-body golden — not just a source pin); the bx-oneclick
+timeline gains a skip-render token + a NAMED newest-500 render cap + a 200 ms
+search debounce (pure primitives node-EXECUTED); universe.html's windows line
++ six integrity loaders ride the gbFetchJson bound with a per-loader
+latest-claims-the-paint generation guard.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess  # nosec B404 — fixed-argv node invocation, test-only
 from html.parser import HTMLParser
@@ -280,33 +290,152 @@ class TestDebouncedInputs:
 
 
 # ---------------------------------------------------------------------------
-# Review MAJOR fix — the fetch_windows/completeness tick fetches are BOUNDED
-# with the abort timer armed THROUGH the body read, honoring the timeoutMs
-# BXPoll passes to the custom fetchJson seam (pre-fix the ticks kept bare
-# un-timed `fetch`, so under BXPoll's one-in-flight scheduling a
+# Review MAJOR fix (#1720), widened by DEC-O1-GUARANTEE-HARDEN-001 to ALL FIVE
+# sibling poller templates — every tick fetch is BOUNDED with the abort timer
+# armed THROUGH the body read, honoring the timeoutMs BXPoll passes to the
+# custom fetchJson seam (pre-fix the ticks kept a headers-only bound /
+# unbounded `await r.text()`, so under BXPoll's one-in-flight scheduling a
 # headers-then-stalled-body response hung the tick promise forever and the
-# poller never rescheduled — the frozen-tab class the migration exists to
-# prevent).
+# poller never rescheduled — the frozen-tab class; the #1720 fix covered only
+# fetch_windows/completeness, and THIS parametrize list's former 2-template
+# narrowness was the fingerprint of the gap).
 # ---------------------------------------------------------------------------
+
+#: The two #1720 templates keep their SELF-CONTAINED local fetchTextBounded —
+#: they deliberately do NOT load bx-ui.js, so migrating them onto the shared
+#: BXUI helper would add a new script dependency for zero behavioral win
+#: (the documented judgment call, DEC-O1-GUARANTEE-HARDEN-001).
+_LOCAL_BOUND_TEMPLATES = ["fetch_windows.html", "completeness.html"]
+#: The three gap templates already depended on BXUI for their fetch helper
+#: (the former headers-only doFetch → BXUI.fetchWithTimeout), so they now
+#: delegate to the ONE shared BXUI.fetchTextBounded (§11 COMMON).
+_SHARED_BOUND_TEMPLATES = ["coverage.html", "spot_coverage.html", "expired_options.html"]
 
 
 class TestBoundedTickFetch:
-    @pytest.mark.parametrize("name", ["fetch_windows.html", "completeness.html"])
+    @pytest.mark.parametrize("name", _LOCAL_BOUND_TEMPLATES + _SHARED_BOUND_TEMPLATES)
     def test_tick_fetch_is_bounded_through_the_body_read(self, name: str) -> None:
         html = _tpl(name)
-        # The bounded-fetch token: timer armed through the BODY read.
+        # The bounded-fetch helper + its tick consumption.
         assert "function fetchTextBounded(url, timeoutMs) {" in html
-        assert "/* timer deliberately still armed through the body read */" in html
         assert "await fetchTextBounded(" in html
         # The custom seam threads BXPoll's own timeout bound into the tick.
         assert "fetchJson: function (_url, timeoutMs) {" in html
         assert "return poll(timeoutMs).then(function (ok) {" in html
+
+    @pytest.mark.parametrize("name", _LOCAL_BOUND_TEMPLATES)
+    def test_local_copy_keeps_the_armed_through_body_token(self, name: str) -> None:
+        html = _tpl(name)
+        # The bounded-fetch token: timer armed through the BODY read.
+        assert "/* timer deliberately still armed through the body read */" in html
         # The legacy no-BXPoll arm defaults to the sibling pages' 12 s bound.
         assert '(typeof timeoutMs === "number" && timeoutMs > 0) ? timeoutMs : 12000;' in html
+
+    @pytest.mark.parametrize("name", _SHARED_BOUND_TEMPLATES)
+    def test_gap_templates_delegate_to_the_shared_bxui_bound(self, name: str) -> None:
+        """The three gap templates ride the ONE shared BXUI.fetchTextBounded."""
+        html = _tpl(name)
+        assert "return BXUI.fetchTextBounded(url, timeoutMs);" in html
+        # KILLED tokens: the headers-only bound + the unbounded body reads.
+        assert "fetchWithTimeout" not in html, (
+            f"{name}: the headers-only fetchWithTimeout bound resurfaced"
+        )
+        assert "function doFetch(url)" not in html
+        assert "await r.text()" not in html, (
+            f"{name}: an unbounded post-headers body read resurfaced"
+        )
+        # The tick consumes the bounded {ok, status, text} shape.
+        assert "const txt = res.text;" in html
+
+    def test_expired_options_second_read_is_bounded_too(self) -> None:
+        """The best-effort pull-progress read rides the SAME bounded helper."""
+        html = _tpl("expired_options.html")
+        assert "await fetchTextBounded('/api/v1/universe/pull-progress', timeoutMs)" in html
+        assert "await pr.json()" not in html
 
     def test_bare_untimed_tick_fetches_are_gone(self) -> None:
         assert 'await fetch("/api/v1/completeness/scoreboard")' not in _tpl("completeness.html")
         assert 'await fetch("/api/v1/coverage/windows?"' not in _tpl("fetch_windows.html")
+        for name in _SHARED_BOUND_TEMPLATES:
+            assert "doFetch(" not in _tpl(name)
+
+
+# ---------------------------------------------------------------------------
+# DEC-O1-GUARANTEE-HARDEN-001 — the ONE shared body-armed bound on BXUI
+# (bx-ui.js), source-pinned AND node-EXECUTED (a real stalled-body abort).
+# ---------------------------------------------------------------------------
+
+
+class TestSharedFetchTextBounded:
+    def test_bx_ui_ships_the_body_armed_helper(self) -> None:
+        js = _js("bx-ui.js")
+        assert "function fetchTextBounded(url, ms) {" in js
+        assert "/* timer deliberately still armed through the body read */" in js
+        # Exported on the BXUI namespace for the template delegators.
+        assert "fetchTextBounded: fetchTextBounded," in js
+        # The 12 s default (the sibling pages' legacy bound) lives HERE now.
+        assert '(typeof ms === "number" && ms > 0) ? ms : 12000;' in js
+        # Timeout keeps the fetchWithTimeout error shape (coverage.html's
+        # failMsg + spot_coverage's timed-out verdict read e.timeout).
+        assert 'e.name = "TimeoutError";' in js
+        assert "e.timeout = true;" in js
+
+    @pytest.mark.skipif(_NODE is None, reason="node not installed")
+    def test_fetch_text_bounded_aborts_a_stalled_body_read(self) -> None:
+        """EXECUTED golden over the REAL shipped bx-ui.js: the happy path
+        resolves {ok, status, text}, and a headers-then-STALLED-BODY response
+        rejects with the TimeoutError{timeout:true} shape within the bound —
+        the exact wedge class fetchWithTimeout (timer cleared at the headers)
+        could never catch."""
+        script = (
+            "const fs = require('fs');\n"
+            f"const src = fs.readFileSync({json.dumps(str(_STATIC / 'bx-ui.js'))}, 'utf8');\n"
+            "global.window = {};\n"
+            "class FakeAbortController {\n"
+            "  constructor() { this.signal = { aborted: false, onabort: null }; }\n"
+            "  abort() { this.signal.aborted = true; if (this.signal.onabort) this.signal.onabort(); }\n"
+            "}\n"
+            "global.AbortController = FakeAbortController;\n"
+            "let mode = 'ok';\n"
+            "global.fetch = function (url, init) {\n"
+            "  if (mode === 'ok') {\n"
+            "    return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('BODY:' + url) });\n"
+            "  }\n"
+            "  // headers arrive fine; the BODY stalls forever unless aborted\n"
+            "  return Promise.resolve({ ok: true, status: 200, text: () => new Promise((resolve, reject) => {\n"
+            "    init.signal.onabort = () => reject(new Error('aborted'));\n"
+            "  }) });\n"
+            "};\n"
+            "eval(src);\n"
+            "const B = global.window.BXUI;\n"
+            "(async () => {\n"
+            "  const okRes = await B.fetchTextBounded('/x', 50);\n"
+            "  if (!(okRes.ok === true && okRes.status === 200 && okRes.text === 'BODY:/x')) {\n"
+            "    throw new Error('happy-path shape wrong: ' + JSON.stringify(okRes));\n"
+            "  }\n"
+            "  mode = 'stall';\n"
+            "  const t0 = Date.now();\n"
+            "  let caught = null;\n"
+            "  try {\n"
+            "    await B.fetchTextBounded('/y', 40);\n"
+            "  } catch (e) { caught = e; }\n"
+            "  if (!caught) { throw new Error('stalled body did NOT abort'); }\n"
+            "  if (!(caught.timeout === true && caught.name === 'TimeoutError')) {\n"
+            "    throw new Error('wrong error shape: ' + caught);\n"
+            "  }\n"
+            "  if (Date.now() - t0 > 5000) { throw new Error('abort exceeded the bound'); }\n"
+            "  console.log('BOUNDED_OK');\n"
+            "})().catch((e) => { console.error(String((e && e.stack) || e)); process.exit(1); });\n"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            [str(_NODE), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "BOUNDED_OK"
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +454,10 @@ _TOUCHED_TEMPLATES = [
     "results.html",
     "screener.html",
     "spot_coverage.html",
+    # DEC-PULL-SCOPED-ALL-ONECLICK-001 refuter-round-4 H NIT-1: the branch
+    # added inline JS (the pull-all-spot button wiring) with no syntax gate.
+    # DEC-O1-GUARANTEE-HARDEN-001 — bounded latest-wins loaders.
+    "universe.html",
     "v29.html",
 ]
 
@@ -473,3 +606,276 @@ class TestDeferSkipIsDeliberate:
         assert '<script defer src="/static/bx-movers-time.js"></script>' not in html
         # The parse-time consumer that makes defer unsafe.
         assert "fillTimes(); renderPills(); load();" in html
+
+
+# ---------------------------------------------------------------------------
+# DEC-O1-GUARANTEE-HARDEN-001 — the bx-oneclick timeline render bounds:
+# (a) a skip-render token so an UNCHANGED (ring, filter) window never
+#     rebuilds the DOM (pre-fix, a live sweep's events tick tore down +
+#     rebuilt up to 5,000 text nodes every ~3 s even for dup-only pages);
+# (b) the DOM render is capped at the NEWEST 500 rows with the truncation
+#     NAMED on a visible count line (the BXScreener bxRenderCount/bxCapNote
+#     anti-illusion idiom);
+# (c) the timeline search input is 200 ms debounced (the #1720 house idiom —
+#     it was the ONE filter input on the estate exempt from the law).
+# The pure primitives are node-EXECUTED below; the DOM wiring is
+# source-pinned (the house #1557 envelope — no browser runner in CI).
+# ---------------------------------------------------------------------------
+
+
+class TestTimelineRenderBounds:
+    def test_render_cap_constant_and_capped_walk(self) -> None:
+        js = _js("bx-oneclick.js")
+        assert "var BX_TIMELINE_RENDER_CAP = 500;" in js
+        assert (
+            "var visible = bxTimelineRenderRows(rows, BX_TIMELINE_RENDER_CAP, state.renderOffset);"
+            in js
+        )
+        # The truncation is NAMED on a visible line (textContent via BXUI.el).
+        assert "bxTimelineCapNote(visible.length, rows.length, state.renderOffset)" in js
+        assert 'window.BXUI.el("div", "oc-event-cap", capNote)' in js
+
+    def test_skip_render_token_gates_the_rebuild(self) -> None:
+        js = _js("bx-oneclick.js")
+        # The token folds the viewport offset (review round 1 MAJOR-A) so a
+        # "load earlier" viewport move genuinely re-renders.
+        assert (
+            "var token = bxTimelineRenderToken(state.ringMutations, q, state.renderOffset);" in js
+        )
+        assert "if (token === state.lastTimelineToken) {" in js
+        # Only ADMITTED records move the counter — a dup-only events page
+        # leaves the window unchanged so the next render skips.
+        assert "var admitted = bxRingAdd(state.ring, state.ringSeen, records," in js
+        assert "state.ringMutations += admitted;" in js
+        # loadEarlier's prepends move it too; selectRun forces the next render.
+        assert "state.ringMutations += take.length;" in js
+        assert "state.lastTimelineToken = null; // ring content reset" in js
+
+    def test_viewport_pager_wiring_source_pins(self) -> None:
+        """Review round 1 MAJOR-A — the slidable-viewport DOM wiring.
+
+        The newest-500 render cap previously DEFEATED the wired "load
+        earlier" pager: prepended older records were never rendered once the
+        filtered rows exceeded the cap. The wiring pins: (a) a loadEarlier
+        click slides the viewport onto the OLDEST window; (b) a live events
+        tick grows a parked viewport's tail distance by the admissions
+        (never yanked back to newest); (c) a run change AND a filter change
+        reset the viewport to the live newest window.
+        """
+        js = _js("bx-oneclick.js")
+        # (a) the click slides onto the oldest window (front-anchored offset).
+        assert "state.renderOffset = bxTimelineEarlierOffset(" in js
+        # (b) a live tick content-anchors a parked viewport.
+        assert "state.renderOffset = bxTimelineTickOffset(state.renderOffset, admitted);" in js
+        # (c) run + filter changes re-anchor on the newest window.
+        assert "state.renderOffset = 0; // a run change re-anchors on the newest window" in js
+        assert "state.renderOffset = 0; // a filter change re-anchors on the newest window" in js
+        # The rendered window clamps to the renderable range before the
+        # stored token folds the EFFECTIVE offset.
+        assert (
+            "state.renderOffset = bxTimelineClampOffset(rows.length, BX_TIMELINE_RENDER_CAP, "
+            "state.renderOffset);" in js
+        )
+
+    def test_search_input_is_debounced(self) -> None:
+        js = _js("bx-oneclick.js")
+        assert "setTimeout(renderTimeline, 200)" in js
+        # The killed per-keystroke direct bind.
+        assert 'searchBox.addEventListener("input", renderTimeline);' not in js
+
+    @pytest.mark.skipif(_NODE is None, reason="node not installed")
+    def test_timeline_pure_primitives_node_golden(self) -> None:
+        """EXECUTED golden over the REAL shipped bx-oneclick.js exports."""
+        script = (
+            f"const O = require({json.dumps(str(_STATIC / 'bx-oneclick.js'))});\n"
+            "const rows = [];\n"
+            "for (let i = 0; i < 1200; i++) { rows.push({ n: i }); }\n"
+            "const capped = O.bxTimelineRenderRows(rows, O.BX_TIMELINE_RENDER_CAP);\n"
+            "const small = [{ n: 1 }, { n: 2 }];\n"
+            "const out = {\n"
+            "  cap: O.BX_TIMELINE_RENDER_CAP,\n"
+            "  cappedLen: capped.length,\n"
+            "  first: capped[0].n,\n"
+            "  last: capped[capped.length - 1].n,\n"
+            "  withinCapIsSameArray: O.bxTimelineRenderRows(small, 500) === small,\n"
+            "  nonArrayIsEmpty: O.bxTimelineRenderRows(null, 500).length === 0,\n"
+            "  note: O.bxTimelineCapNote(capped.length, rows.length),\n"
+            "  noteWhenUncut: O.bxTimelineCapNote(200, 200),\n"
+            "  tokenStable: O.bxTimelineRenderToken(3, 'x') === O.bxTimelineRenderToken(3, 'x'),\n"
+            "  tokenMovesOnMutation: O.bxTimelineRenderToken(3, 'x') !== O.bxTimelineRenderToken(4, 'x'),\n"
+            "  tokenMovesOnFilter: O.bxTimelineRenderToken(3, 'x') !== O.bxTimelineRenderToken(3, 'y'),\n"
+            "  // the separator tooth: a digit-leading filter can never collide\n"
+            "  noJoinCollision: O.bxTimelineRenderToken(1, '2x') !== O.bxTimelineRenderToken(12, 'x'),\n"
+            "  nullFilterIsEmpty: O.bxTimelineRenderToken(0, null) === O.bxTimelineRenderToken(0, ''),\n"
+            "};\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            [str(_NODE), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out == {
+            "cap": 500,
+            "cappedLen": 500,
+            "first": 700,  # the OLDEST 700 rows are the cut — the tail survives
+            "last": 1199,  # the newest row always renders
+            "withinCapIsSameArray": True,
+            "nonArrayIsEmpty": True,
+            "note": "showing newest 500 of 1200 events (render cap)",
+            "noteWhenUncut": "",
+            "tokenStable": True,
+            "tokenMovesOnMutation": True,
+            "tokenMovesOnFilter": True,
+            "noJoinCollision": True,
+            "nullFilterIsEmpty": True,
+        }
+
+    @pytest.mark.skipif(_NODE is None, reason="node not installed")
+    def test_timeline_viewport_pager_node_golden(self) -> None:
+        """Review round 1 MAJOR-A repro, EXECUTED over the REAL shipped file.
+
+        Pre-fix, the newest-500 render slice silently DEFEATED the wired
+        "load earlier" pager: with >500 filtered rows, every prepended older
+        record was invisible. The golden drives the exact viewport
+        composition the widget wires (bxRingAdd admissions →
+        bxTimelineTickOffset · loadEarlier prepend → bxTimelineEarlierOffset
+        · clamp → bxTimelineRenderRows/bxTimelineCapNote) and pins:
+        (a) a ring grown past 500 by three loadEarlier clicks renders the
+            OLDEST loaded event;
+        (b) a live events tick while the viewport is parked does NOT
+            re-anchor it back to newest (same window content; token moves);
+        (c) a filter-change reset (offset 0) re-anchors on the newest row.
+        """
+        script = (
+            f"const O = require({json.dumps(str(_STATIC / 'bx-oneclick.js'))});\n"
+            "const cap = O.BX_TIMELINE_RENDER_CAP;\n"
+            "function ev(n) { return { ts_utc: 't' + n, kind: 'k', payload: { n: n } }; }\n"
+            "let ring = []; const seen = {}; let offset = 0;\n"
+            "// the initial tail pages: events 700..999 (the newest 300)\n"
+            "let recs = []; for (let n = 700; n < 1000; n++) { recs.push(ev(n)); }\n"
+            "offset = O.bxTimelineTickOffset(offset, O.bxRingAdd(ring, seen, recs, 5000));\n"
+            "function win() {\n"
+            "  const rows = O.bxRingFilter(ring, '', '');\n"
+            "  offset = O.bxTimelineClampOffset(rows.length, cap, offset);\n"
+            "  return { rows: rows, vis: O.bxTimelineRenderRows(rows, cap, offset) };\n"
+            "}\n"
+            "function earlier(lo, hi) { // the widget's prepend + slide, verbatim shape\n"
+            "  const take = [];\n"
+            "  for (let n = lo; n < hi; n++) {\n"
+            "    const r = ev(n); const k = O.bxEventLineText(r);\n"
+            "    if (!seen[k]) { seen[k] = true; take.push(r); }\n"
+            "  }\n"
+            "  ring = take.concat(ring);\n"
+            "  offset = O.bxTimelineEarlierOffset(O.bxRingFilter(ring, '', '').length, cap);\n"
+            "}\n"
+            "earlier(500, 700); earlier(300, 500); earlier(100, 300); // three clicks\n"
+            "const w3 = win();\n"
+            "const tokParked = O.bxTimelineRenderToken(9, '', offset);\n"
+            "// a live tick while parked: 3 new events admitted at the tail\n"
+            "offset = O.bxTimelineTickOffset(\n"
+            "  offset, O.bxRingAdd(ring, seen, [ev(1000), ev(1001), ev(1002)], 5000));\n"
+            "const w4 = win();\n"
+            "const out = {\n"
+            "  ringLen: ring.length,\n"
+            "  oldestLoadedRendered: w3.vis[0].payload.n,\n"
+            "  parkedFirst: w4.vis[0].payload.n,\n"
+            "  parkedLast: w4.vis[w4.vis.length - 1].payload.n,\n"
+            "  parkedNote: O.bxTimelineCapNote(w4.vis.length, w4.rows.length, offset),\n"
+            "  // the token moves on a viewport slide (the skip-render fold)\n"
+            "  tokenMovesOnOffset: tokParked !== O.bxTimelineRenderToken(9, '', 0),\n"
+            "  // (c) the filter-change reset re-anchors on the newest row\n"
+            "  resetNewest: O.bxTimelineRenderRows(w4.rows, cap, 0)[cap - 1].payload.n,\n"
+            "  resetNote: O.bxTimelineCapNote(cap, w4.rows.length, 0),\n"
+            "};\n"
+            "console.log(JSON.stringify(out));\n"
+        )
+        proc = subprocess.run(  # nosec B603 — fixed argv, test-only
+            [str(_NODE), "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out == {
+            "ringLen": 903,
+            # (a) the OLDEST loaded event (100) IS rendered after 3 clicks —
+            # pre-fix the newest-500 slice rendered 500..999 and hid it.
+            "oldestLoadedRendered": 100,
+            # (b) the parked window content is UNCHANGED across the tick
+            # (100..599) — never yanked back to the newest window.
+            "parkedFirst": 100,
+            "parkedLast": 599,
+            "parkedNote": "showing events 1–500 of 903 (render cap 500)",
+            "tokenMovesOnOffset": True,
+            "resetNewest": 1002,  # (c) offset 0 renders the live tail again
+            "resetNote": "showing newest 500 of 903 events (render cap)",
+        }
+
+
+# ---------------------------------------------------------------------------
+# DEC-O1-GUARANTEE-HARDEN-001 — universe.html: the 5 s windows line + the six
+# 15 s integrity loaders ride the SAME gbFetchJson body-armed abort bound
+# through ONE latest-claims-the-paint helper (boundedLatestJson — the
+# gbPollGen idiom per loader), so a hung socket can no longer accumulate per
+# tick and an out-of-order slow response can never repaint over a newer one.
+# Cadence + rendered output are pinned unchanged by the existing
+# test_dashboard_poll_hygiene.py universe pins (guard strings, setInterval
+# registrations, catch-up calls) — this class pins only the fetch mechanics.
+# ---------------------------------------------------------------------------
+
+_UNIVERSE_LOADER_CALLS = [
+    'boundedLatestJson("completeness", "/api/v1/universe/completeness")',
+    'boundedLatestJson("mapping", "/api/v1/universe/mapping-integrity")',
+    'boundedLatestJson("master", "/api/v1/universe/master-integrity")',
+    'boundedLatestJson("economics", "/api/v1/universe/economics-integrity")',
+    'boundedLatestJson("parseskips", "/api/v1/universe/parse-skips")',
+    'boundedLatestJson("lakeunique", "/api/v1/universe/lake-uniqueness")',
+    "boundedLatestJson('windowsline', '/api/v1/coverage/windows?limit=0')",
+]
+
+
+class TestUniverseBoundedLoaders:
+    def test_loaders_ride_the_one_bounded_latest_wins_helper(self) -> None:
+        html = _tpl("universe.html")
+        assert "async function boundedLatestJson(key, url) {" in html
+        # Delegation to the SAME gbFetchJson bound (§11 COMMON — no eighth
+        # hand-rolled AbortController copy).
+        assert "const res = await gbFetchJson(url);" in html
+        # The latest-claims-the-paint ordering guard (the gbPollGen idiom).
+        assert (
+            "if (gen !== loaderGen[key]) return null;   "
+            "// superseded — never repaint over a newer response" in html
+        )
+        for call in _UNIVERSE_LOADER_CALLS:
+            assert call in html, f"universe.html: bounded loader call missing: {call!r}"
+
+    def test_bare_untimed_loader_fetches_are_gone(self) -> None:
+        html = _tpl("universe.html")
+        for killed in (
+            'await fetch("/api/v1/universe/completeness")',
+            'await fetch("/api/v1/universe/mapping-integrity")',
+            'await fetch("/api/v1/universe/master-integrity")',
+            'await fetch("/api/v1/universe/economics-integrity")',
+            'await fetch("/api/v1/universe/parse-skips")',
+            'await fetch("/api/v1/universe/lake-uniqueness")',
+            "await fetch('/api/v1/coverage/windows?limit=0')",
+        ):
+            assert killed not in html, f"universe.html: bare loader fetch resurfaced: {killed!r}"
+
+    def test_loaders_consume_the_parsed_body_shape(self) -> None:
+        """gbFetchJson returns {ok, status, body} — the loaders read .body and
+        keep their non-ok early-return degrade (a superseded response reads
+        null → the same silent keep-last-shown arm)."""
+        html = _tpl("universe.html")
+        assert html.count("if (!r || !r.ok) return;") == 7, (
+            "all 7 migrated loaders must keep the non-ok/superseded early return"
+        )
+        assert "const map = r.body;" in html
+        assert "const counts = (r.body || {}).counts || {};" in html

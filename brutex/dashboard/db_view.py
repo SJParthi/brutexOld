@@ -32,6 +32,7 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
@@ -72,14 +73,15 @@ from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.bar_screen import screen_rows
+from brutex.data.errors import CatalogError, LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_provenance import greeks_status_label
-from brutex.data.lake_keys import spot_recovery_candidates
+from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.lake_manifest import (
     ledger_stat_token,
     load_manifest_datasets,
@@ -123,6 +125,7 @@ from brutex.data.partition import (
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
+from brutex.data.today_completeness import TODAY_INCOMPLETE
 from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY_TERMINAL_THRESHOLD,
@@ -630,19 +633,51 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def table_summary(conn: Any) -> list[dict[str, Any]]:
+#: The :func:`table_summary` strict-mode (``raise_on_fault=True``) re-raise
+#: set: the store fault types (``duckdb.Error`` / ``OSError`` — the
+#: ``universe_cache.STORE_FAULT_TYPES`` members, a wedged volume / unreachable
+#: DuckDB / a dropped table on a foreign DB) PLUS
+#: :class:`~brutex.data.errors.CatalogError`, because the
+#: DEC-STORE-WRITE-DEADLINE-001 wedge latch (``_ensure_not_wedged`` on the
+#: store read view's ``execute``) raises CatalogError — a ``DataLakeError``,
+#: NOT a ``duckdb.Error``. MUST stay member-equal to the ``/api/v1/db/tables``
+#: route's ``_TABLES_PROBE_FAULT_TYPES`` (set-equality pinned in
+#: ``test_dashboard_pull_contention_routes.py``) so a strict-mode raise is
+#: ALWAYS caught by that route's uncached degrade arm — never a 500
+#: (round-8 review MINOR: the probe→compute TOCTOU).
+TABLE_SUMMARY_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    CatalogError,
+    duckdb.Error,
+    OSError,
+)
+
+
+def table_summary(conn: Any, *, raise_on_fault: bool = False) -> list[dict[str, Any]]:
     """Return ``[{"table", "row_count"}]`` for every known table.
 
-    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. A
-    table that is missing (a partially-initialised or foreign DB) is
-    tolerated and reported with ``row_count == 0`` rather than raising,
-    so a fresh/empty store renders cleanly.
+    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. By
+    default a table that is missing (a partially-initialised or foreign
+    DB) — or any other per-table read fault — is tolerated and reported
+    with ``row_count == 0`` rather than raising, so a fresh/empty store
+    renders cleanly.
 
     Parameters
     ----------
     conn
         A DuckDB connection — typically
         :attr:`brutex.data.instrument_store.InstrumentStore.connection`.
+    raise_on_fault
+        ``True`` re-raises a :data:`TABLE_SUMMARY_FAULT_TYPES` member (a
+        store fault OR the DEC-STORE-WRITE-DEADLINE-001 wedge latch's
+        ``CatalogError``) instead of folding it into a 0-count — the
+        strict form the ``/api/v1/db/tables`` CACHED compute uses, so a
+        store that wedges AFTER a healthy freshness probe (the round-8
+        probe→compute TOCTOU) raises out of ``get_or_compute`` and a
+        wedge-degraded all-zero summary is NEVER stored under the
+        healthy pre-wedge token. Any exception OUTSIDE that fault set
+        still folds to 0 in BOTH modes (the never-a-500 posture is
+        unchanged for unexpected defect classes). Default ``False`` —
+        every existing caller byte-identical.
 
     Returns
     -------
@@ -655,6 +690,10 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
         # name is a hardcoded allowlist literal, never caller input.
         try:
             row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608  # nosec B608 - name is a hardcoded KNOWN_TABLES literal, never caller input
+        except TABLE_SUMMARY_FAULT_TYPES:
+            if raise_on_fault:
+                raise
+            count = 0
         except Exception:
             count = 0
         else:
@@ -3058,6 +3097,7 @@ def query_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     registry_path: Path | None = None,
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
     use_stats_manifest: bool = False,
     retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
@@ -3451,6 +3491,58 @@ def query_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001): route the page through
+    # the ONE COMMON engine-parity screen so a bad-tick spike / an insane bar the
+    # engine + /movers drop is never SERVED raw here — /db == /movers == engine.
+    # Runs AFTER the raw page rows are resolved (pruned OR legacy path — the
+    # screen is path-agnostic) and AFTER the observed-lower-bound clamp above,
+    # which deliberately reads the RAW page length (a tighter bound on the RAW
+    # stored count the total describes). Spot/futures candles keep the FULL
+    # screen (insane + ×4 bad-tick), seeded with the last KEPT in-session bar
+    # before the page's earliest row so the cross-row bad-tick screen is correct
+    # at the page's left edge (`_bad_tick_seed_bar`; the deep-cluster residual is
+    # documented there). CONTRACT-TYPE-AWARE on the F&O segment: this route ALSO
+    # serves CE/PE contract partitions (via the FNO cascade), and option PREMIA
+    # legitimately move ≥4×/minute on leverage — so a decoded CE/PE symbol
+    # screens INSANE-ONLY (`bad_tick_enabled=False`, no seed — the cross-row arm
+    # is off), matching /movers-options + the /db expired-options tab exactly
+    # (the same scope rule as `_read_future_session(bad_tick=)`); FUT and
+    # unparseable F&O symbols keep the full default-ON screen. Clean pages
+    # return the same object (byte-identical; the screen is an O(page-rows)
+    # Python pass — honest cost, not zero work). HONEST envelope: the seed read
+    # is ONE additional DuckDB query per non-option page over the partition
+    # glob — an O(files) Parquet-metadata scan (a constant-factor addition to
+    # the per-click query count; the LIMIT-k row read itself is tiny), eager
+    # even on clean data; and `total` above is the DATASET-wide
+    # DISTINCT-timestamp count (manifest- OR legacy-served), so on a CORRUPT
+    # partition it OVER-counts by the number of screened-out rows (the served
+    # page shows fewer rows than `total`/`limit` imply) — a bounded honesty gap
+    # on corrupt data only, never a fabricated bar.
+    is_option_contract = False
+    if is_fno:
+        parts = parse_fno_symbol(symbol)
+        is_option_contract = parts is not None and parts.option_type is not None
+        # NIT (disclosed): an UNPARSEABLE F&O symbol falls to the default-ON
+        # full screen — unreachable via the product (the FNO cascade offers
+        # only parse-decoded contracts) and conservative in direction (a
+        # mystery partition is screened like a future, never served a spike).
+    raw_rows = screen_rows(
+        raw_rows,
+        out_columns,
+        source=skip_source,
+        # Options: no seed (the cross-row bad-tick arm is off, a seed is unused
+        # work); spot/FUT/unparseable: the bounded seeded default. `None` (not
+        # True) on the default arm preserves the BRUTEX_BAD_TICK_SCREEN
+        # kill-switch read — the engine-parity contract.
+        seed_bar=(
+            None
+            if is_option_contract
+            else _bad_tick_seed_bar(
+                conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+            )
+        ),
+        bad_tick_enabled=False if is_option_contract else None,
+    )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -3516,6 +3608,11 @@ def query_candles(
             registry_path=registry_path,
             count_cache=count_cache,
             generation=generation,
+            # The evidence-grounded stock drift rung for the moneyness spot-join
+            # (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001) — default ``None`` at every
+            # layer keeps the pure-function callers byte-identical; the dashboard
+            # injects its composite-token-memoised loader (see ``build_app``).
+            stock_drift_loader=stock_drift_loader,
         )
         extra_cells: list[tuple[Any, ...]] = [
             (*spot_pair, *fno) for spot_pair, fno in zip(derived, fno_cells, strict=True)
@@ -3894,6 +3991,89 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
     if ts_idx < 0:
         return set()
     return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
+
+
+#: How many same-session predecessor bars the ``/db`` bad-tick seed reads + screens
+#: to resolve the page's left edge (DEC-DASHBOARD-READ-SCREEN-001). Bounds the ROW
+#: read to k (the glob's O(files) metadata scan is the honest per-click cost — see
+#: `_bad_tick_seed_bar`); a spike cluster deeper than this is the honest
+#: documented residual (the whole-day /movers reader is always correct).
+_BAD_TICK_SEED_WINDOW: Final[int] = 8
+
+
+def _bad_tick_seed_bar(
+    conn: Any,
+    base: Path,
+    *,
+    raw_rows: list[tuple[Any, ...]],
+    out_columns: list[str],
+    skip_source: str,
+) -> tuple[Any, float, float, float, float] | None:
+    """Last KEPT in-session bar before the page's earliest row, or ``None``.
+
+    The bounded prior-bar seed for the ``/db`` cross-row bad-tick screen
+    (DEC-DASHBOARD-READ-SCREEN-001), mirroring the predecessor read of
+    :func:`_intraday_last_close_with_predecessor`: reads the last
+    :data:`_BAD_TICK_SEED_WINDOW` bars STRICTLY BEFORE the page's earliest row AND
+    on the same IST session date (the COMMON :data:`_IST_DATE_EXPR` equality —
+    never a bare ``CAST(timestamp AS DATE)``, which resolves in the ambient
+    DuckDB session TimeZone; DEC-DB-TZ-MONEYNESS-FIXES-001), SCREENS that
+    ascending window through the SAME
+    :func:`~brutex.data.bar_screen.screen_rows`, and returns the LAST KEPT bar as
+    the seed — so the page's leading row is judged against the last GOOD close, not
+    a spike sitting immediately before the page (the single-spike / short-cluster
+    left-edge case; screening only the raw immediate predecessor would wrongly
+    baseline the page's first good row against that spike). The window read is
+    ``ORDER BY DESC LIMIT k`` over the partition glob — HONEST cost: the k-row
+    read is tiny, but the glob itself is an O(files) Parquet-metadata scan (a
+    constant-factor addition per click, NOT O(1) in partition depth). Returns
+    ``None`` when the page lacks OHLC/``timestamp`` columns, is empty, has no
+    same-session predecessor (a page that starts at 09:15), or the whole window
+    screens out. HONEST residual: a spike cluster DEEPER than the window, or a
+    spike as the window's own first bar, is not resolved — the whole-day
+    ``/movers`` reader is always correct; this bounded seed only narrows the
+    ``/db`` page-local left edge.
+    """
+    if any(name not in out_columns for name in ("timestamp", "open", "high", "low", "close")):
+        return None
+    ts_idx = out_columns.index("timestamp")
+    page_ts = [row[ts_idx] for row in raw_rows if isinstance(row[ts_idx], datetime)]
+    if not page_ts:
+        return None
+    earliest = min(page_ts)
+    # The same-session bound is an IST-date equality through the COMMON
+    # :data:`_IST_DATE_EXPR` (never a bare ``CAST(... AS DATE)``, which resolves
+    # in the ambient DuckDB session TimeZone and would SPLIT an IST session
+    # across two local dates under e.g. America/New_York — the
+    # DEC-DB-TZ-MONEYNESS-FIXES-001 hazard class; the Python side mirrors it
+    # with an explicit ``astimezone(_IST)``, naive timestamps read as UTC per
+    # the lake contract).
+    earliest_utc = (
+        earliest.replace(tzinfo=UTC) if earliest.tzinfo is None else earliest.astimezone(UTC)
+    )
+    window = _execute_parquet_resilient(
+        conn,
+        base,
+        'SELECT "timestamp", "open", "high", "low", "close" '  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with bound params
+        "FROM read_parquet(?, union_by_name=true) "
+        f'WHERE "timestamp" < ? AND {_IST_DATE_EXPR} = ? '
+        'ORDER BY "timestamp" DESC LIMIT ?',
+        [earliest, earliest_utc.astimezone(_IST).date(), _BAD_TICK_SEED_WINDOW],
+        source=skip_source,
+    )
+    if not window:
+        return None
+    # Screen the ascending predecessor window; the last SURVIVOR is the seed.
+    ascending = list(reversed(window))
+    kept = screen_rows(
+        ascending,
+        ["timestamp", "open", "high", "low", "close"],
+        source=skip_source,
+    )
+    if not kept:
+        return None
+    ts, open_, high, low, close = kept[-1]
+    return (ts, open_, high, low, close)
 
 
 def _bars_file_windows(
@@ -4437,6 +4617,7 @@ def _underlying_spot_close_by_ts(
     underlying: str,
     interval: str,
     ts_values: list[datetime],
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
 ) -> tuple[dict[datetime, Decimal], str | None]:
     """Read ``{bar_instant: underlying_spot_close}`` for an F&O contract's underlying.
 
@@ -4462,13 +4643,27 @@ def _underlying_spot_close_by_ts(
     I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
     (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
     directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
-    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs + the
+    evidence-grounded STOCK drift rung supplied by *stock_drift_loader*) is walked in
     order, returning the FIRST candidate with any joined spot bar and emitting ONE
     ``db_view.spot_key_recovered`` info naming both keys
     (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
     ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
     every bar even though the spot data existed on disk). Ladder exhaustion returns
     the honest empty map — never a fabricated spot.
+
+    *stock_drift_loader* (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — the /db moneyness
+    twin of the Greeks ladder's DEC-GREEKS-SPOTJOIN-STOCK-001 stock arm) lazily
+    supplies the master-verified :data:`~brutex.data.lake_keys.StockDriftMap`; it is
+    invoked AT MOST ONCE per call and ONLY on the already-cold exhausted-primary path
+    (the exact-key hot path pays zero extra I/O), so a drifted stock spot dir
+    (``BAJAJ-AUTO`` vs the chain's ``BAJAJAUTO``) now classifies moneyness instead of
+    reading ``"?"`` on every bar. ``None`` (the default) or a loader returning
+    ``None``/empty is byte-identical to the pre-stock ladder (the pinned
+    :func:`spot_recovery_candidates` prefix invariant); the one recovery log gains
+    the additive ``rung`` field (``"stock_drift"`` / ``"alias_ladder"``), attributed
+    exactly as the Greeks twin attributes it (indices past the 2-arg ladder length
+    are uniquely stock-sourced).
 
     **1-minute fallback on a partially-prebuilt lake (DEC-DB-FNO-DISPLAY-TRUTH-001
     item 9):** when the whole walk at the display *interval* joins nothing AND
@@ -4558,11 +4753,30 @@ def _underlying_spot_close_by_ts(
             return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
         return {}
 
+    # The drift map is resolved lazily AT MOST ONCE per call (both _walk passes
+    # share the memo), and only on the recovery path — the exact-key hot path
+    # never touches the loader (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001).
+    drift_memo: list[StockDriftMap | None] = []
+
+    def _drift() -> StockDriftMap | None:
+        if not drift_memo:
+            drift_memo.append(stock_drift_loader() if stock_drift_loader is not None else None)
+        return drift_memo[0]
+
     def _walk(probe_interval: str) -> dict[datetime, Decimal]:
         spots = _probe(underlying, probe_interval)
         if spots:
             return spots
-        for candidate in spot_recovery_candidates(underlying, exchange):
+        stock_drift = _drift()
+        candidates = spot_recovery_candidates(underlying, exchange, stock_drift=stock_drift)
+        alias_count = len(candidates)
+        if stock_drift:
+            # The extra 2-arg call runs only on the already-cold exhausted-primary
+            # path with a truthy map — pure string ops, O(1)-bounded (the exact
+            # rung-attribution mechanism of the Greeks twin,
+            # ``greeks_enrich.read_spot_join_with_recovery``).
+            alias_count = len(spot_recovery_candidates(underlying, exchange))
+        for idx, candidate in enumerate(candidates):
             recovered = _probe(candidate, probe_interval)
             if recovered:
                 _LOG.info(
@@ -4571,6 +4785,7 @@ def _underlying_spot_close_by_ts(
                     recovered_key=candidate,
                     exchange=exchange,
                     interval=probe_interval,
+                    rung="stock_drift" if idx >= alias_count else "alias_ladder",
                 )
                 return recovered
         return spots
@@ -4710,6 +4925,7 @@ def _fno_derived_rows(
     registry_path: Path | None = None,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
 ) -> tuple[
     list[tuple[str, str | None, str | None, str | None, int | None, str]],
     StepConfidence | None,
@@ -4841,6 +5057,12 @@ def _fno_derived_rows(
         underlying=underlying,
         interval=interval,
         ts_values=ts_values,
+        # The evidence-grounded stock drift rung (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001)
+        # — the injected lazy loader is consulted only on the exhausted-primary
+        # recovery path, so a drifted stock spot dir classifies moneyness exactly
+        # as the Greeks ladder recovers its spot join; the healthy exact-key page
+        # pays zero extra I/O.
+        stock_drift_loader=stock_drift_loader,
     )
     rows: list[tuple[str, str | None, str | None, str | None, int | None, str]] = []
     for row in raw_rows:
@@ -5193,6 +5415,19 @@ def query_option_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001), INSANE-ONLY for options:
+    # positivity/ordering-impossible option bars are dropped so /db-options never
+    # SERVES a corrupt bar, but the ×4 bad-tick screen is DISABLED
+    # (`bad_tick_enabled=False`) — option PREMIA legitimately move ≥4×/minute on
+    # leverage, so the index-circuit-breaker-calibrated threshold would drop legit
+    # bars; the engine never screens options either. This MATCHES /movers-options
+    # (which passes bad_tick=False through _read_future_session), so the two agree.
+    # No bad-tick seed is needed (the cross-row arm is off). Runs AFTER the raw
+    # page rows are resolved (pruned OR legacy — path-agnostic) and AFTER the
+    # observed-lower-bound clamp above (which deliberately reads the RAW page
+    # length); on a CORRUPT partition the served page shows fewer rows than the
+    # RAW total implies — a bounded honesty gap, never a fabricated bar.
+    raw_rows = screen_rows(raw_rows, out_columns, source=skip_source, bad_tick_enabled=False)
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
     rows = _render_candle_rows(raw_rows, out_columns, "1minute")
@@ -5377,6 +5612,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
+    * ``FAILED`` carrying :data:`~brutex.data.today_completeness.TODAY_INCOMPLETE`
+      (DEC-PULL-TODAY-COMPLETENESS-GATE-001) → ``"today's session not yet
+      settled by vendor (will re-pull)"`` — the pre-settle TODAY gate's
+      streak-exempt deferral, honest that the vendor simply has not settled
+      today yet (not an error, not a data hole).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -5395,6 +5635,13 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
+    if status == "FAILED" and last_error == TODAY_INCOMPLETE:
+        # DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
+        # because the vendor has not settled TODAY's session yet — the honest
+        # wording (a streak-EXEMPT, time-transient deferral; a SKIPPED settle
+        # carrying this tag is structurally unreachable but covered by
+        # DEMOTED_SETTLE_REASONS membership above, defensively).
+        return "today's session not yet settled by vendor (will re-pull)"
     if status == "FAILED":
         return "FAILED (will re-pull)"
     return status
@@ -5519,6 +5766,96 @@ def _ledger_stamp_moved() -> bool:
     return True
 
 
+def _compute_cursor(conn: Any) -> Any:
+    """A statement-isolated DuckDB cursor for a cached window compute — never a raise.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the flagged
+    (``stale_while_revalidate``) window caches may run a compute on a
+    BACKGROUND daemon revalidator, CONCURRENT with the request thread's own
+    statements on the SAME shared connection — and DuckDB's execute→fetch is
+    per-connection pending-result state, so interleaved statements corrupt
+    each other's results (reproduced in-suite: a background counts fold
+    fetched the request's 16-column page rows and died on the 3-tuple
+    unpack). ``conn.cursor()`` yields an isolated statement holder for BOTH
+    production shapes (round-1 BLOCKER fix — the original fallback rationale
+    was FALSE for the store conn, which had no ``cursor()`` and silently
+    shared one single-thread-per-view instance across the revalidator
+    daemons): a raw DuckDB connection returns an independent engine
+    connection (its own pending-result state), and the store's
+    ``_LockedReadConn`` returns a FRESH locked view over the same read
+    cursor + read lock (independent per-view hold state; each compute's
+    execute→fetch stays atomic under the store read lock — never a shared
+    ``_held`` flag, whose cross-thread corruption leaked the read lock and
+    froze every later dashboard read). The inline single-flight computes ride
+    the same cursor, which also closes the pre-existing (rare) cross-request
+    interleave on these families. A conn without ``cursor()`` (test fakes /
+    exotic injections — genuinely single-threaded drivers) — or a raising
+    ``cursor()`` — falls back to *conn* itself (isolation is best-effort,
+    never a 500). Callers pair every isolated cursor with
+    :func:`_close_cursor` so a compute can never strand a held view.
+    """
+    factory = getattr(conn, "cursor", None)
+    if factory is None:
+        return conn
+    try:
+        return factory()
+    except Exception:  # pylint: disable=broad-except — isolation is best-effort
+        return conn
+
+
+def _close_cursor(cursor: Any, conn: Any) -> None:
+    """Best-effort close of a per-compute isolated cursor — NEVER the shared *conn*.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 round 1: an isolated cursor
+    can end its compute still HOLDING state — the legacy-shape probe
+    (`_ensure_full_schema`) raises ``ValueError`` after a description-only
+    read, which on a ``_LockedReadConn`` view leaves the store read lock
+    acquired (an abandoned hold = every later dashboard read deadlocks; the
+    request-shared view was previously rebalanced by the NEXT execute, a
+    per-compute view never is) — and a raw DuckDB cursor is an engine
+    connection worth freeing eagerly rather than at GC. The fallback arm
+    (``cursor is conn`` — the caller's own shared connection) is never
+    closed; a missing/raising ``close`` is swallowed (cleanup can never mask
+    the compute's own outcome or 500 a poll).
+    """
+    if cursor is conn:
+        return
+    close = getattr(cursor, "close", None)
+    if close is None:
+        return
+    with contextlib.suppress(Exception):  # cleanup is best-effort
+        close()
+
+
+def _isolated_counts_total(
+    conn: Any, source: _LedgerScanSource
+) -> tuple[dict[str, dict[str, int]], int]:
+    """:func:`_window_counts_total` on a per-compute isolated cursor (closed after).
+
+    The ONE compute body the flagged counts caches run — possibly on a
+    background SWR revalidator daemon concurrent with the request thread —
+    so it must never touch the caller's shared *conn* directly
+    (`_compute_cursor`) and must release its view even on a raise
+    (`_close_cursor`).
+    """
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_total(cursor, source)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+def _isolated_counts_since(
+    conn: Any, source: _LedgerScanSource, since_iso: str
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The per-run twin of :func:`_isolated_counts_total` — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_since(cursor, source, since_iso)
+    finally:
+        _close_cursor(cursor, conn)
+
+
 #: Resident-key bound for the shared ledger read cache: 3 key families
 #: (records / rows / spot-rollup) × multi-lake test headroom.
 _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
@@ -5531,20 +5868,34 @@ _LEDGER_READ_FLOOR_CAP_S: Final[float] = 120.0
 
 
 def _make_ledger_read_cache(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
     Single-flight + the #920 adaptive floor, both REUSED from the verified
     :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` contract (no
-    third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* is injectable so
-    the floor tests are deterministic (production keeps the monotonic default).
+    third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* / *swr_runner*
+    are injectable so the floor + stale-while-revalidate tests are
+    deterministic (production keeps the monotonic default and the
+    daemon-thread runner).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4 widened — the
+        # operator's live repro: /db window-ledger rows stuck behind an inline
+        # O(rows) re-parse past the floor mid-pull): PAST-floor stamp churn
+        # serves the PRIOR stamp's records instantly and re-parses in ONE
+        # tokenless background revalidator — bounded staleness (≤ floor + one
+        # parse behind the live ledger), every serve logged, converged by the
+        # next idle read (the constant-True probe keeps the arm armed exactly
+        # while the stamp churns).
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
 
@@ -5583,7 +5934,9 @@ def _reset_ledger_read_cache() -> None:
 
 
 def make_window_payload_caches(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[MoversSnapshotCache, MoversSnapshotCache]:
     """Construct the ``(counts_cache, page_cache)`` pair for ``/coverage/windows``.
 
@@ -5606,11 +5959,30 @@ def make_window_payload_caches(
     and page-key churn can never evict the counts entries (round-2 MEDIUM
     fold — see the capacity constant's envelope). *clock* is injectable so the
     floor tests are deterministic (production keeps the monotonic default).
+    Both instances ALSO opt into ``stale_while_revalidate``
+    (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 — see the construction
+    comment below for the sanctioned-staleness envelope).
     """
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4): BOTH instances opt
+    # into stale-while-revalidate — a pull-progress / /coverage/windows poll
+    # landing PAST the 120 s-capped floor serves the PRIOR stamp's counts /
+    # page instantly and revalidates the O(rows + delta-footers) fold in ONE
+    # tokenless background daemon; concurrent pollers never block on the
+    # single-flight (the operator's live repro: the windows page stuck at
+    # "loading…" mid-pull, and the /universe feed dropping ~154 s recurring).
+    # The fold still RUNS (≤1 concurrent, ≤ floor cadence) — this bounds poll
+    # LATENCY, it does not eliminate the fold (Golden Rule #10). Because the
+    # probe is the constant-True `_ledger_stamp_moved`, the SWR arm also
+    # covers CROSS-PROCESS CLI-pull stamp churn: an idle-after-CLI-write read
+    # past the floor converges via one background fold instead of one inline
+    # fold (≤ seconds delayed freshness, log-labelled — the disclosed
+    # sanctioned delta for the counts family).
     counts_cache = MoversSnapshotCache(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     page_cache = MoversSnapshotCache(
@@ -5618,6 +5990,8 @@ def make_window_payload_caches(
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
     return counts_cache, page_cache
@@ -6402,7 +6776,7 @@ def query_window_ledger_page(
         ledger_glob = path.as_posix()
         probed = False
 
-        def _ensure_full_schema() -> None:
+        def _ensure_full_schema(c: Any) -> None:
             """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
             ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
             the /db grid projects ALL 16 columns, so ANY absent optional column
@@ -6412,14 +6786,21 @@ def query_window_ledger_page(
             list, whose NULL-fill would mask a legacy base's missing columns.
             Base-ABSENT (a first pull's delta-only checkpoint) skips it: every
             delta is written by `append_ledger_delta` with the full current
-            schema (writer-pinned). Run at most once per fresh attempt."""
+            schema (writer-pinned). Run at most once per fresh attempt; *c* is
+            the calling compute's statement-isolated cursor (`_compute_cursor`
+            — the flagged caches may run a compute on a background revalidator,
+            concurrent with the request thread's statements; a production
+            store conn isolates via `_LockedReadConn.cursor()`), closed by the
+            compute's `finally` (`_close_cursor`) so the legacy-shape raise
+            below — thrown AFTER a description-only read — can never strand a
+            held read-lock view (round-1 BLOCKER hygiene)."""
             nonlocal probed
             if probed or not path.is_file():
                 return
             available = {
                 str(col[0])
                 for col in (
-                    conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                    c.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
                     or []
                 )
             }
@@ -6432,26 +6813,37 @@ def query_window_ledger_page(
         order_sql = ", ".join(f'"{name}"' for name in _WINDOW_KEY_COLUMNS)
 
         def _total() -> int:
-            _ensure_full_schema()
-            # COUNT(*) over the fold = the number of DISTINCT window keys (the
-            # QUALIFY keeps exactly one row per key; a steady-state base holds
-            # unique keys by construction — save writes the folded to_rows()).
-            row = conn.execute(
-                f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
-                list(source.params),
-            ).fetchone()
-            return int(row[0]) if row else 0
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # COUNT(*) over the fold = the number of DISTINCT window keys (the
+                # QUALIFY keeps exactly one row per key; a steady-state base holds
+                # unique keys by construction — save writes the folded to_rows()).
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+                    list(source.params),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                # The legacy-shape probe raises AFTER a description-only read —
+                # on a `_LockedReadConn` view that hold must be released here or
+                # the store read lock leaks forever (round-1 BLOCKER hygiene).
+                _close_cursor(c, conn)
 
         def _page() -> tuple[tuple[Any, ...], ...]:
-            _ensure_full_schema()
-            # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
-            # source params bind FIRST (the subquery precedes them in the text).
-            cursor = conn.execute(
-                f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
-                f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
-                [*source.params, limit, offset],
-            )
-            return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
+                # source params bind FIRST (the subquery precedes them in the text).
+                cursor = c.execute(
+                    f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
+                    f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                    [*source.params, limit, offset],
+                )
+                return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            finally:
+                _close_cursor(c, conn)
 
         if count_cache is None:
             total = _total()
@@ -6716,10 +7108,17 @@ def phase_progress_payload(
             # #920 adaptive floor throttle mid-pull recomputes. The SAME key
             # `_build_window_payload_duckdb` uses, so the two routes share one
             # warm entry.
+            # The compute runs on a statement-isolated cursor, closed after
+            # (`_isolated_counts_total`): the flagged cache may execute it on a
+            # background revalidator, concurrent with this thread's own
+            # statements — and a production store conn's isolation rides
+            # `_LockedReadConn.cursor()` (a fresh per-compute view; the shared
+            # single-thread view corrupted its hold flag cross-thread and
+            # leaked the store read lock — round-1 BLOCKER).
             counts, _total = count_cache.get_or_compute(
                 f"window-counts|{ledger_file.as_posix()}",
                 generation=revision_generation(source.stamp_token),
-                compute=lambda: _window_counts_total(conn, source),
+                compute=lambda: _isolated_counts_total(conn, source),
             )
         return counts
 
@@ -6901,13 +7300,35 @@ def _build_window_payload_duckdb(
         # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
         # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
         # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
-        available = {
-            str(col[0])
-            for col in (
-                conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
-                or []
-            )
-        }
+        # ISOLATED cursor + close (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+        # deadlock fix): this description-only probe was the LAST remaining
+        # statement on the request's SHARED ``_LockedReadConn`` view — with no
+        # fetch and no close it left the store read RLock HELD by the request's
+        # worker thread at request end (pre-round-1 the later counts/page
+        # statements on the SAME shared view rebalanced it via ``execute``'s
+        # leading ``_release()``; the round-1 per-compute ``cursor()`` isolation
+        # moved them off the shared view, so nothing rebalanced), and the NEXT
+        # request dispatched to a DIFFERENT worker thread deadlocked forever on
+        # ``_lock.acquire()`` (reproduced: the CI unit-gate hang at
+        # test_windows_ledger_fast_path_through_real_connection; py-spy-traced
+        # to the instrument_store ``_LockedReadConn.execute`` acquire). The
+        # probe now follows the same ``_compute_cursor``/``_close_cursor``
+        # discipline as every other statement in this function — its view
+        # releases the lock in the ``finally`` even on the legacy-shape raise
+        # below.
+        probe = _compute_cursor(conn)
+        try:
+            available = {
+                str(col[0])
+                for col in (
+                    probe.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]
+                    ).description
+                    or []
+                )
+            }
+        finally:
+            _close_cursor(probe, conn)
         if not {"empty_streak", "in_pull_fetches"}.issubset(available):
             raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
@@ -6941,10 +7362,15 @@ def _build_window_payload_duckdb(
         if since is not None:
             counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
+        # Computes run on a statement-isolated cursor, closed after
+        # (`_isolated_counts_total`): the flagged caches may execute them on a
+        # background revalidator daemon, concurrent with this thread's own
+        # statements — a production store conn isolates via
+        # `_LockedReadConn.cursor()` (fresh per-compute view, round-1 BLOCKER).
         counts, total = count_cache.get_or_compute(
             f"window-counts|{ledger_glob}",
             generation=stamp_generation,
-            compute=lambda: _window_counts_total(conn, source),
+            compute=lambda: _isolated_counts_total(conn, source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
@@ -6955,7 +7381,7 @@ def _build_window_payload_duckdb(
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
                 generation=stamp_generation,
-                compute=lambda: _window_counts_since(conn, source, since),
+                compute=lambda: _isolated_counts_since(conn, source, since),
             )
 
     valid_buckets = ("spot", "options", "futures")
@@ -7021,14 +7447,24 @@ def _build_window_payload_duckdb(
             # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
             # a superseded row version can never resurrect through a filter); the
             # source params bind FIRST (the subquery precedes them in the SQL text).
+            # Statement-isolated cursor, closed after: this compute may run on the
+            # flagged page cache's background revalidator, concurrent with the
+            # request thread's own statements — a production store conn isolates
+            # via `_LockedReadConn.cursor()` (fresh per-compute view; the shared
+            # single-thread view leaked the store read lock — round-1 BLOCKER).
             params: list[Any] = [*source.params, *where_params, limit, offset]
-            cursor = conn.execute(
-                f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
-                params,
-            )
-            out_columns = [str(col[0]) for col in (cursor.description or [])]
+            isolated = _compute_cursor(conn)
+            try:
+                cursor = isolated.execute(
+                    f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
+                    params,
+                )
+                out_columns = [str(col[0]) for col in (cursor.description or [])]
+                raw_rows = cursor.fetchall()
+            finally:
+                _close_cursor(isolated, conn)
             page: list[dict[str, Any]] = []
-            for raw in cursor.fetchall():
+            for raw in raw_rows:
                 # DuckDB returns native Python values (str for the string columns, int for the
                 # int64 ones, None for a null) — pass them straight to the shared `_window_row`
                 # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
@@ -7428,7 +7864,53 @@ def _contract_grid_row(row: Any) -> list[Any]:
     ]
 
 
-def registry_counts(registry_path: Path) -> dict[str, Any]:
+def registry_count_key(
+    kind: str,
+    *,
+    exch: str | None = None,
+    underlying: str | None = None,
+    expiry_date: str | None = None,
+) -> str:
+    """Build the stable cache key for a registry COUNT (DEC-O1-GUARANTEE-HARDEN-001 H1).
+
+    The registry pagers' ``total`` is a FILTERED ``COUNT(*)`` over the
+    monotonically-growing ``registry.duckdb`` tables — paging-invariant (the
+    :func:`candle_count_key` law: ``limit`` / ``offset`` never change how many
+    rows match), so every page of the same ``(kind, filters)`` shares ONE
+    cached total per registry content revision. *kind* names the counted
+    surface (``"exp"`` expiries / ``"con"`` contracts / ``"counts"`` the
+    whole-registry nav-badge dict). The filter triple is folded via ``repr``
+    (never a bare ``|`` join): the registry filters are UNVALIDATED query
+    strings, so a literal ``|`` inside one must not collide two distinct
+    filter shapes into one key.
+    """
+    return f"reg|{kind}|{(exch, underlying, expiry_date)!r}"
+
+
+def _registry_total(
+    count_cache: CandleCountCache | None,
+    *,
+    generation: int,
+    key: str,
+    compute: Callable[[], int],
+) -> int:
+    """One registry COUNT — memoised when a cache is injected, direct otherwise.
+
+    The ONE cache-or-compute chokepoint for the registry pagers' totals
+    (§11 COMMON — both pagers ride it). ``count_cache=None`` is the
+    byte-identical legacy path (every click recounts, the pre-H1 behaviour).
+    """
+    if count_cache is None:
+        return compute()
+    return count_cache.get_or_compute(key, generation=generation, compute=compute)
+
+
+def registry_counts(
+    registry_path: Path,
+    *,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
+) -> dict[str, Any]:
     """Return ``{"expiries", "contracts", "exists", "note"}`` for the registry cache.
 
     A MISSING ``registry.duckdb`` degrades honestly to ``{"expiries": 0,
@@ -7438,31 +7920,53 @@ def registry_counts(registry_path: Path) -> dict[str, Any]:
     counts are read read-only via :class:`~brutex.data.registry_store.RegistryStore`
     (which is closed before returning), and ``note`` is ``None``.
 
+    With a *count_cache* injected (DEC-O1-GUARANTEE-HARDEN-001 H1) the two
+    whole-table ``COUNT(*)`` reads are memoised under
+    ``registry_count_key("counts")`` at *generation* (the registry-content
+    stat-token digest the route derives) — a repeat nav-badge read within one
+    registry revision is an O(1) dict handoff instead of a store open + two
+    COUNTs; the FIRST read per revision still pays the real store read (honest
+    O(1)-on-repeat, never bare O(1)). ``count_cache=None`` (the default) is
+    the byte-identical legacy path.
+
     Parameters
     ----------
     registry_path
         The ``registry.duckdb`` path (see :func:`registry_path_for`).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (:func:`candle_count_key` precedent — the COMMON
+        :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` satisfies
+        the Protocol).
 
     Returns
     -------
     dict[str, Any]
         ``{"expiries": <int>, "contracts": <int>, "exists": <bool>,
-        "note": <str|None>}``.
+        "note": <str|None>}`` — always a FRESH dict (a memoised hit is copied,
+        so a caller mutating the payload never poisons the cache).
     """
     if not registry_path.is_file():
         return {"expiries": 0, "contracts": 0, "exists": False, "note": _REGISTRY_MISSING_NOTE}
-    from brutex.data.registry_store import RegistryStore
 
-    store = RegistryStore.open(registry_path)
-    try:
-        return {
-            "expiries": store.count_expiries(),
-            "contracts": store.count_contracts(),
-            "exists": True,
-            "note": None,
-        }
-    finally:
-        store.close()
+    def _read() -> dict[str, Any]:
+        """Open the store read-only and count both tables (the legacy body)."""
+        from brutex.data.registry_store import RegistryStore
+
+        with RegistryStore.open(registry_path) as store:
+            return {
+                "expiries": store.count_expiries(),
+                "contracts": store.count_contracts(),
+                "exists": True,
+                "note": None,
+            }
+
+    if count_cache is None:
+        return _read()
+    cached = count_cache.get_or_compute(
+        registry_count_key("counts"), generation=generation, compute=_read
+    )
+    return dict(cached)
 
 
 def list_registry_expiries(
@@ -7472,6 +7976,8 @@ def list_registry_expiries(
     underlying: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted expiry DATES as a browsable grid (``/db``).
 
@@ -7495,6 +8001,16 @@ def list_registry_expiries(
         the store's parameterized SELECT.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1 — the :func:`candle_count_key` idiom):
+        the FILTERED ``total`` is paging-invariant, so with a cache injected a
+        repeat/paging click within one registry revision is an O(1) memo hit
+        instead of an O(filtered rows) ``COUNT(*)`` per click; the FIRST count
+        per revision still runs the real query (honest O(1)-on-repeat). The
+        default ``None`` is the byte-identical legacy path. The page DATA
+        query below stays a per-click ``LIMIT``/``OFFSET`` SELECT (already
+        O(page)) — only the COUNT is memoised.
 
     Returns
     -------
@@ -7520,7 +8036,12 @@ def list_registry_expiries(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_expiries(exch=exch, underlying=underlying)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key("exp", exch=exch, underlying=underlying),
+            compute=lambda: store.count_expiries(exch=exch, underlying=underlying),
+        )
         rows = [
             _expiry_grid_row(r)
             for r in store.list_expiries(
@@ -7547,6 +8068,8 @@ def list_registry_contracts(
     expiry_date: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
 
@@ -7573,6 +8096,12 @@ def list_registry_contracts(
         malformed value raises ``ValueError``.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1; see :func:`list_registry_expiries` —
+        the same O(1)-on-repeat law over the FILTERED leg count, keyed with
+        the validated ISO *expiry_date* string; ``None`` = byte-identical
+        legacy recount per click).
 
     Returns
     -------
@@ -7605,7 +8134,19 @@ def list_registry_contracts(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key(
+                "con",
+                exch=exch,
+                underlying=underlying,
+                expiry_date=None if parsed_expiry is None else parsed_expiry.isoformat(),
+            ),
+            compute=lambda: store.count_contracts(
+                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+            ),
+        )
         rows = [
             _contract_grid_row(r)
             for r in store.list_contracts(
@@ -7644,6 +8185,7 @@ __all__ = [
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
     "SPOT_VERDICT_INTERVALS",
+    "TABLE_SUMMARY_FAULT_TYPES",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",
@@ -7663,6 +8205,7 @@ __all__ = [
     "query_candles",
     "query_option_candles",
     "query_table",
+    "registry_count_key",
     "registry_counts",
     "registry_path_for",
     "resolve_applied_range",

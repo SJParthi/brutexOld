@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -1073,7 +1074,10 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
     The per-verdict ``provisional`` key (R2-SR-F4) is ADDITIVE at
     ``REPORT_VERSION`` 1 — the same precedent as ``pool_pbo``; a pre-change
-    report simply lacks the key.
+    report simply lacks the key. The per-verdict ``cpcv_pass_rate`` key
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) rides the SAME additive-at-1
+    precedent: the RAW full-precision stage-3 fraction or ``null`` (a
+    pre-change report simply lacks the key — readers None-fill).
     """
     return {
         "n_input": report.n_input,
@@ -1092,6 +1096,7 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
                 "detail": verdict.detail,
                 "composite_score": verdict.composite_score,
                 "provisional": verdict.provisional,
+                "cpcv_pass_rate": verdict.cpcv_pass_rate,
             }
             for verdict in report.verdicts
         ],
@@ -1818,15 +1823,27 @@ def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
 def write_report(results_root: Path, report: CascadeWireReport) -> Path:
     """Atomically write the serialised *report* JSON under *results_root*.
 
-    G7 (DEC-SWEEP-UNKILLABLE-CORE-001): same atomic law as
-    :func:`write_manifest` — byte-identical content, torn-write-proof rename.
-    """
-    from brutex.data.atomic_io import atomic_write_simple
+    ATOMIC by TWO independent in-flight demands, converged at the 2026-07-11
+    merge-reconcile to the SAME mechanism — the guard-free
+    :func:`brutex.data.atomic_io.atomic_write_simple`
+    (tmp → fsync → ``os.replace``, the engine-sidecar precedent of
+    DEC-ATOMIC-WRITE-CONSOLIDATE-001):
 
+    - G7 (DEC-SWEEP-UNKILLABLE-CORE-001): the same atomic law as
+      :func:`write_manifest` — a crash mid-write can never leave a torn
+      report for the replay to consume.
+    - DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the ``/results`` poller now READS
+      this file concurrently — the previous bare ``write_bytes`` could be
+      torn-read mid-rewrite.
+
+    Bytes rendered are IDENTICAL (:func:`serialize_wire_report` — the
+    auto==manual golden re-runs unchanged); only durability changed. Raw
+    ``OSError`` propagates unchanged (the engine sidecar error contract).
+    """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = serialize_wire_report(report)
-    atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
+    rendered = serialize_wire_report(report)
+    atomic_write_simple(path, lambda tmp: tmp.write_bytes(rendered))
     return path
 
 

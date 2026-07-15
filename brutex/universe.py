@@ -328,15 +328,28 @@ _REFERENCE_ONLY_SYMBOLS: Final[frozenset[str]] = frozenset(
     symbol for _, symbol in REFERENCE_ONLY_INDEX_UNDERLYINGS
 )
 
-#: The PINNED engine addressing label for the ADR-0012 NIFTY-futures track
+#: The PINNED addressing label of the ADR-0012 NIFTY-futures track
 #: (DEC-FUTURES-ADDRESSING-PIN-001, supersedes the #1178 dual-acceptance
 #: envelope): ONE roll-aware series ALIAS — never a lake dir itself — resolved
-#: at launch into per-contract ``bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT``
-#: partitions by :mod:`brutex.data.futures_series` (which imports THIS
-#: constant; this module deliberately does NOT import that one — it lazily
-#: pulls the trading_core wheel). ``parse_fno_symbol`` returns ``None`` for it
-#: (3 hyphen tokens < the 4-token future minimum), so no vendor contract
-#: symbol can ever collide with the alias (test-pinned).
+#: into per-contract ``bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT`` partitions by
+#: :mod:`brutex.data.futures_series` (which imports THIS constant; this
+#: module deliberately does NOT import that one — it lazily pulls the
+#: trading_core wheel). ``parse_fno_symbol`` returns ``None`` for it (3 hyphen
+#: tokens < the 4-token future minimum), so no vendor contract symbol can
+#: ever collide with the alias (test-pinned).
+#:
+#: ENGINE-SCOPE RETIREMENT (DEC-ENGINE-SPOT-ONLY-001, operator directive
+#: 2026-07-13 — consciously supersedes the engine-scope clause of
+#: DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012 + the launch surface of
+#: DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the alias is NO LONGER an
+#: engine-sweepable instrument — the brute-force engine is SPOT-ONLY
+#: (NIFTY/BANKNIFTY/SENSEX). The constant, the lake resolver
+#: (:mod:`brutex.data.futures_series`), the alias-aware loader
+#: (:mod:`brutex.feed.series_load`) and the Stage-1A roll machinery are
+#: RETAINED as lake/REFERENCE_ONLY tooling below the scope gate (reachable
+#: only via the loud, audit-stamped ``--allow-out-of-scope`` research escape
+#: or recorded-work forensics) — and this constant stays the refusal-hint
+#: matcher, never an admit path.
 NIFTY_FUTURES_SERIES_SYMBOL: Final[str] = "NSE-NIFTY-FUT"
 
 #: The RETIRED ``FuturesContract.series_key`` shape (``NIFTY-FUT-YYYY-MM-DD``,
@@ -353,17 +366,14 @@ _RETIRED_NIFTY_FUTURES_SERIES_RE: Final[re.Pattern[str]] = re.compile(
     r"^NIFTY-FUT-\d{4}-\d{2}-\d{2}$"
 )
 
-#: The NIFTY-futures underlying symbol (the ADR-0012 authorization is
-#: exactly this one underlying).
+#: The NIFTY-futures underlying symbol (the retired-shape hint matcher is
+#: exactly this one underlying — the ADR-0012 track's scope).
 _NIFTY_UNDERLYING: Final[str] = "NIFTY"
 
 #: The lake exchange a NIFTY futures contract trades on (NSE — a foreign
-#: exchange token embedded in a parsed contract symbol is refused).
+#: exchange token embedded in a parsed contract symbol never matches the
+#: retired-shape hint).
 _NIFTY_FUTURES_EXCHANGE: Final[str] = Exchange.NSE.value
-
-#: The lake SEGMENT partition label F&O contract candles live under
-#: (``bars/<exch>/FNO/…`` — CLAUDE.md §6 "F&O candle lake").
-_ENGINE_SWEEP_FNO_SEGMENT: Final[str] = "FNO"
 
 
 def is_engine_sweep_symbol(symbol: str) -> bool:
@@ -375,22 +385,18 @@ def is_engine_sweep_symbol(symbol: str) -> bool:
     :func:`classify_engine_sweep_target`'s job). Accepted, deny-by-default:
 
     * a bare spot symbol of the 3 brute-forced indexes (``NIFTY`` /
-      ``BANKNIFTY`` / ``SENSEX`` — CLAUDE.md §2 Rule 3), OR
-    * the PINNED NIFTY-futures series alias ``NSE-NIFTY-FUT`` (ADR-0012 /
-      DEC-FUTURES-ADDRESSING-PIN-001 — the final addressing shape; the two
-      pre-launch shapes ``NIFTY-FUT-YYYY-MM-DD`` and
-      ``NSE-NIFTY-<DDMmmYY>-FUT`` are RETIRED —
-      :func:`classify_engine_sweep_target` refuses them with a did-you-mean
-      hint).
+      ``BANKNIFTY`` / ``SENSEX`` — CLAUDE.md §2 Rule 3) — and NOTHING else.
 
-    Everything else — India VIX, the ~212 F&O stocks, NTM constituents,
-    BANKNIFTY/SENSEX futures, every option, every per-contract futures
-    symbol — is False. Exact-case (lake keys are case-exact). O(1): one
-    frozenset probe + one string compare.
+    The brute-force engine is SPOT-ONLY (DEC-ENGINE-SPOT-ONLY-001, operator
+    directive 2026-07-13 — consciously supersedes the ADR-0012 /
+    DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 alias admit this predicate carried):
+    the NIFTY-futures series alias ``NSE-NIFTY-FUT`` is REFUSED alongside
+    India VIX, the ~212 F&O stocks, NTM constituents, every option, and
+    every per-contract futures symbol.
+    :func:`classify_engine_sweep_target` names the specific law per refusal.
+    Exact-case (lake keys are case-exact). O(1): one frozenset probe.
     """
-    if symbol in _ENGINE_SWEEP_SPOT_SYMBOLS:
-        return True
-    return symbol == NIFTY_FUTURES_SERIES_SYMBOL
+    return symbol in _ENGINE_SWEEP_SPOT_SYMBOLS
 
 
 def _looks_like_retired_futures_shape(symbol: str) -> bool:
@@ -424,14 +430,16 @@ class EngineSweepVerdict:
     allowed
         Whether the ``(exchange, segment, symbol)`` coordinate may launch.
     tier
-        ``"spot_index"`` (one of the 3 §2 Rule 3 triples), ``"nifty_future"``
-        (the ADR-0012 track), or ``"refused"``.
+        ``"spot_index"`` (one of the 3 §2 Rule 3 triples) or ``"refused"``.
+        The ``"nifty_future"`` tier was RETIRED by DEC-ENGINE-SPOT-ONLY-001
+        (the engine is spot-only) — structurally removed from the Literal so
+        no consumer can silently keep admitting it.
     reason
         The human-readable law citation (allowed) or refusal ground.
     """
 
     allowed: bool
-    tier: Literal["spot_index", "nifty_future", "refused"]
+    tier: Literal["spot_index", "refused"]
     reason: str
 
 
@@ -464,31 +472,25 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
                 "index triples (CLAUDE.md §2 Rule 3)"
             ),
         )
-    if is_engine_sweep_symbol(symbol) and symbol not in _ENGINE_SWEEP_SPOT_SYMBOLS:
-        # The NIFTY-futures series alias: allowed ONLY under the NSE/FNO lake
-        # coordinates (DEC-FUTURES-ADDRESSING-PIN-001).
-        if exchange == _NIFTY_FUTURES_EXCHANGE and segment == _ENGINE_SWEEP_FNO_SEGMENT:
-            return EngineSweepVerdict(
-                allowed=True,
-                tier="nifty_future",
-                reason=(
-                    f"{symbol} is the pinned NIFTY-futures series alias — the "
-                    "operator-authorized dynamic-strategy track (ADR-0012 / "
-                    "DEC-FUTURES-ADDRESSING-PIN-001)"
-                ),
-            )
+    if symbol == NIFTY_FUTURES_SERIES_SYMBOL:
+        # The NIFTY-futures series alias is RETIRED from engine sweep scope
+        # (DEC-ENGINE-SPOT-ONLY-001 — the operator's 2026-07-13 spot-only
+        # directive, consciously superseding the ADR-0012 /
+        # DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 admit): refused on EVERY
+        # coordinate — the pre-flip NSE/FNO admit + wrong-coordinate arms
+        # both collapse into this ONE refusal.
         return EngineSweepVerdict(
             allowed=False,
             tier="refused",
             reason=(
-                # {symbol!r} + {exchange!r}/{segment!r} in every refusal
-                # reason: all three are operator-typed (may embed \n/ESC) and
-                # the reason is echoed to stderr + logs — never let them
-                # forge lines (#907/#919 repr-naming convention; round-8
-                # finding 2 extended the round-4 symbol fix to the pair).
-                f"{symbol!r} is the NIFTY-futures series alias but "
-                f"{exchange!r}/{segment!r} is not its lake coordinate — expected "
-                f"{_NIFTY_FUTURES_EXCHANGE}/{_ENGINE_SWEEP_FNO_SEGMENT} (ADR-0012)"
+                # {symbol!r}: operator-typed symbols may embed \n/ESC and the
+                # reason is echoed to stderr + logs — never let them forge
+                # lines (#907/#919 repr-naming convention).
+                f"{symbol!r} is the NIFTY-futures series alias, RETIRED from "
+                "engine sweep scope by DEC-ENGINE-SPOT-ONLY-001 (supersedes "
+                "the ADR-0012 / DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 "
+                "authorization) — the engine is spot-only; NSE-NIFTY-FUT "
+                "remains lake/REFERENCE_ONLY"
             ),
         )
     if symbol in _ENGINE_SWEEP_SPOT_SYMBOLS:
@@ -511,13 +513,15 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             ),
         )
     upper = symbol.upper()
+    # The case hint covers ONLY symbols whose upper-cased form would itself
+    # classify meaningfully (a spot index / REFERENCE_ONLY name). The futures
+    # series alias is deliberately NOT hinted (DEC-ENGINE-SPOT-ONLY-001 review
+    # round): `NSE-NIFTY-FUT` is itself refused, and the retired-shape law
+    # below already pins "never 'did you mean' a symbol that would itself be
+    # refused" — a lower-cased `nse-nifty-fut` takes the generic spot-only
+    # refusal instead.
     if upper != symbol and (
-        upper in _ENGINE_SWEEP_SPOT_SYMBOLS
-        or upper in _REFERENCE_ONLY_SYMBOLS
-        # The futures series alias is in-scope too (review round-2 finding 3):
-        # a lower-cased `nse-nifty-fut` gets the same hint-never-admit case
-        # pointer instead of the generic out-of-scope refusal.
-        or upper == NIFTY_FUTURES_SERIES_SYMBOL
+        upper in _ENGINE_SWEEP_SPOT_SYMBOLS or upper in _REFERENCE_ONLY_SYMBOLS
     ):
         return EngineSweepVerdict(
             allowed=False,
@@ -527,19 +531,22 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
                 f"case-exact; did you mean {upper!r}?"
             ),
         )
-    # RETIRED-shape did-you-mean hint (DEC-FUTURES-ADDRESSING-PIN-001):
-    # hint-never-admit, mirroring the case-hint branch above — a pre-launch
-    # futures addressing form is refused pointing at the ONE pinned alias.
+    # RETIRED-shape hint (DEC-FUTURES-ADDRESSING-PIN-001 shape law, reworded
+    # by DEC-ENGINE-SPOT-ONLY-001): hint-never-admit — a pre-launch futures
+    # addressing form is refused naming the alias AND the fact the whole
+    # futures track is now outside engine scope (never "did you mean" a
+    # symbol that would itself be refused).
     if _looks_like_retired_futures_shape(symbol):
         return EngineSweepVerdict(
             allowed=False,
             tier="refused",
             reason=(
                 f"{symbol!r} is a RETIRED per-contract NIFTY-futures addressing form — "
-                "the ADR-0012 track is addressed by the ONE series alias "
+                "the futures track's ONE series alias is "
                 f"{NIFTY_FUTURES_SERIES_SYMBOL!r} (DEC-FUTURES-ADDRESSING-PIN-001), "
-                "resolved roll-aware into per-contract lake partitions; "
-                "did you mean that?"
+                "and that track is itself RETIRED from engine sweep scope "
+                "(DEC-ENGINE-SPOT-ONLY-001 — the engine is spot-only; "
+                "NSE-NIFTY-FUT remains lake/REFERENCE_ONLY)"
             ),
         )
     return EngineSweepVerdict(
@@ -550,9 +557,10 @@ def classify_engine_sweep_target(*, exchange: str, segment: str, symbol: str) ->
             # operator-typed name (\n/ESC included) — repr-quote it so the
             # echoed refusal can never forge stderr/log lines (round-4 finding 3).
             f"{symbol!r} is outside the brute-force engine scope — the engine sweeps "
-            "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) plus the "
-            f"NIFTY-futures series alias {NIFTY_FUTURES_SERIES_SYMBOL!r} (ADR-0012); "
-            "F&O stocks, NTM constituents and options are lake/REFERENCE_ONLY"
+            "only NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3; "
+            "DEC-ENGINE-SPOT-ONLY-001 — the engine is spot-only); "
+            "F&O (futures included), NTM constituents and options are "
+            "lake/REFERENCE_ONLY"
         ),
     )
 
