@@ -381,10 +381,18 @@ def test_audit_writer_memory_flat(tmp_path: Path) -> None:
 #: partitioned production-faithfully: settled-``SUCCESS`` rows, settled
 #: ``DH-905``-gap rows (``SKIPPED``), and perpetual-churn rows that took two
 #: clean empties (``empty_streak == 2``, one short of the threshold-3 promotion)
-#: and then keep TIMING OUT — every later outcome is a ``FAILED``, which under
-#: DEC-EMPTY-STREAK-RATELIMIT-001 PRESERVES the streak (a timeout is not evidence
-#: of data) WITHOUT ever incrementing it to 3, so the EMPTY→SKIPPED promotion
-#: never fires — exactly the windows production re-fetches every pull.
+#: and then keep WRITE-DEFERRING — every later outcome is a ``FAILED`` whose
+#: ``error_type`` is a LOCAL-deferral class (``FAILED_STREAK_EXEMPT_ERRORS``,
+#: the #999 wedged-volume re-pull contract), which under
+#: DEC-EMPTY-STREAK-RATELIMIT-001 PRESERVES the ``empty_streak`` (a deferral is
+#: not evidence of data) WITHOUT ever incrementing it to 3, AND under
+#: DEC-AUTO-RESUME-ZERO-SURPRISES-001 never bumps ``failed_streak`` toward the
+#: fetch-exhausted settle — so neither the EMPTY→SKIPPED promotion nor the
+#: ``fetch_exhausted`` terminal settle ever fires: exactly the windows
+#: production re-fetches every pull, forever. (A GENUINE vendor error — e.g. a
+#: vendor timeout — now legitimately settles ``SKIPPED`` after 5 consecutive
+#: FAILEDs per DEC-AUTO-RESUME-ZERO-SURPRISES-001; the exhausted-settle law
+#: itself is pinned in tests/unit/test_window_ledger.py.)
 _WINDOW_UNIVERSE: Final[int] = 512
 _SETTLED_SUCCESS: Final[int] = 128
 _SETTLED_GAP: Final[int] = 64
@@ -432,8 +440,9 @@ def test_window_ledger_memory_flat() -> None:
     for key in gap_keys:
         ledger.settle_known_gap(key, now=now, reason="DH-905 no data in range")
     # Seed each churn window with two CLEAN empties (streak 2, one short of the
-    # threshold-3 promotion); the pull loop below then keeps them TIMING OUT, and
-    # a FAILED preserves the streak at 2 forever without ever settling.
+    # threshold-3 promotion); the pull loop below then keeps them WRITE-DEFERRING
+    # (an exempt local-deferral FAILED), which preserves the empty streak at 2
+    # AND the failed streak at 0 forever without ever settling.
     for key in churn_keys:
         assert ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=now) == EMPTY
         assert ledger.record(key, raw_bars=0, error_type=None, bars_appended=0, now=now) == EMPTY
@@ -453,11 +462,19 @@ def test_window_ledger_memory_flat() -> None:
                 ops += 1
                 if skippable:
                     continue  # production never fetches a settled window
-                # Perpetual timeout: a FAILED PRESERVES the streak (frozen at 2)
-                # without ever reaching 3 — the window never settles, never skips
-                # (DEC-EMPTY-STREAK-RATELIMIT-001).
+                # Perpetual write-deferral: an EXEMPT local-deferral FAILED
+                # (FAILED_STREAK_EXEMPT_ERRORS — the #999 wedged-volume re-pull
+                # contract) PRESERVES the empty streak (frozen at 2) without
+                # ever reaching 3 (DEC-EMPTY-STREAK-RATELIMIT-001) AND never
+                # bumps failed_streak toward the fetch-exhausted settle
+                # (DEC-AUTO-RESUME-ZERO-SURPRISES-001) — the window never
+                # settles, never skips.
                 status = ledger.record(
-                    key, raw_bars=0, error_type="DhanTimeoutError", bars_appended=0, now=now
+                    key,
+                    raw_bars=0,
+                    error_type="WriteDeadlineExceeded",
+                    bars_appended=0,
+                    now=now,
                 )
                 assert status == FAILED, "churn window must never settle"
                 ops += 1
@@ -479,6 +496,10 @@ def test_window_ledger_memory_flat() -> None:
     assert not any(ledger.is_skippable(key) for key in churn_keys)
     for row in ledger.records():
         assert row.empty_streak <= 2, "churn cycle must keep every streak below promotion"
+        assert row.failed_streak == 0, (
+            "an exempt local-deferral FAILED must never bump failed_streak "
+            "toward the fetch-exhausted settle (DEC-AUTO-RESUME-ZERO-SURPRISES-001)"
+        )
     _assert_bounded("window-ledger", growth, net_ceiling=_NET_CEILING_FLAT)
 
 
