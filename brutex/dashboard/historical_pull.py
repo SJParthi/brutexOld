@@ -365,6 +365,28 @@ class HistoricalPullReport:
     order — nothing to resolve) and for a fully-resolved map."""
 
     @property
+    def ok(self) -> bool:
+        """The F&O candle stage verdict — the ONE home of the candle-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): the inner
+        candle arm of the sequencer's
+        :func:`~brutex.dashboard.pipeline_pull.historical_phase_ok` gate
+        DELEGATES here via :attr:`CompositePullReport.ok` (expression MOVED
+        verbatim — this module sits below the sequencer in the import graph;
+        CLAUDE.md §11 COMMON), and the report thereby SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol for a
+        future futures-only / options-only stage binding. ``True`` iff the
+        pull neither died on auth, left any window failing, quarantined any
+        contract pair, nor halted on the mass-empty breaker.
+        """
+        return (
+            not self.auth_aborted
+            and self.still_failed_windows == 0
+            and self.failed_pairs == 0
+            and self.mass_empty_cause is None
+        )
+
+    @property
     def verdict(self) -> PullVerdict:
         """The polished, prioritised :class:`PullVerdict` for this F&O pull.
 

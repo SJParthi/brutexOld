@@ -931,3 +931,45 @@ class TestSpanIndexHoistPin:
         src = inspect.getsource(hp._run_phase)
         assert "span_index = index_lake_spans(spans)" in src
         assert "span_index=span_index" in src
+
+
+class TestReportOkProperty:
+    """``HistoricalPullReport.ok`` — the StageOutcome home of the candle-gate
+    predicate (DEC-STAGED-SEQUENCER-SEAMS-001; the sequencer's
+    ``historical_phase_ok`` inner arm delegates here via the composite)."""
+
+    @staticmethod
+    def _report(
+        *,
+        auth_aborted: bool = False,
+        still_failed_windows: int = 0,
+        failed_pairs: int = 0,
+        mass_empty_cause: str | None = None,
+    ) -> HistoricalPullReport:
+        return HistoricalPullReport(
+            dry_run=False,
+            intervals=("1minute",),
+            contracts_selected=1,
+            contracts_completed=1,
+            bars_appended=1,
+            windows=1,
+            failed_pairs=failed_pairs,
+            still_failed_windows=still_failed_windows,
+            auth_aborted=auth_aborted,
+            note="ok",
+            phase1_clean=True,
+            phase1_complete=(_NIFTY_FUT,),
+            start_dates={_NIFTY_FUT: "2024-01-01"},
+            minute_requested=True,
+            minute_skipped=False,
+            mass_empty_cause=mass_empty_cause,
+        )
+
+    def test_clean_report_ok_true(self) -> None:
+        assert self._report().ok is True
+
+    def test_each_failure_arm_flips_ok_false(self) -> None:
+        assert self._report(auth_aborted=True).ok is False
+        assert self._report(still_failed_windows=1).ok is False
+        assert self._report(failed_pairs=1).ok is False
+        assert self._report(mass_empty_cause="halted").ok is False
