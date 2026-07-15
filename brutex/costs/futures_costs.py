@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Final, Literal, get_args
 
-from brutex.costs.calculator import _round_to_paisa, _round_to_rupee
+from brutex.costs.calculator import ChargeStack, _round_to_paisa, _round_to_rupee
 from brutex.costs.constants import (
     BSE_IPFT_BPS_X100,
     GROWW_BROKERAGE_PAISA,
@@ -559,9 +559,27 @@ def futures_brokerage_leg_paisa(notional_paisa: int, broker: Broker) -> int:
         The leg brokerage in paisa.
     """
     if broker == "zerodha":
-        return ZERODHA_BROKERAGE_PAISA
-    turnover_arm = _round_to_paisa(notional_paisa * GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100)
-    return min(GROWW_BROKERAGE_PAISA, turnover_arm)
+        return _brokerage_leg_paisa(notional_paisa, ZERODHA_BROKERAGE_PAISA, None)
+    return _brokerage_leg_paisa(
+        notional_paisa, GROWW_BROKERAGE_PAISA, GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100
+    )
+
+
+def _brokerage_leg_paisa(
+    notional_paisa: int, flat_paisa: int, turnover_bps_x100: int | None
+) -> int:
+    """One-leg brokerage from caller-RESOLVED broker parameters (int-only core).
+
+    The ONE copy of the ``min(flat, half-up(notional × turnover))`` law
+    (§11 COMMON) in the integer parameter shape the charge stack — and its
+    Rust twin (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) — consumes:
+    ``turnover_bps_x100 = None`` means a flat-only broker (Zerodha);
+    a rate means the Groww min() arm. :func:`futures_brokerage_leg_paisa`
+    stays the public broker-keyed API and delegates here byte-identically.
+    """
+    if turnover_bps_x100 is None:
+        return flat_paisa
+    return min(flat_paisa, _round_to_paisa(notional_paisa * turnover_bps_x100))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -719,6 +737,129 @@ class FuturesCostBreakdown:
             raise ValueError(msg)
 
 
+def _futures_charge_stack_py(
+    entry_open_paisa: int,
+    exit_open_paisa: int,
+    *,
+    is_long: bool,
+    lot_size: int,
+    n_lots: int,
+    cost_free: bool,
+    brokerage_flat_paisa: int,
+    brokerage_turnover_bps_x100: int | None,
+    stt_rate: int,
+    etc_rate: int,
+    sebi_rate: int,
+    ipft_rate: int,
+    stamp_rate: int,
+    gst_rate: int,
+) -> ChargeStack:
+    """The futures charge stack as ONE pure integer function.
+
+    The dispatchable futures core (DEC-EXEC-RUST-CORE-001, MIGRATION.md
+    #1724), the futures twin of
+    :func:`brutex.costs.calculator._charge_stack_py`: fills → notionals →
+    gross, then the ``cost_free`` short-circuit (an INDEX future returns the
+    all-zero stack with ``net == gross`` WITHOUT touching any rate argument —
+    the caller passes zeros on that arm), else the cost-bearing stack under
+    the SAME rounding laws. Every rate / refusal decision is resolved by the
+    CALLER (Python stays the single authoritative rate source; the refusal
+    order STT → ETC → NSE-IPFT → stamp raises there, never here). The body
+    is the byte-identical extraction of the historical inline arithmetic of
+    :func:`compute_futures_trade_cost` and stays the permanent oracle for the
+    Rust twin (``fno_math.exec_futures_charge_stack``).
+
+    Divergences from the options stack, preserved verbatim: gross =
+    ``sell_notional − buy_notional`` for BOTH directions (the fill law
+    pre-assigns the legs — no sign branch); brokerage =
+    :func:`_brokerage_leg_paisa` PER LEG (Groww ``min(flat, turnover)`` /
+    Zerodha flat) instead of the options flat round-trip.
+    """
+    buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit = apply_futures_fill(
+        entry_open_paisa, exit_open_paisa, side="long" if is_long else "short"
+    )
+    n_shares = n_lots * lot_size
+    buy_notional_paisa = buy_fill_paisa * n_shares
+    sell_notional_paisa = sell_fill_paisa * n_shares
+    # Both directions reduce to (sell − buy) over the ADVERSE fills: a long
+    # buys the entry leg and sells the exit leg; a short sells the entry leg
+    # and buys (covers) the exit leg — apply_futures_fill already assigned the
+    # legs, so ONE formula covers both (no sign branch to get wrong).
+    gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa
+    slippage_paisa = realized_slip_per_unit * n_shares
+
+    if cost_free:
+        # INDEX futures: signal-only, ZERO statutory/broker charges
+        # (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001). net == gross.
+        return ChargeStack(
+            buy_fill_paisa=buy_fill_paisa,
+            sell_fill_paisa=sell_fill_paisa,
+            n_shares=n_shares,
+            buy_notional_paisa=buy_notional_paisa,
+            sell_notional_paisa=sell_notional_paisa,
+            brokerage_paisa=0,
+            stt_paisa=0,
+            exch_paisa=0,
+            sebi_paisa=0,
+            ipft_paisa=0,
+            stamp_paisa=0,
+            gst_paisa=0,
+            slippage_paisa=slippage_paisa,
+            total_charges_paisa=0,
+            gross_pnl_paisa=gross_pnl_paisa,
+            net_pnl_paisa=gross_pnl_paisa,
+            realized_slip_per_share=realized_slip_per_unit,
+        )
+
+    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law) /
+    # flat per order (Zerodha) — parameters caller-resolved.
+    brokerage_paisa = _brokerage_leg_paisa(
+        buy_notional_paisa, brokerage_flat_paisa, brokerage_turnover_bps_x100
+    ) + _brokerage_leg_paisa(sell_notional_paisa, brokerage_flat_paisa, brokerage_turnover_bps_x100)
+    # STT: sell-side turnover, statutory rupee rounding.
+    stt_paisa = _round_to_rupee((sell_notional_paisa * stt_rate) // 10_000_000)
+    # ETC: both sides on turnover, half-up to the paisa PER LEG then summed.
+    exch_paisa = _round_to_paisa(buy_notional_paisa * etc_rate) + _round_to_paisa(
+        sell_notional_paisa * etc_rate
+    )
+    # SEBI: both sides (COMMON verified rate).
+    sebi_paisa = _round_to_paisa(buy_notional_paisa * sebi_rate) + _round_to_paisa(
+        sell_notional_paisa * sebi_rate
+    )
+    # IPFT: both sides.
+    ipft_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate) + _round_to_paisa(
+        sell_notional_paisa * ipft_rate
+    )
+    # Stamp: buy side, statutory rupee rounding.
+    stamp_paisa = _round_to_rupee((buy_notional_paisa * stamp_rate) // 10_000_000)
+    # GST 18% on services only, rounded ONCE on the total (DEC-COST-001).
+    gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
+    gst_paisa = _round_to_rupee((gst_base_paisa * gst_rate) // 10_000_000)
+
+    total_charges_paisa = (
+        brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
+    )
+    return ChargeStack(
+        buy_fill_paisa=buy_fill_paisa,
+        sell_fill_paisa=sell_fill_paisa,
+        n_shares=n_shares,
+        buy_notional_paisa=buy_notional_paisa,
+        sell_notional_paisa=sell_notional_paisa,
+        brokerage_paisa=brokerage_paisa,
+        stt_paisa=stt_paisa,
+        exch_paisa=exch_paisa,
+        sebi_paisa=sebi_paisa,
+        ipft_paisa=ipft_paisa,
+        stamp_paisa=stamp_paisa,
+        gst_paisa=gst_paisa,
+        slippage_paisa=slippage_paisa,
+        total_charges_paisa=total_charges_paisa,
+        gross_pnl_paisa=gross_pnl_paisa,
+        net_pnl_paisa=gross_pnl_paisa - total_charges_paisa,
+        realized_slip_per_share=realized_slip_per_unit,
+    )
+
+
 def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown:
     """Compute the full charge breakdown for one round-trip futures trade.
 
@@ -754,94 +895,93 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         skips-and-counts BEFORE calling here; this raise is the
         defence-in-depth choke point for direct callers.
     """
-    buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit = apply_futures_fill(
-        trade.entry_bar_open_paisa, trade.exit_bar_open_paisa, side=trade.side
-    )
-    n_shares = trade.n_lots * trade.lot_size
-    buy_notional_paisa = buy_fill_paisa * n_shares
-    sell_notional_paisa = sell_fill_paisa * n_shares
-    # Both directions reduce to (sell − buy) over the ADVERSE fills: a long
-    # buys the entry leg and sells the exit leg; a short sells the entry leg
-    # and buys (covers) the exit leg — apply_futures_fill already assigned the
-    # legs, so ONE formula covers both (no sign branch to get wrong).
-    gross_pnl_paisa = sell_notional_paisa - buy_notional_paisa
-    slippage_paisa = realized_slip_per_unit * n_shares
+    # COST SCOPE resolved FIRST (pure frozenset membership — never a raise):
+    # an INDEX future never consults ANY regime table, so a 2021 index trade
+    # prices fine (pinned). The stack receives zero rates on that arm.
+    cost_free = is_cost_free_future_underlying(trade.instrument)
+    if cost_free:
+        stt_rate = exch_rate = ipft_rate = stamp_rate = 0
+    else:
+        entry_date = trade.entry_dt_ist.date()
+        # Rate RESOLUTION in the PINNED refusal order — STT → ETC → NSE-IPFT →
+        # stamp (DEC-ETC-REGIME-HISTORY-001; every raise happens HERE, before
+        # any arithmetic — the stack itself is total):
+        # STT raises on the pre-2024-10-01 refusal window.
+        stt_rate = stt_futures_rate_bps_x100(entry_date)
+        # ETC raises for EVERY window today (all-refusal tables; reachable
+        # past this line only under a synthetic-cited fixture).
+        exch_rate = futures_exchange_charge_bps_x100(trade.instrument, entry_date)
+        # IPFT — NSE refuses today; BSE is the assumed-0 options stance.
+        ipft_rate = ipft_futures_bps_x100(trade.instrument, entry_date)
+        # Stamp — refuses today.
+        stamp_rate = stamp_futures_rate_bps_x100(entry_date)
 
-    if is_cost_free_future_underlying(trade.instrument):
-        # INDEX futures: signal-only, ZERO statutory/broker charges
-        # (DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001). net == gross.
-        return FuturesCostBreakdown(
-            n_shares_per_lot=trade.lot_size,
-            n_shares=n_shares,
-            buy_fill_paisa=buy_fill_paisa,
-            sell_fill_paisa=sell_fill_paisa,
-            buy_notional_paisa=buy_notional_paisa,
-            sell_notional_paisa=sell_notional_paisa,
-            brokerage_paisa=0,
-            stt_paisa=0,
-            exch_paisa=0,
-            sebi_paisa=0,
-            ipft_paisa=0,
-            stamp_paisa=0,
-            gst_paisa=0,
-            slippage_paisa=slippage_paisa,
-            total_charges_paisa=0,
-            gross_pnl_paisa=gross_pnl_paisa,
-            net_pnl_paisa=gross_pnl_paisa,
-            cost_free=True,
+    # Broker parameter resolution (validated in __post_init__ — never raises):
+    # Groww = min(flat ₹20, 0.03% × turnover) per leg; Zerodha = flat only.
+    if trade.broker == "zerodha":
+        brokerage_flat_paisa = ZERODHA_BROKERAGE_PAISA
+        brokerage_turnover_bps_x100: int | None = None
+    else:
+        brokerage_flat_paisa = GROWW_BROKERAGE_PAISA
+        brokerage_turnover_bps_x100 = GROWW_FUTURES_BROKERAGE_TURNOVER_BPS_X100
+
+    # --- exec-rust dispatch (slice 7 / P8, DEC-EXEC-RUST-CORE-001) ---
+    # Lazy import (the calculator-site cycle law; see compute_trade_cost).
+    # Default-OFF (`BRUTEX_EXEC_RUST`): the seam returns None unless the
+    # kernel serves; the Python core below stays the permanent oracle arm.
+    from brutex import exec_rust
+
+    stack = exec_rust.charge_stack_futures(
+        trade.entry_bar_open_paisa,
+        trade.exit_bar_open_paisa,
+        is_long=trade.side == "long",
+        lot_size=trade.lot_size,
+        n_lots=trade.n_lots,
+        cost_free=cost_free,
+        brokerage_flat_paisa=brokerage_flat_paisa,
+        brokerage_turnover_bps_x100=brokerage_turnover_bps_x100,
+        stt_rate=stt_rate,
+        etc_rate=exch_rate,
+        sebi_rate=SEBI_FEE_BPS_X100,
+        ipft_rate=ipft_rate,
+        stamp_rate=stamp_rate,
+        gst_rate=GST_TOTAL_BPS_X100,
+    )
+    # --- end exec-rust dispatch ---
+    if stack is None:
+        stack = _futures_charge_stack_py(
+            trade.entry_bar_open_paisa,
+            trade.exit_bar_open_paisa,
+            is_long=trade.side == "long",
+            lot_size=trade.lot_size,
+            n_lots=trade.n_lots,
+            cost_free=cost_free,
+            brokerage_flat_paisa=brokerage_flat_paisa,
+            brokerage_turnover_bps_x100=brokerage_turnover_bps_x100,
+            stt_rate=stt_rate,
+            etc_rate=exch_rate,
+            sebi_rate=SEBI_FEE_BPS_X100,
+            ipft_rate=ipft_rate,
+            stamp_rate=stamp_rate,
+            gst_rate=GST_TOTAL_BPS_X100,
         )
-
-    entry_date = trade.entry_dt_ist.date()
-    # Brokerage: min(₹20, 0.03% × turnover) per executed order (Groww law).
-    brokerage_paisa = futures_brokerage_leg_paisa(
-        buy_notional_paisa, trade.broker
-    ) + futures_brokerage_leg_paisa(sell_notional_paisa, trade.broker)
-    # STT: sell-side turnover, statutory rupee rounding. Raises on the
-    # pre-2024-10-01 refusal window.
-    stt_rate = stt_futures_rate_bps_x100(entry_date)
-    stt_paisa = _round_to_rupee((sell_notional_paisa * stt_rate) // 10_000_000)
-    # ETC: both sides on turnover — raises for EVERY window today (all-refusal
-    # tables; reachable past this line only under a synthetic-cited fixture).
-    exch_rate = futures_exchange_charge_bps_x100(trade.instrument, entry_date)
-    exch_paisa = _round_to_paisa(buy_notional_paisa * exch_rate) + _round_to_paisa(
-        sell_notional_paisa * exch_rate
-    )
-    # SEBI: both sides (COMMON verified rate).
-    sebi_paisa = _round_to_paisa(buy_notional_paisa * SEBI_FEE_BPS_X100) + _round_to_paisa(
-        sell_notional_paisa * SEBI_FEE_BPS_X100
-    )
-    # IPFT: both sides — NSE refuses today; BSE is the assumed-0 options stance.
-    ipft_rate = ipft_futures_bps_x100(trade.instrument, entry_date)
-    ipft_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate) + _round_to_paisa(
-        sell_notional_paisa * ipft_rate
-    )
-    # Stamp: buy side, statutory rupee rounding — refuses today.
-    stamp_rate = stamp_futures_rate_bps_x100(entry_date)
-    stamp_paisa = _round_to_rupee((buy_notional_paisa * stamp_rate) // 10_000_000)
-    # GST 18% on services only, rounded ONCE on the total (DEC-COST-001).
-    gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
-    gst_paisa = _round_to_rupee((gst_base_paisa * GST_TOTAL_BPS_X100) // 10_000_000)
-
-    total_charges_paisa = (
-        brokerage_paisa + stt_paisa + exch_paisa + sebi_paisa + ipft_paisa + stamp_paisa + gst_paisa
-    )
     return FuturesCostBreakdown(
         n_shares_per_lot=trade.lot_size,
-        n_shares=n_shares,
-        buy_fill_paisa=buy_fill_paisa,
-        sell_fill_paisa=sell_fill_paisa,
-        buy_notional_paisa=buy_notional_paisa,
-        sell_notional_paisa=sell_notional_paisa,
-        brokerage_paisa=brokerage_paisa,
-        stt_paisa=stt_paisa,
-        exch_paisa=exch_paisa,
-        sebi_paisa=sebi_paisa,
-        ipft_paisa=ipft_paisa,
-        stamp_paisa=stamp_paisa,
-        gst_paisa=gst_paisa,
-        slippage_paisa=slippage_paisa,
-        total_charges_paisa=total_charges_paisa,
-        gross_pnl_paisa=gross_pnl_paisa,
-        net_pnl_paisa=gross_pnl_paisa - total_charges_paisa,
-        cost_free=False,
+        n_shares=stack.n_shares,
+        buy_fill_paisa=stack.buy_fill_paisa,
+        sell_fill_paisa=stack.sell_fill_paisa,
+        buy_notional_paisa=stack.buy_notional_paisa,
+        sell_notional_paisa=stack.sell_notional_paisa,
+        brokerage_paisa=stack.brokerage_paisa,
+        stt_paisa=stack.stt_paisa,
+        exch_paisa=stack.exch_paisa,
+        sebi_paisa=stack.sebi_paisa,
+        ipft_paisa=stack.ipft_paisa,
+        stamp_paisa=stack.stamp_paisa,
+        gst_paisa=stack.gst_paisa,
+        slippage_paisa=stack.slippage_paisa,
+        total_charges_paisa=stack.total_charges_paisa,
+        gross_pnl_paisa=stack.gross_pnl_paisa,
+        net_pnl_paisa=stack.net_pnl_paisa,
+        cost_free=cost_free,
     )

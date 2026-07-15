@@ -517,3 +517,47 @@ def test_generic_valueerror_from_probe_still_propagates(
     monkeypatch.setattr(costs_constants, "exchange_charge_bps_x100", _boom)
     with pytest.raises(ValueError, match="boom — a generic programmer error"):
         materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=_VolumeSource())
+
+
+# ── DEC-EXEC-RUST-CORE-001 — ON-arm stale verdict (slice 7 / P8) ─────────────
+
+
+class TestExecRustStaleDispatch:
+    """The kernel-served STALE_BAR verdict maps onto the SAME reject + the
+    SAME single ``options.reject.stale_bar`` WARN (identical event name /
+    keys / one-WARN-per-reject cardinality), and the opt-out still prices."""
+
+    @pytest.mark.parametrize(("entry_volume", "exit_volume"), [(0, 10), (10, 0)])
+    def test_on_arm_stale_bar_matches_off_arm_with_one_warn(
+        self, monkeypatch: pytest.MonkeyPatch, entry_volume: int, exit_volume: int
+    ) -> None:
+        from brutex import exec_rust
+
+        source = _VolumeSource(entry_volume=entry_volume, exit_volume=exit_volume)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        with structlog.testing.capture_logs() as logs:
+            on = materialize_trade(_signal_2024(), RULES_BY_NAME["atm"], source=source)
+        assert isinstance(on, RejectedTrade)
+        assert on.reason is RejectReason.STALE_BAR
+        assert on == off
+        events = [x for x in logs if x["event"] == "options.reject.stale_bar"]
+        assert len(events) == 1
+        assert events[0]["entry_volume"] == source.entry_volume
+        assert events[0]["exit_volume"] == source.exit_volume
+
+    def test_on_arm_stale_opt_out_still_prices(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import exec_rust
+
+        source = _VolumeSource(entry_volume=0, exit_volume=0)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = materialize_trade(
+            _signal_2024(), RULES_BY_NAME["atm"], source=source, reject_stale_bars=False
+        )
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = materialize_trade(
+            _signal_2024(), RULES_BY_NAME["atm"], source=source, reject_stale_bars=False
+        )
+        assert isinstance(on, MaterializedTrade)
+        assert on == off

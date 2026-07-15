@@ -92,6 +92,15 @@ pub mod ranking;
 /// `brutex/engine/rust_enum.py`).
 pub mod enum_kernel;
 
+// --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+/// Options/futures execution integer cores: money-law primitives, R15 fill
+/// laws, both charge stacks, and the post-I/O materialize verdict tails —
+/// exact-integer twins of the Python oracles in `brutex.costs` / the two
+/// executors; rates cross the FFI as ARGUMENTS (Python stays the sole
+/// rate/refusal authority).
+pub mod exec;
+// --- end exec (slice 7 / P8) ---
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -186,5 +195,15 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ranking::ranking_rank_order, m)?)?;
     m.add_function(wrap_pyfunction!(ranking::ranking_zscores, m)?)?;
     // ── end slice-4 ranking.rs registrations ──
+    // --- exec (slice 7 / P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_paisa, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_round_to_rupee, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_slippage, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_apply_futures_fill, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_option_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_charge_stack, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_options_materialize, m)?)?;
+    m.add_function(wrap_pyfunction!(exec::ffi::exec_futures_materialize, m)?)?;
+    // --- end exec (slice 7 / P8) ---
     Ok(())
 }

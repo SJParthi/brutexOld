@@ -20,6 +20,8 @@ coverage on `brutex.costs.*` (the per-module strict gate in
 from __future__ import annotations
 
 from datetime import date, datetime
+from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 from brutex.costs import (
@@ -81,6 +83,59 @@ def _make_trade(
         gst_split=gst_split,
         trade_outcome=trade_outcome,
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# FIRST-COLLECTED fast mutation killer (review round 2, R3-F1)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_total_charges_composition_fast_first_pin() -> None:
+    """FAST deterministic killer for the total-composition sign mutants —
+    deliberately the FIRST test pytest collects in this file.
+
+    Review round 2, R3-F1: the weekly mutmut pair runs this file under
+    ``pytest -x``, and the ``+ stamp_paisa`` → ``- stamp_paisa`` mutant on
+    the Step-11 total-charges sum (mutant #92 of the round-1 enumeration)
+    was killed only DEEP into the run (the earlier late-file composition
+    pin sat behind ~70 tests + the hypothesis property, whose shrinking
+    pushed the failing run past mutmut's 2×-baseline threshold →
+    classified SUSPICIOUS → the verdict grep read it as a survivor). This
+    pin makes any total-composition sign flip die at test #1, seconds into
+    the run. Inputs + expected stack are the hand-recomputed values of
+    ``TestChargeStackMutationHardening.test_gst_base_and_total_composition_signs``
+    (big synthetic SEBI/IPFT so every component is distinct + material):
+    4_000 + 11_707_800 + 5_466_511 + 156_052_260 + 312_104_520 + 234_000 +
+    85_252_900 = 570_821_991.
+    """
+    from brutex.costs.calculator import _charge_stack_py
+
+    stack = _charge_stack_py(
+        3_000_000,
+        3_002_010,
+        is_long=True,
+        lot_size=65,
+        n_lots=40,
+        brokerage_round_trip_paisa=4_000,
+        stt_rate=15_000,
+        etc_rate=3_503,
+        sebi_rate=100_000,
+        ipft_rate=200_000,
+        stamp_rate=300,
+        gst_rate=1_800_000,
+    )
+    assert stack.total_charges_paisa == 570_821_991
+    assert stack.total_charges_paisa > 0
+    assert stack.total_charges_paisa == (
+        stack.brokerage_paisa
+        + stack.stt_paisa
+        + stack.exch_paisa
+        + stack.sebi_paisa
+        + stack.ipft_paisa
+        + stack.stamp_paisa
+        + stack.gst_paisa
+    )
+    assert stack.net_pnl_paisa == stack.gross_pnl_paisa - stack.total_charges_paisa
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1299,3 +1354,239 @@ def test_trade_input_rejects_negative_strike() -> None:
             exit_bar_open_paisa=10_000,
             side="long_call",
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# DEC-EXEC-RUST-CORE-001 — the BRUTEX_EXEC_RUST dispatch (slice 7 / P8)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestExecRustDispatch:
+    """ON-arm dispatch parity at the ``compute_trade_cost`` seam.
+
+    The flag-less default is the Python oracle arm (every test above runs
+    it); these tests flip ``BRUTEX_EXEC_RUST=1`` and prove the kernel-served
+    breakdown is WHOLE-OBJECT equal to the OFF arm — with an engagement spy
+    so the ON arm can never go vacuous (a silently-fallen-back kernel would
+    fail the ``spy.calls`` assertion, not just coverage).
+    """
+
+    def test_on_arm_equals_off_arm_and_engages_the_kernel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno_math
+        from brutex import exec_rust
+
+        trade = _make_trade()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+
+        calls: dict[str, int] = {}
+        real = fno_math.exec_option_charge_stack
+
+        def _spy(*a: Any) -> object:
+            calls["exec_option_charge_stack"] = calls.get("exec_option_charge_stack", 0) + 1
+            return real(*a)
+
+        monkeypatch.setattr(
+            exec_rust, "_rust", type("K", (), {"exec_option_charge_stack": staticmethod(_spy)})()
+        )
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        on = compute_trade_cost(trade)
+        assert calls == {"exec_option_charge_stack": 1}
+        assert on == off
+
+    def test_on_arm_short_side_equals_off_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex import exec_rust
+
+        trade = _make_trade(side="short_call", entry_open_paisa=10_005, exit_open_paisa=9_995)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "0")
+        off = compute_trade_cost(trade)
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        assert compute_trade_cost(trade) == off
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop
+    (DEC-EXEC-RUST-CORE-001 — the lake_stats_manifest precedent; the pair
+    rides the historical runner, hence the trailing ``:``). HONEST: pins the
+    WIRING only — the weekly run executes on its own schedule."""
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/costs/calculator.py:tests/unit/test_costs_calculator.py:"' in text, (
+            "costs/calculator.py is not wired into mutation.yml's per-module mutmut loop"
+        )
+
+
+class TestChargeStackMutationHardening:
+    """Deterministic pins killing the weekly-mutmut survivor classes found on
+    the first local run (DEC-EXEC-RUST-CORE-001 wiring — the
+    TestMutationHardening precedent): the three statutory ``// 10_000_000``
+    divisors (each pinned by a hand-searched notional whose 1-paisa raw shift
+    under an off-by-one divisor CROSSES a rupee-rounding boundary), the GST
+    base composition signs (large synthetic SEBI/IPFT so a sign flip moves
+    whole rupees), the total-charges composition signs (non-zero stamp), the
+    exact refusal message, and the breakdown's ``lot_size_basis`` stamp.
+    Expected stacks are hand-recomputed integer-exact in the comments'
+    formulas — never captured from the code under test at runtime.
+    """
+
+    _COMMON: ClassVar[dict[str, object]] = {
+        "is_long": True,
+        "lot_size": 65,
+        "n_lots": 40,  # n_shares 2_600 — big notionals make the divisors bite
+        "brokerage_round_trip_paisa": 4_000,
+        "stt_rate": 15_000,
+        "etc_rate": 3_503,
+        "sebi_rate": 10,
+        "ipft_rate": 50,
+        "stamp_rate": 300,
+        "gst_rate": 1_800_000,
+    }
+
+    @pytest.mark.parametrize(
+        ("entry", "exit_", "expected"),
+        [
+            # STT divisor-sensitive: raw = (7_807_433_400 × 15_000) // 10^7
+            (
+                3_000_854,
+                3_002_864,
+                (
+                    3_000_859,
+                    3_002_859,
+                    2_600,
+                    7_802_233_400,
+                    7_807_433_400,
+                    4_000,
+                    11_711_200,
+                    5_468_066,
+                    15_609,
+                    78_048,
+                    234_100,
+                    1_001_800,
+                    26_000,
+                    18_512_823,
+                    5_200_000,
+                    -13_312_823,
+                    10,
+                ),
+            ),
+            # stamp divisor-sensitive: raw = (7_848_334_000 × 300) // 10^7
+            (
+                3_018_585,
+                3_020_595,
+                (
+                    3_018_590,
+                    3_020_590,
+                    2_600,
+                    7_848_334_000,
+                    7_853_534_000,
+                    4_000,
+                    11_780_300,
+                    5_500_364,
+                    15_702,
+                    78_510,
+                    235_500,
+                    1_007_700,
+                    26_000,
+                    18_622_076,
+                    5_200_000,
+                    -13_422_076,
+                    10,
+                ),
+            ),
+            # GST divisor-sensitive: raw = (base × 1_800_000) // 10^7
+            (
+                3_000_014,
+                3_002_024,
+                (
+                    3_000_019,
+                    3_002_019,
+                    2_600,
+                    7_800_049_400,
+                    7_805_249_400,
+                    4_000,
+                    11_707_900,
+                    5_466_536,
+                    15_605,
+                    78_026,
+                    234_000,
+                    1_001_600,
+                    26_000,
+                    18_507_667,
+                    5_200_000,
+                    -13_307_667,
+                    10,
+                ),
+            ),
+        ],
+        ids=["stt-divisor", "stamp-divisor", "gst-divisor"],
+    )
+    def test_statutory_divisors_pinned_at_rounding_boundaries(
+        self, entry: int, exit_: int, expected: tuple[int, ...]
+    ) -> None:
+        from brutex.costs.calculator import _charge_stack_py
+
+        stack = _charge_stack_py(entry, exit_, **self._COMMON)  # type: ignore[arg-type]
+        assert tuple(stack) == expected
+
+    def test_gst_base_and_total_composition_signs(self) -> None:
+        """Large synthetic SEBI/IPFT rates: a ``+`` → ``-`` flip in the GST
+        base (or in the total-charges sum, incl. the non-zero stamp term)
+        moves whole rupees — pinned by the full exact stack."""
+        from brutex.costs.calculator import _charge_stack_py
+
+        args: dict[str, object] = {**self._COMMON, "sebi_rate": 100_000, "ipft_rate": 200_000}
+        stack = _charge_stack_py(3_000_000, 3_002_010, **args)  # type: ignore[arg-type]
+        assert tuple(stack) == (
+            3_000_005,
+            3_002_005,
+            2_600,
+            7_800_013_000,
+            7_805_213_000,
+            4_000,
+            11_707_800,
+            5_466_511,
+            156_052_260,
+            312_104_520,
+            234_000,
+            85_252_900,
+            26_000,
+            570_821_991,
+            5_200_000,
+            -565_621_991,
+            10,
+        )
+
+    def test_unsupported_outcome_message_pinned_exactly(self) -> None:
+        with pytest.raises(UnsupportedTradeOutcomeError) as excinfo:
+            compute_trade_cost(_make_trade(trade_outcome="EXPIRY_EXERCISE"))
+        assert str(excinfo.value) == (
+            "trade_outcome 'EXPIRY_EXERCISE' is not supported: only "
+            "'NORMAL_CLOSE' is implemented (CALCULATOR_SPEC §4.2 expiry state "
+            "machine not yet implemented)"
+        )
+
+    def test_breakdown_stamps_trade_date_lot_basis(self) -> None:
+        assert compute_trade_cost(_make_trade()).lot_size_basis == "trade_date"
+
+    def test_on_arm_dispatch_args_never_trip_the_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ON arm is served with ZERO fallback events — a corrupted
+        dispatch ARGUMENT (e.g. a float brokerage from a mutated ``* 2``)
+        would raise at the kernel's i64 conversion, fall back to the Python
+        arm and STILL equal the OFF result, so equality alone cannot see it;
+        the no-fallback-warn pin can."""
+        import structlog.testing
+        from brutex import exec_rust
+
+        exec_rust.reset_warn_memo_for_tests()
+        monkeypatch.setenv(exec_rust.ENV_FLAG, "1")
+        with structlog.testing.capture_logs() as logs:
+            compute_trade_cost(_make_trade())
+        assert [e for e in logs if str(e["event"]).startswith("exec_rust.")] == []
+        exec_rust.reset_warn_memo_for_tests()

@@ -68,12 +68,27 @@
 # mutation.yml shard-budget bands absorb future small drift; this growth was
 # NOT small (+7.7%), so the matrix took the #1597 pre-decided +1 shard (5→6).
 #
+# --- slice-7 exec (P8, DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724) ---
+# src/exec/ core files joined the scope: money.rs 35 + fills.rs 64 +
+# costs_options.rs 61 + costs_futures.rs 38 + exec_options.rs 12 +
+# exec_futures.rs 27 = 237 mutants measured 2026-07-11 (`cargo mutants
+# --list -f <file> | wc -l` minus the 599 config baseline, per file, from
+# this dir), lifting the total 599 → 836. The kill surface = the in-module
+# unit/tie tables + the crate proptests + tests/exec_golden.rs (522 frozen
+# cross-language vectors, all six sections). Shard dial: the mutation.yml
+# fno-math matrix took 6 → 8 (the #1597 pre-decided "+1, +2 if the worst
+# shard projects past ~100 min" — ceil(836/7)=120 mutants × 29-40 s ≈
+# 63-86 min nominal ≈ ~103 min at +20%, so +2: ceil(836/8)=105 ≈ 56-76 min
+# nominal, ~91 min worst — see the workflow arithmetic comment).
+# --- end slice-7 exec ---
+#
 # DELIBERATELY OUT (documented, not silent — Golden Rule #10):
 #   compat/*    — 299 mutants; TickVault-compat surface (config defaults, NSE
 #                 calendar, domain types) NOT on the Track-1 engine execution
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
+<<<<<<< HEAD
 # Slice-4 PR-1 (feat(ranking): Rust ranking conversion): src/ranking.rs joins
 # the scope — the rank-time gates / z-scores / composite / rank-order kernels
 # are ENGINE-critical (they feed the persisted leaderboard when
@@ -109,14 +124,38 @@
 # shard-dial change.
 # CLUB R1 weave note: examine_globs is the UNION of slice-4 (ranking.rs) and
 # slice-1 (enum_kernel.rs) scopes — both members' count blocks above stand.
+=======
+#   src/exec/ffi.rs — 265 mutants; the PyO3 wrapper sheet carries ZERO
+#                 in-crate kill surface (`cargo test` never invokes the
+#                 wrappers — the cores they delegate to ARE gated above),
+#                 so gating it in cargo-mutants today would ship 265
+#                 guaranteed survivors. The wrapper WIRING is exercised
+#                 end-to-end by the Python dual-arm CI step + the seam
+#                 golden/differential suites (ci.yml slice-7 exec block);
+#                 an in-crate wrapper-calling test module + scope entry is
+#                 a NAMED follow-up riding DEC-EXEC-RUST-STAGE2-001.
+#   src/exec/mod.rs — re-export surface, 0 mutants.
+>>>>>>> refs/club/1443
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
     "src/python.rs",
     "src/lib.rs",
+<<<<<<< HEAD
     "src/ranking.rs",
     "src/enum_kernel.rs",
 ]
 # The provably-unviable whole-fn constructor-guess class on the two pyclass
 # shim methods ONLY (rationale + verification in the count block above).
 exclude_re = ['replace Resident\w+::enumerate_prefilter -> PyResult']
+=======
+    # --- slice-7 exec (DEC-EXEC-RUST-CORE-001) ---
+    "src/exec/money.rs",
+    "src/exec/fills.rs",
+    "src/exec/costs_options.rs",
+    "src/exec/costs_futures.rs",
+    "src/exec/exec_options.rs",
+    "src/exec/exec_futures.rs",
+    # --- end slice-7 exec ---
+]
+>>>>>>> refs/club/1443

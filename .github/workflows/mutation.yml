@@ -12,7 +12,12 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
+<<<<<<< HEAD
 # 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix,
+=======
+# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix
+#    (6→8 at the slice-7 exec scope growth, DEC-EXEC-RUST-CORE-001),
+>>>>>>> refs/club/1443
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -522,6 +527,7 @@ jobs:
           # again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
+<<<<<<< HEAD
           # masks the proven wrap-less modules.
           # RECORDED DECISION (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 fixer round 1):
           # the compute.py pair deliberately stays the single unit file — the
@@ -540,6 +546,32 @@ jobs:
           # against tests/unit/test_metrics_compute.py alone (spot-verified;
           # MIGRATION.md #1685) — and the golden/differential suites still run
           # on every push via ci.yml's normal test tiers.
+=======
+          # masks the 10 proven modules.
+          # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724):
+          # exec_rust.py (final local zero-survivor runs 2026-07-11: 84/84
+          # KILLED, then 94/94 KILLED after the review-round-1 seam
+          # hardening) + costs/calculator.py (zero-survivor re-run: 123
+          # mutants — 122 KILLED + 1 SUSPICIOUS proven killed via direct
+          # `mutmut apply` -> failing suite, a classifier timing artifact;
+          # re-proven post-round-1: 125 mutants — 124 KILLED + the same
+          # total-sign-flip SUSPICIOUS again apply-proven killed; 0 survived
+          # on every run — divisor/sign/message/basis pins + 5 documented
+          # provably-equivalent pragmas). REVIEW ROUND 2 (R3-F1): the
+          # SUSPICIOUS trip itself is de-flaked — a FIRST-collected fast
+          # total-composition pin kills the sign-flip class at test #1
+          # (0.46 s, far under the 2x-baseline threshold) and the unwrapped
+          # branch below now passes --test-time-base 45; re-proven at the
+          # round-2 tree: calculator 125/125 KILLED (0 timeout / 0
+          # suspicious / 0 survived, TWO consecutive CI-mirrored runs) and
+          # exec_rust 145/145 KILLED 0/0 after the wire-shape-guard
+          # hardening.
+          # costs/futures_costs.py is DELIBERATELY NOT paired yet:
+          # its first bounded local run surfaced early survivors before the
+          # zero-survivor bar could be met inside the slice budget — wiring
+          # it rides DEC-EXEC-COSTS-MUTMUT-001 (the named follow-up), never
+          # a silently-red weekly gate (Golden Rule #10).
+>>>>>>> refs/club/1443
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -555,8 +587,13 @@ jobs:
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+<<<<<<< HEAD
             "brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:" \
             "brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:" \
+=======
+            "brutex/exec_rust.py:tests/unit/test_exec_rust_seam.py:" \
+            "brutex/costs/calculator.py:tests/unit/test_costs_calculator.py:" \
+>>>>>>> refs/club/1443
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
             tmo="${pair##*:}"
@@ -618,9 +655,22 @@ jobs:
                 --simple-output
             else
               runner="sh -c 'pytest $tf -x -q --no-header || exit 1'"
+              # --test-time-base 45 on the UNWRAPPED branch too (slice-7
+              # review round 2, R3-F1 — mirrors the wrapped branch's
+              # classifier slack): mutmut 2.x classifies a KILLED-but-slow
+              # mutant OK_SUSPICIOUS when the failing run exceeds
+              # 2 x baseline + base, and the verdict grep below counts a
+              # SUSPICIOUS id line exactly like a survivor — the
+              # calculator pair's total-sign-flip mutant (killed only via
+              # a late hypothesis property whose shrinking blew the 2x
+              # window) tripped this in 2 of 3 local runs. The base ONLY
+              # widens the killed-vs-suspicious classification; survivors
+              # (tests PASS) and the baseline*10 hard timer (BAD_TIMEOUT)
+              # are untouched.
               mutmut run \
                 --paths-to-mutate "$mod" \
                 --runner "$runner" \
+                --test-time-base 45 \
                 --simple-output
             fi
             mutmut results | tee "mutmut-results-$name.txt"
@@ -748,6 +798,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+<<<<<<< HEAD
+=======
+        # 6 -> 8 shards (slice-7 exec, DEC-EXEC-RUST-CORE-001: scope 599 ->
+        # 836 mutants — see the arithmetic in the run step below).
+>>>>>>> refs/club/1443
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     defaults:
       run:
@@ -791,6 +846,7 @@ jobs:
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
+<<<<<<< HEAD
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 921
           #   mutants measured 2026-07-12 on the merged tree (`cargo mutants
           #   --list | wc -l`; the slice-4 ranking.rs conversion added 321 over
@@ -811,11 +867,21 @@ jobs:
           #   carries BOTH slice scopes — ranking.rs AND enum_kernel.rs — so
           #   the union scope is ~1,125 mutants BY ARITHMETIC over the two
           #   member measurements above (921 + 204; NOT a fresh --list run).
+=======
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
+          #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
+          #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
+          #   trade_sim 124->167; the pre-merge 2026-07-07 measurement was 556);
+          #   + the slice-7 src/exec/ cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
+          #   #1724) = 836 total measured 2026-07-11 (per-file split documented
+          #   in mutants.toml; the exec/ffi.rs exclusion is documented there).
+>>>>>>> refs/club/1443
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
+<<<<<<< HEAD
           #   wall-clock parallelism = this 8-way shard matrix (6->8 = the #1597
           #   shard dial taken TWICE for the slice-4 ranking.rs re-measure: the
           #   920-mutant scope on 6 shards puts the +20%-band worst end at
@@ -823,6 +889,16 @@ jobs:
           #   ceil(921/8)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
           #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
           #   ~= 61-82 min nominal, ~98 at +20% on the worst end -> >= 22 min
+=======
+          #   wall-clock parallelism = this 8-way shard matrix (5->6 = the #1597
+          #   pre-decided +1-shard dial at the 599 re-measure; 6->8 = the SAME
+          #   dial taken twice at the slice-7 836 re-measure, because +1 alone
+          #   projects past the ~100 min line — ceil(836/7)=120 x 29-40 s
+          #   ~= 63-86 min nominal ~= 103 at +20%):
+          #   ceil(836/8)=105 mutants x 29-40 s/mutant serial (CI per-lane measured
+          #   4-9 s build + 25-31 s test) ~= 51-70 min + ~5.5 min baseline/setup
+          #   ~= 56-76 min nominal, ~91 at +20% on the worst end -> >= 29 min
+>>>>>>> refs/club/1443
           #   margin per shard.
           #   wall-clock parallelism = this 8-way shard matrix (6->8 vs main's
           #   #1597 6-shard fno-math config — fno-math was never 7 shards on

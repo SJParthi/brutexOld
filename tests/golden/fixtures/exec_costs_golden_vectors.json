@@ -1,0 +1,10253 @@
+{
+ "_comment": "FROZEN cross-language oracle for the exec integer cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724). Generated ONCE from the Python bodies by scripts/gen_exec_costs_golden.py; regeneration refused without BRUTEX_REGEN_EXEC_GOLDEN=1. Money values are STRINGS (JSON doubles lose >2^53). Charge-stack wires are the pinned 17-slot ChargeStack order; futures materialize wires append [mae, mfe].",
+ "schema_version": 1,
+ "seed": 20260711,
+ "money": [
+  {
+   "id": "rtp-000",
+   "op": "round_to_paisa",
+   "x": "0",
+   "expected": "0"
+  },
+  {
+   "id": "rtp-001",
+   "op": "round_to_paisa",
+   "x": "1",
+   "expected": "0"
+  },
+  {
+   "id": "rtp-002",
+   "op": "round_to_paisa",
+   "x": "4999999",
+   "expected": "0"
+  },
+  {
+   "id": "rtp-003",
+   "op": "round_to_paisa",
+   "x": "5000000",
+   "expected": "1"
+  },
+  {
+   "id": "rtp-004",
+   "op": "round_to_paisa",
+   "x": "5000001",
+   "expected": "1"
+  },
+  {
+   "id": "rtp-005",
+   "op": "round_to_paisa",
+   "x": "-4999999",
+   "expected": "0"
+  },
+  {
+   "id": "rtp-006",
+   "op": "round_to_paisa",
+   "x": "-5000000",
+   "expected": "-1"
+  },
+  {
+   "id": "rtp-007",
+   "op": "round_to_paisa",
+   "x": "-5000001",
+   "expected": "-1"
+  },
+  {
+   "id": "rtp-008",
+   "op": "round_to_paisa",
+   "x": "15000000",
+   "expected": "2"
+  },
+  {
+   "id": "rtp-009",
+   "op": "round_to_paisa",
+   "x": "-15000000",
+   "expected": "-2"
+  },
+  {
+   "id": "rtp-010",
+   "op": "round_to_paisa",
+   "x": "25000000",
+   "expected": "3"
+  },
+  {
+   "id": "rtp-011",
+   "op": "round_to_paisa",
+   "x": "-25000000",
+   "expected": "-3"
+  },
+  {
+   "id": "rtp-012",
+   "op": "round_to_paisa",
+   "x": "123456789012345",
+   "expected": "12345679"
+  },
+  {
+   "id": "rtp-013",
+   "op": "round_to_paisa",
+   "x": "-123456789012345",
+   "expected": "-12345679"
+  },
+  {
+   "id": "rtp-014",
+   "op": "round_to_paisa",
+   "x": "9223372036854775807",
+   "expected": "922337203685"
+  },
+  {
+   "id": "rtp-015",
+   "op": "round_to_paisa",
+   "x": "-9223372036854775808",
+   "expected": "-922337203685"
+  },
+  {
+   "id": "rtp-016",
+   "op": "round_to_paisa",
+   "x": "92233720368547758070000000",
+   "expected": "9223372036854775807"
+  },
+  {
+   "id": "rtp-017",
+   "op": "round_to_paisa",
+   "x": "-92233720368547758080000000",
+   "expected": "-9223372036854775808"
+  },
+  {
+   "id": "rtr-000",
+   "op": "round_to_rupee",
+   "x": "0",
+   "expected": "0"
+  },
+  {
+   "id": "rtr-001",
+   "op": "round_to_rupee",
+   "x": "1",
+   "expected": "0"
+  },
+  {
+   "id": "rtr-002",
+   "op": "round_to_rupee",
+   "x": "49",
+   "expected": "0"
+  },
+  {
+   "id": "rtr-003",
+   "op": "round_to_rupee",
+   "x": "50",
+   "expected": "100"
+  },
+  {
+   "id": "rtr-004",
+   "op": "round_to_rupee",
+   "x": "51",
+   "expected": "100"
+  },
+  {
+   "id": "rtr-005",
+   "op": "round_to_rupee",
+   "x": "-49",
+   "expected": "0"
+  },
+  {
+   "id": "rtr-006",
+   "op": "round_to_rupee",
+   "x": "-50",
+   "expected": "-100"
+  },
+  {
+   "id": "rtr-007",
+   "op": "round_to_rupee",
+   "x": "-51",
+   "expected": "-100"
+  },
+  {
+   "id": "rtr-008",
+   "op": "round_to_rupee",
+   "x": "99",
+   "expected": "100"
+  },
+  {
+   "id": "rtr-009",
+   "op": "round_to_rupee",
+   "x": "100",
+   "expected": "100"
+  },
+  {
+   "id": "rtr-010",
+   "op": "round_to_rupee",
+   "x": "149",
+   "expected": "100"
+  },
+  {
+   "id": "rtr-011",
+   "op": "round_to_rupee",
+   "x": "150",
+   "expected": "200"
+  },
+  {
+   "id": "rtr-012",
+   "op": "round_to_rupee",
+   "x": "-150",
+   "expected": "-200"
+  },
+  {
+   "id": "rtr-013",
+   "op": "round_to_rupee",
+   "x": "12345",
+   "expected": "12300"
+  },
+  {
+   "id": "rtr-014",
+   "op": "round_to_rupee",
+   "x": "-12345",
+   "expected": "-12300"
+  },
+  {
+   "id": "rtr-015",
+   "op": "round_to_rupee",
+   "x": "9223372036854775807",
+   "expected": "9223372036854775800"
+  },
+  {
+   "id": "rtr-016",
+   "op": "round_to_rupee",
+   "x": "-9223372036854775808",
+   "expected": "-9223372036854775800"
+  }
+ ],
+ "fills": [
+  {
+   "id": "fill-opt-000",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-000",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-001",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-001",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-002",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-002",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-003",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-003",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-004",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-004",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-005",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-005",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-006",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-006",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-007",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-007",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-008",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    10,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-008",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    10,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-009",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-009",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-010",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    10,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-010",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    10,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-011",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-011",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-012",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    10,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-012",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    10,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-013",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-013",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-014",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    10,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-014",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    10,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-015",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-015",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-016",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    10,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-016",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    10,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-017",
+   "op": "slippage",
+   "entry": 5,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-017",
+   "op": "futures_fill",
+   "entry": 5,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-018",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-018",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-019",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-019",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-020",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-020",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-021",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-021",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-022",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-022",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-023",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-023",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-024",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-024",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    11,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-025",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-025",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-026",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    11,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-026",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    11,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-027",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-027",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-028",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    11,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-028",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    11,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-029",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-029",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-030",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    11,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-030",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    11,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-031",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-031",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-032",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    11,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-032",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    11,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-033",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-033",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-034",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    11,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-034",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    11,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-035",
+   "op": "slippage",
+   "entry": 6,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-035",
+   "op": "futures_fill",
+   "entry": 6,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-036",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-036",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-037",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-037",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-038",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-038",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-039",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-039",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-040",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-040",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-041",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-041",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-042",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-042",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    12,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-043",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-043",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-044",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    12,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-044",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    12,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-045",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-045",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-046",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    12,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-046",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    12,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-047",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-047",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-048",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    12,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-048",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    12,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-049",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-049",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-050",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    12,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-050",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    12,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-051",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-051",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-052",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    12,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-052",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    12,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-053",
+   "op": "slippage",
+   "entry": 7,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-053",
+   "op": "futures_fill",
+   "entry": 7,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-054",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-054",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-055",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-055",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-056",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-056",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-057",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-057",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-058",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-058",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-059",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-059",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-060",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-060",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    15,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-061",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-061",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-062",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    15,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-062",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    15,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-063",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-063",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-064",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    15,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-064",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    15,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-065",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-065",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-066",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    15,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-066",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    15,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-067",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-067",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-068",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    15,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-068",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    15,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-069",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-069",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-070",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    15,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-070",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    15,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-071",
+   "op": "slippage",
+   "entry": 10,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-071",
+   "op": "futures_fill",
+   "entry": 10,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-072",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-072",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-073",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-073",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-074",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-074",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-075",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-075",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-076",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-076",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-077",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-077",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-078",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-078",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    30,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-079",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-079",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-080",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    30,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-080",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    30,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-081",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-081",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-082",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    30,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-082",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    30,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-083",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-083",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-084",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    30,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-084",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    30,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-085",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-085",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-086",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    30,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-086",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    30,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-087",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-087",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-088",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    30,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-088",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    30,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-089",
+   "op": "slippage",
+   "entry": 25,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-089",
+   "op": "futures_fill",
+   "entry": 25,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-090",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-090",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-091",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-091",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-092",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-092",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-093",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-093",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-094",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-094",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-095",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-095",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-096",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-096",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    31,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-097",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-097",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-098",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    31,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-098",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    31,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-099",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-099",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-100",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    31,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-100",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    31,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-101",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-101",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-102",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    31,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-102",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    31,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-103",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-103",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-104",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    31,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-104",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    31,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-105",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-105",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-106",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    31,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-106",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    31,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-107",
+   "op": "slippage",
+   "entry": 26,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-107",
+   "op": "futures_fill",
+   "entry": 26,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-108",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-108",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-109",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-109",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-110",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-110",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-111",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-111",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-112",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-112",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-113",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-113",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-114",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-114",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    10000,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-115",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-115",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-116",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    10000,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-116",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    10000,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-117",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-117",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-118",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    10000,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-118",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    10000,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-119",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-119",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-120",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    10000,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-120",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    10000,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-121",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-121",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-122",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    10000,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-122",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    10000,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-123",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-123",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-124",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    10000,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-124",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    10000,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-125",
+   "op": "slippage",
+   "entry": 9995,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-125",
+   "op": "futures_fill",
+   "entry": 9995,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-126",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-126",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-127",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-127",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-128",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-128",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-129",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-129",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-130",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-130",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-131",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-131",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-132",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-132",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    12010,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-133",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-133",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-134",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    12010,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-134",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    12010,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-135",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-135",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-136",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    12010,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-136",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    12010,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-137",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-137",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-138",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    12010,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-138",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    12010,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-139",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-139",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-140",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    12010,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-140",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    12010,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-141",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-141",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-142",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    12010,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-142",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    12010,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-143",
+   "op": "slippage",
+   "entry": 12005,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-143",
+   "op": "futures_fill",
+   "entry": 12005,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-144",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-fut-144",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 5,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    5
+   ]
+  },
+  {
+   "id": "fill-opt-145",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-145",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 5,
+   "is_long": false,
+   "expected": [
+    10,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-146",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-fut-146",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 6,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    6
+   ]
+  },
+  {
+   "id": "fill-opt-147",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-147",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 6,
+   "is_long": false,
+   "expected": [
+    11,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-148",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-fut-148",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 7,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    7
+   ]
+  },
+  {
+   "id": "fill-opt-149",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-149",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 7,
+   "is_long": false,
+   "expected": [
+    12,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-150",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-150",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 10,
+   "is_long": true,
+   "expected": [
+    2200005,
+    5,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-151",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-151",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 10,
+   "is_long": false,
+   "expected": [
+    15,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-152",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    2200005,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-152",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 25,
+   "is_long": true,
+   "expected": [
+    2200005,
+    20,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-153",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-153",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 25,
+   "is_long": false,
+   "expected": [
+    30,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-154",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    2200005,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-154",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 26,
+   "is_long": true,
+   "expected": [
+    2200005,
+    21,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-155",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-155",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 26,
+   "is_long": false,
+   "expected": [
+    31,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-156",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    2200005,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-156",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 9995,
+   "is_long": true,
+   "expected": [
+    2200005,
+    9990,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-157",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-157",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 9995,
+   "is_long": false,
+   "expected": [
+    10000,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-158",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    2200005,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-158",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 12005,
+   "is_long": true,
+   "expected": [
+    2200005,
+    12000,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-159",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-159",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 12005,
+   "is_long": false,
+   "expected": [
+    12010,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-160",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    2200005,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-160",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 2200000,
+   "is_long": true,
+   "expected": [
+    2200005,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-opt-161",
+   "op": "slippage",
+   "entry": 2200000,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    2199995,
+    10
+   ]
+  },
+  {
+   "id": "fill-fut-161",
+   "op": "futures_fill",
+   "entry": 2200000,
+   "exit": 2200000,
+   "is_long": false,
+   "expected": [
+    2200005,
+    2199995,
+    10
+   ]
+  }
+ ],
+ "option_stacks": [
+  {
+   "id": "ostack-000",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "NSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    500,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    5810,
+    130000,
+    124190,
+    10
+   ]
+  },
+  {
+   "id": "ostack-001",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "NSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    400,
+    500,
+    2,
+    7,
+    0,
+    800,
+    650,
+    5709,
+    131300,
+    125591,
+    10
+   ]
+  },
+  {
+   "id": "ostack-002",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    500,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    5767,
+    130000,
+    124233,
+    10
+   ]
+  },
+  {
+   "id": "ostack-003",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    400,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    5667,
+    131300,
+    125633,
+    10
+   ]
+  },
+  {
+   "id": "ostack-004",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    800,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6110,
+    130000,
+    123890,
+    10
+   ]
+  },
+  {
+   "id": "ostack-005",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    600,
+    500,
+    2,
+    7,
+    0,
+    800,
+    650,
+    5909,
+    131300,
+    125391,
+    10
+   ]
+  },
+  {
+   "id": "ostack-006",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    800,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    6067,
+    130000,
+    123933,
+    10
+   ]
+  },
+  {
+   "id": "ostack-007",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    600,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    5867,
+    131300,
+    125433,
+    10
+   ]
+  },
+  {
+   "id": "ostack-008",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    800,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6110,
+    130000,
+    123890,
+    10
+   ]
+  },
+  {
+   "id": "ostack-009",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    600,
+    500,
+    2,
+    7,
+    0,
+    800,
+    650,
+    5909,
+    131300,
+    125391,
+    10
+   ]
+  },
+  {
+   "id": "ostack-010",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    800,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    6067,
+    130000,
+    123933,
+    10
+   ]
+  },
+  {
+   "id": "ostack-011",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    600,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    5867,
+    131300,
+    125433,
+    10
+   ]
+  },
+  {
+   "id": "ostack-012",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    1200,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6510,
+    130000,
+    123490,
+    10
+   ]
+  },
+  {
+   "id": "ostack-013",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    1000,
+    500,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6309,
+    131300,
+    124991,
+    10
+   ]
+  },
+  {
+   "id": "ostack-014",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    1200,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    6467,
+    130000,
+    123533,
+    10
+   ]
+  },
+  {
+   "id": "ostack-015",
+   "entry": 9995,
+   "exit": 12005,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    12010,
+    9990,
+    65,
+    780650,
+    649350,
+    4000,
+    1000,
+    465,
+    2,
+    0,
+    0,
+    800,
+    650,
+    6267,
+    131300,
+    125033,
+    10
+   ]
+  },
+  {
+   "id": "ostack-016",
+   "entry": 5,
+   "exit": 5,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 2,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    10,
+    5,
+    150,
+    1500,
+    750,
+    4000,
+    0,
+    1,
+    0,
+    0,
+    0,
+    700,
+    750,
+    4701,
+    -750,
+    -5451,
+    5
+   ]
+  },
+  {
+   "id": "ostack-017",
+   "entry": 7,
+   "exit": 6,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 2,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    12,
+    5,
+    150,
+    1800,
+    750,
+    4000,
+    0,
+    1,
+    0,
+    0,
+    0,
+    700,
+    900,
+    4701,
+    -1050,
+    -5751,
+    6
+   ]
+  },
+  {
+   "id": "ostack-018",
+   "entry": 25,
+   "exit": 26,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 2,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    30,
+    21,
+    150,
+    4500,
+    3150,
+    4000,
+    0,
+    3,
+    0,
+    0,
+    0,
+    700,
+    1500,
+    4703,
+    -1350,
+    -6053,
+    10
+   ]
+  },
+  {
+   "id": "ostack-019",
+   "entry": 26,
+   "exit": 25,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 2,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    31,
+    20,
+    150,
+    4650,
+    3000,
+    4000,
+    0,
+    3,
+    0,
+    0,
+    0,
+    700,
+    1500,
+    4703,
+    -1650,
+    -6353,
+    10
+   ]
+  },
+  {
+   "id": "ostack-020",
+   "entry": 12000,
+   "exit": 15000,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 2,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    12005,
+    14995,
+    150,
+    1800750,
+    2249250,
+    4000,
+    2200,
+    1419,
+    4,
+    20,
+    100,
+    1000,
+    1500,
+    8743,
+    448500,
+    439757,
+    10
+   ]
+  },
+  {
+   "id": "ostack-021",
+   "entry": 10000,
+   "exit": 12010,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    10005,
+    12005,
+    65,
+    650325,
+    780325,
+    4000,
+    800,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6110,
+    130000,
+    123890,
+    10
+   ]
+  },
+  {
+   "id": "ostack-022",
+   "entry": 4333841,
+   "exit": 963345,
+   "is_long": true,
+   "lot_size": 35,
+   "n_lots": 48,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4333846,
+    963340,
+    1680,
+    7280861280,
+    1618411200,
+    4000,
+    2427600,
+    3117415,
+    8899,
+    44496,
+    218400,
+    571500,
+    16800,
+    6392310,
+    -5662450080,
+    -5668842390,
+    10
+   ]
+  },
+  {
+   "id": "ostack-023",
+   "entry": 1656300,
+   "exit": 823227,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 89,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    823232,
+    1656295,
+    1335,
+    1099014720,
+    2211153825,
+    4000,
+    3316700,
+    1159552,
+    3310,
+    16551,
+    33000,
+    213000,
+    13350,
+    4746113,
+    -1112139105,
+    -1116885218,
+    10
+   ]
+  },
+  {
+   "id": "ostack-024",
+   "entry": 4799317,
+   "exit": 425333,
+   "is_long": true,
+   "lot_size": 20,
+   "n_lots": 74,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4799322,
+    425328,
+    1480,
+    7102996560,
+    629485440,
+    4000,
+    629500,
+    2708689,
+    7732,
+    38662,
+    213100,
+    496600,
+    14800,
+    4098283,
+    -6473511120,
+    -6477609403,
+    10
+   ]
+  },
+  {
+   "id": "ostack-025",
+   "entry": 3537554,
+   "exit": 4394941,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 82,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    4394946,
+    3537549,
+    6150,
+    27028917900,
+    21755926350,
+    4000,
+    13597500,
+    15855074,
+    48785,
+    0,
+    810900,
+    2863400,
+    61500,
+    33179659,
+    5272991550,
+    5239811891,
+    10
+   ]
+  },
+  {
+   "id": "ostack-026",
+   "entry": 38212,
+   "exit": 1454889,
+   "is_long": true,
+   "lot_size": 20,
+   "n_lots": 8,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    38217,
+    1454884,
+    160,
+    6114720,
+    232781440,
+    4000,
+    145500,
+    77641,
+    239,
+    0,
+    200,
+    14700,
+    1600,
+    242280,
+    226666720,
+    226424440,
+    10
+   ]
+  },
+  {
+   "id": "ostack-027",
+   "entry": 3449014,
+   "exit": 2517618,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 92,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    2517623,
+    3449009,
+    5980,
+    15055385540,
+    20625073820,
+    4000,
+    12890700,
+    11596149,
+    35680,
+    0,
+    451700,
+    2094400,
+    59800,
+    27072629,
+    -5569688280,
+    -5596760909,
+    10
+   ]
+  },
+  {
+   "id": "ostack-028",
+   "entry": 3371648,
+   "exit": 3714378,
+   "is_long": false,
+   "lot_size": 20,
+   "n_lots": 77,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    3714383,
+    3371643,
+    1540,
+    5720149820,
+    5192330220,
+    4000,
+    5192300,
+    3822641,
+    10912,
+    54563,
+    171600,
+    700600,
+    15400,
+    9956616,
+    527819600,
+    517862984,
+    10
+   ]
+  },
+  {
+   "id": "ostack-029",
+   "entry": 4470069,
+   "exit": 63349,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 17,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    63354,
+    4470064,
+    255,
+    16155270,
+    1139866320,
+    4000,
+    1139900,
+    375707,
+    1156,
+    0,
+    500,
+    68600,
+    2550,
+    1589863,
+    -1123711050,
+    -1125300913,
+    10
+   ]
+  },
+  {
+   "id": "ostack-030",
+   "entry": 2150951,
+   "exit": 3679791,
+   "is_long": true,
+   "lot_size": 35,
+   "n_lots": 74,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2150956,
+    3679786,
+    2590,
+    5570976040,
+    9530645740,
+    4000,
+    9530600,
+    5290098,
+    15102,
+    75508,
+    167100,
+    969200,
+    25900,
+    16051608,
+    3959669700,
+    3943618092,
+    10
+   ]
+  },
+  {
+   "id": "ostack-031",
+   "entry": 3390875,
+   "exit": 2171661,
+   "is_long": false,
+   "lot_size": 35,
+   "n_lots": 40,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    2171666,
+    3390870,
+    1400,
+    3040332400,
+    4747218000,
+    4000,
+    4747200,
+    2530954,
+    7787,
+    0,
+    91200,
+    457700,
+    14000,
+    7838841,
+    -1706885600,
+    -1714724441,
+    10
+   ]
+  },
+  {
+   "id": "ostack-032",
+   "entry": 2337655,
+   "exit": 3292715,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 38,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    3292720,
+    2337650,
+    19000,
+    62561680000,
+    44415350000,
+    4000,
+    66623000,
+    34767535,
+    106977,
+    0,
+    1876900,
+    6278100,
+    190000,
+    109656512,
+    18146330000,
+    18036673488,
+    10
+   ]
+  },
+  {
+   "id": "ostack-033",
+   "entry": 2553782,
+   "exit": 4256275,
+   "is_long": false,
+   "lot_size": 35,
+   "n_lots": 51,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    4256280,
+    2553777,
+    1785,
+    7597459800,
+    4558491945,
+    4000,
+    6837700,
+    3950684,
+    12155,
+    0,
+    227900,
+    714000,
+    17850,
+    11746439,
+    3038967855,
+    3027221416,
+    10
+   ]
+  },
+  {
+   "id": "ostack-034",
+   "entry": 4511987,
+   "exit": 698445,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 87,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    4511992,
+    698440,
+    6525,
+    29440747800,
+    4557321000,
+    4000,
+    4557300,
+    11049372,
+    33998,
+    0,
+    883200,
+    1995700,
+    65250,
+    18523570,
+    -24883426800,
+    -24901950370,
+    10
+   ]
+  },
+  {
+   "id": "ostack-035",
+   "entry": 3278824,
+   "exit": 4392829,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 8,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    3278829,
+    4392824,
+    600,
+    1967297400,
+    2635694400,
+    4000,
+    2635700,
+    1612428,
+    4603,
+    23014,
+    59000,
+    295900,
+    6000,
+    4634645,
+    668397000,
+    663762355,
+    10
+   ]
+  },
+  {
+   "id": "ostack-036",
+   "entry": 3560039,
+   "exit": 4442433,
+   "is_long": true,
+   "lot_size": 35,
+   "n_lots": 39,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    3560044,
+    4442428,
+    1365,
+    4859460060,
+    6063914220,
+    4000,
+    6063900,
+    3550097,
+    10923,
+    0,
+    145800,
+    641700,
+    13650,
+    10416420,
+    1204454160,
+    1194037740,
+    10
+   ]
+  },
+  {
+   "id": "ostack-037",
+   "entry": 2004920,
+   "exit": 2213350,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 54,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2213355,
+    2004915,
+    4050,
+    8964087750,
+    8119905750,
+    4000,
+    8119900,
+    5984523,
+    17084,
+    85420,
+    268900,
+    1096400,
+    40500,
+    15576227,
+    844182000,
+    828605773,
+    10
+   ]
+  },
+  {
+   "id": "ostack-038",
+   "entry": 4315623,
+   "exit": 465701,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 7,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4315628,
+    465696,
+    105,
+    453140940,
+    48898080,
+    4000,
+    48900,
+    175864,
+    502,
+    2510,
+    13600,
+    32900,
+    1050,
+    278276,
+    -404242860,
+    -404521136,
+    10
+   ]
+  },
+  {
+   "id": "ostack-039",
+   "entry": 2891972,
+   "exit": 2813033,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 48,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2891977,
+    2813028,
+    720,
+    2082223440,
+    2025380160,
+    4000,
+    2025400,
+    1438894,
+    4107,
+    20538,
+    62500,
+    264200,
+    7200,
+    3819639,
+    -56843280,
+    -60662919,
+    10
+   ]
+  },
+  {
+   "id": "ostack-040",
+   "entry": 2926623,
+   "exit": 708779,
+   "is_long": false,
+   "lot_size": 20,
+   "n_lots": 88,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    708784,
+    2926618,
+    1760,
+    1247459840,
+    5150847680,
+    4000,
+    7726300,
+    2241327,
+    6398,
+    31991,
+    37400,
+    411100,
+    17600,
+    10458516,
+    -3903387840,
+    -3913846356,
+    10
+   ]
+  },
+  {
+   "id": "ostack-041",
+   "entry": 2942761,
+   "exit": 4641131,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 8,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4641136,
+    2942756,
+    4000,
+    18564544000,
+    11771024000,
+    4000,
+    11771000,
+    10626550,
+    30336,
+    151678,
+    556900,
+    1946300,
+    40000,
+    25086764,
+    6793520000,
+    6768433236,
+    10
+   ]
+  },
+  {
+   "id": "ostack-042",
+   "entry": 1276845,
+   "exit": 1727797,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 46,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1727802,
+    1276840,
+    23000,
+    39739446000,
+    29367320000,
+    4000,
+    29367300,
+    24208100,
+    69106,
+    345534,
+    1192200,
+    4432800,
+    230000,
+    59619040,
+    10372126000,
+    10312506960,
+    10
+   ]
+  },
+  {
+   "id": "ostack-043",
+   "entry": 2409524,
+   "exit": 3254986,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 23,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    2409529,
+    3254981,
+    690,
+    1662575010,
+    2245936890,
+    4000,
+    2245900,
+    1270266,
+    3909,
+    0,
+    49900,
+    230100,
+    6900,
+    3804075,
+    583361880,
+    579557805,
+    10
+   ]
+  },
+  {
+   "id": "ostack-044",
+   "entry": 3961973,
+   "exit": 1775356,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 95,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    1775361,
+    3961968,
+    1425,
+    2529889425,
+    5645804400,
+    4000,
+    5645800,
+    2657100,
+    8176,
+    0,
+    75900,
+    480500,
+    14250,
+    8871476,
+    -3115914975,
+    -3124786451,
+    10
+   ]
+  },
+  {
+   "id": "ostack-045",
+   "entry": 3931988,
+   "exit": 344009,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 66,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    3931993,
+    344004,
+    4290,
+    16868249970,
+    1475777160,
+    4000,
+    1475800,
+    6425913,
+    18344,
+    91720,
+    506000,
+    1177200,
+    42900,
+    9698977,
+    -15392472810,
+    -15402171787,
+    10
+   ]
+  },
+  {
+   "id": "ostack-046",
+   "entry": 4636066,
+   "exit": 4481407,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 3,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    4636071,
+    4481402,
+    45,
+    208623195,
+    201663090,
+    4000,
+    201700,
+    133344,
+    411,
+    0,
+    6300,
+    24800,
+    450,
+    370555,
+    -6960105,
+    -7330660,
+    10
+   ]
+  },
+  {
+   "id": "ostack-047",
+   "entry": 2431538,
+   "exit": 4551895,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 73,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    4551900,
+    2431533,
+    2190,
+    9968661000,
+    5325057270,
+    4000,
+    3328200,
+    4970459,
+    15294,
+    0,
+    299100,
+    898200,
+    21900,
+    9515253,
+    4643603730,
+    4634088477,
+    10
+   ]
+  },
+  {
+   "id": "ostack-048",
+   "entry": 404535,
+   "exit": 482254,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 16,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    482259,
+    404530,
+    240,
+    115742160,
+    97087200,
+    4000,
+    145600,
+    69169,
+    213,
+    0,
+    3500,
+    13200,
+    2400,
+    235682,
+    18654960,
+    18419278,
+    10
+   ]
+  },
+  {
+   "id": "ostack-049",
+   "entry": 295744,
+   "exit": 2806979,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 58,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2806984,
+    295739,
+    870,
+    2442076080,
+    257292930,
+    4000,
+    385900,
+    945589,
+    2699,
+    13496,
+    73300,
+    173800,
+    8700,
+    1598784,
+    2184783150,
+    2183184366,
+    10
+   ]
+  },
+  {
+   "id": "ostack-050",
+   "entry": 1511108,
+   "exit": 4999583,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 69,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4999588,
+    1511103,
+    34500,
+    172485786000,
+    52133053500,
+    4000,
+    78199600,
+    78683980,
+    224619,
+    1123094,
+    5174600,
+    14406400,
+    345000,
+    177816293,
+    120352732500,
+    120174916207,
+    10
+   ]
+  },
+  {
+   "id": "ostack-051",
+   "entry": 4945782,
+   "exit": 4530204,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 57,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4530209,
+    4945777,
+    1710,
+    7746657390,
+    8457278670,
+    4000,
+    8457300,
+    5676239,
+    16204,
+    81019,
+    232400,
+    1039900,
+    17100,
+    15507062,
+    -710621280,
+    -726128342,
+    10
+   ]
+  },
+  {
+   "id": "ostack-052",
+   "entry": 2805224,
+   "exit": 1968315,
+   "is_long": true,
+   "lot_size": 1000,
+   "n_lots": 50,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2805229,
+    1968310,
+    50000,
+    140261450000,
+    98415500000,
+    4000,
+    98415500,
+    83608536,
+    238677,
+    1193385,
+    4207800,
+    15308000,
+    500000,
+    202975898,
+    -41845950000,
+    -42048925898,
+    10
+   ]
+  },
+  {
+   "id": "ostack-053",
+   "entry": 4907329,
+   "exit": 38899,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 27,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4907334,
+    38894,
+    13500,
+    66249009000,
+    525069000,
+    4000,
+    525100,
+    23390960,
+    66774,
+    333870,
+    1987500,
+    4283200,
+    135000,
+    30591404,
+    -65723940000,
+    -65754531404,
+    10
+   ]
+  },
+  {
+   "id": "ostack-054",
+   "entry": 1934964,
+   "exit": 2804649,
+   "is_long": true,
+   "lot_size": 35,
+   "n_lots": 16,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1934969,
+    2804644,
+    560,
+    1083582640,
+    1570600640,
+    4000,
+    1570600,
+    929760,
+    2655,
+    13271,
+    32500,
+    170900,
+    5600,
+    2723686,
+    487018000,
+    484294314,
+    10
+   ]
+  },
+  {
+   "id": "ostack-055",
+   "entry": 581648,
+   "exit": 499642,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 22,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    581653,
+    499637,
+    11000,
+    6398183000,
+    5496007000,
+    4000,
+    5496000,
+    3865611,
+    11894,
+    0,
+    191900,
+    698700,
+    110000,
+    10268105,
+    -902176000,
+    -912444105,
+    10
+   ]
+  },
+  {
+   "id": "ostack-056",
+   "entry": 292766,
+   "exit": 3626961,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 20,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    3626966,
+    292761,
+    600,
+    2176179600,
+    175656600,
+    4000,
+    175700,
+    764346,
+    2352,
+    0,
+    65300,
+    138700,
+    6000,
+    1150398,
+    2000523000,
+    1999372602,
+    10
+   ]
+  },
+  {
+   "id": "ostack-057",
+   "entry": 2958608,
+   "exit": 1836744,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 91,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2958613,
+    1836739,
+    2730,
+    8077013490,
+    5014297470,
+    4000,
+    5014300,
+    4585886,
+    13091,
+    65456,
+    242300,
+    840300,
+    27300,
+    10765333,
+    -3062716020,
+    -3073481353,
+    10
+   ]
+  },
+  {
+   "id": "ostack-058",
+   "entry": 1010005,
+   "exit": 1300917,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 81,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1300922,
+    1010000,
+    81000,
+    105374682000,
+    81810000000,
+    4000,
+    81810000,
+    65570794,
+    187185,
+    935923,
+    3161200,
+    12005600,
+    810000,
+    163674702,
+    23564682000,
+    23401007298,
+    10
+   ]
+  },
+  {
+   "id": "ostack-059",
+   "entry": 2719510,
+   "exit": 478348,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 99,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    2719515,
+    478343,
+    49500,
+    134615992500,
+    23677978500,
+    4000,
+    23678000,
+    51445541,
+    158294,
+    0,
+    4038500,
+    9289400,
+    495000,
+    88613735,
+    -110938014000,
+    -111026627735,
+    10
+   ]
+  },
+  {
+   "id": "ostack-060",
+   "entry": 1609434,
+   "exit": 2840750,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 87,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    2840755,
+    1609429,
+    5655,
+    16064469525,
+    9101320995,
+    4000,
+    13652000,
+    8178882,
+    25165,
+    0,
+    481900,
+    1477400,
+    56550,
+    23819347,
+    6963148530,
+    6939329183,
+    10
+   ]
+  },
+  {
+   "id": "ostack-061",
+   "entry": 1701505,
+   "exit": 897819,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 68,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "NSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    897824,
+    1701500,
+    68000,
+    61052032000,
+    115702000000,
+    4000,
+    72313800,
+    61916938,
+    176754,
+    883770,
+    1831600,
+    11336700,
+    680000,
+    148463562,
+    -54649968000,
+    -54798431562,
+    10
+   ]
+  },
+  {
+   "id": "ostack-062",
+   "entry": 1038057,
+   "exit": 4393849,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 42,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    4393854,
+    1038052,
+    1260,
+    5536256040,
+    1307945520,
+    4000,
+    1307900,
+    2397523,
+    6844,
+    34221,
+    166100,
+    439700,
+    12600,
+    4356288,
+    4228310520,
+    4223954232,
+    10
+   ]
+  },
+  {
+   "id": "ostack-063",
+   "entry": 4980343,
+   "exit": 1502765,
+   "is_long": true,
+   "lot_size": 35,
+   "n_lots": 94,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    4980348,
+    1502760,
+    3290,
+    16385344920,
+    4944080400,
+    4000,
+    4944100,
+    6932063,
+    21329,
+    0,
+    491600,
+    1252300,
+    32900,
+    13645392,
+    -11441264520,
+    -11454909912,
+    10
+   ]
+  },
+  {
+   "id": "ostack-064",
+   "entry": 2918678,
+   "exit": 79154,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 20,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    79159,
+    2918673,
+    20000,
+    1583180000,
+    58373460000,
+    4000,
+    58373500,
+    19485909,
+    59956,
+    0,
+    47500,
+    3519000,
+    200000,
+    81489865,
+    -56790280000,
+    -56871769865,
+    10
+   ]
+  },
+  {
+   "id": "ostack-065",
+   "entry": 1335897,
+   "exit": 2794989,
+   "is_long": false,
+   "lot_size": 20,
+   "n_lots": 8,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2794994,
+    1335892,
+    160,
+    447199040,
+    213742720,
+    4000,
+    213700,
+    231528,
+    661,
+    3305,
+    13400,
+    43100,
+    1600,
+    509694,
+    233456320,
+    232946626,
+    10
+   ]
+  },
+  {
+   "id": "ostack-066",
+   "entry": 4819084,
+   "exit": 2676780,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 18,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    4819089,
+    2676775,
+    270,
+    1301154030,
+    722729250,
+    4000,
+    722700,
+    657762,
+    2024,
+    0,
+    39000,
+    119500,
+    2700,
+    1544986,
+    -578424780,
+    -579969766,
+    10
+   ]
+  },
+  {
+   "id": "ostack-067",
+   "entry": 1295823,
+   "exit": 4026527,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 97,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1295828,
+    4026522,
+    7275,
+    9427148700,
+    29292947550,
+    4000,
+    29292900,
+    13563650,
+    38720,
+    193601,
+    282800,
+    2484000,
+    72750,
+    45859671,
+    19865798850,
+    19819939179,
+    10
+   ]
+  },
+  {
+   "id": "ostack-068",
+   "entry": 1401373,
+   "exit": 9719,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 27,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    1401378,
+    9714,
+    2025,
+    2837790450,
+    19670850,
+    4000,
+    29500,
+    928675,
+    2858,
+    0,
+    85100,
+    168400,
+    20250,
+    1218533,
+    -2818119600,
+    -2819338133,
+    10
+   ]
+  },
+  {
+   "id": "ostack-069",
+   "entry": 1547207,
+   "exit": 1341348,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 46,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    1341353,
+    1547202,
+    690,
+    925533570,
+    1067569380,
+    4000,
+    1067600,
+    647758,
+    1994,
+    0,
+    27800,
+    117700,
+    6900,
+    1866852,
+    -142035810,
+    -143902662,
+    10
+   ]
+  },
+  {
+   "id": "ostack-070",
+   "entry": 154108,
+   "exit": 31039,
+   "is_long": true,
+   "lot_size": 20,
+   "n_lots": 98,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    154113,
+    31034,
+    1960,
+    302061480,
+    60826640,
+    4000,
+    60800,
+    117939,
+    363,
+    0,
+    9100,
+    22000,
+    19600,
+    214202,
+    -241234840,
+    -241449042,
+    10
+   ]
+  },
+  {
+   "id": "ostack-071",
+   "entry": 4475513,
+   "exit": 1378295,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 75,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "NSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    4475518,
+    1378290,
+    2250,
+    10069915500,
+    3101152500,
+    4000,
+    1938200,
+    4613825,
+    13171,
+    65856,
+    302100,
+    845400,
+    22500,
+    7782552,
+    -6968763000,
+    -6976545552,
+    10
+   ]
+  },
+  {
+   "id": "ostack-072",
+   "entry": 3770242,
+   "exit": 2812278,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 74,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    3770247,
+    2812273,
+    2220,
+    8369948340,
+    6243246060,
+    4000,
+    6243200,
+    4749288,
+    14613,
+    0,
+    251100,
+    858200,
+    22200,
+    12120401,
+    -2126702280,
+    -2138822681,
+    10
+   ]
+  },
+  {
+   "id": "ostack-073",
+   "entry": 2081781,
+   "exit": 1686771,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 68,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1686776,
+    2081776,
+    1020,
+    1720511520,
+    2123411520,
+    4000,
+    2123400,
+    1346526,
+    3844,
+    19220,
+    51600,
+    247200,
+    10200,
+    3795790,
+    -402900000,
+    -406695790,
+    10
+   ]
+  },
+  {
+   "id": "ostack-074",
+   "entry": 1360933,
+   "exit": 1779335,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 75,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    1779340,
+    1360928,
+    37500,
+    66725250000,
+    51034800000,
+    4000,
+    51034800,
+    38272016,
+    117760,
+    0,
+    2001800,
+    6910900,
+    375000,
+    98341276,
+    15690450000,
+    15592108724,
+    10
+   ]
+  },
+  {
+   "id": "ostack-075",
+   "entry": 2400041,
+   "exit": 1041338,
+   "is_long": true,
+   "lot_size": 20,
+   "n_lots": 66,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    2400046,
+    1041333,
+    1320,
+    3168060720,
+    1374559560,
+    4000,
+    1374600,
+    1591280,
+    4543,
+    22713,
+    95000,
+    292100,
+    13200,
+    3384236,
+    -1793501160,
+    -1796885396,
+    10
+   ]
+  },
+  {
+   "id": "ostack-076",
+   "entry": 1557380,
+   "exit": 2388700,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 95,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    1557385,
+    2388695,
+    1425,
+    2219273625,
+    3403890375,
+    4000,
+    5105800,
+    1827528,
+    5623,
+    0,
+    66600,
+    330700,
+    14250,
+    7340251,
+    1184616750,
+    1177276499,
+    10
+   ]
+  },
+  {
+   "id": "ostack-077",
+   "entry": 2429180,
+   "exit": 1998488,
+   "is_long": false,
+   "lot_size": 35,
+   "n_lots": 41,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "NSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    1998493,
+    2429175,
+    1435,
+    2867837455,
+    3485866125,
+    4000,
+    2178700,
+    2225702,
+    6354,
+    31768,
+    86000,
+    408200,
+    14350,
+    4940724,
+    -618028670,
+    -622969394,
+    10
+   ]
+  },
+  {
+   "id": "ostack-078",
+   "entry": 427809,
+   "exit": 2331428,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-03-31",
+    "venue": "BSE",
+    "note": "verified"
+   },
+   "expected": [
+    2331433,
+    427804,
+    65,
+    151543145,
+    27807260,
+    4000,
+    27800,
+    58289,
+    180,
+    0,
+    4500,
+    11200,
+    650,
+    105969,
+    123735885,
+    123629916,
+    10
+   ]
+  },
+  {
+   "id": "ostack-079",
+   "entry": 1081858,
+   "exit": 1111182,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 35,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-10-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    1081863,
+    1111177,
+    2625,
+    2839890375,
+    2916839625,
+    4000,
+    2916800,
+    2016583,
+    5757,
+    28783,
+    85200,
+    369900,
+    26250,
+    5427023,
+    76949250,
+    71522227,
+    10
+   ]
+  },
+  {
+   "id": "ostack-080",
+   "entry": 2823511,
+   "exit": 3720258,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 49,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 15000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2026-04-01",
+    "venue": "NSE",
+    "note": "verified"
+   },
+   "expected": [
+    3720263,
+    2823506,
+    1470,
+    5468786610,
+    4150553820,
+    4000,
+    6225800,
+    3369655,
+    9620,
+    48097,
+    164100,
+    617600,
+    14700,
+    10438872,
+    1318232790,
+    1307793918,
+    10
+   ]
+  },
+  {
+   "id": "ostack-081",
+   "entry": 1658988,
+   "exit": 2536198,
+   "is_long": false,
+   "lot_size": 65,
+   "n_lots": 13,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 6250,
+   "etc_rate": 3250,
+   "sebi_rate": 10,
+   "ipft_rate": 0,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "rate_basis": {
+    "rate_basis_date": "2024-09-30",
+    "venue": "BSE",
+    "note": "post-boundary rates carried (ETC refuses on this date)"
+   },
+   "expected": [
+    2536203,
+    1658983,
+    845,
+    2143091535,
+    1401840635,
+    4000,
+    876200,
+    1152103,
+    3545,
+    0,
+    64300,
+    208700,
+    8450,
+    2308848,
+    741250900,
+    738942052,
+    10
+   ]
+  }
+ ],
+ "futures_stacks": [
+  {
+   "id": "fstack-000",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    2200005,
+    2209995,
+    75,
+    165000375,
+    165749625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    749250,
+    749250,
+    10
+   ]
+  },
+  {
+   "id": "fstack-001",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    2210005,
+    2199995,
+    75,
+    165750375,
+    164999625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    -750750,
+    -750750,
+    10
+   ]
+  },
+  {
+   "id": "fstack-002",
+   "entry": 5,
+   "exit": 5,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    10,
+    5,
+    75,
+    750,
+    375,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    375,
+    0,
+    -375,
+    -375,
+    5
+   ]
+  },
+  {
+   "id": "fstack-003",
+   "entry": 5,
+   "exit": 5,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    10,
+    5,
+    75,
+    750,
+    375,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    375,
+    0,
+    -375,
+    -375,
+    5
+   ]
+  },
+  {
+   "id": "fstack-004",
+   "entry": 25,
+   "exit": 26,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    30,
+    21,
+    75,
+    2250,
+    1575,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    -675,
+    -675,
+    10
+   ]
+  },
+  {
+   "id": "fstack-005",
+   "entry": 25,
+   "exit": 26,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "cost-free index (rates untouched)",
+   "expected": [
+    31,
+    20,
+    75,
+    2325,
+    1500,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    -825,
+    -825,
+    10
+   ]
+  },
+  {
+   "id": "fstack-006",
+   "entry": 200,
+   "exit": 220,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    205,
+    215,
+    500,
+    102500,
+    107500,
+    63,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    67,
+    5000,
+    4933,
+    10
+   ]
+  },
+  {
+   "id": "fstack-007",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    221000,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    297956,
+    4995000,
+    4697044,
+    10
+   ]
+  },
+  {
+   "id": "fstack-008",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    221000,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    297956,
+    4995000,
+    4697044,
+    10
+   ]
+  },
+  {
+   "id": "fstack-009",
+   "entry": 200,
+   "exit": 220,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    225,
+    195,
+    500,
+    112500,
+    97500,
+    63,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    67,
+    -15000,
+    -15067,
+    10
+   ]
+  },
+  {
+   "id": "fstack-010",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    220000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    297057,
+    -5005000,
+    -5302057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-011",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2024-10-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    220000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    297057,
+    -5005000,
+    -5302057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-012",
+   "entry": 200,
+   "exit": 220,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    205,
+    215,
+    500,
+    102500,
+    107500,
+    63,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    67,
+    5000,
+    4933,
+    10
+   ]
+  },
+  {
+   "id": "fstack-013",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    221000,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    297956,
+    4995000,
+    4697044,
+    10
+   ]
+  },
+  {
+   "id": "fstack-014",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    221000,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    297956,
+    4995000,
+    4697044,
+    10
+   ]
+  },
+  {
+   "id": "fstack-015",
+   "entry": 200,
+   "exit": 220,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    225,
+    195,
+    500,
+    112500,
+    97500,
+    63,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    67,
+    -15000,
+    -15067,
+    10
+   ]
+  },
+  {
+   "id": "fstack-016",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    220000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    297057,
+    -5005000,
+    -5302057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-017",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2026-03-31 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    220000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    297057,
+    -5005000,
+    -5302057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-018",
+   "entry": 200,
+   "exit": 220,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    205,
+    215,
+    500,
+    102500,
+    107500,
+    63,
+    100,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    167,
+    5000,
+    4833,
+    10
+   ]
+  },
+  {
+   "id": "fstack-019",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    552500,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    629456,
+    4995000,
+    4365544,
+    10
+   ]
+  },
+  {
+   "id": "fstack-020",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2200005,
+    2209995,
+    500,
+    1100002500,
+    1104997500,
+    4000,
+    552500,
+    38146,
+    2205,
+    2205,
+    22000,
+    8400,
+    5000,
+    629456,
+    4995000,
+    4365544,
+    10
+   ]
+  },
+  {
+   "id": "fstack-021",
+   "entry": 200,
+   "exit": 220,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww turnover-arm @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    225,
+    195,
+    500,
+    112500,
+    97500,
+    63,
+    0,
+    4,
+    0,
+    0,
+    0,
+    0,
+    5000,
+    67,
+    -15000,
+    -15067,
+    10
+   ]
+  },
+  {
+   "id": "fstack-022",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "groww flat-arm @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    550000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    627057,
+    -5005000,
+    -5632057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-023",
+   "entry": 2200000,
+   "exit": 2210000,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 5000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "zerodha flat-only @ 2026-04-01 (synthetic ETC/IPFT/stamp)",
+   "expected": [
+    2210005,
+    2199995,
+    500,
+    1105002500,
+    1099997500,
+    4000,
+    550000,
+    38147,
+    2205,
+    2205,
+    22100,
+    8400,
+    5000,
+    627057,
+    -5005000,
+    -5632057,
+    10
+   ]
+  },
+  {
+   "id": "fstack-024",
+   "entry": 3946467,
+   "exit": 880657,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 44,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    880662,
+    3946462,
+    44000,
+    38749128000,
+    173644328000,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    440000,
+    0,
+    134895200000,
+    134895200000,
+    10
+   ]
+  },
+  {
+   "id": "fstack-025",
+   "entry": 4834640,
+   "exit": 2473264,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 48,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2473269,
+    4834635,
+    720,
+    1780753680,
+    3480937200,
+    4000,
+    696200,
+    91027,
+    5262,
+    5262,
+    35600,
+    19000,
+    7200,
+    856351,
+    1700183520,
+    1699327169,
+    10
+   ]
+  },
+  {
+   "id": "fstack-026",
+   "entry": 1890373,
+   "exit": 3729149,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 25,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1890378,
+    3729144,
+    1875,
+    3544458750,
+    6992145000,
+    4000,
+    1398400,
+    182283,
+    10536,
+    10536,
+    70900,
+    37300,
+    18750,
+    1713955,
+    3447686250,
+    3445972295,
+    10
+   ]
+  },
+  {
+   "id": "fstack-027",
+   "entry": 2725129,
+   "exit": 1005788,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 26,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1005793,
+    2725124,
+    13000,
+    13075309000,
+    35426612000,
+    4000,
+    7085300,
+    839083,
+    48502,
+    48502,
+    261500,
+    169200,
+    130000,
+    8456087,
+    22351303000,
+    22342846913,
+    10
+   ]
+  },
+  {
+   "id": "fstack-028",
+   "entry": 668183,
+   "exit": 3941630,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 49,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    668188,
+    3941625,
+    24500,
+    16370606000,
+    96569812500,
+    4000,
+    19314000,
+    1953869,
+    112941,
+    112941,
+    327400,
+    393100,
+    245000,
+    22218251,
+    80199206500,
+    80176988249,
+    10
+   ]
+  },
+  {
+   "id": "fstack-029",
+   "entry": 2817614,
+   "exit": 2496028,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 6,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2817619,
+    2496023,
+    3000,
+    8452857000,
+    7488069000,
+    4000,
+    1497600,
+    275778,
+    15941,
+    15941,
+    169100,
+    56100,
+    30000,
+    2034460,
+    -964788000,
+    -966822460,
+    10
+   ]
+  },
+  {
+   "id": "fstack-030",
+   "entry": 2639498,
+   "exit": 2909568,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 6,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    2639503,
+    2909563,
+    3000,
+    7918509000,
+    8728689000,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    30000,
+    0,
+    810180000,
+    810180000,
+    10
+   ]
+  },
+  {
+   "id": "fstack-031",
+   "entry": 1110056,
+   "exit": 537448,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 4,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1110061,
+    537443,
+    60,
+    66603660,
+    32246580,
+    4000,
+    6400,
+    1710,
+    99,
+    99,
+    1300,
+    1100,
+    600,
+    14708,
+    -34357080,
+    -34371788,
+    10
+   ]
+  },
+  {
+   "id": "fstack-032",
+   "entry": 3979436,
+   "exit": 4273540,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 14,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    3979441,
+    4273535,
+    420,
+    1671365220,
+    1794884700,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    4200,
+    0,
+    123519480,
+    123519480,
+    10
+   ]
+  },
+  {
+   "id": "fstack-033",
+   "entry": 4332264,
+   "exit": 941912,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 21,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    941917,
+    4332259,
+    630,
+    593407710,
+    2729323170,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    6300,
+    0,
+    2135915460,
+    2135915460,
+    10
+   ]
+  },
+  {
+   "id": "fstack-034",
+   "entry": 2597107,
+   "exit": 4120495,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 33,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2597112,
+    4120490,
+    495,
+    1285570440,
+    2039642550,
+    4000,
+    407900,
+    57526,
+    3326,
+    3326,
+    25700,
+    12300,
+    4950,
+    514078,
+    754072110,
+    753558032,
+    10
+   ]
+  },
+  {
+   "id": "fstack-035",
+   "entry": 994149,
+   "exit": 4865494,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 29,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    994154,
+    4865489,
+    2175,
+    2162284950,
+    10582438575,
+    4000,
+    2116500,
+    220484,
+    12744,
+    12744,
+    43200,
+    45000,
+    21750,
+    2454672,
+    8420153625,
+    8417698953,
+    10
+   ]
+  },
+  {
+   "id": "fstack-036",
+   "entry": 1140193,
+   "exit": 1356037,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1356042,
+    1140188,
+    500,
+    678021000,
+    570094000,
+    4000,
+    114000,
+    21593,
+    1248,
+    1248,
+    13600,
+    5100,
+    5000,
+    160789,
+    -107927000,
+    -108087789,
+    10
+   ]
+  },
+  {
+   "id": "fstack-037",
+   "entry": 1188628,
+   "exit": 2826645,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 1,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2826650,
+    1188623,
+    15,
+    42399750,
+    17829345,
+    4000,
+    3600,
+    1042,
+    60,
+    60,
+    800,
+    900,
+    150,
+    10462,
+    -24570405,
+    -24580867,
+    10
+   ]
+  },
+  {
+   "id": "fstack-038",
+   "entry": 1049611,
+   "exit": 4243492,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 12,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    1049616,
+    4243487,
+    900,
+    944654400,
+    3819138300,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    9000,
+    0,
+    2874483900,
+    2874483900,
+    10
+   ]
+  },
+  {
+   "id": "fstack-039",
+   "entry": 676389,
+   "exit": 1526408,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 20,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1526413,
+    676384,
+    600,
+    915847800,
+    405830400,
+    4000,
+    81200,
+    22865,
+    1322,
+    1322,
+    18300,
+    5300,
+    6000,
+    134309,
+    -510017400,
+    -510151709,
+    10
+   ]
+  },
+  {
+   "id": "fstack-040",
+   "entry": 345576,
+   "exit": 422245,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 12,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    422250,
+    345571,
+    180,
+    76005000,
+    62202780,
+    4000,
+    12400,
+    2391,
+    138,
+    138,
+    1500,
+    1200,
+    1800,
+    21767,
+    -13802220,
+    -13823987,
+    10
+   ]
+  },
+  {
+   "id": "fstack-041",
+   "entry": 3863816,
+   "exit": 2988894,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 32,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2988899,
+    3863811,
+    960,
+    2869343040,
+    3709258560,
+    4000,
+    741900,
+    113810,
+    6578,
+    6578,
+    57400,
+    23600,
+    9600,
+    953866,
+    839915520,
+    838961654,
+    10
+   ]
+  },
+  {
+   "id": "fstack-042",
+   "entry": 2439761,
+   "exit": 1579685,
+   "is_long": false,
+   "lot_size": 30,
+   "n_lots": 20,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1579690,
+    2439756,
+    600,
+    947814000,
+    1463853600,
+    4000,
+    292800,
+    41722,
+    2412,
+    2412,
+    19000,
+    9100,
+    6000,
+    371446,
+    516039600,
+    515668154,
+    10
+   ]
+  },
+  {
+   "id": "fstack-043",
+   "entry": 4602815,
+   "exit": 2033174,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 39,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    4602820,
+    2033169,
+    585,
+    2692649700,
+    1189403865,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    5850,
+    0,
+    -1503245835,
+    -1503245835,
+    10
+   ]
+  },
+  {
+   "id": "fstack-044",
+   "entry": 1167628,
+   "exit": 2341524,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 11,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    2341529,
+    1167623,
+    165,
+    386352285,
+    192657795,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1650,
+    0,
+    -193694490,
+    -193694490,
+    10
+   ]
+  },
+  {
+   "id": "fstack-045",
+   "entry": 1619831,
+   "exit": 1745377,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 47,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1619836,
+    1745372,
+    23500,
+    38066146000,
+    41016242000,
+    4000,
+    8203200,
+    1368125,
+    79082,
+    79082,
+    761300,
+    275500,
+    235000,
+    10770289,
+    2950096000,
+    2939325711,
+    10
+   ]
+  },
+  {
+   "id": "fstack-046",
+   "entry": 3623975,
+   "exit": 3765440,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 12,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    3765445,
+    3623970,
+    180,
+    677780100,
+    652314600,
+    4000,
+    130500,
+    23011,
+    1330,
+    1330,
+    13600,
+    5300,
+    1800,
+    179071,
+    -25465500,
+    -25644571,
+    10
+   ]
+  },
+  {
+   "id": "fstack-047",
+   "entry": 1251829,
+   "exit": 3993588,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 31,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1251834,
+    3993583,
+    930,
+    1164205620,
+    3714032190,
+    4000,
+    742800,
+    84394,
+    4878,
+    4878,
+    23300,
+    17700,
+    9300,
+    881950,
+    2549826570,
+    2548944620,
+    10
+   ]
+  },
+  {
+   "id": "fstack-048",
+   "entry": 2462639,
+   "exit": 4717008,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 33,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2462644,
+    4717003,
+    990,
+    2438017560,
+    4669832970,
+    4000,
+    934000,
+    122966,
+    7108,
+    7108,
+    48800,
+    25400,
+    9900,
+    1149382,
+    2231815410,
+    2230666028,
+    10
+   ]
+  },
+  {
+   "id": "fstack-049",
+   "entry": 3418619,
+   "exit": 4687318,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 33,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    4687323,
+    3418614,
+    33000,
+    154681659000,
+    112814262000,
+    4000,
+    22562900,
+    4627680,
+    267496,
+    267496,
+    3093600,
+    930000,
+    330000,
+    31753172,
+    -41867397000,
+    -41899150172,
+    10
+   ]
+  },
+  {
+   "id": "fstack-050",
+   "entry": 2947479,
+   "exit": 477983,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 18,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    2947484,
+    477978,
+    540,
+    1591641360,
+    258108120,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    5400,
+    0,
+    -1333533240,
+    -1333533240,
+    10
+   ]
+  },
+  {
+   "id": "fstack-051",
+   "entry": 88851,
+   "exit": 581266,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 32,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    88856,
+    581261,
+    2400,
+    213254400,
+    1395026400,
+    4000,
+    279000,
+    27823,
+    1608,
+    1608,
+    4300,
+    6300,
+    24000,
+    324639,
+    1181772000,
+    1181447361,
+    10
+   ]
+  },
+  {
+   "id": "fstack-052",
+   "entry": 1102820,
+   "exit": 4813194,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 29,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    4813199,
+    1102815,
+    14500,
+    69791385500,
+    15990817500,
+    4000,
+    3198200,
+    1484032,
+    85782,
+    85782,
+    1395800,
+    298700,
+    145000,
+    6552296,
+    -53800568000,
+    -53807120296,
+    10
+   ]
+  },
+  {
+   "id": "fstack-053",
+   "entry": 2333891,
+   "exit": 1130790,
+   "is_long": true,
+   "lot_size": 500,
+   "n_lots": 34,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2333896,
+    1130785,
+    17000,
+    39676232000,
+    19223345000,
+    4000,
+    3844700,
+    1018963,
+    58899,
+    58899,
+    793500,
+    205300,
+    170000,
+    5984261,
+    -20452887000,
+    -20458871261,
+    10
+   ]
+  },
+  {
+   "id": "fstack-054",
+   "entry": 4159316,
+   "exit": 4702357,
+   "is_long": false,
+   "lot_size": 15,
+   "n_lots": 14,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    4702362,
+    4159311,
+    210,
+    987496020,
+    873455310,
+    4000,
+    174700,
+    32195,
+    1860,
+    1860,
+    19700,
+    7200,
+    2100,
+    241515,
+    -114040710,
+    -114282225,
+    10
+   ]
+  },
+  {
+   "id": "fstack-055",
+   "entry": 1583034,
+   "exit": 280045,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 21,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    280050,
+    1583029,
+    10500,
+    2940525000,
+    16621804500,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    105000,
+    0,
+    13681279500,
+    13681279500,
+    10
+   ]
+  },
+  {
+   "id": "fstack-056",
+   "entry": 691474,
+   "exit": 3445675,
+   "is_long": true,
+   "lot_size": 15,
+   "n_lots": 11,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    691479,
+    3445670,
+    165,
+    114094035,
+    568535550,
+    4000,
+    113700,
+    11810,
+    683,
+    683,
+    2300,
+    3100,
+    1650,
+    136276,
+    454441515,
+    454305239,
+    10
+   ]
+  },
+  {
+   "id": "fstack-057",
+   "entry": 2310230,
+   "exit": 4374273,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 16,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "rate_basis": "seeded random",
+   "expected": [
+    4374278,
+    2310225,
+    16000,
+    69988448000,
+    36963600000,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    160000,
+    0,
+    -33024848000,
+    -33024848000,
+    10
+   ]
+  },
+  {
+   "id": "fstack-058",
+   "entry": 3812719,
+   "exit": 1125687,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 30,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1125692,
+    3812714,
+    30000,
+    33770760000,
+    114381420000,
+    4000,
+    22876300,
+    2563033,
+    148152,
+    148152,
+    675400,
+    515400,
+    300000,
+    26930437,
+    80610660000,
+    80583729563,
+    10
+   ]
+  },
+  {
+   "id": "fstack-059",
+   "entry": 3698374,
+   "exit": 2424774,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 33,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    2424779,
+    3698369,
+    2475,
+    6001328025,
+    9153463275,
+    4000,
+    1830700,
+    262178,
+    15154,
+    15154,
+    120000,
+    53400,
+    24750,
+    2300586,
+    3152135250,
+    3149834664,
+    10
+   ]
+  },
+  {
+   "id": "fstack-060",
+   "entry": 1748057,
+   "exit": 612026,
+   "is_long": false,
+   "lot_size": 1000,
+   "n_lots": 50,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": null,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    612031,
+    1748052,
+    50000,
+    30601550000,
+    87402600000,
+    4000,
+    17480500,
+    2041472,
+    118005,
+    118005,
+    612000,
+    410700,
+    500000,
+    20784682,
+    56801050000,
+    56780265318,
+    10
+   ]
+  },
+  {
+   "id": "fstack-061",
+   "entry": 3847850,
+   "exit": 3003692,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 31,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    3847855,
+    3003687,
+    2325,
+    8946262875,
+    6983572275,
+    4000,
+    1396700,
+    275586,
+    15930,
+    15930,
+    178900,
+    56100,
+    23250,
+    1943146,
+    -1962690600,
+    -1964633746,
+    10
+   ]
+  },
+  {
+   "id": "fstack-062",
+   "entry": 3311296,
+   "exit": 1569593,
+   "is_long": false,
+   "lot_size": 500,
+   "n_lots": 42,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    1569598,
+    3311291,
+    21000,
+    32961558000,
+    69537111000,
+    4000,
+    13907400,
+    1773227,
+    102499,
+    102499,
+    659200,
+    356800,
+    210000,
+    16905625,
+    36575553000,
+    36558647375,
+    10
+   ]
+  },
+  {
+   "id": "fstack-063",
+   "entry": 661358,
+   "exit": 2745545,
+   "is_long": true,
+   "lot_size": 30,
+   "n_lots": 28,
+   "cost_free": false,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 2000,
+   "etc_rate": 173,
+   "sebi_rate": 10,
+   "ipft_rate": 10,
+   "stamp_rate": 200,
+   "gst_rate": 1800000,
+   "rate_basis": "seeded random",
+   "expected": [
+    661363,
+    2745540,
+    840,
+    555544920,
+    2306253600,
+    4000,
+    461300,
+    49509,
+    2862,
+    2862,
+    11100,
+    10700,
+    8400,
+    542333,
+    1750708680,
+    1750166347,
+    10
+   ]
+  }
+ ],
+ "options_materialize": [
+  {
+   "id": "omat-000",
+   "entry": 12000,
+   "exit": 15000,
+   "entry_volume": 0,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "stale_bar",
+   "expected": null
+  },
+  {
+   "id": "omat-001",
+   "entry": 12000,
+   "exit": 15000,
+   "entry_volume": 10,
+   "exit_volume": 0,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "stale_bar",
+   "expected": null
+  },
+  {
+   "id": "omat-002",
+   "entry": 12000,
+   "exit": 15000,
+   "entry_volume": 0,
+   "exit_volume": 0,
+   "reject_stale": false,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "trade",
+   "expected": [
+    12005,
+    14995,
+    65,
+    780325,
+    974675,
+    4000,
+    1000,
+    614,
+    2,
+    9,
+    0,
+    800,
+    650,
+    6425,
+    194350,
+    187925,
+    10
+   ]
+  },
+  {
+   "id": "omat-003",
+   "entry": 25,
+   "exit": 15000,
+   "entry_volume": 0,
+   "exit_volume": 10,
+   "reject_stale": false,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "tick_floor",
+   "expected": null
+  },
+  {
+   "id": "omat-004",
+   "entry": 25,
+   "exit": 15000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "tick_floor",
+   "expected": null
+  },
+  {
+   "id": "omat-005",
+   "entry": 26,
+   "exit": 15000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "trade",
+   "expected": [
+    31,
+    14995,
+    65,
+    2015,
+    974675,
+    4000,
+    1000,
+    342,
+    1,
+    5,
+    0,
+    800,
+    650,
+    6148,
+    972660,
+    966512,
+    10
+   ]
+  },
+  {
+   "id": "omat-006",
+   "entry": 26,
+   "exit": 4,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "tick_floor",
+   "expected": null
+  },
+  {
+   "id": "omat-007",
+   "entry": 26,
+   "exit": 5,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "trade",
+   "expected": [
+    31,
+    5,
+    65,
+    2015,
+    325,
+    4000,
+    0,
+    1,
+    0,
+    0,
+    0,
+    700,
+    325,
+    4701,
+    -1690,
+    -6391,
+    5
+   ]
+  },
+  {
+   "id": "omat-008",
+   "entry": 25,
+   "exit": 15000,
+   "entry_volume": 0,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "stale_bar",
+   "expected": null
+  },
+  {
+   "id": "omat-009",
+   "entry": 9995,
+   "exit": 12005,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 65,
+   "n_lots": 1,
+   "brokerage_round_trip_paisa": 4000,
+   "stt_rate": 10000,
+   "etc_rate": 3503,
+   "sebi_rate": 10,
+   "ipft_rate": 50,
+   "stamp_rate": 300,
+   "gst_rate": 1800000,
+   "expected_kind": "trade",
+   "expected": [
+    10000,
+    12000,
+    65,
+    650000,
+    780000,
+    4000,
+    800,
+    501,
+    2,
+    7,
+    0,
+    800,
+    650,
+    6110,
+    130000,
+    123890,
+    10
+   ]
+  }
+ ],
+ "futures_materialize": [
+  {
+   "id": "fmat-000",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 0,
+   "exit_volume": 10,
+   "path_highs": [
+    2201000
+   ],
+   "path_lows": [
+    2199000
+   ],
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "stale_bar",
+   "expected": null
+  },
+  {
+   "id": "fmat-001",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 10,
+   "exit_volume": 0,
+   "path_highs": [
+    2201000
+   ],
+   "path_lows": [
+    2199000
+   ],
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "stale_bar",
+   "expected": null
+  },
+  {
+   "id": "fmat-002",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 0,
+   "exit_volume": 0,
+   "path_highs": [
+    2201000
+   ],
+   "path_lows": [
+    2199000
+   ],
+   "reject_stale": false,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "trade",
+   "expected": [
+    2200005,
+    2209995,
+    75,
+    165000375,
+    165749625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    749250,
+    749250,
+    10,
+    75375,
+    74625
+   ]
+  },
+  {
+   "id": "fmat-003",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "path_highs": [],
+   "path_lows": [],
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "trade",
+   "expected": [
+    2200005,
+    2209995,
+    75,
+    165000375,
+    165749625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    749250,
+    749250,
+    10,
+    0,
+    0
+   ]
+  },
+  {
+   "id": "fmat-004",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "path_highs": [
+    2201000,
+    2208000,
+    2203000
+   ],
+   "path_lows": [
+    2199000,
+    2204000,
+    2195000
+   ],
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "trade",
+   "expected": [
+    2200005,
+    2209995,
+    75,
+    165000375,
+    165749625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    749250,
+    749250,
+    10,
+    375375,
+    599625
+   ]
+  },
+  {
+   "id": "fmat-005",
+   "entry": 2200000,
+   "exit": 2210000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "path_highs": [
+    2201000,
+    2208000,
+    2203000
+   ],
+   "path_lows": [
+    2199000,
+    2204000,
+    2195000
+   ],
+   "reject_stale": true,
+   "is_long": false,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "trade",
+   "expected": [
+    2210005,
+    2199995,
+    75,
+    165750375,
+    164999625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    -750750,
+    -750750,
+    10,
+    600375,
+    374625
+   ]
+  },
+  {
+   "id": "fmat-006",
+   "entry": 2200000,
+   "exit": 2190000,
+   "entry_volume": 10,
+   "exit_volume": 10,
+   "path_highs": [
+    2230000
+   ],
+   "path_lows": [
+    2170000
+   ],
+   "reject_stale": true,
+   "is_long": true,
+   "lot_size": 75,
+   "n_lots": 1,
+   "cost_free": true,
+   "brokerage_flat_paisa": 2000,
+   "brokerage_turnover_bps_x100": 3000,
+   "stt_rate": 0,
+   "etc_rate": 0,
+   "sebi_rate": 0,
+   "ipft_rate": 0,
+   "stamp_rate": 0,
+   "gst_rate": 0,
+   "expected_kind": "trade",
+   "expected": [
+    2200005,
+    2189995,
+    75,
+    165000375,
+    164249625,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    750,
+    0,
+    -750750,
+    -750750,
+    10,
+    2250375,
+    2249625
+   ]
+  }
+ ]
+}
