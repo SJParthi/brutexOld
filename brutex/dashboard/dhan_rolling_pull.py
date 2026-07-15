@@ -26,7 +26,7 @@ temp lake root), and :func:`default_dhan_rolling_option_pull` takes an injectabl
 ``adapter_factory`` so its enumerate → build-writer → ingest orchestration is
 fake-driven too. The ONLY ``# pragma: no cover`` is the real credential + SDK adapter
 build (:func:`build_dhan_rolling_option_adapter`), which needs AWS SSM + the ``dhanhq``
-SDK — the exact spot precedent (:func:`~brutex.dashboard.dhan_pull.build_dhan_spot_adapter`).
+SDK — the exact spot precedent (:func:`~brutex.dashboard.dhan_pull.build_dhan_spot_clients`).
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def build_dhan_rolling_option_adapter(
     and composes the
     :class:`~brutex.adapters.dhan.rolling_option_adapter.RollingOptionAdapter`.
     ``# pragma: no cover`` — it needs real AWS + the ``dhanhq`` SDK; the pull core is
-    fake-driven. Mirrors :func:`~brutex.dashboard.dhan_pull.build_dhan_spot_adapter`.
+    fake-driven. Mirrors :func:`~brutex.dashboard.dhan_pull.build_dhan_spot_clients`.
     """
     from brutex.adapters.dhan.client import DhanClient
     from brutex.adapters.dhan.reauth import DhanSdkRefresher

@@ -575,7 +575,15 @@ def run_dhan_spot_ingest_with_retry(
     """
     today_resolved = today if today is not None else now_ist().date()
     floor = dhan_history_floor(today_resolved)
-    effective_start = max(start, floor) if end > floor else None
+    # The report's effective-end view of the prev-day clamp — the plan below
+    # re-derives it through the ONE clamp helper (which owns the honest INFO
+    # note; this local min() emits nothing, so the note still fires exactly
+    # once per plan). Parity with the daily law's report stamps
+    # (daily_ingest.run_dhan_spot_daily) — report fields only: with the
+    # rolling floor strictly before *today* the clamped and raw computations
+    # cannot diverge in value, and the plan itself already clamps.
+    effective_end = min(end, today_resolved)
+    effective_start = max(start, floor) if effective_end > floor else None
     work, unresolved = plan_dhan_work(
         symbols=symbols,
         security_ids=security_ids,
@@ -607,7 +615,7 @@ def run_dhan_spot_ingest_with_retry(
         requested_start=start,
         effective_start=effective_start,
         floor=floor,
-        entirely_pre_floor=end <= floor,
+        entirely_pre_floor=effective_end <= floor,
     )
     warn_resolved_all_empty(report)
     return report

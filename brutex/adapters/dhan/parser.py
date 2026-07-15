@@ -49,8 +49,9 @@ from brutex.data.models import CandleBar
 
 #: The FIXED IST offset (+05:30, no DST) — the EXACT mirror of the midnight-IST
 #: daily-anchor law in ``brutex/data/spot_daily_resample.py`` (``_IST = timezone(
-#: timedelta(hours=5, minutes=30))``), mirror-pinned in the parser tests so the
-#: native daily bars land byte-compatible with the derived-1day convention.
+#: timedelta(hours=5, minutes=30))``), test-PINNED equal to that module's ``_IST``
+#: (``test_ist_constant_pinned_to_spot_daily_resample``) so the native daily bars
+#: land byte-compatible with the derived-1day convention.
 _IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
 
 #: The four required OHLC price columns.
@@ -191,8 +192,8 @@ def parse_daily_candle_columns(payload: Mapping[str, object]) -> list[CandleBar]
     (``.astimezone(IST).date()``) and then re-stamped to the midnight-IST
     instant of that date stored UTC — EXACTLY the convention
     ``brutex/data/spot_daily_resample.py`` mints (00:00 IST ⇔ 18:30 UTC of the
-    prior calendar day; the ``_IST`` offset above is the mirror-pinned twin of
-    its line-105 law). Any TWO raw bars normalizing to the SAME IST date keep
+    prior calendar day; the ``_IST`` offset above is the test-pinned twin of
+    its ``_IST`` law). Any TWO raw bars normalizing to the SAME IST date keep
     the FIRST occurrence (the lake's keep-first law applied at parse time —
     deterministic, never a mis-paired duplicate), counted nowhere: the shape is
     vendor-anomalous and the keep-first sink would drop the duplicate anyway.

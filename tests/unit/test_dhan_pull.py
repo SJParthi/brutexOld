@@ -3,8 +3,8 @@
 Fully fake-driven — an injected fetch adapter + a fake daily client + a temp lake
 root + an injected ``materialize`` seam + a fake AWS client — so
 :mod:`brutex.dashboard.dhan_pull` is 100% line+branch with no boto3 / dhanhq /
-network. The production credential + SDK build (``build_dhan_spot_clients`` + its
-thin ``build_dhan_spot_adapter`` delegator) is the ONLY ``# pragma: no cover``
+network. The production credential + SDK build (``build_dhan_spot_clients``)
+is the ONLY ``# pragma: no cover``
 (it needs real AWS + the SDK); the production seam (``default_dhan_spot_pull``)
 is driven here via its injectable ``clients_factory`` + ``materialize`` seams —
 every chain branch (dry-run · daily-gate STOP · spot-fail prebuild gate · clean

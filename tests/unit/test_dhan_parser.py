@@ -263,3 +263,15 @@ def test_daily_parse_vendor_drift_propagates() -> None:
     del cols["close"]
     with pytest.raises(DhanVendorDriftError):
         parse_daily_candle_columns(cols)
+
+
+def test_ist_constant_pinned_to_spot_daily_resample() -> None:
+    # The NIT-1 pin: the parser's `_IST` claims to be the EXACT mirror of the
+    # midnight-IST daily-anchor law in brutex/data/spot_daily_resample.py — pin
+    # the two timezone objects EQUAL (fixed +05:30 offset, no DST), so a drift
+    # in either module fails HERE instead of silently mis-stamping daily bars.
+    from brutex.adapters.dhan import parser as dhan_parser
+    from brutex.data import spot_daily_resample
+
+    assert dhan_parser._IST == spot_daily_resample._IST
+    assert dhan_parser._IST.utcoffset(None) == spot_daily_resample._IST.utcoffset(None)

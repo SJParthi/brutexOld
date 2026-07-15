@@ -46,9 +46,8 @@ adapter + a temp lake root + an injected ``materialize`` seam), so this module i
 (:func:`default_dhan_spot_pull`) takes an injectable ``clients_factory`` +
 ``materialize`` seam so its resolve → daily → gate → pull → prebuild-gate →
 observer orchestration (every gate branch) is fake-driven too; the ONLY
-``# pragma: no cover`` sites are the real credential + SDK client builds
-(:func:`build_dhan_spot_clients` + its thin :func:`build_dhan_spot_adapter`
-delegator), which need AWS SSM + the ``dhanhq`` SDK.
+``# pragma: no cover`` site is the real credential + SDK client build
+(:func:`build_dhan_spot_clients`), which needs AWS SSM + the ``dhanhq`` SDK.
 """
 
 from __future__ import annotations
@@ -565,20 +564,6 @@ DailyCandles` — and, composed into the
     )
 
 
-def build_dhan_spot_adapter(
-    *,
-    security_ids: Mapping[str, int],
-    client: object | None = None,
-) -> FetchOhlcv:  # pragma: no cover — real AWS SSM + dhanhq SDK build
-    """Build the production 1-minute fetch adapter (back-compat thin delegator).
-
-    Delegates to :func:`build_dhan_spot_clients` (the ONE production build —
-    CLAUDE.md §11 COMMON) and returns its ``fetch`` half; kept for callers that
-    need only the 1-minute surface.
-    """
-    return build_dhan_spot_clients(security_ids=security_ids, client=client).fetch
-
-
 def default_dhan_spot_pull(
     request: DhanPullRequest,
     *,
@@ -752,7 +737,6 @@ __all__ = [
     "DhanPullRequest",
     "DhanSpotClients",
     "DhanSpotPullFn",
-    "build_dhan_spot_adapter",
     "build_dhan_spot_clients",
     "default_dhan_spot_pull",
     "dhan_credentials_error",

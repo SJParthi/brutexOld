@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -633,6 +633,36 @@ class TestRollingFloorClamp:
         assert [e for e in logs if e.get("event") == "dhan.window_floor_clamped"] == []
         assert report.effective_start == date(2024, 1, 1)
         assert adapter.windows[0][0] == date(2024, 1, 1)
+
+    def test_report_stamps_compute_against_clamped_effective_end(self) -> None:
+        # The NIT-2 parity pin: the report's entirely_pre_floor/effective_start
+        # stamps compute against the CLAMPED effective end (min(end, today) —
+        # the DEC-DHAN-TODAY-CLAMP-001 view), never the raw requested end — the
+        # daily law's exact rule (daily_ingest.run_dhan_spot_daily). An explicit
+        # to_date=today request (raw half-open end == today + 1, clamped to
+        # today at plan time) must report byte-identically to the blank-default
+        # end == today request. Report-field parity only: with the rolling
+        # floor strictly before today the two computations cannot diverge in
+        # value, so this pins the RULE both laws share.
+        reports = []
+        for end in (_FROZEN_TODAY, _FROZEN_TODAY + timedelta(days=1)):
+            report = run_dhan_spot_ingest_with_retry(
+                symbols=["NIFTY"],
+                adapter=_StartRecordingAdapter(),
+                sink=_RecordingSink(),
+                security_ids={"NIFTY": 13},
+                start=date(2020, 1, 1),
+                end=end,
+                session_filter=_no_filter,
+                today=_FROZEN_TODAY,
+            )
+            reports.append(report)
+        blank_default, explicit_today = reports
+        assert blank_default.entirely_pre_floor is False
+        assert explicit_today.entirely_pre_floor is False
+        assert blank_default.effective_start == explicit_today.effective_start == _FROZEN_FLOOR
+        assert blank_default.floor == explicit_today.floor == _FROZEN_FLOOR
+        assert blank_default.requested_start == explicit_today.requested_start
 
     def test_entirely_pre_floor_plans_zero_windows_with_one_warning(self) -> None:
         # The spine's defensive-totality arm (headless callers): end <= floor plans
