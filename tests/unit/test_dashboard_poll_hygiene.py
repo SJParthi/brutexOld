@@ -18,7 +18,14 @@ polling concern). It also:
 
 (The reports.html sweep-poll hardening this pack originally shipped was dropped
 once DEC-OPERATOR-PAGE-REAL-001 moved the Run-Sweep surface off ``/reports``;
-its dedicated pin was removed with it.)
+its dedicated pin was removed with it. DEC-DASHBOARD-POLL-HYGIENE-002's v29
+in-place sweep-poller hardening + its pins here were likewise RETIRED at the
+2026-07-11 merge-reconcile: DEC-FRONTEND-LATENCY-HARDENING-001 (#1720) deleted
+those pollers for the shared-poller subscription, and the four defect classes
+stay pinned at the BXPoll core — hidden guard / through-body abort / capped
+backoff / visibilitychange catch-up in
+``test_dashboard_oneclick_frontend.py::TestPollDiscipline`` plus the v29
+subscription pins in ``test_dashboard_frontend_latency.py``.)
 
 SUPERSESSION (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720): the
 five uniform 4 s pollers no longer own an inline ``if (document.hidden)``
@@ -178,14 +185,18 @@ def test_universe_visibilitychange_fires_the_catch_up_pollers() -> None:
     ):
         assert call in js, f"universe.html: catch-up call {call!r} is missing"
     # The catch-up rides the EXISTING pull-progress visibilitychange listener —
-    # this change adds NO new listener. universe.html carries exactly TWO
+    # this change adds NO new listener. universe.html carries exactly THREE
     # listeners total: the pull-progress one (which folds these catch-ups,
     # marked by the DEC-DASHBOARD-POLL-HYGIENE-001 comment) + the independent
     # greeks-backfill gb-poller listener that landed on main via
-    # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9).
-    assert js.count("addEventListener('visibilitychange'") == 2, (
-        "universe.html must carry exactly the pull-progress + gb-poller "
-        "visibilitychange listeners — the poll-hygiene catch-ups add no new one"
+    # DEC-GREEKS-BULK-REENRICH-001 (#1558 round 9) + the cross-verify cv-poller
+    # listener (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md #1776 — an
+    # intent-preserved pin update: each independent job WATCHER owns exactly
+    # one listener; the poll-hygiene CATCH-UPS still add none of their own).
+    assert js.count("addEventListener('visibilitychange'") == 3, (
+        "universe.html must carry exactly the pull-progress + gb-poller + "
+        "cv-poller visibilitychange listeners — the poll-hygiene catch-ups "
+        "add no new one"
     )
     # And the folded integrity catch-ups live INSIDE the pull-progress listener
     # (before the gb-poller listener), not in a listener of their own.

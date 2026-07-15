@@ -44,6 +44,266 @@ O-envelope: TTL-memoised file lanes (one bounded scandir + three tiny JSON reads
 per refresh; never a lake scan). READ-side dashboard/observability only —
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
 Active-branch blurb + MIGRATION.md #1747.)
+Earlier: 2026-07-14 (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md
+#1794 (renumbered #1792 → #1793 → #1794 across the 2026-07-14
+merge-reconciles — main took #1792 for
+DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, then #1793 for
+DEC-SETTLE-EVIDENCE-ADOPTION-001), branch `claude/bulk-spot-completeness-flag` — the bulk whole-universe
+spot pull arms `detect_completeness_gaps`: `pull_all_spot`'s ONE spine call
+now threads `detect_completeness_gaps=not dry_run` (the cli.py `cmd_fetch`
+idiom), so the #1031 interior-gap / trailing-truncation demotions run on
+EVERY daily production path (nightly · ▶ Pull Spot + auto-pull · /pull-all ·
+retry-failed · the crossverify pull legs) instead of being dead on all of
+them — closing #1774's honest-envelope item (i). The spine's `is_index` gate
+keeps the ~750 illiquid CASH names observe-only on the gap/truncation class
+(the intrinsic ALL_FILTERED demotion stays deliberately un-index-gated);
+dry-runs stay
+double-protected (flag False + record-inert None ledger); demotions are
+bounded (settle SKIPPED at threshold 3, remediation `brutex
+reopen-skipped`). ONE call site + docs + tests — the detectors + spine are
+byte-untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1794.)
+Earlier: 2026-07-14 (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md
+#1793 — the measured-settle evidence adoption channel: the #1775 probe's
+`--summarize --emit-evidence` → committed `docs/groww/probe/settle_evidence.json`
+(schema 1, reviewed beside its transcripts) → the validated three-tier
+resolution env > evidence > the conservative 17:30 default (the tier-1
+short-circuit preserves `--settle-ist`/env supremacy; explicit
+`BRUTEX_SETTLE_EVIDENCE_PATH` junk fails loud, default-path corruption
+WARNs once + falls back — the r6/r7 posture on the shared regular-file-only
+loader, MOVED to COMMON `brutex/data/sidecar_read.py` with a byte-compatible
+pull_intent shim); ships the CHANNEL, ships NO measured number — every
+production resolution is byte-identical until the operator's evidence PR
+lands (parity-pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
+per-item record lives in the §1 Active-branch blurb + MIGRATION.md #1793 —
+this header carries the one-line summary, never the story.)
+Earlier: 2026-07-14 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001,
+MIGRATION.md #1792 — vendor-empty spot symbols (zero stored 1-minute bars)
+classify NO-SOURCE at the prebuild read (the retyped whole-partition
+`NoStored1mBarsError` arm — lake truth, never the #1779-rejected report
+`no_data`), counted + named in the note/payload/CLI, `PrebuildOutcome.ok`
+unaffected so the movers warm fires over the healthy majority — the #1779
+withheld-run-wide residual CLOSED; default path byte-identical; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1792 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-13 (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md
+#1785, branch `claude/sweep-lock-pull-concurrency` — the dashboard sweep route
++ the nightly sweep leg stop holding the LAKE pull flock through the sweep:
+CLI parity — cmd_sweep_all's OWN G10 lake read-guard (SH, held across the bar
+PRELOAD only) + G6 sweep single-flight own the sweep-vs-pull exclusion — fixing
+the CONFIRMED G10 self-conflict BLOCKER (flock is per open file description, so
+the job/chain-held EX made the same-process G10 SH acquire raise LakeBusyError
+at EVERY dashboard/nightly sweep preload since G10 landed at 3f32b3e; CI-blind
+via faked seams) AND delivering the operator requirement that the daily pull +
+crossverify→S3 run CONCURRENTLY with a multi-day sweep's compute phase.
+SUPERSEDES DEC-SWEEP-NIGHTLY-AUTOMATION-001 (#1612)'s lake-lock
+held-through-SWEEP clause. Run identity frozen at preload; byte-identity
+proven by the executed concurrency regression. Lock COMPOSITION only — ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries the pointer, never the story — the full record lives in
+the §1 Active-branch blurb + MIGRATION.md #1785.)
+Earlier: 2026-07-13 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md
+#1779 — the one-click scoped-ALL SPOT pull: the additive `scope=spot-only`
+token on the ONE `/pull-pipeline` launcher (default requests byte-identical,
+pinned) + the NEW `brutex pull-all-spot` CLI over
+`build_headless_pipeline(scope=…)`; the F&O phases run as no-op reports
+through the UNCHANGED sequencer (note SURGERY — "F&O skipped by design
+(spot-only scope)", never a fake "0 expiries"); explicit "Greeks: not run —
+no options in this pull" text; the fail-soft crossverify tail (production
+default = the REAL #1776 producer, fired strictly OUTSIDE our held pull
+single-flight); the CLI `--auto` gate with the UNMEASURED-conservative
+17:30 IST settle default (`BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) +
+Muhurat whole-day deferral + the composed mid-run Muhurat belt — the guard
+module byte-untouched; a persisted spot-only intent resumes SPOT-ONLY, never
+widened; since the round-5 fold the button SELF-ARMS the daily post-market
+auto-pull (NEW `dashboard/auto_pull_scheduler.py` — first click = run now +
+arm forever; the same gate + launcher reused, once-per-day law, durable
+`.pull_all_spot_auto.json`, disarm chip; the CLI `--auto` + cron lane is the
+headless alternative); since the round-6/round-7 folds the durable state
+loads are corruption-hardened for EVERY shape, non-regular inodes included
+(never crash OR hang the boot — the round-6 #1776 M1 decode fold + the
+round-7 #1614 `O_NONBLOCK`+`S_ISREG` regular-file-only loader with the
+fstat-on-fd size cap) and the
+combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + ▶ Pull
+F&O (the NEW manual `scope=fno-only` mirror — spot no-op by note surgery,
+metadata/historical/Greeks real, F&O-only prebuild + warm; tail + scheduler
+stay Spot-exclusive, ALL FOUR ruled exclusivities negative-pinned since
+round 7). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1779 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-13 (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 —
+the O(1)-guarantee verification + hardening pass: `docs/O1_GUARANTEE_AUDIT.md`
+becomes the AUTHORITATIVE honest per-path complexity classification (51 rows —
+the six Golden-Rule-#5 engine hot paths · the DB/lake dashboard reads · the
+frontend; the anti-illusion rule applied to every row — no bare O(1) claim
+where the FIRST read is O(files)/O(rows)); the reported M4-Pro
+ResultsStore.get "1.87×" strict-tier failure is triaged
+VERIFIED-NOT-A-REGRESSION (a one-line dict probe, measured flat
+51.7/53.5/51.7 ns at 1k/10k/100k rows; the #1301 cache-tier 3.0× re-gate
+already absorbs the dict-probe physics band; NEW 100k-deep pin); FIVE
+hardenings land (the last 3 unbounded-body poller templates ride the NEW
+COMMON `BXUI.fetchTextBounded`; the oneclick timeline gains a dup-tick
+skip token + a NAMED newest-500 render cap + the 200 ms search debounce;
+universe.html's seven interval loaders ride ONE bounded latest-wins helper;
+the /db registry pagers' filtered COUNT gains an O(1)-on-repeat memo on the
+NEW `registry_revision` stat token; the leaderboard + oneclick-runs O(dirs)
+freshness probes are TTL-bounded by the NEW `RevisionProbeMemo` — a ≤1 s
+DISCLOSED staleness window, kill switch `BRUTEX_REVISION_PROBE_TTL_S=0`)
++ EIGHT bench gates close the audit's missing-gate findings. READ-side
+dashboard + tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+no lake/schema/scope/vocab/rate change; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1791 — this header carries the
+one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 —
+the brute-force ENGINE is SPOT-ONLY by operator directive: the ADR-0012 /
+DEC-NIFTY-DYNAMIC-STRATEGY-001 NIFTY-futures engine authorization + the
+DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface are CONSCIOUSLY
+SUPERSEDED (engine surface {3 spot} ∪ {NSE-NIFTY-FUT} → {3 spot});
+`is_engine_sweep_symbol` admits EXACTLY NIFTY/BANKNIFTY/SENSEX and every
+production sweep entry refuses `NSE-NIFTY-FUT` loudly citing the DEC +
+"the engine is spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY" —
+BEFORE any futures-series resolution or lake I/O; the futures resolver /
+alias-aware loader / Stage-1A roll machinery / symbol_id 4 are RETAINED as
+lake tooling below the gate (reachable only via the loud audit-stamped
+--allow-out-of-scope research escape or recorded-work forensics); Groww
+PULL/lake scope UNTOUCHED — futures ingest stays REFERENCE_ONLY; the
+per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1790 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md
+#1789 — the cross-verify WITHHELD-day AUTO-RE-GATE folded into the daily
+run's catchup: every prior day inside `catchup_days` whose journal still
+names withheld symbols is re-gated from the since-healed lake (re-export →
+stage → publish the now-complete ones; the journal `withheld` map rewritten
+to the honest remainder; already-published keys NEVER re-put — journal
+idempotency; fail-closed gate-first; per-day LEAF journal flocks; runs
+BEFORE the session gate so weekend fires re-gate a healed Friday) — closing
+the runbook's "manual --day re-run" remediation for the heal-within-catchup
+case and CLOSING the #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001
+(id retired unused — the operator's separate historical whole-range S3
+backfill idea was STOOD DOWN by ruling 2026-07-13: current-day-only S3
+push); PLUS the persistent last-run failure surface — the runner persists
+`<lake>/.crossverify/last_run.json` for every MATERIAL verdict (never
+dry-runs, never the honest skips), `GET /api/v1/crossverify/progress`
+serves it as the additive `last_run` field (threadpool, never a 500) and
+the /universe panel renders it on load, so a finished failure survives
+page reloads AND dashboard restarts; the retryable-exhaustion
+`publish_failed` verdict gains a REAL detail (failing count + capped key
+sample); the summary/CLI lines gain the `re-gated N` token (INFO now
+requires recovered==0 AND regated==0). HONEST: only WITHHELD symbols
+re-gate — an honest-`nothing` zero-bar day backfilled later, or a day
+older than catchup_days, still needs `--day`; one month-partition read
+per re-gated symbol·day. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env; the per-item
+record lives ONLY in the §1 Active-branch blurb + MIGRATION.md #1789 —
+this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md
+#1788 — the cross-verify export contract AMENDED to SPOT-ONLY over the
+WHOLE spot universe (operator ruling 2026-07-13): the NIFTY/BANKNIFTY
+futures legs come OUT — no futures pulls, no futures CSVs; TickVault must
+NOT expect futures files (absence is BY DESIGN) — and the export
+enumeration widens to ALL admitted indices (~25, incl. INDIAVIX +
+sectorals; the engine trio stays the structural floor) + ALL stocks (~751,
+F&O-eligible AND reference-only NTM names) via the ONE
+`whole_universe_spot_targets` law shared by pull AND export (export ≡ pull
+by construction). INDEX policy TIERED (the approved index-policy ruling,
+same-branch fix round): the STRICT count+close-edge withhold law is scoped
+to the VERIFIED engine trio; the other ~22 indices ride an OBSERVE-ONLY
+count law (published-with-a-counter, zero bars = honest nothing, forming
+last bar still withholds) with the three-way
+strict-published/observe-published/withheld split visible in the ONE
+Telegram summary; promotion = probe-evidenced follow-up DEC
+(DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001). CSV byte contract (header incl. `oi`; spot empty-oi
+cell) / gate binding / S3 posture + key layout / 1-minute-only law /
+Muhurat-session semantics / journal-publish machinery ALL UNCHANGED; the
+FUT mapper/renderer/gate/prebuild arms retained STRUCTURAL
+(direct-unit-covered, unreachable from the producer, kept for possible
+re-expansion); the metadata + FUT-candle pull legs, the registry read, the
+G2 FUT settle-retry class DELETED; negative-pinned: a lake WITH futures
+contract dirs + registry FUT rows yields ZERO `*_FNO` keys.
+DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 CLOSED MOOT. ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; the
+per-item record lives ONLY in the §1 Active-branch blurb + MIGRATION.md
+#1788 — this header carries the pointer, never the story.)
+Earlier: 2026-07-13 (QUAD MAX-CLUB merge vehicle, branch
+`claude/quad-dashboard-lakeinv-universe-docs` — the file-disjoint fold of FOUR PRs as ONE
+merge event off main tip 3f32b3ef (merged forward over main through 81052345 on 2026-07-13): #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002
+#1699 + DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+#1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001 #1764.
+The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DEC-IDs are the
+stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
+each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
+DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
+MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
+one zero-touch post-close chain — priority pull (ALL spot + NIFTY/BANKNIFTY
+futures, NO options) → completeness gate (FAIL-CLOSED on the sibling #1774
+module) → day-scoped never-stamping prebuild → the pinned per-symbol CSV
+byte contract → idempotent journal-keyed S3 publish to
+`tv-prod-cold/crossverify/*` (PutObject-ONLY — BruteX's FIRST sanctioned AWS
+WRITE surface; the SSM read-only pledge UNCHANGED; boto3 via the NEW
+optional `crossverify` extra, never installed in CI) — surfaced as `brutex
+crossverify {run,install,uninstall,status}` (launchd label
+`com.brutex.crossverify`, `--at` REQUIRED probe-decided; trading-day-aware
+journal deadman) + the /universe dashboard button riding the SAME runner
+(cross_process_lock=False — the runner's own lock trio; market-hours law
+runner-owned at step E). Correct-or-absent: a short/settling file is
+WITHHELD + CRITICAL-alerted, never wrong bytes; Muhurat days skip entirely
+(no files, both sides no-op); a missing index day = exit 2 (the real gate
+reads `count_short`; the INDEX-`no_today_bars`→BLOCKED arm is defensive
+totality — the post-#1503 integration-moment fold in #1776). HONEST
+envelope: vendor same-day availability UNVERIFIED (the operator's 5-day
+settle probe decides `--at`); BSE_EQ/BSE_FNO structural-only; GREEKS N/A
+(the options-only stage on an options-excluding pull); movers warm =
+revision propagation only; named follow-ups
+DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (BSE-FNO probe-gated) +
+DEC-CROSSVERIFY-PREEMPT-002 (true preemption — job-cancel dependency).
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+change; the per-item record lives ONLY in the §1 Active-branch blurb +
+MIGRATION.md #1776 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-PULL-TODAY-COMPLETENESS-GATE-001, MIGRATION.md #1774 —
+the pre-settle TODAY minute-completeness gate: a post-close pull's covers-today
+window WITHHOLDS today's still-settling bars from the keep-first lake (the #837
+forming shape would freeze forever) and defers streak-EXEMPT re-pullable FAILED
+(`TODAY_INCOMPLETE` — never bumps toward SKIPPED; heals at the next nightly
+PROVIDED the vendor has settled by then — the probe-measured settle time +
+margin grounds that schedule)
+until the per-class criteria pass (INDEX count+close-edge · CASH/FUT/CE-PE
+shape checks; FUT count observe-only; legit vendor-empty NEVER demotes —
+pinned); armed at ALL FOUR production pulls incl. the bulk `pull_all_spot`
+behind the fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch resolved once per
+pull; non-today windows byte-identical (pinned); + the companion read-only
+post-close settle probe measuring the UNDOCUMENTED vendor EOD settle time
+(DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, #1775). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; pull-INTEGRITY only; the per-item record lives in the
+§1 Active-branch blurb + MIGRATION.md #1774 — this header carries the one-line
+summary, never the story.)
+Earlier: 2026-07-12 (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 —
+the pre-merge gate treats the NON-required self-hosted `m4pro-absolute-throughput`
+bench check as NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+`scripts/ci/pre-merge-check.sh` is UNIONED with the caller's `IGNORE_CHECK_NAMES`
+at all three rollup scan sites (count · failed · pending) — so the
+offline-runner pending-forever shape can never refuse a merge (the ONE
+residual — a manually-CANCELLED bench run's `bless-baseline` check — is
+named in #1753, documented not broadened per the operator only-m4pro
+constraint) and
+auto-merge.yml's caller-SET `IGNORE_CHECK_NAMES` cannot clobber the exemption —
+while a FAILED m4pro is surfaced as a WARN-only line that never affects the
+exit code AT THIS GATE (auto-merge's own untouched ci-check still refuses a
+FAILED/CANCELLED m4pro — pre-existing; the PENDING shape is non-blocking
+end-to-end) and every REQUIRED check still blocks fully (redteam-pinned incl.
+the pending-`CI OK (aggregate gate)`-still-blocks + failed-required cases;
+fails-before-proven against the baseline script). The check is genuinely
+NON-required: not in ci.yml's `ci-ok` needs; MIGRATION.md #382 + #1534 — a
+bench regression is caught POST-merge on the self-hosted runner, never a
+merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
+blurb + MIGRATION.md #1753.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -1076,7 +1336,10 @@ sweep via `cmd_sweep_all` on the daemon key-list precedent, the three
 unattended escape flags structurally absent AND dispatch-hard-refused —
 STRICTER than the daemon, which refuses only `--allow-out-of-scope`), under a
 NEW nightly flock + acquire-and-HELD pull locks (the LAKE pull lock held
-through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical;
+through the sweep leg = the R4/G10 sweep-vs-pull exclusion, mechanical
+[the lake-lock-held-through-the-sweep-leg clause SUPERSEDED by
+DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — released after
+PULL+PREBUILD, FREE during the sweep leg];
 holder-note honesty on refusals — a pull refused mid-nightly reads
 "(holder: nightly:<id>)"), with the R42 break law (first failing link stops;
 later links BLOCKED-because-<link>; tripwires — link-transition, DURABLE-audit
@@ -2412,6 +2675,918 @@ hostile-review pass._
   + the REAL routes; 16 frontend pins incl. the killed unconditional-green token + node-EXECUTED helper goldens;
   ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/bulk-spot-completeness-flag`
+  (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
+  #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took
+  #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, then #1793 for
+  DEC-SETTLE-EVIDENCE-ADOPTION-001) — the bulk
+  whole-universe spot pull arms `detect_completeness_gaps`: `pull_all_spot`'s
+  ONE spine call (`_one_pass` → `run_groww_spot_ingest_with_retry`) now
+  threads `detect_completeness_gaps=not dry_run` — the cli.py `cmd_fetch`
+  idiom, hoisted as `_detect_gaps` beside the #1774 `_today_gate` — so the
+  #1031 interior-gap / trailing-truncation demotions run on EVERY daily
+  production path (the 01:30 nightly, ▶ Pull Spot + the auto-pull scheduler,
+  /pull-all, retry-failed, the crossverify pull legs — all funnel through
+  this one call), including the engine indices; pre-fix the kwarg was OMITTED
+  (defaults False at `run_ingest.py`) so the demotions were DEAD on every
+  bulk path and a holey/truncated SUCCESS index window settled forever.
+  CLOSES #1774's honest-envelope item (i) + the in-code NOTE. The spine's
+  three hard gates are byte-untouched and do the correctness work
+  (`detect_completeness_gaps AND is_index AND interval != 1day`; ALL_FILTERED
+  stays flag-gated-not-index-gated — intrinsic, so arming the bulk path
+  reaches CASH names on THAT class too): the ~750 illiquid CASH names stay
+  observe-only WARNed on the interior-gap/truncation class, never demoted on
+  it; demotion = re-pullable FAILED +
+  INTERIOR_GAP/SUSPECTED_PARTIAL, streak-bumping, settles SKIPPED at
+  EMPTY_TERMINAL_THRESHOLD=3 (bounded — never a livelock; honest
+  DEMOTED_SETTLE_REASONS label; remediation `brutex reopen-skipped`); stored
+  bars always kept. HONEST: covers ALL ~25 admitted indices via `is_index`
+  (every index prints on every session — the session-level presence the
+  detectors key on; intra-session density not claimed — so the #1031
+  rationale holds), NOT retroactive
+  (already-settled holey windows stay settled — the #1774 item-(a)
+  fetched-bars boundary; lake audit = DEC-LAKE-AUDIT-SETTLING-ROWS-001), the
+  detectors abstain out-of-calendar-coverage from 2027-01-01 until the 2027
+  NSE list lands (graceful lapse, no false demotes), the crossverify pull
+  legs arm too (always live, same bound). Dry-run double-protected: flag
+  False AND `begin_pull_ledger(dry_run=True)` → None (record-inert).
+  Fails-before-proven (NEW `TestCompletenessDemotionArming` spy pair + the
+  `TestBulkSpotCompletenessDemotionE2E` clock-free 2024 interior-hole e2e —
+  index FAILED+INTERIOR_GAP, same-pull non-index equity SUCCESS; 3/4 fail
+  with the one-kwarg fix stash-reverted); ONE test-churn reconcile
+  (`test_second_pull_reports_skipped_settled_windows` fixture bounded inside
+  the 5-session tolerance — it pins the settled-skip law, so it must settle);
+  every other `pull_all_spot(dry_run=False, …)` suite green unmodified.
+  Pull-INTEGRITY only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; `pull_controller.py`
+  100.00% line+branch on its ci.yml stanza; ruff/ruff-format clean; `mypy
+  --strict` clean; pyright 0 new.)
+  Earlier: `claude/settle-evidence-adoption` (**DEC-SETTLE-EVIDENCE-ADOPTION-001,
+  MIGRATION.md #1793** — renumbered #1792 → #1793 at the 2026-07-14 second merge-reconcile
+  (main took #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001; DEC-IDs are the stable
+  handles per DEC-LEDGER-RENUMBER-001) — the measured-settle EVIDENCE-FILE adoption channel, closing the
+  #1779 standing promise "re-derive when the probe lands" MECHANICALLY. The #1775 probe
+  gains `--summarize --emit-evidence PATH [--margin-minutes N]`: a per-day × canonical-slot
+  fold of ≥5 REGULAR trading days of transcripts (non-trading/Muhurat days excluded +
+  recorded; off-grid slot labels ignored + counted `ignored_records`; refuses to emit
+  without a qualifying slot — exit 2; self-validates via the repo validator) into
+  `docs/groww/probe/settle_evidence.json` (schema 1, committed + reviewed BESIDE its
+  transcripts — the tests/bench/baselines precedent). NEW `brutex/calendars/settle_evidence.py`
+  = the validator (the truth table: exact schema/kind, strict ASCII HH:MM, bool-refused
+  ints, `adopted == earliest + margin` with no midnight wrap, the ≥15:35 BLOCK_END floor
+  with 15:35-exact allowed, the per-day support law, tz-UTC-exact `generated_at_utc` —
+  aware-but-non-UTC refused since the r1 fold) + the
+  stat-token-memoized loader with the D/X corruption SPLIT: an operator-typed EXPLICIT
+  `BRUTEX_SETTLE_EVIDENCE_PATH` fails LOUD on every junk shape (the resolve_* law) while
+  DEFAULT-path corruption is ONE `settle_evidence.invalid` WARN per stat-token + the 17:30
+  fallback (the r6/r7 never-crash-never-hang boot posture — the fail-loud tier for
+  COMMITTED content is CI's committed-file test + the emitter's self-validation, the
+  DEC-BENCH-ABS-BASELINE-001 two-tier posture). `resolve_settle_time` = a thin wrapper over
+  NEW `resolve_settle_resolution` (env > evidence > default; the tier-1 short-circuit keeps
+  `--settle-ist`/env supremacy — evidence NEVER read while the settle env is set, spy- +
+  e2e-pinned); the `before_settle` deferral detail carries per-tier provenance — the DEFAULT
+  arm BYTE-IDENTICAL incl. the verbatim UNMEASURED clause (exact-string-pinned), the
+  measured arm "measured — probe evidence: earliest all-pass HH:MM IST + N min margin over
+  D trading days", the env arm "operator override BRUTEX_PULL_ALL_SETTLE_IST" (a documented
+  pin move — Golden Rule #10 both directions). The r7-hardened regular-file-only loader
+  (`read_sidecar_bytes`/`SidecarReadResult`) MOVED VERBATIM to NEW COMMON
+  `brutex/data/sidecar_read.py` (calendars must not import dashboard; copy refused by §11;
+  the #1715 leaf+shim precedent; the calendars→data edge verified acyclic) with pull_intent
+  re-exporting byte-compatibly. BOTH eager-validation surfaces (cmd_dashboard boot +
+  cmd_pull_all_spot pre-lock) PROBE the channel via one `evidence_settle()` line each, so a
+  junk explicit path fails loud even while the settle env's tier-1 short-circuit masks the
+  resolver's own read (the latent-junk class); the scheduler's `_next_eligible` junk arm
+  reads "unknown — invalid settle config: {exc}" (the exc self-names its env var; the
+  "NO new vendor-call surface" pin byte-untouched). Observability: `settle_evidence.valid`
+  INFO (once per stat-token — truthful under a tier-1 override: "adopted whenever
+  BRUTEX_PULL_ALL_SETTLE_IST is unset") · `settle_evidence.invalid` WARN ·
+  `settle_evidence.stale` WARN (>180 d, still ADOPTED — measured-then-margined dominates a
+  guess); no new Telegram lane (config, not runtime health). HONEST: this PR ships ZERO
+  measured numbers — the build env provably cannot probe (agent proxy CONNECT 403 to both
+  Groww hosts, verified 2026-07-14; `growwapi` not installed) — so the UNMEASURED wording
+  stays true + verbatim on the default tier and the no-evidence resolution is
+  BYTE-IDENTICAL to #1779 (the `test_resolution_no_evidence_is_byte_identical` parity
+  oracle sweeps the full env matrix on both the channel-off and default-path-absent arms);
+  the measured value is OPERATOR WORK (probe ≥5 regular days → --emit-evidence → review →
+  commit → CI validates → next deploy adopts); production self-learning REJECTED (passive
+  evidence is CENSORED at the observation schedule — it can never legitimately LOWER the
+  value — and the gate-pass time is parse-blind to the raw 6-vs-7 settle shape only the
+  probe measures); the scheduler probe-until-available loop REJECTED (amends the #1779
+  "NO new vendor-call surface" pin for an UNVERIFIED benefit); named follow-ups
+  DEC-SETTLE-PROD-EVIDENCE-RECORDER-001 (crossverify recorder + default_too_early
+  raise-guard — diagnostics, deliberately out) + the evidence COMMIT itself.
+  HOSTILE-REVIEW ROUND folded (4× SHIP — the per-item record lives in MIGRATION.md
+  #1793): honesty docstrings (`default_evidence_path` drops its `.resolve()` — the
+  resolver's "no I/O" claim made literally true; the per-poll one-stat probe cost
+  disclosed), repr conventions (the stale WARN's `generated_at_utc` field + `_fail`'s
+  path — the #907 source-repr law), `generated_at_utc` tightened to tz-UTC-exact, the
+  NUL-path raw-ValueError wrapped into the uniform env-naming refusal, the emitter's
+  informational non-monotonic note (emit-path-only — plain --summarize stdout stays
+  note-free), and the `_RECORD_KEYS` writer↔fixture drift pin. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ZERO new
+  vendor calls; `market_hours.py` byte-untouched; new env var BRUTEX_SETTLE_EVIDENCE_PATH
+  (+ the conftest hermeticity belt, off-by-default in tests only). GATES:
+  `settle_evidence.py` 100.00% line+branch standalone (212/90, 111 tests incl. the
+  subprocess emitter round-trip golden — refuter-r3 re-measure) + `sidecar_read.py` 100.00%
+  (34/6) on their NEW ci.yml stanzas; `auto_pull_gate.py` (93/30) ·
+  `auto_pull_scheduler.py` (253/56) · `pull_intent.py` (225/50 on its mapped trio)
+  re-measured 100.00%; ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new vs
+  the pre-change baseline.)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  (**DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792** — the
+  #1779 vendor-EMPTY × prebuild × movers-warm residual CLOSED: a spot symbol
+  with ZERO stored 1-minute bars (vendor-empty or never pulled — the reader
+  cannot distinguish, both causes named) is classified NO-SOURCE at the
+  prebuild read itself — the whole-partition arm of `make_lake_read_1m` is
+  retyped to the NEW `NoStored1mBarsError(ValueError)` (message bytes
+  UNCHANGED; the months-bounded heal-recall arm stays plain ValueError,
+  mutant-killed) with the existence predicate extracted §11-COMMON
+  (`has_stored_1m_bars` + `spot_1m_partition_dir`); the spot phase catches it
+  FIRST (except-order mutant-killed) → the new `no_source` class (still
+  `attempted`, never `failed`; the parallel worker kind-GATED to SPOT items —
+  a contract's identical error stays a failure, pinned), so
+  `PrebuildOutcome.ok` stays True and the #1145/#1221 movers-warm gate
+  (expression untouched) now FIRES over the healthy majority instead of
+  withholding the warm run-wide forever; the empty symbol is COUNTED + NAMED
+  (capped, the quarantine-headline idiom via the ONE shared
+  `format_capped_names`) on the note clause + emit-on-nonzero
+  `prebuild_no_source`/`prebuild_no_source_count` payload keys + the CLI
+  `no-source:` line + per-symbol INFO + the all-no-source WARN — never
+  silently dropped, never a fabricated snapshot (warm discovery is
+  parquet-file-gated per dataset — structural absence holds when NO
+  timeframe holds parquet, re-pinned with real-lake evidence; a surviving
+  previously stored DERIVED timeframe legitimately keeps the symbol
+  discoverable, serving genuine stored bars — the refuter-round-2
+  scoping). VERDICT = LAKE
+  truth by construction — no report field participates (the #1779 `no_data`
+  trap is dead structurally; the healthy-incremental-re-run trap twin is the
+  permanent regression net); a mixed no_source + REAL failure still reads
+  `ok=False`, warm withheld (failure wins, both surfaced). The #1779
+  inherited-behavior e2e pin consciously FLIPPED
+  (`…no_source_named_warm_fires`); fails-before proven — 9 [FB] tests fail
+  at merge-base source. HONEST residuals: cause attribution unwired (named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 — the ledger-fold risks
+  recorded in #1792); a hand-planted schema-complete 0-row parquet passes
+  the existence arm and the prebuild COMPLETES it as a 0-bar SUCCESS —
+  neither no_source nor failed, warm unaffected, byte-identical to main's
+  pre-change behavior (the refuter-round-3 EXECUTED correction of the
+  earlier FALSE "fails loudly" wording, now e2e-pinned; a schema-BROKEN
+  plant is the shape that still fails loudly via the per-symbol data-error
+  quarantine; out-of-band — production writers never render 0-row files);
+  empty symbols re-probe every pull (today's cost); the
+  strict gate deliberately does not block on no_source; the law is
+  deliberately NON-TIERED — an ENGINE-trio index (NIFTY/BANKNIFTY/SENSEX)
+  vendor-empty reads the SAME INFO + named skip, warm fires (the
+  refuter-round-1 disclosure fold — a conscious non-goal, the symbol stays
+  headline-named + /coverage//completeness-visible; escalation = named
+  follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001). REFUTER ROUND 1
+  folded (per-finding record in MIGRATION.md #1792): the index-tier
+  disclosure above + the `_warn_if_all_no_source` empty-phase guard's
+  surviving mutant killed (WARN-absence pins on BOTH fno-only paths — a
+  guard-dropped mutant fired a spurious count=0 all_no_source WARN on every
+  ▶ Pull F&O run and passed the whole 87-test battery pre-pin). REFUTER
+  ROUND 2 folded (2 MINOR, both executed-repro-validated then fixed —
+  per-finding record in MIGRATION.md #1792): the note clause's
+  "+ movers warm" exclusion tail DROPPED (an overclaim — a symbol whose 1m
+  partition was emptied post-pull while a previously DERIVED 1day survives
+  classifies no_source yet legitimately stays in warm discovery off the
+  stored 1day; the five structural-absence claim sites scoped to
+  no-parquet-in-ANY-timeframe; NEW stale-derived e2e twin, fails on the
+  pre-fix wording) + the runbook §7 remediation gains the heal-emptied
+  THIRD-shape branch (post-pull removal reads settled SUCCESS bars>0 on
+  /coverage/windows — never the vendor-empty "settled SKIPPED bars=0"
+  signature §7 alone prescribed; inspect `<lake>/.quarantine/`, restore or
+  re-pull). REFUTER ROUND 3 folded (1 MINOR, executed-repro-validated then
+  fixed WORDING-only — per-finding record in MIGRATION.md #1792): the
+  0-row-parquet residual claim corrected as above (the three claim sites
+  rewritten to the executed truth + the NEW
+  `test_e2e_zero_row_parquet_completes_as_zero_bar_success` pin; behavior
+  itself pre-existing + unchanged, merge-base-parity executed). REFUTER
+  ROUND 4 folded (1 MINOR, executed-repro-validated then fixed at ROOT
+  CAUSE — per-finding record in MIGRATION.md #1792): an UNENUMERABLE
+  permission-broken POPULATED partition no longer misclassifies benign
+  no_source — pathlib SUPPRESSES PermissionError during glob traversal, so
+  the probe's original `is_dir() and any(rglob(...))` spelling read the
+  EACCES fault as "empty" and the retyped arm turned a merge-base loud
+  warm-withholding FAILURE into ok=True + a false "vendor-empty or never
+  pulled" wording (executed real-permissions A/B, uid 65534);
+  `has_stored_1m_bars` now enumerates with an OSError-PROPAGATING
+  `os.walk(onerror=raise)` (rglob-parity kept, absent/non-dir shapes stay
+  the benign False), so the EACCES propagates out of the reader as OSError —
+  a `parquet_read_skip_errors` member — restoring the merge-base
+  per-symbol-FAILURE classification (WARNING, ok=False, warm withheld),
+  fails-before-pinned at probe + reader level via a CI-safe
+  monkeypatched-scandir harness. Default path
+  byte-identical (note + wire payload + CLI stdout literal-golden-pinned;
+  zero added I/O — the classification rides an exception that only exists on
+  the empty shape). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `timeframe_materialize.py` (176/56,
+  the round-4 re-measure) +
+  `gated_prebuild.py` (143/26) + `prebuild_parallel.py` (85/16) +
+  `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
+  line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
+  clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)
+  Earlier: `claude/sweep-lock-pull-concurrency`
+  (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
+  the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
+  CLI parity: `cmd_sweep_all` OWNS the sweep-vs-pull exclusion — the G10 lake read-guard
+  (`LOCK_SH` on the pull single-flight file, held across the bar PRELOAD ONLY) + the G6 sweep
+  single-flight (DEC-SWEEP-UNKILLABLE-CORE-001 #1712). FIXES the CONFIRMED BLOCKER (executed
+  repro): the route's `BackgroundPullJob.start(...)` left `cross_process_lock` at the default
+  True and the nightly held the lake lock in its chain-lifetime stack, so the job/chain EX on
+  `<lake>/.locks/pull_singleflight.lock` made cmd_sweep_all's own G10 SH acquire on the SAME
+  file (a second open file description, SAME process) raise `LakeBusyError: a pull/heal is
+  running against this lake …` at EVERY dashboard/nightly sweep preload since G10 landed
+  (commit 3f32b3e) — CI-blind because the route tests fake `run_sweep_from_request` and the
+  nightly tests inject a fake `run_sweep`. THE FIX: (1) the sweep route passes
+  `cross_process_lock=False` (the crossverify callee-owns-its-locks precedent); (2) the
+  nightly's LAKE lock moves into a `lake_stack` closed in `pull_fn`'s `finally` — the exact
+  account-lock post-PULL+PREBUILD release pattern, with a chain-lifetime backstop so every
+  failure path still releases; the stale "no sweep-level flock exists" docstring + runbook
+  passages rewritten. SUPERSEDES #1612's "LAKE pull lock held through the sweep leg" clause —
+  the operator's daily-pull/crossverify concurrency requirement overrides the old whole-run
+  exclusion. SAFETY (verified): run identity (`data_snapshot_hash`) is FROZEN at preload from
+  the bars memo; the sweep spine/stage-3/cascade/diffcheck read only the memoised `_bars_for`;
+  mid/post-run lake reads (VIX stamper, results-depth loader, launch freshness gate) are
+  reference/display-only and never in run identity; pull writes are per-partition-flocked
+  atomic `os.replace` keep-first. PROOF (executed): the new
+  `tests/integration/test_sweep_pull_concurrency.py` runs the REAL cmd_sweep_all while a peer
+  takes the REAL pull lock EX mid-compute AND rewrites the preloaded partition through the
+  production writer — sweep completes EXIT_OK, result trees BYTE-IDENTICAL to the solo control
+  (the #1712 `_result_tree` idiom + TUPLE_DONE store_content_hash parity + an anti-vacuous
+  sensitivity arm), the concurrent bars land intact; fails-before pins on the route kwargs,
+  the nightly hold-span (held through PULL+PREBUILD, FREE during SWEEP — probed live both
+  sides), the e2e sweep-leg EX acquire, + the pull_jobs G10 self-conflict mechanism pair and
+  the parametrized every-failure-path lock-release law. HONEST: a pull mid-WRITE still refuses
+  a STARTING sweep at preload (G10 unchanged — bounded, relaunch); a preloading sweep still
+  refuses a pull start for the preload instant (D-13 wording debt stays
+  DEC-SWEEP-LOCK-WORDING-001); a nightly sweep-leg preload racing a contending pull can fail
+  that night's link loudly (break law, cron-red — accepted, implausible at 01:30); the
+  dashboard sweep-during-cross-process-pull shape moves from a start() refusal to an honest
+  job-error LakeBusyError at preload (test-pinned). Lock COMPOSITION only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change;
+  `pull_jobs.py` (371/78) + `nightly/run.py` (296/54) 100.00% line+branch on their gates;
+  ruff/ruff-format clean; `mypy --strict` clean; pyright at the pre-change baseline (0 new).)
+  Earlier: `claude/pull-scoped-all-oneclick` (**DEC-PULL-SCOPED-ALL-ONECLICK-001,
+  MIGRATION.md #1779** — the one-click scoped-ALL SPOT pull: ONE dashboard button
+  (`#pullAllSpotBtn` → the EXISTING `/pull-pipeline` launcher with the NEW additive
+  `scope=spot-only` token — all launcher rails inherited byte-identically; a scope-less
+  request's payload is byte-identical modulo the ONE additive `scope` key,
+  exact-payload-pinned; unknown token = clean 400) + ONE CLI subcommand
+  `brutex pull-all-spot` (over `build_headless_pipeline(scope=…)`; NOT cmd_fetch;
+  deliberately NO --start/--end — full-range convergence is the promise). SPOT ONLY —
+  all indices + ~750 stocks, 1minute, 2020-01-01 → prev day, auto-incremental via the
+  durable window ledger (second-run ZERO-fetch convergence e2e-pinned). The chain runs
+  THROUGH the unchanged `run_full_pipeline`: NEW `dashboard/pull_scope.py` no-op
+  `MetadataPullReport`/`CompositePullReport` builders pass the sequencer gates vacuously
+  (`historical is None` → True, the documented no-op arm); prebuild rides an EMPTY F&O
+  cascade; ONLY the spot movers warmer is injected (futures/options segments honestly
+  ABSENT; the CLI warms nothing — process-local cache, stdout says so). Greeks:
+  structurally never run — the note carries the explicit "Greeks: not run — no options
+  in this pull" constant. NOTE SURGERY: the sequencer's "metadata 0 expiries + 0
+  contracts, historical 0 bars over 0 contract(s)" no-op wording is REPLACED by
+  ", F&O skipped by design (spot-only scope)" (negative-pinned — a designed no-op must
+  never read like a real empty vendor result); ledger-failure prefix + quarantine clause
+  stay LEADING; a half-drifted `_complete_note` wording logs ONE
+  `pull_scope.note_surgery_miss` WARN, the e2e negative pin guards a full drift.
+  CROSSVERIFY TAIL (fail-soft, PRODUCTION-DEFAULT-REAL): the injectable tail seam's
+  default binding is the LANDED #1776 producer — the dashboard reuses the
+  `_crossverify_job` trigger (the route's runner/start body extracted into ONE shared
+  `_start_crossverify_producer`, §11 COMMON; started as the launcher's LAST step; the
+  runner's own bounded-wait lock trio absorbs the pull-flock handoff — NEVER nested
+  inside our held single-flight), the CLI invokes `run_crossverify` strictly AFTER the
+  flock/lease release (lock-ordering law F/B-verified), sharing ONE
+  SessionRateController; "not configured" renders only on genuine construction failure
+  (junk BRUTEX_CROSSVERIFY_* env — fail-soft, the spot pull is never blocked);
+  LakeWriteHalt RE-RAISES out of the fence. AUTO GATE (CLI `--auto`, cron-green
+  deferrals exit 0): NEW `calendars/auto_pull_gate.py` — trading-day + Muhurat
+  whole-day deferral + the NAMED CONSERVATIVE settle constant 17:30 IST
+  (`BRUTEX_PULL_ALL_SETTLE_IST`, fail-loud strict HH:MM, structurally ≥ 15:35 =
+  the guard's BLOCK_END; explicitly UNMEASURED — the #1775 probe is unrun, 17:30 =
+  its last slot; re-derive when the probe lands) + the launcher-level
+  `compose_market_closed` Muhurat mid-run belt ([open−30 min, close+5 min) from
+  MUHURAT_SESSIONS; the guard module byte-UNTOUCHED — composed, never edited; the
+  belt honors the SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch as the guard it
+  composes over — guard off ⇒ belt off, ONE switch for the shared-account
+  protection family (the hostile-review r1 ruling, both-arms-pinned); the
+  belt's fails-before proven IN-TEST: the bare guard is blind inside the frozen
+  2025-10-21 session — and since the r1 fix round the DASHBOARD wiring itself is
+  frozen-clock predicate-pinned (the R4 M6 mutant re-applied + verified killed). `PullIntent` gains the OPTIONAL `scope` field (pre-scope files
+  parse to None = full) so a crashed spot-only pull resumes SPOT-ONLY — never a
+  silently-widened F&O pull; since the refuter-round-3 fold a REFUSED concurrent
+  launch RESTORES the running pull's persisted intent (the pre-start persist had
+  clobbered it — a refused full-scope click during a live spot-only pull left a
+  full-scope intent whose crash-replay resumed the WRONG scope; NEW
+  `restore_intent_after_refused_start`, fails-before-pinned at the r2-fold
+  head — the
+  clobber CLASS is inherited, the restore fixes the symbols/dates dimensions
+  too), and since the refuter-round-4 fold the launcher's WHOLE intent
+  transaction (snapshot → persist → start → restore) is SERIALIZED under the
+  per-store process-local `PullIntentStore.launch_mutex` — the r4 G-1/R4-1
+  raced-sibling interleavings (a stale prior=None snapshot orphan-clearing
+  the RUNNING winner's intent; a second refused click re-installing the
+  first's clobber) are structurally closed for in-process launchers, both
+  executed race repros shipped as fails-before-pinned regression tests at the
+  r3-fold head; cross-process launchers stay excluded by the flock, and the
+  winner-clear-vs-restore TOCTOU stays the disclosed best-effort residual
+  (never a wrong scope; a resurrected just-finished intent costs one
+  idempotent boot re-pull — zero re-fetched spot windows, though the
+  metadata phase + the crossverify tail's producer still issue their
+  per-run vendor calls — the r4 G-2 zero-fetch honesty correction). M2 verify-then-wire outcome: NO new ledger-flush wiring
+  needed — `pull_all_spot` flushes the durable ledger per processed window internally
+  (mid-run-interrupt durability e2e GREEN with zero wiring). HONEST residuals: settle
+  time UNMEASURED (mis-set ⇒ bounded deferral churn, never wrong data — the #1774
+  today-gate + prev-day bound are the net); 2026 Muhurat timings unnotified →
+  `muhurat_session_active` honestly False (AUTO still defers the whole day);
+  out-of-coverage ≥2027 weekday AUTO proceeds post-settle with ONE WARN; dashboard tail
+  handoff may idle ≤ one 60 s lock retry; first-ever full run is LONG (no wall-clock
+  SLA claimed); manual click during a live Muhurat session starts-then-halts at the
+  first window (named follow-up DEC-PULL-ALL-MUHURAT-MANUAL-GATE-001); the full-scope
+  arm keeps the guard's Muhurat blindness (named follow-up
+  DEC-PIPELINE-MUHURAT-BELT-001). HOSTILE-REVIEW ROUND 1 folded (the per-finding
+  record lives in MIGRATION.md #1779): the R4-M6 dashboard-belt-wiring teeth, the
+  kill-switch coupling above, the exit-law prose-follows-code rewrite (still-failing
+  windows exit 2 by DEFAULT — the dead strict subterm deleted), the "?"-for-unknown
+  still_failed render, the tail-LakeWriteHalt CRITICAL alert-then-re-raise, the
+  keep_awake span widened over the crossverify tail (locks still exit first), the
+  `re.ASCII` settle shape, the actual-resolved-settle deferral detail, and the
+  spot-only-aware stopped-note trailer. REFUTER ROUND 1 folded (3 refuters; the
+  per-finding record lives in MIGRATION.md #1779): the Muhurat-belt deferral
+  HONESTY fix — the deferral surfaces no longer make the FALSE "inside
+  08:45-15:35" clock claim during an evening Muhurat session (NEW
+  `rewrite_market_hours_note` both-arms surgery on the dashboard finish detail +
+  the CLI prints; ONE `auto_pull_gate.muhurat_belt_halt` WARN per composed
+  instance attributes the Muhurat arm in the logs — the shared
+  `MarketHoursHalt.reason` contract untouched); the CLI ok=True headline is now
+  ALWAYS the surged note (ledger-reload-FAILED / prebuild-CRASHED warning
+  clauses never dropped; a crashed prebuild gets its own "CRASHED (ErrorType)"
+  line); junk `BRUTEX_PIPELINE_STRICT_GATE` is a clean pre-lock exit 1 (the
+  cmd_nightly precedent); `setBulkDisabled` covers BOTH pull buttons; the no-op
+  reports echo the launch's dry_run; the kill-switch no-re-read + both surfaces'
+  wiring-level guard-OFF arms pinned (the M-A2/M-I survivor mutants killed);
+  the vendor-EMPTY × prebuild × movers-warm interaction REAL-prebuild-e2e-pinned
+  as an INHERITED residual (the scoped exclusion REJECTED on executed evidence —
+  the spot report's `no_data` conflates vendor-empty with an already-settled
+  incremental re-run; named follow-up DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001
+  [CLOSED by DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 —
+  the reclassify-at-read no-source law; the e2e pin consciously flipped]);
+  the `materialize_lake_timeframes` no-stored-bars remediation names BOTH causes
+  (the one shared-module text edit); the intent ROLLBACK scope-widening residual
+  disclosed (docstring + ledger + runbook §5); the dry-run
+  prebuild-failures-by-design shape documented (runbook §7). ROUND-5 FOLD —
+  the SELF-ARMING POST-MARKET SCHEDULER (the operator hard requirement: ONE
+  click ⇒ fully automatic daily): NEW `dashboard/auto_pull_scheduler.py` (own
+  ci.yml 100% gate) — a daemon ticker (60 s, fail-loud
+  `BRUTEX_AUTO_PULL_TICK_S`) consulting the EXISTING `auto_pull_allowed` gate
+  + the durable atomic `<lake>/.pull_all_spot_auto.json` state (corrupt ⇒
+  DISARMED + one WARN); the ▶ button's URL gains `auto_arm=1` — the FIRST
+  click arms forever (a market-hours-refused click still arms; the response
+  says both), the fire seam IS the same `_launch_pipeline(scope=spot-only)`
+  path (all rails inherited, NO new vendor-call surface), once-per-day
+  STARTED-attempt law (refused launches — e.g. a whole-run-flock-holding
+  multi-day dashboard sweep — retry on later ticks; a FAILED started run
+  retries the NEXT eligible day; the incremental ledger makes catch-up
+  complete), success marked only via `note_run_complete(ok=True)` for EVERY
+  real spot-only run (a successful manual click counts as the day's pull);
+  disarm chip + `POST /api/v1/universe/pull-all-spot-auto` toggle + additive
+  `auto_pull` payload/pull-progress blocks; boot lifespan resumes ticking iff
+  durably armed (None/disarmed = zero threads); fires only while the
+  dashboard runs — the CLI `--auto` + cron lane stays the headless
+  alternative. The r5 K-1 conv-commits MAJOR remediated pre-push (the
+  `docs(migration+claude+runbook)` subject reworded to the comma form — tree
+  byte-identical; orphaned interim SHA citations swept to round labels) +
+  the J-NIT-1 held-I/O-envelope wording quantified on all three surfaces.
+  ROUND-6 FOLD — refuter round 6 (M CLEAN + O CLEAN + N: 1 MAJOR) + the
+  coordinator-ruled TWO-BUTTON SPLIT: [N-1 MAJOR] the durable-state loads
+  can no longer crash the dashboard — `AutoPullStateStore.load` AND
+  `PullIntentStore.load` adopt the crossverify #1776 round-2 M1 template
+  (bytes read + decode INSIDE the corruption-tolerant path; UnicodeDecodeError
+  / RecursionError / OverflowError folded; a 16 MiB size cap checked
+  PRE-read) — every corruption shape reads DISARMED / no-intent with ONE
+  WARN [COMPLETED at the round-7 fold for the non-regular-inode shapes the
+  M1 template cannot see — see the ROUND-7 FOLD below]; F/B-proven through
+  the REAL `build_app` lifespan boot (invalid-UTF-8 ·
+  nesting-bomb · oversized each CRASHED the boot at the pre-fix head in a
+  scratch worktree; a corrupt intent file 500'd the pull click — all clean
+  post-fix); [M-2] `cmd_dashboard` eagerly validates
+  `BRUTEX_PULL_ALL_SETTLE_IST` beside the tick env (junk = clean exit-1 at
+  boot, never a delayed tick crash) + `auto_pull.tick_error` dedupes per
+  (day, error-type) with the day-rollover re-WARN as the heartbeat and
+  `status().last_outcome` carrying the live error; [M-3] the
+  two-dashboard-processes-on-one-lake residual disclosed (docstring + ledger
+  + runbook — the scheduler state file is process-local-mutex'd only);
+  [N-2/N-4/M-1] orphaned pre-rebase SHA citations swept to round labels, the
+  unsigned reworded commit re-created SIGNED via `commit-tree -S` (tree +
+  message bytes + dates verbatim; whole chain re-verified), the ledger test
+  count recounted honestly. THE TWO-BUTTON SPLIT (all rulings
+  coordinator-locked): NEW scope token `fno-only` — the exact spot-only
+  mirror: the SPOT phase is an honest all-zeros no-op `BulkSpotReport`
+  passing `spot_phase_ok` vacuously with note surgery to "spot skipped by
+  design (F&O-only scope)" (negative-pinned — never reads like a real empty
+  spot pull); metadata + F&O historical + Greeks run REAL; prebuild = the
+  F&O cascade ONLY (`include_spot=False` → the gated spine's
+  `materialize_spot=None` reported-noop, the options-noop mirror); movers
+  warm = futures+options only; guard/belt/completeness/intent-scope rails
+  inherited (a crashed fno-only pull resumes FNO-ONLY). RULED exclusivities,
+  each pinned: the crossverify tail NEVER fires on fno-only (Spot-exclusive);
+  the scheduler NEVER arms/fires fno-only (`auto_arm` on a non-spot-only
+  scope stays 400); the bare route stays the full-chain API default
+  byte-identical; the headless binding REFUSES fno-only loudly (`brutex
+  pull-fno` = the named one-line follow-up). UI: the combined "Pull · full
+  pipeline" button is REMOVED — universe.html carries exactly TWO pull
+  buttons, ▶ Pull Spot (auto-arming, relabeled) + ▶ Pull F&O (manual,
+  selection- + date-aware, `scope=fno-only`); `setBulkDisabled` covers both.
+  ROUND-7 FOLD — refuter round 7 (P: 1 MAJOR + 1 NIT · Q: 1 MINOR + 2 NITs ·
+  R: CLEAN e2e): [P-1 MAJOR] the round-6 hardening's plain `read_bytes` HUNG
+  FOREVER on a NON-REGULAR inode (FIFO / `/dev/zero` symlink / socket /
+  directory) planted at either sidecar — no exception, so the boot belt
+  never fired: executed at the pre-fix head, the REAL lifespan boot wedged
+  SILENTLY (strictly worse than the N-1 crash) and a REAL pull click's
+  request thread wedged in the held-mutex intent snapshot; FIXED on the
+  #1614 round-6 loader template — ONE shared `pull_intent.read_sidecar_bytes`
+  (`O_RDONLY|O_NONBLOCK` open → `S_ISREG` on the fd's `fstat` → the 16 MiB
+  cap on the SAME fstat — CLOSING the round-6 stat→read TOCTOU, P-2 —
+  → bounded read → owned-flag close-in-finally) serves BOTH stores; a
+  non-regular inode folds into the SAME corruption arm naming the shape, a
+  dangling symlink reads ABSENT, F/B-proven in bounded subprocesses (boot +
+  click HANG at 68d18dea; clean disarmed/recovered at head) + SIGALRM
+  hang-watchdog regressions at store/boot/click level; [Q-1 MINOR] the two
+  round-6 ruled exclusivities that lacked teeth are now negative-pinned —
+  an fno-only run never clobbers `/api/v1/universe/pull-verdict` (a prior
+  red banner survives byte-equal) and never marks the day's spot auto-pull
+  (`last_success_date`/`last_attempt_date` stay unset under an ARMED wired
+  scheduler) — refuter Q's surviving mutants M-Q6/M-Q8 re-applied + verified
+  KILLED; [Q-2/Q-3] the #1779 Files-line recount (7 new + 12 touched;
+  gated_prebuild + pipeline_prebuild named) + the doubled universe.html
+  comment word.
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; `pull_scope.py` (99/24) + `auto_pull_gate.py`
+  (80/28) + `auto_pull_scheduler.py` (253/56, round-7 re-measure) +
+  `pull_intent.py` (253/56, round-7 re-measure)
+  100.00% line+branch on their ci.yml gates (+ `gated_prebuild.py` 134/24 ·
+  `pipeline_prebuild.py` 193/54 re-measured 100.00%); touched
+  app.py/cli.py/pipeline_binding.py lines covered; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 errors on every touched file.)
+  Earlier: `claude/o1-guarantee-harden` (**DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791** —
+  the O(1)-guarantee verification + hardening pass. THE RECORD: NEW `docs/O1_GUARANTEE_AUDIT.md` — the
+  authoritative honest per-path complexity classification (51 rows: the six Golden-Rule-#5 engine hot paths ·
+  the DB/lake dashboard read paths · the frontend), every row carrying its honest class
+  (genuine-O(1) / O(1)-on-repeat / O(page) / O(rows)-O(files) / O(n log n)), its first-read/worst-case/error-path
+  cost and its bench gate or an explicit "none" — under the anti-illusion rule: NO path claims bare O(1) where its
+  FIRST read is O(files)/O(rows) (the #1528 posture, product-wide), and the enforcement split is stated plainly
+  (the merge-blocking guarantee is the shared-CI ROBUST tier — the whole tests/bench dir every push at 3–10×
+  ceilings — 123 bench files (measured 2026-07-13 at the post-QUAD merged tree; the QUAD fold raised the round-1
+  census 121 → 123 — sub-split unchanged): 75 ratio / 19 cache-tier / 2 metadata-sweep / 10 M4PRO_ABS-gated; the strict 1.1× M4-Pro
+  tier + absolute floors run post-merge, non-required + non-blocking BY DESIGN per #382 + #1753). THE TRIAGE: the
+  reported M4-Pro ResultsStore.get "1.87×" strict-tier failure is VERIFIED NOT A REGRESSION — the path is a
+  one-line dict probe (`results_store.py:692`), measured dead flat (51.7/53.5/51.7 ns at 1k/10k/100k rows;
+  re-measured 0.994×/0.962×), "1.87" has NO trace in the repo, the ledgered history is the #1301 1.134× cache-tier
+  singleton (rerouted to `cache_tier_ceiling` → 3.0× strict; the DEC-O1-CACHE-TIER-001 M4-Pro calibration bounds
+  the dict band at 2.11×) — a 1.87× reading PASSES today's gate with headroom while the O(1) oracle keeps teeth;
+  NEW deep-depth pin `test_get_ratio_is_o1_deep_depth` (100k-vs-1k) carries the triage note in-test. THE FIVE
+  HARDENINGS: (F1) the headers-then-stalled-body poller wedge closed on its LAST THREE carriers —
+  coverage/spot_coverage/expired_options ride the NEW COMMON `BXUI.fetchTextBounded` (abort armed THROUGH
+  `r.text()`; same TimeoutError shape, degrades byte-identical; `TestBoundedTickFetch` widened 2 → ALL FIVE
+  templates + a node-EXECUTED stalled-body golden; fetch_windows/completeness deliberately KEEP their
+  self-contained local copies — they do not load bx-ui.js, documented); (F2) the bx-oneclick timeline render
+  bounded — a dup-only events tick renders NOTHING (`ringMutations` skip token), the render caps at the NEWEST 500
+  with the truncation NAMED on-screen, the search input gains the 200 ms house debounce (killing the 5,000-node
+  teardown+rebuild every ~3 s / per keystroke; node-executed goldens); (F3) universe.html's `refreshWindowsLine` +
+  six integrity loaders ride ONE `boundedLatestJson` (the EXISTING `gbFetchJson` body-armed abort + a per-loader
+  generation claim — stale late responses never repaint; renders byte-identical, poll-hygiene pins pass
+  unmodified; the 2026-07-13 merge-reconcile folded main's #1763 client-belt NO-OVERLAP guard into the SAME
+  helper — a tick whose prior fetch is in flight is skipped, and #1763's interim inline `guardedPollJson`
+  AbortController copy is superseded by the gbFetchJson-delegating helper); (H1) the /db registry pagers — the ONE wholly-uncached /db pager — gain an O(1)-on-repeat
+  filtered-COUNT memo: NEW `lake_revision.registry_revision` (base + `.wal` stat token; probe fault → uncached
+  legacy, never stale) + `db_view.registry_count_key` (repr-folded, collision-proof) + optional
+  `count_cache`/`generation` on both pagers + `registry_counts` (None = byte-identical legacy), page DATA
+  untouched (O(page) LIMIT/OFFSET); (H2) the per-poll O(dirs) freshness-probe tax TTL-bounded at the two named
+  sites — NEW `lake_revision.RevisionProbeMemo` (default-ON TTL 1.0 s, `BRUTEX_REVISION_PROBE_TTL_S`; `0` =
+  byte-identical legacy; junk fails LOUD; single-flight; a None probe is never memoised + evicts the prior entry —
+  outage recovery immediate) wrapping EXACTLY the leaderboard `sweep_results_revision` + oneclick
+  `runs_revision_probe` calls via `build_app(revision_probe_memo=)`, with the conftest hermeticity belt
+  (`REVISION_PROBE_TTL_ENV` setdefault "0" — the #1692/#1774 precedent). THE EIGHT BENCH GATES (all green this
+  session, shared tier): the deep-depth pin + `test_registry_count_cache_o1.py` (4 clicks → 1 COUNT; generation
+  move → exactly +1; cached click flat 2000-vs-200 legs) + `test_db_tables_swr_o1.py` (5 polls → 1 sweep;
+  master-revision move → +1) + `test_preopen_export_memo_o1.py` (warm click = ZERO further read_parquet
+  statements, bytes identical) + `test_window_ledger_degrade_memo_o1.py` (degrade arm: one parse per stamp) +
+  `test_revision_probe_ttl_o1.py` (6 polls → 1 sweep per route; post-TTL → exactly one re-probe) +
+  `test_sweep_cache_bloom_rebuild_cost.py` (resume rebuild LINEAR: 10k→61.0 ms / 100k→78.0 ms = 1.28× vs the 20×
+  ceiling) + the `test_blake3_combo_hash_o1.py` payload pins (measured: `roll_schedule` 80 ordinals → 3.54× base,
+  pinned < 8×; 10.66× bytes → 10.59× time = LINEAR — flat-vs-payload is physics-impossible, honestly NOT
+  claimed). HONEST ENVELOPES: the TTL memo INTRODUCES a ≤1 s freshness-detection staleness window (disclosed +
+  kill-switched; the walk itself stays O(run dirs) per fresh probe — the F5 uncapped ruling stands, FREQUENCY
+  bounded not the walk); the registry cache is O(1)-on-repeat — the FIRST click per revision pays the O(filtered
+  rows) COUNT; frontend caps are NAMED on-screen, never silent truncation; the SummaryCache `revision_probe` path
+  is deliberately NOT wrapped (scoped to the two named sites). DELIBERATELY NOT CHANGED (named follow-ups):
+  MoversSnapshotCache negative-result backoff = DEC-MOVERS-CACHE-ERROR-BACKOFF-001; movers LRU eviction churn
+  under hostile coordinate churn (capacity 256 — note only); `OptionDedupIndex._add_locked` Bloom-first ordering
+  (the pre-existing in-source Rule-11 follow-up); `ResultsStore.top_k` O(n log n) (documented; the #1533 route
+  cache is the enforcement). GATES: db_view ci.yml-EXACT stanza 100.00% (1659/536, 764 passed); lake_revision
+  100.00% (139/36) via the coverage_gate_discovery per-module gate; frontend six-suite 195 passed + the 44-file
+  battery 988 passed + the backend 12-file suite 125 passed; ruff/ruff-format clean; `mypy --strict` clean on
+  touched files (0 new); pyright 0 new vs the origin/main baseline; `node --check` clean. READ-side dashboard +
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/engine-spot-only` (**DEC-ENGINE-SPOT-ONLY-001,
+  MIGRATION.md #1790** — the brute-force ENGINE is SPOT-ONLY (operator
+  directive 2026-07-13, "wipe off the future, only spots alone"): the
+  NIFTY-futures series alias `NSE-NIFTY-FUT` is RETIRED from engine sweep
+  scope — a CONSCIOUS, ledgered supersession of the engine-scope clause of
+  DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012 and the launch surface of
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 (#1700–#1710), never a silent scope
+  change (Golden Rule #3). `brutex/universe.py::is_engine_sweep_symbol`
+  admits EXACTLY the 3 spot indexes; `classify_engine_sweep_target` refuses
+  the alias on EVERY coordinate (the `EngineSweepVerdict.tier` Literal drops
+  `"nifty_future"` STRUCTURALLY); every production sweep entry — `brutex
+  sweep`/`sweep-all`/the daemon/`sweep-verify --recount` via
+  `check_sweep_scope`, the dashboard sweep route (400, no override by
+  design), the dashboard launch button (`probe_futures_alias` reads honestly
+  unavailable citing the DEC), and programmatic `SweepGridConfig`
+  construction (Layer-1 ValueError) — refuses LOUDLY citing
+  DEC-ENGINE-SPOT-ONLY-001 + "the engine is spot-only; NSE-NIFTY-FUT remains
+  lake/REFERENCE_ONLY", BEFORE any futures-series resolution or lake I/O
+  (spy-pinned). RATIONALE: the 3 spot indices carry no traded volume, so the
+  VWAP bits 52/53 permanently abstain on every remaining engine instrument —
+  removing the one volume-bearing engine instrument makes that unconditional
+  (coordinates with the #1787 volume-bits work). RETAINED below the gate
+  (tested internals + lake tooling, NOT deleted): `futures_series.py`,
+  `series_load.py`, the Stage-1A roll-reset machinery, the
+  instrument⟺roll_schedule invariant, the cascade `roll_schedules` carriage,
+  and `_SYMBOL_ID_TABLE` row 4 (append-only law) — reachable ONLY via the
+  pre-existing loud, audit-stamped `--allow-out-of-scope` CLI research
+  escape or recorded-work forensics; the frozen futures goldens drive
+  `run_persisted_sweep` below the gate and pass UNMODIFIED (run identity
+  untouched). Groww PULL/lake scope UNTOUCHED — futures ingest + the F&O
+  lake stay REFERENCE_ONLY. Fails-before-proven regression
+  (`TestSpotOnlyScopeRefusal` — the pre-flip source RAN the sweep) + the
+  `is_engine_sweep_symbol` truth table + the isolation property collapse to
+  the 3 spot triples. ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX; no
+  vocab/rate/lake-schema change; `universe.py` 100% line+branch on its
+  ci.yml gate + the whole-engine gate green; ruff/ruff-format clean, `mypy
+  --strict` clean, pyright 0 new. HOSTILE-REVIEW ROUND folded (verdict
+  SHIP×2 — 2 MINOR + 3 NIT, per-item record in MIGRATION.md #1790): the
+  stale lowercase-alias case-hint clause DROPPED (never "did you mean" a
+  symbol that is itself refused — `nse-nifty-fut` now takes the generic
+  spot-only refusal, its test flipped to pin that); ADR-0016 §6 gains the
+  appended SUPERSEDED-IN-PART note; the ADR-0012/ADR-0016/spec launch-DEC
+  ledger cites reconciled `#1521–#1523` → the verified `#1700–#1702`; the
+  `:770`-points-at-the-fence NIT REFUTED with evidence — spec line 770 IS
+  the blake3 formula on this branch, cite kept.)
+  Earlier: `claude/crossverify-backfill` (**DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789** —
+  the withheld-day AUTO-RE-GATE + the persistent last-run surface, stacked on PR #1515's
+  `claude/crossverify-spot-only` head (the PR opens after #1515 lands). OPERATOR SCOPE RULING 2026-07-13: the
+  originally-briefed HISTORICAL whole-range S3 backfill (2020→today walk) was STOOD DOWN before any code landed —
+  current-day-only S3 push stands; the "2020→today" ask concerned the LOCAL pull. Delivered: (1) step D2 in
+  `run.py` (`_regate_withheld_scan` + NEW `journal.scan_withheld_journals`) — every prior day inside
+  `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` (default 5; the ONE shared catchup window) whose journal still names WITHHELD
+  symbols has exactly those symbols re-gated from the since-healed lake: re-export → stage → publish the
+  now-complete ones under that day's LEAF journal flock (re-loaded under the lock — a peer's re-gate converges),
+  the journal `withheld` map rewritten to the honest remainder (still-withheld = reason UPDATED; honest `nothing`
+  = dropped + INFO, never a fabricated file; no-longer-enumerable = kept verbatim + WARN); already-published keys
+  are NEVER re-put (the `mark_staged` sha idempotency law + `publish_staged`'s pending-only puts — e2e-pinned
+  zero second PUTs); FAIL-CLOSED gate-first (gate absent ⇒ the whole scan skips with one WARN); runs BEFORE the
+  session gate (weekend fires re-gate a healed Friday — the step-D parity law); whole-run failure classes mirror
+  steps D/K/M (S3BackendUnavailable ⇒ publish_failed exit 2 · staging LakeWriteHalt ⇒ emit_pull_halt + suspect ·
+  nonretryable S3 ⇒ the scan aborts, later days left for the next run; a step-D recovery abort skips D2
+  entirely); defensive totality on calendar-abstain/non-trading/Muhurat prior days; ONE lazy `enumerate_targets`
+  per run. `CrossverifyReport` gains the additive put-level `regated` (counts toward the `published` verdict —
+  the recovered_prior twin); the Telegram summary + CLI lines gain `re-gated N` (INFO requires recovered==0 AND
+  regated==0; regated=None reads "?" never INFO); one `crossverify.regate_day` INFO per day. CLOSES the
+  #1776-named follow-up DEC-CROSSVERIFY-BACKFILL-001 (id RETIRED UNUSED — the runbook bound that name to exactly
+  this auto-re-gate; "backfill" now denotes the separately-stood-down historical push). (2) the PERSISTENT
+  last-run failure surface: `_finish` writes `<lake>/.crossverify/last_run.json` (atomic, best-effort — a failed
+  VIEW write never kills a run) for every MATERIAL verdict (summary verdicts + refused; NEVER dry-runs, NEVER the
+  honest skips — a weekend skip cannot clobber Friday's failure record, pinned) carrying the full report counts +
+  the NEW capped cross-pass `failed_keys` sample + detail; `journal.load_last_run` rides the load_journal
+  corruption-tolerance contract (absent/corrupt/oversized ⇒ None + one WARN); `GET /api/v1/crossverify/progress`
+  serves the additive `last_run` field (never-raises root resolve + `run_in_threadpool` — one O(1) sidecar read
+  per poll off the event loop; null never a 500) and the /universe panel's NEW `cvRenderLastRun` renders ✓/✕ +
+  day + verdict + counts + failing keys + detail on load, textContent-only — a finished failure survives page
+  reloads AND dashboard restarts (pinned across a REBUILT app instance); the retryable-exhaustion
+  `publish_failed` verdict gains the real "N key(s) still failing after retries (first: …)" detail (was empty).
+  HONEST LIMITS (named): only WITHHELD symbols re-gate — an honest-`nothing` zero-bar day backfilled later, or a
+  withheld day OLDER than catchup_days, still needs the manual `--day` re-run; each re-gated symbol pays one
+  month-partition read (O(one month of 1-minute bars) per symbol·day); a pending key published by the D2 pass
+  rather than the recovery scan counts `regated`, not `recovered_prior` (attribution only — both → published);
+  the last-run record is a VIEW — the per-day journal stays the durable truth. POLISH ROUND folded (same branch,
+  pre-open — both hostile reviews SHIP; their non-blocking items as ONE commit): a MATERIAL skip-day run
+  (regated/recovered_prior > 0 — a weekend/Muhurat/deferred fire that shipped real S3 objects) now emits the ONE
+  Telegram summary (WARN — the catch-up tier; the three skip verdicts gain markers + join the WARN set) AND
+  writes the last-run record (material-actions-only writes win — the Friday record a weekend re-gate overwrites
+  was resolved by that very re-gate; a TRUE no-op skip stays silent, Friday's failure record survives —
+  supersedes the initial summary/last_run-silent parity); the D2 target enumeration is guarded FAIL-OPEN (NEW
+  `_store_read_errors()` — the `spot_drift` house mirror; a transient store fault ⇒ one
+  `crossverify.regate_scan_failed` WARN + whole-scan skip, the main day never sinks; a genuine bug still
+  propagates); the two journal scans' oldest-boundary (offset == lookback IN, lookback+1 OUT) is mutation-pinned
+  (both `range(lookback_days - 1, …)` mutants verified killed); the peer-converged re-gate arm pinned SILENT (no
+  save, no INFO). TESTS: `TestWithheldRegate` (17) + `TestLastRunRecord` (7) + `TestSkipDayMaterialVisibility`
+  (6) + `TestRegateEnumerationGuard` (4 tests / 6 cases) on run.py (100.00%
+  line+branch), `TestScanWithheldJournals` + `TestLastRunRecordStore` + the 4 boundary pins on journal.py
+  (100.00%), the summary/CLI
+  token + severity pins (incl. the material-skip WARN/marker trio), `TestLastRunSurface` (5, incl.
+  across-a-rebuilt-app) + the panel textContent pin, and
+  the REAL-gate integration e2e (day D truncated-BANKNIFTY withheld exit 2 → lake healed via the production sink
+  → the NEXT trading day's run publishes D with regated==1, withheld cleared, staging gone, zero re-puts, the
+  last-run record flipping withheld_partial → published) — ci.yml UNTOUCHED (every new test in an already-gated
+  file). GATES: whole-package `brutex.crossverify` 100.00% line+branch; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; zero
+  new routes, zero new env vars.)
+  Earlier: `claude/crossverify-spot-only` (**DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788** —
+  the cross-verify export contract AMENDED to SPOT-ONLY over the WHOLE spot universe (operator ruling
+  2026-07-13; supersedes-in-part #1776's "ALL spot + NIFTY/BANKNIFTY futures" tonight-scope clause):
+  (1) FUTURES OUT — the metadata + FUT-candle pull legs DELETED from `pull_leg.py` (spot is the ONE vendor
+  leg; `PullLegReport` slims to `spot_ok/halted/halt_reason`; the str-vs-date dual-shape law collapses to
+  the spot chain's ISO-string law, its `pull_all_spot` signature drift pin kept), `run.py` loses the
+  registry read (the `_enumerate` FUT arm + skip-pull fallback + `registry_path`), the `default_seams`
+  `metadata_puller`/`candle_puller` params, and the G2 FUT settle-retry class
+  (`day_export.SETTLE_RETRY_REASONS_FUT` deleted — the belt is INDEX-only); NO futures pulls happen and NO
+  futures CSVs are produced — TickVault must NOT expect futures files, absence is BY DESIGN
+  (negative-pinned: a lake WITH a full FNO contract partition AND a registry holding live FUT rows yields
+  ZERO `*_FNO` keys — e2e over the full `run_crossverify` chain on S3+journal+staging, the seams-level
+  registry-ignored pin, and the spot-only `s3_keys.txt` golden regenerated via the gated generator).
+  (2) WHOLE-SPOT-UNIVERSE IN (the addendum census): the landed producer's STOCK enumeration was already
+  whole-universe (~751 — every NSE EQ row incl. reference-only NTM names; the lean store's
+  `fno_eligible_underlyings` unions every persisted EQ by construction) but its INDEX enumeration was the
+  ENGINE TRIO only — WIDENED: NEW COMMON `pull_leg.whole_universe_spot_targets` (the ONE
+  `classify_instrument` enumeration WITH `reference_only_security_ids` threaded — the /universe
+  full-membership precedent) is shared by the pull leg AND `run.py._enumerate`, so export ≡ pull BY
+  CONSTRUCTION; `canonical_identity`'s INDEX arm widens from the 3-coord `EXPORT_INDEX_COORDS` allowlist
+  (deleted) to the universe IDX fetch rule's mirror (every key-safe NSE index; from BSE only SENSEX —
+  mirror-pinned against `is_universe_underlying`), so ALL ~25 indices incl. INDIAVIX/sectorals export; the
+  engine trio stays a STRUCTURAL FLOOR in `_enumerate` (a masterless lake still enumerates + BLOCKS on a
+  missing brute-force index — the surface never silently narrows); three-tier pin: an index + an F&O stock
+  + a reference-only NTM stock ALL enumerate (leg unit + seams level over a real `instruments.duckdb`).
+  (3) UNCHANGED BYTE-FOR-BYTE: the CSV contract (header incl. `oi`; spot rows keep the pinned empty-oi
+  cell), the completeness-gate binding, the S3 posture/key layout (PutObject-only on
+  `tv-prod-cold/crossverify/*`), the 1-minute-only law, Muhurat/session semantics, the journal/publish
+  machinery; all 7 golden CSV fixtures byte-identical. (4) RETAINED STRUCTURAL (documented
+  unreachable-from-producer, 100% direct-unit-covered — no coverage pragma hides dead code): the canonical
+  FUT mapping + `NSE_FNO`/`BSE_FNO` tokens + `EXPORT_FUTURES_UNDERLYINGS`, the renderer's oi-int +
+  NULL-OI-fut refusal laws (the two FUT fixtures re-labelled STRUCTURAL renderer goldens), the prebuild
+  FNO arm, the gate's FUT class + fake-twin arms. (5) GATE POLICY at ~776 symbols (deliverable 2, verified
+  against the #1774 sibling; INDEX tiers per the coordinator-APPROVED index-policy ruling, folded in the
+  same-branch fix round): ALL ~25 indices + all stocks stay IN the export — the STRICT count+close-edge
+  WITHHOLD law is scoped to the VERIFIED engine trio ONLY (`day_export.STRICT_INDEX_COORDS`, derived from
+  the ONE `BRUTE_FORCE_INDEX_UNDERLYINGS` engine constant — never re-minted; a zero-bar TRIO index reads
+  `count_short` from the real gate ⇒ withheld_partial exit 2 CRITICAL; the INDEX-`no_today_bars`→BLOCKED
+  arm survives as documented defensive totality, production-dead — the F2 truth-table correction); the
+  other ~22 indices (INDIAVIX — the §6 UNVERIFIED example — + sectorals) ride the OBSERVE-ONLY count law
+  (`index_export_policy`): bars + complete close edge ⇒ PUBLISHED with the short/excess count COUNTED
+  (per-symbol `crossverify.observe_count_anomaly` INFO + the run-level `publish_observe` counter — never a
+  count-withhold); zero bars ⇒ honest `nothing` (never a CRITICAL); a forming last bar still withholds
+  (`last_bar_incomplete`, settle-retry eligible); promotion path = a probe-evidenced follow-up DEC
+  (DEC-CROSSVERIFY-INDEX-STRICT-PROMOTE-001, named in #1788). CASH = all-zero-volume shape ONLY, NO
+  minute-count demand (the #1031
+  illiquid lesson — a legitimately thin day SHIPS, a zero-bar day is honest `nothing`); HONEST LIMIT
+  (named): a genuinely-settled all-zero-volume CASH day is indistinguishable from a still-settling one —
+  withheld either way, never wrong bytes; operator visibility (nothing ships invisibly): the ONE Telegram
+  summary carries the THREE-WAY split strict-published/observe-published (decision-level
+  `CrossverifyReport.publish_strict`/`publish_observe`) beside the withheld/blocked/nothing counts
+  verbatim (pins; the CLI line mirrors the tokens) + the journal's `withheld` map names each
+  symbol+reason; the runbook gains the TIERED gate-class table; e2e arm: a REAL-gate 374/375
+  close-edge-complete NIFTYIT day publishes observe-counted through the full chain. HONEST recovery-scan
+  envelope (F3, ruled benign): a pre-trim staged-but-unpublished FUT file would be honestly COMPLETED by a
+  post-trim recovery scan (correct bytes under the prior contract; stray FUT objects inert under the
+  amendment). CLOSES AS MOOT
+  DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 (nothing to ingest with futures out; #1776's text NOT edited — the
+  closure lives in #1788); DEC-CROSSVERIFY-PREEMPT-002 unaffected. GATES: whole-package
+  `brutex.crossverify` 100.00% line+branch (1246/330, 534 battery tests) + every per-module ci.yml stanza
+  green (no test files deleted — ci.yml untouched); ruff/ruff-format clean; `mypy --strict` clean; pyright
+  0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs` (**QUAD MAX-CLUB merge
+  vehicle** — the file-disjoint fold of FOUR PRs as ONE merge event, assembled off main tip
+  3f32b3ef: **#1440** dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 +
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 + DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 +
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · **#1450** DEC-LAKE-INVARIANTS-PREINDEX-001 #1762
+  (stream the L3 lake-invariants scan + boot content token O(series)/O(dir), and stop
+  full-rescanning every boot on an unstamped sweep) · **#1288** DEC-DASHBOARD-READPATH-WEDGE-001
+  #1763 (the `universe.html` guarded-poll CLIENT belt — seven pollers routed through ONE
+  `guardedPollJson` with a 10 s AbortController + per-URL no-overlap guard [MECHANISM
+  SUPERSEDED at the 2026-07-13 #1791 merge-reconcile: the belt's no-overlap guard is folded
+  into `boundedLatestJson` — the gbFetchJson-delegating helper carrying the same body-armed
+  abort — and the interim inline `guardedPollJson` copy was deleted; the belt's INTENT stands])
+  · **#1441** docs
+  club DEC-EAP-FEEDBACK-INDEX-001 #1764 (+ the Zerodha 10y feasibility record + the market
+  one-pager, docs-only). File-disjoint by construction (only `docs/MIGRATION.md` + this
+  `CLAUDE.md` are union files); the three colliding ledger rows were renumbered off main's
+  taken #1712/#1715 (DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001). READ-side
+  dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
+  MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
+  Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
+  DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
+  TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
+  renderer · fail-closed gate seam · day exporter · journal/staging · PUT-only S3 publisher · pull/prebuild legs ·
+  run step-machine · launchd schedule, each 100% line+branch on its own ci.yml stanza) executing ONE zero-touch
+  post-close chain: priority pull (ALL spot with EXPLICIT `to_date=day` + scoped metadata + `expiry>=day`
+  NIFTY/BANKNIFTY futures — options EXCLUDED per the tonight-scope addendum; ONE SessionRateController spans the
+  legs) → the sibling #1774 completeness gate behind a narrow FAIL-CLOSED Protocol (module absent ⇒ refused exit 1,
+  never publish-ungated; the per-class branch-on-REASON table — a missing index day = exit 2 (real-gate token `count_short`; INDEX `no_today_bars` = BLOCKED stays the defensive-totality arm — the post-#1503 integration-moment fold: `export_symbol` now passes the STRICT covering `window_end = day + 1` the real #1774 law demands, the fake twin mirrors it, and `TestRealGateBinding` pins the REAL no-fallback binding end-to-end), settling
+  FUT / short index = bounded settle-retry then withheld-final) → the day-scoped never-stamping derive (#1778:
+  month-bounded 19 TFs + ±1d-padded 1day on the heal-recall template; the partial-derive-never-stamps invariant BY
+  CONSTRUCTION; double-derive-on-nightly disclosed, no new nightly cost) → the pinned CSV byte contract (UTF-8
+  no-BOM · LF+trailing newline · no-quote-ever · 2dp ROUND_HALF_UP via `round_money` · `oi` empty-for-spot /
+  int-for-fut with the NULL-OI-fut render REFUSAL · out-of-session/dup-minute/csv_safe-mutable REFUSE · raw-`&` S3
+  keys `M&M.csv`) → staging + per-day journal (atomic, crash-convergent) → LOCKS RELEASED → idempotent publish
+  (journal-keyed skip; bounded 1 s/4 s retry; AccessDenied aborts the WHOLE publish naming the IAM runbook;
+  recovery scan re-publishes prior pending staged bytes) → exactly ONE Telegram summary
+  (`SweepAlerter.crossverify_summary`/`crossverify_refused` + the blanket-try emit helpers the producer's
+  `_default_alerter` binds by NAME — landing them woke the alerts with zero producer edits, pinned end-to-end).
+  SURFACES: `brutex crossverify {run,install,uninstall,status}` (thin shims; exit law 0/1/2 cron-red; `--at`
+  REQUIRED probe-decided, NO default fire time; launchd `com.brutex.crossverify` DELEGATES to the nightly
+  install law via the ADDITIVE defaulted `log_stem`/`next_step` params — nightly plist bytes UNCHANGED, pinned;
+  the TRADING-DAY-AWARE journal-mtime deadman never false-MISSes a Monday or the day after Diwali) + the
+  /universe dashboard button (tonight-scope item 2): `POST /api/v1/crossverify/run` + O(1) progress route on a
+  DEDICATED third `BackgroundPullJob` sharing the app's SessionRateController — `cross_process_lock=False` (the
+  runner's `default_seams` lock seam owns the account→lake→lease trio, bounded 45-min wait-retry + honest
+  refusal; a job-level second flock acquire would self-conflict) + `market_hours_exempt=True` (the RUNNER owns
+  the market-hours law at its step E — honest `deferred_market_hours` exit 0); the panel rides the shared
+  `gbFetchJson` hung-fetch-bounded helper, textContent-only. BSE_EQ/BSE_FNO stay STRUCTURAL-only (mapper+pins,
+  never emitted); Muhurat = whole-run skip, NO files; GREEKS N/A — the Greeks stage is options-only and this
+  pull excludes options, nothing to enrich. HONEST: vendor same-day 1-minute availability UNVERIFIED — the
+  operator's 5-day settle probe decides `--at` (a too-early run WITHHOLDS, correct-or-absent, never wrong
+  bytes); movers warm = revision propagation only; CASH files legitimately <375 rows (INDEX strict 375);
+  withheld days = manual `--day` re-run (publish-PARTIAL recovery automatic); NO preemption (a foreign lock
+  holder past the budget defers the day — CRITICAL refused; TRUE preemption = named follow-up
+  DEC-CROSSVERIFY-PREEMPT-002 on the job-cancel mechanism); SENSEX-futures ingest = named follow-up
+  DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 gated on a Groww BSE-FNO availability probe; the FIRST-AWS-WRITE posture
+  (#1777) is PutObject-only on `tv-prod-cold/crossverify/*` — the SSM read-only pledge UNCHANGED, boto3 via the
+  NEW optional `crossverify` extra CI never installs, no real S3 put in CI (operator acceptance step). Integration
+  proof: a real-ParquetBarSink lake through the FULL `run_crossverify` over `default_seams` (real locks/reader/
+  export/journal/prebuild; FakeS3 + recording alerter injected) — published bytes byte-verified vs the committed
+  goldens, idempotent re-run 0 puts, truncated-index withheld exit 2, crash-mid-publish next-run convergence, the
+  derive leg proven by the independent `lake_derived_freshness_verdicts` oracle. ROUND-1 HOSTILE-REVIEW FIX PACK
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1776): the F1 BLOCKER (the futures
+  candle leg passed ISO STRINGS to `pull_contract_candles`, whose real signature types `date | None` — every real
+  futures pull would have TypeError'd; both legs now pass strings to the spot chain / `date` objects to the candle
+  chain, typed-stub contract tests + an `inspect.signature` drift pin on BOTH real chains), the corrupt-stored-row
+  isolation widening (`InvalidOperation`/`TypeError` → withheld `read_error`, never a whole-run crash), the
+  positive symbol allowlist `symbol_key_safe` (uppercase+digits+`&-.`, control chars/lowercase/dot-tokens refused;
+  mirrored control-char refusal in the renderer's cell guard), the validated `staging_path_for_key` (a tampered
+  journal key can never traverse outside the staging tree), the recovery scan moved BEFORE the session gate (a
+  weekend run still republishes prior pending keys; recovered staging cleaned, failed-again staging kept +
+  `publish_failed` exit 2), repr()'d vendor-derived log fields (#907), the step-boundary-deadline / box-IST /
+  IAM-guardrail / legacy-bar runbook honesty notes, and the intentional double-CRITICAL-on-halt comment.
+  ROUND-2 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the per-finding record lives in MIGRATION.md
+  #1776): the two refuter-confirmed MAJORs killed with stash-verified fail-before tests — (M1) `load_journal`
+  reads bytes+decode INSIDE the corruption-tolerant path (an invalid-UTF-8 / directory-shaped journal loads
+  None + one WARN; pre-fix it raised uncaught and ONE bit-rotted prior-day journal wedged EVERY later run via
+  the recovery scan) and (M2) `publish_staged` VERIFIES each staged file against the journal's recorded
+  sha256+size BEFORE the PUT (a bit-rotted/tampered staged file on the recovery path was previously published
+  VERBATIM to production S3; now WARN + failed + pending + staging kept — a same-day re-render heals) — plus the
+  S1 deferral honesty law (ALL exit-0 early returns ride ONE `_early_ok` upgrade: a recovery soft-failure is
+  `publish_failed` exit 2, never cron-green), the S2a per-day journal flock (the COMMON `partition_write_lock`
+  on the day's journal path serialises step-D recovery / stage+journal / publish+cleanup spans — the day flock
+  is a LEAF, never held while acquiring the pull trio; contended = prior-day skip / today honest refused exit
+  1; flock-held probes + a two-thread convergence test), the S2b `staging_orphaned` WARN (wiped/corrupt-journal
+  staging named + left in place), the S3e recovery abort law (nonretryable stops the prior-day scan), the S3a
+  `MAX_WINDOW_DAYS=3660` config bound, the S3b `nothing_to_do`-writes-its-journal deadman honesty correction
+  (schedule.py/runbook/#1776 + an in-test pin), the S3d eager market-hours-env 400 on the dashboard route (CLI
+  parity; dry-run exempt), and the S4 `covers_today` defense-in-depth belt (`gate_contract_violation` withheld,
+  never a publish on a lying "complete"). ROUND-3 HOSTILE-REVIEW FIX PACK folded (same branch, pre-open — the
+  per-finding record lives in MIGRATION.md #1776): the refuter-confirmed X1 MAJOR killed — step M RE-LOADS
+  today's journal UNDER the day flock (the step-D law applied to today), so a K_A,K_B,M_A,M_B same-day
+  interleave CONVERGES (zero puts, the peer's published entries counted skipped_already;
+  `crossverify.publish_converged`) instead of the stale in-memory journal reading the peer-cleaned staging as
+  a FALSE publish_failed exit 2 + CRITICAL while S3 is complete — the interleave now forced DETERMINISTICALLY
+  in-test (the peer's whole step M injected at run B's step-L clock hook; fails pre-fix) beside the kept
+  two-thread belt; plus the journal parse guard widened (`OverflowError`/`RecursionError` + the 16 MiB
+  `MAX_JOURNAL_BYTES` size cap — the SweepCheckpointStore precedent; load + recovery-scan arms
+  fail-before-verified), the gate binding folding `AttributeError` into the fail-closed refusal NAMING the
+  missing attribute + the per-symbol `gate_signature_drift` withhold on a classify `TypeError` (never a
+  mid-run crash), the sha256-operand killing test (same-length different-bytes tamper; the operand-drop
+  mutant applied + verified killed by exactly the new test), and the PR-body/#1776 stale-count + deadman-claim
+  honesty refresh (whole-crossverify 1257 stmts / 320 branches / 0 missed; 414 package tests). ROUND-4 POLISH
+  folded (same branch, pre-open — the per-finding record lives in MIGRATION.md #1776): P1 the mid-day/pre-open
+  honesty split (a mid-day fire is the SILENT `deferred_market_hours` exit 0, a pre-open fire is the
+  withhold-CRITICAL — runbook + schedule.py docstring + #1776 aligned) · P2 the gate-seam enum-VALUE-drift fold
+  into the typed withhold path · P3 `NoCredentialsError` classified nonretryable (whole-publish abort naming the
+  IAM runbook) · P4 the step-M provenance killing test pin. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 new; `node --check` clean on the touched template's inline scripts.)
+  Earlier: `claude/pull-today-completeness-gate` (**DEC-PULL-TODAY-COMPLETENESS-GATE-001 +
+  DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001, MIGRATION.md #1774–#1775** — renumbered
+  #1751–#1752 → #1755–#1756 → #1774–#1775 (the first hop at the 2026-07-13
+  merge-reconcile — main's #1488 wave took #1751 for
+  DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 + #1752 for
+  DEC-GROWW-ERRORCODE-ASCII-GUARD-001; the second per the coordinator's
+  fresh authoritative reservation map, live ceiling #1773) — the
+  pre-settle TODAY minute-completeness gate + the post-close settle probe.
+  (1) NEW pure classifier `brutex/data/today_completeness.py` (the
+  partial_window_detect/observe_all_filtered template) consulted in BOTH ingest
+  tails after `drop_bars_after` and BEFORE `sink.append` + `ledger.record`: on a
+  covers-today window (STRICT `window_end == clamp_today + 1 day`, `clamp_today`
+  stamped on the frozen `_RawWindow`/`_OptionRawWindow` payloads from the SAME
+  instant `clamp_window_end` used — midnight-coherent, the tail never reads a
+  clock) that FAILS the per-class criteria, today's IST-dated bars are WITHHELD
+  from the append (the write guard — keep-first would freeze the #837
+  still-settling `volume=0`/`open_interest=None` rows FOREVER; prior-date
+  history still lands) and the window demotes via the #1031 channel under the
+  NEW streak-EXEMPT `TODAY_INCOMPLETE` reason
+  (`window_ledger.STREAK_EXEMPT_DEGRADED_REASONS` — the streak never bumps, a
+  SKIPPED settle is structurally unreachable + belt-guarded, both membership
+  mutants hand-killed; the tombstone protection inherited free; the next pull
+  whose window no longer covers today is inert and the settled bars LAND —
+  PROVIDED the vendor has settled by that first non-covers-today re-pull, which
+  is exactly why the nightly must schedule after the probe-measured settle
+  time + margin (the #1775 runbook); convergence + zero-conflict lifecycle
+  integration-pinned against a real lake with the gate-off keep-first-freeze
+  counterfactual). (2) Criteria table:
+  INDEX_SPOT = distinct-minute count == `session.duration_minutes` (375
+  regular/Budget-weekend, 60 Muhurat) AND `session_last_bar_complete`;
+  CASH_SPOT = all-zero-volume shape only (no count demand — the #1031 illiquid
+  lesson; an honest heuristic extension of the FNO shape law); FUT = ANY-bar
+  OI-null / all-zero-volume mandatory + count OBSERVE-ONLY
+  (`today_count_short` INFO, far-month sparsity is legit); OPTION = OI-null
+  only; FNO zero-today-bars ABSTAINS; raw==0 stays the EMPTY channel (the
+  legit-vendor-empty pin, both spines) with `today_empty` visibility;
+  out-of-coverage (≥2027) abstains; non-trading today passes vacuously.
+  (3) Armed at ALL FOUR production sites — incl. the bulk `pull_all_spot` phase
+  `detect_completeness_gaps` never reached (that hole stays observed, named
+  follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001 [CLOSED by that DEC,
+  MIGRATION.md #1794 — `pull_all_spot` now threads
+  `detect_completeness_gaps=not dry_run`]) — via its OWN spine param
+  `today_completeness_gate`, each site resolving the fail-loud
+  `BRUTEX_TODAY_COMPLETENESS_GATE` env ONCE per pull (dry-run/inspect ⇒ False
+  without touching the env; junk fails loud at pull start); all four
+  wiring-spied. Events capped 20/pull + one suppressed summary; the wrapper is
+  fail-open (`today_gate_error` — a crashed diagnostic never demote-loops a
+  pull); `db_view.window_status_label` reads the honest "today's session not
+  yet settled by vendor (will re-pull)"; conftest gains the
+  `TODAY_COMPLETENESS_GATE_ENV` setdefault hermeticity belt (the #1692
+  wall-clock philosophy). HONEST: the gate judges what THIS fetch returned
+  (pre-fix stored partial days need the runbook remediation — mechanised audit
+  = DEC-LAKE-AUDIT-SETTLING-ROWS-001); the shape checks are parsed-bar
+  INFERENCE of the destroyed 6-element row (false positives cost one bounded
+  streak-exempt deferral, measured by the probe); a PROGRESSIVELY-settling
+  mixed CASH day passes the all-bars zero-volume rule and keep-first freezes
+  its forming minutes — a disclosed residual, conditional on unverified
+  per-minute CASH settlement behavior, probe-measurable via the per-CASH
+  `raw_null_volume`/`rows_len6` fields (#1774 (b)); a `nightly_summary`
+  deferral line = DEC-TODAY-GATE-NIGHTLY-SURFACE-001. (4) The #1775 probe
+  (`docs/groww/probe/postclose_settle_probe.py` + runbook): the doctor-kit
+  mint-BLOCKED read-only SSM paced client probes NIFTY/BANKNIFTY/SENSEX + 10
+  seed-fixed F&O-eligible CASH stocks + the front-month NIFTY FUT at
+  15:35/15:45/16:00/16:30/17:30 IST, recording the LITERAL 6-vs-7 raw row
+  shapes the parse destroys + count/close-edge/FUT-field checks into
+  timestamped JSONL + human transcripts, with `--summarize` building the
+  slot × check settle matrix; zero lake writes/settles; NOT run here (no creds
+  in the build env — nothing about the settle time claimed). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
+  `today_completeness.py` 100% line+branch standalone on a NEW ci.yml gate;
+  every touched gated module re-measured 100.00%; ruff/ruff-format clean,
+  `mypy --strict` clean, pyright 0 errors.)
+  Earlier: `claude/premerge-m4pro-nonblock` (**DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753** —
+  the pre-merge gate treats the non-required self-hosted
+  `m4pro-absolute-throughput` check as NON-BLOCKING: `scripts/ci/pre-merge-check.sh`
+  gains a HARDCODED (deliberately NOT env-overridable — broadening the set
+  requires a code change + a new DEC) `NONBLOCKING_CHECK_NAMES` constant
+  UNIONED with the caller's `IGNORE_CHECK_NAMES` at all three rollup scan
+  sites (count · failed · pending), so the offline-runner pending-forever
+  shape can never refuse a merge AND auto-merge.yml's
+  caller-SET `IGNORE_CHECK_NAMES` ("Auto-merge on green CI") cannot clobber
+  the exemption; a FAILED/CANCELLED m4pro is surfaced as a WARN-only line
+  that never affects the exit code — the round-3 claim-scoping: that
+  tolerance is THIS gate's verdict only, since on the auto-merge path the
+  workflow's own EARLIER ci-check `failing` scan (deliberately untouched —
+  outside this change's file-set) still refuses a FAILED/CANCELLED/
+  TIMED_OUT m4pro, while the PENDING shape (the motivating incident) is
+  non-blocking end-to-end because a queued check carries no conclusion for
+  that scan to match; the sibling `bench-m4pro.yml`
+  `bless-baseline` job is deliberately NOT exempted (the round-2 NAMED
+  RESIDUAL — operator authorization covers exactly
+  `m4pro-absolute-throughput`, broadening requires a new DEC; live-run
+  evidence 29172994876 + 29189211057: it cannot block in the offline-runner
+  scenario — its needs-downstream check-run is never instantiated while
+  m4pro sits QUEUED, and a completed feature-branch run marks it SKIPPED —
+  so the ONE reachable re-block shape is an operator manually CANCELLING a
+  stuck bench run; remediation: push a fresh head SHA, or a new DEC — the
+  full record lives in #1753's HONEST envelope); every REQUIRED check still
+  blocks —
+  redteam-pinned (NEW `TestM4proNonblocking`, 9 tests — incl. the round-4
+  TIMED_OUT warn-path pin `test_timed_out_m4pro_warns_but_does_not_block`
+  (the one round-4 cosmetic NIT, closed mutant-verified) and the round-1
+  review fold's source pin that the hardcoded set is EXACTLY
+  {m4pro-absolute-throughput} with the env-default override idiom absent,
+  round-3-HARDENED with the line-start assignment census + the append
+  refusal + the exact-passthrough census (both evasion mutants — an append
+  after the literal; a second line-start env-defaulted assignment —
+  verified passing the round-1 pin and failing the hardened one) —
+  fails-before-proven 5/7 on the 7 behavior tests against the baseline
+  script incl. THE pending-m4pro case; the
+  pending-`CI OK (aggregate gate)`-still-blocks + failed-required-still-blocks
+  pins guard the unchanged fail-closed posture; the excluded entry never
+  inflates the EXPECTED_MIN_CHECKS floor). SAFE because the check is
+  genuinely NON-required (not in ci.yml's `ci-ok` needs AND absent from
+  branch-protection-drift.yml's 22-member required-contexts set — the
+  round-1 review corrected the overstated "aggregate gate only" wording in
+  the script comment + ledger to this two-way evidence; MIGRATION.md #382
+  DEC-M4PRO-PR-TRIGGER-001 + #1534 DEC-BENCH-ABS-BASELINE-001 — a bench
+  regression is caught POST-merge on the self-hosted runner, never a merge
+  blocker, unchanged here). CI-gate script + redteam tests + docs only;
+  ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  no scope/vocab/rate change.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -5762,7 +6937,11 @@ hostile-review pass._
 
    **Engine-scope amendment (DEC-NIFTY-DYNAMIC-STRATEGY-001 / ADR-0012,
    2026-06-29, MIGRATION.md entry #1006; companion clause owned by PR-1
-   DEC-VOCAB-U128-CODEGEN-001 #1010):** the operator has AUTHORIZED the
+   DEC-VOCAB-U128-CODEGEN-001 #1010) — the ENGINE-FUTURES AUTHORIZATION in
+   this block is RETIRED by DEC-ENGINE-SPOT-ONLY-001 (2026-07-13,
+   MIGRATION.md #1790 — see the retirement note at the end of this block;
+   the history below is kept verbatim per the supersession convention):**
+   the operator had AUTHORIZED the
    brute-force ENGINE to ALSO run on **NIFTY futures** for the dedicated
    dynamic-strategy track (a session-anchored intraday VWAP is feasible on
    futures because they carry traded volume, unlike a spot index per
@@ -5794,6 +6973,24 @@ hostile-review pass._
    reset at every roll (D11 — no level ever crosses the basis gap). The
    engine sweep surface is EXACTLY {the 3 spot index triples} ∪
    {NSE/FNO/NSE-NIFTY-FUT}.**
+
+   **RETIREMENT (DEC-ENGINE-SPOT-ONLY-001, 2026-07-13, MIGRATION.md
+   #1790):** the operator has DIRECTED the engine back to SPOT-ONLY ("wipe
+   off the future, only spots alone") — this CONSCIOUSLY SUPERSEDES the
+   engine-futures authorization above and the PR-5 launch surface: the
+   engine sweep surface is EXACTLY the 3 spot index triples
+   (NIFTY/BANKNIFTY/SENSEX), `is_engine_sweep_symbol` refuses
+   `NSE-NIFTY-FUT`, and every production sweep entry refuses it loudly
+   citing the DEC + the remediation ("the engine is spot-only;
+   NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"). NIFTY futures REJOIN the
+   REFERENCE_ONLY surface (lake ingest + the F&O candle lake untouched);
+   the 60-condition vocabulary itself is UNCHANGED (data-independent —
+   the volume-bearing VWAP bits 52/53 now permanently abstain on every
+   engine instrument, since no spot index carries volume); the futures
+   resolver / alias-aware loader / Stage-1A roll machinery / symbol_id 4
+   are RETAINED as tested lake-tooling internals below the scope gate,
+   reachable only via the loud, audit-stamped `--allow-out-of-scope` CLI
+   research escape or recorded-work forensics.**
 
    **Scope expansion (DEC-P0-063, 2026-05-22, MIGRATION.md entry
    #200):** Track 1's INGEST scope was formally expanded to additionally
@@ -5857,8 +7054,9 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:760` after spec growth moved it from :743
-   (earlier :654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:770` after spec growth moved it from :760
+   (earlier :743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
+   :760→:770 with the DEC-ENGINE-SPOT-ONLY-001 scope-retirement note) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
@@ -6043,6 +7241,265 @@ hostile-review pass._
   from durable local state — unwired lanes read the explicit "not wired",
   never a fabricated green; READ-side only; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/bulk-spot-completeness-flag`
+  (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794 — renumbered
+  #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles, main took
+  #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 then #1793 for
+  DEC-SETTLE-EVIDENCE-ADOPTION-001 — the bulk
+  whole-universe spot pull arms `detect_completeness_gaps`:
+  `pull_all_spot`'s ONE spine call now threads
+  `detect_completeness_gaps=not dry_run` (the cli.py idiom, hoisted beside
+  the #1774 `_today_gate`), so the #1031 interior-gap /
+  trailing-truncation demotions run on every daily production path —
+  nightly, ▶ Pull Spot + auto-pull, /pull-all, retry-failed, the
+  crossverify pull legs — closing #1774's honest-envelope item (i); the
+  spine's `is_index` gate keeps the ~750 illiquid CASH names observe-only
+  on the gap/truncation class (the intrinsic ALL_FILTERED demotion stays
+  deliberately un-index-gated),
+  dry-runs stay double-protected (flag False + record-inert None ledger),
+  demotions settle SKIPPED at threshold 3 (bounded; `brutex
+  reopen-skipped`); NOT retroactive; detectors abstain out-of-coverage
+  from 2027 until the NSE list lands; ONE call site + docs + tests, the
+  detectors + spine byte-untouched; pull-INTEGRITY only — ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1794 for the full blurb)
+  Earlier: `claude/settle-evidence-adoption`
+  (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793 — the measured-settle
+  EVIDENCE-FILE adoption channel: the #1775 probe's `--summarize
+  --emit-evidence PATH [--margin-minutes N]` folds ≥5 REGULAR probe days into
+  the committed schema-1 `docs/groww/probe/settle_evidence.json`, and the
+  `--auto`/scheduler settle resolution becomes the validated three-tier law
+  env > evidence > the conservative 17:30 default (NEW
+  `calendars/settle_evidence.py` validator + memoized loader; explicit
+  `BRUTEX_SETTLE_EVIDENCE_PATH` junk fails loud — the resolve_* law;
+  default-path corruption = one WARN + the 17:30 fallback — the r6/r7 boot
+  posture; the CI committed-file test is the fail-loud tier for committed
+  content); `resolve_settle_time` wraps NEW `resolve_settle_resolution`
+  (tier-1 short-circuit keeps `--settle-ist`/env supremacy, e2e-pinned); the
+  `before_settle` detail carries per-tier provenance — the DEFAULT arm
+  byte-identical incl. the verbatim UNMEASURED clause; the shared
+  regular-file-only loader MOVED to COMMON `brutex/data/sidecar_read.py`
+  (pull_intent re-exports byte-compatibly — the #1715 leaf+shim precedent);
+  both eager-validation surfaces probe the channel so a junk explicit path
+  fails loud even under a tier-1 override; ships the CHANNEL, ships NO
+  measured number — the no-evidence resolution is BYTE-IDENTICAL to #1779
+  (parity-pinned) and the measured value is operator work (probe → emit →
+  review → commit → CI validates → adopt); ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1793 for the full blurb)
+  Earlier: `claude/spotonly-prebuild-empty-exclude`
+  (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — the #1779
+  vendor-EMPTY × prebuild × movers-warm residual CLOSED: zero-stored-bars
+  spot symbols classify NO-SOURCE at the prebuild read (the retyped
+  whole-partition `NoStored1mBarsError` arm — lake truth, never the
+  #1779-rejected report `no_data`; spot phase catches it first, parallel
+  worker kind-gated; months-bounded arm stays plain ValueError), counted +
+  named on the note + emit-on-nonzero payload keys + the CLI `no-source:`
+  line; `PrebuildOutcome.ok` unaffected so the movers warm fires over the
+  healthy majority (the warm-side exclusion is structural when NO timeframe
+  holds parquet — discovery is parquet-file-gated, re-pinned; a surviving
+  stored DERIVED timeframe legitimately keeps a symbol discoverable — the
+  refuter-round-2 scoping, the "+ movers warm" note tail dropped); the
+  inherited e2e pin consciously
+  flipped + the healthy-incremental-re-run trap twin is the permanent
+  regression net; a mixed no_source + REAL failure still withholds the warm;
+  default path byte-identical (note/wire/stdout literal-pinned); named
+  follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001 (cause attribution); ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1792 for the full blurb)
+  Earlier: `claude/sweep-lock-pull-concurrency`
+  (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785 — the dashboard
+  sweep route + the nightly sweep leg stop holding the LAKE pull flock through
+  the sweep: `cross_process_lock=False` at the sweep route's job start + the
+  nightly lake lock released after PULL+PREBUILD (the account-lock pattern) —
+  cmd_sweep_all's OWN G10 preload-only SH read-guard + G6 sweep single-flight
+  own the sweep-vs-pull exclusion (CLI parity); fixes the confirmed G10
+  self-conflict BLOCKER (LakeBusyError at every dashboard/nightly sweep
+  preload since 3f32b3e) and lets the daily pull + crossverify run
+  CONCURRENTLY with a multi-day sweep's compute phase; SUPERSEDES #1612's
+  held-through-SWEEP clause; run identity frozen at preload, byte-identity
+  proven by the executed concurrency regression
+  (tests/integration/test_sweep_pull_concurrency.py); lock COMPOSITION only —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1785 for the full blurb)
+  Earlier: `claude/pull-scoped-all-oneclick`
+  (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779 — the one-click
+  scoped-ALL SPOT pull: the additive `scope=spot-only` token on the ONE
+  `/pull-pipeline` launcher + the `#pullAllSpotBtn` button + the
+  `brutex pull-all-spot` CLI over `build_headless_pipeline(scope=…)`; no-op
+  F&O reports through the unchanged sequencer + note surgery + explicit
+  Greeks-not-run text; fail-soft crossverify tail (production default = the
+  REAL #1776 producer, fired strictly outside our held pull single-flight);
+  the CLI `--auto` gate (UNMEASURED-conservative 17:30 IST settle default,
+  `BRUTEX_PULL_ALL_SETTLE_IST`, floor 15:35) + Muhurat whole-day deferral +
+  the composed mid-run Muhurat belt — `market_hours.py` byte-untouched, the
+  belt honoring the SAME `BRUTEX_MARKET_HOURS_GUARD` kill switch (guard off ⇒
+  belt off — the hostile-review r1 ruling);
+  spot-only intents resume spot-only — and a REFUSED concurrent launch
+  restores the running pull's persisted intent (refuter-round-3 F-1;
+  the pre-start persist no longer clobbers it), with the whole launcher
+  intent transaction serialized under the per-store process-local
+  `launch_mutex` since the refuter-round-4 fold (G-1/R4-1 — raced sibling
+  clicks can no longer orphan-clear or re-clobber the running pull's
+  intent; cross-process exclusion stays the flock); since the round-5 fold
+  the button SELF-ARMS the daily post-market auto-pull — NEW
+  `dashboard/auto_pull_scheduler.py` (own ci.yml 100% gate): `auto_arm=1`
+  on the button's first click arms a durable daemon ticker that fires the
+  SAME spot-only launcher once per day when the EXISTING `auto_pull_allowed`
+  gate opens (refused launches — e.g. a whole-run sweep — retry on later
+  ticks; a successful manual click counts as the day's pull; disarm chip +
+  toggle route; boot resumes ticking iff durably armed; zero threads
+  otherwise; the CLI `--auto` + cron lane stays the headless alternative);
+  since the round-6 + round-7 folds the durable state loads
+  (`.pull_all_spot_auto.json` + `.pull_intent.json`) are corruption-hardened
+  for EVERY shape, non-regular inodes included — the round-6 #1776 M1 decode
+  fold (a corrupt file never crashes the boot or 500s a click) completed by
+  the round-7 P-1 re-hardening on the #1614 `O_NONBLOCK`+`S_ISREG`
+  regular-file-only loader (a planted FIFO / device symlink no longer HANGS
+  the boot or the click; the 16 MiB cap moved onto the fd's `fstat`, closing
+  the stat→read TOCTOU — both hangs F/B-proven at the pre-fix head in
+  bounded subprocesses) — and the
+  combined pipeline button is SPLIT into ▶ Pull Spot (auto-arming) + the NEW
+  manual ▶ Pull F&O (`scope=fno-only` — the exact spot-only mirror: spot
+  phase = honest no-op with note surgery, metadata/historical/Greeks real,
+  F&O-only prebuild + futures/options warm; the crossverify tail + the
+  scheduler stay Spot-EXCLUSIVE, pinned — since the round-7 fold the
+  verdict-clobber + never-marks-the-day exclusivities are negative-pinned
+  too, refuter Q's surviving mutants killed; the bare route stays the
+  full-chain API default byte-identical; the headless binding refuses
+  fno-only — `pull-fno` CLI twin is the named follow-up);
+  ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1779 for the full blurb)
+  Earlier: `claude/o1-guarantee-harden`
+  (DEC-O1-GUARANTEE-HARDEN-001, MIGRATION.md #1791 — the O(1)-guarantee
+  verification + hardening pass: NEW `docs/O1_GUARANTEE_AUDIT.md` is the
+  authoritative honest per-path complexity classification (51 rows across
+  the engine hot paths / DB-lake reads / frontend; no bare-O(1) claim where
+  the first read is O(files); the merge-blocking vs post-merge enforcement
+  split stated plainly); the M4-Pro ResultsStore.get "1.87×" report triaged
+  VERIFIED-NOT-A-REGRESSION (one-line dict probe, measured flat at 100×
+  depth; the #1301 cache-tier re-gate absorbs the physics band; NEW
+  deep-depth pin); five hardenings (the NEW COMMON `BXUI.fetchTextBounded`
+  on the last 3 unbounded-body poller templates; the oneclick timeline
+  dup-tick skip token + NAMED newest-500 render cap + 200 ms search
+  debounce; universe.html's seven loaders on ONE bounded latest-wins
+  helper; the /db registry filtered-COUNT memo on the NEW
+  `registry_revision` token; the NEW `RevisionProbeMemo` TTL-bounding the
+  leaderboard + oneclick-runs O(dirs) probes — ≤1 s disclosed staleness,
+  kill switch) + eight bench gates; READ-side dashboard + tests + docs
+  only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; matches §1's Active branch line)
+  Earlier: `claude/engine-spot-only`
+  (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790 — the brute-force ENGINE is
+  SPOT-ONLY: `NSE-NIFTY-FUT` RETIRED from engine sweep scope, every
+  production sweep entry refuses it loudly citing the DEC + "the engine is
+  spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY"; consciously
+  supersedes the ADR-0012 engine-futures authorization + the
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 launch surface; futures machinery
+  retained below the gate as lake/REFERENCE_ONLY tooling; Groww pull/lake
+  scope untouched; ENGINE surface now EXACTLY NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1790 for the
+  full blurb)
+  Earlier: `claude/crossverify-backfill`
+  (DEC-CROSSVERIFY-WITHHELD-REGATE-001, MIGRATION.md #1789 — the cross-verify
+  WITHHELD-day AUTO-RE-GATE folded into the daily run's catchup (step D2:
+  prior days' gate-withheld symbols re-gated from the since-healed lake —
+  re-export → stage → publish the now-complete ones, journal withheld map
+  rewritten, published keys never re-put, fail-closed gate-first, per-day
+  LEAF journal flocks, runs before the session gate; closes the #1776-named
+  follow-up DEC-CROSSVERIFY-BACKFILL-001 — id retired unused, the historical
+  whole-range S3 backfill was STOOD DOWN by operator ruling 2026-07-13) +
+  the persistent last-run failure surface (`<lake>/.crossverify/last_run.json`
+  → the additive `last_run` progress field → the /universe panel renders it
+  on load; the retryable-exhaustion publish_failed verdict gains a real
+  failing-keys detail); POLISH ROUND folded — a MATERIAL skip-day run
+  (regated/recovered > 0) summarises (WARN catch-up tier) + writes the
+  last-run record (a true no-op skip stays silent — Friday's failure record
+  survives), the D2 enumeration is guarded FAIL-OPEN
+  (`crossverify.regate_scan_failed` — the main day never sinks), and the
+  journal scans' oldest-boundary is mutation-pinned; stacked on PR #1515's
+  `claude/crossverify-spot-only`
+  head; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1789 for the full blurb)
+  Earlier: `claude/crossverify-spot-only`
+  (DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788 — the cross-verify
+  export contract AMENDED to SPOT-ONLY over the WHOLE spot universe
+  (operator ruling 2026-07-13): futures OUT — the metadata + FUT-candle pull
+  legs, the registry read and the G2 FUT settle-retry class DELETED; no
+  futures pulls, no futures CSVs (TickVault must NOT expect futures files —
+  absence is BY DESIGN; negative-pinned: an FNO-carrying lake + a registry
+  with live FUT rows yield ZERO `*_FNO` keys) — and whole-spot-universe IN:
+  the ONE `whole_universe_spot_targets` enumeration (ALL ~25 indices incl.
+  INDIAVIX/sectorals via the widened canonical INDEX arm + ALL ~751 stocks
+  incl. reference-only NTM names) shared by pull AND export, the engine trio
+  kept as the structural enumeration floor; INDEX policy TIERED per the
+  approved index-policy ruling (fix round) — strict count+close-edge
+  withhold on the VERIFIED engine trio only, the other ~22 indices
+  observe-only (published-with-a-counter; zero bars = honest nothing;
+  forming last bar withholds) with the
+  strict-published/observe-published/withheld three-way split in the
+  summary; CSV byte contract / gate binding
+  / S3 posture / 1-minute law / journal-publish machinery UNCHANGED; the FUT
+  mapper/renderer/gate/prebuild arms retained STRUCTURAL
+  (direct-unit-covered); DEC-CROSSVERIFY-SENSEX-FUT-INGEST-001 CLOSED MOOT;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1788 for the full blurb)
+  Earlier: `claude/quad-dashboard-lakeinv-universe-docs`
+  (QUAD MAX-CLUB merge vehicle — the file-disjoint fold of FOUR PRs as ONE merge:
+  #1440 dashboard lane club (DEC-DASHBOARD-POLL-HYGIENE-002 #1699 ·
+  DEC-DASHBOARD-READ-SCREEN-001 #1759 · DEC-DB-TZ-MONEYNESS-FIXES-001 #1760 ·
+  DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 #1761) · #1450 DEC-LAKE-INVARIANTS-PREINDEX-001 #1762 ·
+  #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
+  #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/crossverify-producer`
+  (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
+  DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
+  TickVault cross-verification producer: NEW `brutex/crossverify/` package
+  running the zero-touch post-close chain (priority pull [ALL spot +
+  NIFTY/BANKNIFTY futures, NO options] → fail-closed completeness gate →
+  day-scoped never-stamping derive → the pinned per-symbol CSV byte
+  contract → idempotent journal-keyed S3 publish, PutObject-ONLY on
+  `tv-prod-cold/crossverify/*` — BruteX's FIRST sanctioned AWS write
+  surface, SSM read-only pledge unchanged), surfaced as `brutex crossverify
+  {run,install,uninstall,status}` (launchd `com.brutex.crossverify`, `--at`
+  REQUIRED probe-decided, trading-day-aware journal deadman) + the /universe
+  dashboard button on a dedicated BackgroundPullJob riding the SAME runner;
+  correct-or-absent (withheld + CRITICAL, never wrong bytes; Muhurat days
+  skip entirely; missing index day = exit 2 — real-gate `count_short`,
+  the INDEX `no_today_bars` BLOCKED arm defensive); GREEKS N/A (options-only
+  stage, options-excluding pull); BSE_EQ/BSE_FNO structural-only;
+  SENSEX-futures ingest + true preemption = named follow-up DECs; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/pull-today-completeness-gate`
+  (DEC-PULL-TODAY-COMPLETENESS-GATE-001 + DEC-GROWW-POSTCLOSE-SETTLE-PROBE-001,
+  MIGRATION.md #1774–#1775 — the pre-settle TODAY minute-completeness gate:
+  covers-today windows withhold today's still-settling bars from the keep-first
+  lake and defer streak-EXEMPT re-pullable FAILED (`TODAY_INCOMPLETE`) until the
+  per-class criteria pass; armed at all four production pulls behind the
+  fail-loud `BRUTEX_TODAY_COMPLETENESS_GATE` switch; + the read-only post-close
+  settle probe under docs/groww/probe/; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1774–#1775 for the full blurb)
+  Earlier: `claude/premerge-m4pro-nonblock`
+  (DEC-PREMERGE-M4PRO-NONBLOCK-001, MIGRATION.md #1753 — the pre-merge gate
+  treats the non-required self-hosted `m4pro-absolute-throughput` check as
+  NON-BLOCKING: a HARDCODED `NONBLOCKING_CHECK_NAMES` constant in
+  `scripts/ci/pre-merge-check.sh`, UNIONED with the caller's
+  `IGNORE_CHECK_NAMES` at all three rollup scan sites so auto-merge.yml's
+  caller-SET value cannot clobber it; a FAILED m4pro warns, never blocks
+  at this gate (auto-merge's own untouched ci-check still refuses a
+  FAILED/CANCELLED m4pro — pre-existing; PENDING is non-blocking
+  end-to-end);
+  the offline-runner pending-forever shape can never refuse a merge (the
+  manual-cancel `bless-baseline` residual is named in #1753 — documented,
+  not broadened, per the operator only-m4pro constraint);
+  every REQUIRED check still blocks — redteam-pinned + fails-before-proven;
+  safe per MIGRATION.md #382 + #1534 (not in ci-ok needs; bench regressions
+  caught post-merge on the self-hosted runner); CI-gate script + redteam
+  tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
@@ -6059,8 +7516,7 @@ hostile-review pass._
   sweep-core conversion: the behavior-identical fold/combine decomposition of
   `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
   `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
-  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
-  branch line)
+  this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
@@ -6560,7 +8016,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:4863-4864` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5114-5115` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
@@ -6568,7 +8024,7 @@ bruteX/
 | F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:595-608` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
-| NIFTY-futures ENGINE series alias | **`NSE-NIFTY-FUT`** (symbol_id 4) — the ONE pinned ADR-0012 futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolved at launch by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the engine hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
+| NIFTY-futures series alias (LAKE tooling — NO LONGER an ENGINE series, DEC-ENGINE-SPOT-ONLY-001 #1790) | **`NSE-NIFTY-FUT`** (symbol_id 4, append-only registry row) — the ONE pinned futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolvable by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the Stage-1A machinery hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias. **ENGINE-RETIRED (DEC-ENGINE-SPOT-ONLY-001):** `is_engine_sweep_symbol` refuses it — the alias + resolver + loader survive ONLY as lake/REFERENCE_ONLY tooling below the scope gate (reachable via the loud `--allow-out-of-scope` research escape or recorded-work forensics), never a default engine series | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |
 | INDIA VIX symbol | **`NSE-INDIAVIX`** — reference-only (`buy/sell_allowed=0`), never in the 52-vocab | `groww/constants.py:101-102` |
 | INDIA VIX historical-candle availability | **UNVERIFIED** — Phase-0 HARD-GATE; if absent on Groww the migration is rescinded before cutover | `adr/0009-...-migration.md:90,111-112` |
 | Token lifetime + backtest-vs-live drift | **Token lifetime VERIFIED (production logs 2026-06-23):** the daily access token resets at **06:00 IST** — handled UNATTENDED by the mid-pull reauth self-heal (on the production read-only broker a RE-READ of the Lambda-minted SSM token, `groww.token.reread` — DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 over the #909 seam), so the Phase-0 "unattended TOTP token lifetime" gate is CLOSED. The prior-vendor↔Groww 1m bar drift stays **UNVERIFIED** (Phase-0 probe gate) | `adr/0009-...-migration.md:88-92,113-124`; `groww/reauth.py` |

@@ -100,6 +100,8 @@ class _Spies:
     materialize_calls: list[dict[str, Any]] = field(default_factory=list)
     footprint_calls: list[tuple[Path, Any]] = field(default_factory=list)
     registries: list[object] = field(default_factory=list)
+    cascade_args: list[tuple[Any, ...]] = field(default_factory=list)
+    fno_walks: list[str] = field(default_factory=list)
 
 
 _FIXED_NOW = datetime(2026, 7, 7, 21, 0, tzinfo=UTC)
@@ -112,6 +114,7 @@ def _wire(
     prebuild_outcome: PrebuildOutcome | None = None,
     env: dict[str, str] | None = None,
     dry_run: bool = False,
+    scope: str = "full",
 ) -> tuple[HeadlessPipeline, _Spies, _FakeStore]:
     """Build a fully spy-wired headless pipeline over a fake store."""
     spies = _Spies()
@@ -187,8 +190,16 @@ def _wire(
         "brutex.dashboard.prebuild_parallel.resolve_prebuild_workers",
         lambda *a, **k: 3,
     )
-    monkeypatch.setattr("brutex.dashboard.db_view.list_fno_candle_datasets", lambda _lake: [])
-    monkeypatch.setattr("brutex.dashboard.fno_cascade.build_fno_cascade", lambda _ds: "CASCADE")
+    monkeypatch.setattr(
+        "brutex.dashboard.db_view.list_fno_candle_datasets",
+        lambda _lake: spies.fno_walks.append("walk") or [],
+    )
+
+    def spy_cascade(datasets: Any) -> str:
+        spies.cascade_args.append(tuple(datasets))
+        return "CASCADE"
+
+    monkeypatch.setattr("brutex.dashboard.fno_cascade.build_fno_cascade", spy_cascade)
 
     hp = build_headless_pipeline(
         lake_root=lake,
@@ -198,6 +209,7 @@ def _wire(
         env=env or {},
         store_opener=lambda _path: cast(Any, store),
         now=lambda: _FIXED_NOW,
+        scope=scope,
     )
     return hp, spies, store
 
@@ -698,3 +710,148 @@ def test_execute_threads_the_four_phases(monkeypatch: pytest.MonkeyPatch) -> Non
         # (None here — the test double is built without one).
         "market_closed": None,
     }
+
+
+# ── scope=spot-only (DEC-PULL-SCOPED-ALL-ONECLICK-001) ───────────────────
+
+
+def test_scope_full_default_parity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The explicit ``scope="full"`` binds the SAME real F&O closures as the
+    scope-less default (the default-parity pin — B §5)."""
+    hp, spies, _store = _wire(monkeypatch, tmp_path, scope="full")
+    assert hp.run_metadata() == "META-REPORT"
+    assert spies.metadata["kwargs"]["dry_run"] is False
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    prior = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False)
+    assert hp.run_historical(prior) == "HIST-REPORT"
+    assert spies.historical["kwargs"]["prior_steps"] is prior
+    hp.run_prebuild(frozenset())
+    spies.prebuild["cascade_or_error"]()  # force the captured cascade factory
+    assert spies.fno_walks == ["walk"]  # the full arm enumerates the F&O lake
+    assert spies.cascade_args == [()]  # empty because the walk spy returns []
+
+
+def test_scope_spot_only_swaps_fno_closures_for_noops(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """spot-only: the two F&O closures ARE the pull_scope no-op builders —
+    the real spines + the registry are NEVER touched; the prebuild rides an
+    EMPTY cascade (no F&O dataset walk)."""
+    from brutex.dashboard.pull_scope import (
+        SPOT_ONLY_HISTORICAL_NOTE,
+        SPOT_ONLY_METADATA_NOTE,
+    )
+
+    hp, spies, _store = _wire(monkeypatch, tmp_path, scope="spot-only")
+    meta = hp.run_metadata()
+    assert meta.note == SPOT_ONLY_METADATA_NOTE
+    assert meta.expiries_persisted == 0
+    assert spies.metadata == {}  # the real metadata spine never ran
+    assert spies.registries == []  # the registry store was never opened
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    hist = hp.run_historical(PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False))
+    assert hist.note == SPOT_ONLY_HISTORICAL_NOTE
+    assert hist.historical is None
+    assert spies.historical == {}  # the real composite spine never ran
+    hp.run_prebuild(frozenset())
+    spies.prebuild["cascade_or_error"]()  # force the captured cascade factory
+    assert spies.cascade_args == [()]  # EMPTY cascade — spot-only never re-derives F&O
+    assert spies.fno_walks == []  # the F&O dataset walk never ran
+
+
+def test_scope_spot_only_spot_closure_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The SPOT closure's kwargs are IDENTICAL between the two scope arms
+    (kwarg-for-kwarg — until_clean / floor_store / market_closed all shared)."""
+    hp_full, spies_full, _s1 = _wire(monkeypatch, tmp_path, scope="full")
+    hp_full.run_spot()
+    hp_spot, spies_spot, _s2 = _wire(monkeypatch, tmp_path, scope="spot-only")
+    hp_spot.run_spot()
+    assert set(spies_full.spot["kwargs"]) == set(spies_spot.spot["kwargs"])
+    assert spies_spot.spot["kwargs"]["until_clean"] is True
+    assert spies_spot.spot["kwargs"]["auto_retry"] is True
+
+
+def test_scope_spot_only_composes_muhurat_belt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The spot-only REAL build's market_closed is the COMPOSED predicate
+    (guard verdict OR muhurat_session_active) — a live Muhurat session blocks
+    even though the trading-day-keyed guard reads the holiday as non-trading;
+    a dry-run build stays None (compose passes None through)."""
+    from datetime import datetime as _dt
+
+    hp, _spies, _store = _wire(monkeypatch, tmp_path, scope="spot-only")
+    assert hp.market_closed is not None
+    # Freeze the belt's clock INSIDE a listed Muhurat session (2024-11-01
+    # evening) and the guard's own clock OUTSIDE the market-hours window: the
+    # bare guard says open (holiday => non-trading), the composed belt blocks.
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: _dt(2024, 11, 1, 18, 30))
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: _dt(2024, 11, 1, 18, 30))
+    assert hp.market_closed() is True  # the Muhurat arm fired
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: _dt(2024, 11, 1, 20, 0))
+    assert hp.market_closed() is False  # past close+5min — open again
+    hp_dry, _sp, _st = _wire(monkeypatch, tmp_path, dry_run=True, scope="spot-only")
+    assert hp_dry.market_closed is None  # dry-run parity (None passthrough)
+
+
+def test_scope_spot_only_guard_off_market_closed_is_bare_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 MINOR-B — kills the M-I hardcoded-env mutant, nightly arm]
+    With the guard kill switch OFF in the BUILD env, the spot-only binding's
+    ``market_closed`` IS the guard's own never-blocked base (the compose
+    returned it UNCHANGED) and reads False even at a frozen Muhurat instant —
+    the operator's ``BRUTEX_MARKET_HOURS_GUARD=0`` genuinely disarms the belt
+    at the WIRING level. A compose call site hardcoding ``env={"…": "1"}``
+    would wrap the base and read True here."""
+    from datetime import datetime as _dt
+
+    from brutex.calendars.market_hours import _market_never_blocked
+
+    hp, _spies, _store = _wire(
+        monkeypatch, tmp_path, scope="spot-only", env={"BRUTEX_MARKET_HOURS_GUARD": "0"}
+    )
+    assert hp.market_closed is not None
+    assert hp.market_closed is _market_never_blocked  # base returned UNCHANGED
+    frozen = _dt(2024, 11, 1, 18, 30)  # inside the listed evening session
+    monkeypatch.setattr("brutex.calendars.auto_pull_gate.now_ist", lambda: frozen)
+    monkeypatch.setattr("brutex.calendars.market_hours.now_ist", lambda: frozen)
+    assert hp.market_closed() is False  # guard off ⇒ belt off — never a block
+
+
+def test_scope_spot_only_dry_run_threads_into_noop_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[refuter-r1 r2 NIT-6, nightly arm] the binding threads its dry_run
+    flag into the bound no-op builders — a dry-run report's nested F&O
+    sub-reports never read ``dry_run: false``. The wet build stays False."""
+    from brutex.dashboard.pipeline_pull import PriorStepsVerdict
+
+    hp_dry, _sp, _st = _wire(monkeypatch, tmp_path, dry_run=True, scope="spot-only")
+    assert hp_dry.run_metadata().dry_run is True
+    prior = PriorStepsVerdict(spot_clean=True, metadata_clean=True, strict=False)
+    assert hp_dry.run_historical(prior).dry_run is True
+    hp_wet, _sp2, _st2 = _wire(monkeypatch, tmp_path, scope="spot-only")
+    assert hp_wet.run_metadata().dry_run is False
+    assert hp_wet.run_historical(prior).dry_run is False
+
+
+def test_scope_fno_only_refused_no_headless_binding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[round-6 two-button split] the registry-valid ``fno-only`` token has NO
+    headless binding (dashboard-only by ruling — the manual ▶ Pull F&O
+    button): the build REFUSES loudly instead of silently running the FULL
+    chain (the B H9 never-widen law). The ``pull-fno`` CLI twin is a named
+    one-line follow-up (#1779)."""
+    with pytest.raises(ValueError, match="no headless binding"):
+        _wire(monkeypatch, tmp_path, scope="fno-only")
+
+
+def test_scope_unknown_token_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown pull scope"):
+        _wire(monkeypatch, tmp_path, scope="spotonly")
