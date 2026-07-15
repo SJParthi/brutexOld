@@ -581,7 +581,7 @@ excepted). Per-sidecar disposition:
 | `bars/` + catalog + `.manifest/` + `.locks/` | **NEST** — verified per-domain (the Dhan track's feed-root nesting law, §2 binding invariant; lock disjointness Decision 1 rationale (c)) |
 | window ledger | **SEPARATE** under `feeds/dhan/window_ledger/` with `market="dhan"`/`"dhan-option"` tokens (§2.3) — non-re-pullable state; **Pin D1-2** below |
 | `.rate` (the CLI rate bridge, `<lake_root>/.rate/pull_rate.json`) | **nest-or-vendor-token** — a Dhan chain writes it (if ever) under its OWN root, never the primary bridge file |
-| `.pull_intent` (`<lake_root>/.pull_intent.json` — `PULL_INTENT_FILENAME`, `brutex/dashboard/pull_intent.py:120`; `PullIntentStore` :306/:327) | **nest-or-vendor-token, with the ISOL-02 v1 RULING (assurance fold):** the sidecar is a ROOT-SINGLETON with NO vendor field (verified — `PullIntent` carries symbols/symbol/from_date/to_date/restarts/created_at/scope only), previously OMITTED from this ADR's sidecar enumeration; a Dhan launch reusing the primary-root launcher would CLOBBER a running Groww intent and a crash+boot would replay the WRONG vendor's scope. **RULING: v1 = the Dhan chain runs with NO intent store** — no boot-resume; manual re-run is the recovery (consistent with the G4 manual-runs posture, §1.3 item 6 / Decision 7); if/when Dhan gains resume-intent it gets its OWN `PullIntentStore` under `feeds/dhan/`. A TWO-VENDOR CRASH-RESUME pin is REQUIRED in WS-C/WS-D: a crash+boot with a Groww intent present resumes the GROWW scope only and never fires a Dhan launch (and the Dhan v1 chain, having no store, resumes nothing). **LAUNCHER GATING (assurance re-review fold, NG-2 — BLOCKER: the ISOL-02 ruling pinned the CHAIN's no-intent-store but NOT the shared LAUNCHER):** `persist_intent_for_launch` (`brutex/dashboard/pull_intent.py:481`, invoked by the shared dashboard launcher at `brutex/dashboard/app.py:5257`) writes the vendorless ROOT-SINGLETON **BEFORE the vendor graph runs** — a Dhan launch through that launcher would persist a Groww-SHAPED boot-resume intent regardless of the chain having no store (a crash+boot replays the WRONG vendor/scope). FIX: the PROFILE gates the LAUNCHER, not just the chain — `VendorPullProfile` gains **`no_intent_persist`** (Groww `False`, Dhan v1 `True`; Decision 4) and the launcher consults it BEFORE the persist: a `no_intent_persist` profile's launch NEVER invokes `persist_intent_for_launch` (and correspondingly wires no clear/restore hooks against the primary singleton). The WS-C pin is driven through the REAL shared launcher — never a chain-only fake — asserting the PRIMARY root's `.pull_intent.json` singleton is byte-UNTOUCHED by a Dhan launch (both arms: a prior Groww intent PRESENT survives byte-identical; no intent present ⇒ none is created). **P1 COUPLING (disclosed):** once P1 lands (§15 item 4), a Dhan pull is no longer account-flock-excluded from a concurrent Groww pull — a Groww crash+boot-resume could then read Dhan-written scope if persist defaulted ON; the two-vendor crash-resume pin CANNOT hold while persist defaults on, so the launcher gate is a companion requirement of P1, not polish |
+| `.pull_intent` (`<lake_root>/.pull_intent.json` — `PULL_INTENT_FILENAME`, `brutex/dashboard/pull_intent.py:120`; `PullIntentStore` :306/:327) | **nest-or-vendor-token, with the ISOL-02 v1 RULING (assurance fold):** the sidecar is a ROOT-SINGLETON with NO vendor field (verified — `PullIntent` carries symbols/symbol/from_date/to_date/restarts/created_at/scope only), previously OMITTED from this ADR's sidecar enumeration; a Dhan launch reusing the primary-root launcher would CLOBBER a running Groww intent and a crash+boot would replay the WRONG vendor's scope. **RULING: v1 = the Dhan chain runs with NO intent store** — no boot-resume; manual re-run is the recovery (consistent with the G4 manual-runs posture, §1.3 item 6 / Decision 7); if/when Dhan gains resume-intent it gets its OWN `PullIntentStore` under `feeds/dhan/`. A TWO-VENDOR CRASH-RESUME pin is REQUIRED in WS-C/WS-D: a crash+boot with a Groww intent present resumes the GROWW scope only and never fires a Dhan launch (and the Dhan v1 chain, having no store, resumes nothing). **LAUNCHER GATING (assurance re-review fold, NG-2 — BLOCKER: the ISOL-02 ruling pinned the CHAIN's no-intent-store but NOT the shared LAUNCHER):** `persist_intent_for_launch` (`brutex/dashboard/pull_intent.py:481`, invoked by the shared dashboard launcher at `brutex/dashboard/app.py:5257`) writes the vendorless ROOT-SINGLETON **BEFORE the vendor graph runs** — a Dhan launch through that launcher would persist a Groww-SHAPED boot-resume intent regardless of the chain having no store (a crash+boot replays the WRONG vendor/scope). FIX: the PROFILE gates the LAUNCHER, not just the chain — `VendorPullProfile` gains **`no_intent_persist`** (Groww `False`, Dhan v1 `True`; Decision 4) and the launcher consults it BEFORE the persist: a `no_intent_persist` profile's launch NEVER invokes `persist_intent_for_launch` (and correspondingly wires no clear/restore hooks against the primary singleton). **MECHANISM (fold #4, NG2-EDGE-LAUNCH-MUTEX-COUPLING):** gating only the persist CALL is INSUFFICIENT — the shared launcher ENTERS the primary store's `launch_mutex` on `pull_intent_store is not None` (`app.py:5243`, held across `start()` INCLUDING the SSM credential read + lease enter/refresh — the ≈10 s held-span I/O envelope the launcher's own J-NIT-1 comment discloses) — so a `no_intent_persist` launch binds NO primary intent store at all: it reaches the launcher with `pull_intent_store=None`, structurally skipping mutex + persist + clear/restore hooks + banner; a Dhan launch can never CONTEND on the primary launch mutex (the zero-cross-impact requirement). The WS-C pin is driven through the REAL shared launcher — never a chain-only fake — asserting BOTH: the PRIMARY root's `.pull_intent.json` singleton is byte-UNTOUCHED by a Dhan launch (both arms: a prior Groww intent PRESENT survives byte-identical; no intent present ⇒ none is created) AND the primary launch mutex is NEVER ENTERED by it (fold #4). **P1 COUPLING (disclosed):** once P1 lands (§15 item 4), a Dhan pull is no longer account-flock-excluded from a concurrent Groww pull — a Groww crash+boot-resume could then read Dhan-written scope if persist defaulted ON; the two-vendor crash-resume pin CANNOT hold while persist defaults on, so the launcher gate is a companion requirement of P1, not polish |
 | `.greeks_backfill` (checkpoint sidecar) + the `groww.vendor_floor.*` schema_meta rows | **N/A-for-Dhan** (Groww-shaped surfaces; the Dhan chain never touches them) |
 | the Greeks SPOT-JOIN root | **the ONE surface that does NOT nest for free** — the reader is hard-anchored at the primary `bars/` tree (`spot_join.py:83`/:113) and must be ROUTED by the profile's domain (the CAPA-01 fix — PRECONDITION P4, §15 item 7) — and guarded at RUNTIME by **Pin D1-3** (the read-domain assertion, NG-5): routing binds the right reader, the assertion REFUSES the wrong one |
 
@@ -602,8 +602,15 @@ excepted). Per-sidecar disposition:
   INSUFFICIENT — `feeds/dhan/**` NESTS under the primary root, so such a
   check FALSE-PASSES a feeds/dhan dest presented to the PRIMARY profile
   (nested roots are not disjoint prefixes); the primary profile's domain
-  is the root MINUS the registered `feeds/` subtrees, expressed via the
-  exclusion law. In-repo precedent:
+  excludes the ENTIRE `feeds/` path-component prefix STRUCTURALLY —
+  registration-INDEPENDENT ("the root MINUS the whole `feeds/` subtree",
+  NEVER merely the registered-`feeds/`-subtrees complement: that form
+  would INCLUDE an UNREGISTERED `feeds/<other>/` dest in the primary
+  domain and FALSE-PASS a primary-profile write there — the same
+  nested-root false-pass class this correction closes; the §1.4
+  invisibility argument — zero `feeds/` references in any primary
+  scanner — already relies on exactly the whole-prefix exclusion)
+  (fold #4, NG3-EDGE-UNREGISTERED-SUBTREE). In-repo precedent:
   `OptionParquetWriter._assert_options_containment`
   (`brutex/data/option_parquet_writer.py:317` — verified; the assurance
   brief's `lake_heal` attribution corrected: `lake_heal.py:1197` only
@@ -615,7 +622,12 @@ excepted). Per-sidecar disposition:
   NEGATIVE-PIN battery is REQUIRED: both directions + the typed refusal +
   the **NESTED-ROOT fixture** (a `feeds/dhan/**` dest presented to the
   PRIMARY profile must REFUSE — exactly the false-pass shape a
-  prefix-check mechanism would let through).
+  prefix-check mechanism would let through) + the **UNREGISTERED-FEEDS
+  fixtures** (fold #4, NG3-EDGE): a PRIMARY-profile write under
+  `feeds/<anything>/` REFUSES whether or not that subtree is REGISTERED —
+  the fixture dest lives under an unregistered `feeds/<other>/` — and a
+  FEEDS-profile write under a FOREIGN `feeds/<other>/` subtree refuses
+  too.
 - **Pin D1-2 (nightly-backup allowlist):** when the Dhan window ledger
   lands under `feeds/dhan/window_ledger/`, the NIGHTLY backup allowlist
   `_LAKE_MEMBERS` (`brutex/nightly/backup.py:130-136` — verified:
@@ -891,7 +903,7 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | Field | Groww binding | Dhan binding | Owner |
 |---|---|---|---|
 | `vendor` token | `"groww"` | `"dhan"` | orchestration |
-| Lake write domain (typed `WriteDomain` — an ALLOWED-SUBTREE SET with foreign-domain EXCLUSION; the NG-3 typing law below) | the primary subtrees (`bars/` + `options/` + the primary sidecars) — equivalently the root MINUS every registered `feeds/` subtree, by the exclusion law | `{<lake_root>/feeds/dhan/**}` | orchestration invariant (Decision 1 + Pin D1-1; the WRITE law — read routing is per-consumer, guarded by Pin D1-3) |
+| Lake write domain (typed `WriteDomain` — an ALLOWED-SUBTREE SET with foreign-domain EXCLUSION; the NG-3 typing law below) | the primary subtrees (`bars/` + `options/` + the primary sidecars) — equivalently the root MINUS the ENTIRE `feeds/` subtree, a registration-INDEPENDENT structural prefix exclusion (fold #4, NG3-EDGE: the registered-subtrees-complement form would FALSE-PASS a primary write under an UNREGISTERED `feeds/<other>/`) | `{<lake_root>/feeds/dhan/**}` | orchestration invariant (Decision 1 + Pin D1-1; the WRITE law — read routing is per-consumer, guarded by Pin D1-3) |
 | Capability set | `{spot, futures, options: per_contract, metadata}` | `{spot, options: rolling_atm}` | operator ruling A |
 | Daily (`1day`) source | `derived` — SPOT-PREBUILD derives `1day` from stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, Groww-only per §4.1 supersession 5) | `native` — the vendor daily endpoint, depth to inception, runs FIRST as `run_spot_daily`; prebuild `include_daily` structurally OFF (the RULING C pinned invariant) | operator ruling C |
 | History-floor resolvers | const `GROWW_HISTORY_FLOOR` = 2020-01-01 (CLAUDE.md §2 Rule 3) | rolling `today − 5y + 7d` + unified options floor (`DEC-DHAN-ROLLING-FLOOR-001`; TRUE depth UNVERIFIED) | adapter |
@@ -902,7 +914,7 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | Lock domain | account + lake-root + lease trio at the primary root | the ONE feed-root flock at `feeds/dhan/` | adapter (mechanism), orchestration (disjointness invariant) |
 | Market-hours guard binding | ON, LOCKED (DEC-GROWW-MARKET-HOURS-GUARD-001) | `lambda: False` — the no-guard binding IS a `Callable[[], bool]`, NOT `None` (the assurance-fold type correction, CONC-01: the job ctor's type is non-Optional — `market_hours_guard: Callable[[], bool] = guard_active_default`, `pull_jobs.py:443` — so `None` would not even type-check; §1.3 item 8's `market_closed=None` is the SPINE's separate Optional predicate seam; any Dhan policy = NEW decision, Q2) | operator |
 | Today-completeness binding (PRECONDITION P3) | the classifier GATE armed at the spine (DEC-PULL-TODAY-COMPLETENESS-GATE-001 — wired Groww-only today, `pull_controller.py:2157`/`:3228`) | `clamp_to_prev_session` v1 — EVERY Dhan pull window END (the NATIVE-DAILY `run_spot_daily` window INCLUDED — the NG-1 extension — beside the 1-minute spot/options windows) is CLAMPED to the previous trading day, derived from the BARE vendor-agnostic calendar back-walk (`previous_trading_session` with NO observed overlay for Dhan v1 — the §9 P3 ruling + the NG-4 mechanism constraint); threading the vendor-agnostic classifier through the Dhan spine is the NAMED upgrade path | operator ruling (assurance fold, CONC-02; extended NG-1/NG-4) |
-| Launcher intent gating (`no_intent_persist`) | `False` — the shared launcher persists the boot-resume intent as today (DEC-PULL-INTENT-RESUME-001 lineage) | `True` v1 — the shared launcher NEVER invokes `persist_intent_for_launch` for a Dhan launch (the NG-2 launcher gate; §2.5 `.pull_intent` row — the profile gates the LAUNCHER, not just the chain) | orchestration (assurance re-review fold, NG-2) |
+| Launcher intent gating (`no_intent_persist`) | `False` — the shared launcher persists the boot-resume intent as today (DEC-PULL-INTENT-RESUME-001 lineage) | `True` v1 — the shared launcher NEVER invokes `persist_intent_for_launch` for a Dhan launch (the NG-2 launcher gate; §2.5 `.pull_intent` row — the profile gates the LAUNCHER, not just the chain); MECHANISM (fold #4, NG2-EDGE): the launch binds NO primary intent store — `pull_intent_store=None` at the launcher, structurally skipping mutex/persist/clear/restore/banner (the primary `launch_mutex` is entered on `pull_intent_store is not None`, `app.py:5243`, held across `start()` incl. ~10 s SSM/lease I/O — persist-call gating alone would still CONTEND on it) | orchestration (assurance re-review fold, NG-2) |
 | Ledger / incrementality capability | durable window ledger, `market="groww"` family | ABSENT today (gap G4) — gates auto-arm per Decision 7 | adapter, ruled by orchestration |
 | Greeks seam | the COMMON fenced pass binding | a callable over the COMMON kernel (CLI-only today; seam = this design's ask) — the binding's SPOT-JOIN reader is ROUTED by `write_domain` + stamps the vendor/spot-source provenance bit (PRECONDITION P4, §15 item 7) | shared kernel; binding per vendor |
 | Ledger market tokens | `groww` / `groww-future` / `groww-option` | `dhan` / `dhan-option` (Decision 1 §2.3) | orchestration convention |
@@ -916,8 +928,14 @@ presented to the PRIMARY profile. The domain is therefore typed as an
 **ALLOWED-SUBTREE SET with explicit FOREIGN-DOMAIN EXCLUSION**: a dest is
 in-domain iff its realpath falls under one of THIS profile's subtrees AND
 under NO OTHER registered profile's subtree; the PRIMARY profile's domain
-is the root MINUS the registered `feeds/` subtrees, expressed via that
-exclusion law (never by enumerating the root's children). ADJUDICATION
+additionally excludes the ENTIRE `feeds/` path-component prefix
+STRUCTURALLY — registration-INDEPENDENT ("the root MINUS the whole
+`feeds/` subtree", never by enumerating the root's children and NEVER the
+registered-subtrees complement: an UNREGISTERED `feeds/<other>/` dest
+falls INSIDE that complement, so a primary-profile write there would
+FALSE-PASS — the same false-pass class; §1.4's
+zero-`feeds/`-references invisibility argument already relies on the
+whole-prefix form) (fold #4, NG3-EDGE-UNREGISTERED-SUBTREE). ADJUDICATION
 RECORDED: the alternative "keep a single `Path` + document the
 composition" was considered and REFUTED by the nested-root false-pass
 above — the struct/set form is adopted (Pin D1-1's mechanism updated to
@@ -1302,7 +1320,15 @@ sequencer:
   `VendorPullProfile` carries the `today_completeness` binding field
   (Decision 4); WS-D ships the clamp/absence pins — per window class,
   INCLUDING the forming-daily-bar ABSENCE pin and the back-walk pin over
-  weekend + holiday-adjacent days (§15 item 6). (The Dhan
+  weekend + holiday-adjacent days (§15 item 6). **CLAMP-ABSTAIN CONTRACT
+  (fold #4, NG4-EDGE-2027-CLAMP-ABSTAIN):**
+  `previous_trading_session(observed=frozenset())` ABSTAINS (returns
+  `None`) past the NSE holiday-coverage floor (2026 today) — on abstain
+  the clamp REFUSES/HALTS the stage LOUDLY with a typed error, NEVER a
+  fallback to `today`: a today-fallback would silently re-open the NG-1
+  unhealable forming-native-`1day` freeze exactly in the 2027 window; the
+  WS-D battery gains the coverage-abstain refusal pin (a post-coverage
+  window END ⇒ loud stage refusal, NO window issued). (The Dhan
   track has fold-queued their side; the explicit `to_date=today` arm was
   the residual this ruling closes.)
 - **Dhan auto-arm** is additionally BLOCKED by Decision 7 until
@@ -1460,7 +1486,9 @@ otherwise have to guess):**
   the foreign-domain EXCLUSION law (NG-3; Decision 4 — a dest is
   in-domain iff its realpath falls under one of the profile's subtrees
   AND under NO other registered profile's; the primary domain = the root
-  MINUS the registered `feeds/` subtrees).
+  MINUS the ENTIRE `feeds/` subtree, registration-INDEPENDENT — fold #4,
+  NG3-EDGE: the registered-complement form would false-pass an
+  unregistered `feeds/<other>/` dest).
 
 **Invariants every vendor spine must honor (the contract this design
 enforces — invariant 1 at RUNTIME per Pin D1-1, the rest at review
@@ -1721,8 +1749,13 @@ the inspection and records the consumption/rename.
    pins per window class: the forming-daily-bar ABSENCE pin (a
    mid-session Dhan chain run stores NO today-dated `1day` bar) + the
    intraday clamp pin + the back-walk pin over weekend AND
-   holiday-adjacent days. (The Dhan track has fold-queued their side; the
-   explicit `to_date=today` arm was the residual.)
+   holiday-adjacent days + the coverage-abstain refusal pin (fold #4,
+   NG4-EDGE: past the 2026 NSE holiday-coverage floor
+   `previous_trading_session` returns `None` — the clamp REFUSES the
+   stage loudly with a typed error, NEVER falls back to `today`, which
+   would silently re-open the NG-1 unhealable forming-native-`1day`
+   freeze in the 2027 window). (The Dhan track has fold-queued their
+   side; the explicit `to_date=today` arm was the residual.)
 7. **WS-D PRECONDITION P4 (assurance fold, CAPA-01; assurance-register
    pointer VCA-011; extended at the assurance re-review fold, NG-5 +
    NG-6) — REQUIRED before ANY second-vendor Greeks binding:**
@@ -1830,7 +1863,10 @@ folding (the corrections recorded per gap):
   root, so a realpath-STARTSWITH check FALSE-PASSES a feeds/dhan dest
   against the PRIMARY profile (nested roots are not disjoint prefixes).
   Retyped as an ALLOWED-SUBTREE SET with foreign-domain EXCLUSION
-  (primary = root MINUS registered `feeds/` subtrees); the nested-root
+  (primary = root MINUS registered `feeds/` subtrees — that
+  registered-complement PHRASING itself superseded at fold #4,
+  NG3-EDGE: the exclusion is the WHOLE `feeds/` prefix,
+  registration-independent); the nested-root
   negative-pin fixture is required; the earlier "single Path + documented
   composition" ruling is SUPERSEDED by that refutation (adjudication
   recorded at Decision 4). The v1 read-composition note stands: NO
@@ -1857,6 +1893,51 @@ folding (the corrections recorded per gap):
   `greeks_provenance_id` values byte-unchanged), and is bounded by the
   ≤ bit 30 Int32 ceiling — a third vendor / any pack-width growth needs
   its own pack-width DEC.
+
+**Assurance fold-#3 RE-review disposition (2026-07-15, vs this file's
+then-head `98533528` — folded by this revision, fold #4):** verdict
+FIX-FIRST; the fold-#3 six items (NG-1..NG-6) verified **6/6 CLOSED
+byte-exact**; 1 MAJOR + 2 MINOR edge findings — ALL ADR-TEXT precision
+fixes, no new mechanism — folded @ this commit:
+
+- **NG3-EDGE-UNREGISTERED-SUBTREE (MAJOR, freeze-blocking → Pin D1-1 +
+  the Decision 4 table row + the Decision 4 typing paragraph + the §12
+  field sketch):** the fold-#3 text stated the PRIMARY write-domain THREE
+  times in the COMPLEMENT form "root MINUS the REGISTERED `feeds/`
+  subtrees" and called it equivalent to the allowed-set form — NOT
+  equivalent for an UNREGISTERED `feeds/` subtree: the allowed-set form
+  correctly refuses a dest under `feeds/<unregistered>/`, but the
+  registered-complement form INCLUDES it in the primary domain, so a
+  primary-profile write there FALSE-PASSES (the same nested-root
+  false-pass class NG-3 closed). Fixed at all sites: the primary domain
+  excludes the ENTIRE `feeds/` path-component prefix STRUCTURALLY —
+  registration-INDEPENDENT ("root MINUS the whole `feeds/` subtree") —
+  which §1.4's invisibility argument (zero `feeds/` references in any
+  primary scanner) already relies on; Pin D1-1's required battery gains
+  the UNREGISTERED-FEEDS negative fixtures (a primary-profile write under
+  `feeds/<anything>/` refuses, registered or not; a feeds-profile write
+  under a foreign `feeds/<other>/` refuses too).
+- **NG4-EDGE-2027-CLAMP-ABSTAIN (MINOR → the §9 P3 mechanism + the §15
+  item 6 pin list):** `previous_trading_session(observed=frozenset())`
+  ABSTAINS (returns `None`) past the NSE holiday-coverage floor (2026
+  today). RULED: on abstain the clamp REFUSES/HALTS the stage LOUDLY with
+  a typed error — NEVER a fallback to `today` (a today-fallback would
+  silently re-open the NG-1 unhealable forming-native-`1day` freeze
+  exactly in the 2027 window); the coverage-abstain refusal pin joins the
+  WS-D battery (a post-coverage window END ⇒ loud stage refusal, NO
+  window issued).
+- **NG2-EDGE-LAUNCH-MUTEX-COUPLING (MINOR → the §2.5 `.pull_intent` row +
+  the Decision 4 `no_intent_persist` field + the §17 WS-C pin):** gating
+  only the persist CALL is insufficient — the shared launcher ENTERS the
+  primary store's `launch_mutex` on `pull_intent_store is not None`
+  (`app.py:5243`, held across `start()` including the SSM credential read
+  + lease I/O, the ≈10 s held-span envelope). RULED: a
+  `no_intent_persist` launch binds NO primary intent store — it reaches
+  the launcher with `pull_intent_store=None`, structurally skipping
+  mutex/persist/clear/restore/banner — so a Dhan launch can never CONTEND
+  on the primary launch mutex (zero-cross-impact); the WS-C pin asserts
+  BOTH the byte-untouched primary `.pull_intent.json` singleton AND no
+  primary-mutex entry.
 
 ## 16. Open questions for operator sign-off (numbered, answerable)
 
@@ -1907,8 +1988,10 @@ folding (the corrections recorded per gap):
   per-vendor guard binding; the CONC-01 fail-loud construction assertions
   (a non-Groww vendor never resolves `_build_live_controller` /
   `guard_active_default`); the NG-2 launcher intent gate with its
-  REAL-shared-launcher pin (the primary `.pull_intent.json` singleton
-  byte-untouched by a Dhan launch, §2.5); the two-vendor crash-resume pin
+  REAL-shared-launcher pin asserting BOTH the primary `.pull_intent.json`
+  singleton byte-untouched by a Dhan launch AND no primary-launch-mutex
+  entry (the fold-#4 NG2-EDGE store-unbound mechanism —
+  `pull_intent_store=None`, §2.5); the two-vendor crash-resume pin
   (§2.5 `.pull_intent` row, with WS-D); the Pin D1-1 runtime refusal
   (with WS-B).
 - **WS-D:** the Dhan chain binding against the profile (with the Dhan
@@ -1974,6 +2057,15 @@ folding (the corrections recorded per gap):
   `no_intent_persist` launcher gate · the NG-3 `WriteDomain`
   allowed-subtree-set retyping · Pin D1-3 · the NG-6 provenance-bit
   encoding law.
+- The assurance session's fold-#3 RE-review (2026-07-15, vs `98533528`;
+  the fold-#3 six items NG-1..NG-6 verified 6/6 CLOSED byte-exact;
+  verdict FIX-FIRST — 1 MAJOR + 2 MINOR ADR-text precision edges) —
+  folded as the §15.1 fold-#4 disposition record: the NG3-EDGE
+  whole-`feeds/`-prefix structural (registration-INDEPENDENT) primary
+  domain + the unregistered-feeds Pin D1-1 fixtures · the NG4-EDGE
+  clamp-abstain refusal contract (never a today-fallback) · the NG2-EDGE
+  store-unbound launcher mechanism (`pull_intent_store=None` — no
+  primary-mutex entry).
 - CLAUDE.md §2 Rules 3/4/6, §6 (Groww verified facts), §8 (hardware
   envelope).
 - DEC-PIPELINE-AUTOPREBUILD-001 (the terminal prebuild being
