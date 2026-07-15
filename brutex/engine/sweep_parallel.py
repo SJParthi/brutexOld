@@ -845,7 +845,8 @@ class _WorkerContext:
     :func:`~brutex.engine.sweep_mem_budget.resolve_mem_budget_bytes` divides the
     RAM-derived default rank budget by the pool size. Defaulted (``1``) so every
     pre-existing constructor call — and the sequential path's semantics — is
-    byte-identical.
+    byte-identical. (T2's DEC-SWEEP-SCALE-GUARDS-001 call-site division was
+    DEDUPED to this landed mechanism at the 2026-07-11 fold — main wins.)
     """
 
     grid: SweepGridConfig

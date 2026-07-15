@@ -35,6 +35,8 @@ from __future__ import annotations
 import os
 from collections.abc import Generator, Iterator, Sequence
 from concurrent.futures import Future
+from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -42,6 +44,8 @@ import brutex.engine.sweep_parallel as mod
 import pytest
 from brutex.config.hardware_envelope import UNDETECTED_RAM, reset_hardware_envelope_cache
 from brutex.data.models import CandleBar
+from brutex.data.option_dedup import OptionDedupIndex
+from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_audit import SweepAuditWriter
 from brutex.engine.sweep_cache import SweepCache
 from brutex.engine.sweep_checkpoint import SweepCheckpointStore
@@ -60,6 +64,7 @@ from brutex.engine.sweep_orchestrator import (
     count_sweep_tuples,
 )
 from brutex.engine.sweep_progress import SweepProgress
+from brutex.engine.sweep_run import ComboDedup, SweepRunConfig, run_persisted_sweep
 from brutex.engine.sweep_supervisor import SweepGuards, grid_identity
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.observability.logging import reset_configuration
@@ -332,3 +337,91 @@ class TestDriverWiresPoolSize:
         assert max_workers == 2  # pool_size = workers − 1 (the writer-actor core)
         assert ctx.budget_workers == 2
         assert os.environ[BUDGET_WORKERS_ENV] == "2"  # the in-process initializer ran
+
+
+# ────── the no-double-division pin (the DEC-SWEEP-SCALE-GUARDS-001 dedupe fold) ──────
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _mini_bars(n: int = 240) -> list[CandleBar]:
+    """A small trending 1-minute series — enough for a real run_persisted_sweep."""
+    bars: list[CandleBar] = []
+    price = 100.0
+    for m in range(n):
+        close = price + 0.6 if m % 3 else price - 0.3
+        ts = (datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(minutes=m)).astimezone(UTC)
+        hi = max(price, close) + 0.5
+        lo = min(price, close) - 0.5
+        bars.append(
+            CandleBar(
+                timestamp=ts,
+                open=Decimal(str(round(price, 2))),
+                high=Decimal(str(round(hi, 2))),
+                low=Decimal(str(round(lo, 2))),
+                close=Decimal(str(round(close, 2))),
+                volume=100,
+                open_interest=None,
+            )
+        )
+        price = close
+    return bars
+
+
+class TestNoDoubleDivisionAfterScaleGuardsDedupe:
+    """T2's DEC-SWEEP-SCALE-GUARDS-001 call-site division was DEDUPED to main's
+    landed DEC-SWEEP-MEM-BUDGET-WORKERS-WIRE-001 (#1671) at the 2026-07-11 fold.
+
+    The surviving SINGLE division lives INSIDE ``resolve_mem_budget_bytes``
+    (the pool-initializer ``BRUTEX_SWEEP_BUDGET_WORKERS`` seam); the plan seam
+    in ``run_persisted_sweep`` consumes it BARE. Had T2's
+    ``per_worker_mem_budget_bytes(..., sweep_concurrency)`` call-site division
+    survived beside it, an 8-worker pool would plan against
+    ``total ÷ (8 × 8)`` — this pin proves the resolved plan budget is
+    ``total ÷ 8`` EXACTLY, main's semantics, never the double-divided figure.
+    """
+
+    def test_no_double_division_after_scale_guards_dedupe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import brutex.engine.sweep_run as sweep_run_mod
+
+        monkeypatch.delenv(MEM_BUDGET_ENV, raising=False)
+        monkeypatch.delenv("BRUTEX_SWEEP_BOUNDED_RANK", raising=False)
+        # The simulated pool-worker env: 48 GiB box, the pool initializer's
+        # export of an 8-eval-worker pool (the #1671 seam, pinned above).
+        _simulate_ram(monkeypatch, 48 * _GIB)
+        monkeypatch.setenv(BUDGET_WORKERS_ENV, "8")
+
+        captured: list[int] = []
+        real_plan = sweep_run_mod.plan_rank_memory
+
+        def _spy_plan(**kwargs: Any) -> Any:
+            captured.append(kwargs["budget_bytes"])
+            return real_plan(**kwargs)
+
+        monkeypatch.setattr(sweep_run_mod, "plan_rank_memory", _spy_plan)
+
+        cfg = SweepRunConfig(
+            instrument="NIFTY",
+            tf="1m",
+            direction=Side.BUY,
+            mode="A",
+            condition_bits=[0, 1, 2],
+            k=1,
+            data_snapshot_hash="snap0001",
+            indicator_version="ind-v1",
+            code_commit_sha="deadbeef",
+            tf_minutes=1,
+            sl_paisa=80,
+            tp_paisa=50,
+            top_k=3,
+        )
+        store = ResultsStore(path=tmp_path / "nodouble.parquet")
+        dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+        with AuditWriter.open(tmp_path / "nodouble.jsonl") as audit:
+            run_persisted_sweep(_mini_bars(), cfg, store=store, dedup=dedup, audit=audit)
+
+        total = 8 * _GIB  # 48 GiB × 1/6 — the undivided whole-machine figure
+        assert captured == [total // 8]  # main's ÷ pool_size, EXACTLY (1 GiB)
+        assert captured[0] != total // (8 * 8)  # NEVER the double-divided 128 MiB
