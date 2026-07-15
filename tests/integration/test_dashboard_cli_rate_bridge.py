@@ -13,7 +13,8 @@ through the injected :class:`~brutex.dashboard.rate_bridge_cache.RateBridgeCache
 SLOW-READ LATENCY BOUND (an Event-wedged reader — the route still answers bounded,
 labelled ``unverified``, single-flight, and the event loop stays free); the cache-hit
 spy (one read across polls within the TTL); BYTE-COMPAT (the payload key set is the
-frozen pre-change set plus exactly the two additive freshness keys, and the fresh-bridge
+frozen pre-change set plus exactly the two additive freshness keys and the additive
+``last_pull`` outcome block of DEC-OPERATOR-HEALTH-TRUTH-001, and the fresh-bridge
 values match a DIRECT un-cached ``build_pull_rate_view_merged`` computation); staleness
 honesty under the memo (a stale/frozen snapshot ages from its own ``wall_time`` — never
 a fabricated "flowing"); deleted-file / permission-denied / unwired degrades; and the
@@ -68,6 +69,11 @@ _PRE_CHANGE_KEYS = frozenset(
 
 #: The two ADDITIVE honest-freshness keys (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001).
 _ADDITIVE_KEYS = frozenset({"bridge_source", "bridge_probe_age_s"})
+
+#: The ADDITIVE honest last-pull OUTCOME block (DEC-OPERATOR-HEALTH-TRUTH-001,
+#: MIGRATION.md #1747) — the conscious extension this pin exists to force: the
+#: operator heartbeat joins it so a HALTED pull never renders the clean green.
+_LAST_PULL_KEYS = frozenset({"last_pull"})
 
 
 class _FakeStore:
@@ -367,7 +373,7 @@ class TestSlowReadLatencyBound:
                 body = resp.json()
                 assert body["bridge_source"] == "unverified"
                 assert body["bridge_probe_age_s"] is None  # cold — nothing ever completed
-                assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+                assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS | _LAST_PULL_KEYS
                 assert body["flow_state"] == "idle"  # panel-only — never fabricated
                 # A FOLLOWER while still wedged: immediate, and NO second read
                 # was started (single-flight keyed on daemon completion).
@@ -425,7 +431,7 @@ class TestGuardSpawnFailureNever500s:
             body = resp.json()
             assert body["bridge_source"] == "unverified"
             assert body["bridge_probe_age_s"] is None  # cold — nothing ever completed
-            assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+            assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS | _LAST_PULL_KEYS
             # The flag was released: the NEXT poll re-spawns the refresh and
             # surfaces the fresh CLI bridge (pre-fix: 'unverified' forever).
             resp2 = c.get("/api/v1/pull/rate")
@@ -467,11 +473,11 @@ class TestCacheHitSpy:
 
 
 class TestByteCompatPin:
-    """Additive-only payload contract: the frozen pre-change keys + exactly two."""
+    """Additive-only payload contract: the frozen pre-change keys + the additive sets."""
 
     def test_payload_key_set_across_degrade_scenarios(self, tmp_path: Path) -> None:
         """no-store / fresh / stale / corrupt / absent all carry the same key set."""
-        expected = _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+        expected = _PRE_CHANGE_KEYS | _ADDITIVE_KEYS | _LAST_PULL_KEYS
         # no store wired
         with _client(DashboardState(), instrument_store=None) as c:
             body = c.get("/api/v1/pull/rate").json()
