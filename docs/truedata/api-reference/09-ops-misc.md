@@ -43,7 +43,7 @@ Researched 2026-07-15. Retrieval-honesty envelope + confidence legend:
 - NO machine-readable holiday-calendar endpoint exists in any SDK
   (source grep for 'holiday' — none). Market status is runtime-only: the
   WS `getmarketstatus` command + `marketstatus` events (pkg-source,
-  high). Holiday-calendar API: UNVERIFIED/absent — an adapter would keep
+  high). A holiday-calendar API appears ABSENT (UNVERIFIED) — an adapter would keep
   using BruteX's own `brutex/calendars/nse.py` as the calendar authority.
 - The replay feed covers non-market-hours development (daily post-market
   + weekends), free for API subscribers (KB via search-relay, medium).

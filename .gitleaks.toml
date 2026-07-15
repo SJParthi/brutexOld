@@ -51,6 +51,14 @@ regexes = [
 # (NIFTYMIDCAP100), alert dedupe keys, the vendored Groww API reference's
 # placeholder Bearer tokens + truncated sample JWT header, and backticked
 # kwargs in MIGRATION.md ledger prose (`max_rounds=0`, `ceiling_per_min=500`).
+# 2026-07-15 addition (DEC-GDF-TRUEDATA-DOCS-001, PR #1543): the GDF +
+# TrueData vendor-doc packs — same class as docs/groww/: placeholder
+# credential examples (`accessKey=<key>`, `password=<p>`) + prose fragments
+# (the audited hit was the prose "UNVERIFIED/absent" after "API:" in
+# docs/truedata/api-reference/09-ops-misc.md — entropy 3.85 via the '/';
+# reworded, but the string remains in the PR commit's diff, so the
+# rule-scoped path allowlist is the history-safe fix). High-signal rules
+# stay live on these paths.
 
 [[rules]]
 id = "generic-api-key"
@@ -59,6 +67,8 @@ description = "Audited fixture/vendored-doc/ledger-prose paths — generic-api-k
 paths = [
   '''^tests/''',
   '''^docs/groww/''',
+  '''^docs/gdf/''',
+  '''^docs/truedata/''',
   '''^docs/MIGRATION\.md$''',
   '''^brutex/dashboard/static/''',
 ]
