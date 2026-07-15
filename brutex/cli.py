@@ -7019,40 +7019,25 @@ def cmd_sweep(
     return EXIT_OK
 
 
-def _resolve_code_commit_sha() -> str:  # pragma: no cover — git/subprocess + cli-omitted
-    """Return the real current git commit SHA, falling back to the package version.
+def _resolve_code_commit_sha() -> str:  # pragma: no cover — cli-omitted thin delegator
+    """Return the real current git commit SHA (COMMON — delegates to the engine leaf).
 
-    Golden Rule #1/#4: the run-identity's ``code_commit_sha`` must be a REAL value,
-    never a placeholder. Uses ``git rev-parse HEAD`` when run inside a checkout;
-    if git is unavailable (e.g. a wheel install with no repo), falls back to the
-    pinned ``brutex.__version__`` — still a real, traceable code identity.
+    The builder body moved to
+    :func:`brutex.engine.run_environment.current_code_commit_sha` (CLAUDE.md
+    §11 COMMON) so the cascade replay's REPL-01 vocabulary gate reads the SAME
+    current-environment string without importing the CLI; this shim keeps the
+    historical CLI name for its many in-file call sites.
     """
-    import subprocess  # nosec B404 — git SHA read only; fixed constant argv below
+    from brutex.engine.run_environment import current_code_commit_sha
 
-    try:
-        out = subprocess.run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
-            ["git", "rev-parse", "HEAD"],  # noqa: S607 — fixed constant argv, no shell/user input
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        sha = out.stdout.strip()
-        if sha:
-            return sha
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return f"brutex-{__version__}"
+    return current_code_commit_sha()
 
 
-def _indicator_version() -> str:  # pragma: no cover — cli-omitted thin string builder
-    """Return a real indicator-stack version string (BruteX + shared trading_core)."""
-    try:
-        import trading_core
+def _indicator_version() -> str:  # pragma: no cover — cli-omitted thin delegator
+    """Return the indicator-stack version (COMMON — delegates to the engine leaf)."""
+    from brutex.engine.run_environment import current_indicator_version
 
-        return f"brutex-{__version__}+trading_core-{trading_core.__version__}"
-    except (ImportError, AttributeError):  # pragma: no cover — wheel always present in prod
-        return f"brutex-{__version__}"
+    return current_indicator_version()
 
 
 def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (helper tested in engine)
@@ -8042,6 +8027,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 # resets AND is recorded in the manifest for the MANUAL replay
                 # — never a schedule-blind re-score of a futures winner.
                 roll_schedule_by_instrument=roll_schedule_by_instrument,
+                # REPL-01: record the GRID's run-identity strings (the exact
+                # environment the winners were minted under) so the MANUAL
+                # replay can refuse a vocabulary/code flip instead of
+                # re-scoring old winners through a different evaluator.
+                indicator_version=grid.indicator_version,
+                code_commit_sha=grid.code_commit_sha,
                 # No stamper seam: the cascade candidate re-simulations are
                 # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
                 # see cascade_wire.build_candidate_input's sanctioned

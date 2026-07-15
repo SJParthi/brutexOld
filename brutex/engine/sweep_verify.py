@@ -1333,7 +1333,14 @@ def verify_identity(
                 detail=(
                     f"none of the {len(found)} store(s) matches any of the "
                     f"{len(plan)} expected path(s) — wrong grid flags, wrong "
-                    f"recorded context, or wrong root; per-file verdicts withheld"
+                    f"recorded context, wrong root, OR a condition-vocabulary "
+                    f"flip since the tree was swept (the DEFAULT swept-bit set "
+                    f"tracks IMPLEMENTED_MASK, so a reshape — e.g. the VWAP "
+                    f"bits 52/53 retiring — moves every default-grid store "
+                    f"address); re-run sweep-verify with the tree's RECORDED "
+                    f"--conditions list, or use --recount (it reads the "
+                    f"recorded context from the tree's audit chain); per-file "
+                    f"verdicts withheld"
                 ),
             )
         )

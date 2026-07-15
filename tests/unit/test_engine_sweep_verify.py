@@ -1619,6 +1619,19 @@ class TestIdentity:
         assert report.checked_stores == 0
         assert not report.clean
 
+    def test_grid_mismatch_detail_names_the_vocabulary_flip_remediation(self, tree: Path) -> None:
+        """REPL-02 — a plain sweep-verify on a PRE-reshape default-swept tree
+        reads grid_mismatch (default_condition_bits changed with the reshape);
+        the detail must NAME a vocabulary flip as a possible cause and the
+        remediation (the recorded --conditions list / --recount context) —
+        never leave the operator staring at a bare "wrong grid flags"."""
+        wrong = _grid(data_snapshot_hash="ffffffff")
+        (finding,) = verify_identity(tree, wrong).findings
+        assert "condition-vocabulary flip" in finding.detail
+        assert "IMPLEMENTED_MASK" in finding.detail
+        assert "RECORDED --conditions" in finding.detail
+        assert "--recount" in finding.detail
+
     def test_unattributed_store_warns(self, tree: Path) -> None:
         store = _store_path(tree, _grid())
         foreign = store.with_name("bull_k1_" + "f" * 16 + ".parquet")

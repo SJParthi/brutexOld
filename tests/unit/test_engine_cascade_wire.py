@@ -2392,3 +2392,207 @@ class TestWriteReportAtomic:
         first = path.read_bytes()
         cw.write_report(tmp_path, _manual_report())
         assert path.read_bytes() == first  # deterministic bytes, atomically re-landed
+
+
+# ── REPL-01: the cascade-replay vocabulary gate ───────────────────────────────
+
+
+def _auto_write(tmp_path: Path, **overrides: Any) -> cw.CascadeWireReport:
+    """Run the AUTOMATIC path with the standard one-spec fixture."""
+    kwargs: dict[str, Any] = {
+        "sweep_id": "a" * 64,
+        "specs": [_spec()],
+        "bars_for": _bars_for(_session_bars()),
+        "bars_context": cw.BarsContext(
+            exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+        ),
+        "cascade_config": cw.cascade_config_for_sweep("a" * 64),
+    }
+    kwargs.update(overrides)
+    return cw.run_and_write_from_specs(tmp_path, **kwargs)
+
+
+class TestReplayVocabularyGate:
+    """REPL-01 (BLOCKER): a replay on a root recorded under a DIFFERENT
+    vocabulary/code identity must REFUSE loudly instead of re-simulating old
+    winners through the new evaluator (zero-trade FAILs) and OVERWRITING the
+    one-per-root cascade-report.json; a LEGACY manifest with no recorded
+    identity is warned + refused, never silently replayed."""
+
+    def test_writer_records_the_current_environment_by_default(self, tmp_path: Path) -> None:
+        from brutex.engine.run_environment import (
+            current_code_commit_sha,
+            current_indicator_version,
+        )
+
+        _auto_write(tmp_path)
+        manifest = cw.load_manifest(tmp_path)
+        assert manifest.indicator_version == current_indicator_version()
+        assert manifest.code_commit_sha == current_code_commit_sha()
+
+    def test_writer_records_the_threaded_grid_strings(self, tmp_path: Path) -> None:
+        # The launcher threads its grid's RECORDED strings — they land verbatim.
+        _auto_write(tmp_path, indicator_version="iv-recorded", code_commit_sha="sha-recorded")
+        manifest = cw.load_manifest(tmp_path)
+        assert manifest.indicator_version == "iv-recorded"
+        assert manifest.code_commit_sha == "sha-recorded"
+
+    def test_matching_replay_proceeds(self, tmp_path: Path) -> None:
+        # The default write records the CURRENT environment, so a same-process
+        # replay matches the gate and reproduces the byte-identical report.
+        _auto_write(tmp_path)
+        before = cw.report_path(tmp_path).read_bytes()
+        cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        assert cw.report_path(tmp_path).read_bytes() == before
+
+    def test_pre_reshape_indicator_version_refuses_and_never_overwrites(
+        self, tmp_path: Path
+    ) -> None:
+        # A manifest recorded under the PRE-reshape crate (0.3.2) replayed in
+        # the current environment: refused naming recorded vs current, the
+        # report bytes untouched, no re-stamp of a wrong-provenance report.
+        _auto_write(tmp_path, indicator_version="brutex-0.1.0+trading_core-0.3.2")
+        before = cw.report_path(tmp_path).read_bytes()
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        message = str(excinfo.value)
+        assert "REFUSED" in message
+        assert "indicator_version" in message
+        assert "brutex-0.1.0+trading_core-0.3.2" in message
+        assert "brutex sweep-all" in message  # remediation named
+        assert cw.report_path(tmp_path).read_bytes() == before
+
+    def test_code_commit_mismatch_refuses(self, tmp_path: Path) -> None:
+        _auto_write(tmp_path, code_commit_sha="0" * 40)
+        before = cw.report_path(tmp_path).read_bytes()
+        with pytest.raises(cw.CascadeWireError, match="code_commit_sha"):
+            cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        assert cw.report_path(tmp_path).read_bytes() == before
+
+    def test_mismatch_names_every_diverging_field(self, tmp_path: Path) -> None:
+        _auto_write(tmp_path, indicator_version="iv-old", code_commit_sha="sha-old")
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        message = str(excinfo.value)
+        assert "indicator_version: recorded 'iv-old'" in message
+        assert "code_commit_sha: recorded 'sha-old'" in message
+
+    def test_legacy_manifest_refuses_with_a_warning_and_never_overwrites(
+        self, tmp_path: Path
+    ) -> None:
+        # A LEGACY manifest (written before the gate — no identity fields):
+        # ONE warning + a loud refusal citing the remediation; the existing
+        # report is byte-untouched (never silently replayed/overwritten).
+        _auto_write(tmp_path)
+        manifest = cw.load_manifest(tmp_path)
+        legacy = cw.CascadeManifest(
+            version=manifest.version,
+            sweep_id=manifest.sweep_id,
+            cascade_config=manifest.cascade_config,
+            bars_context=manifest.bars_context,
+            specs=manifest.specs,
+            indicator_version=None,
+            code_commit_sha=None,
+        )
+        cw.write_manifest(tmp_path, legacy)
+        before = cw.report_path(tmp_path).read_bytes()
+        with capture_logs() as logs, pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        message = str(excinfo.value)
+        assert "records no vocabulary identity" in message
+        assert "brutex sweep-all" in message
+        assert cw.report_path(tmp_path).read_bytes() == before
+        events = [
+            log for log in logs if log["event"] == "cascade_wire.replay_legacy_no_vocab_identity"
+        ]
+        assert len(events) == 1
+
+    def test_half_recorded_manifest_is_legacy_too(self, tmp_path: Path) -> None:
+        # Either field absent → LEGACY refusal (a half-stamped manifest is
+        # never trusted as gated).
+        _auto_write(tmp_path)
+        manifest = cw.load_manifest(tmp_path)
+        half = cw.CascadeManifest(
+            version=manifest.version,
+            sweep_id=manifest.sweep_id,
+            cascade_config=manifest.cascade_config,
+            bars_context=manifest.bars_context,
+            specs=manifest.specs,
+            indicator_version=manifest.indicator_version,
+            code_commit_sha=None,
+        )
+        cw.write_manifest(tmp_path, half)
+        with pytest.raises(cw.CascadeWireError, match="no vocabulary identity"):
+            cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+
+    def test_legacy_json_without_the_keys_parses_to_none(self) -> None:
+        # Old readers/writers interop: a manifest JSON with NEITHER key (the
+        # exact bytes a pre-gate writer produced) parses with None identity.
+        manifest = cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="a" * 64,
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            specs=(_spec(),),
+        )
+        import json as _json
+
+        payload = _json.loads(cw.manifest_to_json(manifest))
+        del payload["indicator_version"]
+        del payload["code_commit_sha"]
+        legacy_bytes = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        parsed = cw.manifest_from_json(legacy_bytes)
+        assert parsed.indicator_version is None
+        assert parsed.code_commit_sha is None
+
+
+# ── G-SIGNBI-02: the winners_hex lossless twin ────────────────────────────────
+
+
+class TestWinnersHexTwin:
+    """The manifest's winner masks as an ADDITIVE ``%032x`` hex twin beside the
+    legacy bare ints (a bit-63 mask exceeds 2**53 — exact in Python's JSON
+    ints, corrupted by any IEEE-double consumer)."""
+
+    _BIT63_MASK = (1 << 63) | (1 << 60) | 0b101
+
+    def _manifest(self, mask: int) -> cw.CascadeManifest:
+        return cw.CascadeManifest(
+            version=cw.MANIFEST_VERSION,
+            sweep_id="a" * 64,
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            specs=(_spec(winners=((_rid(1), mask),)),),
+        )
+
+    def test_bit63_mask_round_trips_via_both_forms(self) -> None:
+        import json as _json
+
+        data = cw.manifest_to_json(self._manifest(self._BIT63_MASK))
+        payload = _json.loads(data)
+        spec = payload["specs"][0]
+        assert spec["winners"] == [[_rid(1), self._BIT63_MASK]]
+        assert spec["winners_hex"] == [[_rid(1), f"{self._BIT63_MASK:032x}"]]
+        parsed = cw.manifest_from_json(data)
+        assert parsed.specs[0].winners == ((_rid(1), self._BIT63_MASK),)
+
+    def test_diverging_hex_twin_refuses_as_corrupt(self) -> None:
+        import json as _json
+
+        payload = _json.loads(cw.manifest_to_json(self._manifest(self._BIT63_MASK)))
+        payload["specs"][0]["winners_hex"] = [[_rid(1), f"{self._BIT63_MASK - 1:032x}"]]
+        tampered = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(cw.CascadeWireError, match="winners_hex does not match winners"):
+            cw.manifest_from_json(tampered)
+
+    def test_legacy_manifest_without_hex_parses(self) -> None:
+        import json as _json
+
+        payload = _json.loads(cw.manifest_to_json(self._manifest(self._BIT63_MASK)))
+        del payload["specs"][0]["winners_hex"]
+        legacy = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        assert cw.manifest_from_json(legacy).specs[0].winners == ((_rid(1), self._BIT63_MASK),)
