@@ -184,7 +184,7 @@
     <div id="panel" aria-busy="true">
       <!-- Skeleton shimmer, NOT a "loading…" literal: poll() ALWAYS resolves
            this to data / an honest empty state / an honest error state
-           (fetchWithTimeout bounds a hung request at 12 s). -->
+           (fetchTextBounded bounds a hung request through the body read). -->
       <div class="skelwrap" aria-hidden="true">
         <span class="bx-skel bx-skel-row" style="width:38%"></span>
         <span class="bx-skel bx-skel-row"></span>
@@ -207,8 +207,9 @@
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the initial paint is a skeleton
    shimmer that ALWAYS resolves — "loading…" is banned as a terminal state;
-   fetches ride BXUI.fetchWithTimeout (12 s deadline, plain-fetch fallback
-   only until the deferred bx-ui.js executes) so a hung endpoint mid-pull
+   fetches ride the shared BXUI.fetchTextBounded (abort armed THROUGH the
+   body read — DEC-O1-GUARANTEE-HARDEN-001; 12 s default bound) so a hung
+   endpoint mid-pull — headers-then-stalled-body included —
    rejects into the catch instead of pending forever; an error BEFORE any
    data renders an honest .bx-state error card with Retry, an error AFTER
    data keeps the last real table (the header verdict carries the failure);
@@ -241,11 +242,14 @@ function setDot(state) {
   if (state) liveDot.classList.add("live-" + state);
 }
 
-/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
-   catch. bx-ui.js is deferred, so only the very first tick can fall back to
-   bare fetch — every later 4 s tick is guarded. */
-function doFetch(url) {
-  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
+function fetchTextBounded(url, timeoutMs) {
+  if (window.BXUI && BXUI.fetchTextBounded) {
+    return BXUI.fetchTextBounded(url, timeoutMs);
+  }
+  return fetch(url).then(function (r) {
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
+  });
 }
 
 /* KPI writes ride the shared change-only count-up when available (final
@@ -354,16 +358,16 @@ let lastCoverageTxt = null;
 let lastHeadline = {};
 let lastRowCount = 0;
 
-async function poll() {
+async function poll(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/options");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/options", timeoutMs);
+    if (!res.ok) {
       lastCoverageTxt = null;
-      liveTxt.textContent = "error " + r.status;
-      showFetchError(r.status, false);
+      liveTxt.textContent = "error " + res.status;
+      showFetchError(res.status, false);
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastCoverageTxt) {
       lastCoverageTxt = txt;
       const body = JSON.parse(txt);
@@ -381,8 +385,10 @@ async function poll() {
     let running = false;
     let prOk = false;
     try {
-      const pr = await doFetch('/api/v1/universe/pull-progress');
-      if (pr.ok) { prOk = true; running = ((await pr.json()).state || "") === "running"; }
+      /* Best-effort second read, same bounded-body helper — a malformed body
+         throws into THIS inner catch (running=false), never backs the tick off. */
+      const pr = await fetchTextBounded('/api/v1/universe/pull-progress', timeoutMs);
+      if (pr.ok) { prOk = true; running = (JSON.parse(pr.text).state || "") === "running"; }
     } catch (e) { running = false; }
     liveTxt.textContent = running
       ? "pulling · " + num(h.series) + " series · " + num(h.total_bars) + " bars"
@@ -415,8 +421,8 @@ function startPolling() {
     poller = window.BXPoll.createPoller({
       url: "/api/v1/coverage/options", // informational — the tick owns its own fetches
       pollMs: 4000,
-      fetchJson: function () {
-        return poll().then(function (ok) {
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
           if (!ok) { throw new Error("coverage/options poll tick failed"); }
           return { ok: true };
         });

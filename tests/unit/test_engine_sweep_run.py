@@ -147,6 +147,7 @@ def _forced_fallback_sim(
     *,
     tf_minutes: int,
     reference_stamper: object = None,
+    precomputed_columns: object = None,
 ) -> ResidentTradeSim:
     """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
@@ -154,13 +155,16 @@ def _forced_fallback_sim(
     bit-identical Python oracle (the wired-vs-unwired forcing seam — the same
     instance-level ``_rust = None`` mechanism the rust_trade_sim fallback tests
     use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
-    attribute the superclass ctor just built).
+    attribute the superclass ctor just built). ``precomputed_columns`` tracks
+    the additive W2-rider kwarg (DEC-STAGE1A-RUST-BATCH-001) so the factory's
+    signature stays call-compatible with the production seam.
     """
     sim = ResidentTradeSim(
         bars,
         bar_bits,
         tf_minutes=tf_minutes,
         reference_stamper=reference_stamper,  # type: ignore[arg-type]
+        precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
     )
     sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
     return sim

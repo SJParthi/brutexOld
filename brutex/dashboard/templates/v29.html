@@ -2117,6 +2117,23 @@
   .hb-big.hb-bad { color: var(--red); }
   .hb-big.hb-idle { color: var(--muted); font-weight: 600; }
 
+  /* ══ Health hub (DEC-OPERATOR-HEALTH-TRUTH-001) ══
+     One green/red fold over nightly · backup dead-man · doctor · mutation ·
+     pull. Rendered by bx-health-hub.js (textContent only); a lane with no
+     local signal reads the grey "not wired" — never a fabricated green. */
+  .hh-body { display: flex; flex-direction: column; gap: 7px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+  .hh-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+  .hh-lane { min-width: 128px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
+  .hh-badge { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-strong); font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .hh-badge-ok { color: var(--green-bright); border-color: var(--green-dim); }
+  .hh-badge-warn, .hh-badge-unknown { color: var(--yellow); border-color: var(--yellow); }
+  .hh-badge-bad { color: var(--red); border-color: var(--red); }
+  .hh-main { color: var(--text-bright); font-weight: 600; overflow-wrap: anywhere; }
+  .hh-note { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+  .hh-fold-ok { color: var(--green-bright); border-color: var(--green-dim); }
+  .hh-fold-warn { color: var(--yellow); border-color: var(--yellow); }
+  .hh-fold-bad { color: var(--red); border-color: var(--red); }
+
   /* ══ One-click REAL wiring surfaces (DEC-OPERATOR-PAGE-REAL-001) ══
      Run bar · awaiting banner · chain map · timeline · VERIFY-ME panel ·
      run controls. All values arrive via textContent from the
@@ -2139,6 +2156,10 @@
   .oc-chain-amber { color: var(--yellow); border-color: var(--yellow); }
   .oc-chain-red { color: var(--red); border-color: var(--red); }
   .oc-chain-pending { opacity: 0.7; }
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the rank-1 cascade verdict badge —
+     a cascade-FAILED winner stays rank-1 (annotation never reranks) but can
+     NEVER read silently green: the fail state paints the red badge. */
+  .oc-cascade-fail { color: var(--red); font-weight: 800; }
   #ocTimeline { max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.7; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 12px; }
   .oc-event-line { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
   .oc-verify-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
@@ -2202,6 +2223,10 @@
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
+<!-- Health hub widget (DEC-OPERATOR-HEALTH-TRUTH-001): ONE BXPoll-disciplined
+     poller over /api/v1/health/hub — loaded AFTER bx-poll.js (defer preserves
+     document order, so window.BXPoll exists when the widget boots). -->
+<script defer src="/static/bx-health-hub.js"></script>
 </head>
 <body class="operator-mode">
 
@@ -2305,6 +2330,23 @@
       <div id="hbProofBody"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
     </div>
   </div>
+</section>
+
+<!-- ══ HEALTH HUB (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747) ══════
+     ONE green/red fold over the automation lanes: pull outcome · nightly
+     chain · backup dead-man · doctor-daily · mutation gate. Rendered by
+     bx-health-hub.js from GET /api/v1/health/hub (one BXPoll-disciplined
+     poller — the #1720 one-poller-per-endpoint law; textContent only).
+     HONESTY LAW: a lane with no local signal reads the explicit grey
+     "not wired"; a degraded lane LOOKS degraded — never a fabricated green. -->
+<section class="hb show-operator-only" id="bxHealthHub" aria-label="Unified health hub">
+  <div class="hb-head">
+    <span class="hb-title">Health hub</span>
+    <span class="hb-sub">nightly · backup dead-man · doctor · mutation · pull — per-lane honest verdicts</span>
+    <span class="oc-pill" id="bxHealthFold">—</span>
+    <span class="oc-updated" id="bxHealthUpdated">awaiting first poll</span>
+  </div>
+  <div id="bxHealthHubBody" class="hh-body"><div class="bx-skel bx-skel-row"></div><div class="bx-skel bx-skel-row" style="width:62%"></div></div>
 </section>
 
 <!-- ══ One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) ══
@@ -2450,7 +2492,7 @@
         <div class="dot"></div>
         <div class="label"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 2v6.5L3 12l6 3.5V22h6v-6.5l6-3.5-6-3.5V2H9z"/></svg><span class="jargon">REAL OR FLUKE?</span><span class="plain-eng" style="display:none">PROOF</span></div>
         <div class="big" data-oc="r1_dsr" data-explain="dsr">—</div>
-        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass</span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
+        <div class="sub"><span class="jargon">DSR · CPCV <span data-oc="r1_cpcv">—</span>% pass · cascade <span data-oc="r1_cascade" data-explain="cascade_status">—</span></span><span class="plain-eng" style="display:none">Statistical verification from the stored run</span></div>
       </div>
     </div>
 
@@ -2506,6 +2548,10 @@
             <tr><td>Sharpe (full precision)</td><td data-oc="r1_sharpe">—</td></tr>
             <tr><td>DSR</td><td data-oc="r1_dsr">—</td></tr>
             <tr><td>CPCV pass %</td><td data-oc="r1_cpcv">—</td></tr>
+            <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade
+                 verdict joined onto the winner (server-built status_text;
+                 "—" until a cascade-joined artifact lands). -->
+            <tr><td>Cascade verdict</td><td data-oc="r1_cascade" data-explain="cascade_status">—</td></tr>
             <tr><td>Max drawdown</td><td data-oc="r1_max_dd">—</td></tr>
             <tr><td>VIX band</td><td data-oc="r1_vix_band">no VIX band</td></tr>
             <!-- Item 3 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime
@@ -3515,15 +3561,52 @@
     //    pollers summed). ──
     function renderHbPull(d) {
       const state = (d && typeof d.flow_state === 'string') ? d.flow_state : 'idle';
+      // DEC-OPERATOR-HEALTH-TRUTH-001: 'done' means ONLY "no pull running +
+      // a fresh tick" (pull_rate_view.py) — the pre-fix green "last pull
+      // completed cleanly" showed the SAME green for a disk-full /
+      // market-hours / quota HALT. The additive `last_pull` OUTCOME block
+      // (classified backend-side from the job's recorded state + the pull
+      // verdict) now decides; its tone ∈ ok|warn|bad|idle maps 1:1 onto
+      // setSlot. All strings land via textContent (never markup).
+      const lp = (d && d.last_pull && typeof d.last_pull === 'object') ? d.last_pull : null;
       if (state === 'flowing') {
         setSlot('pull', 'ok', fmtRps(d.req_per_sec_achieved) + ' r/s achieved → ' + fmtRps(d.req_per_sec_allowed) + ' allowed',
           'pull active · measured completed rate');
+      } else if (state === 'failing') {
+        // Previously fell through to "idle — no pull running" — dishonest for
+        // an ACTIVE pull burning calls that all fail.
+        setSlot('pull', 'bad', 'pull active — calls FAILING',
+          'calls are being issued and every one fails (' + fmtRps(d.req_per_sec_failed) + ' failed r/s)');
       } else if (state === 'stalled') {
         setSlot('pull', 'warn', 'pull active — flow stalled', 'issued-but-not-completing (vendor backoff / prebuild / write stall)');
+      } else if (state === 'local') {
+        // Previously fell through to "idle" — an ACTIVE pull in a
+        // zero-vendor-call local stage (prebuild/movers) reads amber, not idle.
+        setSlot('pull', 'warn', 'pull active — local processing',
+          (d && typeof d.flow_detail === 'string' && d.flow_detail) ? d.flow_detail : 'prebuild/movers — no vendor calls by design');
       } else if (state === 'done') {
-        setSlot('pull', 'ok', 'pull finished', 'last pull completed cleanly');
+        if (lp && lp.outcome === 'clean') {
+          setSlot('pull', 'ok', 'pull finished — completed cleanly', String(lp.detail || 'classified clean by the pull verdict'));
+        } else if (lp && (lp.tone === 'warn' || lp.tone === 'bad')) {
+          // HALTED / deferred / failed / completed-with-issues: the named
+          // degraded state — NEVER the clean-completion green.
+          setSlot('pull', lp.tone, String(lp.headline || 'pull finished — degraded'), String(lp.detail || ''));
+        } else if (lp && lp.outcome === 'completed') {
+          setSlot('pull', 'ok', 'pull finished', String(lp.detail || 'completed — no classified verdict recorded'));
+        } else {
+          // No outcome evidence (an idle-tone outcome / an older backend):
+          // an honest neutral — never an unevidenced "completed cleanly".
+          setSlot('pull', 'idle', 'pull finished', 'outcome unknown — no classified verdict recorded');
+        }
       } else {
-        setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
+        // idle: a degraded LAST outcome stays visible after the rate tick
+        // ages out — a halted pull must not fade into a neutral "idle".
+        if (lp && (lp.tone === 'warn' || lp.tone === 'bad')) {
+          setSlot('pull', lp.tone, String(lp.headline || 'last pull degraded'),
+            (lp.detail ? String(lp.detail) + ' · ' : '') + 'no pull running now');
+        } else {
+          setSlot('pull', 'idle', 'idle — no pull running', 'start one from the Universe page');
+        }
       }
     }
 

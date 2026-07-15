@@ -77,6 +77,49 @@ class TestMaterializeWorkItem:
         with pytest.raises(LakeWriteHalt):
             pp.materialize_work_item(_item())
 
+    def test_spot_no_stored_bars_classified_no_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T8 [fails-before] — a SPOT item's whole-partition zero-stored-bars
+        read is classified ``no_source`` (never ``error``), exactly like the
+        sequential spine (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001); ONE
+        per-symbol INFO event."""
+        from brutex.data.timeframe_materialize import NoStored1mBarsError
+        from structlog.testing import capture_logs
+
+        def _raise(**_kwargs: object) -> MaterializeResult:
+            raise NoStored1mBarsError("no stored 1minute bars for NSE/CASH/RELIANCE — …")
+
+        monkeypatch.setattr("brutex.data.timeframe_materialize.materialize_lake_timeframes", _raise)
+        with capture_logs() as logs:
+            res = pp.materialize_work_item(_item("RELIANCE", kind=PrebuildKind.SPOT))
+        assert res.result is None
+        assert res.error is None
+        assert res.no_source is not None
+        assert res.no_source.startswith("NoStored1mBarsError: ")
+        infos = [e for e in logs if e["event"] == "universe.prebuild.spot_no_source"]
+        assert len(infos) == 1
+        assert infos[0]["symbol"] == "RELIANCE"
+        assert infos[0]["log_level"] == "info"
+
+    @pytest.mark.parametrize("kind", [PrebuildKind.FUTURES, PrebuildKind.OPTIONS])
+    def test_contract_no_stored_bars_stays_error(
+        self, monkeypatch: pytest.MonkeyPatch, kind: PrebuildKind
+    ) -> None:
+        """T9 — the KIND gate (kills the drop-the-kind-check mutant): the SAME
+        error on a contract item stays a quarantining ``error`` — sequential
+        parity with the contract phases' unchanged failure semantics."""
+        from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+        def _raise(**_kwargs: object) -> MaterializeResult:
+            raise NoStored1mBarsError("no stored 1minute bars for NSE/FNO/X — …")
+
+        monkeypatch.setattr("brutex.data.timeframe_materialize.materialize_lake_timeframes", _raise)
+        res = pp.materialize_work_item(_item("NSE-NIFTY-30Jan25-FUT", kind=kind))
+        assert res.no_source is None
+        assert res.error is not None
+        assert res.error.startswith("NoStored1mBarsError: ")
+
 
 # ────────────────────────────────────────────────────────────────────────
 # resolve_prebuild_workers

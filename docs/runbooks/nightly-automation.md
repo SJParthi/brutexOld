@@ -14,7 +14,7 @@ with the R50 sealed-snapshot backup/restore and launchd scheduling.
 
 | # | Link | What it does | Source |
 |---|------|--------------|--------|
-| 1 | COLLISION | acquires the nightly + account + lake pull locks (acquire-and-HOLD — the probe IS the acquisition, zero TOCTOU) + the sweep-liveness heuristic | `brutex/nightly/run.py` (`collision_fn`), `brutex/adapters/groww/pull_singleflight.py` |
+| 1 | COLLISION | acquires the nightly + account + lake pull locks (the probe IS the acquisition, zero TOCTOU; account + lake locks release after PULL+PREBUILD — DEC-SWEEP-LOCK-PULL-CONCURRENCY-001) + the sweep-liveness heuristic | `brutex/nightly/run.py` (`collision_fn`), `brutex/adapters/groww/pull_singleflight.py` |
 | 2 | DISK | fail-CLOSED free-space floors, backup requirement INVENTORY-sized ×1.2 | `brutex/nightly/probes.py::check_disk_floors` |
 | 3 | BACKUP | seals `<backup_root>/<nightly_id>` (pre-mutation state — the rollback point) + retention prune | `brutex/nightly/backup.py::create_snapshot` |
 | 4-5 | PULL + PREBUILD | ONE headless `run_full_pipeline` execution (spot → metadata → historical → prebuild), decomposed into two reported links | `brutex/nightly/pipeline_binding.py` |
@@ -188,14 +188,19 @@ reconciles via `reconcile_ledger_with_lake` / `seed_lake_success`
 |---|---|---|---|
 | `nightly_singleflight.lock` (holder note `nightly:<id>`) | 1 | end of chain | REFUSED `nightly_already_running` |
 | account pull lock (`~/.brutex/locks/pull_account*.flock`) | 2 | released after PREBUILD (no vendor calls during the sweep) | REFUSED `pull_in_flight` |
-| `pull_singleflight.lock` (holder note `nightly:<id>`) | 3 | **held through SWEEP** | REFUSED `pull_in_flight` — never queued |
+| `pull_singleflight.lock` (holder note `nightly:<id>`) | 3 | **released after PREBUILD** (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001) | REFUSED `pull_in_flight` — never queued |
 | sweep-liveness probe (NOT a lock) | 4 | n/a | REFUSED `sweep_alive(<evidence>)` |
 
-Holding the LAKE pull lock through the sweep leg is the R4/G10 sweep-vs-pull
-exclusion made mechanical (no sweep-level flock exists): a manual pull
-attempted mid-nightly is refused with `(holder: nightly:<id>)` — correct,
-because its bars would re-key the data under the sweep's feet.
-try-acquire-and-release was rejected as a TOCTOU. A missing AWS credential
+The LAKE pull lock is held through PULL+PREBUILD only
+(DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, superseding #1612's held-through-SWEEP
+clause): the SWEEP leg's sweep-vs-pull exclusion is owned by `cmd_sweep_all`
+itself — the G10 lake read-guard (`LOCK_SH` on the same file, PRELOAD only)
++ the G6 sweep single-flight (`brutex/engine/sweep_singleflight.py`) — so a
+manual pull / the crossverify producer can run CONCURRENTLY with the sweep's
+compute phase (an EX still held through the sweep leg would additionally
+self-conflict G10's SH acquire → `LakeBusyError` at preload). A manual pull
+attempted during PULL+PREBUILD is refused with `(holder: nightly:<id>)`.
+A missing AWS credential
 skips the account lock with one loud `nightly.account_lock_skipped` WARN.
 A long nightly crossing 06:00 IST is safe — the token re-mint self-heals
 mid-pull (the reauth re-read).
@@ -280,9 +285,13 @@ merge-integration.
    leaves a mixed old/new set — re-run the restore (idempotent).
    Manifest-extraneous files OUTSIDE `window_ledger/deltas/` are not deleted
    (documented hazard; a stray tuple parquet is inert without its sentinel).
-9. The nightly holds the lake pull lock through its sweep leg — manual pulls
-   on this lake are refused for the duration (deliberate, loudly attributed
-   via the holder note).
+9. The nightly holds the lake pull lock through PULL+PREBUILD only — manual
+   pulls on this lake are refused for that span (loudly attributed via the
+   holder note); during the SWEEP leg the lake lock is FREE and a pull can run
+   concurrently (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001; the sweep's own G10
+   preload guard still refuses a sweep START over a mid-write lake, and a
+   pull contending exactly during the sweep leg's brief preload fails that
+   nightly link loudly — break law, cron-red).
 10. Backup/restore are honestly O(files + bytes) — never claimed O(1); the
     probes are O(1)-per-call and bench-pinned flat
     (`tests/bench/test_nightly_probe_o1.py`).
