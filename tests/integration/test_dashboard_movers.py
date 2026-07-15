@@ -482,7 +482,7 @@ class TestOptionPrevCloseOneMinuteNative:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Read spy: the CE baseline resolve performs ZERO 1day-partition reads."""
-        import brutex.dashboard.movers_snapshot as ms
+        from brutex.dashboard import movers_snapshot as ms
 
         self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
         calls: list[str] = []

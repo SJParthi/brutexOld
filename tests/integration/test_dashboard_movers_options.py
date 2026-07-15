@@ -1558,7 +1558,7 @@ class TestRegistryStrikeStep:
     def test_movers_template_renders_the_low_confidence_marker(self) -> None:
         # The frontend honesty marker (a trailing " ~" keyed off the row field) is
         # present in the served template — display-only, string-pinned.
-        import brutex.dashboard as dashboard_pkg
+        from brutex import dashboard as dashboard_pkg
 
         template = (Path(dashboard_pkg.__file__).parent / "templates" / "movers.html").read_text(
             encoding="utf-8"
