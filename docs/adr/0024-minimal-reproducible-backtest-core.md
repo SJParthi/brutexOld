@@ -213,6 +213,15 @@ Golden Rule #3):**
   dirs (`brutex/data/lake_keys.py:36-41`); the alias ladder covers only the
   alias class. Not an observed production class (writers use canonical keys)
   — accepted and recorded honestly in #1837.
+- **(c) NO automated off-box copy of ANY lake/audit data.** Retiring the
+  S3/B2 remote (#1839, downgrading DEC-BACKUP-OFFBOX-001's whole-root
+  off-box lane, MIGRATION.md #1596) leaves the local restic repo sharing
+  its box's fate UNIFORMLY — a box loss (SSD death / theft / fire /
+  ransomware) loses everything since the last operator-made external copy
+  (the manual `docs/runbooks/lake-backup-restore.md` path is the only
+  external-copy lever); honestly, #1596's lane was gated on ADR-0017's
+  M1–M8 operator-manual register and may never have been provisioned — the
+  downgrade is from "available-if-provisioned" to "none".
 
 ## 4.5 Edge-case register (scenario → policy → owning phase)
 
