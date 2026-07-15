@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime
@@ -26,7 +27,12 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
 
-from brutex.adapters.groww.pull_singleflight import PullAlreadyRunningError
+from brutex.adapters.dhan.ingest import DhanIngestReport
+from brutex.adapters.groww.pull_singleflight import (
+    PullAlreadyRunningError,
+    account_pull_singleflight_lock,
+    account_singleflight_lock_path,
+)
 from brutex.config.credentials_types import CredentialsError, DhanCredentials
 from brutex.dashboard.app import (
     DashboardState,
@@ -699,3 +705,175 @@ class TestDhanAccountLockIsolation:
         spawned[0]()  # finish A -> releases the shared key
         assert job_b.start(lambda _h: None, total=1) is True  # now admitted
         spawned[-1]()
+
+
+class _BlockingDhanPull:
+    """A WET ``dhan_spot_pull`` seam that BLOCKS inside the job worker until released.
+
+    Lets a test inspect the ACCOUNT flock the REAL :class:`BackgroundPullJob` acquired
+    in ``start()`` WHILE it is still held: the flock FILE persists after release, but
+    the exclusive HOLD (the contention proof) exists only while the worker runs. Touches
+    NO AWS / dhanhq — the account lock is taken by ``start()`` BEFORE this body runs, so
+    the body is a pure blocker returning a minimal report.
+    """
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, request: DhanPullRequest) -> DhanPullReport:
+        _ = request
+        self.entered.set()
+        self.release.wait(timeout=30.0)
+        return DhanPullReport(
+            spot=DhanIngestReport(outcomes=(), resolved_symbols=(), unresolved_symbols=()),
+            prebuild=None,
+            dry_run=False,
+        )
+
+
+def _patch_account_lock_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    dhan_client_id: str,
+    groww_api_key: str,
+) -> Path:
+    """Redirect the account-lock dir to CI-safe tmp + stub BOTH vendor credential
+    loaders (no SSM / boto3 / network), so the REAL ``account_pull_singleflight_lock``
+    flock lands under tmp and the Dhan/Groww fingerprints are known + deterministic.
+
+    Patching the Groww resolver too pins the DEFAULT ``_default_account_key_resolver``
+    (the key the Dhan jobs inherit on the UNFIXED tree) to a KNOWN api-key, so the
+    fails-before RED is a clean SEMANTIC failure (the Dhan pull acquiring the GROWW
+    fingerprint) rather than a real-AWS lookup. Returns the tmp account-lock dir.
+    """
+    lock_dir = tmp_path / "account_locks"
+    lock_dir.mkdir()
+    monkeypatch.setattr(
+        "brutex.adapters.groww.pull_singleflight.default_account_lock_dir", lambda: lock_dir
+    )
+
+    def _load_dhan(*, client: Any = None) -> DhanCredentials:
+        _ = client
+        return DhanCredentials(client_id=dhan_client_id, access_token="jwt-not-a-real-token")
+
+    monkeypatch.setattr("brutex.config.credentials_dhan_aws.load_dhan_aws_credentials", _load_dhan)
+    monkeypatch.setattr(
+        "brutex.config.credentials.resolve_groww_aws_credentials",
+        lambda **_kwargs: SimpleNamespace(api_key=groww_api_key),
+    )
+    return lock_dir
+
+
+def _wait_account_lock_free(api_key: str, lock_dir: Path, *, timeout: float) -> None:
+    """Bounded-wait until the account flock for *api_key* is releasable — proving the
+    job worker released it. The flock is NON-BLOCKING, so a still-held lock raises
+    :class:`PullAlreadyRunningError` INSTANTLY (never hangs); we retry until the deadline.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with account_pull_singleflight_lock(api_key, lock_dir=lock_dir):
+                return
+        except PullAlreadyRunningError:
+            if time.monotonic() >= deadline:  # pragma: no cover — the worker released well within
+                raise
+            time.sleep(0.02)
+
+
+class TestDhanAccountLockProductionWiredP1:
+    """DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 P1 — the PRODUCTION-WIRED killing test: drive
+    the REAL ``build_app`` route → the REAL ``BackgroundPullJob.start`` →
+    ``_acquire_singleflight`` → the REAL ``account_pull_singleflight_lock`` flock, and
+    assert against the ACTUAL acquired flock FILE PATH (never a mocked resolver return).
+
+    Fails-before on the bare club head (both Dhan jobs omit ``account_key_resolver`` ⇒
+    the default GROWW api-key ⇒ the Dhan pull acquires the GROWW fingerprint): ARM-1's
+    path inequality fails, and ARM-2's held-Groww-lock REFUSES the Dhan start. The flock
+    is ``LOCK_NB``, so the bare-tree contention RAISES instantly — a SEMANTIC RED, never
+    a hang.
+    """
+
+    def test_wet_dhan_pull_acquires_the_dhan_fingerprinted_account_flock(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ARM-1 (LOCK-PATH, production-wired): the ACTUAL account flock the REAL wet
+        # Dhan job acquires is the DHAN client-id fingerprint, distinct from the Groww
+        # api-key's — inspected on the REAL flock file while the worker holds it.
+        lock_dir = _patch_account_lock_env(
+            monkeypatch, tmp_path, dhan_client_id="DHANCLIENT123", groww_api_key="GROWWKEY999"
+        )
+        dhan_path = account_singleflight_lock_path("DHANCLIENT123", lock_dir=lock_dir)
+        groww_path = account_singleflight_lock_path("GROWWKEY999", lock_dir=lock_dir)
+        assert dhan_path != groww_path  # distinct credentials → distinct flock files
+        blocking = _BlockingDhanPull()
+        with TestClient(
+            build_app(DashboardState(), instrument_store=store, dhan_spot_pull=blocking)
+        ) as client:
+            resp = client.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": False})
+            assert resp.status_code == 200
+            assert resp.json()["started"] is True
+            # The worker is now inside the wet body ⇒ start() has acquired the account
+            # flock synchronously (the flock is taken BEFORE the worker spawns).
+            assert blocking.entered.wait(timeout=10.0)
+            # The ACTUAL acquired account-lock file is EXACTLY the Dhan-fingerprinted one,
+            # and the Groww fingerprint was never taken by the Dhan pull.
+            held = sorted(lock_dir.glob("pull_account*.flock"))
+            assert held == [dhan_path]
+            assert not groww_path.exists()
+            # It is genuinely HELD + VENDOR-SCOPED: a second same-account (client-id) Dhan
+            # peer CONTENDS on the SAME account-lock path (isolation is by-key, not by
+            # lock deletion), while the Groww account path is FREE — the Dhan pull never
+            # touched it, so no Dhan↔Groww false serialisation.
+            with (
+                pytest.raises(PullAlreadyRunningError),
+                account_pull_singleflight_lock("DHANCLIENT123", lock_dir=lock_dir),
+            ):
+                pass  # pragma: no cover — the guarded body never runs (acquire raises)
+            with account_pull_singleflight_lock("GROWWKEY999", lock_dir=lock_dir):
+                pass  # the Groww path is acquirable → not held by the Dhan pull
+            blocking.release.set()
+            _wait_account_lock_free("DHANCLIENT123", lock_dir, timeout=10.0)
+
+    def test_held_groww_account_flock_does_not_exclude_a_wet_dhan_pull(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ARM-2 (DUAL-HOLD): the test HOLDS the real Groww account flock via the
+        # pull_singleflight primitive under fingerprint("GROWWKEY999"); a REAL wet Dhan
+        # pull (build_app route) still STARTS and acquires ITS Dhan flock — BOTH flocks
+        # are simultaneously held, proving NO mutual exclusion across the two accounts.
+        lock_dir = _patch_account_lock_env(
+            monkeypatch, tmp_path, dhan_client_id="DHANCLIENT123", groww_api_key="GROWWKEY999"
+        )
+        dhan_path = account_singleflight_lock_path("DHANCLIENT123", lock_dir=lock_dir)
+        blocking = _BlockingDhanPull()
+        # Hold the GROWW account flock for the whole Dhan-pull attempt (the SAME lock a
+        # concurrent Groww pull would take).
+        with (
+            account_pull_singleflight_lock("GROWWKEY999", lock_dir=lock_dir),
+            TestClient(
+                build_app(DashboardState(), instrument_store=store, dhan_spot_pull=blocking)
+            ) as client,
+        ):
+            resp = client.post("/api/v1/universe/pull-pipeline-dhan", params={"dry_run": False})
+            assert resp.status_code == 200
+            # NOT refused despite the Groww account lock being held — the Dhan pull keys
+            # on the Dhan client-id, a DIFFERENT flock file (pre-fix it keyed on the GROWW
+            # api-key ⇒ this start would have been REFUSED / started False).
+            assert resp.json()["started"] is True
+            assert blocking.entered.wait(timeout=10.0)
+            # BOTH flocks are alive AT THE SAME TIME:
+            assert dhan_path.exists()
+            with (
+                pytest.raises(PullAlreadyRunningError),
+                account_pull_singleflight_lock("DHANCLIENT123", lock_dir=lock_dir),
+            ):  # the Dhan flock is genuinely held by the running job
+                pass  # pragma: no cover — the guarded body never runs (acquire raises)
+            with (
+                pytest.raises(PullAlreadyRunningError),
+                account_pull_singleflight_lock("GROWWKEY999", lock_dir=lock_dir),
+            ):  # the Groww flock is STILL held by THIS test
+                pass  # pragma: no cover — the guarded body never runs (acquire raises)
+            blocking.release.set()
+            _wait_account_lock_free("DHANCLIENT123", lock_dir, timeout=10.0)
