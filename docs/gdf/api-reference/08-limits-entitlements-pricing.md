@@ -6,53 +6,18 @@ Researched 2026-07-15. Retrieval-honesty envelope + confidence legend:
 
 ## 1. The per-key entitlement model — GetLimitation (vendor-authored, HIGH)
 
-Everything is configured PER API KEY. The `GetLimitation` response —
-GFDLWS 0.0.4 README sample, values ILLUSTRATIVE (not plan quotes):
+Everything is configured PER API KEY. The `GetLimitation` response
+(`MessageType: "LimitationResult"`) is a four-block record — field
+inventory from the GFDLWS 0.0.4 README's ILLUSTRATIVE sample (its values
+are NOT plan quotes; the dump is summarized per the licensing posture,
+[README.md](./README.md)):
 
-```json
-{
-"GeneralParams":{
-  "AllowedBandwidthPerHour":-1.0,
-  "AllowedCallsPerHour":-1,
-  "AllowedCallsPerMonth":-1,
-  "AllowedBandwidthPerMonth":-1.0,
-  "ExpirationDate":1485468000,
-  "Enabled":true
-},
-"AllowedExchanges":[
-  {"AllowedInstruments":-1,"DataDelay":0,"ExchangeName":"CDS"},
-  {"AllowedInstruments":-1,"DataDelay":0,"ExchangeName":"MCX"},
-  {"AllowedInstruments":-1,"DataDelay":0,"ExchangeName":"NFO"},
-  {"AllowedInstruments":-1,"DataDelay":0,"ExchangeName":"NSE"},
-  {"AllowedInstruments":-1,"DataDelay":0,"ExchangeName":"NSE_IDX"}
-],
-"AllowedFunctions":[
-  {"FunctionName":"GetExchangeMessages","IsEnabled":false},
-  {"FunctionName":"GetHistory","IsEnabled":true},
-  {"FunctionName":"GetLastQuote","IsEnabled":false},
-  {"FunctionName":"GetLastQuoteArray","IsEnabled":false},
-  {"FunctionName":"GetLastQuoteArrayShort","IsEnabled":false},
-  {"FunctionName":"GetLastQuoteShort","IsEnabled":false},
-  {"FunctionName":"GetMarketMessages","IsEnabled":false},
-  {"FunctionName":"GetSnapshot","IsEnabled":true},
-  {"FunctionName":"SubscribeRealtime","IsEnabled":false}
-],
-"HistoryLimitation":{
-  "TickEnabled":true,"DayEnabled":true,"WeekEnabled":false,"MonthEnabled":false,
-  "MaxEOD":100000,"MaxIntraday":44,
-  "Hour_1Enabled":false,"Hour_2Enabled":false,"Hour_3Enabled":false,"Hour_4Enabled":false,"Hour_6Enabled":false,"Hour_8Enabled":false,"Hour_12Enabled":false,
-  "Minute_1Enabled":true,"Minute_2Enabled":false,"Minute_3Enabled":false,"Minute_4Enabled":false,"Minute_5Enabled":false,"Minute_6Enabled":false,"Minute_10Enabled":false,"Minute_12Enabled":false,"Minute_15Enabled":false,"Minute_20Enabled":false,"Minute_30Enabled":false,
-  "MaxTicks":5
-},
-"MessageType":"LimitationResult"
-}
-```
-
-Interpretation (field names = high; semantics partly inferred):
-`-1` = unlimited; `DataDelay` per exchange (0 = realtime — delayed feeds
-are a sold variant); function-level enable flags; per-interval history
-enablement + record caps (`MaxTicks`, `MaxEOD`, `MaxIntraday`); key
-`ExpirationDate` (epoch); bandwidth + call quotas per hour/month.
+| Block | Fields (names = high) | Semantics (partly inferred) |
+|---|---|---|
+| `GeneralParams` | `AllowedBandwidthPerHour` · `AllowedCallsPerHour` · `AllowedCallsPerMonth` · `AllowedBandwidthPerMonth` · `ExpirationDate` · `Enabled` | call + bandwidth quotas per hour/month (`-1` observed = unlimited); key expiry as epoch seconds; master enable flag |
+| `AllowedExchanges[]` | `ExchangeName` · `AllowedInstruments` · `DataDelay` | per-exchange record: instrument allowance (`-1` = unlimited) + feed delay (`0` = realtime — delayed feeds are a sold variant) |
+| `AllowedFunctions[]` | `FunctionName` · `IsEnabled` | per-FUNCTION enablement. The illustrative sample shows a key with `GetHistory` + `GetSnapshot` enabled and the quote/stream functions disabled — i.e. a **history-only key** exists as a product shape |
+| `HistoryLimitation` | `TickEnabled` · `DayEnabled` · `WeekEnabled` · `MonthEnabled` · `Hour_{1,2,3,4,6,8,12}Enabled` · `Minute_{1,2,3,4,5,6,10,12,15,20,30}Enabled` · `MaxTicks` · `MaxEOD` · `MaxIntraday` | per-interval history enablement + per-request record caps (the sample illustrates small `MaxTicks` / large `MaxEOD` style caps — sample values, not plan quotes) |
 
 **Operational law for any adapter:** call `GetLimitation` FIRST and treat
 its answer — not this document — as the capability surface of the key in

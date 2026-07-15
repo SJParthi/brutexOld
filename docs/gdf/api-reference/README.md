@@ -25,7 +25,7 @@ confidence legend used across ALL files in this directory:
 
 | Method | Meaning | Confidence cap |
 |---|---|---|
-| `pypi-fetch` | **Vendor-authored PyPI packages** fetched directly (author "Global Datafeeds \<developer@globaldatafeeds.in\>": `GFDLWS` 0.0.4, `ws-gfdl` 1.1.0, `gfdl-rest` 1.0.3 — READMEs + full source read). Vendor-published code = vendor truth for the wire protocol. | **high** |
+| `pypi-fetch` | **Vendor-authored PyPI packages** fetched directly (author "Global Datafeeds \<developer@globaldatafeeds.in\>": `GFDLWS` 0.0.4, `ws-gfdl` 1.1.0, `gfdl-rest` 1.0.3 — READMEs + full source read here; the COMPLETE family is 7 packages per the sibling census below). Vendor-published code = vendor truth for the wire protocol. | **high** |
 | `search-relay` | WebSearch server-side retrieval of vendor doc pages (content relayed, never byte-read here) | **medium** (high only when triangulated with a vendor-authored artifact) |
 | `github-fetch` | Third-party repos on GitHub (working integrations) | **low** for vendor truth (medium when ≥2 independent repos agree + vendor corroboration) |
 | — | Could not retrieve at all | **UNVERIFIED** |
@@ -34,6 +34,36 @@ Every claims table in this pack carries Source + access date + confidence.
 A credentialed live probe is MANDATORY before any figure here is encoded
 in BruteX/TickVault code. Full URL-by-URL attempt log:
 [11-retrieval-log.md](./11-retrieval-log.md).
+
+## Licensing posture — SUMMARIZE-ONLY (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780)
+
+GDF's subscriber terms include personal-use clauses and its redistribution
+terms are UNVERIFIED, so the standing coordinator ruling for GDF material
+in this PUBLIC repo is **summarize-only**: no verbatim vendor prose and no
+vendor response-sample dumps are committed. API **facts and identifiers**
+— endpoint/function/MessageType names, parameter names, enum tokens,
+field names, JSON key shapes, identifier grammars — are facts and are
+recorded (request key shapes carry placeholder values; response samples
+are recast as field-inventory tables; quoted vendor sentences are
+paraphrased with attribution). Verbatim originals stay re-fetchable
+bit-for-bit via the pinned PyPI digests in
+[docs/vendors/gdfl/sdk/PACKAGES.md](../../vendors/gdfl/sdk/PACKAGES.md).
+This pack was conformed to the ruling on 2026-07-15 (MIGRATION.md #1795
+reconcile note).
+
+### Sibling archive — docs/vendors/gdfl/ (read both)
+
+A parallel GDFL capture (2026-07-13, DEC-GDFL-VENDOR-DOCS-001) landed on
+main while this pack was in flight. The two are complementary; this pack
+cross-references it ONE-WAY (its files are not edited here):
+
+| Question | Authority |
+|---|---|
+| Finest-granularity + depth VERDICT (incl. raw-sample measurements + 10 credentialed probe gates) | [docs/vendors/gdfl/VERDICT.md](../../vendors/gdfl/VERDICT.md) |
+| PyPI SDK census (7 packages, defects incl. the broken `getbyperiod`, pinned SHA256 re-fetch digests) | [docs/vendors/gdfl/sdk/PACKAGES.md](../../vendors/gdfl/sdk/PACKAGES.md) |
+| CURRENT-package WS MessageType inventory (wsgfdl-py 1.3.5 — 38 requests / 36 results) | [docs/vendors/gdfl/api/WEBSOCKET_API.md](../../vendors/gdfl/api/WEBSOCKET_API.md) |
+| REST surface own-words summary (incl. gfdl-rest defect list) | [docs/vendors/gdfl/api/REST_API.md](../../vendors/gdfl/api/REST_API.md) |
+| Vendor doc-portal section-by-section walkthrough + endpoints/limits/pricing/symbology/company + the TrueData comparison | THIS pack (+ [docs/truedata/api-reference/](../../truedata/api-reference/README.md) + [docs/research/GDF_TRUEDATA_FEASIBILITY.md](../../research/GDF_TRUEDATA_FEASIBILITY.md)) |
 
 ## File index (mapped to the vendor's own doc tree)
 
@@ -78,8 +108,9 @@ connection; REST passes `accessKey=` on every call.
 | REST | `http://nimblerest.lisuns.com:4531` / TLS `https://…:4532` | medium (≥4 third-party repos); TLS port medium-low (seen once) |
 | TLS WebSocket (`wss://`) | UNVERIFIED (zero evidence) | UNVERIFIED |
 
-Vendor's own words: "End point URL and Port number will be provided by
-Global Datafeeds" (GFDLWS README, pypi-fetch, high).
+Per the vendor reference, the endpoint URL and port are issued to each
+subscriber by Global Datafeeds (paraphrased; GFDLWS README, pypi-fetch,
+high).
 
 ### The 29-function vocabulary (+5 newer)
 
@@ -94,6 +125,10 @@ GetLastQuoteOptionGreeks(+Array/+Chain); newer additions:
 SubscribeOptionChain · SubscribeOptionChainGreeks ·
 SubscribeTopGainersLosers · GetTopGainersLosers · GetHistoryGreeks.
 (Vendor GFDLWS 0.0.4 README + package modules, pypi-fetch, high.)
+The CURRENT `wsgfdl-py` 1.3.5 widens this to 38 request / 36 result
+MessageTypes (adds GetVolumeShockers, SubscribeSnapshotGreeks,
+GetSnapshotGreeks, an AdjustSplits history flag) — full inventory in
+[docs/vendors/gdfl/api/WEBSOCKET_API.md](../../vendors/gdfl/api/WEBSOCKET_API.md).
 
 ### Load-bearing numbers (with confidence)
 

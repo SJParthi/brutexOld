@@ -36,6 +36,25 @@ code, not captured wire bytes. A credentialed live probe is MANDATORY
 before any figure here is encoded in BruteX/TickVault code. Full
 URL-by-URL attempt log: [10-retrieval-log.md](./10-retrieval-log.md).
 
+## Licensing posture (why this pack MAY carry verbatim SDK excerpts)
+
+The GDFL SUMMARIZE-ONLY ruling (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md
+#1780) is VENDOR-SPECIFIC — it binds GDF material because GDF's subscriber
+terms carry personal-use clauses and its redistribution terms are
+UNVERIFIED. No such ruling binds TrueData. The verbatim content in THIS
+pack is therefore of three deliberate classes, each defensible on its own
+terms: (1) code/wire-shape excerpts from TrueData's own PUBLISHED
+OPEN-SOURCE SDKs — npm `truedata-nodejs` (MIT) and PyPI `truedata`
+(GPL-3.0 per its metadata) — quoted with attribution as those licenses
+permit; (2) identifiers, JSON key shapes and wire TOKENS (error/status
+match-strings) — facts; (3) SHORT attributed quotations of vendor
+knowledge-base / marketing lines where the exact wording is load-bearing
+(ordinary quotation practice — sentence-scale, never page-scale
+reproduction; longer KB content is summarized). If a future ruling
+extends summarize-only to TrueData, recast classes (1) and (3) exactly as
+the GDF pack was conformed on 2026-07-15 (MIGRATION.md #1795 reconcile
+note).
+
 ## File index (mapped to the vendor's real doc surfaces)
 
 TrueData's documentation lives across: the marketing/API site

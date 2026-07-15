@@ -9,10 +9,10 @@ Researched 2026-07-15. Retrieval-honesty envelope + confidence legend:
 
 | Claim | Value | Source (access 2026-07-15) | Confidence |
 |---|---|---|---|
-| Vendor | Global Datafeeds, globaldatafeeds.in — Indian market-data vendor ("Live data of NSE Stocks, NSE F&O, NSE CDS, MCX, BSE Stocks and BSE F&O in charting platforms") | homepage title via search-relay | medium |
+| Vendor | Global Datafeeds, globaldatafeeds.in — Indian market-data vendor; the homepage positions it as live NSE (stocks/F&O/CDS), MCX and BSE (stocks/F&O) data for charting platforms (paraphrased homepage title) | homepage title via search-relay | medium |
 | Legal entity | Global Financial Datafeeds LLP ("GFDL") | zoominfo listing + vendor branding via search-relay | medium |
-| Authorization claim | "Authorized NSE, BSE, MCX & NCDEX Stock Realtime API Provider"; "authorized real-time data vendor of Indian Stock Exchanges NSE, NFO, CDS, MCX, BSE, BFO, NCDEX and Fundamental Data" | `/authorised-data-vendors/`, `/authorized-nse-bse-mcx-stock-realtime-api-provider/` via search-relay | medium |
-| History/scale claims | "Established in 2010"; "uptime of 99.995%"; "50 million data requests daily"; "25+ charting supported platforms" | homepage + `/apis/` via search-relay | medium (vendor marketing) |
+| Authorization claim | The vendor's authorization pages present it as an exchange-authorized real-time data vendor for NSE, BSE, MCX & NCDEX — API-token-level coverage naming NSE, NFO, CDS, MCX, BSE, BFO, NCDEX plus fundamental data (paraphrased; exchange names are facts) | `/authorised-data-vendors/`, `/authorized-nse-bse-mcx-stock-realtime-api-provider/` via search-relay | medium |
+| History/scale claims | Established 2010; claimed uptime 99.995%; claimed ~50 million data requests served daily; 25+ supported charting platforms (vendor marketing figures, paraphrased) | homepage + `/apis/` via search-relay | medium (vendor marketing) |
 | Data vendor ONLY | No order routing / broking anywhere in the doc surface — pure market-data vendor | negative observation across all retrieved material | high (for the retrieved surface) |
 
 ## 2. Type of APIs available (vendor section)
@@ -31,8 +31,8 @@ Researched 2026-07-15. Retrieval-honesty envelope + confidence legend:
 
 | Claim | Value | Source | Confidence |
 |---|---|---|---|
-| Realtime | "Realtime data updating at 1 second frequency" for NSE Stocks, NSE Indices, NSE F&O, NSE Currency, MCX, BSE Stocks, BSE Indices & BSE F&O | `/introduction/type-of-data-available/` via search-relay | medium |
-| Historical periodicities | "Historical data of Periodicity Tick, Minute, Day, Week, Month" (+HOUR per the function parameter table) | same + vendor README parameter table (pypi-fetch) | high (triangulated) |
+| Realtime | Realtime data updating at a stated **1-second frequency** (paraphrased vendor claim) for NSE Stocks, NSE Indices, NSE F&O, NSE Currency, MCX, BSE Stocks, BSE Indices & BSE F&O | `/introduction/type-of-data-available/` via search-relay | medium |
+| Historical periodicities | Historical data at the Tick / Minute / Day / Week / Month periodicities (paraphrased; +HOUR per the function parameter table — the tokens are enum identifiers) | same + vendor README parameter table (pypi-fetch) | high (triangulated) |
 | Historical depth (bundled) | tick 7 days · 1–4 min 3 months · 5–10 min 4.5 months · 15–30 min + hourly 6 months · daily/weekly/monthly since 2010 — full table + caveats in [04-historical-data.md](./04-historical-data.md) | same page via search-relay | medium |
 | Delayed-feed variant | "delayed" appears in the `/apis/` landing title; `DataDelay` is a per-exchange field in GetLimitation (0 = realtime) | search-relay + GFDLWS README (pypi-fetch) | high (the field) / medium (the sold variant) |
 | Exchanges observed as API tokens | NSE, NSE_IDX, NFO, CDS, BSE, BSE_IDX, BFO, BSE_DEBT, MCX | vendor GetExchanges samples (pypi-fetch) | high |

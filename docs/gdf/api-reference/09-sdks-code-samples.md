@@ -6,20 +6,40 @@ Researched 2026-07-15. Retrieval-honesty envelope + confidence legend:
 
 ## 1. Vendor-authored PyPI packages (pypi-fetch = direct, HIGH confidence)
 
-These three packages, authored by
-"Global Datafeeds \<developer@globaldatafeeds.in\>", are the strongest
-evidence in this pack — the wire protocol was read from their source.
+The vendor's PyPI family is **SEVEN packages** (author accounts
+"Global Datafeeds \<developer@globaldatafeeds.in\>" + a GDFL employee).
+The AUTHORITATIVE census — full-simple-index discovery, per-package
+defects, pinned sdist/wheel SHA256 digests for bit-exact re-fetch — is the
+sibling archive
+**[docs/vendors/gdfl/sdk/PACKAGES.md](../../vendors/gdfl/sdk/PACKAGES.md)**
+(DEC-GDFL-VENDOR-DOCS-001, captured 2026-07-13). Summary, plus what THIS
+pack's protocol claims were read from:
 
-| Package | Import | Latest | Releases | Deps | Notes |
-|---|---|---|---|---|---|
-| **GFDLWS** ("Package to implement WebSocket API of Global Datafeeds") | `import GFDLWS as gw` | 0.0.4 (2024-09-16) | 0.0.1–0.0.3 (2024-09-13), 0.0.4 (2024-09-16) | `websockets` | Classifier "Development Status :: 3 - Alpha", Windows classifier. Modules cover all 29+5 functions. **Code quality is rough** — sync-over-async wrappers, bare excepts, a `getcaldle` typo'd method name, an inverted `Max`-handling branch in that method. Treat as reference for the WIRE PROTOCOL, not a production-grade client. |
-| **ws-gfdl** (predecessor, same description) | `import gfdlws as gw` | 1.1.0 (2022-08-12) | 1.0.0–1.1.0 (2022-08-11/12) | `websockets` | Same vendor author; README identical in substance (29 functions). Third-party integrations import `gfdlws`. |
-| **gfdl-rest** ("Beta Package to implement REST API of Global Datafeeds") | `import gfdl_rest as rs` | 1.0.3 (2024-11-11) | 1.0.0/1.0.1 (2024-08-23), 1.0.2 (2024-08-27), 1.0.3 (2024-11-11) | `requests` | Class-per-function over `BaseAPI` (accessKey injection + `xml=true` / `format=CSV`). **BUG observed:** `GetHistoryGreeks.py` hits endpoint `"GetHistory/"` (not `GetHistoryGreeks/`) — verify against the vendor REST docs before use. |
+| Package | Latest | Import | Status |
+|---|---|---|---|
+| **wsgfdl-py** | **1.3.5** (2025-11-28) | `gfdlws` | **CURRENT WS** — the newest release in the family; adds volume-shockers, snapshot-Greeks, split-adjusted history. Its span-form history call `getbyperiod` is **BROKEN as shipped** (9 args into a 10-parameter zero-default coroutine — AST-verified, sibling census) |
+| **gfdl-rest** | **1.0.3** (2024-11-11) | `gfdl_rest` | **CURRENT REST** — class-per-function over `BaseAPI` (accessKey injection + `xml=true` / `format=CSV`); deps `requests`. **BUG observed here:** `GetHistoryGreeks.py` hits endpoint `"GetHistory/"` (not `GetHistoryGreeks/`) — verify against the vendor REST docs before use |
+| GFDLWS | 0.0.4 (2024-09-16) | `GFDLWS` | superseded intermediate duplicate — THE package this pack's WS wire-protocol read used (full source; its README carries the function reference). Alpha classifier; **rough code** — sync-over-async wrappers, bare excepts, a `getcaldle` typo'd method name, an inverted `Max`-handling branch in that method |
+| ws-gfdl | 1.1.0 (2022-08-12) | `gfdlws` — **collides with wsgfdl-py; never co-install** | original 2022 lineage; README identical in substance (29 functions); third-party integrations import `gfdlws` |
+| restgfdl | 1.1.5 (2024-08-23) | `restgfdl` | employee-account predecessor of gfdl-rest (fewer functions); superseded |
+| Gfdlws-Sub | 0.1 (2024-10-16) | `Gfdlws_Sub` | subscribe-only helper; the only genuinely async/callback client in the family |
+| GlobalDatafeeds-ws | 0.0.1 (2024-10-14) | — | **EMPTY placeholder** — no code in sdist OR wheel (sibling census, verified) |
+
+This pack's wire-shape evidence was read from **GFDLWS 0.0.4 + gfdl-rest
+1.0.3** full source (my 2026-07-15 capture); the sibling census
+additionally read **wsgfdl-py 1.3.5**, which WIDENS the WS vocabulary to
+38 request / 36 result MessageTypes (e.g. `GetVolumeShockers`,
+`SubscribeSnapshotGreeks`, an `AdjustSplits` history flag) — inventory in
+[docs/vendors/gdfl/api/WEBSOCKET_API.md](../../vendors/gdfl/api/WEBSOCKET_API.md).
+Treat ALL of these packages as reference material for the WIRE PROTOCOL,
+never production-grade clients (defect inventory: sibling census).
 
 Name-collision warnings (pypi-fetch, high): PyPI `gfdl` (0.2.0, 2026) is
-"Gradient Free Deep Learning" from LANL — UNRELATED. Probed-and-absent
-names: `gfdlrest`, `globaldatafeeds`, `nimbleapi`, `gfdl-ws`, `gfdlws2`
-(404 on PyPI, 2026-07-15).
+"Gradient Free Deep Learning" from LANL — UNRELATED (as are `gfdlfremake`,
+`gfdlnb`, `gfdlvitals`, `gdflib` — NOAA-GFDL/other, per the sibling
+census). Probed-and-absent names: `gfdlrest`, `globaldatafeeds`,
+`nimbleapi`, `gfdl-ws`, `gfdlws2` (404 on PyPI, 2026-07-15); `restgfdl-py`
+is a name-only registration with zero releases (sibling census).
 
 ## 2. Vendor code-sample & download pages (search-relay, medium)
 

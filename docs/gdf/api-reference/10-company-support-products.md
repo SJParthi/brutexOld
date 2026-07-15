@@ -9,9 +9,9 @@ center, authorization pages, desktop-product pages.
 | Claim | Value | Source (2026-07-15) | Confidence |
 |---|---|---|---|
 | Legal entity | Global Financial Datafeeds LLP ("GFDL"; brand "Global Datafeeds") | zoominfo listing + vendor branding via search-relay | medium |
-| Authorization | "Authorized NSE, BSE, MCX & NCDEX Stock Realtime API Provider"; "authorized real-time data vendor of Indian Stock Exchanges NSE, NFO, CDS, MCX, BSE, BFO, NCDEX and Fundamental Data" | vendor authorization pages via search-relay | medium |
-| Founded / history | "Established in 2010"; "pioneers in vendor-neutral streaming data dissemination in India" | vendor pages via search-relay | medium |
-| Scale/uptime | "uptime of 99.995% [during market hours]"; "50 million data requests daily" | homepage + `/apis/` via search-relay | medium (marketing) |
+| Authorization | Presented as an exchange-authorized real-time data vendor for NSE, BSE, MCX & NCDEX — token-level coverage naming NSE, NFO, CDS, MCX, BSE, BFO, NCDEX plus fundamental data (paraphrased; exchange names are facts) | vendor authorization pages via search-relay | medium |
+| Founded / history | Established 2010; self-described as an early mover in vendor-neutral streaming data dissemination in India (paraphrased) | vendor pages via search-relay | medium |
+| Scale/uptime | Claimed 99.995% uptime during market hours; claimed ~50 million data requests served daily (paraphrased marketing figures) | homepage + `/apis/` via search-relay | medium (marketing) |
 | Twitter/X | @GlobalDatafeeds ("GlobalFinancialDataFeeds LLP") | x.com listing via search | medium |
 
 ## 2. Support & contacts
@@ -31,7 +31,7 @@ center, authorization pages, desktop-product pages.
 | Product | Platforms | Notes | Source/conf |
 |---|---|---|---|
 | NimbleDataPro | AmiBroker (32/64-bit) | entry product; plans from 5 symbols/segment | vendor `/nimbledatapro/` + compare page via search-relay; medium |
-| NimbleDataProPlus | AmiBroker, MetaStock, NinjaTrader 6/7, AdvancedGet, MultiCharts, Ensign, Neuroshell Trader, Fibonacci Trader, Galactic Trader, ELWAVE, SierraChart | 225 symbols at a time; 450 when subscribing both segments (NSE FNO + MCX); "true tick-by-tick data with time-stamp of 1 second … 5 times faster than most data vendors whose data updates every 5 seconds" | compare page via search-relay; medium |
+| NimbleDataProPlus | AmiBroker, MetaStock, NinjaTrader 6/7, AdvancedGet, MultiCharts, Ensign, Neuroshell Trader, Fibonacci Trader, Galactic Trader, ELWAVE, SierraChart | 225 symbols at a time; 450 when subscribing both segments (NSE FNO + MCX); marketed as 1-second-stamped tick data, positioned as ~5× faster than typical vendors said to update every 5 seconds (paraphrased marketing claim — note the vendor's own "tick" is second-stamped, [03](./03-websocket-functions.md) §2) | compare page via search-relay; medium |
 | NimbleDataProPlus Lite | lighter variant | third-party pricing page exists | low |
 | NimbleKey | MTPredictor, MotiveWave, AbleTrend, Wave59, ArthaChitra, PTS Primo Charts, QuantShare, Updata, Sentient Trader, Volfort | key-based feed for third-party platforms | compare page relay; medium |
 | NimbleDataProPlus VM | hosted-VM variant (reseller traderskart.in) | | low |

@@ -12,52 +12,62 @@ with the same function names.
 | Function | What it returns | Channel | Source | Confidence |
 |---|---|---|---|---|
 | GetHistory | Historical TICK / MINUTE / HOUR / DAY / WEEK / MONTH rows, either by From/To window or by `Max` latest records | WS + REST | GFDLWS README + gfdl-rest README (pypi-fetch) | high |
-| GetHistoryAfterMarket | Same as GetHistory but only up to the previous working day (current day's data available only after market close). Vendor: "useful for … back-testing … This should also save their API costs." | WS + REST | GFDLWS README (pypi-fetch) | high |
+| GetHistoryAfterMarket | Same as GetHistory but only up to the previous working day (current day's data available only after market close). The vendor positions it for backtesting workloads and as a way to reduce API costs (paraphrased) | WS + REST | GFDLWS README (pypi-fetch) | high |
 | GetHistoryGreeks | Historical option-Greeks rows → `HistoryGreeksResult`; params Exchange, InstrumentIdentifier, isShortIdentifier, Max, From, To | WS (+ REST doc page exists) | GFDLWS `historygreeks.py` (pypi-fetch); search-relay for the REST page | high (WS) / medium (REST) |
 
-## 2. WS wire requests — verbatim (GFDLWS `history.py`, high)
+## 2. WS wire requests — key shapes (from GFDLWS `history.py`, high)
+
+(Identifiers/enum tokens verbatim as facts; sample values replaced by
+placeholders per the licensing posture, [README.md](./README.md).)
 
 By window:
 ```json
-{"MessageType":"GetHistory","Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","Periodicity":"MINUTE","Period":1,"From":"1658115000","To":"1658138400","isShortIdentifier":"false","UserTag":"dhananjay"}
+{"MessageType":"GetHistory","Exchange":"<exchange>","InstrumentIdentifier":"<identifier>","Periodicity":"MINUTE","Period":1,"From":"<epoch-seconds>","To":"<epoch-seconds>","isShortIdentifier":"false","UserTag":"<tag>"}
 ```
 By latest-N records:
 ```json
-{"MessageType":"GetHistory","Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","Periodicity":"MINUTE","Period":1,"Max":10,"isShortIdentifier":"false"}
+{"MessageType":"GetHistory","Exchange":"<exchange>","InstrumentIdentifier":"<identifier>","Periodicity":"MINUTE","Period":1,"Max":10,"isShortIdentifier":"false"}
 ```
 Response MessageTypes: `HistoryOHLCResult` (MINUTE/HOUR/DAY/WEEK/MONTH)
 or `HistoryTickResult` (TICK).
 
-WS response row shapes (README verbatim; epoch SECONDS):
-```json
-// OHLC row
-{"LastTradeTime":1658138400,"QuotationLot":50,"TradedQty":800,"OpenInterest":11179850,"Open":16312.95,"High":16312.95,"Low":16312.95,"Close":16312.95}
-// TICK row
-{"LastTradeTime":1594186301,"LastTradePrice":10775.0,"QuotationLot":75,"TradedQty":225,"OpenInterest":12176625,"BuyPrice":10774.3,"BuyQty":75,"SellPrice":10775.0,"SellQty":3150}
-```
+WS response row field inventories (vendor README samples, summarized;
+timestamps epoch SECONDS):
 
-## 3. REST request — verbatim construction (gfdl-rest `GetHistory.py`, high)
+| Row kind | Fields |
+|---|---|
+| OHLC row | `LastTradeTime` · `QuotationLot` · `TradedQty` · `OpenInterest` · `Open` · `High` · `Low` · `Close` |
+| TICK row | `LastTradeTime` · `LastTradePrice` · `QuotationLot` · `TradedQty` · `OpenInterest` · `BuyPrice` · `BuyQty` · `SellPrice` · `SellQty` — a 1-second L1 snapshot record, NOT a raw exchange tick |
+
+## 3. REST request — construction (gfdl-rest `GetHistory.py`, high)
 
 ```
 GET {base}/GetHistory/?accessKey=…&exchange=…&instrumentIdentifier=…&periodicity=…&period=…[&max=…][&from=…][&to=…][&userTag=…][&isShortIdentifier=…]
 ```
 (+ `xml=true` | `format=CSV` output selectors.)
 
-REST response envelope (gfdl-rest README verbatim — note **milliseconds**
-epoch and ALL-CAPS field names):
-```json
-{"USERTAG": "surendran", "OHLC": [{"CLOSE": 24757.3, "HIGH": 24794, "LASTTRADETIME": 1724243400000, "LOW": 24685.05, "OPEN": 24697.7, "OPENINTEREST": 10906875, "QUOTATIONLOT": 25, "TRADEDQTY": 2223325}, …]}
-{"USERTAG": "surendran", "TICK": [{"BUYPRICE": 24753.8, "BUYQTY": 50, "LASTTRADEPRICE": 24753.15, "LASTTRADETIME": 1724231023000, "OPENINTEREST": 10906875, "QUOTATIONLOT": 25, "SELLPRICE": 24758, "SELLQTY": 25, "TRADEDQTY": 625}, …]}
-```
+REST response envelope (gfdl-rest README samples, summarized — note
+**milliseconds** epoch and ALL-CAPS field names): the top level carries a
+`USERTAG` echo plus ONE array keyed `OHLC` or `TICK` by periodicity.
+Row field inventories:
+
+| Array | Fields |
+|---|---|
+| `OHLC` rows | `CLOSE` · `HIGH` · `LASTTRADETIME` · `LOW` · `OPEN` · `OPENINTEREST` · `QUOTATIONLOT` · `TRADEDQTY` |
+| `TICK` rows | `BUYPRICE` · `BUYQTY` · `LASTTRADEPRICE` · `LASTTRADETIME` · `OPENINTEREST` · `QUOTATIONLOT` · `SELLPRICE` · `SELLQTY` · `TRADEDQTY` |
+
+`LASTTRADETIME` values in the vendor samples are 13-digit epoch
+**milliseconds** (vs the WS samples' 10-digit seconds) — the adapter-facing
+divergence pinned in §4.
 
 ## 4. Timestamp semantics — TWO conventions (adapter-critical)
 
 | Claim | Value | Source | Confidence |
 |---|---|---|---|
-| Request From/To | Unix epoch **seconds** ("no. of seconds since Epoch … 1st January 1970"), both WS and REST | both vendor READMEs (pypi-fetch) | high |
-| WS responses | epoch **seconds** (`LastTradeTime: 1669262572`) | GFDLWS README samples | high |
-| REST responses | epoch **milliseconds** (`LASTTRADETIME: 1724243400000`) + ALL-CAPS field names | gfdl-rest README samples | high |
-| Wall-clock mapping | Vendor's own example: `1658138400` = "18-07-2022 15:30:00" — that epoch is 2022-07-18T10:00:00Z = 15:30 IST ⇒ genuine Unix time. Daily rows appear stamped at 15:20/15:30 IST session times (e.g. `1724243400000` = 2024-08-21 15:20 IST) | vendor READMEs + arithmetic | high (Unix-UTC epoch) / medium (exact daily-bar stamp convention) |
+| Request From/To | Unix epoch **seconds** (documented as seconds since the Unix epoch, 1970-01-01 — paraphrased), both WS and REST | both vendor READMEs (pypi-fetch) | high |
+| WS responses | epoch **seconds** (10-digit `LastTradeTime` values in the vendor samples) | GFDLWS README samples | high |
+| REST responses | epoch **milliseconds** (13-digit `LASTTRADETIME` values) + ALL-CAPS field names | gfdl-rest README samples | high |
+| Wall-clock mapping | The vendor reference pairs epoch `1658138400` with the wall-clock 15:30 on 2022-07-18 — that epoch is 2022-07-18T10:00:00Z = 15:30 IST ⇒ genuine Unix time. Daily rows appear stamped at 15:20/15:30 IST session times (e.g. `1724243400000` = 2024-08-21 15:20 IST) | vendor READMEs + arithmetic | high (Unix-UTC epoch) / medium (exact daily-bar stamp convention) |
 
 ## 5. Periodicities & per-key enablement
 
@@ -121,6 +131,6 @@ the only way to answer it.
 | Claim | Value | Source | Confidence |
 |---|---|---|---|
 | `Max` request param limits returned records | yes | vendor READMEs | high |
-| Per-key record caps `MaxTicks` / `MaxEOD` / `MaxIntraday` | present in GetLimitation (sample values 5 / 100000 / 44 in the vendor README's ILLUSTRATIVE response — not plan quotes) | GFDLWS README | high (field names) |
+| Per-key record caps `MaxTicks` / `MaxEOD` / `MaxIntraday` | present in GetLimitation (the vendor README's ILLUSTRATIVE response shows key-specific caps per record kind — not plan quotes) | GFDLWS README | high (field names) |
 | Hard server-side per-call row cap (N candles/call) | **UNVERIFIED** (not stated in retrieved material) | — | UNVERIFIED |
 | Corporate-action adjustment policy for EOD/IEOD history | **UNVERIFIED** (beyond the IEOD "backadjusted futures" wording) | — | UNVERIFIED |

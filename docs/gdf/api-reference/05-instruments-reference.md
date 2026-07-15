@@ -20,13 +20,24 @@ streams and includes GetTopGainersLosers + GetHistoryGreeks).
 | GetOptionTypes | Exchange, [InstrumentType, Product, Expiry] | `CE, PE` | |
 | GetStrikePrices | Exchange, [InstrumentType, Product, Expiry, OptionType] | strike list | third-party REST usage in the wild passes **`expiry=0`** apparently meaning "nearest" (github-fetch; numeric-expiry-index semantics UNVERIFIED in vendor docs) |
 
-Sample instrument record (WS README verbatim, high):
-```json
-{"Identifier":"OPTIDX_NIFTY_21JUL2022_CE_12900","Name":"OPTIDX","Expiry":"21Jul2022","StrikePrice":12900.0,"Product":"NIFTY","PriceQuotationUnit":"","OptionType":"CE","ProductMonth":"21Jul2022","UnderlyingAsset":"","UnderlyingAssetExpiry":"","IndexName":"","TradeSymbol":"NIFTY21JUL2212900CE","QuotationLot":50.0,"Description":"","TokenNumber":"69695","LowPriceRange":2667.2,"HighPriceRange":4221.1}
-```
-(REST record adds `EXCHANGE`; the REST sample omits the token. The
-numeric `TokenNumber` is REQUIRED by the single-token Greeks calls — see
-[06](./06-greeks-optionchain.md).)
+Instrument record field inventory (WS README sample, summarized; the
+identifier examples are facts — grammar in [07](./07-symbology.md)):
+
+| Field | Content |
+|---|---|
+| `Identifier` | the long GFDL form, e.g. `OPTIDX_NIFTY_21JUL2022_CE_12900` |
+| `Name` | instrument type token (e.g. `OPTIDX`) |
+| `Expiry` · `ProductMonth` | mixed-case `DDMonYYYY` form (e.g. `21Jul2022`) |
+| `StrikePrice` | float (`0` slot for futures) |
+| `Product` | underlying name (e.g. `NIFTY`) |
+| `OptionType` | `CE` / `PE` (`XX` slot for futures) |
+| `TradeSymbol` | exchange trading symbol, e.g. `NIFTY21JUL2212900CE` |
+| `QuotationLot` | lot size (float) |
+| `TokenNumber` | numeric string — REQUIRED by the single-token Greeks calls ([06](./06-greeks-optionchain.md)) |
+| `LowPriceRange` · `HighPriceRange` | day price band |
+| `PriceQuotationUnit` · `UnderlyingAsset` · `UnderlyingAssetExpiry` · `IndexName` · `Description` | present, empty strings in the vendor sample |
+
+(The REST record adds `EXCHANGE`; the REST sample omits the token.)
 
 ## 2. Whole-exchange snapshot (bulk bars)
 
@@ -43,12 +54,12 @@ sweeps). (pypi-fetch vendor README, high; shape UNVERIFIED.)
 
 ## 3. Market/exchange messages & server/account info
 
-| Function | Returns (verbatim vendor samples, high) |
+| Function | Returns (vendor samples, summarized; high) |
 |---|---|
-| GetMarketMessages | `{"Request":{"Exchange":"NFO","MessageType":"GetMarketMessages"},"Result":[{"ServerTime":1658288700,"SessionID":0,"MarketType":"Normal Market Open","Exchange":"NFO","MessageType":"MarketMessagesItemResult"}],"MessageType":"MarketMessagesResult"}` |
-| GetExchangeMessages | array of `{"ServerTime":…,"Identifier":"Market","Message":"…","MessageType":"ExchangeMessagesItemResult"}` |
-| GetServerInfo | `{"ServerID":"444A-C7","MessageType":"ServerInfoResult"}` |
-| GetLimitation | full per-key entitlement dump — verbatim in [08-limits-entitlements-pricing.md](./08-limits-entitlements-pricing.md) |
+| GetMarketMessages | `MarketMessagesResult` envelope: a `Request` echo (`Exchange` + `MessageType`) + a `Result` array of `MarketMessagesItemResult` items carrying `ServerTime` (epoch s) · `SessionID` · `MarketType` (observed token: `Normal Market Open`) · `Exchange` |
+| GetExchangeMessages | array of `ExchangeMessagesItemResult` items: `ServerTime` · `Identifier` (observed token: `Market`) · `Message` (free-text exchange notice) |
+| GetServerInfo | `ServerInfoResult` carrying `ServerID` (serving-backend id string) |
+| GetLimitation | the per-key entitlement record — field-by-field in [08-limits-entitlements-pricing.md](./08-limits-entitlements-pricing.md) |
 
 `GetMarketMessages` (`MarketType: "Normal Market Open"`) is the closest
 thing to a market-status API in the vocabulary — no holiday-calendar

@@ -8,7 +8,8 @@ documentation** (per-function pages). Primary evidence: **GFDLWS 0.0.4**
 
 ## 1. The function vocabulary
 
-Vendor README "List of Functions" (verbatim order, high):
+Vendor README "List of Functions" (function names are identifiers — kept
+verbatim, in the vendor README's order; high):
 
 1. SubscribeRealtime 2. SubscribeSnapshot 3. GetLastQuote
 4. GetLastQuoteShort 5. GetLastQuoteShortWithClose 6. GetLastQuoteArray
@@ -32,20 +33,41 @@ chain streams under "Advanced Streaming API" and the Greeks calls under
 [04-historical-data.md](./04-historical-data.md); reference calls in
 [05-instruments-reference.md](./05-instruments-reference.md).
 
-## 2. Streaming subscriptions — verbatim wire JSON (vendor source, high)
+**CURRENT-package widening (sibling census reconcile):** the NEWEST vendor
+WS package, `wsgfdl-py` 1.3.5 (2025-11-28 — see
+[09-sdks-code-samples.md](./09-sdks-code-samples.md)), widens the
+vocabulary to **38 request / 36 result MessageTypes** — adding e.g.
+`GetVolumeShockers`, `SubscribeSnapshotGreeks`, `GetSnapshotGreeks` and an
+`AdjustSplits` split-adjusted-history flag. The full AST-verified
+inventory lives in the sibling archive:
+[docs/vendors/gdfl/api/WEBSOCKET_API.md](../../vendors/gdfl/api/WEBSOCKET_API.md)
+(pypi-fetch, high). This file documents the 29+5 set of GFDLWS 0.0.4, which
+remains a subset of 1.3.5's vocabulary.
+
+## 2. Streaming subscriptions — wire shapes (vendor source, summarized; high)
+
+Request/response FIELD NAMES + enum tokens below are vendor identifiers
+(kept verbatim as facts); the vendor README's response sample dumps are
+recast as field inventories per the licensing posture
+([README.md](./README.md)).
 
 ### SubscribeRealtime — 1-second push per instrument (runs until market close or unsubscribe)
 
-Request (GFDLWS `realtime.py`):
+Request — key shape built by GFDLWS `realtime.py`:
 ```json
-{"MessageType":"SubscribeRealtime","Exchange":"NFO","Unsubscribe":"false","InstrumentIdentifier":"NIFTY-I"}
+{"MessageType":"SubscribeRealtime","Exchange":"<exchange>","Unsubscribe":"false","InstrumentIdentifier":"<identifier>"}
 ```
 Unsubscribe = the same message with `"Unsubscribe":"true"`.
 
-Response stream — `MessageType: "RealtimeResult"` (README sample, verbatim):
-```json
-{"Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","LastTradeTime":1669262572,"ServerTime":1669262572,"AverageTradedPrice":18309.69,"BuyPrice":18323.9,"BuyQty":50,"Close":18286.75,"High":18329.35,"Low":18297.15,"LastTradePrice":18325.0,"LastTradeQty":750,"Open":18310.0,"OpenInterest":5657350,"QuotationLot":50.0,"SellPrice":18325.1,"SellQty":100,"TotalQtyTraded":681250,"Value":12473476312.5,"PreOpen":false,"PriceChange":38.25,"PriceChangePercentage":0.21,"OpenInterestChange":-98200,"MessageType":"RealtimeResult"}
-```
+Response stream — one `MessageType: "RealtimeResult"` frame ≈ every
+second, carrying (field inventory from the vendor README sample):
+`Exchange` · `InstrumentIdentifier` · `LastTradeTime` + `ServerTime`
+(Unix epoch **seconds**) · `AverageTradedPrice` · `BuyPrice`/`BuyQty` +
+`SellPrice`/`SellQty` (L1 top-of-book, one level each side) · `Open` /
+`High` / `Low` / `Close` (Close = previous close; the change fields key
+off it) · `LastTradePrice` / `LastTradeQty` · `OpenInterest` ·
+`QuotationLot` · `TotalQtyTraded` · `Value` (session turnover) · `PreOpen`
+(bool) · `PriceChange` / `PriceChangePercentage` · `OpenInterestChange`.
 
 Notes (high unless stated): timestamps are Unix epoch **seconds**;
 top-of-book only (single Buy/Sell price+qty) — no depth levels in this
@@ -57,28 +79,27 @@ from vendor materials, medium — flagged).
 
 ### SubscribeSnapshot — streamed bar snapshots per Periodicity/Period (e.g. 1-min bars as they complete)
 
-Request (`realsnapshot.py`):
+Request — key shape built by `realsnapshot.py`:
 ```json
-{"MessageType":"SubscribeSnapshot","Exchange":"NFO","Periodicity":"MINUTE","Period":1,"InstrumentIdentifier":"NIFTY-I"}
+{"MessageType":"SubscribeSnapshot","Exchange":"<exchange>","Periodicity":"MINUTE","Period":1,"InstrumentIdentifier":"<identifier>"}
 ```
-Response stream — `MessageType: "RealtimeSnapshotResult"` (README verbatim):
-```json
-{"Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","Periodicity":"MINUTE","Period":1,"LastTradeTime":1669265340,"TradedQty":11300,"OpenInterest":5608700,"Open":18351.0,"High":18353.95,"Low":18350.25,"Close":18353.95,"MessageType":"RealtimeSnapshotResult"}
-```
+Response stream — `MessageType: "RealtimeSnapshotResult"` frames per
+completed bucket, carrying (vendor README sample, summarized): `Exchange` ·
+`InstrumentIdentifier` · `Periodicity` · `Period` · `LastTradeTime`
+(epoch seconds) · `TradedQty` · `OpenInterest` · `Open`/`High`/`Low`/`Close`.
 
 ## 3. On-demand quote calls (single round-trip over the same WS)
 
 ### GetLastQuote
 Params: Exchange, InstrumentIdentifier, optional isShortIdentifier
-[true/false, default false]. Response `LastQuoteResult` (README verbatim):
-```json
-{"Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","LastTradeTime":1658138400,"ServerTime":1658138400,"AverageTradedPrice":16234.07,"BuyPrice":16310.0,"BuyQty":4900,"Close":16068.3,"High":16520.0,"Low":16170.45,"LastTradePrice":16312.95,"LastTradeQty":800,"Open":16199.0,"OpenInterest":11179850,"QuotationLot":50.0,"SellPrice":16312.95,"SellQty":300,"TotalQtyTraded":8102000,"Value":131528435140.0,"PreOpen":false,"PriceChange":244.65,"PriceChangePercentage":1.52,"OpenInterestChange":-767300,"MessageType":"LastQuoteResult"}
-```
+[true/false, default false]. Response: one `MessageType: "LastQuoteResult"`
+frame whose field set is IDENTICAL to the `RealtimeResult` inventory in
+§2 (same 22 business fields, vendor README sample, summarized).
 
-### GetLastQuoteShort → `LastQuoteShortResult` (README verbatim)
-```json
-{"Exchange":"NFO","InstrumentIdentifier":"NIFTY-I","LastTradeTime":1658138400,"BuyPrice":16310.0,"LastTradePrice":16312.95,"SellPrice":16312.95,"MessageType":"LastQuoteShortResult"}
-```
+### GetLastQuoteShort → `LastQuoteShortResult`
+Trimmed field set (vendor README sample, summarized): `Exchange` ·
+`InstrumentIdentifier` · `LastTradeTime` · `BuyPrice` · `LastTradePrice` ·
+`SellPrice`.
 
 ### GetLastQuoteShortWithClose → `LastQuoteShortWithCloseResult`
 Same as Short + previous-day `Close`. (high)
@@ -90,14 +111,14 @@ Same as Short + previous-day `Close`. (high)
   `LastQuoteArrayShortWithCloseResult` wrapping per-symbol records. (high)
 
 ### GetSnapshot — latest bar per Periodicity/Period, up to 25 symbols
-Response `SnapshotResult`. NOTE: the response echoes FULL identifiers
+Response `SnapshotResult`; per-symbol records carry (vendor README sample,
+summarized): `InstrumentIdentifier` · `Exchange` · `LastTradeTime` ·
+`TradedQty` · `OpenInterest` · `Open`/`High`/`Low`/`Close` · `TokenNumber`
+(nullable). NOTE: the response echoes FULL identifiers
 (`FUTIDX_NIFTY_28JUL2022_XX_0`) even when the request used continuous
-aliases (`NIFTY-I`) — README verbatim sample:
-```json
-{"InstrumentIdentifier":"FUTIDX_BANKNIFTY_28JUL2022_XX_0","Exchange":"NFO","LastTradeTime":1658204580,"TradedQty":31200,"OpenInterest":2306425,"Open":35436.5,"High":35443.0,"Low":35420.15,"Close":35434.0,"TokenNumber":null}
-```
+aliases (`NIFTY-I`) — identifier grammar in [07-symbology.md](./07-symbology.md).
 
-## 4. Common parameter table (vendor README verbatim, high)
+## 4. Common parameter table (consolidated from the vendor README, own words; high)
 
 | Parameter | Meaning |
 |---|---|

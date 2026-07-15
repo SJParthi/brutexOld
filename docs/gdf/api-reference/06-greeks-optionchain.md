@@ -21,16 +21,17 @@ GDF serves option Greeks keyed by the numeric instrument **TokenNumber**
 | GetLastQuoteOptionGreeksChain | ENTIRE chain of an underlying (params Exchange, Product) | chain envelope — vendor sample only as ZIP `OptionGreeksChainWithQuoteResponse_JSON.zip` (not retrievable) |
 | GetHistoryGreeks | historical Greeks rows (params Exchange, InstrumentIdentifier, isShortIdentifier, Max, From, To) | `HistoryGreeksResult` — see [04-historical-data.md](./04-historical-data.md) |
 
-### SubscribeRealtimeGreeks — wire shape (README verbatim, high)
+### SubscribeRealtimeGreeks — wire shape (vendor README, summarized; high)
 
-Request (built by `realtimegreeks.py`):
+Request — key shape built by `realtimegreeks.py` (token value is a
+placeholder):
 ```json
-{"MessageType":"SubscribeRealtimeGreeks","Exchange":"NFO","Token":"70222"}
+{"MessageType":"SubscribeRealtimeGreeks","Exchange":"<exchange>","Token":"<token>"}
 ```
-Response stream (note MessageType echoes the REQUEST name):
-```json
-{"Exchange":"NFO","Token":"70222","Timestamp":1660292501,"IV":0.11267127841711044,"Delta":0.2549774944782257,"Theta":-6.706413269042969,"Vega":7.45473575592041,"Gamma":0.0012275002663955092,"IVVwap":0.1129087582230568,"Vanna":2.9635884761810303,"Charm":-0.026660971343517303,"Speed":3.0227099614421604E-06,"Zomma":-0.006058624479919672,"Color":-5.450446406030096E-05,"Volga":4533.580078125,"Veta":132.6668243408203,"ThetaGammaRatio":-5463.4716796875,"ThetaVegaRatio":-0.8996178507804871,"DTR":-0.038019951432943344,"MessageType":"SubscribeRealtimeGreeks"}
-```
+Response stream: frames whose `MessageType` ECHOES the request name
+(`SubscribeRealtimeGreeks` — no `…Result` suffix), each carrying
+`Exchange` · `Token` · `Timestamp` (epoch seconds) + the 16 float Greek
+fields below (field inventory from the vendor README sample).
 
 **Greek set (16 fields):** IV, Delta, Theta, Vega, Gamma, IVVwap, Vanna,
 Charm, Speed, Zomma, Color, Volga, Veta, ThetaGammaRatio, ThetaVegaRatio,

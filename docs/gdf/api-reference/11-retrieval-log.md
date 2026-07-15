@@ -17,7 +17,7 @@ ENVIRONMENT block, not vendor truth.
 | https://pypi.org/ + files.pythonhosted.org | 200 (allowed direct) |
 | pypi.org/pypi/{gfdlws, gfdl-rest, ws-gfdl}/json | FETCHED (vendor package metadata) |
 | pypi.org/pypi/gfdl/json | FETCHED — UNRELATED package (LANL ML lib), recorded to avoid confusion |
-| pypi.org/pypi/{gfdlrest, globaldatafeeds, gdfl, nimbleapi, gfdl-ws, gfdlws2}/json | 404 (names do not exist; real names are GFDLWS, ws-gfdl, gfdl-rest) |
+| pypi.org/pypi/{gfdlrest, globaldatafeeds, gdfl, nimbleapi, gfdl-ws, gfdlws2}/json | 404 (those guessed names do not exist). My per-name probes found GFDLWS, ws-gfdl, gfdl-rest — an INCOMPLETE census: the complete vendor family on PyPI is SEVEN packages (§5 below) |
 | files.pythonhosted.org …/GFDLWS-0.0.4.tar.gz | FETCHED + extracted (README + full source read) |
 | files.pythonhosted.org …/gfdl_rest-1.0.3.tar.gz | FETCHED + extracted (README + full source read) |
 | raw.githubusercontent.com/sisoppin/gdta/develop/README.md | FETCHED (third-party; endpoint found to be a placeholder) |
@@ -59,3 +59,28 @@ the full query list lives in the session research notes.
 - Everything above needs a credentialed live probe (start with
   `GetLimitation` + `GetExchanges` + `GetInstruments('NSE_IDX')`) before
   being encoded as fact in BruteX/TickVault code.
+
+## 5. Post-capture reconcile (2026-07-15, same day — Golden Rule #10 record)
+
+At the merge-reconcile with main, this pack met the SIBLING GDFL archive
+`docs/vendors/gdfl/` (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780;
+captured 2026-07-13, landed on main 2026-07-15 via PR #1549). Two
+corrections were folded into this pack from it:
+
+1. **SDK census completeness.** My discovery used per-name JSON probes
+   (guessed names), which found 3 packages and MISSED the CURRENT
+   `wsgfdl-py` 1.3.5 (2025-11-28) plus `restgfdl`, `Gfdlws-Sub` and the
+   empty `GlobalDatafeeds-ws` — the sibling census grepped the FULL PyPI
+   simple index (~848k projects) and is authoritative:
+   [docs/vendors/gdfl/sdk/PACKAGES.md](../../vendors/gdfl/sdk/PACKAGES.md).
+   The wire-protocol claims in this pack came from GFDLWS 0.0.4 +
+   gfdl-rest 1.0.3 full source and STAND (0.0.4's vocabulary is a subset
+   of 1.3.5's); the vocabulary-widening deltas are cross-referenced in
+   [03](./03-websocket-functions.md) §1 and [09](./09-sdks-code-samples.md).
+2. **SUMMARIZE-ONLY conform sweep.** The sibling archive carries the
+   standing coordinator ruling for GDFL material in this PUBLIC repo
+   (no verbatim vendor prose / response-sample dumps; identifiers + key
+   shapes are facts). This pack's vendor-README sample blocks were recast
+   into field-inventory tables the same day — see the licensing-posture
+   section in [README.md](./README.md) + MIGRATION.md #1795's reconcile
+   note.

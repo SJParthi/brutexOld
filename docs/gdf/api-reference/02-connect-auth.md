@@ -9,7 +9,7 @@ WebSockets API** · **How To Connect Using REST API** (+ auth model).
 | Claim | Value | Source (access 2026-07-15) | Confidence |
 |---|---|---|---|
 | Credential | ONE **API key** per account (GUID-looking string in third-party code); no username/password pair, no OAuth, no TOTP | GFDLWS 0.0.4 README + gfdl-rest 1.0.3 README (pypi-fetch) | high |
-| Endpoint provisioning | "End point URL and Port number will be provided by Global Datafeeds" — per-customer provisioning; docs never print the production host | GFDLWS README §How to Connect (pypi-fetch) | high |
+| Endpoint provisioning | Per-customer: the vendor reference states that the endpoint URL and port are issued to each subscriber by Global Datafeeds (paraphrased) — the docs never print the production host | GFDLWS README §How to Connect (pypi-fetch) | high |
 | Key issuance | Purchase → key from the team; trial/API-key requests via `sales@globaldatafeeds.in`; "Take A Free Trial" on `/apis/` | search-relay of `/apis/` + how-to-connect pages | medium |
 | Key expiry | Server-side: `ExpirationDate` (epoch) in the GetLimitation response — no client-visible refresh flow | GFDLWS README (pypi-fetch) | high |
 
@@ -19,17 +19,17 @@ Connect to `ws://<endpoint>:<port>` then authenticate ONCE per connection,
 immediately after connect; all subsequent requests ride the authenticated
 connection (GFDLWS `ws.py`, pypi-fetch, high).
 
-Request (verbatim, vendor source):
+Request — JSON key shape (vendor identifiers kept verbatim as facts; the
+key value is a placeholder):
 
 ```json
 {"MessageType": "Authenticate", "Password": "<API key>"}
 ```
 
-Success response (vendor README verbatim):
-
-```json
-{"Complete":true,"Message":"Welcome!","MessageType":"AuthenticateResult"}
-```
+Response: one frame with `MessageType: "AuthenticateResult"` carrying
+`Complete` (bool — `true` on success) and `Message` (a server greeting
+string). (Field names from the vendor README sample, summarized — see the
+licensing-posture section in [README.md](./README.md).)
 
 - On `Complete: false` the vendor sample simply re-sends Authenticate
   (retry loop). (pypi-fetch, high)
