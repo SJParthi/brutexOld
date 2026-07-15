@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -298,6 +299,23 @@ def _daemon_spawn(fn: Callable[[], None]) -> None:  # pragma: no cover — real-
     threading.Thread(target=fn, daemon=True).start()
 
 
+@dataclass(frozen=True, slots=True)
+class RetainedPullState:
+    """The last PULL-kind run's snapshot + its run correlation id (immutable).
+
+    DEC-OPERATOR-HEALTH-TRUTH-001 (hostile-review M2 fix): the shared job slot
+    also runs the SWEEP, whose ``PullProgress.start`` RESETS the shared tracker
+    — so the last pull's terminal state must be retained SEPARATELY or a halted
+    pull's red outcome is wiped by the next sweep. ``pull_id`` is the run's
+    correlation id (``""`` for a run-less deferral/refusal record), letting the
+    outcome probe correlate the un-timestamped verdict holder with the EXACT
+    run this snapshot describes — never a stale verdict over a different run.
+    """
+
+    snapshot: ProgressSnapshot
+    pull_id: str
+
+
 class BackgroundPullJob:
     """A single-flight background pull with an O(1) live-progress snapshot.
 
@@ -494,6 +512,15 @@ class BackgroundPullJob:
         #: AttributeError; stamped in :meth:`start` under the claim lock, strictly AFTER
         #: the single-flight refusal (a refused start never overwrites the running kind).
         self._job_kind: str = JOB_KIND_PULL
+        #: The last PULL-kind run's RETAINED terminal snapshot + run id
+        #: (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2/m5): survives the
+        #: shared tracker being reset by a later SWEEP start, so a halted
+        #: pull's red outcome is never wiped into a masked green. Stamped in
+        #: :meth:`_run`'s identity-gated ``finally`` (real runs) and via
+        #: :meth:`_retain_pull_terminal` (the run-less deferral/refusal
+        #: records); read by :meth:`last_pull_state`. ``None`` until the first
+        #: PULL-kind start/deferral.
+        self._last_pull_terminal: RetainedPullState | None = None
         #: The CURRENT run's account-wide single-flight lock context manager (entered in
         #: :meth:`start`, exited in :meth:`_run`'s ``finally``). ``None`` between runs and
         #: when the guard is disabled (no resolvable lake root). Held for the WHOLE pull so
@@ -706,6 +733,12 @@ class BackgroundPullJob:
                 "deferred — inside NSE market-hours window (08:45-15:35 IST); "
                 "pulls run outside market hours only"
             )
+            # Retain the deferral as the last PULL terminal (DEC-OPERATOR-HEALTH-TRUTH-001,
+            # hostile-review m5): the gate fires BEFORE ``_job_kind`` is stamped, so
+            # without this a deferral following a SWEEP run was invisible to the
+            # outcome probe (the shared tracker's record was gated out as the
+            # sweep's). Passed the ATTEMPTED kind explicitly; no run id exists.
+            self._retain_pull_terminal(job_kind=job_kind)
             _LOG.warning(
                 "pull.deferred.market_hours",
                 job_kind=job_kind,
@@ -813,6 +846,12 @@ class BackgroundPullJob:
                     self._empty_ambient_beats = prior_empty_ambient_beats
                     self._cancel_event = prior_cancel_event
                     self._cancellable = prior_cancellable
+                # Retain the refusal record as the last PULL terminal
+                # (DEC-OPERATOR-HEALTH-TRUTH-001): the outcome probe then reads
+                # the honest ``refused_busy`` even after a later sweep reuses
+                # the shared tracker. ATTEMPTED kind — a refused sweep start
+                # never masquerades as a pull outcome; no run id was minted.
+                self._retain_pull_terminal(job_kind=job_kind)
                 return False
         else:
             # ZERO-WRITE run (``cross_process_lock=False`` — see the docstring) or a
@@ -1292,6 +1331,19 @@ class BackgroundPullJob:
                     # let a stale worker clobber a newer run.
                     if self._watchdog is watchdog:
                         self._running = False
+                        # Retain THIS run's terminal snapshot when it was a PULL
+                        # (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2): the
+                        # shared tracker is reset by the NEXT start (a sweep
+                        # included), so the honest last-pull outcome — a halted
+                        # pull's red included — must survive here, keyed with the
+                        # run id so the outcome probe can correlate the verdict
+                        # holder with EXACTLY this run. Inline (self._lock is held
+                        # and non-reentrant — _retain_pull_terminal would deadlock);
+                        # lock order job → progress, a pinned-safe leaf read.
+                        if self._job_kind == JOB_KIND_PULL:
+                            self._last_pull_terminal = RetainedPullState(
+                                self._progress.snapshot(), run_pull_id
+                            )
                         # Collect the run's ACCEPTED empty-ambient direct-beat tally for
                         # the observability-only debug flush below (review fold MINOR —
                         # logged OUTSIDE the lock, mirroring
@@ -1663,6 +1715,48 @@ class BackgroundPullJob:
         with self._lock:
             return self._running and self._cancel_event.is_set()
 
+    def last_pull_state(self) -> RetainedPullState | None:
+        """The last PULL-kind run's snapshot + run id — O(1), sweep-proof.
+
+        DEC-OPERATOR-HEALTH-TRUTH-001 (hostile-review M2/m5 fix): the honest
+        last-pull-outcome projection must survive the shared job slot being
+        REUSED by the zero-vendor-call SWEEP — ``PullProgress.start`` resets the
+        shared tracker, so a halted pull's ``error`` snapshot would otherwise be
+        WIPED by the next sweep and the classifier could fall back to a
+        possibly-stale verdict (the masked-green class). This returns:
+
+        * the LIVE snapshot + run id while a PULL-kind run is in flight;
+        * otherwise the RETAINED terminal snapshot of the last PULL-kind run
+          (stamped in :meth:`_run`'s identity-gated ``finally``), which also
+          covers the market-hours START deferral and the single-flight
+          refusals (each stamps via :meth:`_retain_pull_terminal` with an
+          EMPTY run id — no run ever existed);
+        * ``None`` when no pull has ever run/deferred on this slot.
+
+        The carried ``pull_id`` lets the outcome probe consult the
+        (un-timestamped) last-pull-verdict holder ONLY when the verdict was
+        stamped by the SAME run the snapshot describes — a stale verdict can
+        never colour a different run's outcome.
+        """
+        with self._lock:
+            if self._running and self._job_kind == JOB_KIND_PULL:
+                return RetainedPullState(self._progress.snapshot(), self._pull_id)
+            return self._last_pull_terminal
+
+    def _retain_pull_terminal(self, *, job_kind: str, pull_id: str = "") -> None:
+        """Retain the just-recorded snapshot as the last PULL terminal (O(1)).
+
+        DEC-OPERATOR-HEALTH-TRUTH-001: called at the run-less refusal sites —
+        the market-hours START deferral and the cross-process single-flight
+        refusal — with the ATTEMPTED *job_kind* (a refused SWEEP start must
+        never masquerade as a pull outcome). *pull_id* stays ``""`` there: no
+        run was minted, so no verdict can ever correlate with it.
+        """
+        if job_kind != JOB_KIND_PULL:
+            return
+        with self._lock:
+            self._last_pull_terminal = RetainedPullState(self._progress.snapshot(), pull_id)
+
     @property
     def counters(self) -> CoverageCounters:
         """The incremental coverage counters fed by the write funnel — O(1)."""
@@ -1733,6 +1827,7 @@ __all__ = [
     "LakeRootResolver",
     "ProgressHook",
     "PullWork",
+    "RetainedPullState",
     "SingleflightFactory",
     "Spawner",
     "SuccessHook",
