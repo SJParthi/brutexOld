@@ -15,7 +15,6 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from brutex.data.models import CandleBar
-from brutex.execution.fill_mode import FillMode
 from brutex.futures.executor import (
     FuturesBarWindow,
     FuturesRuleResult,
@@ -123,8 +122,11 @@ class TestSuffixIndependence:
     def test_r18_entry_fills_at_the_signal_minute_never_a_later_bar(
         self, prices: list[int], spread: int
     ) -> None:
-        # [R18] the entry fill derives ONLY from the entry-minute bar's open
-        # (+1 tick): recompute independently from the input price list.
+        # [R18] the entry fill derives ONLY from the entry-minute bar under
+        # the ONE worst-case law (DEC-FILL-WORST-CASE-ONLY-001): its adverse
+        # HIGH + 1 tick — recomputed independently from the input price list
+        # (high = open + spread by the _bar helper's construction). A LATER
+        # bar's price can never leak into the fill.
         bars = {
             (_ENTRY + timedelta(minutes=i)).astimezone(UTC): _bar(
                 _ENTRY + timedelta(minutes=i), p, spread
@@ -139,14 +141,9 @@ class TestSuffixIndependence:
             signal,
             resolver=_Resolver(),
             source=_DictSource(bars),
-            # Legacy-mode pin (DEC-FILL-WORST-CASE-001): this property derives
-            # the PRECISE open+tick fill independently; the suffix-independence
-            # property above runs the (worst-case) executor DEFAULT and is
-            # comparative, so it covers the WORST_CASE arm for free.
-            fill_mode=FillMode.PRECISE,
         )
         assert isinstance(out, MaterializedFuturesTrade)
-        assert out.buy_fill_paisa == prices[0] + 5
+        assert out.buy_fill_paisa == prices[0] + spread + 5
 
 
 class TestRankIndependence:

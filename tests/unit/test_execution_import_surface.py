@@ -27,15 +27,15 @@ _DELETED_SUBMODULES = (
 
 _EXPECTED_ALL = [
     "BacktestResult",
-    # DEC-FILL-WORST-CASE-001: the global fill-mode vocabulary joins the
-    # surviving surface (FillMode enum + default + env name + resolver).
-    "DEFAULT_FILL_MODE",
     "EquityPoint",
     "ExecutionError",
+    # DEC-FILL-WORST-CASE-ONLY-001: the single-member fill vocabulary + the
+    # removed-knob refusal guard (the resolver/default machinery is DELETED).
     "FILL_MODE_ENV",
     "Fill",
     "FillCosts",
     "FillMode",
+    "FillModeRemovedError",
     "FreezeQuantityExceededError",
     "InstrumentMeta",
     "InsufficientFundsError",
@@ -43,7 +43,7 @@ _EXPECTED_ALL = [
     "InvalidPriceError",
     "NonMonotonicBarError",
     "Position",
-    "resolve_fill_mode",
+    "require_fill_mode_env_unset",
 ]
 
 

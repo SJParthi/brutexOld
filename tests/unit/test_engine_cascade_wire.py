@@ -34,7 +34,6 @@ from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import build_equity_curve
 from brutex.engine.sweep_orchestrator import SweepTuple
 from brutex.engine.trade_sim import simulate_trades
-from brutex.execution.fill_mode import FillMode
 from brutex.metrics.cascade import (
     CandidateVerdict,
     CascadeReport,
@@ -101,59 +100,57 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
-class TestSpecFillModeRoundTrip:
-    """DEC-FILL-WORST-CASE-001: the spec's additive fill_mode manifest law."""
+class TestSpecFillModeManifestLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001: the unconditional manifest token + the
+    precise-era refusal law (worst-case is the ONLY fill model)."""
 
-    def test_precise_spec_dict_is_byte_stable_no_key(self) -> None:
-        # Emit-on-non-PRECISE: a PRECISE spec's manifest dict carries NO
-        # fill_mode key — pre-mode manifest bytes are unchanged.
+    def test_spec_dict_carries_the_permanent_worst_case_token(self) -> None:
         payload = cw._spec_to_dict(_spec())
-        assert "fill_mode" not in payload
-
-    def test_worst_case_spec_round_trips(self) -> None:
-        spec = _spec(fill_mode=FillMode.WORST_CASE)
-        payload = cw._spec_to_dict(spec)
         assert payload["fill_mode"] == "worst_case"
-        assert cw._spec_from_dict(payload) == spec
+        assert cw._spec_from_dict(payload) == _spec()
 
-    def test_absent_key_parses_as_precise_legacy(self) -> None:
+    def test_absent_key_refuses_as_precise_era(self) -> None:
+        # Fails-before pin: a pre-DEC manifest (no fill_mode key — the old
+        # PRECISE elide) must refuse LOUDLY naming the DEC, never replay.
         payload = cw._spec_to_dict(_spec())
-        parsed = cw._spec_from_dict(payload)
-        assert parsed.fill_mode is FillMode.PRECISE
-        assert parsed == _spec()
+        del payload["fill_mode"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_literal_precise_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a worst-case manifest",
+        ):
+            cw._spec_from_dict(payload)
 
     def test_junk_fill_mode_refuses(self) -> None:
         payload = cw._spec_to_dict(_spec())
         payload["fill_mode"] = "worst"
-        with pytest.raises(cw.CascadeWireError, match="invalid cascade tuple spec"):
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
             cw._spec_from_dict(payload)
 
-    def test_literal_precise_token_refuses_as_tampered(self) -> None:
-        # DEC-FILL-WORST-CASE-001 fix round 3 (NIT-1 — each reader refuses
-        # what ITS OWN writer never emits): `_spec_to_dict` elides at
-        # PRECISE, so a literal "precise" token in a manifest is a
-        # hand-edited/tampered line — refused like a junk token, never
-        # silently accepted (the AUDIT wire is the opposite convention by
-        # design: its writers always record explicitly, its reader accepts
-        # the literal token).
-        payload = cw._spec_to_dict(_spec())
-        payload["fill_mode"] = "precise"
-        with pytest.raises(cw.CascadeWireError, match="KEY ABSENCE"):
-            cw._spec_from_dict(payload)
+    def test_spec_carries_no_fill_mode_field(self) -> None:
+        # Killed-token pin: the config object carries NO mode — the law is
+        # global, so nothing can thread a per-spec fill choice back in.
+        from dataclasses import fields
 
-    def test_candidates_for_spec_threads_the_spec_mode(self) -> None:
-        # The re-deriver sources the mode from the SAME spec it sources sl/tp
-        # from: a WORST_CASE spec's candidate re-sim produces DIFFERENT
-        # candidate scalars than the PRECISE spec on the same bars (the
-        # adverse-max fills genuinely move the trades).
+        assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+    def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
         bars = _session_bars()
-        precise = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
-        worst = cw.candidates_for_spec(
-            _spec(winners=((_rid(1), 0),), fill_mode=FillMode.WORST_CASE), bars
-        )
-        assert len(precise) == 1
-        assert len(worst) == 1
-        assert worst[0].returns != precise[0].returns
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        assert len(a) == 1
+        assert a[0].returns == b[0].returns  # no hidden mode input survives
 
 
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
@@ -272,28 +269,33 @@ def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
-    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+    """A 40-bar gap-up session with two down-spikes → fat-tailed WORST-CASE PnL.
 
-    The wide intrabar ranges let an SL/TP exit fill at different prices across
-    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
-    tails, so a reconstruction over these bars yields a DEFINED, non-zero
-    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
-    is material to the DSR. The pattern is deterministic (no RNG): a fixed
-    ``±`` swing list plus the spike overrides.
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the one hardcoded adverse-max
+    law): a long ENTERS at the bar HIGH and a triggered TP fills at
+    ``min(level, low)``, so a positive-Sharpe fixture needs the TRIGGER bar's
+    LOW to clear the target — every regular bar GAPS UP (open = prior close
+    + 3.00, low = open − 0.20, close = open + 1.00, high = close + 0.30), so
+    the next bar's low (prior close + 2.80) sits above the TP level (entry
+    high + 2.00 = prior close + 2.30 relative to its own bar) and the win
+    banks exactly +200 paisa. The two down-spike bars (16: −4.00, 30: −6.00)
+    inject the heavy tail: bar 30's dip breaches the entry-relative floor and
+    the trade closes at the adverse ``min(level, low)`` for −330 paisa.
+    Measured on this tree: 13 trades = twelve +200 and one −330 → Sharpe
+    ≈ 1.127 (> the test's SR_0 ≈ 0.207) with a DEFINED, non-zero excess
+    kurtosis ≈ 8.083 — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. Deterministic (no RNG).
     """
-    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
     seq: list[tuple[str, str, str, str]] = []
     price = 100.0
     for i in range(40):
-        o = price
-        if i in (10, 24):  # fat UPSIDE spikes
-            high, low, c = o + 15.0, o - 0.5, o + 12.0
-        elif i in (16, 30):  # fat DOWNSIDE spikes
-            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        o = price + 3.0
+        if i in (16, 30):  # fat DOWNSIDE spikes (different depths → tail variety)
+            depth = 4.0 if i == 16 else 6.0
+            high, low, c = o + 0.1, o - depth, o - depth + 1.0
         else:
-            delta = swings[i % len(swings)]
-            c = o + delta
-            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+            c = o + 1.0
+            high, low = c + 0.3, o - 0.2
         seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
         price = c
 
@@ -316,9 +318,9 @@ def _fat_tailed_bars() -> list[CandleBar]:
 def _fat_tailed_candidate() -> Any:
     """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
 
-    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
-    defined, non-zero excess kurtosis (≈1.73) — the fixture the
-    DSR-kurtosis-convention regression tests share.
+    ``sl=500 / tp=200`` over the gap-up session produces 13 worst-case trades
+    (twelve +200, one −330) with a defined, non-zero excess kurtosis (≈8.08)
+    — the fixture the DSR-kurtosis-convention regression tests share.
     """
     bars = _fat_tailed_bars()
     bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
@@ -651,9 +653,12 @@ class TestBuildCandidateInput:
         the old ``0.0``, which the DSR would have mis-read as a non-excess
         kurtosis of zero).
         """
-        bars = _session_bars()
+        # A FLAT session (o == h == l == c on every bar): under the one
+        # worst-case law every fill lands at the same price, so the
+        # reconstructed PnL is constant (zero) → kurtosis undefined.
+        flat = [_bar(16 + i, "100.00", "100.00", "100.00", "100.00") for i in range(6)]
+        bars = flat
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
-        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
         cand = cw.build_candidate_input(
             run_id=_rid(1),
             mask=0,

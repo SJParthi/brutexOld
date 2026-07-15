@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 import pytest
 from brutex.costs.constants import TICK_PAISA
 from brutex.data.models import OptionBar
-from brutex.execution.fill_mode import FillMode
 from brutex.options.executor import (
     TICK_FLOOR_MULTIPLE,
     ExpiryKind,
@@ -576,14 +575,13 @@ class _RangeSource:
         )
 
 
-def test_worst_case_is_the_executor_default() -> None:
-    # The options executor is the production config surface: a bare call
-    # prices WORST_CASE, bit-identical to the explicit mode.
-    bare = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
-    explicit = materialize_trade(
-        _signal(), RULES_BY_NAME["atm"], source=_RangeSource(), fill_mode=FillMode.WORST_CASE
-    )
-    assert bare == explicit
+def test_worst_case_is_the_only_law_no_mode_parameter() -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law — the
+    # executor surfaces carry NO mode parameter (killed-token pins).
+    import inspect
+
+    for fn in (materialize_trade, run_rule_over_signals, execute_options_sim):
+        assert "fill_mode" not in inspect.signature(fn).parameters, fn.__name__
 
 
 def test_worst_case_buys_high_sells_low_plus_tick() -> None:
@@ -596,60 +594,36 @@ def test_worst_case_buys_high_sells_low_plus_tick() -> None:
     assert out.breakdown.sell_fill_paisa == 14_895
 
 
-def test_precise_opt_out_is_byte_identical_legacy() -> None:
-    # Explicit PRECISE over range bars anchors the OPENs — identical to the
-    # legacy flat-bar fills.
-    out = materialize_trade(
-        _signal(), RULES_BY_NAME["atm"], source=_RangeSource(), fill_mode=FillMode.PRECISE
-    )
-    assert isinstance(out, MaterializedTrade)
-    assert out.breakdown.buy_fill_paisa == 12_005
-    assert out.breakdown.sell_fill_paisa == 14_995
-
-
-def test_worst_case_net_never_beats_precise() -> None:
+def test_ranged_bars_never_beat_flat_bars() -> None:
+    # The per-trade floor: the SAME opens on WIDER bars can only fill worse
+    # (flat bars fill exactly open ± tick — the never-flatter anchor).
     worst = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
-    precise = materialize_trade(
-        _signal(), RULES_BY_NAME["atm"], source=_RangeSource(), fill_mode=FillMode.PRECISE
-    )
+    flat = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_Source())
     assert isinstance(worst, MaterializedTrade)
-    assert isinstance(precise, MaterializedTrade)
-    assert worst.net_pnl_paisa < precise.net_pnl_paisa
+    assert isinstance(flat, MaterializedTrade)
+    assert worst.net_pnl_paisa < flat.net_pnl_paisa
 
 
-def test_tick_floor_gate_judged_on_opens_mode_independent() -> None:
-    # The §7.8 entry-quality gate reads the OPENs in BOTH modes — a fill mode
-    # never changes a reject decision (a large bar HIGH cannot rescue or
-    # doom a floor-priced entry).
+def test_tick_floor_gate_judged_on_opens_fill_law_independent() -> None:
+    # The §7.8 entry-quality gate reads the OPENs — the fill law never
+    # changes a reject decision (a large bar HIGH cannot rescue or doom a
+    # floor-priced entry).
     floor_rupees = f"{TICK_FLOOR_MULTIPLE * TICK_PAISA / 100:.2f}"
-    for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
-        out = materialize_trade(
-            _signal(),
-            RULES_BY_NAME["atm"],
-            source=_Source(entry_open=floor_rupees, exit_open="1.00"),
-            fill_mode=mode,
-        )
-        assert isinstance(out, RejectedTrade)
-        assert out.reason is RejectReason.TICK_FLOOR
+    out = materialize_trade(
+        _signal(),
+        RULES_BY_NAME["atm"],
+        source=_Source(entry_open=floor_rupees, exit_open="1.00"),
+    )
+    assert isinstance(out, RejectedTrade)
+    assert out.reason is RejectReason.TICK_FLOOR
 
 
-def test_worst_case_threads_through_rule_and_sim_surfaces() -> None:
-    # run_rule_over_signals + execute_options_sim thread the mode: the SAME
-    # signals price strictly worse under the (default) worst-case than under
-    # the explicit PRECISE opt-out.
-    worst_rule = run_rule_over_signals([_signal()], RULES_BY_NAME["atm"], source=_RangeSource())
-    precise_rule = run_rule_over_signals(
-        [_signal()], RULES_BY_NAME["atm"], source=_RangeSource(), fill_mode=FillMode.PRECISE
-    )
-    assert worst_rule.net_pnl_paisa < precise_rule.net_pnl_paisa
-    worst_sim = execute_options_sim(
-        [_signal()], source=_RangeSource(), rules=[RULES_BY_NAME["atm"]]
-    )
-    precise_sim = execute_options_sim(
-        [_signal()],
-        source=_RangeSource(),
-        rules=[RULES_BY_NAME["atm"]],
-        fill_mode=FillMode.PRECISE,
-    )
-    assert worst_sim[0].net_pnl_paisa == worst_rule.net_pnl_paisa
-    assert precise_sim[0].net_pnl_paisa == precise_rule.net_pnl_paisa
+def test_rule_and_sim_surfaces_price_the_one_law() -> None:
+    # run_rule_over_signals + execute_options_sim price the SAME hardcoded
+    # worst-case law as materialize_trade — one law, no per-surface drift.
+    rule = run_rule_over_signals([_signal()], RULES_BY_NAME["atm"], source=_RangeSource())
+    sim = execute_options_sim([_signal()], source=_RangeSource(), rules=[RULES_BY_NAME["atm"]])
+    single = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
+    assert isinstance(single, MaterializedTrade)
+    assert rule.net_pnl_paisa == single.net_pnl_paisa
+    assert sim[0].net_pnl_paisa == rule.net_pnl_paisa

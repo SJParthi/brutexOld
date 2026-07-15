@@ -68,9 +68,6 @@ def _namespace(**overrides: Any) -> argparse.Namespace:
         "stage3_fevals": None,
         "stage3_restarts": None,
         "lake_root": None,
-        # DEC-FILL-WORST-CASE-001: --fill-mode parses to None by default; the
-        # nightly leg forwards it verbatim (cmd_sweep_all resolves env/default).
-        "fill_mode": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -113,7 +110,6 @@ def test_kwargs_golden_for_representative_namespace(tmp_path: Path) -> None:
         "stage3_top_k": None,
         "stage3_fevals": None,
         "stage3_restarts": None,
-        "fill_mode": None,
     }
 
 

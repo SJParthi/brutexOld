@@ -40,17 +40,16 @@ from brutex.engine.sweep_diffcheck import (
     resolve_diffcheck_k,
     sample_masks,
 )
-from brutex.execution.fill_mode import FillMode
 from structlog.testing import capture_logs
 
 #: D-6 traceability — test name → requirement/gap tokens.
 TRACEABILITY: dict[str, tuple[str, ...]] = {
-    "test_r45_entry_fills_next_bar_open": ("R45",),
+    "test_r45_entry_fills_next_bar_adverse_extreme": ("R45",),
     "test_r45_overnight_gap_entry_is_dropped": ("R45",),
     "test_r45_session_gap_closes_at_prior_session_last_bar": ("R45",),
     "test_r45_forced_exit_overrides_everything": ("R45",),
     "test_r45_sl_tp_touch_and_sl_first_tie": ("R45",),
-    "test_r45_end_of_data_closes_at_last_close": ("R45",),
+    "test_r45_end_of_data_closes_at_last_bar_adverse_extreme": ("R45",),
     "test_r45_sampler_same_identity_same_masks": ("R45",),
     "test_r45_sampler_different_snapshot_hash_different_masks": ("R45",),
     "test_r45_ast_import_ban": ("R45",),
@@ -158,8 +157,9 @@ class TestReferenceSimulateValidation:
 
 
 class TestReferenceSimulateRules:
-    def test_r45_entry_fills_next_bar_open(self) -> None:
-        """Signal on bar 0 ⇒ enter at bar 1 OPEN; entry bar's range folds MFE/MAE."""
+    def test_r45_entry_fills_next_bar_adverse_extreme(self) -> None:
+        """Signal on bar 0 ⇒ enter at bar 1's HIGH (BUY, worst-case); the
+        entry bar's range folds MFE/MAE (DEC-FILL-WORST-CASE-ONLY-001)."""
         bars = [
             _bar(0, 10_000, 10_005, 9_995, 10_000),
             _bar(1, 10_010, 10_030, 10_000, 10_020),
@@ -176,18 +176,18 @@ class TestReferenceSimulateRules:
         assert len(trades) == 1
         trade = trades[0]
         assert trade.entry_idx == 1
-        assert trade.entry_paisa == 10_010
+        assert trade.entry_paisa == 10_030  # bar1 HIGH (the adverse extreme)
         assert trade.entry_ts == bars[1].timestamp
         assert trade.exit_idx == 2
-        assert trade.exit_paisa == 10_040
+        assert trade.exit_paisa == 9_990  # EOD at bar2 LOW (the adverse extreme)
         assert trade.exit_ts == bars[2].timestamp
-        assert trade.pnl_paisa == 30
-        assert trade.mfe_paisa == 40  # bar2 high 10_050 − entry 10_010
-        assert trade.mae_paisa == 20  # bar2 low 9_990 vs entry 10_010
+        assert trade.pnl_paisa == -40
+        assert trade.mfe_paisa == 20  # bar2 high 10_050 − entry 10_030
+        assert trade.mae_paisa == 40  # bar2 low 9_990 vs entry 10_030
         assert trade.holding_bars == 2
         assert trade.exit_reason == "end_of_data"
 
-    def test_r45_end_of_data_closes_at_last_close(self) -> None:
+    def test_r45_end_of_data_closes_at_last_bar_adverse_extreme(self) -> None:
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             _bar(1, 10_010, 10_012, 10_008, 10_011),
@@ -198,11 +198,12 @@ class TestReferenceSimulateRules:
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "end_of_data"
-        assert trade.exit_paisa == 10_011
-        assert trade.pnl_paisa == 10_010 - 10_011  # SELL: entry − exit == −1
+        # SELL: entry at bar1 LOW 10_008; EOD cover at bar1 HIGH 10_012.
+        assert trade.exit_paisa == 10_012
+        assert trade.pnl_paisa == 10_008 - 10_012  # SELL: entry − exit == −4
         assert trade.holding_bars == 1
-        assert trade.mfe_paisa == 2  # SELL fav = entry − low = 10_010 − 10_008
-        assert trade.mae_paisa == 2  # SELL adv = high − entry = 10_012 − 10_010
+        assert trade.mfe_paisa == 0  # SELL fav = entry − low = 10_008 − 10_008
+        assert trade.mae_paisa == 4  # SELL adv = high − entry = 10_012 − 10_008
 
     def test_no_signal_no_trades(self) -> None:
         trades = reference_simulate(
@@ -227,30 +228,44 @@ class TestReferenceSimulateRules:
         assert trades == []
 
     def test_r45_sl_tp_touch_and_sl_first_tie(self) -> None:
-        """SL/TP touch on [low, high]; a bar spanning BOTH fills the stop (pessimistic)."""
+        """SL/TP touch on [low, high]; a bar spanning BOTH fills the stop (SL-first).
+
+        The FLAT entry bar keeps the levels at open ± 50 (worst-case entry ==
+        the flat bar's high == its open); the next bar spans BOTH levels and
+        the stop wins, filling at min(level 9_950, bar low 9_940) = 9_940.
+        (A LONG TP can never trigger on its own entry bar under the
+        adverse-max law — entry == the bar high — so the tie is only
+        reachable on a later bar.)
+        """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_060, 9_940, 10_000),  # entry bar spans BOTH levels
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry: worst == open
+            _bar(2, 10_000, 10_060, 9_940, 10_000),  # spans BOTH levels
         ]
         trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=50
+            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=50
         )
         assert len(trades) == 1
         trade = trades[0]
-        assert trade.exit_reason == "stop_loss"  # SL_FIRST tie
-        assert trade.exit_paisa == 9_950  # AT_LEVEL: exactly entry − 50
-        assert trade.pnl_paisa == -50
-        assert trade.exit_idx == 1  # the ENTRY bar itself is managed
-        assert trade.holding_bars == 1
+        assert trade.exit_reason == "stop_loss"  # SL-first tie, hardcoded
+        assert trade.exit_paisa == 9_940  # min(level 9_950, bar low 9_940)
+        assert trade.pnl_paisa == -60
+        assert trade.exit_idx == 2
+        assert trade.holding_bars == 2
 
     def test_sl_touch_boundary_exact_level(self) -> None:
-        """BUY stop fires iff low <= sl — a low exactly AT the level fills."""
+        """BUY stop fires iff low <= sl — a low exactly AT the level fills.
+
+        Flat entry bar (levels anchor open == high); the trigger bar's low
+        sits exactly ON the level, so min(level, low) == the level itself.
+        """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_010, 9_950, 10_000),  # low == sl level exactly
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
+            _bar(2, 10_000, 10_010, 9_950, 10_000),  # low == sl level exactly
         ]
         trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
+            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
@@ -259,33 +274,42 @@ class TestReferenceSimulateRules:
     def test_sl_one_paisa_above_level_does_not_fill(self) -> None:
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_010, 9_951, 10_000),  # low = sl + 1: no touch
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry (level 9_950)
+            _bar(2, 10_000, 10_010, 9_951, 10_000),  # low = sl + 1: no touch
         ]
         trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
+            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=50, tp_paisa=None
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "end_of_data"
 
     def test_tp_touch_buy(self) -> None:
+        # Flat entry (tp level 10_030); the trigger bar touches the level but
+        # the adverse-max fill is min(level 10_030, bar low 9_990) = 9_990 —
+        # a "take-profit" priced at the bar LOW (worst-case).
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_030, 9_990, 10_010),
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
+            _bar(2, 10_000, 10_030, 9_990, 10_010),
         ]
         trades = reference_simulate(
-            bars, [True, False], direction="BUY", tf_minutes=1, sl_paisa=100, tp_paisa=30
+            bars, [True, False, False], direction="BUY", tf_minutes=1, sl_paisa=100, tp_paisa=30
         )
         assert len(trades) == 1
         trade = trades[0]
         assert trade.exit_reason == "take_profit"
-        assert trade.exit_paisa == 10_030
-        assert trade.pnl_paisa == 30
+        assert trade.exit_paisa == 9_990
+        assert trade.pnl_paisa == -10
 
     def test_sell_mirror_levels(self) -> None:
-        """SELL: stop above (high >= sl), target below (low <= tp)."""
+        """SELL: stop above (high >= sl), target below (low <= tp).
+
+        Worst-case SELL entry = bar1 LOW 9_995 → sl level 10_045; bar1's own
+        high 10_050 breaches it same-bar; cover = max(level, high) = 10_050.
+        """
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_050, 9_995, 10_020),  # high == entry + 50 == sl level
+            _bar(1, 10_000, 10_050, 9_995, 10_020),
         ]
         trades = reference_simulate(
             bars, [True, False], direction="SELL", tf_minutes=1, sl_paisa=50, tp_paisa=200
@@ -294,19 +318,23 @@ class TestReferenceSimulateRules:
         trade = trades[0]
         assert trade.exit_reason == "stop_loss"
         assert trade.exit_paisa == 10_050
-        assert trade.pnl_paisa == -50  # SELL: entry − exit
+        assert trade.pnl_paisa == 9_995 - 10_050  # SELL: entry − exit == −55
 
     def test_sell_take_profit_below(self) -> None:
+        # Flat entry (SELL at 10_000, tp level 9_970); the trigger bar's low
+        # touches the level but the cover is max(level 9_970, bar high
+        # 10_005) = 10_005 — a "take-profit" priced at the bar HIGH.
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
-            _bar(1, 10_000, 10_005, 9_970, 9_980),  # low == entry − 30 == tp level
+            _bar(1, 10_000, 10_000, 10_000, 10_000),  # flat entry
+            _bar(2, 10_000, 10_005, 9_970, 9_980),
         ]
         trades = reference_simulate(
-            bars, [True, False], direction="SELL", tf_minutes=1, sl_paisa=None, tp_paisa=30
+            bars, [True, False, False], direction="SELL", tf_minutes=1, sl_paisa=None, tp_paisa=30
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "take_profit"
-        assert trades[0].pnl_paisa == 30
+        assert trades[0].pnl_paisa == 10_000 - 10_005
 
     def test_entry_ignored_while_open_and_on_exit_bar(self) -> None:
         """Single position: signals while open + on the exit bar are consumed."""
@@ -332,7 +360,7 @@ class TestReferenceSimulateRules:
         assert trades[1].exit_reason == "end_of_data"
 
     def test_r45_forced_exit_overrides_everything(self) -> None:
-        """The 15:20 IST bar force-closes at ITS OPEN, folding (open, open) only."""
+        """The 15:20 IST bar force-closes at its ADVERSE EXTREME, folding (open, open) only."""
         anchor = datetime(2024, 1, 2, 9, 47, tzinfo=UTC)  # 15:17 IST
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000, anchor=anchor),  # 15:17 arm
@@ -352,11 +380,11 @@ class TestReferenceSimulateRules:
         trade = trades[0]
         assert trade.exit_reason == "forced_1520"
         assert trade.exit_idx == 3
-        assert trade.exit_paisa == 10_035  # the forced bar's OPEN
-        assert trade.pnl_paisa == 35
+        assert trade.exit_paisa == 9_900  # the forced bar's LOW (adverse extreme)
+        assert trade.pnl_paisa == 9_900 - 10_010  # entry = bar1 HIGH 10_010
         # Excursion: bar3 folds (open, open) ONLY — its 10_100/9_900 wicks never fold.
-        assert trade.mfe_paisa == 40  # bar2 high 10_040 − entry 10_000
-        assert trade.mae_paisa == 20  # bar2 low 9_980 vs entry 10_000
+        assert trade.mfe_paisa == 30  # bar2 high 10_040 − entry 10_010
+        assert trade.mae_paisa == 30  # bar2 low 9_980 vs entry 10_010
 
     def test_bar_opening_1519_is_not_forced_for_1m(self) -> None:
         """Strict boundary: a 1m bar closing exactly AT 15:20 is NOT forced."""
@@ -441,7 +469,7 @@ class TestReferenceSimulateRules:
             [True, False, False, False],
             direction="BUY",
             tf_minutes=1,
-            sl_paisa=50,  # would fill stop_loss at 9_960 IF the boundary bar were managed
+            sl_paisa=50,  # would fill stop_loss IF the boundary bar were managed
             tp_paisa=None,
         )
         assert len(trades) == 1
@@ -450,12 +478,12 @@ class TestReferenceSimulateRules:
         assert trade.entry_idx == 1
         assert trade.exit_idx == 1  # the day-1 last stored bar, NOT the boundary bar
         assert trade.exit_ts == bars[1].timestamp
-        assert trade.exit_paisa == 10_020  # day-1 last CLOSE — the finish() pricing
-        assert trade.pnl_paisa == 10
+        assert trade.exit_paisa == 10_005  # day-1 last bar LOW — the finish() pricing
+        assert trade.pnl_paisa == 10_005 - 10_030  # entry = bar1 HIGH 10_030
         assert trade.holding_bars == 1
         # NO excursion fold from the boundary bar (day-1 evidence only).
-        assert trade.mfe_paisa == 20  # bar1 high 10_030 − entry 10_010
-        assert trade.mae_paisa == 5  # entry 10_010 − bar1 low 10_005
+        assert trade.mfe_paisa == 0  # entry IS bar1's high — nothing above it
+        assert trade.mae_paisa == 25  # entry 10_030 − bar1 low 10_005
 
     def test_session_gap_boundary_bar_never_arms_next_bar_fills(self) -> None:
         """The boundary bar's own signal never arms; earliest re-arm i+1, fill i+2."""
@@ -532,10 +560,10 @@ class TestReferenceSimulateRules:
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             CandleBar(
                 timestamp=_OPEN_UTC + timedelta(minutes=1),
-                open=Decimal("100.005"),  # → 100.01 → 10_001 paisa
-                high=Decimal("100.10"),
-                low=Decimal("99.90"),
-                close=Decimal("100.00"),
+                open=Decimal("99.90"),
+                high=Decimal("100.005"),  # the BUY entry anchor → 100.01 → 10_001
+                low=Decimal("99.85"),
+                close=Decimal("99.95"),
                 volume=0,
                 open_interest=None,
             ),
@@ -789,10 +817,6 @@ class _Grid:
     condition_bits: tuple[int, ...] = (0, 1, 2)
     data_snapshot_hash: str = "snap"
     start_equity_paisa: int = 10_000_000
-    # DEC-FILL-WORST-CASE-001: the hook threads grid.fill_mode into the
-    # reference (same-mode vs same-mode); PRECISE keeps the legacy fixtures'
-    # hand-derived numbers byte-identical.
-    fill_mode: FillMode = FillMode.PRECISE
 
 
 class _SuspectStub:
@@ -903,7 +927,6 @@ class TestDiffCheckHook:
             tf_minutes: int,
             sl_paisa: int | None,
             tp_paisa: int | None,
-            fill_mode: FillMode = FillMode.PRECISE,
         ) -> list[RefTrade]:
             trades = real(
                 bars,
@@ -912,7 +935,6 @@ class TestDiffCheckHook:
                 tf_minutes=tf_minutes,
                 sl_paisa=sl_paisa,
                 tp_paisa=tp_paisa,
-                fill_mode=fill_mode,
             )
             # The plant: one paisa of drift on the first trade.
             return [
@@ -1123,7 +1145,7 @@ class TestDiffCheckHook:
             assert isinstance(getattr(sample, field), int | datetime)
 
 
-# ── DEC-FILL-WORST-CASE-001 — the independently re-stated worst-case arm ────
+# ── DEC-FILL-WORST-CASE-ONLY-001 — the ONE re-stated worst-case fill law ────
 
 
 class TestReferenceSimulateWorstCase:
@@ -1144,7 +1166,6 @@ class TestReferenceSimulateWorstCase:
                 tf_minutes=1,
                 sl_paisa=None,
                 tp_paisa=None,
-                fill_mode=FillMode.WORST_CASE,
             )
             assert len(trades) == 1
             assert trades[0].entry_paisa == expected_entry, direction
@@ -1164,7 +1185,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=50,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
@@ -1187,7 +1207,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=None,
             tp_paisa=50,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "take_profit"
@@ -1209,7 +1228,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=50,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "stop_loss"
@@ -1233,7 +1251,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=None,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         trade = trades[0]
@@ -1255,7 +1272,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=None,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         assert trades[0].exit_reason == "end_of_data"
@@ -1278,7 +1294,6 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=None,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
         )
         assert len(trades) == 1
         trade = trades[0]
@@ -1289,10 +1304,9 @@ class TestReferenceSimulateWorstCase:
 
     def test_worst_case_levels_anchor_on_the_worst_entry_fill(self) -> None:
         # The documented honest interaction: SL/TP levels anchor on the
-        # ACTUAL (adverse-extreme) entry fill, so trigger timing can differ
-        # between modes — here the SAME bar trips the stop ONLY under
-        # worst-case (level 10_030 − 50 = 9_980 vs precise 10_000 − 50 =
-        # 9_950; bar 2's low 9_975 touches only the former).
+        # ACTUAL (adverse-extreme) entry fill — here the stop level is
+        # entry HIGH 10_030 − 50 = 9_980 (an open-anchored level would have
+        # been 9_950, untouched by bar 2's low 9_975), so bar 2 trips it.
         bars = [
             _bar(0, 10_000, 10_000, 10_000, 10_000),
             _bar(1, 10_000, 10_030, 10_000, 10_010),  # entry: worst 10_030
@@ -1305,26 +1319,16 @@ class TestReferenceSimulateWorstCase:
             tf_minutes=1,
             sl_paisa=50,
             tp_paisa=None,
-            fill_mode=FillMode.WORST_CASE,
-        )
-        precise = reference_simulate(
-            bars,
-            [True, False, False],
-            direction="BUY",
-            tf_minutes=1,
-            sl_paisa=50,
-            tp_paisa=None,
         )
         assert worst[0].exit_reason == "stop_loss"
         assert worst[0].exit_paisa == 9_975  # min(level 9_980, low 9_975)
-        assert precise[0].exit_reason == "end_of_data"
 
     def test_worst_case_parity_with_production_walker(self) -> None:
         # TEST-SIDE oracle join (the module's own import ban binds the
         # PRODUCTION file, not this test): the naive worst-case arm agrees
         # bit-for-bit with the production walker under the SAME mode on a
         # mixed fixture (range bars, SL+TP, forced tail).
-        from brutex.engine.trade_sim import FillPolicy, simulate_trades
+        from brutex.engine.trade_sim import simulate_trades
         from brutex.strategies.types import Side
 
         anchor = datetime(2024, 1, 2, 9, 40, tzinfo=UTC)  # 15:10 IST
@@ -1344,7 +1348,6 @@ class TestReferenceSimulateWorstCase:
                 tf_minutes=1,
                 stop_loss_paisa=60,
                 take_profit_paisa=60,
-                policy=FillPolicy(fill_mode=FillMode.WORST_CASE),
             )
             ref = reference_simulate(
                 bars,
@@ -1353,7 +1356,6 @@ class TestReferenceSimulateWorstCase:
                 tf_minutes=1,
                 sl_paisa=60,
                 tp_paisa=60,
-                fill_mode=FillMode.WORST_CASE,
             )
             assert len(prod) == len(ref), direction
             for p, r in zip(prod, ref, strict=True):

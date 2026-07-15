@@ -99,25 +99,44 @@ def _trading_days(start: date, n: int) -> list[date]:
 
 
 def _bars() -> list[CandleBar]:
-    """A winning upward-zigzag: BUY masks pass the 5 hard gates via the TP leg."""
+    """The worst-case-rankable gap-up drift: BUY masks pass the 5 hard gates.
+
+    DEC-FILL-WORST-CASE-ONLY-001 re-craft (the old wide-range zigzag SL'd
+    every worst-case entry on its own bar): narrow gap-up bars (range 0.50 <
+    the SL 0.80; the next gap-up's low clears the TP level → +50 wins), a
+    shallow bearish bar each 7-bar cycle, and a DEEP bearish bar (range
+    0.85) every 4th cycle whose stop-out keeps profit_factor finite.
+    """
     out: list[CandleBar] = []
+    cycle = 0
     for day in _trading_days(date(2024, 1, 1), _N_DAYS):
         price = 100.0
         for m in range(_PER_DAY):
-            close = price + 0.6 if m % 3 else price - 0.3
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish bar
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
             ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
             out.append(
                 CandleBar(
                     timestamp=ts.astimezone(UTC),
-                    open=Decimal(str(round(price, 2))),
-                    high=Decimal(str(round(max(price, close) + 0.5, 2))),
-                    low=Decimal(str(round(min(price, close) - 0.5, 2))),
-                    close=Decimal(str(round(close, 2))),
+                    open=Decimal(str(round(o, 2))),
+                    high=Decimal(str(round(h, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(c, 2))),
                     volume=1000,
                     open_interest=None,
                 )
             )
-            price = close
+            price = c
     return out
 
 
@@ -167,12 +186,6 @@ def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
         max_combos=None,
         data_snapshot_hash=None,
         options_sim=False,
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001 fix round 2): this suite's
-        # fixtures + expectations were minted under PRECISE — under the
-        # WORST_CASE production default the tiny fixture's combos fail the
-        # rank gates and persist NOTHING (the Stage-1 pin sweep missed this
-        # file; the explicit pin is byte-identical to the pre-mode launch).
-        fill_mode="precise",
         stage3_enable=True,
         stage3_top_k=2,
         stage3_fevals=8,

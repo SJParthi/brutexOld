@@ -35,7 +35,6 @@ from brutex.engine.sweep_diffcheck import (
     reference_simulate,
     sample_masks,
 )
-from brutex.execution.fill_mode import FillMode
 
 from tests.bench._abs_baseline_registry import measure_best_of_min
 from tests.bench._o1_tiers import ratio_ceiling
@@ -100,9 +99,6 @@ class _Grid:
     condition_bits: tuple[int, ...]
     data_snapshot_hash: str = "snap"
     start_equity_paisa: int = 10_000_000
-    # DEC-FILL-WORST-CASE-001: the hook threads grid.fill_mode into the
-    # reference; PRECISE keeps this bench's oracle stubs byte-identical.
-    fill_mode: FillMode = FillMode.PRECISE
 
 
 class _CountingSim:

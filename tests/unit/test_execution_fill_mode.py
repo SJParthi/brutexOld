@@ -1,78 +1,94 @@
-"""Unit tests for :mod:`brutex.execution.fill_mode` (DEC-FILL-WORST-CASE-001).
+"""Unit tests for :mod:`brutex.execution.fill_mode` (DEC-FILL-WORST-CASE-ONLY-001).
 
-Covers the two-member vocabulary, the production default, and every branch of
-the fail-loud ``$BRUTEX_FILL_MODE`` resolver — 100% line + branch on the
-stdlib-only leaf.
+Covers the SINGLE-member vocabulary, the removed-knob refusal guard
+(``require_fill_mode_env_unset`` — refuses EVERY set value, ``worst_case``
+included), and the killed-token pins proving the retired machinery
+(``PRECISE`` / ``resolve_fill_mode`` / ``DEFAULT_FILL_MODE``) stays deleted —
+100% line + branch on the stdlib-only leaf.
 """
 
 from __future__ import annotations
 
 import pytest
 from brutex.execution.fill_mode import (
-    DEFAULT_FILL_MODE,
     FILL_MODE_ENV,
     FillMode,
-    resolve_fill_mode,
+    FillModeRemovedError,
+    require_fill_mode_env_unset,
 )
 
 
 class TestVocabulary:
-    """The enum values are the wire/identity tokens — pinned."""
+    """The enum value is the wire/identity token — pinned, single-member."""
 
-    def test_member_values_pinned(self) -> None:
-        # These strings enter canonical_trade_params / the tuple digests /
-        # the cascade manifest — append-only wire vocabulary, never renamed.
+    def test_single_member_worst_case_only(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law —
+        # the enum is a typed vocabulary token, never a configuration axis.
+        assert [m.value for m in FillMode] == ["worst_case"]
+
+    def test_member_value_pinned(self) -> None:
+        # This string enters canonical_trade_params / the tuple digests /
+        # the cascade manifest — wire vocabulary, never renamed.
         assert FillMode.WORST_CASE.value == "worst_case"
-        assert FillMode.PRECISE.value == "precise"
-        assert [m.value for m in FillMode] == ["worst_case", "precise"]
 
-    def test_production_default_is_worst_case(self) -> None:
-        # DEC-FILL-WORST-CASE-001: the anti-illusion floor is the DEFAULT at
-        # the production config layer.
-        assert DEFAULT_FILL_MODE is FillMode.WORST_CASE
+    def test_precise_member_deleted(self) -> None:
+        # Killed-token pin: the retired legacy mode is DELETED, not hidden.
+        assert not hasattr(FillMode, "PRECISE")
 
     def test_env_name_pinned(self) -> None:
+        # Retained ONLY so the refusal guard can name the stale variable.
         assert FILL_MODE_ENV == "BRUTEX_FILL_MODE"
 
+    def test_resolver_machinery_deleted(self) -> None:
+        # Killed-token pins: the env resolver + production-default constant
+        # are gone from the module surface (nothing resolves a mode any more).
+        import brutex.execution.fill_mode as mod
 
-class TestResolveFillMode:
-    """Every resolver branch: default / explicit / case-fold / fail-loud."""
+        assert not hasattr(mod, "resolve_fill_mode")
+        assert not hasattr(mod, "DEFAULT_FILL_MODE")
 
-    def test_unset_returns_default(self) -> None:
-        assert resolve_fill_mode({}) is DEFAULT_FILL_MODE
+    def test_all_surface_pinned(self) -> None:
+        import brutex.execution.fill_mode as mod
 
-    def test_blank_returns_default(self) -> None:
-        # Whitespace-only is "unset" — an empty export must not fail a launch.
-        assert resolve_fill_mode({FILL_MODE_ENV: "   "}) is DEFAULT_FILL_MODE
+        assert mod.__all__ == [
+            "FILL_MODE_ENV",
+            "FillMode",
+            "FillModeRemovedError",
+            "require_fill_mode_env_unset",
+        ]
 
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            ("worst_case", FillMode.WORST_CASE),
-            ("precise", FillMode.PRECISE),
-            ("WORST_CASE", FillMode.WORST_CASE),
-            ("Precise", FillMode.PRECISE),
-            ("  precise  ", FillMode.PRECISE),
-        ],
-    )
-    def test_explicit_values_case_insensitive(self, raw: str, expected: FillMode) -> None:
-        assert resolve_fill_mode({FILL_MODE_ENV: raw}) is expected
 
-    @pytest.mark.parametrize("junk", ["worst", "1", "true", "worstcase", "précise"])
-    def test_junk_fails_loud(self, junk: str) -> None:
-        # The BRUTEX_LOG_LEVEL fail-loud precedent: a junk env var raises a
-        # typed ValueError NAMING the variable + the valid tokens — never a
-        # silent fallback to a mode the operator did not choose.
-        with pytest.raises(ValueError, match=FILL_MODE_ENV):
-            resolve_fill_mode({FILL_MODE_ENV: junk})
+class TestRequireFillModeEnvUnset:
+    """Every guard branch: unset / empty / whitespace pass; ANY value refuses."""
 
-    def test_junk_message_names_valid_tokens_and_value(self) -> None:
-        with pytest.raises(ValueError, match=r"worst_case, precise") as excinfo:
-            resolve_fill_mode({FILL_MODE_ENV: "junk"})
-        assert "'junk'" in str(excinfo.value)
+    def test_unset_passes(self) -> None:
+        require_fill_mode_env_unset({})  # no raise
 
-    def test_default_env_source_is_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(FILL_MODE_ENV, "precise")
-        assert resolve_fill_mode() is FillMode.PRECISE
+    def test_empty_string_passes(self) -> None:
+        # The common `VAR= cmd` unset idiom — nothing was configured.
+        require_fill_mode_env_unset({FILL_MODE_ENV: ""})
+
+    def test_whitespace_only_passes(self) -> None:
+        require_fill_mode_env_unset({FILL_MODE_ENV: "   "})
+
+    @pytest.mark.parametrize("raw", ["worst_case", "precise", "WORST_CASE", "junk", " precise "])
+    def test_any_set_value_refuses(self, raw: str) -> None:
+        # The fails-before refusal (DEC-FILL-WORST-CASE-ONLY-001): the knob is
+        # REMOVED, so even the spelling that matches the one law refuses —
+        # silently accepting it would bless stale deployment configs.
+        with pytest.raises(FillModeRemovedError) as exc_info:
+            require_fill_mode_env_unset({FILL_MODE_ENV: raw})
+        message = str(exc_info.value)
+        assert "DEC-FILL-WORST-CASE-ONLY-001" in message
+        assert FILL_MODE_ENV in message
+
+    def test_error_is_a_value_error(self) -> None:
+        # The CLI launch guards catch ValueError → clean EXIT_USER_ERROR.
+        assert issubclass(FillModeRemovedError, ValueError)
+
+    def test_default_env_reads_os_environ(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(FILL_MODE_ENV, "worst_case")
+        with pytest.raises(FillModeRemovedError):
+            require_fill_mode_env_unset()
         monkeypatch.delenv(FILL_MODE_ENV)
-        assert resolve_fill_mode() is DEFAULT_FILL_MODE
+        require_fill_mode_env_unset()  # no raise once unset

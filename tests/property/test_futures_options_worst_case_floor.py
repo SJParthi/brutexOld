@@ -1,57 +1,32 @@
-"""DEC-FILL-WORST-CASE-001 — the UNCONDITIONAL per-trade worst-case floor.
+"""DEC-FILL-WORST-CASE-ONLY-001 — the UNCONDITIONAL per-trade worst-case floor.
 
-The futures/options executors re-price FIXED trade lists (entry/exit
-instants inherited verbatim from the spot winner), so — unlike the spot
-engine, whose SL/TP levels re-anchor on the worst entry and can move
-trigger TIMING (the matched-trade-scoped floor of
-``tests/property/test_trade_sim_worst_case_floor.py``) — the floor here is
-UNCONDITIONAL per trade: for the SAME signal over the SAME bars,
+The futures/options executors re-price FIXED trade lists (entry/exit instants
+inherited verbatim from the spot winner), so — unlike the spot engine, whose
+SL/TP levels re-anchor on the worst entry and can move trigger TIMING — the
+floor here is UNCONDITIONAL per trade. Worst-case is the ONLY fill model (the
+PRECISE arm is DELETED), so the reference is the retired OPEN ± one-tick
+convention restated IN-TEST as pure arithmetic over the drawn bars (never an
+executor run): for the SAME signal over the SAME bars,
 
-* the worst-case BUY fill is ``>=`` the precise buy fill,
-* the worst-case SELL fill is ``<=`` the precise sell fill,
-* the worst-case net P&L is ``<=`` the precise net P&L,
+* the worst-case BUY fill is ``>=`` open + tick (paying up to the bar HIGH
+  plus the tick — the F&O ±1-tick discipline rides ON TOP of the adverse
+  extreme),
+* the worst-case SELL fill is ``<=`` open − tick (selling down to the bar LOW
+  minus the tick),
+* the per-unit worst-case spread ``sell − buy`` is ``<=`` the open-anchored
+  spread — the [FILL-WORSTCASE-SIDE-SIGN] monotonicity pin: worst-case can
+  only UNDERSTATE the open-anchored price, never overstate,
 
-with GROSS equality exactly when both fill bars are flat on their adverse
-sides (the +tick discipline — the flat-bar counterexample; on the
-COST-FREE index-futures leg ``net == gross``, so the flat-bar equality
-holds at the NET level there too). Bars are drawn on the 2dp tick grid
-(paisa ints ÷ 100 → exact Decimals, the lake-write snap law).
+with EXACT fill equality when the fill bars are flat on their adverse sides
+(extreme == open ⇒ fill == open ± tick — proving the tick discipline is
+retained, not replaced, by the extreme law). Bars are drawn on the 2dp tick
+grid (paisa ints ÷ 100 → exact Decimals, the lake-write snap law).
 
-THE NET FLOOR NEEDS THE ADVERSE-LEVY-ROUNDING LAW (fix round 2,
-MIGRATION.md #1786): as originally shipped, this file's net-floor clause
-asserted a FALSE theorem — the refuter's executed counterexample
-(``@example`` below: entry flat at ₹460.05, exit low ONE paisa under the
-open, entry date 2024-10-03) had the worst-case sell notional 25 paisa
-smaller crossing a ₹0.5 STT nearest-rupee rounding boundary DOWNWARD, so
-STT dropped ₹1 while gross dropped only 25 paisa: worst net −7,095 BEAT
-precise net −7,170 by 75 paisa. The fix: under WORST_CASE every
-nearest-rounded levy in the cost stack rounds ADVERSELY (ceiling) —
-``calculator._round_levy_rupee`` / ``_round_levy_paisa`` — while PRECISE
-keeps the legacy nearest rounding byte-identical.
-
-DOMINANCE PROOF (why the ceiling restores the unconditional net floor):
-let ``Δb = worst_buy_notional − precise_buy_notional ≥ 0`` and
-``Δs = precise_sell_notional − worst_sell_notional ≥ 0`` (fill dominance ×
-n_shares), so ``precise_gross − worst_gross = Δ = Δb + Δs``. Per levy with
-rounding unit ``u`` (₹1 statutory / 1 paisa commercial) and rate ``r``:
-
-* a BUY-anchored levy's worst raw value is ``>=`` its precise raw value,
-  and ``ceil(x) >= nearest(y)`` whenever ``x >= y`` — so the worst levy is
-  never SMALLER than the precise one (no shortfall, only extra charge);
-* a SELL-anchored levy's raw gap is ``d = r·Δs`` (plus at most 1 paisa of
-  statutory floor-division truncation): when ``d < u/2``,
-  ``nearest(raw_worst + d) <= ceil(raw_worst)`` — shortfall ``<= 0``; when
-  ``d >= u/2`` the shortfall is ``<= d + u/2 <= 2d = 2·r·Δs``;
-* GST compounds the other levies' gaps through its base at 18%.
-
-Summing: ``charges_precise − charges_worst <= 2·(Σ sell-side rates)·
-(1 + 2×18%)·Δs + O(paisa truncation) << Δs <= Δ`` because the summed levy
-rates (STT 0.1% + ETC ~0.035% + SEBI 0.0001% + IPFT 0.0005% + the futures
-brokerage turnover arm 0.03%) are ``<< 36%``. Hence
-``net_worst <= net_precise`` UNCONDITIONALLY. On flat adverse bars the
-notionals are equal, so every worst levy is ``ceil >= nearest`` — charges
-can only be HIGHER under worst — which is why the flat-bar clause pins
-GROSS equality (net equality survives only on the cost-free futures leg).
+The refuter's fix-round-2 STT-boundary example (entry flat at ₹460.05, exit
+low one paisa under the open — the 25-paisa notional gap crossing a ₹0.5 STT
+nearest-rounding boundary) is kept as a permanent in-domain ``@example``: the
+adverse-levy-rounding law (``_round_levy_*`` ceilings, now the ONLY rounding)
+is exercised on exactly that boundary every run.
 """
 
 from __future__ import annotations
@@ -62,7 +37,6 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from brutex.data.models import CandleBar, OptionBar
-from brutex.execution.fill_mode import FillMode
 from brutex.futures.executor import (
     FuturesBarWindow,
     FuturesSignal,
@@ -87,10 +61,12 @@ _O_ENTRY = datetime(2024, 10, 3, 9, 16, tzinfo=_IST)
 _O_EXIT = datetime(2024, 10, 3, 15, 20, tzinfo=_IST)
 _O_EXPIRY = date(2024, 10, 31)
 
+#: The F&O one-tick adverse discipline in paisa (₹0.05 — TICK_PAISA).
+_TICK = 5
+
 #: One priced bar on the 2dp grid: (open_paisa, up_band_paisa, down_band_paisa).
 #: Opens well above the option tick-floor gate (> 25 paisa) so every drawn
-#: trade ACCEPTS in both modes; bands bounded below the open so lows stay
-#: positive.
+#: trade ACCEPTS; bands bounded below the open so lows stay positive.
 _BAR = st.tuples(
     st.integers(min_value=1_000, max_value=3_000_000),
     st.integers(min_value=0, max_value=500),
@@ -151,27 +127,30 @@ class TestFuturesWorstCaseFloor:
         worst = materialize_futures_trade(
             signal, resolver=_FutResolver(), source=_FutSource(window)
         )
-        precise = materialize_futures_trade(
-            signal,
-            resolver=_FutResolver(),
-            source=_FutSource(window),
-            fill_mode=FillMode.PRECISE,
-        )
         assert isinstance(worst, MaterializedFuturesTrade)
-        assert isinstance(precise, MaterializedFuturesTrade)
-        # Fill dominance — adverse on BOTH legs, never better.
-        assert worst.buy_fill_paisa >= precise.buy_fill_paisa
-        assert worst.sell_fill_paisa <= precise.sell_fill_paisa
-        # The per-trade P&L floor (cost-free index: net == gross).
-        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
-        # Flat adverse sides ⇒ exact equality (the +tick discipline).
+        # The retired open-anchored reference, restated as pure arithmetic:
+        # LONG buys the entry bar / sells the exit bar; SHORT the reverse.
+        buy_open, sell_open = (entry[0], exit_[0]) if bull else (exit_[0], entry[0])
+        ref_buy = buy_open + _TICK
+        ref_sell = sell_open - _TICK
+        # Fill dominance — adverse on BOTH legs, never better than open±tick.
+        assert worst.buy_fill_paisa >= ref_buy
+        assert worst.sell_fill_paisa <= ref_sell
+        # The per-trade P&L floor (cost-free index: net == gross; identical
+        # lot sizing on both sides of the comparison, so per-unit suffices).
+        n_units = worst.lot_size * worst.n_lots
+        assert worst.net_pnl_paisa <= (ref_sell - ref_buy) * n_units
+        # Flat adverse sides ⇒ extreme == open ⇒ EXACT open±tick fills (the
+        # +tick discipline rides ON TOP of the extreme, never replaces it).
         entry_up, entry_down = entry[1], entry[2]
         exit_up, exit_down = exit_[1], exit_[2]
         adverse_flat = (
             (entry_up == 0 and exit_down == 0) if bull else (entry_down == 0 and exit_up == 0)
         )
         if adverse_flat:
-            assert worst.net_pnl_paisa == precise.net_pnl_paisa
+            assert worst.buy_fill_paisa == ref_buy
+            assert worst.sell_fill_paisa == ref_sell
+            assert worst.net_pnl_paisa == (ref_sell - ref_buy) * n_units
 
 
 class _OptSource:
@@ -202,12 +181,10 @@ class _OptSource:
 class TestOptionsWorstCaseFloor:
     @settings(max_examples=150, deadline=None)
     @given(entry=_BAR, exit_=_BAR, bull=st.booleans())
-    # The refuter's executed net-floor counterexample (fix round 2): entry
-    # flat at ₹460.05, exit low 1 paisa under the open — the 25-paisa-smaller
-    # worst sell notional crossed a ₹0.5 STT rounding boundary downward and
-    # the PRE-fix worst net (−7,095) BEAT precise (−7,170). Pinned as a
-    # permanent in-domain example; the adverse-levy-rounding law keeps it
-    # below the floor now (worst −7,297 <= precise −7,170).
+    # The refuter's fix-round-2 STT-boundary shape, kept as a permanent
+    # in-domain example: entry flat at ₹460.05, exit low 1 paisa under the
+    # open — the sell notional crosses a ₹0.5 STT rounding boundary; the
+    # adverse (ceiling) levy rounding is exercised on exactly that edge.
     @example(entry=(46005, 0, 0), exit_=(46005, 0, 1), bull=True)
     def test_per_trade_floor_unconditional(
         self, entry: tuple[int, int, int], exit_: tuple[int, int, int], bull: bool
@@ -222,27 +199,26 @@ class TestOptionsWorstCaseFloor:
         )
         source = _OptSource(entry, exit_)
         worst = materialize_trade(signal, RULES_BY_NAME["atm"], source=source)
-        precise = materialize_trade(
-            signal, RULES_BY_NAME["atm"], source=source, fill_mode=FillMode.PRECISE
-        )
         assert isinstance(worst, MaterializedTrade)
-        assert isinstance(precise, MaterializedTrade)
         # DEC-EXEC-008 BUY-only: the long leg buys the entry bar, sells the
-        # exit bar in BOTH directions (CE for BULL, PE for BEAR).
-        assert worst.breakdown.buy_fill_paisa >= precise.breakdown.buy_fill_paisa
-        assert worst.breakdown.sell_fill_paisa <= precise.breakdown.sell_fill_paisa
-        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
-        # The cost stack itself can never round in the worst trade's favor
-        # (the adverse-levy-rounding law, fix round 2): at equal-or-worse
-        # notionals every worst levy is ceil'd, so a SMALLER worst charge
-        # total can only come from the smaller sell notional — bounded by
-        # the dominance proof (module docstring), never a boundary flip.
+        # exit bar in BOTH directions (CE for BULL, PE for BEAR) — so the
+        # open-anchored reference is entry-open + tick / exit-open − tick.
+        ref_buy = entry[0] + _TICK
+        ref_sell = exit_[0] - _TICK
+        assert worst.breakdown.buy_fill_paisa >= ref_buy
+        assert worst.breakdown.sell_fill_paisa <= ref_sell
+        # The gross floor at the trade's own share count: worst-case can only
+        # UNDERSTATE the open-anchored gross (charges only ever ADD to the
+        # loss — every levy rounds adversely — so the net floor follows).
+        n_shares = worst.breakdown.n_shares
+        ref_gross = (ref_sell - ref_buy) * n_shares
+        assert worst.breakdown.gross_pnl_paisa <= ref_gross
+        assert worst.net_pnl_paisa <= ref_gross
+        # Flat adverse sides ⇒ EXACT open±tick fills (the +tick discipline).
         if entry[1] == 0 and exit_[2] == 0:
-            # Flat adverse sides ⇒ identical fills ⇒ GROSS equality; the
-            # ceil'd levies may exceed the nearest-rounded precise ones, so
-            # net equality is deliberately NOT asserted (charges_worst >=
-            # charges_precise is — the fix-round-2 reframe).
-            assert worst.breakdown.buy_fill_paisa == precise.breakdown.buy_fill_paisa
-            assert worst.breakdown.sell_fill_paisa == precise.breakdown.sell_fill_paisa
-            assert worst.breakdown.gross_pnl_paisa == precise.breakdown.gross_pnl_paisa
-            assert worst.breakdown.total_charges_paisa >= precise.breakdown.total_charges_paisa
+            assert worst.breakdown.buy_fill_paisa == ref_buy
+            assert worst.breakdown.sell_fill_paisa == ref_sell
+            assert worst.breakdown.gross_pnl_paisa == ref_gross
+            # Charges are strictly positive, so net sits strictly below the
+            # gross reference on the flat-bar arm too.
+            assert worst.net_pnl_paisa < ref_gross

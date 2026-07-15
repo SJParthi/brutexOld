@@ -74,24 +74,42 @@ def _sequential_sweep_workers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _day_bars(day: date, base: float, n: int = 120) -> list[CandleBar]:
-    """The sweep-run golden's drifting intraday shape, anchored on *day*."""
+    """The worst-case-rankable gap-up intraday shape, anchored on *day*.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old wide-range drift SL'd every entry on its own
+    bar): 7-bar cycles of NARROW gap-up bars (range 0.50 < the SL 0.80; the
+    next gap-up's low clears the TP level → +50 wins), a shallow bearish bar
+    at cycle position 3, and a DEEP bearish bar (range 0.85) every 4th cycle
+    whose stop-out keeps profit_factor finite — the launch grid's masks
+    clear the hard rank gates at sl=80/tp=50.
+    """
     out: list[CandleBar] = []
     price = base
     for m in range(n):
-        close = price + 0.6 if m % 3 else price - 0.3
+        k = m % 7
+        if k == 3:  # shallow bearish bar
+            o = price
+            c, h, lo = o - 0.3, o + 0.1, o - 0.4
+        elif k == 4 and (m // 7) % 4 == 0:  # deep bearish loss carrier
+            o = price
+            c, h, lo = o - 0.65, o + 0.1, o - 0.75
+        else:  # narrow gap-up win bar
+            o = price + 3.0
+            c, h, lo = o + 0.3, o + 0.4, o - 0.1
         ts = datetime(day.year, day.month, day.day, 9, 16, tzinfo=_IST) + timedelta(minutes=m)
         out.append(
             CandleBar(
                 timestamp=ts.astimezone(UTC),
-                open=Decimal(str(round(price, 2))),
-                high=Decimal(str(round(max(price, close) + 0.5, 2))),
-                low=Decimal(str(round(min(price, close) - 0.5, 2))),
-                close=Decimal(str(round(close, 2))),
+                open=Decimal(str(round(o, 2))),
+                high=Decimal(str(round(h, 2))),
+                low=Decimal(str(round(lo, 2))),
+                close=Decimal(str(round(c, 2))),
                 volume=100,
                 open_interest=None,
             )
         )
-        price = close
+        price = c
     return out
 
 
@@ -151,12 +169,6 @@ def _kwargs(
         "max_combos": None,
         "data_snapshot_hash": None,
         "options_sim": False,
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001 fix round 2): this suite's
-        # fixtures + expectations were minted under PRECISE — under the
-        # WORST_CASE production default the tiny fixture's combos fail the
-        # rank gates and persist NOTHING (the Stage-1 pin sweep missed this
-        # file; the explicit pin is byte-identical to the pre-mode launch).
-        "fill_mode": "precise",
         # DEC-ENGINE-SPOT-ONLY-001: NSE-NIFTY-FUT is RETIRED from default
         # engine sweep scope — these tests exercise the RETAINED
         # below-the-gate futures machinery via the loud, audit-stamped
@@ -787,56 +799,38 @@ def test_crashed_parallel_launch_prefix_audit_still_resumes(
     assert rc == EXIT_OK
 
 
-def test_worst_case_launch_line_records_the_fill_mode(tmp_path: Path) -> None:
-    """The SWEEP_LAUNCH fill-mode recording law (DEC-FILL-WORST-CASE-001 —
-    round-2 NIT-3 superseded by FIX ROUND 3): the pre-dispatch launch context
-    line records the fill mode ALWAYS AND EXPLICITLY — including the literal
-    "precise" — matching the SWEEP_START recording law, so a same-generation
-    mixed-mode root is detectable and a parallel-crash-window prefix audit
-    (the launch line only — every buffered per-tuple SWEEP_START lost with
-    the parent) reads the TRUE mode. The round-2 emit-on-non-PRECISE /
-    key-ABSENCE pin legitimately FLIPPED here: PRECISE is now an explicit
-    token on the AUDIT wire (canonical_trade_params / run identity / tuple
-    digests keep the elision law byte-untouched)."""
+def test_launch_line_records_the_unconditional_worst_case_token(tmp_path: Path) -> None:
+    """The AUDIT recording law (DEC-FILL-WORST-CASE-ONLY-001): the
+    pre-dispatch SWEEP_LAUNCH line AND every per-tuple SWEEP_START record the
+    UNCONDITIONAL ``fill_mode: worst_case`` params token — so a
+    parallel-crash-window prefix audit (the launch line only, every buffered
+    per-tuple SWEEP_START lost with the parent) still derives its facts
+    refusal-free under the precise-era refusal law."""
     import json
 
     from brutex.engine.sweep_verify import recorded_audit_facts
-    from brutex.execution.fill_mode import FillMode
 
     lake_root, catalog_path = _seed_lake(tmp_path, derive=False)
     results_root = tmp_path / "sweeps"
-    rc = cmd_sweep_all(
-        **_kwargs(
-            lake_root, catalog_path, results_root, intervals="1minute", fill_mode="worst_case"
-        )
-    )
+    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, results_root, intervals="1minute"))
     assert rc == EXIT_OK
     audit_path = results_root / "audit" / "sweep-all.jsonl"
     lines = audit_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    actions = [json.loads(line)["action"] for line in lines]
-    launch_idx = actions.index("SWEEP_LAUNCH")
-    launch = json.loads(lines[launch_idx])
-    assert launch["payload"]["params"]["fill_mode"] == "worst_case"
-    # Truncate to the strict pre-dispatch prefix — exactly what a parent
-    # crash right after dispatch leaves durable — and read the scoped facts:
-    # the generation's fill mode survives the crash window.
-    audit_path.write_text("".join(lines[: launch_idx + 1]), encoding="utf-8")
-    assert recorded_audit_facts(audit_path)[3] == (FillMode.WORST_CASE,)
-
-    # The explicit-PRECISE half (fix round 3): a precise launch RECORDS the
-    # literal token on both the launch line and every per-tuple SWEEP_START.
-    precise_root = tmp_path / "sweeps_precise"
-    rc = cmd_sweep_all(**_kwargs(lake_root, catalog_path, precise_root, intervals="1minute"))
-    assert rc == EXIT_OK
-    precise_audit = precise_root / "audit" / "sweep-all.jsonl"
     recording_actions = set()
-    for line in precise_audit.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         entry = json.loads(line)
         if entry["action"] in ("SWEEP_LAUNCH", "SWEEP_START"):
             recording_actions.add(entry["action"])
-            assert entry["payload"]["params"]["fill_mode"] == "precise"
+            assert entry["payload"]["params"]["fill_mode"] == "worst_case"
     assert recording_actions == {"SWEEP_LAUNCH", "SWEEP_START"}
-    assert recorded_audit_facts(precise_audit)[3] == (FillMode.PRECISE,)
+    # Truncate to the strict pre-dispatch prefix — exactly what a parent
+    # crash right after dispatch leaves durable — and read the scoped facts:
+    # the generation still reads clean (never the precise-era refusal).
+    actions = [json.loads(line)["action"] for line in lines]
+    launch_idx = actions.index("SWEEP_LAUNCH")
+    audit_path.write_text("".join(lines[: launch_idx + 1]), encoding="utf-8")
+    context, _schedules, _others = recorded_audit_facts(audit_path)
+    assert context is not None
 
 
 def test_lossy_audit_over_foreign_generation_sentinels_still_resumes(

@@ -1,72 +1,100 @@
-"""WORST_CASE fill mode — the RESIDENT-KERNEL seam of DEC-FILL-WORST-CASE-001.
+"""The worst-case-only fill law — the RESIDENT-KERNEL seam
+(DEC-FILL-WORST-CASE-ONLY-001).
 
-The ``ResidentTradeSim`` half of the fill-mode suite, split out of
+The ``ResidentTradeSim`` half of the fill-law suite, split out of
 ``test_engine_trade_sim_fill_mode.py`` so the DEC-CICD-GATE-HONESTY-001
 discovery gate's stem mapping credits these tests to
-``brutex/engine/rust_trade_sim.py`` (the module they gate — the sibling
-file stems to ``trade_sim`` and is invisible to the rust_trade_sim
-pairing; the coverage gap that redded PR #1522's discovery gate on lines
-380-384 / 964-967 / 1018). Covers the ``_kernel_accepts_worst_case``
-feature-detection probe matrix, the legacy-wheel
-``fill_mode_kernel_missing`` demotion (memo + warn-once), the PRECISE
-seven-argument back-compat call, and the real-kernel WORST_CASE
-bit-parity vs the Python oracle (the 8-argument kernel call). The
-shared bar fixture + WORST policy are imported from the sibling module
-(Golden Rule #11 COMMON — never a copy).
+``brutex/engine/rust_trade_sim.py`` (the module they gate — the sibling file
+stems to ``trade_sim`` and is invisible to the rust_trade_sim pairing).
+Covers the ``_kernel_fill_law_current`` signature probe matrix, the
+STALE-WHEEL construction demotion (``fill_law_kernel_stale`` — a wheel that
+still exposes the retired mode flags would silently price the retired
+PRECISE defaults through its flagless call, so the WHOLE object serves the
+worst-case Python oracle instead), the flagless four-argument kernel call,
+and the real-kernel bit-parity vs the oracle. The shared bar fixture is
+imported from the sibling module (Golden Rule #11 COMMON — never a copy).
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 from brutex.engine.combo_mask import mask_to_entry_signals
-from brutex.engine.rust_trade_sim import ResidentTradeSim, _kernel_accepts_worst_case
+from brutex.engine.rust_trade_sim import (
+    _STALE_KERNEL_FLAGS,
+    ResidentTradeSim,
+    _kernel_fill_law_current,
+)
 from brutex.engine.trade_sim import simulate_trades
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
 
-from tests.unit.test_engine_trade_sim_fill_mode import _WORST, _bar
+from tests.unit.test_engine_trade_sim_fill_mode import _bar
 
 
-class TestKernelSeamFeatureDetection:
-    """The resident-kernel seam: real-wheel parity + the legacy-wheel demotion."""
+def _window() -> tuple[list[Any], list[int]]:
+    bars = [
+        _bar(0, 100, 101, 99, 100),
+        _bar(1, 100, 105, 98, 100),
+        _bar(2, 85, 88, 80, 82),
+        _bar(3, 90, 95, 85, 92),
+    ]
+    return bars, [1, 0, 1, 0]
 
-    @staticmethod
-    def _window() -> tuple[list[Any], list[int]]:
-        bars = [
-            _bar(0, 100, 101, 99, 100),
-            _bar(1, 100, 105, 98, 100),
-            _bar(2, 85, 88, 80, 82),
-            _bar(3, 90, 95, 85, 92),
-        ]
-        return bars, [1, 0, 1, 0]
 
-    def test_real_kernel_serves_worst_case_bit_identical_to_oracle(self) -> None:
-        bars, bits = self._window()
+class TestKernelServesTheOneLaw:
+    """A current wheel serves worst-case bit-identical to the oracle."""
+
+    def test_real_kernel_bit_identical_to_oracle(self) -> None:
+        bars, bits = _window()
         sim = ResidentTradeSim(bars, bits, tf_minutes=1)
         if not sim.rust_active:  # pragma: no cover — wheel-less environment
             pytest.skip("fno_math wheel not installed")
-        kernel = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=1000, policy=_WORST)[0]
+        kernel = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=1000)[0]
         oracle = simulate_trades(
             bars,
             mask_to_entry_signals(bits, 1),
             direction=Side.BUY,
             tf_minutes=1,
             stop_loss_paisa=1000,
-            policy=_WORST,
         )
         assert [(t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars) for t in kernel] == [
             (t.pnl_paisa, t.mfe_paisa, t.mae_paisa, t.holding_bars) for t in oracle
         ]
-        assert kernel[0].pnl_paisa == 8000 - 10500  # the worst-case bytes, not precise
+        # The worst-case bytes: entry at bar-1 HIGH 105, the bar-2 gap-through
+        # stop (level 95, low 80) fills at the LOW — never the retired
+        # precise open-entry / at-level fills.
+        assert kernel[0].pnl_paisa == 8000 - 10500
 
-    def test_legacy_kernel_demotes_worst_case_to_oracle_with_one_warn(self) -> None:
-        # A wheel PREDATING the worst_case kwarg: the batch demotes to the
-        # bit-exact Python oracle with the warn-once fill_mode_kernel_missing
-        # reason — never a TypeError, never a wrong kernel answer.
-        class _LegacyKernel:
-            calls: ClassVar[list[tuple[Any, ...]]] = []
+    def test_simulate_masks_takes_no_policy_kwarg(self) -> None:
+        # Killed-token pin: the batch entry carries NO mode/policy axis.
+        import inspect
+
+        params = inspect.signature(ResidentTradeSim.simulate_masks).parameters
+        assert "policy" not in params
+        assert "fill_mode" not in params
+
+
+class TestStaleWheelDemotion:
+    """A wheel predating the one-law kernel demotes to the oracle at construction."""
+
+    def test_stale_flags_tuple_pinned(self) -> None:
+        # The four retired mode flags a PRE-DEC wheel still exposes — their
+        # DEFAULTS priced the retired PRECISE law, so their presence marks
+        # the kernel stale (append-only detection vocabulary).
+        assert _STALE_KERNEL_FLAGS == ("worst_case", "sl_next_open", "tp_next_open", "tp_first")
+
+    def test_stale_kernel_demotes_whole_object_to_oracle(self, monkeypatch: Any) -> None:
+        # Construction-time demotion: a stale wheel's kernel is DISCARDED
+        # (self._rust = None, reason fill_law_kernel_stale) so every batch
+        # rides the bit-exact worst-case oracle — never a silent precise
+        # answer through the retired flags' defaults.
+        import fno_math
+
+        class _StaleKernel:
+            def __init__(self, *args: Any) -> None:
+                pass
 
             def simulate_masks(
                 self,
@@ -78,72 +106,44 @@ class TestKernelSeamFeatureDetection:
                 tp_next_open: bool = False,
                 tp_first: bool = False,
             ) -> list[list[tuple[int, int, int, int, int, int]]]:
-                raise AssertionError("a legacy kernel must never serve a WORST_CASE batch")
+                raise AssertionError("a stale kernel must never serve a batch")
 
-        bars, bits = self._window()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
-        sim._rust = _LegacyKernel()
+        monkeypatch.setattr(fno_math, "ResidentSweepSim", _StaleKernel)
+        bars, bits = _window()
         with capture_logs() as logs:
-            first = sim.simulate_masks(
-                [1], direction=Side.BUY, stop_loss_paisa=1000, policy=_WORST
-            )[0]
-            second = sim.simulate_masks(  # repeat: memo + warn-once
-                [1], direction=Side.BUY, stop_loss_paisa=1000, policy=_WORST
-            )[0]
+            sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        assert sim.rust_active is False
+        stale_warns = [
+            log
+            for log in logs
+            if log.get("event") == "rust_trade_sim.fallback"
+            and log.get("reason") == "fill_law_kernel_stale"
+        ]
+        assert len(stale_warns) == 1
+        served = sim.simulate_masks([1], direction=Side.BUY, stop_loss_paisa=1000)[0]
         oracle = simulate_trades(
             bars,
             mask_to_entry_signals(bits, 1),
             direction=Side.BUY,
             tf_minutes=1,
             stop_loss_paisa=1000,
-            policy=_WORST,
         )
-        for served in (first, second):
-            assert [(t.pnl_paisa, t.mae_paisa) for t in served] == [
-                (t.pnl_paisa, t.mae_paisa) for t in oracle
-            ]
-        warns = [
-            log
-            for log in logs
-            if log.get("event") == "rust_trade_sim.call_fallback"
-            and log.get("reason") == "fill_mode_kernel_missing"
+        assert [(t.pnl_paisa, t.mae_paisa) for t in served] == [
+            (t.pnl_paisa, t.mae_paisa) for t in oracle
         ]
-        assert len(warns) == 1  # warn-once per (instance, reason)
 
-    def test_legacy_kernel_still_serves_precise_via_the_seven_arg_call(self) -> None:
-        # PRECISE batches never probe the flag and keep the historical
-        # 7-argument kernel call — an old wheel keeps serving them.
-        recorded: list[int] = []
+    def test_kernel_fill_law_probe_matrix(self) -> None:
+        class _Current:
+            def simulate_masks(self, masks: object, is_buy: bool, sl: object, tp: object) -> None:
+                raise NotImplementedError  # signature probe only — never invoked
 
-        class _LegacyKernel:
-            def simulate_masks(
-                self,
-                masks: list[int],
-                is_buy: bool,
-                sl_paisa: int | None,
-                tp_paisa: int | None,
-                sl_next_open: bool = False,
-                tp_next_open: bool = False,
-                tp_first: bool = False,
-            ) -> list[list[tuple[int, int, int, int, int, int]]]:
-                recorded.append(len(masks))
-                return [[] for _ in masks]
-
-        bars, bits = self._window()
-        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
-        sim._rust = _LegacyKernel()
-        out = sim.simulate_masks([1, 2], direction=Side.BUY, stop_loss_paisa=1000)
-        assert recorded == [2]
-        assert out == [[], []]
-
-    def test_kernel_accepts_worst_case_probe_matrix(self) -> None:
-        class _New:
+        class _StaleWorstCaseFlag:
             def simulate_masks(self, masks: object, *, worst_case: bool = False) -> None:
-                raise NotImplementedError  # signature probe only — never invoked
+                raise NotImplementedError
 
-        class _Old:
+        class _StaleTpFirst:
             def simulate_masks(self, masks: object, tp_first: bool = False) -> None:
-                raise NotImplementedError  # signature probe only — never invoked
+                raise NotImplementedError
 
         class _NoAttr:
             pass
@@ -153,11 +153,22 @@ class TestKernelSeamFeatureDetection:
 
         class _NoSignature:
             # ``inspect.signature(type)`` raises ValueError (no signature for
-            # the builtin) — the conservative UNSUPPORTED arm.
+            # the builtin) — the conservative STALE arm: the oracle serves
+            # the batch correctly either way.
             simulate_masks = type
 
-        assert _kernel_accepts_worst_case(_New()) is True
-        assert _kernel_accepts_worst_case(_Old()) is False
-        assert _kernel_accepts_worst_case(_NoAttr()) is False
-        assert _kernel_accepts_worst_case(_NotCallable()) is False
-        assert _kernel_accepts_worst_case(_NoSignature()) is False
+        assert _kernel_fill_law_current(_Current()) is True
+        assert _kernel_fill_law_current(_StaleWorstCaseFlag()) is False
+        assert _kernel_fill_law_current(_StaleTpFirst()) is False
+        assert _kernel_fill_law_current(_NoAttr()) is False
+        assert _kernel_fill_law_current(_NotCallable()) is False
+        assert _kernel_fill_law_current(_NoSignature()) is False
+
+    def test_real_wheel_probes_current(self) -> None:
+        # The wheel built from THIS tree's flagless kernel reads CURRENT.
+        pytest.importorskip("fno_math")
+        bars, bits = _window()
+        sim = ResidentTradeSim(bars, bits, tf_minutes=1)
+        if sim._rust is None:  # pragma: no cover — wheel-less environment
+            pytest.skip("fno_math wheel not installed")
+        assert _kernel_fill_law_current(sim._rust) is True

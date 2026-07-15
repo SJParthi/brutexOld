@@ -195,40 +195,18 @@ class TestValidateCandidate:
         validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
         assert seen == {"oos": (None, False), "cpcv": (None, False)}
 
-    def test_policy_threads_into_both_composed_re_simulations(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # NIT-2 (DEC-FILL-WORST-CASE-001 fix round 2): validate_candidate was
-        # fill-mode-blind — no way to validate a candidate under the SAME
-        # mode its sweep ran. Spy on BOTH composed re-simulations (the OOS
-        # holdout AND the CPCV return-series producer) via the candidate
-        # module's own bindings and prove the policy reaches each; a severed
-        # pass-through fails this pin.
-        from brutex.engine import candidate as candidate_mod
-        from brutex.engine.robustness import combo_returns as real_returns
-        from brutex.engine.trade_sim import FillPolicy
-        from brutex.engine.validation import validate_out_of_sample as real_oos
-        from brutex.execution.fill_mode import FillMode
+    def test_no_fill_policy_seam_survives(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law, so
+        # the round-2 policy pass-through is DELETED — validate_candidate and
+        # both composed re-simulations (the OOS holdout + the CPCV
+        # return-series producer) carry NO policy/fill_mode seam; a knob
+        # sneaking back in fails this killed-token pin.
+        import inspect
 
-        bars = _multiday(4, bars_per_day=5)
-        policy = FillPolicy(fill_mode=FillMode.WORST_CASE)
-        seen: dict[str, object] = {}
+        from brutex.engine.robustness import combo_returns
+        from brutex.engine.validation import validate_out_of_sample
 
-        def _oos_spy(*args: Any, **kwargs: Any) -> Any:
-            seen["oos"] = kwargs.get("policy")
-            return real_oos(*args, **kwargs)
-
-        def _returns_spy(*args: Any, **kwargs: Any) -> Any:
-            seen["cpcv"] = kwargs.get("policy")
-            return real_returns(*args, **kwargs)
-
-        monkeypatch.setattr(candidate_mod, "validate_out_of_sample", _oos_spy)
-        monkeypatch.setattr(candidate_mod, "combo_returns", _returns_spy)
-        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1, policy=policy)
-        assert seen == {"oos": policy, "cpcv": policy}
-        # The default call stays the library-PRECISE legacy path.
-        seen.clear()
-        validate_candidate(bars, 0, [(0, _m())], direction=Side.BUY, tf_minutes=1)
-        from brutex.engine.trade_sim import DEFAULT_FILL_POLICY
-
-        assert seen == {"oos": DEFAULT_FILL_POLICY, "cpcv": DEFAULT_FILL_POLICY}
+        for fn in (validate_candidate, validate_out_of_sample, combo_returns):
+            params = inspect.signature(fn).parameters
+            assert "policy" not in params, fn.__name__
+            assert "fill_mode" not in params, fn.__name__

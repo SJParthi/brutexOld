@@ -24,7 +24,6 @@ from brutex.engine.sweep_orchestrator import (
 )
 from brutex.engine.sweep_run_core import sweep_run_core
 from brutex.engine.sweep_supervisor import grid_identity
-from brutex.execution.fill_mode import FillMode
 from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.observability.flight_recorder import iter_run_records
 from brutex.observability.run_tripwires import TripwireConfig
@@ -54,10 +53,9 @@ def _golden_grid() -> SweepGridConfig:
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the frozen golden pair
-        # was locked under the legacy exact fills — pin PRECISE explicitly;
-        # NEVER regenerate the literals.
-        fill_mode=FillMode.PRECISE,
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law — the
+        # golden pair was RE-LOCKED on the rankable gap-up fixture (see the
+        # source module's re-lock note); the grid carries no mode field.
     )
 
 

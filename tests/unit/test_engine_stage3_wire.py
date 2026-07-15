@@ -67,7 +67,6 @@ from brutex.engine.sweep_orchestrator import (
     tuple_store_path,
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
-from brutex.execution.fill_mode import FillMode
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.strategies.types import FibAnchorKind, Side
@@ -131,15 +130,56 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
+def _bar_ohlc(day: int, minute: int, o: float, h: float, lo: float, c: float) -> CandleBar:
+    """Build one IST-session minute bar with EXPLICIT extremes (worst-case fixture)."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(h, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
 def _trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+    """A gap-up drift both masks RANK on under the ONE worst-case fill law.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old wide-range drift SL'd every entry on its own
+    bar): 7-bar cycles of NARROW gap-up bars (open = prior close + 3.00,
+    range 0.50 < the SL 0.80 — no same-bar stop-out; the NEXT gap-up's low
+    clears the TP level so the win banks exactly +50), a shallow BEARISH
+    signal bar at cycle position 3 (feeds the k=1 bit-1 mask), and — every
+    4th cycle — a DEEP bearish bar at position 4 (range 0.85 > the SL) whose
+    stop-out keeps profit_factor FINITE for BOTH masks (losses −85 entering
+    the deep bar itself / −115 stopped from the prior bar's fill). Measured
+    on this tree at sl=80/tp=50: FULL mask-0 PF 3.72 · mask-2 PF 3.77; TRAIN
+    slice 72 / 30 trades — every hard rank gate passes on both masks.
+    """
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish SIGNAL bar (bit 1 fires)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            bars.append(_bar_ohlc(d, m, o, h, lo, c))
+            price = c
     return bars
 
 
@@ -166,9 +206,6 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "stage3_max_fevals": 6,
         "stage3_max_restarts": 1,
         **_CTX,
-        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): these suites predate the
-        # worst-case fill mode — pin PRECISE explicitly (never regenerate).
-        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1122,47 +1159,38 @@ class TestManifestRecordRelPath:
 # ────── The WORST_CASE evaluator threading pin (fix round 2) ──────
 
 
-class TestEvaluatorFillModeThreading:
-    """FIX-ROUND-2 MINOR seam pin (MIGRATION.md #1786): stage3_wire's
-    ``_make_evaluator`` binds ``policy=FillPolicy(fill_mode=fill_mode)``.
+class TestEvaluatorOneLawWorstCase:
+    """DEC-FILL-WORST-CASE-ONLY-001: stage3_wire's ``_make_evaluator`` runs the
+    ONE hardcoded worst-case law — the fill_mode/policy seam is DELETED.
 
-    The refuters' executed mutant — severing that kwarg (a bare
-    ``FillPolicy()``) — survived the whole covering set because no test
-    executed a WORST_CASE stage-3 evaluation whose objective diverges from
-    PRECISE: every existing ``_make_evaluator`` test either pins PRECISE
-    (fill-mode-invariant by construction) or asserts wiring, never a
-    mode-divergent metric value. On this suite's own ``_trending_bars(3)``
-    the two modes diverge hard at ``evaluate(80, 50)`` — the worst-case
-    SL/TP re-anchoring flips every TP winner into an SL loser — so the
-    pinned pair kills the mutant.
+    Hand-derived pins on ``_trending_bars(3)`` (the worst-case-rankable
+    gap-up fixture) at ``evaluate(80, 50)``: 27 trades — 24 TP wins of
+    exactly +50 (entry at the narrow gap-up bar's HIGH; the next gap-up's
+    low clears the TP level so the fill is AT level) and 3 deep-bar
+    stop-outs (−115 each: entry fill o+0.40, stop floor o−0.40, deep low
+    o−0.75 → adverse fill min(level, low) = o−0.75) → gross_profit
+    24 × 50 = 1_200, gross_loss 3 × 115 = 345, net +855.
     """
 
-    def test_worst_case_evaluation_diverges_from_precise(self) -> None:
+    def test_one_law_evaluation_reproduces_the_worst_case_pins(self) -> None:
+        import inspect
+
         from brutex.engine import stage3_wire as stage3_mod
 
+        assert "fill_mode" not in inspect.signature(stage3_mod._make_evaluator).parameters
         bars = _trending_bars(3)
         bar_bits = build_bar_bits(bars)
-        metrics: dict[FillMode, ResultMetrics] = {}
-        for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
-            evaluate = stage3_mod._make_evaluator(
-                bars=bars,
-                bar_bits=bar_bits,
-                mask=0,
-                side=Side.BUY,
-                tf_minutes=1,
-                start_equity_paisa=10_000_000,
-                fill_mode=mode,
-                reference_stamper=None,
-            )
-            metrics[mode] = evaluate(80, 50)
-        worst, precise = metrics[FillMode.WORST_CASE], metrics[FillMode.PRECISE]
-        # Hand-derived pins (same 45 trades in both modes — pure fill/level
-        # divergence): worst-case fills at the bar extremes anchor SL/TP on
-        # the adverse entry, turning every trade into an SL loser
-        # (gross_profit 0), while precise nets +300.
-        assert worst.total_trades == precise.total_trades == 45
-        assert worst.net_pnl_paisa == -6_750
-        assert worst.gross_profit_paisa == 0
-        assert worst.gross_loss_paisa == 6_750
-        assert precise.net_pnl_paisa == 300
-        assert worst.net_pnl_paisa < precise.net_pnl_paisa
+        evaluate = stage3_mod._make_evaluator(
+            bars=bars,
+            bar_bits=bar_bits,
+            mask=0,
+            side=Side.BUY,
+            tf_minutes=1,
+            start_equity_paisa=10_000_000,
+            reference_stamper=None,
+        )
+        worst = evaluate(80, 50)
+        assert worst.total_trades == 27
+        assert worst.net_pnl_paisa == 855
+        assert worst.gross_profit_paisa == 1_200
+        assert worst.gross_loss_paisa == 345
