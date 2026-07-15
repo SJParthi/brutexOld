@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
 from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.constants import (
     GROWW_FUTURE_COVERAGE_MARKET,
@@ -4047,6 +4048,223 @@ class TestMarkCompleteStoreWriteDefer:
         assert deferred[0]["contracts"] == 2
         assert deferred[0]["error_type"] == "StoreWriteDeadlineExceeded"
         assert deferred[0]["defer_seconds"] == 0.2
+
+
+def test_live_pull_overlay_hoisted_above_the_fno_reconcile(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-SEED-OBSERVED-OVERLAY-001 ordering spy (the F&O site): ONE overlay load,
+    strictly BEFORE the F&O cold-start reconcile, whose ``observed=`` receives the
+    SAME snapshot (documented-INERT today — the symmetry pre-wiring pin)."""
+    expected = _write_overlay_sidecar(tmp_lake)
+    order: list[str] = []
+    seed_observed: list[object] = []
+    real_load = hp.load_observed_holidays
+    real_reconcile = hp.reconcile_fno_ledger_windows
+
+    def _load_spy(root: Path) -> frozenset[date]:
+        order.append("load")
+        return real_load(root)
+
+    def _reconcile_spy(*args: object, **kwargs: object) -> int:
+        order.append("reconcile")
+        seed_observed.append(kwargs.get("observed"))
+        return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hp, "load_observed_holidays", _load_spy)
+    monkeypatch.setattr(hp, "reconcile_fno_ledger_windows", _reconcile_spy)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert order.count("load") == 1
+    assert "reconcile" in order
+    assert order.index("load") < order.index("reconcile")
+    assert seed_observed and all(observed == expected for observed in seed_observed)
+
+
+# ── mass ALL-FILTERED breaker wiring: ONE per PHASE, shared across rounds ─────
+# DEC-ALLFILTERED-MASS-BREAKER-001 review rounds 3+4: the production F&O phase
+# driver (``_run_phase``) resolves ONE breaker per phase and injects the SAME
+# instance into every until-clean round's market-bucket
+# ``run_groww_option_ingest`` calls, so a vendor-day event's all-filtered
+# evidence POOLS across the futures + options buckets (round 3 fail-before:
+# each bucket's driver invocation resolved its OWN fresh breaker — split
+# evidence, and up to one alarm per bucket) AND the trip LATCHES across the
+# retry rounds (round 4 fail-before: each round's fresh breaker let a
+# sub-floor retry round settle windows the trip alarm promised were halted).
+
+
+def test_all_filtered_breaker_one_per_phase_shared_across_market_buckets(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ONE ``AllFilteredBreaker`` per phase, injected into EVERY market bucket.
+
+    A NIFTY selection spans BOTH buckets (FUT → groww-future, CE/PE →
+    groww-option). A spy captures the ``all_filtered_breaker`` kwarg of every
+    ``run_groww_option_ingest`` call: both calls MUST receive the SAME real
+    instance (round-3 fail-before: the kwarg was never passed — the spy saw
+    ``None`` twice and each driver invocation resolved its own breaker).
+    """
+    breakers: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, all_filtered_breaker: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        breakers.append(all_filtered_breaker)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert len(breakers) == 2  # the futures bucket + the options bucket
+    assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+    assert breakers[0] is breakers[1]  # the ONE shared per-pass instance
+
+
+def test_all_filtered_breaker_one_per_phase_latched_across_passes(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EVERY until-clean pass shares the ONE phase-scoped breaker (round 4).
+
+    The trip must LATCH across retry rounds: two rounds → the SAME instance in
+    all four bucket calls (2 rounds × 2 buckets). Fail-before (the round-3
+    per-pass resolve): rounds 1 and 2 received DISTINCT instances, so a trip in
+    round 1 was forgotten by round 2's fresh breaker — a sub-floor retry round
+    could then settle a suppressed window SKIPPED minutes after the CRITICAL
+    alarm promised settles were halted for the pull. A fresh PHASE still starts
+    clean (Golden Rule #7 — no state leak across pulls).
+    """
+    breakers: list[object] = []
+    still_failed_report = GrowwOptionIngestReport(
+        pairs={
+            ("NSE-NIFTY-25Jan24-21000-CE", "1day"): IngestReport(
+                windows=1, bars_appended=0, transient_failures=1, still_failed_windows=1
+            )
+        },
+        failures=(),
+    )
+
+    def _spy_ingest(
+        *_args: object, all_filtered_breaker: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        breakers.append(all_filtered_breaker)
+        return still_failed_report
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        until_clean=True,
+        until_clean_rounds=2,
+        now=_NOW,
+    )
+    # Round 1 (still-failed 1, no baseline → progress) + round 2 (no shrink →
+    # stuck-stop) = 2 passes × 2 buckets = 4 calls.
+    assert len(breakers) == 4
+    assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+    # ONE phase-scoped instance in EVERY call — across buckets AND passes, so
+    # a round-1 trip stays latched through round 2 (review round 4).
+    assert all(b is breakers[0] for b in breakers[1:])
+
+
+class _SaturdayMinuteSDK(_FakeSDK):
+    """A fake SDK whose EVERY candle is a Saturday 1-minute bar (all-filtered shape).
+
+    2024-01-06 is a plain non-trading Saturday (the calendar-aware boundary
+    filter drops the bar), so every fetched window reads raw_bars=1, kept=0 —
+    the vendor-day mass all-filtered signature.
+    """
+
+    def get_historical_candles(self, **kw: object) -> dict[str, object]:
+        super().get_historical_candles(**kw)  # keep the call accounting
+        return {"candles": [["2024-01-06T10:00:00", 100.0, 110.0, 90.0, 105.0, 50, 7]]}
+
+
+def test_vendor_day_split_across_market_buckets_trips_shared_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vendor-day event SPLIT across the futures + options buckets still trips.
+
+    Fail-before (review round 3): per-bucket breakers fragmented the evidence —
+    ONE all-filtered FUTURES underlying (AAA) + ONE all-filtered OPTIONS
+    underlying (BBB) at SPREAD floor 2 tripped NEITHER bucket (each saw one
+    series) and NO alarm fired. With the shared per-pass breaker the SAME shape
+    pools to 2 distinct series → exactly ONE trip + count-naming alarm.
+    """
+    monkeypatch.setenv("BRUTEX_ALLFILTERED_BREAKER_SPREAD_SERIES", "2")
+    store = RegistryStore.open(tmp_path / "registry.duckdb")
+    expiry = date(2024, 1, 25)
+    store.upsert_contract(
+        "NSE",
+        "AAA",
+        expiry,
+        "NSE-AAA-25Jan24-FUT",
+        side="FUT",
+        strike=None,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    store.upsert_contract(
+        "NSE",
+        "BBB",
+        expiry,
+        "NSE-BBB-25Jan24-100-CE",
+        side="CE",
+        strike=100.0,
+        run_id=_RUN_ID,
+        fetched_at=_FETCHED,
+    )
+    sdk = _SaturdayMinuteSDK()
+    sink = _RecordingSink()
+    selected = store.list_contracts()
+    with capture_logs() as logs:
+        pull_contract_candles(
+            selected,
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1minute",),
+            registry=store,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+        )
+    trips = [e for e in logs if e["event"] == "allfiltered_breaker.tripped"]
+    assert len(trips) == 1  # exactly ONE alarm — never one per bucket
+    assert trips[0]["trip_rule"] == "spread"
+    assert trips[0]["distinct_series"] == 2  # AAA (futures) + BBB (options) pooled
 
 
 # ── DEC-FORM-WINNER-PERSIST-001: ONE shared &-form preference per phase ───────

@@ -77,6 +77,29 @@ class BloomMembership(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
+def _blake3_key(fields: list[str], *, label: str) -> bytes:
+    """The ONE separator-guarded join+hash core behind every dedup key (O(1)).
+
+    Joins *fields* with the ASCII unit separator and hashes via the
+    ``fno_math.blake3_hash`` Rust kernel. Shared by :func:`option_bar_key`
+    and :func:`candle_dedup_key` (CLAUDE.md §11 COMMON — one source of truth
+    for the guard + join + hash, never copy-pasted).
+
+    Raises
+    ------
+    CandleParseError
+        If any field VALUE itself contains the unit separator (*label* names
+        the key family in the message). See :func:`option_bar_key` for why the
+        guard exists.
+    """
+    if any(_FIELD_SEP in field for field in fields):
+        raise CandleParseError(
+            f"{label} key field contains the reserved unit separator: {fields!r}"
+        )
+    payload = _FIELD_SEP.join(fields)
+    return fno_math.blake3_hash(payload.encode("utf-8"))
+
+
 def option_bar_key(
     *,
     underlying: str,
@@ -121,13 +144,39 @@ def option_bar_key(
         The raw 32-byte blake3 digest (not hex — the Bloom + exact tiers
         consume raw bytes; call ``.hex()`` at a display/audit boundary).
     """
-    fields = [underlying, expiry, strike, side, str(epoch)]
-    if any(_FIELD_SEP in field for field in fields):
-        raise CandleParseError(
-            f"option-bar key field contains the reserved unit separator: {fields!r}"
-        )
-    payload = _FIELD_SEP.join(fields)
-    return fno_math.blake3_hash(payload.encode("utf-8"))
+    return _blake3_key([underlying, expiry, strike, side, str(epoch)], label="option-bar")
+
+
+def candle_dedup_key(
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    epoch: int,
+) -> bytes:
+    """Return the canonical blake3 dedup key for one lake candle bar (O(1)).
+
+    The L3 replay-oracle key (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): identity =
+    partition coordinates + bar epoch — exactly the lake's timestamp-keyed
+    bar identity, so "live set == replayed set" means "the audit's
+    admitted-bar record equals the dedup ground truth". Same
+    :func:`_blake3_key` core (unit-separator guard + blake3) as
+    :func:`option_bar_key`; ``.hex()`` at the audit boundary is the
+    ``action="add"`` subject (hex can never contain ``"|"``).
+
+    Raises
+    ------
+    CandleParseError
+        If any field VALUE contains the reserved unit separator (see
+        :func:`option_bar_key`).
+
+    Returns
+    -------
+    bytes
+        The raw 32-byte blake3 digest.
+    """
+    return _blake3_key([exchange, segment, symbol, interval, str(epoch)], label="candle-dedup")
 
 
 def key_for_option_bar(bar: OptionBar, *, underlying: str, expiry: str) -> bytes:
@@ -275,6 +324,7 @@ __all__ = [
     "BloomMembership",
     "ExactMembership",
     "OptionDedupIndex",
+    "candle_dedup_key",
     "key_for_option_bar",
     "option_bar_key",
     "unique_option_bars",

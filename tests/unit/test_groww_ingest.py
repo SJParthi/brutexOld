@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from brutex.adapters.all_filtered_breaker import AllFilteredBreaker
 from brutex.adapters.groww.errors import (
     GrowwAuthError,
     GrowwBadRequestError,
@@ -37,6 +38,7 @@ from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.partial_window_detect import last_completed_session_on_or_before
 from brutex.data.sink import SinkAppendResult
 from brutex.data.today_completeness import TODAY_INCOMPLETE
+from brutex.data.window_ledger import WindowLedger as LedgerWindowLedger
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.universe_phases import ItemResult
@@ -2975,6 +2977,495 @@ class TestIngestSpotFeedbackStandDown:
             max_retry_passes=0,
         )
         assert timeouts == [1]  # the spine remains the timeout ladder's only feeder
+
+
+class TestMassAllFilteredBreaker:
+    """DEC-ALLFILTERED-MASS-BREAKER-001 — the spot spine's mass-event guard:
+    trip → suppress further ALL_FILTERED settles + rescind same-pull pre-trip
+    settles + exactly ONE count-naming alarm."""
+
+    # 2021-01-26 (Republic Day) 10:05 IST — in-window wall clock, NO session.
+    _HOLIDAY_TS = datetime(2021, 1, 26, 4, 35, tzinfo=UTC)
+
+    @staticmethod
+    def _tiny_breaker() -> AllFilteredBreaker:
+        # FRACTION rule armed at 3 observations across 3 series (the engine-pull
+        # shape); the SPREAD rule disabled so the trip point is deterministic.
+        return AllFilteredBreaker(
+            spread_series_limit=0,
+            fraction_limit=0.5,
+            min_observations=3,
+            fraction_min_series=3,
+        )
+
+    def _pull_symbol(
+        self,
+        symbol: str,
+        led: LedgerWindowLedger,
+        breaker: AllFilteredBreaker | None,
+        *,
+        detect: bool = True,
+        bars: list[CandleBar] | None = None,
+    ) -> None:
+        ingest_spot(
+            _Adapter(bars=bars if bars is not None else [_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_inst(symbol),
+            interval="1minute",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=led,
+            detect_completeness_gaps=detect,
+            all_filtered_breaker=breaker,
+        )
+
+    def test_mass_all_filtered_suppresses_settles_and_alarms_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FAILS-BEFORE / PASSES-AFTER: a >=3-series all-filtered event through the
+        # REAL tail. Symbol A is pre-seeded at streak 2, so its record IN this pull
+        # settles SKIPPED BEFORE the counters cross (the pre-trip settle); the trip
+        # on the 3rd series then RESCINDS it, suppresses the trip-crossing window,
+        # and alarms exactly once (structlog ERROR + one Telegram push).
+        from brutex.data.session import ALL_FILTERED
+        from brutex.data.window_ledger import (
+            ALL_FILTERED_MASS_RESCINDED,
+            WindowLedger,
+        )
+        from brutex.notifications.sweep_alerts import SweepAlerter
+
+        pushes: list[dict] = []
+
+        def _spy(self: SweepAlerter, **kw: object) -> bool:
+            pushes.append(dict(kw))
+            return True
+
+        monkeypatch.setattr(SweepAlerter, "mass_all_filtered", _spy)
+        led = WindowLedger()
+        breaker = self._tiny_breaker()
+        # Pre-seed A at streak 2 (two prior pulls' ALL_FILTERED demotions).
+        for _ in range(2):
+            self._pull_symbol("AAA", led, None)
+        assert led.records()[0].empty_streak == 2
+        with capture_logs() as logs, pull_id_scope("massaf1"):
+            self._pull_symbol("AAA", led, breaker)  # settles SKIPPED pre-trip
+            assert led.newly_settled_skipped == 1
+            self._pull_symbol("BBB", led, breaker)  # obs 2 — below min_obs
+            self._pull_symbol("CCC", led, breaker)  # obs 3 — TRIPS + rescinds
+        by_symbol = {r.security_id: r for r in led.records()}
+        # The pre-trip settle was RESCINDED — FAILED + the mass-rescind marker,
+        # streak/provenance reset, tombstoned, verdict counter decremented.
+        assert by_symbol["AAA"].status == "FAILED"
+        assert by_symbol["AAA"].last_error == ALL_FILTERED_MASS_RESCINDED
+        assert by_symbol["AAA"].empty_streak == 0
+        assert by_symbol["AAA"].streak_provenance == ""
+        assert led.newly_settled_skipped == 0
+        aaa_key = ("groww", "AAA", "1minute", "2021-01-01", "2021-01-31")
+        assert aaa_key in led.reopened_keys()
+        assert aaa_key in led.degraded_keys()
+        # BBB recorded BEFORE the trip — the normal demotion (streak bumped).
+        assert by_symbol["BBB"].status == "FAILED"
+        assert by_symbol["BBB"].last_error == ALL_FILTERED
+        assert by_symbol["BBB"].empty_streak == 1
+        # CCC — the trip-crossing window — SUPPRESSED ITSELF: FAILED + reason,
+        # streak NOT bumped, provenance untouched.
+        assert by_symbol["CCC"].status == "FAILED"
+        assert by_symbol["CCC"].last_error == ALL_FILTERED
+        assert by_symbol["CCC"].empty_streak == 0
+        assert by_symbol["CCC"].streak_provenance == ""
+        # EXACTLY ONE loud alarm: one structlog ERROR + one Telegram push, both
+        # naming the counts + the rescind.
+        errors = _events(logs, "allfiltered_breaker.tripped")
+        assert len(errors) == 1
+        assert errors[0]["trip_rule"] == "fraction"
+        assert errors[0]["all_filtered_windows"] == 3
+        assert errors[0]["observed_windows"] == 3
+        assert errors[0]["distinct_series"] == 3
+        assert errors[0]["rescinded_settles"] == 1
+        assert errors[0]["pull_id"] == "massaf1"
+        assert len(pushes) == 1
+        assert pushes[0]["rescinded_settles"] == 1
+        assert pushes[0]["pull_id"] == "massaf1"
+        assert pushes[0]["window_samples"] == (
+            "AAA:1minute 2021-01-01→2021-01-31",
+            "BBB:1minute 2021-01-01→2021-01-31",
+            "CCC:1minute 2021-01-01→2021-01-31",
+        )
+
+    def test_below_threshold_settles_byte_identical(self) -> None:
+        # The task's explicit below-threshold requirement: 1-2 series fully
+        # all-filtered over 3 pulls settle SKIPPED exactly as today even with a
+        # LIVE (default-config) breaker present — both floors are above 2 series.
+        from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
+        from brutex.data.window_ledger import EMPTY_TERMINAL_THRESHOLD, SKIPPED, WindowLedger
+
+        led = WindowLedger()
+        breaker = resolve_all_filtered_breaker()
+        for _ in range(EMPTY_TERMINAL_THRESHOLD):
+            self._pull_symbol("AAA", led, breaker)
+            self._pull_symbol("BBB", led, breaker)
+        by_symbol = {r.security_id: r for r in led.records()}
+        assert by_symbol["AAA"].status == SKIPPED
+        assert by_symbol["BBB"].status == SKIPPED
+        assert not breaker.tripped
+
+    def test_runner_resolves_and_threads_the_breaker_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The runner ALWAYS builds a breaker (env-configured) and threads it into
+        # every pair — proven by an env-lowered trip through run_groww_spot_ingest.
+        from brutex.adapters.all_filtered_breaker import (
+            ALLFILTERED_BREAKER_FRACTION_MIN_SERIES_ENV,
+            ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV,
+        )
+        from brutex.adapters.groww.run_ingest import run_groww_spot_ingest
+        from brutex.data.session import ALL_FILTERED
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.orchestrator.parallel import SerialRunParallel
+
+        monkeypatch.setenv(ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV, "3")
+        monkeypatch.setenv(ALLFILTERED_BREAKER_FRACTION_MIN_SERIES_ENV, "3")
+        led = WindowLedger()
+        with capture_logs() as logs:
+            run_groww_spot_ingest(
+                _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+                _Sink(),
+                instruments=[_inst("AAA"), _inst("BBB"), _inst("CCC")],
+                intervals=["1minute"],
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+                ledger=led,
+                run_parallel=SerialRunParallel(),
+                detect_completeness_gaps=True,
+            )
+        assert len(_events(logs, "allfiltered_breaker.tripped")) == 1
+        # Every window stays FAILED + re-pullable (the trip suppressed the third).
+        assert {r.status for r in led.records()} == {"FAILED"}
+        assert {r.last_error for r in led.records()} == {ALL_FILTERED}
+
+    def test_ineligible_windows_never_feed_the_breaker(self) -> None:
+        # dry-run (detect off) / daily interval / exempt symbol / genuine EMPTY —
+        # none joins the numerator OR the denominator.
+        from brutex.data.window_ledger import WindowLedger
+
+        breaker = self._tiny_breaker()
+        led = WindowLedger()
+        # (a) detect_completeness_gaps=False — the dry-run/synthetic contract.
+        self._pull_symbol("AAA", led, breaker, detect=False)
+        # (b) genuine EMPTY (raw_bars == 0).
+        self._pull_symbol("BBB", led, breaker, bars=[])
+        # (c) session-exempt symbol (never session-filtered).
+        self._pull_symbol("GIFTNIFTY", led, breaker)
+        assert breaker.counts() == (0, 0, 0)
+        assert not breaker.tripped
+
+    def test_daily_interval_never_feeds_the_breaker(self) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        breaker = self._tiny_breaker()
+        ingest_spot(
+            _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            ledger=WindowLedger(),
+            detect_completeness_gaps=True,
+            all_filtered_breaker=breaker,
+        )
+        assert breaker.counts() == (0, 0, 0)
+
+    def test_kept_bars_count_the_denominator_only(self) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        breaker = self._tiny_breaker()
+        self._pull_symbol("AAA", WindowLedger(), breaker, bars=[_bar()])
+        assert breaker.counts() == (1, 0, 0)
+
+    def test_trip_with_no_ledger_rescinds_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The rescind ternary's ledger-None arm: the alarm still fires, rescinded=0.
+        from brutex.notifications.sweep_alerts import SweepAlerter
+
+        pushes: list[dict] = []
+        monkeypatch.setattr(
+            SweepAlerter,
+            "mass_all_filtered",
+            lambda self, **kw: pushes.append(dict(kw)) or True,
+        )
+        breaker = self._tiny_breaker()
+        with capture_logs() as logs:
+            for symbol in ("AAA", "BBB", "CCC"):
+                ingest_spot(
+                    _Adapter(bars=[_bar(self._HOLIDAY_TS)]),  # type: ignore[arg-type]
+                    _Sink(),
+                    instrument=_inst(symbol),
+                    interval="1minute",
+                    start=date(2021, 1, 1),
+                    end=date(2021, 1, 31),
+                    ledger=None,
+                    detect_completeness_gaps=True,
+                    all_filtered_breaker=breaker,
+                )
+        errors = _events(logs, "allfiltered_breaker.tripped")
+        assert len(errors) == 1
+        assert errors[0]["rescinded_settles"] == 0
+        assert pushes and pushes[0]["rescinded_settles"] == 0
+
+    def test_genuine_empty_channel_unaffected_while_tripped(self) -> None:
+        # The EMPTY channel is untouched by the mass-AF suppression (renamed in
+        # review round 1, finding F6 — this test drives a genuine clean EMPTY,
+        # NOT an INTERIOR_GAP demotion; the real orthogonal-channel spine pin is
+        # test_interior_gap_demotion_unaffected_while_tripped below).
+        from brutex.data.window_ledger import WindowLedger
+
+        breaker = self._tiny_breaker()
+        led = WindowLedger()
+        for symbol in ("AAA", "BBB", "CCC"):
+            self._pull_symbol(symbol, led, breaker)
+        assert breaker.tripped
+        # A genuine clean EMPTY in the tripped pull still bumps + settles (here
+        # via the old-window single-confirm — the mass-AF suppression reaches
+        # ONLY the ALL_FILTERED degraded channel, never the EMPTY channels).
+        self._pull_symbol("DDD", led, breaker, bars=[])
+        rec = {r.security_id: r for r in led.records()}["DDD"]
+        assert rec.status == "SKIPPED"
+        assert rec.streak_provenance is not None
+        assert rec.streak_provenance.startswith("EMPTY@")
+
+    def test_interior_gap_demotion_unaffected_while_tripped(self) -> None:
+        # The REAL orthogonal-channel pin (review round 1, finding F6): an
+        # INTERIOR_GAP demotion driven through the spine WITH a tripped breaker
+        # still BUMPS the streak — the `all_filtered` conjunct in the tail's
+        # `allow_degraded_settle` construction keeps the spot-only completeness
+        # channels byte-unchanged while tripped (kills the drop-the-conjunct
+        # mutant the EMPTY-shaped test above cannot: suppress is IGNORED for
+        # EMPTY, so only a degraded non-ALL_FILTERED record has teeth here).
+        from brutex.data.interior_gap_detect import INTERIOR_GAP
+        from brutex.data.window_ledger import WindowLedger
+
+        breaker = self._tiny_breaker()
+        led = WindowLedger()
+        for symbol in ("AAA", "BBB", "CCC"):
+            self._pull_symbol(symbol, led, breaker)
+        assert breaker.tripped
+        # A holed-but-in-session March-2024 window (the #1031 interior-gap
+        # fixture shape) for a fourth symbol, pulled while tripped.
+        t = _march_2024_trading_days()
+        ingest_spot(
+            _Adapter(bars=[_in_session_bar(t[0]), _in_session_bar(t[-1])]),  # type: ignore[arg-type]
+            _Sink(),
+            instrument=_inst("DDD"),
+            interval="1minute",
+            start=date(2024, 3, 1),
+            end=date(2024, 3, 31),
+            ledger=led,
+            detect_completeness_gaps=True,
+            all_filtered_breaker=breaker,
+        )
+        rec = {r.security_id: r for r in led.records()}["DDD"]
+        assert rec.status == "FAILED"
+        assert rec.last_error == INTERIOR_GAP
+        assert rec.empty_streak == 1  # BUMPED — never suppressed by the tripped breaker
+        assert rec.streak_provenance is not None
+        assert rec.streak_provenance.startswith("INTERIOR_GAP@")
+
+    def test_tail_consults_the_breaker_inside_the_ledger_record(self) -> None:
+        # Review round 1 (the F2/F4/F5/F7/F8 TOCTOU): the suppression decision is
+        # evaluated INSIDE record() UNDER the ledger lock — never pre-computed in
+        # the tail — so it serializes with the trip's one-shot rescind and a
+        # settle in flight at the trip instant can never leak un-rescinded.
+        # Ordering spy: allow_settle fires AFTER record() was entered (pre-fix
+        # the order was allow_settle THEN record — the leakable window).
+        from typing import Any
+
+        from brutex.data.window_ledger import WindowLedger
+
+        calls: list[str] = []
+
+        class _SpyBreaker(AllFilteredBreaker):
+            def allow_settle(self) -> bool:
+                calls.append("allow_settle")
+                return super().allow_settle()
+
+        class _SpyLedger(WindowLedger):
+            def record(self, *args: Any, **kwargs: Any) -> str:
+                calls.append("record_enter")
+                return super().record(*args, **kwargs)
+
+        breaker = _SpyBreaker(
+            spread_series_limit=0,
+            fraction_limit=0.5,
+            min_observations=99,  # never trips — the allow path is the point
+            fraction_min_series=3,
+        )
+        led = _SpyLedger()
+        self._pull_symbol("AAA", led, breaker)
+        assert calls == ["record_enter", "allow_settle"]
+
+    def test_with_retry_latches_one_breaker_across_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round 4 (the v3-round-2 MAJOR): run_groww_spot_ingest_with_retry
+        # resolves the breaker ONCE (when None) and threads the SAME instance
+        # into EVERY pass, so a pass-1 trip stays latched through the retry
+        # rounds. Fail-before: it forwarded the None verbatim and each pass
+        # resolved its OWN fresh instance.
+        from brutex.adapters.groww import run_ingest as ri
+
+        breakers: list[object] = []
+        still_failed = ri.GrowwIngestReport(
+            pairs={
+                ("AAA", "1minute"): IngestReport(
+                    windows=1, bars_appended=0, transient_failures=1, still_failed_windows=1
+                )
+            },
+            failures=(),
+        )
+
+        def _spy(
+            *_args: object, all_filtered_breaker: object = None, **_kw: object
+        ) -> ri.GrowwIngestReport:
+            breakers.append(all_filtered_breaker)
+            return still_failed
+
+        monkeypatch.setattr(ri, "run_groww_spot_ingest", _spy)
+        ri.run_groww_spot_ingest_with_retry(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instruments=[_inst("AAA")],
+            intervals=["1minute"],
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            max_retry_rounds=2,
+            retry_backoff=lambda _i: None,
+        )
+        # The original pass + 2 retry rounds (still-failed never clears).
+        assert len(breakers) == 3
+        assert all(isinstance(b, AllFilteredBreaker) for b in breakers)
+        assert all(b is breakers[0] for b in breakers)  # ONE latched instance
+
+    def test_with_retry_forwards_an_injected_breaker_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The other resolve arm: an injected instance (a pull entrypoint's
+        # pull-scoped breaker, or a test's) reaches every pass unwrapped.
+        from brutex.adapters.groww import run_ingest as ri
+
+        sentinel = self._tiny_breaker()
+        breakers: list[object] = []
+
+        def _spy(
+            *_args: object, all_filtered_breaker: object = None, **_kw: object
+        ) -> ri.GrowwIngestReport:
+            breakers.append(all_filtered_breaker)
+            return ri.GrowwIngestReport(pairs={}, failures=())
+
+        monkeypatch.setattr(ri, "run_groww_spot_ingest", _spy)
+        ri.run_groww_spot_ingest_with_retry(
+            _Adapter(),  # type: ignore[arg-type]
+            _Sink(),
+            instruments=[_inst("AAA")],
+            intervals=["1minute"],
+            start=date(2021, 1, 1),
+            end=date(2021, 1, 31),
+            all_filtered_breaker=sentinel,
+        )
+        assert breakers == [sentinel]  # clean pass — no retry; the sentinel, not a wrap
+
+    def test_trip_latch_holds_across_retry_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # FAILS-BEFORE / PASSES-AFTER (review round 4 — the demonstrated leak):
+        # pass 1 observes 6 eligible windows (3 all-filtered across 3 series →
+        # the FRACTION rule trips at AAA's own observation with the floor
+        # env-set to 6) and the CRITICAL alarm promises settles are halted for
+        # the pull; a transient-timeout symbol (GGG) leaves still_failed > 0,
+        # arming the auto-retry round. That round re-fetches every
+        # non-skippable window — the 3 suppressed AF FAILED ones included —
+        # but observes only 3 eligible windows, BELOW the 6-observation floor:
+        # pre-fix its FRESH per-pass breaker never tripped and AAA (prior
+        # streak 2, preserved by the pass-1 suppression) bumped to threshold
+        # and settled SKIPPED minutes AFTER the alarm, un-rescinded and
+        # un-alarmed. The latched pull-scoped breaker keeps every AF window
+        # FAILED + re-pullable.
+        from brutex.adapters.all_filtered_breaker import (
+            ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV,
+        )
+        from brutex.adapters.groww import ingest as ingest_mod
+        from brutex.adapters.groww.run_ingest import run_groww_spot_ingest_with_retry
+        from brutex.data.session import ALL_FILTERED
+        from brutex.data.window_ledger import WindowLedger
+        from brutex.notifications.sweep_alerts import SweepAlerter
+        from brutex.orchestrator.parallel import SerialRunParallel
+
+        pushes: list[dict] = []
+        monkeypatch.setattr(
+            SweepAlerter,
+            "mass_all_filtered",
+            lambda self, **kw: pushes.append(dict(kw)) or True,
+        )
+        # No real sleeps: neutralize the in-pull transient-retry backoff GGG burns.
+        monkeypatch.setattr(ingest_mod, "_time_sleep", lambda _s: None)
+        monkeypatch.setenv(ALLFILTERED_BREAKER_MIN_OBSERVATIONS_ENV, "6")
+        led = WindowLedger()
+        # Pre-seed AAA at streak 2 (EMPTY_TERMINAL_THRESHOLD - 1) — two prior
+        # pulls' ALL_FILTERED demotions: ONE more allowed bump settles it.
+        for _ in range(2):
+            self._pull_symbol("AAA", led, None)
+        assert led.records()[0].empty_streak == 2
+        af_symbols = frozenset({"AAA", "BBB", "CCC"})
+        holiday_ts = self._HOLIDAY_TS
+
+        class _MixedAdapter:
+            """AF symbols → a holiday bar (all-filtered); GGG → a persistent
+            transient timeout (arms the auto-retry round without ever feeding
+            the breaker); others → a complete window (SUCCESS, never re-pulled)."""
+
+            def fetch_ohlcv(
+                self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+            ) -> list[CandleBar]:
+                del exchange, interval, start
+                if symbol == "GGG":
+                    raise GrowwTimeoutError("transient — arms the retry round")
+                if symbol in af_symbols:
+                    return [_bar(holiday_ts)]
+                last_session = last_completed_session_on_or_before(end - timedelta(days=1))
+                return [_in_session_bar(last_session)]
+
+        with capture_logs() as logs:
+            run_groww_spot_ingest_with_retry(
+                _MixedAdapter(),  # type: ignore[arg-type]
+                _Sink(),
+                # AAA is the 6th ELIGIBLE observation — the trip-crossing one
+                # (GGG's raised fetch never reaches the tail, so it observes
+                # nothing in either pass).
+                instruments=[_inst(s) for s in ("BBB", "CCC", "DDD", "EEE", "FFF", "AAA", "GGG")],
+                intervals=["1minute"],
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 31),
+                ledger=led,
+                run_parallel=SerialRunParallel(),
+                detect_completeness_gaps=True,
+                max_retry_rounds=1,
+                retry_backoff=lambda _i: None,
+            )
+        by_symbol = {r.security_id: r for r in led.records()}
+        # THE LEAK PIN: AAA stays FAILED with its streak PRESERVED — pre-fix the
+        # retry pass settled it SKIPPED (streak 2 → 3) post-alarm.
+        assert by_symbol["AAA"].status == "FAILED"
+        assert by_symbol["AAA"].last_error == ALL_FILTERED
+        assert by_symbol["AAA"].empty_streak == 2
+        assert led.newly_settled_skipped == 0
+        # BBB/CCC recorded pre-trip in pass 1 (streak 1); the latched breaker
+        # suppresses their retry-pass records too (streaks preserved).
+        assert by_symbol["BBB"].empty_streak == 1
+        assert by_symbol["CCC"].empty_streak == 1
+        # The clean symbols settled SUCCESS in pass 1 and were never re-pulled;
+        # the transient symbol is still honestly FAILED (a NEXT pull's problem).
+        assert by_symbol["DDD"].status == "SUCCESS"
+        assert by_symbol["GGG"].status == "FAILED"
+        # EXACTLY ONE alarm for the whole pull — the pass-1 trip transition.
+        assert len(_events(logs, "allfiltered_breaker.tripped")) == 1
+        assert len(pushes) == 1
 
 
 class _ScriptAdapter:

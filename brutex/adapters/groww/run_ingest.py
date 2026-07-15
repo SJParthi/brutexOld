@@ -52,8 +52,13 @@ import structlog
 if TYPE_CHECKING:
     from brutex.adapters.groww.spot_bounds import SpotWindows
     from brutex.adapters.ingest_common import RetryOutcome
-    from brutex.orchestrator.audit import AuditWriter
+    from brutex.data.audit_capture import AuditCaptureSink
+    from brutex.orchestrator.audit import AuditWriter, BufferedAuditRecord
 
+from brutex.adapters.all_filtered_breaker import (
+    AllFilteredBreaker,
+    resolve_all_filtered_breaker,
+)
 from brutex.adapters.empty_circuit_breaker import (
     EmptySettleBreaker,
     MassEmptySettleHalt,
@@ -260,6 +265,73 @@ def _resolve_spot_window(
     return symbol_windows.get(symbol, (start, end))
 
 
+def _append_capture_records(
+    records: tuple[BufferedAuditRecord, ...],
+    audit: AuditWriter,
+) -> None:
+    """Append drained capture records onto the hash-chained *audit* writer.
+
+    The ONE append loop every capture drain seam shares (CLAUDE.md §11
+    COMMON) — the in-run seams in :func:`run_groww_spot_ingest` and the pull
+    owner's post-pipeline-drain :func:`flush_capture_to_audit`. Controller
+    thread only (the ``AuditWriter`` is not thread-safe, Golden Rule #8).
+    """
+    for record in records:
+        audit.append(action=record.action, subject=record.subject, payload=record.payload)
+
+
+def flush_capture_to_audit(
+    capture: AuditCaptureSink | None,
+    audit: AuditWriter | None,
+) -> int:
+    """The FOURTH capture drain seam — flush records the async pipeline deferred.
+
+    DEC-AUDIT-LAKE-REPLAY-ORACLE-001 round-1 review fix (BLOCKER): under the
+    DEFAULT-ON async fetch pipeline (DEC-GROWW-FETCH-ASYNC-SEPARATION-001) a
+    window's durable ``sink.append`` — the point the capture sink buffers its
+    ``LAKE_APPEND_WRITTEN`` / ``add`` records — runs on a background pipeline
+    consumer (or write-pool shard) thread, and the pipeline is only drained
+    by the pull owner AFTER :func:`run_groww_spot_ingest_with_retry` returns.
+    Records buffered after the run's own final ``drain_remaining()`` would
+    therefore be STRANDED — silently discarded with the sink — making the
+    capture log structurally incomplete (a false replay divergence + a
+    permanent L3 ``extra_in_live``, since the settled windows are never
+    re-pulled). The pull owner MUST call this on the controller thread AFTER
+    draining the fetch pipeline + write consumer, while the ingest ``audit``
+    writer is still open (``cli.py`` ``cmd_fetch``'s ``finally`` does).
+
+    Replay is order-insensitive to the resulting post-``INGEST_RUN_COMPLETE``
+    chain lines: events are applied in ``(capture_run, capture_seq)`` order,
+    not chain-line order.
+
+    Returns the number of records appended to the chain. ``capture is None``
+    (the default OFF mode) and an empty buffer both return ``0``; a non-empty
+    buffer with ``audit is None`` discards and logs the loud
+    ``audit_capture.no_chain`` WARN (capture without a chain is useless,
+    never silent).
+    """
+    if capture is None:
+        return 0
+    records = capture.drain_remaining()
+    if not records:
+        return 0
+    pull_id = current_pull_id()
+    if audit is None:
+        _LOG.warning(
+            "audit_capture.no_chain",
+            pull_id=pull_id,
+            discarded=len(records),
+        )
+        return 0
+    _append_capture_records(records, audit)
+    _LOG.info(
+        "audit_capture.post_drain_flush",
+        pull_id=pull_id,
+        records=len(records),
+    )
+    return len(records)
+
+
 @dataclass(frozen=True, slots=True)
 class PairFailure:
     """A ``(symbol, interval)`` pair that failed terminally (quarantined)."""
@@ -354,11 +426,13 @@ def run_groww_spot_ingest(
     today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
     should_stop: CancelCheck | None = None,
     market_closed: Callable[[], bool] | None = None,
+    capture: AuditCaptureSink | None = None,
 ) -> GrowwIngestReport:
     """Ingest every ``(instrument, interval)`` spot pair over ``[start, end)``.
 
@@ -458,6 +532,24 @@ def run_groww_spot_ingest(
         :class:`~brutex.adapters.empty_circuit_breaker.MassEmptySettleHalt`, a
         :data:`_GLOBAL_STOP_ERRORS` member — the whole pull halts loudly. Tests inject
         a configured instance.
+    all_filtered_breaker
+        Optional :class:`~brutex.adapters.all_filtered_breaker.AllFilteredBreaker`
+        (DEC-ALLFILTERED-MASS-BREAKER-001). Every PRODUCTION caller injects the
+        ONE pull-scoped instance resolved at its pull entrypoint (the dashboard
+        bulk + single-symbol pulls and the CLI ``cmd_fetch`` — review round 4;
+        :func:`run_groww_spot_ingest_with_retry` resolves one itself for a
+        direct ``None`` caller), so the trip latches ACROSS retry passes and
+        until-clean rounds, never just this invocation. ``None`` (direct
+        single-pass callers / tests) constructs a FRESH env-configured breaker
+        for THIS invocation via
+        :func:`~brutex.adapters.all_filtered_breaker.resolve_all_filtered_breaker`,
+        so the mass ALL-FILTERED guard is ON by default and its state can never
+        leak across pulls. The ONE breaker is threaded into every pair's
+        window tails (pull-wide counting — a vendor-day timestamp bug spans
+        symbols); a trip SUPPRESSES further ``ALL_FILTERED`` SKIPPED-settles +
+        auto-rescinds the same-pull pre-trip ones + emits ONE count-naming alarm
+        — deliberately NOT a pull stop (fetching/storage stay unpoisoned). Tests
+        inject a configured instance.
     storm_breaker
         Optional per-pull :class:`~brutex.adapters.error_storm_breaker.ErrorStormBreaker`
         (DEC-VENDOR-DOWN-BREAKER-001), threaded verbatim into every pair's window
@@ -506,6 +598,35 @@ def run_groww_spot_ingest(
         ledger's PLANNED/FAILED windows stay resumable next out-of-hours run). ``None``
         (the default — dry-run / synthetic / unit-test callers) never gates; ONLY the
         real production entrypoints bind the live guard.
+    capture
+        Optional :class:`~brutex.data.audit_capture.AuditCaptureSink`
+        (DEC-AUDIT-LAKE-REPLAY-ORACLE-001). When wired (the caller has ALREADY
+        wrapped *sink* — or the write pool's base sink — in it via
+        :func:`~brutex.data.audit_capture.resolve_audit_capture`), its buffered
+        replay records are drained onto the SAME hash-chained *audit* writer on
+        the CONTROLLER thread at three seams: after each pair's
+        ``INGEST_PAIR_DONE``, after each ``INGEST_PAIR_FAILED`` (a quarantined
+        pair's already-durable windows MUST still be audited or replay is
+        structurally incomplete), and once more before ``INGEST_RUN_COMPLETE``.
+        HONEST async-mode envelope (Golden Rule #10): those in-run seams flush
+        everything ONLY on the synchronous path — when *fetch_pipeline* (the
+        production DEFAULT) or *write_pool* is wired, a window's durable
+        ``sink.append`` runs on a background consumer thread AFTER the
+        producer's deferred outcome resolves, so a pair's records may not yet
+        be buffered when its pair seam fires (the per-pair drain is then an
+        empty no-op) and records may still arrive after the final in-run
+        drain. The pull owner MUST therefore call
+        :func:`flush_capture_to_audit` (the FOURTH seam) after draining the
+        pipeline + write pool, while the chain is still open — ``cmd_fetch``'s
+        ``finally`` does. The chain stays literally single-writer (Golden
+        Rule #8) — no worker thread ever touches the
+        :class:`~brutex.orchestrator.audit.AuditWriter`; replay applies events
+        in ``(capture_run, capture_seq)`` order, so drain-seam chain-line
+        placement is forensically irrelevant. ``capture`` wired with ``audit
+        is None`` discards the records and logs ONE loud
+        ``audit_capture.no_chain`` WARN per run (capture without a chain is
+        useless, never silent). ``None`` (the default) is byte-identical to
+        today.
 
     Returns
     -------
@@ -535,6 +656,19 @@ def run_groww_spot_ingest(
     # the groups run SEQUENTIALLY to settlement, so cross-group evidence could never
     # protect the FIRST (indices) group anyway. Full disclosure: MIGRATION.md #1527.
     breaker = empty_breaker if empty_breaker is not None else resolve_empty_breaker()
+    # One mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001):
+    # every production caller INJECTS the pull-scoped instance resolved at its
+    # entrypoint (review round 4 — the trip must latch across retry passes and
+    # until-clean rounds, or a sub-floor retry pass settles windows the pass-1
+    # alarm promised were halted), so all pairs — and all PASSES — share ONE
+    # counter (a vendor-day timestamp bug empties every symbol's boundary at
+    # once) and a fresh pull always starts clean (Golden Rule #7). The `None`
+    # fallback resolve serves direct single-pass callers; the explicit param is
+    # ALSO the test seam; BRUTEX_ALLFILTERED_BREAKER=off resolves a disabled
+    # instance (observe no-ops — byte-identical settle behaviour).
+    af_breaker = (
+        all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
+    )
     # One WRITE-health breaker per PASS (DEC-WRITE-HEALTH-BREAKER-001), mirroring the
     # empty breaker above: all pairs share ONE per-partition defer accounting (a wedged
     # volume fails every partition) and a fresh pass/pull always starts clean. The
@@ -616,12 +750,36 @@ def run_groww_spot_ingest(
                 today_completeness_gate=today_completeness_gate,
                 observed_holidays=observed_holidays,
                 empty_breaker=breaker,
+                all_filtered_breaker=af_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=wbreaker,
                 floor_learner=floor_learner,
                 should_stop=should_stop,
                 market_closed=market_closed,
             )
+
+    # Replay-capture drain (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): records buffered by
+    # the capture sink on worker/shard threads are appended to the real chain ONLY
+    # here on the controller thread — the AuditWriter stays literally single-writer
+    # (Golden Rule #8; the sanctioned BufferedAuditRecord replay pattern).
+    capture_no_chain_warned = False
+
+    def _drain_capture(records: tuple[BufferedAuditRecord, ...]) -> None:
+        """Append drained capture records to the chain (controller thread only)."""
+        nonlocal capture_no_chain_warned
+        if not records:
+            return
+        if audit is None:
+            # Capture without a chain is useless — never silent (one WARN per run).
+            if not capture_no_chain_warned:
+                capture_no_chain_warned = True
+                _LOG.warning(
+                    "audit_capture.no_chain",
+                    pull_id=pull_id,
+                    discarded=len(records),
+                )
+            return
+        _append_capture_records(records, audit)
 
     pairs: dict[tuple[str, str], IngestReport] = {}
     failures: list[PairFailure] = []
@@ -657,6 +815,8 @@ def run_groww_spot_ingest(
                     "still_failed_windows": report.still_failed_windows,
                 },
             )
+            if capture is not None:
+                _drain_capture(capture.drain_pair(instrument.symbol_name, interval))
             if on_progress is not None:
                 on_progress(label, report.bars_appended, False)
             continue
@@ -711,6 +871,10 @@ def run_groww_spot_ingest(
             f"{instrument.symbol_name}:{interval}",
             {"error": str(exc), "auth_failure": auth_failed},
         )
+        # A quarantined pair's ALREADY-DURABLE windows must still be audited or
+        # the replay is structurally incomplete (DEC-AUDIT-LAKE-REPLAY-ORACLE-001).
+        if capture is not None:
+            _drain_capture(capture.drain_pair(instrument.symbol_name, interval))
         # Quarantine-cause nook: WHY this pair was dropped (the bare failed=N count
         # otherwise hides the terminal Groww error).
         _LOG.warning(
@@ -752,6 +916,17 @@ def run_groww_spot_ingest(
             retried_windows=inst_retried,
             still_failed_windows=inst_still_failed,
         )
+    # Final replay-capture drain: any records not claimed by a pair drain (e.g. a
+    # pair whose fan-out outcome never arrived) land on the chain before the run
+    # closes. HONEST envelope: this bounds capture memory to the run ONLY on the
+    # synchronous path — under the default-ON async fetch pipeline / write pool a
+    # window's sink.append (where records are buffered) runs on a background
+    # consumer thread that may still be queued when this drain fires, so the pull
+    # owner MUST flush once more via `flush_capture_to_audit` AFTER draining the
+    # pipeline + write consumer (the fourth seam; cli.py cmd_fetch's finally) or
+    # those records are stranded and the capture log is structurally incomplete.
+    if capture is not None:
+        _drain_capture(capture.drain_remaining())
     maybe_audit(
         audit,
         "INGEST_RUN_COMPLETE",
@@ -830,11 +1005,13 @@ def run_groww_spot_ingest_with_retry(
     today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
+    all_filtered_breaker: AllFilteredBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
     should_stop: CancelCheck | None = None,
     market_closed: Callable[[], bool] | None = None,
+    capture: AuditCaptureSink | None = None,
 ) -> SpotIngestWithRetry:
     """Run the spot pull, then auto-retry any leftover failed windows.
 
@@ -875,6 +1052,17 @@ def run_groww_spot_ingest_with_retry(
     caller drains it ONCE at pull end (after the LAST pass), so every queued window is
     processed + ledger-recorded before the final ledger flush.
 
+    *all_filtered_breaker* (DEC-ALLFILTERED-MASS-BREAKER-001): ONE instance spans
+    the whole pull's retry rounds — a ``None`` resolves a single fresh
+    env-configured breaker HERE (review round 4; the storm_breaker/floor_learner
+    whole-pull precedent) and the SAME instance is threaded into every pass, so
+    the trip LATCHES across retry rounds and the "settles halted for this pull"
+    alarm promise holds through them. The superseded per-pass fresh resolve let a
+    sub-floor retry pass (fewer re-attempted windows than the observation floor)
+    bump a suppressed window's streak to threshold and settle it SKIPPED minutes
+    AFTER the CRITICAL alarm — un-rescinded and un-alarmed. Production callers
+    (the dashboard pull + the CLI) inject the pull-scoped instance they resolved,
+    so the latch ALSO spans their outer until-clean rounds.
     *empty_breaker* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001) is forwarded verbatim to
     every pass. The production ``None`` makes EACH pass resolve its own fresh
     env-configured breaker (per-pass counting; no state leak across passes or pulls);
@@ -904,6 +1092,15 @@ def run_groww_spot_ingest_with_retry(
     window it tries (:class:`~brutex.data.errors.MarketHoursHalt`). ``None`` (the
     default) never gates.
 
+    *capture* (DEC-AUDIT-LAKE-REPLAY-ORACLE-001) is forwarded verbatim to every
+    pass: ONE capture sink (and ONE attached
+    :class:`~brutex.data.audit_capture.DedupJournal`) spans all retry rounds, so a
+    retry pass's idempotent re-appends admit zero new ``add`` rows and every
+    pass's replay records drain onto the same chain at the controller seams.
+    In async-pipeline mode the caller additionally owns the post-drain
+    :func:`flush_capture_to_audit` seam (see :func:`run_groww_spot_ingest`'s
+    *capture* envelope). ``None`` (the default) is byte-identical to today.
+
     Returns
     -------
     SpotIngestWithRetry
@@ -915,6 +1112,18 @@ def run_groww_spot_ingest_with_retry(
     # (CLAUDE.md §11 COMMON — one engine for both vendors); imported here, paid once
     # per pull, never on the hot path.
     from brutex.adapters.ingest_common import retry_failed_windows
+
+    # ONE mass ALL-FILTERED breaker across EVERY pass of this call (review round 4,
+    # DEC-ALLFILTERED-MASS-BREAKER-001): resolved HERE — not per pass — so the trip
+    # LATCHES across the retry rounds. The per-pass fresh resolve broke the alarm's
+    # pull-wide promise: a retry pass re-attempts exactly the FAILED windows a
+    # tripped pass-1 breaker suppressed, and when that re-attempt set sits below
+    # the observation/series floors its FRESH breaker never tripped — the window
+    # bumped to threshold and settled SKIPPED post-alarm, un-rescinded. Fresh per
+    # CALL still holds (Golden Rule #7: no state leak across pulls).
+    af_breaker = (
+        all_filtered_breaker if all_filtered_breaker is not None else resolve_all_filtered_breaker()
+    )
 
     def _one_pass() -> GrowwIngestReport:
         """Run ONE full spot-ingest pass with the original call's bindings."""
@@ -941,11 +1150,13 @@ def run_groww_spot_ingest_with_retry(
             today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
+            all_filtered_breaker=af_breaker,
             storm_breaker=storm_breaker,
             write_breaker=write_breaker,
             floor_learner=floor_learner,
             should_stop=should_stop,
             market_closed=market_closed,
+            capture=capture,
         )
 
     report = _one_pass()
@@ -971,6 +1182,7 @@ __all__ = [
     "ProgressHook",
     "SpotIngestWithRetry",
     "SpotJob",
+    "flush_capture_to_audit",
     "run_groww_spot_ingest",
     "run_groww_spot_ingest_with_retry",
     "with_paced_client",

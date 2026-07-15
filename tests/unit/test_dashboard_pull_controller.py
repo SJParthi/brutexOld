@@ -3545,7 +3545,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         assert expected  # the sidecar IS present — the dry-run must still ignore it
@@ -3564,7 +3564,7 @@ class TestObservedHolidaysArming:
     def test_pull_all_spot_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3588,7 +3588,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_live_threads_loaded_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         expected = _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3613,7 +3613,7 @@ class TestObservedHolidaysArming:
     def test_pull_candles_dry_run_threads_empty_overlay(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.dashboard.pull_controller as pc
+        from brutex.dashboard import pull_controller as pc
 
         _write_overlay_sidecar(tmp_path)
         captured: list[object] = []
@@ -3776,6 +3776,8 @@ class TestIngestAuditWiring:
     def test_pull_candles_dry_run_writes_no_audit(self, tmp_path: Path) -> None:
         pull_candles(_index(), lake_root=tmp_path, dry_run=True)
         assert not (tmp_path / "audit").exists()
+
+
 
 
 class TestCooperativeCancel:
@@ -4352,3 +4354,102 @@ class TestBulkSpotCompletenessDemotionE2E:
         )
         assert report.dry_run is True
         assert not ledger_path(tmp_path).is_file()  # record-inert — no ledger written
+
+
+class TestSeedObservedOverlayOrdering:
+    """DEC-SEED-OBSERVED-OVERLAY-001 — the overlay load is HOISTED above the
+    cold-start reconcile and ONE snapshot feeds BOTH the seed gate and the
+    fetch-time detectors (single source of truth; exactly one load per pull)."""
+
+    def test_pull_all_spot_loads_once_and_threads_the_seed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        order: list[str] = []
+        seed_observed: list[object] = []
+        ingest_observed: list[object] = []
+        real_load = pc.load_observed_holidays
+        real_reconcile = pc.reconcile_ledger_windows  # the bulk MINUTE-phase seed
+        real_ingest = pc.run_groww_spot_ingest_with_retry
+
+        def _load_spy(root: Path) -> frozenset:
+            order.append("load")
+            return real_load(root)
+
+        def _reconcile_spy(*args: object, **kwargs: object) -> int:
+            order.append("reconcile")
+            seed_observed.append(kwargs.get("observed"))
+            return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+        def _ingest_spy(*args: object, **kwargs: object) -> object:
+            ingest_observed.append(kwargs.get("observed_holidays"))
+            return real_ingest(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "load_observed_holidays", _load_spy)
+        monkeypatch.setattr(pc, "reconcile_ledger_windows", _reconcile_spy)
+        monkeypatch.setattr(pc, "run_groww_spot_ingest_with_retry", _ingest_spy)
+        pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=False,
+            now=_BULK_NOW,
+            adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+        )
+        # ONE load per pull, strictly BEFORE the reconcile (the hoist).
+        assert order.count("load") == 1
+        assert "reconcile" in order
+        assert order.index("load") < order.index("reconcile")
+        # The SAME snapshot feeds the seed gate AND the fetch-time detectors.
+        assert seed_observed and all(o == expected for o in seed_observed)
+        assert ingest_observed and all(o == expected for o in ingest_observed)
+
+    def test_pull_candles_loads_once_and_threads_both_reconciles(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        expected = _write_overlay_sidecar(tmp_path)
+        order: list[str] = []
+        seed_observed: list[object] = []
+        real_load = pc.load_observed_holidays
+        real_reconcile = pc.reconcile_ledger_with_lake
+
+        def _load_spy(root: Path) -> frozenset:
+            order.append("load")
+            return real_load(root)
+
+        def _reconcile_spy(*args: object, **kwargs: object) -> int:
+            order.append("reconcile")
+            seed_observed.append(kwargs.get("observed"))
+            return real_reconcile(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pc, "load_observed_holidays", _load_spy)
+        monkeypatch.setattr(pc, "reconcile_ledger_with_lake", _reconcile_spy)
+        pull_candles(
+            _index(),
+            lake_root=tmp_path,
+            dry_run=False,
+            from_date="2021-01-04",
+            to_date="2021-01-08",
+            adapter_factory=lambda root, _inst: (SyntheticSpotAdapter(), _real_sink(root)),
+        )
+        assert order.count("load") == 1
+        assert "reconcile" in order  # daily and/or minute — every one post-load
+        assert order.index("load") < order.index("reconcile")
+        assert seed_observed and all(o == expected for o in seed_observed)
+
+    def test_pull_all_spot_dry_run_never_loads_the_overlay(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard import pull_controller as pc
+
+        _write_overlay_sidecar(tmp_path)
+        loads: list[Path] = []
+        real_load = pc.load_observed_holidays
+        monkeypatch.setattr(
+            pc, "load_observed_holidays", lambda root: loads.append(root) or real_load(root)
+        )
+        pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert loads == []  # the frozenset()-if-dry_run guard survived the hoist

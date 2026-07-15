@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
+from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
 from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
 from brutex.adapters.error_storm_breaker import resolve_error_storm_breaker
 from brutex.adapters.groww.chunks import window_days_for_interval as groww_window_days_for
@@ -1912,6 +1913,17 @@ def pull_all_spot(
                 pull_id=pid,
                 note="window ledger reload FAILED — running full re-verify pull (no skip)",
             )
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
+        # cold-start reconcile so the seed's continuity gate and the fetch-time
+        # completeness detectors judge ONE consistent overlay snapshot (a mid-pull
+        # sidecar rewrite by the drift CLI is deliberately not re-read) — and
+        # threaded into the detectors' margin arithmetic + the seed gate ONLY (an
+        # observed holiday is not a data hole) — NEVER into window planning or the
+        # session filter. A dry-run threads the empty overlay (the
+        # ``detect_completeness_gaps`` gating pattern); ``load_observed_holidays``
+        # never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         if ledger is not None and daily_requested:
             # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): on a fresh clone
             # the ledger is empty but the lake may already hold years of bars. Seed
@@ -1935,6 +1947,7 @@ def pull_all_spot(
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=_observed_holidays,
             )
             # PLAN the remaining (genuinely-absent) windows — ``WindowLedger.plan``
             # is itself absent-only, so a just-seeded SUCCESS row stays settled.
@@ -1999,6 +2012,19 @@ def pull_all_spot(
         # raises ``MarketHoursHalt`` (a global stop) — caught below, the committed work
         # kept + the pull deferred to the next out-of-hours run.
         _market_closed = None if dry_run else market_closed
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the storm-breaker precedent above): resolved HERE and
+        # threaded into EVERY phase / until-clean round / retry pass, so the trip
+        # LATCHES pull-wide — a per-pass fresh instance let a sub-floor retry
+        # round settle windows the trip alarm promised were halted. Resolved
+        # unconditionally (unlike the storm breaker): a dry-run's windows are
+        # ineligible by construction (the `detect_completeness_gaps=not dry_run`
+        # threading below → never observed — review round 5: this entrypoint
+        # previously omitted the kwarg entirely, so the REAL bulk pull's windows
+        # were equally ineligible and the breaker was structurally inert on the
+        # primary production path), so the instance stays inert there —
+        # byte-identical settles.
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner (DEC-VENDOR-FLOOR-LAZY-PROBE-001): ONE
         # per-pull instance over the PACED replica of THIS pull's adapter. The live
         # pool factory hands every leaf a no-op pace (`build_live_pool` without a
@@ -2032,12 +2058,9 @@ def pull_all_spot(
             end=end.date(),
             floors=load_vendor_floors(floor_store, [i.symbol_name for i in instruments]),
         )
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
-        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
-        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+        # (The observed-sessions overlay was loaded ONCE above, before the
+        # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
+        # ``_observed_holidays`` snapshot feeds the fetch-time detectors below.)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -2202,13 +2225,17 @@ def pull_all_spot(
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
                     # #1031 interior-gap / trailing-truncation demotions — armed
-                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001) —
-                    # resolved once above.
+                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001; the
+                    # #1442 review-round-5 fix converged on main's resolved-once
+                    # flag) — a live pull thereby ALSO feeds the mass
+                    # all-filtered breaker (its spot eligibility requires this
+                    # flag — DEC-ALLFILTERED-MASS-BREAKER-001).
                     detect_completeness_gaps=_detect_gaps,
                     # Pre-settle TODAY minute-completeness gate
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                     should_stop=should_stop,
@@ -2690,6 +2717,10 @@ def pull_all_spot(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                             symbol_windows=_floor_windows,
+                            # The SAME per-pull overlay snapshot the fetch-time
+                            # detectors read (DEC-SEED-OBSERVED-OVERLAY-001 —
+                            # hoisted once, above the daily reconcile).
+                            observed=_observed_holidays,
                         )
                         # Pre-plan ledger snapshot — pairs with the pre-pull spans
                         # above so this pull's own settles can never false-flag.
@@ -3158,6 +3189,14 @@ def pull_candles(
         # Unified per-window ledger (DEC-WINDOW-LEDGER-001): load/migrate ONCE for the
         # whole pull. Only the 1-minute phase runs; ``1day`` is derived after the pull.
         ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE both
+        # reconciles (daily here + the minute-path one below) so the seed's
+        # continuity gate and the fetch-time detectors judge ONE consistent overlay
+        # snapshot; threaded into the detectors' margin arithmetic + the seed gate
+        # ONLY — NEVER into window planning or the session filter. A dry-run threads
+        # the empty overlay; the loader never raises (missing/corrupt -> empty).
+        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
         if ledger is not None and daily_requested:
             # Cold-start seed FIRST (DEC-WINDOW-LEDGER-001, Stage b1): seed SUCCESS
             # for this symbol's lake-enclosed windows so the upcoming is_skippable
@@ -3179,6 +3218,7 @@ def pull_candles(
                 end=end.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=_observed_holidays,
             )
             plan_windows(
                 ledger,
@@ -3232,6 +3272,16 @@ def pull_candles(
         # live pull (a dry-run threads ``None`` — the ``detect_completeness_gaps``
         # gating below).
         _storm_breaker = None if dry_run else resolve_error_storm_breaker()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4) — the single-symbol twin of the pull_all_spot wiring:
+        # resolved once and threaded into BOTH phase invocations so the latch is
+        # pull-scoped, never per driver invocation. Resolved unconditionally: a
+        # dry-run's windows are ineligible by construction (the
+        # `detect_completeness_gaps=not dry_run` threading below → never
+        # observed — review round 5: this site previously hardcoded the flag
+        # True, so a dry-run's weekend-start synthetic windows WERE observed as
+        # all-filtered, contradicting the dry-run-never-feeds contract).
+        _af_breaker = resolve_all_filtered_breaker()
         # Lazy vendor-depth-floor learner + learned-floor planning clamp
         # (DEC-VENDOR-FLOOR-LAZY-PROBE-001) — the single-symbol twin of the
         # pull_all_spot wiring: armed only for a real pull, probing through the
@@ -3257,12 +3307,8 @@ def pull_candles(
             end=end.date(),
             floors=load_vendor_floors(floor_store, (symbol,)),
         )
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A dry-run threads the empty overlay (the ``detect_completeness_gaps`` gating
-        # pattern); ``load_observed_holidays`` never raises (missing/corrupt -> empty).
-        _observed_holidays = frozenset() if dry_run else load_observed_holidays(lake_root)
+        # (The observed-sessions overlay was loaded ONCE above, before the reconciles
+        # — DEC-SEED-OBSERVED-OVERLAY-001; the SAME snapshot feeds the detectors.)
         # Emit the resolved client connection-pool width once (DEC-LAKE-WRITE-INSTRUMENT-001)
         # so the write/lake latency telemetry can be sized against the real budget.
         _emit_pull_pool_size(pid)
@@ -3325,13 +3371,17 @@ def pull_candles(
                     # Real production Groww pull → OPT IN to the data-completeness re-pull demotion
                     # (DEC-INTERIOR-GAP-DETECT-001 / DEC-PARTIAL-WINDOW-REPULL-001). A dense INDEX
                     # 1-minute window with a confirmed interior hole / trailing truncation is
-                    # re-pulled; dry-run / synthetic pulls leave this OFF (the default) so they never
-                    # false-red on the synthetic adapter's first-day-only bars.
-                    detect_completeness_gaps=True,
+                    # re-pulled; a dry-run threads False EXPLICITLY so its synthetic first-day-only
+                    # bars never false-red NOR feed the mass all-filtered breaker (review round 5:
+                    # this site hardcoded True since #1230, so a dry-run's weekend-start synthetic
+                    # windows were demoted AND observed as all-filtered — the stale "leaves this
+                    # OFF (the default)" wording papered over it; the CLI cmd_fetch pattern).
+                    detect_completeness_gaps=not dry_run,
                     # Pre-settle TODAY minute-completeness gate
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=_today_gate,
                     observed_holidays=_observed_holidays,
+                    all_filtered_breaker=_af_breaker,
                     storm_breaker=_storm_breaker,
                     floor_learner=_floor_learner,
                 )
@@ -3405,6 +3455,7 @@ def pull_candles(
                             market=GROWW_COVERAGE_MARKET,
                             window_days_for=groww_window_days_for,
                             symbol_windows=_floor_windows,
+                            observed=_observed_holidays,
                         )
                         plan_windows(
                             ledger,

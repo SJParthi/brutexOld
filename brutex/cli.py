@@ -4840,6 +4840,7 @@ def cmd_fetch(
     # throttled mint / a stale read-only re-read) never alert — carved back out via
     # `is_terminal_auth_failure` at the except site (they re-raise unchanged, exactly
     # as they propagated before this tuple caught them).
+    from brutex.adapters.all_filtered_breaker import resolve_all_filtered_breaker
     from brutex.adapters.empty_circuit_breaker import MassEmptySettleHalt
     from brutex.adapters.error_storm_breaker import (
         VendorDownError,
@@ -4859,6 +4860,7 @@ def cmd_fetch(
         reconcile_pairs_with_pipeline,
     )
     from brutex.adapters.groww.run_ingest import (
+        flush_capture_to_audit,
         run_groww_spot_ingest_with_retry,
         with_paced_client,
     )
@@ -5195,6 +5197,18 @@ def cmd_fetch(
             floors=load_vendor_floors(floor_store, floor_symbols),
         )
         ledger = begin_pull_ledger(resolved, dry_run=_no_persist)
+        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001 +
+        # DEC-SEED-OBSERVED-OVERLAY-001): loaded ONCE per pull — HOISTED ABOVE the
+        # cold-start reconcile below so the seed's continuity gate and the
+        # fetch-time completeness detectors judge ONE consistent overlay snapshot;
+        # threaded into the detectors' margin arithmetic + the seed gate ONLY (an
+        # observed holiday is not a data hole) — NEVER into window planning or the
+        # session filter. A ``--dry-run`` threads the empty overlay (the
+        # ``detect_completeness_gaps`` gating pattern); the loader never raises
+        # (missing/corrupt -> empty).
+        from brutex.calendars.observed_sessions import load_observed_holidays
+
+        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
         if ledger is not None:
             # Seed the durable ledger in the SAME (market, tile-width) namespace the
             # Groww spot spine fetches+records in (DEC-DASHBOARD-GROWW-SPOT-001 fixed
@@ -5225,6 +5239,7 @@ def cmd_fetch(
                 end=end_dt.date(),
                 market=GROWW_COVERAGE_MARKET,
                 window_days_for=groww_window_days_for,
+                observed=observed_holidays,
                 symbol_windows=floor_windows,
             )
         # `--retry-failed` (the manual trigger) ALWAYS retries on demand; otherwise
@@ -5320,6 +5335,25 @@ def cmd_fetch(
         from brutex.data.today_completeness import resolve_today_completeness_enabled
 
         today_gate = (not (dry_run or inspect)) and resolve_today_completeness_enabled()
+
+        # Audit→lake replay capture (DEC-AUDIT-LAKE-REPLAY-ORACLE-001): env-gated
+        # (BRUTEX_AUDIT_REPLAY_CAPTURE), default OFF → `resolve_audit_capture`
+        # returns the sink object UN-wrapped (identity) and `capture` stays None,
+        # so the default live pull is byte- and event-identical. Resolved HERE —
+        # immediately BEFORE build_write_consumer — so pool-routed shard-worker
+        # appends route THROUGH the wrapper (the pool owns the base sink; wrapping
+        # any later would let pooled writes bypass capture). `--dry-run`/`--inspect`
+        # (`_no_persist`) never consult the resolver: they wire no ingest audit
+        # chain, so capture would have nothing to drain into.
+        from brutex.data.audit_capture import AuditCaptureSink, resolve_audit_capture
+
+        capture: AuditCaptureSink | None = None
+        if not _no_persist:
+            sink, capture = resolve_audit_capture(
+                sink,
+                lake_root=sink_lake_root,
+                lmdb_dir=sink_lake_root / "audit" / "dedup-live.lmdb",
+            )
         write_consumer = build_write_consumer(sink, dry_run=_no_persist)
         fetch_pipeline = build_fetch_pipeline(dry_run=_no_persist, lake_root=sink_lake_root)
         # Vendor-down error-storm breaker + dead-credential StillStale escalation
@@ -5329,14 +5363,6 @@ def cmd_fetch(
         # ``None`` so it can never observe synthetic outcomes (the same gating as
         # ``detect_completeness_gaps`` below).
         storm_breaker = None if dry_run else resolve_error_storm_breaker()
-        # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE
-        # per pull and threaded into the completeness detectors' margin arithmetic
-        # ONLY (an observed holiday is not a data hole) — NEVER into window planning.
-        # A ``--dry-run`` threads the empty overlay (the ``detect_completeness_gaps``
-        # gating pattern); the loader never raises (missing/corrupt -> empty).
-        from brutex.calendars.observed_sessions import load_observed_holidays
-
-        observed_holidays = frozenset() if dry_run else load_observed_holidays(sink_lake_root)
         # Mid-run market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): a `brutex fetch`
         # launched at 01:30 IST (the start gate ALLOWED it) can run for hours and cross
         # 08:45 — the most-exposed path (legacy auto-resume re-launches it). Thread a
@@ -5346,6 +5372,17 @@ def cmd_fetch(
         # only the clock), `None` for `--dry-run`/`--inspect` (a synthetic adapter / no
         # persistence makes ZERO vendor calls, so those are exempt like the start gate).
         market_closed = None if (dry_run or inspect) else resolve_market_closed()
+        # ONE mass ALL-FILTERED breaker per PULL (DEC-ALLFILTERED-MASS-BREAKER-001,
+        # review round 4 — the CLI twin of pull_all_spot's wiring, the storm-breaker
+        # precedent above): resolved HERE and threaded into every pass / until-clean
+        # round so the trip LATCHES pull-wide — a per-pass fresh instance let a
+        # sub-floor retry round settle windows the trip alarm promised were halted.
+        # Resolved unconditionally: a ``--dry-run``'s windows are ineligible by
+        # construction (``detect_completeness_gaps=False`` → never observed).
+        af_breaker = resolve_all_filtered_breaker()
+        # (The observed-sessions overlay was loaded ONCE above, before the
+        # cold-start reconcile — DEC-SEED-OBSERVED-OVERLAY-001; the SAME
+        # ``observed_holidays`` snapshot feeds the fetch-time detectors below.)
 
         def _one_fetch_pass(do_retry_flag: bool) -> Any:
             """Run ONE full spot pass-with-auto-retry over the SHARED window ledger."""
@@ -5377,7 +5414,12 @@ def cmd_fetch(
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=today_gate,
                     observed_holidays=observed_holidays,
+                    all_filtered_breaker=af_breaker,
                     storm_breaker=storm_breaker,
+                    # Replay-capture drains ride the SAME `audit=ingest_audit`
+                    # chain at the controller seams (None when the env gate is
+                    # OFF — the byte-identical default).
+                    capture=capture,
                     # Learned-floor clamp + in-pull depth learner
                     # (DEC-CLI-DEPTH-FLOORS-001): the SAME `floor_windows` the
                     # plan above tiled (planned keys == fetched keys) + the
@@ -5495,6 +5537,38 @@ def cmd_fetch(
                 # error is swallowed so the ledger persist still runs.
                 drain_fetch_pipeline(fetch_pipeline)
                 drain_write_consumer(write_consumer)
+                # FOURTH replay-capture drain seam (DEC-AUDIT-LAKE-REPLAY-ORACLE-001
+                # round-1 review fix, BLOCKER): under the default-ON async fetch
+                # pipeline a window's durable sink.append — where the capture sink
+                # buffers its LAKE_APPEND_WRITTEN / L3 'add' records — runs on a
+                # background consumer thread, so records buffered AFTER run_ingest's
+                # own final drain would be silently STRANDED (a structurally
+                # incomplete forensic log: false replay divergence + a permanent L3
+                # extra_in_live, since the settled windows are never re-pulled).
+                # Both drains above have completed every queued tail, so this flush —
+                # on the controller thread, while `ingest_audit` is still open —
+                # lands the last records on the chain. Replay is order-insensitive
+                # to the post-RUN_COMPLETE placement (events apply in
+                # (capture_run, capture_seq) order). A no-op when capture is None
+                # (the default OFF mode / --dry-run / --inspect). Best-effort at
+                # THIS seam (the drain_fetch_pipeline swallow pattern): a chain-write
+                # failure here must never mask the pull's real outcome nor skip the
+                # end_pull_ledger persist below — replay then honestly reports the
+                # gap (the torn-capture class), never a silent success. DELIBERATELY
+                # broader than drain_fetch_pipeline's `except LakeWriteHalt: raise`
+                # carve-out: the capture chain is a FORENSIC sidecar, not lake data
+                # — a flush-raised halt propagating out of this `finally` would
+                # mask the pull's real outcome AND skip the ledger persist, while a
+                # genuine disk-full is not lost: `end_pull_ledger`'s own
+                # `atomic_write_via` (moments below, on the DURABLE ledger path)
+                # still maps ENOSPC → `LakeWriteHalt` (round-3 review; regression:
+                # tests/integration/test_cli_fetch_capture_wiring.py).
+                try:
+                    flush_capture_to_audit(capture, ingest_audit)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    import structlog
+
+                    structlog.get_logger("brutex.cli").exception("pull.capture_flush_failed")
                 # DEC-LAKE-HEAL-001 L2 (CLI seam — DEC-CLI-LAKE-HEAL-L2-001, the #1175
                 # named follow-up): heal the just-pulled slice at the SAME post-drain
                 # seam the dashboard uses (the fetched 1-minute is durably in the lake
@@ -6996,40 +7070,155 @@ def cmd_sweep(
     return EXIT_OK
 
 
-def _resolve_code_commit_sha() -> str:  # pragma: no cover — git/subprocess + cli-omitted
-    """Return the real current git commit SHA, falling back to the package version.
+def _git_identity(
+    *,
+    cwd: Path,
+    tracked_path: Path | None = None,
+    runner: Callable[..., Any] | None = None,
+) -> str | None:
+    """Resolve the git HEAD SHA of the repo rooted at *cwd*, dirty-suffixed.
 
-    Golden Rule #1/#4: the run-identity's ``code_commit_sha`` must be a REAL value,
-    never a placeholder. Uses ``git rev-parse HEAD`` when run inside a checkout;
-    if git is unavailable (e.g. a wheel install with no repo), falls back to the
-    pinned ``brutex.__version__`` — still a real, traceable code identity.
+    Returns the 40-char HEAD SHA (with a ``-dirty`` suffix when the working tree
+    has uncommitted changes), or ``None`` when git is unavailable / *cwd* is not
+    a checkout that TRACKS *tracked_path* (the caller then falls back to the
+    pinned package version).
+
+    Two run-identity completeness guarantees (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001):
+
+    * ``cwd`` is passed EXPLICITLY, so ``git rev-parse`` always resolves THIS
+      repository regardless of the process launch directory. Without it the SHA
+      forked with the invocation directory (R3-RUNID-01) — running the sweep from
+      a sibling checkout served a foreign / corrupt identity.
+    * a ``git status --porcelain`` probe (same ``cwd``) appends ``-dirty`` so an
+      uncommitted, edited working tree can never serve stale pre-edit identity
+      (RIF-2 / audit C9). If HEAD resolves but the dirty probe itself fails, the
+      clean SHA is returned rather than a fabricated (unverified) dirty flag.
+
+    Enclosing-repo guard (PR-4 review): ``git`` walks parent directories for a
+    ``.git``, so a brutex package nested inside an UNRELATED enclosing repository
+    (a non-editable wheel unpacked into a venv that itself lives inside another
+    checkout) would resolve the ENCLOSING repo's HEAD — a FALSE code identity for
+    brutex. When *tracked_path* is given, a ``git ls-files --error-unmatch`` probe
+    (same ``cwd``, same *runner* seam) CONFIRMS the resolved repo actually tracks
+    that file BEFORE the SHA is trusted; a non-zero exit (the path is not tracked
+    here) ⇒ ``None`` ⇒ the honest ``brutex-{__version__}`` fallback. The
+    editable / source deployment (file tracked by brutex's own repo) is
+    unaffected — only the nested-enclosing-repo case changes.
+
+    Honest limits (Golden Rule #10):
+
+    * The ``-dirty`` suffix is a single boolean flag, NOT a working-tree digest —
+      it collapses EVERY uncommitted state into one identity, so two DIFFERENT
+      uncommitted edits over the same HEAD share ``<sha>-dirty`` and are NOT
+      distinguished (dirty-state distinctness is not captured; a committed SHA is
+      the only genuinely fork/collision-free code identity).
+    * Dirty detection is best-effort: ``git status --porcelain`` also reports
+      UNTRACKED non-ignored files, so a stray build artifact flips the flag to
+      ``-dirty``; and a timed-out / errored status probe drops the flag and serves
+      the clean SHA.
+
+    *runner* injects the subprocess entry point (defaults to ``subprocess.run``)
+    so the git seam is fully unit-testable without a live repository.
     """
     import subprocess  # nosec B404 — git SHA read only; fixed constant argv below
 
+    run = runner if runner is not None else subprocess.run
     try:
-        out = subprocess.run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
-            ["git", "rev-parse", "HEAD"],  # noqa: S607 — fixed constant argv, no shell/user input
+        head = run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
+            ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             check=True,
             timeout=5,
+            cwd=cwd,
         )
-        sha = out.stdout.strip()
-        if sha:
-            return sha
     except (OSError, subprocess.SubprocessError):
-        pass
+        return None
+    sha = head.stdout.strip()
+    if not sha:
+        return None
+    if tracked_path is not None:
+        # Confirm the resolved repo actually TRACKS this file before trusting its
+        # HEAD — an enclosing foreign repo would otherwise serve a false identity.
+        # `ls-files --error-unmatch` exits non-zero when the path is untracked here.
+        try:
+            run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
+                ["git", "ls-files", "--error-unmatch", "--", str(tracked_path)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                cwd=cwd,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+    try:
+        status = run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return sha
+    return f"{sha}-dirty" if status.stdout.strip() else sha
+
+
+def _resolve_code_commit_sha() -> str:
+    """Return the real current git commit SHA, falling back to the package version.
+
+    Golden Rule #1/#4: the run-identity's ``code_commit_sha`` must be a REAL value,
+    never a placeholder. Delegates to :func:`_git_identity` rooted at the BruteX
+    package directory (``Path(__file__).parent``), passing THIS file as the
+    ``tracked_path`` so the resolved repo is confirmed to actually track brutex
+    (an enclosing foreign repo around a nested wheel is rejected → the honest
+    fallback, not its HEAD). The SHA is INVARIANT to the process working directory
+    and carries a ``-dirty`` suffix on an uncommitted tree
+    (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001). If git is unavailable (e.g. a wheel
+    install with no repo) or the resolved repo does not track brutex, falls back
+    to the pinned ``brutex.__version__`` — still a real, traceable code identity.
+    """
+    pkg_file = Path(__file__).resolve()
+    sha = _git_identity(cwd=pkg_file.parent, tracked_path=pkg_file)
+    if sha is not None:
+        return sha
     return f"brutex-{__version__}"
 
 
-def _indicator_version() -> str:  # pragma: no cover — cli-omitted thin string builder
-    """Return a real indicator-stack version string (BruteX + shared trading_core)."""
+def _indicator_version() -> str:
+    """Return a real indicator-stack version string.
+
+    Encodes the FULL Rust hot-kernel stack in run identity: BruteX + the
+    ``fno_math`` sweep-simulation kernel + the shared ``trading_core`` evaluator
+    crate. The kernel tokens are appended in a fixed alphabetical order
+    (``fno_math`` before ``trading_core``) so the string is deterministic.
+
+    Adding ``fno_math`` closes R3-RUNID-02 (DEC-SWEEP-RUN-IDENTITY-COMPLETE-001):
+    the prior string omitted it, so an ``fno_math`` rebuild did NOT re-key run
+    identity — a stale sweep-sim kernel could serve results under an unchanged
+    identity. A missing module (a source checkout without a built wheel) drops
+    only its own token; the remaining order is unchanged.
+    """
+    parts = [f"brutex-{__version__}"]
+    try:
+        import fno_math
+
+        parts.append(f"fno_math-{fno_math.__version__}")
+    except (ImportError, AttributeError):
+        # No built fno_math wheel (source checkout) → drop only its token and
+        # keep the deterministic order; a missing kernel never fails identity.
+        pass
     try:
         import trading_core
 
-        return f"brutex-{__version__}+trading_core-{trading_core.__version__}"
-    except (ImportError, AttributeError):  # pragma: no cover — wheel always present in prod
-        return f"brutex-{__version__}"
+        parts.append(f"trading_core-{trading_core.__version__}")
+    except (ImportError, AttributeError):
+        # No built trading_core wheel → drop only its token; the remaining
+        # tokens still form a real, traceable indicator-stack identity.
+        pass
+    return "+".join(parts)
 
 
 def _data_snapshot_hash(  # pragma: no cover — cli-omitted thin delegate (helper tested in engine)
