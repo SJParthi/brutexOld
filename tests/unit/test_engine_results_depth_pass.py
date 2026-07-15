@@ -408,7 +408,16 @@ class TestExclusionsAndParity:
         paths = sidecar_paths_for(store_path, out_root, run_id=grid_identity(grid))
         stamp = load_stamp(paths)
         assert stamp is not None
-        write_tuple_sidecars(paths, [], [], store_content_hash=stamp.store_content_hash)
+        # DEC-DEPTH-STAMP-REFDATA-001 (#1801): carry the SAME reference_fingerprint
+        # the pass wrote so the re-stamped trio stays CURRENT (both the store bytes
+        # AND the reference fingerprint must match, else the tuple re-derives).
+        write_tuple_sidecars(
+            paths,
+            [],
+            [],
+            store_content_hash=stamp.store_content_hash,
+            reference_fingerprint=stamp.reference_fingerprint,
+        )
         report = _run_pass(out_root, grid)
         assert report.tuples_skipped_current == 1
         assert report.excluded_no_aggs == 5
@@ -819,3 +828,472 @@ class TestCascadeJoinThreading:
             entry["cascade"] == {"status": "not_validated", "reason": "not_in_cascade_pool"}
             for entry in loaded.entries
         )
+
+
+class TestMissingStoreLoud:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 1 M2): a missing
+    finalist store is classified deterministically (no-bars ⇒ expected; bars
+    present ⇒ deletion-suspect), counted + capped-INFO'd + — when the
+    bars-present, not-quarantined count exceeds the run-scoped FAILED
+    allowance (round 2 M1: the quarantined-prior class is identity-attributed) —
+    WARNed loud with an actionable path sample. The out_root fixture swept the
+    ONE-arm _grid(); running the pass over the TWO-arm grid leaves the tp=None
+    tuple with no store on disk — exactly one (bars-present) missing store."""
+
+    def _two_arm_grid(self) -> SweepGridConfig:
+        return _grid(take_profits=[50, None])
+
+    def test_missing_store_unexplained_warns(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=0)
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 0  # bars present — deletion-suspect
+        assert report.missing_store_unexplained == 1  # the pass's OWN computed field
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["unexplained"] == 1
+        assert warns[0]["expected"] == 0
+        # Review round 1 item 3: the remediation names sweep-verify's REAL flag
+        # (--results-root; --out-root does not exist) + review round 1 M2: the
+        # run-scoped-allowance residual heuristic is disclosed in the note.
+        assert "--results-root" in warns[0]["note"]
+        assert "--out-root" not in warns[0]["note"]
+        assert "run-scoped" in warns[0]["note"]
+        # The per-store INFO fired (capped) + the sample carries the absent path.
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
+        assert len(infos) == 1
+        assert report.missing_store_sample and report.missing_store_sample[0].endswith(".parquet")
+
+    def test_explained_missing_is_info_only_no_warn(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=1)
+        assert report.tuples_missing_store == 1
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        # The per-store INFO still fires (observability), just not the WARN.
+        assert [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_default_none_treats_every_missing_as_unexplained(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid())  # expected_missing default None
+        assert report.tuples_missing_store == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["expected"] is None
+
+    def test_zero_missing_emits_no_missing_events(self, out_root: Path) -> None:
+        with capture_logs() as logs:
+            report = _run_pass(out_root, _grid())
+        assert report.tuples_missing_store == 0
+        assert report.missing_store_sample == ()
+        assert not [
+            log
+            for log in logs
+            if log["event"]
+            in ("results_depth.missing_store", "results_depth.missing_store_unexplained")
+        ]
+
+    def test_missing_store_info_capped_and_sampled(self) -> None:
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _MISSING_STORE_SAMPLE_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 5):
+                _note_missing_store(
+                    Path(f"/lake/{i}.parquet"), tallies, no_bars=False, quarantined=False
+                )
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # INFO capped
+        assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 5  # count uncapped
+        assert len(tallies.missing_store_sample) == _MISSING_STORE_SAMPLE_CAP  # sample capped
+
+    def test_no_bars_note_shares_the_info_cap_and_never_samples(self) -> None:
+        """Review round 1 M2: the no-bars class logs its OWN capped INFO
+        (results_depth.missing_store_no_bars), shares the ONE log-volume cap
+        with the bars-present class, counts missing_expected_no_bars, and is
+        NEVER sampled (the sample feeds the actionable deletion WARN only)."""
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 3):
+                _note_missing_store(
+                    Path(f"/lake/nb-{i}.parquet"), tallies, no_bars=True, quarantined=False
+                )
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_no_bars"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # shared INFO cap
+        assert tallies.tuples_missing_store == _MISSING_STORE_LOG_CAP + 3
+        assert tallies.missing_expected_no_bars == _MISSING_STORE_LOG_CAP + 3
+        assert tallies.missing_store_sample == []  # never sampled
+        assert not [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_no_bars_missing_store_is_expected_never_unexplained(self, out_root: Path) -> None:
+        """Review round 1 M2 — THE RESUME regression: a tuple whose bar slice
+        is EMPTY is deterministically storeless (the sweep never writes a
+        store for it — first run AND checkpoint resume alike). On a RESUMED
+        run its skip folds into skipped_resume, so the run-scoped allowance is
+        0 (modelled by expected_missing=0 here) — the pre-fix run-N-counter
+        formula false-WARNed "partial store deletion" on that healthy resume.
+        The deterministic classification fires NO unexplained WARN."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        with capture_logs() as logs:
+            report = run_results_depth_pass(
+                out_root=out_root,
+                grid=grid,
+                # BANKNIFTY was never swept (its slice is empty) — the no-bars
+                # prefix tuple; NIFTY's store exists from the fixture sweep.
+                bars_for=lambda instrument, _tf: _BARS if instrument == "NIFTY" else [],
+                minute_bars_for=lambda _i: _BARS,
+                expected_missing=0,
+            )
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_no_bars"]
+        assert len(infos) == 1
+        assert report.missing_store_sample == ()  # no-bars misses are never sampled
+
+    def test_genuine_deletion_still_warns_with_run_scoped_allowance(self, out_root: Path) -> None:
+        """The M2 teeth twin (genuine-deletion-on-resume): a swept BARS-PRESENT
+        store deleted out from under the tree still WARNs against the resume's
+        run-scoped allowance (expected_missing=0) — the classification never
+        masks a real deletion."""
+        grid = _grid()
+        store = tuple_store_path(out_root, next(iter_sweep_tuples(grid)), grid)
+        store.unlink()
+        with capture_logs() as logs:
+            report = _run_pass(out_root, grid, expected_missing=0)
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_no_bars == 0
+        assert report.missing_store_unexplained == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["missing_no_bars"] == 0
+        assert store.name in str(warns[0]["sample"])
+
+    def test_over_allowance_clamps_to_zero_never_negative(self, out_root: Path) -> None:
+        """max(0, …): an allowance larger than the observed misses reports an
+        honest 0 (never a negative unexplained count) and stays silent."""
+        with capture_logs() as logs:
+            report = _run_pass(out_root, self._two_arm_grid(), expected_missing=5)
+        assert report.tuples_missing_store == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+
+
+class TestMissingStoreQuarantineIdentity:
+    """DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 2 M1): a
+    quarantined-prior missing store is attributed BY IDENTITY (the sidecar
+    label set), NOT by a stale COUNT — so a stale entry for a tuple whose store
+    now EXISTS can never launder an UNRELATED deletion into a silent green run.
+    Plus round-2 MUST-FIX 2: a raising ``bars_for`` on a missing store
+    quarantines ONLY that tuple (never aborts the pass)."""
+
+    def _two_symbol_swept(self, dest: Path) -> SweepGridConfig:
+        dest.mkdir()
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        _run_sweep(dest, grid, _BARS)
+        return grid
+
+    def test_stale_quarantine_identity_never_masks_a_deletion(self, tmp_path: Path) -> None:
+        """THE round-2 M1 refuter repro: a STALE quarantine entry for tuple T
+        (whose store still EXISTS) + a deleted UNRELATED tuple D (bars present)
+        → the WARN FIRES naming D. The pre-fix count-based code
+        (``expected_missing = tuples_failed + tuples_quarantined_prior``, a
+        caller passing an allowance of 1) was SILENT here: missing(1) −
+        allowance(1) = 0."""
+        from brutex.engine.sweep_supervisor import tuple_label
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        tuples = list(iter_sweep_tuples(grid))
+        d_tuple, t_tuple = tuples[0], tuples[1]
+        d_store = tuple_store_path(dest, d_tuple, grid)
+        t_store = tuple_store_path(dest, t_tuple, grid)
+        assert d_store.exists() and t_store.exists()  # both swept
+        d_store.unlink()  # the genuine deletion
+        with capture_logs() as logs:
+            report = _run_pass(
+                dest,
+                grid,
+                expected_missing=0,  # FAILED-only allowance; no failures this run
+                quarantined_labels=frozenset({tuple_label(t_tuple)}),  # STALE: T exists
+            )
+        assert report.tuples_missing_store == 1
+        # The stale identity matched NOTHING (T is not missing), so it granted
+        # ZERO allowance — the deletion of D is loudly unexplained.
+        assert report.missing_expected_quarantined == 0
+        assert report.missing_store_unexplained == 1
+        warns = [log for log in logs if log["event"] == "results_depth.missing_store_unexplained"]
+        assert len(warns) == 1
+        assert warns[0]["missing_quarantined"] == 0
+        assert d_store.name in str(warns[0]["sample"])
+
+    def test_quarantined_identity_explains_a_genuinely_missing_tuple(self, tmp_path: Path) -> None:
+        """The complement: when the MISSING tuple's own identity is in the
+        sidecar set, it is explained (``missing_expected_quarantined``) — a
+        capped INFO, NEVER the unexplained WARN."""
+        from brutex.engine.sweep_supervisor import tuple_label
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        d_tuple = next(iter_sweep_tuples(grid))
+        d_store = tuple_store_path(dest, d_tuple, grid)
+        d_store.unlink()
+        with capture_logs() as logs:
+            report = _run_pass(
+                dest,
+                grid,
+                expected_missing=0,
+                quarantined_labels=frozenset({tuple_label(d_tuple)}),
+            )
+        assert report.tuples_missing_store == 1
+        assert report.missing_expected_quarantined == 1
+        assert report.missing_store_unexplained == 0
+        assert not [
+            log for log in logs if log["event"] == "results_depth.missing_store_unexplained"
+        ]
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_quarantined"]
+        assert len(infos) == 1
+        assert report.missing_store_sample == ()  # quarantined misses are never sampled
+
+    def test_note_missing_store_quarantined_shares_the_info_cap(self) -> None:
+        from brutex.engine.results_depth_pass import (
+            _MISSING_STORE_LOG_CAP,
+            _note_missing_store,
+        )
+
+        tallies = _Tallies()
+        with capture_logs() as logs:
+            for i in range(_MISSING_STORE_LOG_CAP + 4):
+                _note_missing_store(
+                    Path(f"/lake/q-{i}.parquet"), tallies, no_bars=False, quarantined=True
+                )
+        infos = [log for log in logs if log["event"] == "results_depth.missing_store_quarantined"]
+        assert len(infos) == _MISSING_STORE_LOG_CAP  # shared INFO cap
+        assert tallies.missing_expected_quarantined == _MISSING_STORE_LOG_CAP + 4
+        assert tallies.missing_store_sample == []  # never sampled
+        assert not [log for log in logs if log["event"] == "results_depth.missing_store"]
+
+    def test_raising_bars_for_on_missing_store_quarantines_one_tuple(self, tmp_path: Path) -> None:
+        """Round-2 MUST-FIX 2: the ``_bars`` no-bars classification runs INSIDE
+        the per-tuple try, so a lake-reading ``bars_for`` that RAISES on the
+        missing tuple quarantines ONLY that tuple (counted ``tuples_errored`` +
+        logged) and the pass keeps going — the sibling with a present store is
+        still processed. The pre-fix code had ``_bars`` OUTSIDE the try, so the
+        raise aborted the WHOLE pass."""
+
+        class _Boom(Exception):
+            pass
+
+        dest = tmp_path / "sweeps"
+        grid = self._two_symbol_swept(dest)
+        bnf_tuple = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        tuple_store_path(dest, bnf_tuple, grid).unlink()  # BANKNIFTY store missing
+
+        def _raising_bars_for(instrument: str, _tf: str) -> list[CandleBar]:
+            if instrument == "BANKNIFTY":
+                raise _Boom("lake read failed for the missing tuple")
+            return _BARS
+
+        with capture_logs() as logs:
+            report = run_results_depth_pass(
+                out_root=dest,
+                grid=grid,
+                bars_for=_raising_bars_for,
+                minute_bars_for=lambda _i: _BARS,
+                expected_missing=0,
+            )
+        # The raising bars_for did NOT abort the pass: BANKNIFTY quarantined
+        # (counted errored), NIFTY still processed.
+        assert report.tuples_errored == 1
+        assert report.tuples_processed >= 1
+        # It raised during classification, so the missing store was never
+        # tallied as missing (it is an errored tuple instead).
+        assert report.tuples_missing_store == 0
+        errs = [log for log in logs if log["event"] == "results_depth.tuple_error"]
+        assert len(errs) == 1
+        assert errs[0]["error_type"] == "_Boom"
+
+
+class TestBarsSha256:
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1801): the full-content reference-bar digest."""
+
+    def test_identical_streams_match(self) -> None:
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        assert _bars_sha256(_BARS) == _bars_sha256(list(_BARS))
+
+    def test_absent_series_folds_a_stable_token(self) -> None:
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        assert _bars_sha256(()) == _bars_sha256([])
+        assert _bars_sha256(()) != _bars_sha256(_BARS)
+
+    def test_interior_change_moves_the_digest(self) -> None:
+        """A single interior bar mutation (SAME count/endpoints) moves the digest —
+        the property that kills a sampled count+endpoints fingerprint mutant."""
+        from dataclasses import replace
+
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        mid = len(_BARS) // 2
+        mutated = list(_BARS)
+        mutated[mid] = replace(mutated[mid], close=mutated[mid].close + Decimal("0.01"))
+        assert _bars_sha256(mutated) != _bars_sha256(_BARS)
+        # endpoints unchanged, count unchanged — only an interior bar moved.
+        assert mutated[0] == _BARS[0]
+        assert mutated[-1] == _BARS[-1]
+        assert len(mutated) == len(_BARS)
+
+    def test_open_interest_is_covered(self) -> None:
+        from dataclasses import replace
+
+        from brutex.engine.results_depth_pass import _bars_sha256
+
+        with_oi = [replace(_BARS[0], open_interest=42)]
+        without_oi = [replace(_BARS[0], open_interest=None)]
+        assert _bars_sha256(with_oi) != _bars_sha256(without_oi)
+
+    def test_naive_timestamp_fails_loud(self) -> None:
+        """Review round 1 item 7: a tz-NAIVE timestamp must raise — a naive
+        ``astimezone(UTC)`` would resolve via the MACHINE's local zone, making
+        the digest (and the resume decision) silently host-dependent."""
+        from brutex.engine.results_depth_pass import _bar_ts_us
+
+        with pytest.raises(ValueError, match="naive bar timestamp"):
+            _bar_ts_us(datetime(2026, 1, 5, 9, 16))
+        # The tz-aware path stays exact-integer µs (no float rounding).
+        assert _bar_ts_us(datetime(1970, 1, 1, 0, 0, 1, 500, tzinfo=UTC)) == 1_000_500
+
+
+class TestReferenceFingerprintRedo:
+    """DEC-DEPTH-STAMP-REFDATA-001 (#1801): a reference-data change forces a redo;
+    unchanged refs + store still skip; an old field-less stamp re-derives once."""
+
+    def test_reference_change_forces_redo(self, out_root: Path) -> None:
+        # VECTOR 8b: pass 1 with NO VIX stamps the tuple; pass 2 with REAL VIX,
+        # store bytes UNCHANGED, must re-derive (not skip) and stamp VIX.
+        first = _run_pass(out_root, _grid(), vix=False)
+        assert first.tuples_processed == 1
+        with capture_logs() as logs:
+            second = _run_pass(out_root, _grid(), vix=True)
+        assert second.tuples_skipped_current == 0
+        assert second.tuples_processed == 1
+        redo = [log for log in logs if log["event"] == "results_depth.tuple_redo_reference_changed"]
+        assert len(redo) == 1
+        # The re-derived trades now carry real VIX stamps (not the pass-1 NULLs).
+        import polars as pl
+
+        trades = pl.read_parquet(_tuple_paths(out_root, _grid()).trades)
+        assert trades.get_column("vix_entry").drop_nulls().len() > 0
+
+    def test_unchanged_refs_and_store_still_skip(self, out_root: Path) -> None:
+        _run_pass(out_root, _grid(), vix=True)
+        paths = _tuple_paths(out_root, _grid())
+        before = {p: p.read_bytes() for p in (paths.trades, paths.aggs, paths.equity)}
+        report = _run_pass(out_root, _grid(), vix=True)
+        assert report.tuples_skipped_current == 1
+        assert report.tuples_processed == 0
+        # The sidecar trio is byte-identical — a skip rewrites nothing (O(1) resume).
+        for p, data in before.items():
+            assert p.read_bytes() == data
+
+    def test_old_field_absent_stamp_re_derives_once(self, out_root: Path) -> None:
+        import json
+
+        _run_pass(out_root, _grid(), vix=True)
+        stamp_path = _tuple_paths(out_root, _grid()).stamp
+        payload = json.loads(stamp_path.read_text(encoding="utf-8"))
+        assert "reference_fingerprint" in payload  # a fresh stamp carries the field
+        # Simulate a PRE-feature stamp: strip the key entirely.
+        del payload["reference_fingerprint"]
+        stamp_path.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8"
+        )
+        stamp = load_stamp(_tuple_paths(out_root, _grid()))
+        assert stamp is not None
+        assert stamp.reference_fingerprint is None  # tolerant parse
+        report = _run_pass(out_root, _grid(), vix=True)
+        assert report.tuples_processed == 1  # re-derived, never a fabricated match
+        # The rewritten stamp now carries the field.
+        assert load_stamp(_tuple_paths(out_root, _grid())).reference_fingerprint is not None  # type: ignore[union-attr]
+
+    def test_provider_flag_flip_forces_redo(self, out_root: Path) -> None:
+        _run_pass(out_root, _grid(), vix=True)
+        # Flip the reasons provider None → wired: sidecar CONTENT changes, so the
+        # fingerprint moves and the tuple re-derives.
+        report = run_results_depth_pass(
+            out_root=out_root,
+            grid=_grid(),
+            bars_for=lambda _i, _tf: _BARS,
+            minute_bars_for=lambda _i: _BARS,
+            daily_bars_for=None,
+            vix_bars=_BARS,
+            reason_provider=lambda _c: {"reason": "x"},
+        )
+        assert report.tuples_processed == 1
+
+    def test_minute_bars_change_re_derives_only_that_instrument(self, tmp_path: Path) -> None:
+        """Granularity pin: a per-instrument fingerprint means a one-instrument
+        minute-bars change re-derives ONLY that instrument's tuples."""
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        out_root = tmp_path / "sweeps"
+        out_root.mkdir()
+        _run_sweep(out_root, grid, _BARS)
+
+        def _run(minute_for: object) -> ResultsDepthReport:
+            return run_results_depth_pass(
+                out_root=out_root,
+                grid=grid,
+                bars_for=lambda _i, _tf: _BARS,
+                minute_bars_for=minute_for,  # type: ignore[arg-type]
+                daily_bars_for=None,
+                vix_bars=None,
+            )
+
+        first = _run(lambda _i: _BARS)
+        assert first.tuples_processed == 2  # both instruments stamped
+        # Change ONLY NIFTY's minute bars (drop the last bar) → only NIFTY moves.
+        nifty_bars = list(_BARS[:-1])
+
+        def _minute(instrument: str) -> Sequence[CandleBar]:
+            return nifty_bars if instrument == "NIFTY" else _BARS
+
+        with capture_logs() as logs:
+            second = _run(_minute)
+        assert second.tuples_processed == 1  # exactly one instrument re-derived
+        assert second.tuples_skipped_current == 1
+        redo = [log for log in logs if log["event"] == "results_depth.tuple_redo_reference_changed"]
+        assert len(redo) == 1
+        assert "NIFTY" in redo[0]["store"]
+        assert "BANKNIFTY" not in redo[0]["store"]
+
+    def test_two_identical_passes_are_deterministic(self, out_root: Path) -> None:
+        """The determinism golden: two identical passes → byte-identical trio +
+        equal fingerprint (produced_at_utc stays the ONE non-deterministic field)."""
+        _run_pass(out_root, _grid(), vix=True)
+        paths = _tuple_paths(out_root, _grid())
+        fp1 = load_stamp(paths).reference_fingerprint  # type: ignore[union-attr]
+        trio1 = {p: p.read_bytes() for p in (paths.trades, paths.aggs, paths.equity)}
+        # A second pass skips (current), so a fresh REBUILD is forced to compare
+        # bytes: strip the stamp so the trio is re-derived from scratch.
+        paths.stamp.unlink()
+        _run_pass(out_root, _grid(), vix=True)
+        fp2 = load_stamp(paths).reference_fingerprint  # type: ignore[union-attr]
+        assert fp1 == fp2
+        for p, data in trio1.items():
+            assert p.read_bytes() == data

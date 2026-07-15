@@ -7383,6 +7383,20 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # G10 (DEC-SWEEP-UNKILLABLE-CORE-001): hold the SHARED lake read-guard
             # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
             # this launch loudly; once the bars are in memory the guard is released.
+            # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1799 → landed here as
+            # the reconcile-refusal lane): collect the reconcile's UNREADABLE +
+            # present-but-EMPTY partition verdicts through the loader's
+            # on_reconcile seam so the launch can REFUSE loudly below (a silent
+            # skip poisons the PDH/PDL/pivot/Fib anchors across the hole while
+            # data_snapshot_hash stamps the holed series canonical, Golden
+            # Rule #4).
+            corrupt_partitions: list[str] = []
+            empty_partitions: list[str] = []
+
+            def _collect_reconcile(reconcile_result: Any) -> None:
+                corrupt_partitions.extend(reconcile_result.unreadable)
+                empty_partitions.extend(reconcile_result.empty_partitions)
+
             slices: dict[tuple[str, str], list[Any]] = {}
             with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
                 for symbol in symbol_list:
@@ -7397,6 +7411,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             start=start_dt,
                             end=end_dt,
                             resolution=resolution,
+                            on_reconcile=_collect_reconcile,
                             stat_cache=True,
                         )
         except FuturesSeriesError as exc:
@@ -7409,6 +7424,77 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # change run identity (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001,
             # MIGRATION.md #1797).
             print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+
+        # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1799): a CORRUPT /
+        # version-incompatible Parquet partition the reconcile SKIPPED is an
+        # INTERIOR data hole invisible in the swept output — Stage-1A rolls
+        # _prev_day_ohlc from whatever bar precedes the next session, so day N's
+        # "prev day" silently becomes day N-k, poisoning the PDH/PDL/pivot/Fib
+        # anchors (bits 6-29+48-51) while data_snapshot_hash stamps the holed
+        # series as canonical (Golden Rule #4). REFUSE the launch loudly — this is
+        # the freshness-gate class (Correctness > everything), NOT the
+        # --allow-missing-slices class (which opts into visibly-ABSENT whole
+        # pairs). No escape flag: absent != corrupt.
+        if corrupt_partitions:
+            corrupt_sorted = sorted(corrupt_partitions)
+            shown = corrupt_sorted[:10]
+            extra = len(corrupt_sorted) - len(shown)
+            more = f" (+{extra} more)" if extra > 0 else ""
+            print(
+                f"[brutex] REFUSED: {len(corrupt_sorted)} unreadable (corrupt) partition "
+                "file(s) skipped by the catalog reconcile — the sweep would run on "
+                "silently-holed data (PDH/PDL/pivot/Fib anchors poisoned across the hole, "
+                "bits 6-29+48-51, and the run identity would hash the partial series as "
+                f"canonical, Golden Rule #4): {', '.join(shown)}{more}. Remedy: "
+                "quarantine/heal (brutex lake audit-unique), re-pull the named months, "
+                "or restore read permissions (chmod/chown) if the file is "
+                "permission-blocked, then re-run.",
+                file=sys.stderr,
+            )
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "sweep_launch.corrupt_partitions_refused",
+                lake=str(resolved_lake),
+                files=corrupt_sorted,
+            )
+            return EXIT_USER_ERROR
+        # DEC-LAKE-STATS-MANIFEST-001 residual R2N-06: a PRESENT, readable,
+        # EXACTLY-0-row month partition is the corrupt-month refusal's twin — no
+        # BruteX writer emits a valid 0-row parquet (ParquetWriter.write raises on
+        # empty input, the all-filtered heal UNLINKS the partition, a footer-last
+        # crash truncates → PolarsError → corrupt refusal above), so a PRESENT
+        # 0-row file is externally-forged / anomalous. Left benign it silently
+        # DROPS the whole month with a data_snapshot_hash bit-identical to the
+        # drop — the exact silent-partial class this refusal exists to close.
+        # REFUSE loudly, naming the file(s), mirroring the corrupt refusal. Scoped
+        # to the unambiguous exactly-0-row present case: a legitimately data-less
+        # month has NO file (benign ENOENT) and a legitimately THIN present month
+        # has rows > 0, so neither is refused (a row-COUNT density oracle is
+        # DEFERRED — DEC-RECONCILE-ROW-DENSITY-ORACLE-001, follow-up only).
+        if empty_partitions:
+            empty_sorted = sorted(empty_partitions)
+            shown = empty_sorted[:10]
+            extra = len(empty_sorted) - len(shown)
+            more = f" (+{extra} more)" if extra > 0 else ""
+            print(
+                f"[brutex] REFUSED: {len(empty_sorted)} present-but-EMPTY (0-row) partition "
+                "file(s) found by the catalog reconcile — no BruteX writer emits a valid "
+                "0-row parquet, so a present 0-row file is externally-forged/anomalous and "
+                "the sweep would silently DROP the whole month (its bars vanish with a "
+                "data_snapshot_hash bit-identical to the drop, Golden Rule #4): "
+                f"{', '.join(shown)}{more}. Remedy: delete/heal the empty file(s) "
+                "(brutex lake audit-unique) or re-pull the named months, then re-run.",
+                file=sys.stderr,
+            )
+            import structlog
+
+            structlog.get_logger("brutex.cli").error(
+                "sweep_launch.empty_partitions_refused",
+                lake=str(resolved_lake),
+                files=empty_sorted,
+            )
             return EXIT_USER_ERROR
 
         loaded = {key: len(bars) for key, bars in slices.items() if bars}
@@ -8195,6 +8281,27 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     )(_RESULTS_DEPTH_VIX_SYMBOL),
                     margin_entry_date=_parse_dt(start).date(),
                     cascade_report=cascade_report,
+                    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 1 M2 +
+                    # round 2 M1): the RUN-SCOPED FAILED allowance ONLY (a
+                    # SweepComboError-failed tuple wrote no store THIS run —
+                    # run-scoped, freshly computed; it cannot over-claim for
+                    # completed-run tuples, whose dedup-cache record prevents a
+                    # re-dispatch; a crash inside the store-write → cache-record
+                    # window is the disclosed residual — the re-dispatched tuple
+                    # can fail while its prior-run store exists, granting one
+                    # consumable count). The
+                    # quarantined-prior class is NO LONGER summed here — it is
+                    # attributed BY IDENTITY in the pass via quarantined_labels
+                    # (below): a durable sidecar COUNT could go stale (its clear is
+                    # manual, #1608) and an unrelated deletion could consume the
+                    # stale allowance — a silent green run — while a per-tuple
+                    # IDENTITY match grants allowance ONLY for the tuple actually
+                    # missing. The no-bars class is likewise NOT summed (the pass
+                    # classifies it deterministically per missing store — resume-safe:
+                    # a run-N counter here would false-WARN on a healthy resume, and
+                    # summing tuples_skipped_no_bars would DOUBLE-allow).
+                    expected_missing=result.tuples_failed,
+                    quarantined_labels=_depth_quarantined_labels(out_root, grid_identity(grid)),
                 )
             else:
                 print(
@@ -10223,6 +10330,53 @@ _RESULTS_DEPTH_VIX_EXCHANGE: Final[str] = "NSE"
 _RESULTS_DEPTH_VIX_SEGMENT: Final[str] = "INDEX"
 _RESULTS_DEPTH_VIX_SYMBOL: Final[str] = "INDIAVIX"
 
+#: Cap on the ``results_depth.reference_partition_unreadable`` WARN's named-file
+#: sample (the reference-loader twin of ``_MISSING_STORE_SAMPLE_CAP``).
+_REFERENCE_UNREADABLE_WARN_CAP: Final[int] = 20
+
+
+def _warn_unreadable_reference_partitions(
+    unreadable: Sequence[str], *, symbol: str, interval: str
+) -> int:
+    """LOUD capped WARN naming corrupt/unreadable reference partition(s).
+
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 2 M4). The
+    results-depth REFERENCE reconcile (VIX 1m + reference 1day/1m) must NEVER
+    fail the sweep — a corrupt/unreadable reference month is NOT a launch
+    refusal here (unlike the sweep-launch reconcile, which refuses; the depth
+    pass is post-sweep and fenced) — but it must NOT be SILENT either: the
+    holed reference series would be stamped as the canonical
+    ``reference_fingerprint`` (skip-current FOREVER). Emit one capped WARN +
+    stderr line NAMING the file(s) so the operator sees it. Returns the count
+    (0 ⇒ no-op, nothing unreadable). NOT a report-count seam: the reference
+    loader is separate from the pass's ``ResultsDepthReport`` — surfacing the
+    count there would need threading a mutable sink through the loader closure,
+    an explicit honest limit deferred (the WARN is the visible signal).
+    """
+    count = len(unreadable)
+    if count == 0:
+        return 0
+    shown = sorted(unreadable)[:_REFERENCE_UNREADABLE_WARN_CAP]
+    extra = count - len(shown)
+    more = f" (+{extra} more)" if extra > 0 else ""
+    import structlog
+
+    structlog.get_logger("brutex.cli").warning(
+        "results_depth.reference_partition_unreadable",
+        symbol=symbol,
+        interval=interval,
+        count=count,
+        files=shown,
+    )
+    print(
+        f"[brutex] WARNING: results-depth — {count} unreadable (corrupt) reference "
+        f"partition file(s) for {symbol}/{interval}: the reference series is HOLED and "
+        "would stamp as canonical (skip-current forever); quarantine/heal or re-pull the "
+        f"named months, then re-run 'brutex sweep-all': {', '.join(shown)}{more}",
+        file=sys.stderr,
+    )
+    return count
+
 
 def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _maybe_run_options_sim_on_winners precedent; the fenced orchestration in _run_results_depth_adapter is the covered surface)
     *,
@@ -10257,13 +10411,19 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
             from brutex.feed.replay import ReplayFeed
 
             with Catalog.open(catalog_path) as cat:
-                reconcile_catalog_from_lake(
+                reconcile_result = reconcile_catalog_from_lake(
                     lake_root=lake_root,
                     catalog=cat,
                     exchange=exchange,
                     segment=segment,
                     symbol=symbol,
                     interval=interval,
+                )
+                # #1800 round 2 M4: a corrupt reference month is skipped by the
+                # reconcile — surface it LOUDLY (never fail the sweep) so a holed
+                # reference series is never silently stamped canonical.
+                _warn_unreadable_reference_partitions(
+                    reconcile_result.unreadable, symbol=symbol, interval=interval
                 )
                 feed = ReplayFeed(
                     catalog=cat,
@@ -10291,6 +10451,24 @@ def _depth_reference_loader(  # pragma: no cover — real-lake I/O shim (the _ma
     return _load
 
 
+def _depth_quarantined_labels(out_root: Path, sweep_id: str) -> frozenset[str]:
+    """The quarantined-prior tuple IDENTITY set for the results-depth pass.
+
+    DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 2 M1). Reads the
+    durable ``<out_root>/.sweep_quarantine.json`` sidecar (#1608) through the
+    COMMON :func:`~brutex.engine.sweep_parallel.load_quarantined_tuple_labels`
+    — sweep-scoped by *sweep_id*, and itself FAIL-SOFT (a missing / corrupt /
+    hostile sidecar → the empty set + one loud ``sweep.quarantine.sidecar_corrupt``
+    WARN, never a raise), so wiring it can never fail a completed sweep. The
+    pass attributes each bars-present missing store whose ``tuple_label`` is in
+    this set BY IDENTITY (``missing_expected_quarantined``), closing the
+    count-based masking a stale sidecar could otherwise cause.
+    """
+    from brutex.engine.sweep_parallel import load_quarantined_tuple_labels
+
+    return frozenset(load_quarantined_tuple_labels(out_root, sweep_id))
+
+
 def _run_results_depth_adapter(
     *,
     out_root: Path,
@@ -10300,6 +10478,8 @@ def _run_results_depth_adapter(
     daily_bars_for: Callable[[str], Sequence[Any] | None],
     vix_bars: Sequence[Any] | None,
     margin_entry_date: date,
+    expected_missing: int | None = None,
+    quarantined_labels: frozenset[str] | None = None,
     pass_runner: Callable[..., Any] | None = None,
     cascade_report: Any | None = None,
 ) -> bool:
@@ -10317,6 +10497,27 @@ def _run_results_depth_adapter(
     ``KeyboardInterrupt`` / ``SystemExit`` / ``MemoryError`` always re-raise
     raw (global stops are never swallowed). Returns ``True`` iff the pass
     completed and its report printed.
+
+    ``expected_missing`` is the sweep's RUN-SCOPED **FAILED-only** allowance
+    (``tuples_failed`` — review round 2 M1 narrowed it from
+    ``tuples_failed + tuples_quarantined_prior``: the quarantined-prior class is
+    now attributed BY IDENTITY via ``quarantined_labels`` below, and the no-bars
+    class deterministically per missing store — neither is part of this count).
+    ``quarantined_labels`` is the durable ``.sweep_quarantine.json`` label SET
+    (``load_quarantined_tuple_labels`` — #1608). Both are threaded into the pass
+    so a bars-present, not-quarantined missing-store count beyond the FAILED
+    allowance raises one ``results_depth.missing_store_unexplained`` WARN + one
+    mirrored stderr line (DEC-DEPTH-MISSING-STORE-LOUD-001, MIGRATION.md #1800).
+    The identity attribution closes the round-2 masking: a STALE quarantine
+    sidecar entry for a tuple whose store now exists can no longer LAUNDER an
+    unrelated deletion into a silent green run (a COUNT allowance could be spent
+    on the deletion; an IDENTITY match cannot). The stderr mirror reads the
+    pass's OWN ``report.missing_store_unexplained`` — ONE formula, never
+    re-derived here. HONEST residual (disclosed in both messages): the
+    allowance is run-scoped, so a deletion coinciding with prior-run failures
+    can be under-attributed. The return value STAYS ``True`` in the unexplained
+    case — the fenced "NEVER fails the sweep" contract is byte-preserved; it is
+    observability, not an exit change.
 
     ``pass_runner`` is an injection seam for tests; ``None`` runs the real
     :func:`brutex.engine.results_depth_pass.run_results_depth_pass`.
@@ -10378,6 +10579,8 @@ def _run_results_depth_adapter(
             reason_provider=reason_payload,
             margin_roi_provider=_margin_roi,
             cascade_join=cascade_join,
+            expected_missing=expected_missing,
+            quarantined_labels=quarantined_labels,
         )
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -10404,6 +10607,29 @@ def _run_results_depth_adapter(
         f"top100={'written' if report.top100_written else 'FAILED'} "
         f"entries={report.top100_entries}"
     )
+    # DEC-DEPTH-MISSING-STORE-LOUD-001 (#1800, review round 1 M2): mirror the
+    # pass's OWN unexplained count (report.missing_store_unexplained — the ONE
+    # formula lives in the pass) onto stderr so a cron tail sees it; the
+    # sweep's exit path is UNCHANGED (return stays True — observability, not a
+    # failure).
+    unexplained_missing = report.missing_store_unexplained
+    if unexplained_missing > 0:
+        sample = ", ".join(report.missing_store_sample)
+        sample_suffix = f": {sample}" if sample else ""
+        print(
+            f"[brutex] WARNING: results-depth — {unexplained_missing} bars-present, "
+            "not-quarantined finalist store(s) missing beyond the sweep's run-scoped "
+            "FAILED allowance "
+            f"(missing={report.tuples_missing_store}, "
+            f"no_bars={report.missing_expected_no_bars}, "
+            f"quarantined={report.missing_expected_quarantined}, "
+            f"failed_expected={expected_missing}) — partial store deletion or a foreign "
+            "grid identity (quarantined-prior tuples are attributed by identity, so a "
+            "stale sidecar can no longer mask a deletion; a deletion coinciding with "
+            "prior-run FAILURES can be under-attributed); re-run 'brutex sweep-all' "
+            f"with the same selection to rebuild{sample_suffix}",
+            file=sys.stderr,
+        )
     return True
 
 
