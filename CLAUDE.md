@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
+_Last updated: 2026-07-13 (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780 —
+the SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
+verdict at docs/vendors/gdfl/: GDFL's finest history granularity is 1-second L1
+SNAPSHOT data (its vendor API enum token is TICK — irregular within-second
+cadence, NOT a fixed one-row-per-second grid, NOT sub-second exchange
+tick-by-tick; the 1-second class is the CEILING for Indian retail data per the
+prior verified 2026-07-09 tick-feed research), NO 1-second OHLC bar periodicity
+exists anywhere in the API, and the days-scale (unconfirmed figure — never
+years-scale on any reading) snapshot-history window makes a
+2022→now 1-second-class BACKFILL impossible — forward capture only. Every fact
+evidence-tiered; ZERO verbatim vendor prose / vendor source trees / raw sample
+data committed (the coordinator's summarize-only licensing ruling — PyPI
+re-fetch URLs + SHA256 digests pinned instead); the 63-blocked-site-URLs
+capture honesty + the operator manual-upload list live in the archive's
+MANIFEST.md; the extract/ingest design is deliberately SPLIT OUT under
+DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger).
+DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item record lives
+in the §1 Active-branch blurb + MIGRATION.md #1780 — this header carries the
+one-line summary, never the story.)
+Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
 `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
@@ -2623,7 +2643,33 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
+- **Active branch:** `claude/gdfl-vendor-docs` (**DEC-GDFL-VENDOR-DOCS-001,
+  MIGRATION.md #1780** — the SUMMARIZE-ONLY GDFL (globaldatafeeds.in) vendor-docs
+  archive + the definitive granularity/depth VERDICT at `docs/vendors/gdfl/`
+  (README · VERDICT · MANIFEST · api/REST_API + api/WEBSOCKET_API ·
+  sdk/PACKAGES · INGEST_POINTER). VERDICT (operator-directed framing): GDFL's
+  finest history granularity is 1-second L1 SNAPSHOT data — the vendor API enum
+  token is TICK (`HistoryTickResult`) — second-stamped L1 quote/trade snapshots
+  with irregular within-second cadence, NOT a fixed one-row-per-second grid and
+  NOT sub-second exchange tick-by-tick; the 1-second class is the CEILING for
+  Indian retail data (prior verified 2026-07-09 tick-feed research), NO 1-second
+  OHLC bar periodicity exists (`GetHistory` enum = TICK/MINUTE/HOUR/DAY/WEEK/
+  MONTH), and the days-scale (unconfirmed figure — never years-scale)
+  snapshot-history window ⇒ a 2022→now 1-second-class
+  BACKFILL is impossible — forward capture from subscription day only. Every
+  fact carries an evidence tier (SDK-VERIFIED · RAW-SAMPLE-MEASURED ·
+  PRIOR-VERIFIED-NOTE · OFFICIAL-SNIPPET-UNCONFIRMED · UNVERIFIED · NOT STATED
+  IN SDK); the summarize-only licensing ruling commits ZERO verbatim vendor
+  prose / source trees / raw sample rows (pinned PyPI SHA256 digests re-fetch
+  the originals); the 75-attempt capture log (63 site URLs egress-blocked) +
+  the 5-item operator manual-upload list live in the archive's MANIFEST.md;
+  the reconstructed 10-gate credentialed probe list guards any future adoption.
+  The extract/ingest design is deliberately split out under
+  DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger).
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
+  OUT of BruteX per DEC-LIVE-REMOVE-001.)
+  Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
   only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
@@ -7228,7 +7274,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/operator-health-truth`
+- **Active feature branch:** `claude/gdfl-vendor-docs`
+  (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780 — the SUMMARIZE-ONLY GDFL
+  vendor-docs archive + the definitive granularity/depth verdict at
+  `docs/vendors/gdfl/`: GDFL's finest history granularity is 1-second L1
+  SNAPSHOT data (vendor enum TICK — irregular cadence, not a fixed 1-second
+  grid, not sub-second tick-by-tick; the ceiling for Indian retail data), NO
+  1-second OHLC bar periodicity exists, days-scale (unconfirmed figure — never
+  years-scale) snapshot history ⇒ backfill
+  impossible / forward capture only; evidence-tiered, zero verbatim vendor
+  prose/source/data committed (summarize-only licensing ruling; pinned PyPI
+  SHA256 re-fetch digests); the ingest design is split out under
+  DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger);
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1780 for the full blurb)
+  Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
   completed cleanly" on `flow_state === 'done'` is KILLED — the pull-rate
