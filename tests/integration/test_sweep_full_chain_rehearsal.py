@@ -23,15 +23,34 @@ production writers ingest uses) by driving the REAL ``cli.cmd_sweep_all`` shim,
 
 Runtime is measured and printed per leg (``rehearsal.<leg>.seconds`` lines in
 the pytest output) so the CI job's budget claim stays evidence-backed.
+
+Rehearsal-scoped budgets (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795):
+run identity folds ``code_commit_sha``, so the Stage-3 CMA-ES seed and the
+Stage-4 cascade seed re-roll PER COMMIT — on an expensive draw, candidates
+survive into cascade filter #9 (``monte_carlo_permutation_test``,
+``mc_n_permutations=1000`` in production) where each permutation re-runs a
+full pure-Python trade simulation, and — because this test drives
+``cli.cmd_sweep_all`` DIRECTLY, bypassing the ``main()``-dispatch log-volume
+guard (DEC-SWEEP-LOG-VOLUME-GUARD-001) — every simulated trade emitted two
+structlog DEBUG events on an UNCONFIGURED logger. Together those made the
+300 s wall-clock ceiling below commit-seed-dependent (main itself failed it
+at 452.6 s — actions run 29249947445). The ``_rehearsal_env`` bound fixes
+both at the fixture: ``BRUTEX_SWEEP_MC_PERMUTATIONS=25`` (the SAME idiom as
+the ``BRUTEX_SWEEP_DIFFCHECK_K=8`` budget above — MC keeps real teeth, the
+worst-case draw is bounded) + a scoped INFO logging bound (the dispatch
+guard's posture, ``reset_configuration``-fenced so no other test is
+affected). The 300.0 s ceiling + the production default 1000 are UNTOUCHED.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +62,7 @@ from brutex.calendars.nse import get_session
 from brutex.data.models import CandleBar
 from brutex.engine.sweep_audit import verify_chain
 from brutex.observability.flight_recorder import iter_run_records
+from brutex.observability.logging import configure_logging, reset_configuration
 from brutex.observability.progress_beat import (
     register_progress_beat,
     unregister_progress_beat,
@@ -85,6 +105,53 @@ _N_DAYS = 190
 _PER_DAY = 12
 #: The design's rehearsal-sized diffcheck budget (CI_K_SAMPLES, D-10/graft C).
 _CI_K_SAMPLES = 8
+#: Rehearsal-sized Stage-4 Monte-Carlo permutation budget
+#: (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the diffcheck-K idiom):
+#: enough permutations for the p-value filter to keep real teeth in the
+#: miniature chain, small enough that an expensive commit-seed draw (every
+#: surviving candidate reaching filter #9) stays well inside the 300 s
+#: ceiling. Production keeps ``CascadeConfig.mc_n_permutations = 1000``.
+_CI_MC_PERMUTATIONS = 25
+
+
+@contextlib.contextmanager
+def _rehearsal_env() -> Iterator[None]:
+    """Bound one rehearsal chain run: CI budgets + the INFO log-volume guard.
+
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795). Three scoped bounds,
+    all restored on exit so no other test in the process is affected:
+
+    * ``BRUTEX_SWEEP_DIFFCHECK_K=8`` — the pre-existing R45 diffcheck budget;
+    * ``BRUTEX_SWEEP_MC_PERMUTATIONS=25`` — the Stage-4 MC permutation
+      budget (resolved fail-loud by ``cmd_sweep_all`` through the
+      ``cascade_config_for_sweep(overrides=…)`` seam);
+    * a scoped ``configure_logging(level="INFO")`` — this fixture calls
+      ``cli.cmd_sweep_all`` DIRECTLY, bypassing the ``main()``-dispatch
+      log-volume guard (DEC-SWEEP-LOG-VOLUME-GUARD-001), so without it every
+      simulated trade streams two DEBUG events through an unconfigured
+      structlog (~65-70 % of a worst-draw pass's wall clock was renderer
+      cost). ``reset_configuration`` runs BEFORE (clearing any first-use
+      logger cache so the bound genuinely bites) and AFTER (restoring the
+      unconfigured default for later tests — the ``_clean_logging_state``
+      idiom of ``test_cli_sweep_log_level``).
+    """
+    env_budgets = {
+        "BRUTEX_SWEEP_DIFFCHECK_K": str(_CI_K_SAMPLES),
+        "BRUTEX_SWEEP_MC_PERMUTATIONS": str(_CI_MC_PERMUTATIONS),
+    }
+    backups = {name: os.environ.get(name) for name in env_budgets}
+    os.environ.update(env_budgets)
+    reset_configuration()
+    configure_logging(level="INFO", json_renderer=False)
+    try:
+        yield
+    finally:
+        reset_configuration()
+        for name, backup in backups.items():
+            if backup is None:
+                del os.environ[name]
+            else:  # pragma: no cover — env pre-set only outside the suite
+                os.environ[name] = backup
 
 
 def _trading_days(start: date, n: int) -> list[date]:
@@ -224,15 +291,8 @@ class _Rehearsal:
 @pytest.fixture(scope="module")
 def rehearsal(tmp_path_factory: pytest.TempPathFactory) -> _Rehearsal:
     """Run the full chain (first pass + resume pass) exactly ONCE per module."""
-    env_backup = os.environ.get("BRUTEX_SWEEP_DIFFCHECK_K")
-    os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = str(_CI_K_SAMPLES)
-    try:
+    with _rehearsal_env():
         state = _Rehearsal(tmp_path_factory.mktemp("rehearsal"))
-    finally:
-        if env_backup is None:
-            del os.environ["BRUTEX_SWEEP_DIFFCHECK_K"]
-        else:  # pragma: no cover — env pre-set only outside the suite
-            os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = env_backup
     print(f"\nrehearsal.first_pass.seconds={state.seconds_first:.2f}")
     print(f"rehearsal.resume_pass.seconds={state.seconds_second:.2f}")
     return state
@@ -273,6 +333,11 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     assert report["sweep_id"] == rehearsal.run_id
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
+    # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): the env-resolved MC
+    # budget travelled the cascade_config_for_sweep(overrides=…) seam into the
+    # MANIFEST-STORED config — the manual `brutex cascade` replay reads only
+    # this frozen value, so the replay stays exact under the override.
+    assert manifest["cascade_config"]["mc_n_permutations"] == _CI_MC_PERMUTATIONS
 
 
 def test_r28_manifest_contract_shape_and_funnel(rehearsal: _Rehearsal) -> None:
@@ -464,15 +529,8 @@ class _Adversarial:
 
 @pytest.fixture(scope="module")
 def adversarial(tmp_path_factory: pytest.TempPathFactory) -> _Adversarial:
-    env_backup = os.environ.get("BRUTEX_SWEEP_DIFFCHECK_K")
-    os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = str(_CI_K_SAMPLES)
-    try:
+    with _rehearsal_env():
         state = _Adversarial(tmp_path_factory.mktemp("adversarial"))
-    finally:
-        if env_backup is None:
-            del os.environ["BRUTEX_SWEEP_DIFFCHECK_K"]
-        else:  # pragma: no cover — env pre-set only outside the suite
-            os.environ["BRUTEX_SWEEP_DIFFCHECK_K"] = env_backup
     print(f"\nrehearsal.adversarial.seconds={state.seconds:.2f}")
     return state
 

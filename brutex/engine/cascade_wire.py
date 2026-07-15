@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
@@ -498,6 +499,62 @@ class CascadeWireReport:
 
 
 # ── Cascade config (deterministic seed from the sweep id) ─────────────────────
+
+#: Env var overriding the Stage-4 Monte-Carlo permutation budget
+#: (``CascadeConfig.mc_n_permutations``) — DEC-REHEARSAL-MC-BUDGET-001,
+#: MIGRATION.md #1795. Unset/blank keeps the production default (1000)
+#: BYTE-IDENTICAL; an integer ``>= 1`` bounds filter #9's worst-case cost
+#: (each permutation re-runs a full pure-Python trade simulation, so an
+#: expensive seed draw can dominate a small CI rehearsal's wall clock —
+#: the R38 rehearsal fixture sets a small budget the way it already bounds
+#: diffcheck via ``BRUTEX_SWEEP_DIFFCHECK_K``). Junk / ``< 1`` RAISES
+#: (the fail-loud house env idiom — ``resolve_diffcheck_k`` precedent).
+MC_PERMUTATIONS_ENV: Final[str] = "BRUTEX_SWEEP_MC_PERMUTATIONS"
+
+
+def resolve_mc_permutations(env: Mapping[str, str] | None = None) -> int | None:
+    """Resolve the optional MC permutation-budget override (fail-loud).
+
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): reads
+    :data:`MC_PERMUTATIONS_ENV`. Unset / blank ⇒ ``None`` — the caller passes
+    NO override and :class:`~brutex.metrics.cascade.CascadeConfig` keeps its
+    production ``mc_n_permutations`` default (1000) byte-identical (pinned).
+    A non-blank value must parse as an integer ``>= 1`` (a zero/negative
+    budget would silently disable the Monte-Carlo permutation filter — an
+    explicit disable is NOT offered); anything else RAISES ``ValueError``
+    naming the env var, so a typo'd knob is a clean pre-sweep user-config
+    error, never a mid-run surprise (``cmd_sweep_all`` resolves it EAGERLY
+    beside the diffcheck/stall knobs). The resolved value is threaded through
+    the EXISTING :func:`cascade_config_for_sweep` ``overrides=`` seam, so it
+    lands in the manifest-stored cascade config and the MANUAL replay stays
+    exact (pinned by test).
+
+    Parameters
+    ----------
+    env
+        Environment mapping; defaults to ``os.environ`` (injectable).
+
+    Returns
+    -------
+    int | None
+        The override budget, or ``None`` when the env var is unset/blank.
+
+    Raises
+    ------
+    ValueError
+        If the value is not an integer ``>= 1``.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    raw = src.get(MC_PERMUTATIONS_ENV, "")
+    if raw.strip() == "":
+        return None
+    try:
+        n = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"{MC_PERMUTATIONS_ENV}={raw!r} must be an integer >= 1") from exc
+    if n < 1:
+        raise ValueError(f"{MC_PERMUTATIONS_ENV}={raw!r} must be an integer >= 1")
+    return n
 
 
 def cascade_config_for_sweep(
@@ -2342,6 +2399,7 @@ __all__ = [
     "CASCADE_REPORT_STAGE",
     "MANIFEST_FILENAME",
     "MANIFEST_VERSION",
+    "MC_PERMUTATIONS_ENV",
     "REPORT_FILENAME",
     "REPORT_VERSION",
     "BarsContext",
@@ -2366,6 +2424,7 @@ __all__ = [
     "manifest_snapshot_hash",
     "manifest_to_json",
     "report_path",
+    "resolve_mc_permutations",
     "run_and_write_from_manifest",
     "run_and_write_from_specs",
     "run_cascade_over_specs",

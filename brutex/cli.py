@@ -7261,6 +7261,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # clean user-config error at launch, never a mid-run traceback (the same
     # law as the cache knobs above; the stall policy's `workers` arg is
     # validation-only, deliberately never used to lower the bound).
+    from brutex.engine.cascade_wire import resolve_mc_permutations
     from brutex.engine.sweep_diffcheck import resolve_diffcheck_k
     from brutex.engine.sweep_run_core import sweep_run_core
     from brutex.engine.sweep_singleflight import lake_read_guard
@@ -7270,6 +7271,12 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         tripwire_config = TripwireConfig.from_env()
         diffcheck_k = resolve_diffcheck_k()
+        # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): the optional
+        # Stage-4 Monte-Carlo permutation budget override — resolved EAGERLY
+        # like the sibling knobs (junk = a clean pre-sweep user-config error);
+        # None (env unset) threads NO override, so the production
+        # CascadeConfig default (1000) is byte-identical.
+        mc_permutations = resolve_mc_permutations()
         stall_policy = resolve_stall_policy(per_tuple_estimate_s=None, workers=1)
     except ValueError as exc:
         print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
@@ -8003,7 +8010,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 specs=cascade_specs,
                 bars_for=_bars_for,
                 bars_context=BarsContext(exchange=exchange, segment=segment, start=start, end=end),
-                cascade_config=cascade_config_for_sweep(sweep_id),
+                # DEC-REHEARSAL-MC-BUDGET-001: the optional MC permutation
+                # budget rides the EXISTING overrides seam, so the resolved
+                # value lands in the manifest-stored cascade config and the
+                # MANUAL `brutex cascade` replay stays exact; None = no
+                # override = the byte-identical production config.
+                cascade_config=cascade_config_for_sweep(
+                    sweep_id,
+                    overrides=(
+                        None if mc_permutations is None else {"mc_n_permutations": mc_permutations}
+                    ),
+                ),
                 stage3=stage3_manifest_record(stage3_report, results_root=out_root),
                 leaderboard_trials=leaderboard_trials,
                 # ADR-0012 (review round-1): the SAME resolved schedule map the
