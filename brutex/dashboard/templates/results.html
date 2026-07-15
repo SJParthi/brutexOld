@@ -459,6 +459,44 @@ function failState(label, opts) {
   }
 }
 
+/* Store-fault honesty (the display half of DEC-SWEEP-RESULTS-DEPTH-001
+   Ruling 10 / package C3): the backend degrades a corrupt/unreadable
+   ResultsStore into a 200 payload carrying explicit error/error_type markers
+   (sweep_results_view.store_error_payload) precisely so a store FAULT can
+   never masquerade as the friendly "No sweeps yet" hero. Render a DISTINCT
+   error card NAMING the error_type — createElement/textContent only (the repo
+   XSS law); the KPI cards read honest "—" unknowns, never the payload's
+   structural zeros. Refolded from PR #1368 (Batch A) onto main's shape. */
+function renderStoreError(board) {
+  ROWS = [];
+  renderCardsUnknown();
+  eraBanner.textContent = "";
+  eraBanner.classList.remove("show");
+  const errType = String(board.error_type || "unknown");
+  const detail = String(board.error);
+  const title = "results store error (" + errType + ")";
+  if (window.BXUI) {
+    BXUI.errorCard(panel, {
+      title: title,
+      hint: detail + " — not an empty leaderboard: the sweep store could not be read.",
+      retry: load,
+    });
+  } else {
+    panel.textContent = "";
+    const box = document.createElement("div");
+    const head = document.createElement("div");
+    head.textContent = title;
+    const hint = document.createElement("div");
+    hint.textContent = detail + " — not an empty leaderboard: the sweep store could not be read.";
+    box.appendChild(head);
+    box.appendChild(hint);
+    panel.appendChild(box);
+  }
+  statusEl.textContent = title + " — " + detail;
+  liveTxt.textContent = "store error";
+  setDot("down");
+}
+
 /* Fill a <select> with options, preserving the current value when still valid. */
 function fillSelect(el, values) {
   const cur = el.value;
@@ -546,6 +584,13 @@ async function load() {
     const r = await (window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url));
     if (!r.ok) { failState("error " + r.status, { status: r.status }); return; }
     const board = await r.json();
+    /* A store-fault degrade payload (error/error_type markers) is a 200 that
+       is NOT "no sweeps yet" — route it to the distinct honest error card
+       BEFORE any count/hero rendering could launder it into an empty state. */
+    if (board && board.error) {
+      renderStoreError(board);
+      return;
+    }
     renderCards(board);
     /* Snapshot-era honesty (DEC-RESULTS-SURFACE-HONESTY-001): when the ranked
        rows span more than one data era, say so LOUDLY. textContent only — the
