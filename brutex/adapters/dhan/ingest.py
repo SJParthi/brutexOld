@@ -89,8 +89,10 @@ class FetchOhlcv(Protocol):
 _MARKET: Final[str] = DHAN_COVERAGE_MARKET
 
 #: The lake partition segment for a Dhan index series (the neutral INDEX segment; the
-#: Dhan lake nests under ``feeds/dhan/`` so this convention is self-contained).
-_SEGMENT: Final[str] = "INDEX"
+#: Dhan lake nests under ``feeds/dhan/`` so this convention is self-contained). Shared
+#: by BOTH Dhan spot stages (this 1-minute spine + the native-daily
+#: ``daily_ingest`` — CLAUDE.md §11 COMMON, never re-minted).
+SPOT_SEGMENT: Final[str] = "INDEX"
 
 #: Per-window outcome status vocabulary.
 STATUS_SUCCESS: Final[str] = "success"
@@ -189,6 +191,70 @@ class DhanIngestReport:
         return sum(1 for o in self.outcomes if o.status == STATUS_FAILED)
 
 
+def clamp_dhan_window_end(end: date, *, today: date) -> date:
+    """Clamp a HALF-OPEN window ``end`` so the last pulled day is the PREVIOUS day.
+
+    DEC-DHAN-TODAY-CLAMP-001: BOTH Dhan window laws (the 1-minute
+    :func:`plan_dhan_work` and the native-daily
+    :func:`~brutex.adapters.dhan.daily_ingest.plan_dhan_daily_work`) consult this
+    ONE helper. The half-open effective end is ``min(end, today)`` — i.e. the last
+    INCLUSIVE day requested from the vendor is ``today − 1`` — the EXACT plain-
+    calendar prev-day upper-bound law
+    :func:`~brutex.dashboard.pull_controller.resolve_candle_range` already applies
+    to a blank default (``today − timedelta(days=1)``; deliberately NOT a
+    trading-day walk). A blank-default pull (whose surface already passes the
+    half-open ``end == today``) is BYTE-IDENTICAL — no clamp, no note; an EXPLICIT
+    ``to_date=today`` (half-open ``end == today + 1``) is CLAMPED (not refused)
+    with ONE honest INFO note. *today* is the IST date resolved once per launch
+    and threaded (never a mid-plan clock read).
+    """
+    if end <= today:
+        return end
+    _LOG.info(
+        "dhan.window_end_clamped",
+        requested_end=end.isoformat(),
+        effective_end=today.isoformat(),
+        detail=("clamped to previous day — today's bars settle after close; never wrong bytes"),
+    )
+    return today
+
+
+def expand_dhan_symbol_windows(
+    *,
+    symbols: Sequence[str],
+    security_ids: Mapping[str, int],
+    windows: Sequence[object],
+) -> tuple[list[DhanWorkItem], list[str]]:
+    """Expand planned windows across symbols; split resolved work from unresolved symbols.
+
+    The ONE symbol-expansion law both Dhan planners share (CLAUDE.md §11 COMMON —
+    :func:`plan_dhan_work` and the native-daily
+    :func:`~brutex.adapters.dhan.daily_ingest.plan_dhan_daily_work`). A symbol
+    ABSENT from *security_ids* is unresolved (no work item planned — the caller
+    loud-skips it). *windows* is the ``plan_windows`` output (``DateWindow``
+    bounds are ISO ``YYYY-MM-DDTHH:MM:SS`` strings — the date part is taken).
+    """
+    work: list[DhanWorkItem] = []
+    unresolved: list[str] = []
+    for symbol in symbols:
+        security_id = security_ids.get(symbol)
+        if security_id is None:
+            unresolved.append(symbol)
+            continue
+        exchange = dhan_index_exchange(symbol)
+        for window in windows:
+            work.append(
+                DhanWorkItem(
+                    symbol=symbol,
+                    exchange=exchange,
+                    security_id=security_id,
+                    start=date.fromisoformat(window.start[:10]),  # type: ignore[attr-defined]
+                    end=date.fromisoformat(window.end[:10]),  # type: ignore[attr-defined]
+                )
+            )
+    return work, unresolved
+
+
 def plan_dhan_work(
     *,
     symbols: Sequence[str],
@@ -217,11 +283,16 @@ def plan_dhan_work(
     launch and threaded (``None`` resolves ``now_ist().date()`` here — a plan
     never re-reads the clock mid-run). The floor governs REQUESTS only: pre-floor
     bars already stored are never deleted (keep-first, append-only).
+
+    **The prev-day END clamp (DEC-DHAN-TODAY-CLAMP-001) ALSO lives here:** the
+    half-open end is clamped through :func:`clamp_dhan_window_end` (an explicit
+    ``to_date=today`` pull ends at the previous day with ONE honest INFO note;
+    the blank default is byte-identical).
     """
-    floor = dhan_history_floor(today if today is not None else now_ist().date())
-    work: list[DhanWorkItem] = []
-    unresolved: list[str] = []
-    if end <= floor:
+    today_resolved = today if today is not None else now_ist().date()
+    floor = dhan_history_floor(today_resolved)
+    effective_end = clamp_dhan_window_end(end, today=today_resolved)
+    if effective_end <= floor:
         _LOG.warning(
             "dhan.pull_entirely_pre_floor",
             requested_start=start.isoformat(),
@@ -230,7 +301,7 @@ def plan_dhan_work(
             margin_days=DHAN_FLOOR_MARGIN_DAYS,
             detail="nothing to pull (requested range wholly before the Dhan rolling floor)",
         )
-        windows = []
+        windows: list[object] = []
     else:
         effective_start = max(start, floor)
         if effective_start > start:
@@ -241,33 +312,23 @@ def plan_dhan_work(
                 floor=floor.isoformat(),
                 margin_days=DHAN_FLOOR_MARGIN_DAYS,
             )
-        windows = plan_windows(
-            datetime.combine(effective_start, time.min),
-            datetime.combine(end, time.min),
-            window_days=window_days_for_interval(interval),
-        )
-    for symbol in symbols:
-        security_id = security_ids.get(symbol)
-        if security_id is None:
-            unresolved.append(symbol)
-            continue
-        exchange = dhan_index_exchange(symbol)
-        for window in windows:
-            work.append(
-                DhanWorkItem(
-                    symbol=symbol,
-                    exchange=exchange,
-                    security_id=security_id,
-                    # DateWindow bounds are ISO "YYYY-MM-DDTHH:MM:SS" strings — take the date part.
-                    start=date.fromisoformat(window.start[:10]),
-                    end=date.fromisoformat(window.end[:10]),
-                )
+        windows = list(
+            plan_windows(
+                datetime.combine(effective_start, time.min),
+                datetime.combine(effective_end, time.min),
+                window_days=window_days_for_interval(interval),
             )
-    return work, unresolved
+        )
+    return expand_dhan_symbol_windows(symbols=symbols, security_ids=security_ids, windows=windows)
 
 
-def _warn_unresolved(symbol: str) -> DhanWindowOutcome:
-    """Loud-skip an unresolved symbol (zero bars, re-pullable) — never a fabricated bar."""
+def warn_unresolved(symbol: str) -> DhanWindowOutcome:
+    """Loud-skip an unresolved symbol (zero bars, re-pullable) — never a fabricated bar.
+
+    The ONE unresolved-symbol law BOTH Dhan spot stages share (CLAUDE.md §11
+    COMMON — this 1-minute spine and the native-daily
+    :func:`~brutex.adapters.dhan.daily_ingest.run_dhan_spot_daily`).
+    """
     _LOG.warning(
         "dhan.index_unverified",
         symbol=symbol,
@@ -324,8 +385,12 @@ def scan_resolved_all_empty(report: DhanIngestReport) -> tuple[str, ...]:
     return tuple(suspicious)
 
 
-def _warn_resolved_all_empty(report: DhanIngestReport) -> None:
-    """Emit exactly ONE WARN per RESOLVED symbol that returned zero bars all-range."""
+def warn_resolved_all_empty(report: DhanIngestReport) -> None:
+    """Emit exactly ONE WARN per RESOLVED symbol that returned zero bars all-range.
+
+    Shared by BOTH Dhan spot stages (CLAUDE.md §11 COMMON — this 1-minute spine
+    and the native-daily :func:`~brutex.adapters.dhan.daily_ingest.run_dhan_spot_daily`).
+    """
     for symbol in scan_resolved_all_empty(report):
         _LOG.warning(
             "dhan.symbol_all_empty",
@@ -377,7 +442,7 @@ def _process_item(
             )
         result = sink.append(
             exchange=item.exchange.value,
-            segment=_SEGMENT,
+            segment=SPOT_SEGMENT,
             symbol=item.symbol,
             interval=interval,
             bars=bounded,
@@ -420,6 +485,44 @@ def _process_item(
         status=STATUS_SUCCESS,
         bars_appended=result.bars_net_new,
     )
+
+
+def process_work_with_retry(
+    work: Sequence[DhanWorkItem],
+    *,
+    process: Callable[[DhanWorkItem], DhanWindowOutcome],
+    max_rounds: int = 3,
+    backoff: Callable[[int], None] = _noop_backoff,
+) -> list[DhanWindowOutcome]:
+    """Process *work* items with bounded in-run retry of retryable-failed windows.
+
+    The ONE bounded-retry round engine BOTH Dhan spot stages share (CLAUDE.md
+    §11 COMMON — the 1-minute :func:`run_dhan_spot_ingest_with_retry` and the
+    native-daily :func:`~brutex.adapters.dhan.daily_ingest.run_dhan_spot_daily`):
+    each round applies *process* to every pending item, keeps the LATEST outcome
+    per item, and re-queues only a RETRYABLE-failed item for a later round (up
+    to ``max(1, max_rounds)`` rounds; *backoff* fires between rounds that still
+    have pending items). Returns the latest per-item outcomes in first-seen
+    order. A pull-wide stop raised by *process* (the
+    :func:`~brutex.adapters.dhan.errors.is_terminal_pull_stop` carve-out lives
+    INSIDE the per-item processors) propagates — the engine never swallows it.
+    """
+    latest: dict[DhanWorkItem, DhanWindowOutcome] = {}
+    pending = list(work)
+    rounds = max(1, max_rounds)
+    for round_index in range(rounds):
+        if not pending:
+            break
+        next_pending: list[DhanWorkItem] = []
+        for item in pending:
+            outcome = process(item)
+            latest[item] = outcome
+            if outcome.status == STATUS_FAILED and outcome.retryable:
+                next_pending.append(item)
+        pending = next_pending
+        if pending and round_index < rounds - 1:
+            backoff(round_index)
+    return list(latest.values())
 
 
 def run_dhan_spot_ingest_with_retry(
@@ -482,30 +585,21 @@ def run_dhan_spot_ingest_with_retry(
         today=today_resolved,
     )
     resolved = tuple(dict.fromkeys(item.symbol for item in work))
-    outcomes: list[DhanWindowOutcome] = [_warn_unresolved(symbol) for symbol in unresolved]
-    latest: dict[DhanWorkItem, DhanWindowOutcome] = {}
-    pending = list(work)
-    rounds = max(1, max_rounds)
-    for round_index in range(rounds):
-        if not pending:
-            break
-        next_pending: list[DhanWorkItem] = []
-        for item in pending:
-            outcome = _process_item(
-                item,
-                adapter=adapter,
-                sink=sink,
-                interval=interval,
-                session_filter=session_filter,
-                pace=pace,
-            )
-            latest[item] = outcome
-            if outcome.status == STATUS_FAILED and outcome.retryable:
-                next_pending.append(item)
-        pending = next_pending
-        if pending and round_index < rounds - 1:
-            backoff(round_index)
-    outcomes.extend(latest.values())
+    outcomes: list[DhanWindowOutcome] = [warn_unresolved(symbol) for symbol in unresolved]
+
+    def _process(item: DhanWorkItem) -> DhanWindowOutcome:
+        return _process_item(
+            item,
+            adapter=adapter,
+            sink=sink,
+            interval=interval,
+            session_filter=session_filter,
+            pace=pace,
+        )
+
+    outcomes.extend(
+        process_work_with_retry(work, process=_process, max_rounds=max_rounds, backoff=backoff)
+    )
     report = DhanIngestReport(
         outcomes=tuple(outcomes),
         resolved_symbols=resolved,
@@ -515,19 +609,25 @@ def run_dhan_spot_ingest_with_retry(
         floor=floor,
         entirely_pre_floor=end <= floor,
     )
-    _warn_resolved_all_empty(report)
+    warn_resolved_all_empty(report)
     return report
 
 
 __all__ = [
+    "SPOT_SEGMENT",
     "STATUS_FAILED",
     "STATUS_SKIPPED_UNRESOLVED",
     "STATUS_SUCCESS",
     "DhanIngestReport",
     "DhanWindowOutcome",
     "DhanWorkItem",
+    "clamp_dhan_window_end",
     "dhan_index_exchange",
+    "expand_dhan_symbol_windows",
     "plan_dhan_work",
+    "process_work_with_retry",
     "run_dhan_spot_ingest_with_retry",
     "scan_resolved_all_empty",
+    "warn_resolved_all_empty",
+    "warn_unresolved",
 ]

@@ -22,6 +22,7 @@ from brutex.adapters.dhan.ingest import (
     STATUS_SUCCESS,
     DhanIngestReport,
     DhanWorkItem,
+    clamp_dhan_window_end,
     dhan_index_exchange,
     plan_dhan_work,
     run_dhan_spot_ingest_with_retry,
@@ -722,6 +723,60 @@ class TestRollingFloorClamp:
         )
         # floor keys on the IST 2026-07-15, one day past the UTC date's floor.
         assert min(item.start for item in work) == constants_floor(date(2026, 7, 15))
+
+
+class TestTodayEndClamp:
+    """`clamp_dhan_window_end` — the DEC-DHAN-TODAY-CLAMP-001 prev-day END law.
+
+    BOTH Dhan window laws (`plan_dhan_work` + the native-daily
+    `plan_dhan_daily_work`) consult this ONE helper: a blank-default pull
+    (half-open ``end == today``) is BYTE-IDENTICAL (no clamp, no note); an
+    explicit ``to_date=today`` (half-open ``end == today + 1``) is CLAMPED to
+    ``today`` — the last INCLUSIVE day requested from the vendor is the
+    PREVIOUS day — with ONE honest ``dhan.window_end_clamped`` INFO.
+    """
+
+    def test_end_at_today_is_byte_identical_no_note(self) -> None:
+        # The blank-default shape: half-open end == today — no clamp, no note.
+        with capture_logs() as logs:
+            assert clamp_dhan_window_end(_FROZEN_TODAY, today=_FROZEN_TODAY) == _FROZEN_TODAY
+        assert [e for e in logs if e["event"] == "dhan.window_end_clamped"] == []
+
+    def test_end_before_today_is_byte_identical_no_note(self) -> None:
+        earlier = date(2026, 7, 1)
+        with capture_logs() as logs:
+            assert clamp_dhan_window_end(earlier, today=_FROZEN_TODAY) == earlier
+        assert [e for e in logs if e["event"] == "dhan.window_end_clamped"] == []
+
+    def test_end_past_today_clamps_to_today_with_one_info(self) -> None:
+        # The explicit to_date=today shape: half-open end == today + 1 → clamped.
+        requested = date(2026, 7, 15)  # _FROZEN_TODAY + 1 day
+        with capture_logs() as logs:
+            assert clamp_dhan_window_end(requested, today=_FROZEN_TODAY) == _FROZEN_TODAY
+        notes = [e for e in logs if e["event"] == "dhan.window_end_clamped"]
+        assert len(notes) == 1
+        assert notes[0]["requested_end"] == "2026-07-15"
+        assert notes[0]["effective_end"] == "2026-07-14"
+        assert notes[0]["log_level"] == "info"
+
+    def test_plan_dhan_work_explicit_today_end_last_day_is_prev_day(self) -> None:
+        # The 1-minute plan law consults the clamp: an explicit to_date=today
+        # (half-open end == today + 1) plans windows whose HALF-OPEN end is
+        # today — i.e. the last inclusive vendor day is the PREVIOUS day.
+        with capture_logs() as logs:
+            work, unresolved = plan_dhan_work(
+                symbols=["NIFTY"],
+                security_ids={"NIFTY": 13},
+                interval="1minute",
+                start=date(2026, 6, 1),
+                end=date(2026, 7, 15),  # today + 1 — the explicit to_date=today shape
+                today=_FROZEN_TODAY,
+            )
+        assert unresolved == []
+        assert work, "the plan must have produced windows"
+        assert max(item.end for item in work) == _FROZEN_TODAY
+        notes = [e for e in logs if e["event"] == "dhan.window_end_clamped"]
+        assert len(notes) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
