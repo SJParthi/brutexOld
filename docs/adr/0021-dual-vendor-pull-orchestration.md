@@ -69,7 +69,10 @@ at the same-day input fold):** Dhan 1-DAY spot is pulled **NATIVELY** from
 Dhan's daily endpoint (`POST /v2/charts/historical`; depth = instrument
 inception) and runs **FIRST** — Dhan NEVER derives `1day`. Default window
 2020-01-01 → today; the daily endpoint's depth reaches instrument
-inception — the ~5y rolling cap is INTRADAY-only (§1.3 item 5). The Dhan
+inception — the ~5y rolling cap is INTRADAY-only (§1.3 item 5). (The
+ruled default names the REQUEST shape; the window END is CLAMPED to the
+previous trading day by the EXTENDED P3 ruling — §9, the NG-1 fold — the
+native-daily window included.) The Dhan
 prebuild derives **INTRADAY TFs ONLY**: `include_daily` is structurally
 OFF for the Dhan tree — a NEW PINNED INVARIANT (the native Dhan `1day`
 partition is never derived and never prebuild-overwritten; the seam
@@ -401,9 +404,10 @@ corrected in place):
   `lake_root / "bars" / <exch> / <segment> / …` at :113 with no domain
   routing), so a second-vendor Greeks pass would silently join against
   GROWW spot today. The fix is REQUIRED before any second-vendor Greeks
-  binding: route the reader by `profile.write_domain` + stamp a
-  vendor/spot-source provenance bit — PRECONDITION P4 (§15 item 7;
-  assurance-register pointer VCA-011).
+  binding: route the reader by the profile's domain + stamp a
+  vendor/spot-source provenance bit + the Pin D1-3 runtime read-domain
+  assertion (the assurance re-review fold, NG-5) — PRECONDITION P4
+  (§15 item 7; assurance-register pointer VCA-011).
 - **Lake scanners are anchored, `feeds/` is invisible (re-verified):**
   `lake_content_token` (`brutex/data/lake_heal.py:2086`) walks EXACTLY
   `BAR_DIR_NAME` + `OPTIONS_DIR_NAME` under the root (:2131-2134); the
@@ -577,19 +581,29 @@ excepted). Per-sidecar disposition:
 | `bars/` + catalog + `.manifest/` + `.locks/` | **NEST** — verified per-domain (the Dhan track's feed-root nesting law, §2 binding invariant; lock disjointness Decision 1 rationale (c)) |
 | window ledger | **SEPARATE** under `feeds/dhan/window_ledger/` with `market="dhan"`/`"dhan-option"` tokens (§2.3) — non-re-pullable state; **Pin D1-2** below |
 | `.rate` (the CLI rate bridge, `<lake_root>/.rate/pull_rate.json`) | **nest-or-vendor-token** — a Dhan chain writes it (if ever) under its OWN root, never the primary bridge file |
-| `.pull_intent` (`<lake_root>/.pull_intent.json` — `PULL_INTENT_FILENAME`, `brutex/dashboard/pull_intent.py:120`; `PullIntentStore` :306/:327) | **nest-or-vendor-token, with the ISOL-02 v1 RULING (assurance fold):** the sidecar is a ROOT-SINGLETON with NO vendor field (verified — `PullIntent` carries symbols/symbol/from_date/to_date/restarts/created_at/scope only), previously OMITTED from this ADR's sidecar enumeration; a Dhan launch reusing the primary-root launcher would CLOBBER a running Groww intent and a crash+boot would replay the WRONG vendor's scope. **RULING: v1 = the Dhan chain runs with NO intent store** — no boot-resume; manual re-run is the recovery (consistent with the G4 manual-runs posture, §1.3 item 6 / Decision 7); if/when Dhan gains resume-intent it gets its OWN `PullIntentStore` under `feeds/dhan/`. A TWO-VENDOR CRASH-RESUME pin is REQUIRED in WS-C/WS-D: a crash+boot with a Groww intent present resumes the GROWW scope only and never fires a Dhan launch (and the Dhan v1 chain, having no store, resumes nothing) |
+| `.pull_intent` (`<lake_root>/.pull_intent.json` — `PULL_INTENT_FILENAME`, `brutex/dashboard/pull_intent.py:120`; `PullIntentStore` :306/:327) | **nest-or-vendor-token, with the ISOL-02 v1 RULING (assurance fold):** the sidecar is a ROOT-SINGLETON with NO vendor field (verified — `PullIntent` carries symbols/symbol/from_date/to_date/restarts/created_at/scope only), previously OMITTED from this ADR's sidecar enumeration; a Dhan launch reusing the primary-root launcher would CLOBBER a running Groww intent and a crash+boot would replay the WRONG vendor's scope. **RULING: v1 = the Dhan chain runs with NO intent store** — no boot-resume; manual re-run is the recovery (consistent with the G4 manual-runs posture, §1.3 item 6 / Decision 7); if/when Dhan gains resume-intent it gets its OWN `PullIntentStore` under `feeds/dhan/`. A TWO-VENDOR CRASH-RESUME pin is REQUIRED in WS-C/WS-D: a crash+boot with a Groww intent present resumes the GROWW scope only and never fires a Dhan launch (and the Dhan v1 chain, having no store, resumes nothing). **LAUNCHER GATING (assurance re-review fold, NG-2 — BLOCKER: the ISOL-02 ruling pinned the CHAIN's no-intent-store but NOT the shared LAUNCHER):** `persist_intent_for_launch` (`brutex/dashboard/pull_intent.py:481`, invoked by the shared dashboard launcher at `brutex/dashboard/app.py:5257`) writes the vendorless ROOT-SINGLETON **BEFORE the vendor graph runs** — a Dhan launch through that launcher would persist a Groww-SHAPED boot-resume intent regardless of the chain having no store (a crash+boot replays the WRONG vendor/scope). FIX: the PROFILE gates the LAUNCHER, not just the chain — `VendorPullProfile` gains **`no_intent_persist`** (Groww `False`, Dhan v1 `True`; Decision 4) and the launcher consults it BEFORE the persist: a `no_intent_persist` profile's launch NEVER invokes `persist_intent_for_launch` (and correspondingly wires no clear/restore hooks against the primary singleton). The WS-C pin is driven through the REAL shared launcher — never a chain-only fake — asserting the PRIMARY root's `.pull_intent.json` singleton is byte-UNTOUCHED by a Dhan launch (both arms: a prior Groww intent PRESENT survives byte-identical; no intent present ⇒ none is created). **P1 COUPLING (disclosed):** once P1 lands (§15 item 4), a Dhan pull is no longer account-flock-excluded from a concurrent Groww pull — a Groww crash+boot-resume could then read Dhan-written scope if persist defaulted ON; the two-vendor crash-resume pin CANNOT hold while persist defaults on, so the launcher gate is a companion requirement of P1, not polish |
 | `.greeks_backfill` (checkpoint sidecar) + the `groww.vendor_floor.*` schema_meta rows | **N/A-for-Dhan** (Groww-shaped surfaces; the Dhan chain never touches them) |
-| the Greeks SPOT-JOIN root | **the ONE surface that does NOT nest for free** — the reader is hard-anchored at the primary `bars/` tree (`spot_join.py:83`/:113) and must be ROUTED by `profile.write_domain` (the CAPA-01 fix — PRECONDITION P4, §15 item 7) |
+| the Greeks SPOT-JOIN root | **the ONE surface that does NOT nest for free** — the reader is hard-anchored at the primary `bars/` tree (`spot_join.py:83`/:113) and must be ROUTED by the profile's domain (the CAPA-01 fix — PRECONDITION P4, §15 item 7) — and guarded at RUNTIME by **Pin D1-3** (the read-domain assertion, NG-5): routing binds the right reader, the assertion REFUSES the wrong one |
 
 **Numbered pins:**
 
 - **Pin D1-1 (RUNTIME write-domain refusal — the ISOL-04 promotion; a
-  WS-B/WS-C requirement):** §12 invariant 1 is PROMOTED from review-time to
+  WS-B/WS-C requirement; mechanism CORRECTED at the assurance re-review
+  fold, NG-3):** §12 invariant 1 is PROMOTED from review-time to
   a RUNTIME fail-loud pin — every staged write dest's realpath is resolved
-  against the active profile's `write_domain` and a cross-domain write
+  against the active profile's `write_domain` — the **ALLOWED-SUBTREE SET
+  with FOREIGN-DOMAIN EXCLUSION** (the Decision 4 typing law): the dest
+  must fall under one of THIS profile's subtrees AND under NO OTHER
+  registered profile's — and a cross-domain write
   REFUSES with a typed exception (never a keep-first merge): a
   `feeds/dhan/**` profile landing under the primary `bars/`/`options/`
-  trees, and vice-versa. In-repo precedent:
+  trees, and vice-versa. **MECHANISM CORRECTION (NG-3):** a bare
+  realpath-STARTSWITH check against a single primary-root `Path` is
+  INSUFFICIENT — `feeds/dhan/**` NESTS under the primary root, so such a
+  check FALSE-PASSES a feeds/dhan dest presented to the PRIMARY profile
+  (nested roots are not disjoint prefixes); the primary profile's domain
+  is the root MINUS the registered `feeds/` subtrees, expressed via the
+  exclusion law. In-repo precedent:
   `OptionParquetWriter._assert_options_containment`
   (`brutex/data/option_parquet_writer.py:317` — verified; the assurance
   brief's `lake_heal` attribution corrected: `lake_heal.py:1197` only
@@ -598,7 +612,10 @@ excepted). Per-sidecar disposition:
   and the keep-first writer does NOT raise on a cross-domain dest
   (`brutex/data/parquet_writer.py:560-617` — the stored bar silently wins),
   so a mis-rooted writer would silently arbitrate, never crash. A
-  NEGATIVE-PIN battery is REQUIRED (both directions + the typed refusal).
+  NEGATIVE-PIN battery is REQUIRED: both directions + the typed refusal +
+  the **NESTED-ROOT fixture** (a `feeds/dhan/**` dest presented to the
+  PRIMARY profile must REFUSE — exactly the false-pass shape a
+  prefix-check mechanism would let through).
 - **Pin D1-2 (nightly-backup allowlist):** when the Dhan window ledger
   lands under `feeds/dhan/window_ledger/`, the NIGHTLY backup allowlist
   `_LAKE_MEMBERS` (`brutex/nightly/backup.py:130-136` — verified:
@@ -606,6 +623,19 @@ excepted). Per-sidecar disposition:
   audit) MUST gain it — non-re-pullable data is structurally unreachable
   to the allowlist lane otherwise (§1.4 backup row; elevated from a WS-D
   note at the assurance fold).
+- **Pin D1-3 (RUNTIME read-domain assertion on the Greeks spot-join — the
+  READ-side twin of Pin D1-1; assurance re-review fold, NG-5; folded into
+  PRECONDITION P4, §15 item 7):** the Greeks spot-join binding asserts at
+  RUNTIME that its resolved spot-reader ROOT lies inside the invoking
+  profile's domain — a second-vendor Greeks pass handed a PRIMARY-domain
+  spot reader REFUSES with a typed exception (mirroring the write-domain
+  refusal), never a silent cross-vendor join. The containment test is the
+  SAME allowed-subtree-set + foreign-exclusion law as Pin D1-1 (a nested
+  `feeds/` root must not false-pass a prefix check). Negative pins
+  REQUIRED both directions (a Dhan pass × a primary-domain reader; a
+  primary pass × a Dhan-domain reader). This is the runtime BELT under
+  P4's routing fix: routing binds the right reader, the assertion refuses
+  the wrong one.
 
 ---
 
@@ -684,7 +714,11 @@ Groww-only (§4.1 supersession 5).
   └──────────────────────────────────────────────────────────────────────┘
    NATIVE 1-DAY SPOT  (POST /v2/charts/historical — the vendor's DAILY
    │      endpoint; depth = instrument inception; default window
-   │      2020-01-01 → today; Dhan NEVER derives 1day — RULING C.
+   │      2020-01-01 → today with the END CLAMPED to the previous trading
+   │      day — the EXTENDED P3 ruling, §9/NG-1: a mid-session END=today
+   │      daily fetch would freeze a FORMING 1day bar that, being NATIVE
+   │      (include_daily OFF), nothing ever re-derives; Dhan NEVER
+   │      derives 1day — RULING C.
    │      Runs FIRST as its OWN stage callable `run_spot_daily` with its
    │      own gate + stopped_after token: a native-daily failure halts
    │      BEFORE any 1-minute vendor calls, observably)
@@ -857,7 +891,7 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | Field | Groww binding | Dhan binding | Owner |
 |---|---|---|---|
 | `vendor` token | `"groww"` | `"dhan"` | orchestration |
-| Lake write domain | primary root (`bars/` + `options/`) | `<lake_root>/feeds/dhan/` | orchestration invariant (Decision 1) |
+| Lake write domain (typed `WriteDomain` — an ALLOWED-SUBTREE SET with foreign-domain EXCLUSION; the NG-3 typing law below) | the primary subtrees (`bars/` + `options/` + the primary sidecars) — equivalently the root MINUS every registered `feeds/` subtree, by the exclusion law | `{<lake_root>/feeds/dhan/**}` | orchestration invariant (Decision 1 + Pin D1-1; the WRITE law — read routing is per-consumer, guarded by Pin D1-3) |
 | Capability set | `{spot, futures, options: per_contract, metadata}` | `{spot, options: rolling_atm}` | operator ruling A |
 | Daily (`1day`) source | `derived` — SPOT-PREBUILD derives `1day` from stored 1-minute (DEC-1MINUTE-ONLY-DERIVE-1DAY-001, Groww-only per §4.1 supersession 5) | `native` — the vendor daily endpoint, depth to inception, runs FIRST as `run_spot_daily`; prebuild `include_daily` structurally OFF (the RULING C pinned invariant) | operator ruling C |
 | History-floor resolvers | const `GROWW_HISTORY_FLOOR` = 2020-01-01 (CLAUDE.md §2 Rule 3) | rolling `today − 5y + 7d` + unified options floor (`DEC-DHAN-ROLLING-FLOOR-001`; TRUE depth UNVERIFIED) | adapter |
@@ -867,10 +901,33 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | Account-key resolver | Groww `api_key` fingerprint (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001) | Dhan client-id-keyed — the TARGET binding, NOT shipped: WS-D PRECONDITION P1 (feed-track review fold; today their club jobs inherit the default GROWW-key resolver, `pull_jobs.py:154-177` — Decision 5 preamble) | adapter (P1 owned by the Dhan track) |
 | Lock domain | account + lake-root + lease trio at the primary root | the ONE feed-root flock at `feeds/dhan/` | adapter (mechanism), orchestration (disjointness invariant) |
 | Market-hours guard binding | ON, LOCKED (DEC-GROWW-MARKET-HOURS-GUARD-001) | `lambda: False` — the no-guard binding IS a `Callable[[], bool]`, NOT `None` (the assurance-fold type correction, CONC-01: the job ctor's type is non-Optional — `market_hours_guard: Callable[[], bool] = guard_active_default`, `pull_jobs.py:443` — so `None` would not even type-check; §1.3 item 8's `market_closed=None` is the SPINE's separate Optional predicate seam; any Dhan policy = NEW decision, Q2) | operator |
-| Today-completeness binding (PRECONDITION P3) | the classifier GATE armed at the spine (DEC-PULL-TODAY-COMPLETENESS-GATE-001 — wired Groww-only today, `pull_controller.py:2157`/`:3228`) | `clamp_to_prev_session` v1 — the 1-minute spot/options window END is CLAMPED to the previous trading day (§9 P3 ruling); threading the vendor-agnostic classifier through the Dhan spine is the NAMED upgrade path | operator ruling (assurance fold, CONC-02) |
+| Today-completeness binding (PRECONDITION P3) | the classifier GATE armed at the spine (DEC-PULL-TODAY-COMPLETENESS-GATE-001 — wired Groww-only today, `pull_controller.py:2157`/`:3228`) | `clamp_to_prev_session` v1 — EVERY Dhan pull window END (the NATIVE-DAILY `run_spot_daily` window INCLUDED — the NG-1 extension — beside the 1-minute spot/options windows) is CLAMPED to the previous trading day, derived from the BARE vendor-agnostic calendar back-walk (`previous_trading_session` with NO observed overlay for Dhan v1 — the §9 P3 ruling + the NG-4 mechanism constraint); threading the vendor-agnostic classifier through the Dhan spine is the NAMED upgrade path | operator ruling (assurance fold, CONC-02; extended NG-1/NG-4) |
+| Launcher intent gating (`no_intent_persist`) | `False` — the shared launcher persists the boot-resume intent as today (DEC-PULL-INTENT-RESUME-001 lineage) | `True` v1 — the shared launcher NEVER invokes `persist_intent_for_launch` for a Dhan launch (the NG-2 launcher gate; §2.5 `.pull_intent` row — the profile gates the LAUNCHER, not just the chain) | orchestration (assurance re-review fold, NG-2) |
 | Ledger / incrementality capability | durable window ledger, `market="groww"` family | ABSENT today (gap G4) — gates auto-arm per Decision 7 | adapter, ruled by orchestration |
 | Greeks seam | the COMMON fenced pass binding | a callable over the COMMON kernel (CLI-only today; seam = this design's ask) — the binding's SPOT-JOIN reader is ROUTED by `write_domain` + stamps the vendor/spot-source provenance bit (PRECONDITION P4, §15 item 7) | shared kernel; binding per vendor |
 | Ledger market tokens | `groww` / `groww-future` / `groww-option` | `dhan` / `dhan-option` (Decision 1 §2.3) | orchestration convention |
+
+**WRITE-DOMAIN TYPING (assurance re-review fold, NG-3 — the single-`Path`
+form REFUTED):** `write_domain` was sketched as a single `Path`, but
+`feeds/dhan/**` NESTS under the primary root — nested roots are not
+disjoint prefixes — so a realpath-STARTSWITH containment check against a
+single primary-root `Path` gives a FALSE PASS for a `feeds/dhan/**` dest
+presented to the PRIMARY profile. The domain is therefore typed as an
+**ALLOWED-SUBTREE SET with explicit FOREIGN-DOMAIN EXCLUSION**: a dest is
+in-domain iff its realpath falls under one of THIS profile's subtrees AND
+under NO OTHER registered profile's subtree; the PRIMARY profile's domain
+is the root MINUS the registered `feeds/` subtrees, expressed via that
+exclusion law (never by enumerating the root's children). ADJUDICATION
+RECORDED: the alternative "keep a single `Path` + document the
+composition" was considered and REFUTED by the nested-root false-pass
+above — the struct/set form is adopted (Pin D1-1's mechanism updated to
+match, §2.5). READ composition, documented in the same fold: `write_domain`
+is the WRITE law ONLY — v1 requires NO cross-domain reads (each vendor's
+Greeks pass joins its OWN domain's spot; the engine reads the primary tree
+only; a future Groww-vs-Dhan cross-verify reader is the only NAMED
+cross-domain consumer and is out of v1 scope) — read ROUTING is a
+per-consumer binding (PRECONDITION P4) guarded at runtime by the Pin D1-3
+read-domain assertion (§2.5, NG-5).
 
 **FORCE-INJECTION requirement (assurance fold, CONC-01 — adjudicated on
 carried-forward evidence and ACCEPTED on the merits, §15.1):** the
@@ -1207,18 +1264,45 @@ sequencer:
   exists, and the 100k/day quota is the SHARED budget. Default per the
   current ruling: NO Dhan guard.
 - **Dhan today-window law — the P3 RULING (assurance fold, CONC-02
-  confirmed):** the today-completeness law must hold PER VENDOR. The gate
+  confirmed; EXTENDED at the assurance re-review fold, NG-1 + NG-4):** the
+  today-completeness law must hold PER VENDOR. The gate
   is Groww-spine-only (verified, §1.4 today-completeness row:
   `pull_controller.py:2157`/`:3228`), the lake is keep-first, and Dhan has
   NO market-hours guard (Q2 default) — so a mid-session Dhan END=today
-  1-minute pull would freeze still-settling bars FINAL. **RULING: v1 = the
-  Dhan 1-minute spot/options window END is CLAMPED to the previous trading
-  day** — an explicit `to_date=today` is clamped with an honest note,
-  never wrong bytes; threading the vendor-agnostic today-completeness
+  1-minute pull would freeze still-settling bars FINAL, and the NATIVE-DAILY
+  stage is the WORSE twin (NG-1): `run_spot_daily`'s END=today would fetch
+  a FORMING same-day `1day` bar mid-session that keep-first freezes and
+  that NOTHING ever overwrites (`include_daily` structurally OFF — the
+  native `1day` has no derive-refresh path, unlike Groww's
+  derive-refreshed `1day`), so it could NEVER self-heal. **RULING
+  (extended): v1 = EVERY Dhan pull window END — the native-daily
+  `run_spot_daily` window AND the 1-minute spot/options windows — is
+  CLAMPED to the previous trading day** — an explicit `to_date=today` is
+  clamped with an honest note, never wrong bytes; today's settled daily
+  bar arrives on the NEXT day's run — an ACCEPTED one-day daily lag,
+  disclosed; threading the vendor-agnostic today-completeness
   classifier (`classify_today_completeness` is a pure function, §1.4)
-  through the Dhan spine is the NAMED upgrade path. The
+  through the Dhan spine is the NAMED upgrade path. **MECHANISM
+  CONSTRAINT (NG-4 — re-aimed by the assurance session's precision
+  correction from the settle-evidence framing):** the clamp's "previous
+  trading day" derives from the vendor-agnostic trading-calendar
+  BACK-WALK (`calendars/nse.previous_trading_session`,
+  `brutex/calendars/nse.py:999`) with the observed-session overlay
+  VENDOR-SCOPED per §12 invariant 6 — that invariant already forbade the
+  contamination class but was UNWIRED to P3; it is now BOUND here: the
+  overlay's detector keys on GROWW ledger evidence
+  (`market == GROWW_COVERAGE_MARKET`,
+  `brutex/calendars/observed_sessions.py:470`) and Dhan has NO ledger
+  (G4), so for Dhan v1 the resolution uses NO overlay at all
+  (`observed=frozenset()` — the bare calendar back-walk); a Groww-evidence
+  observed-holiday must never move a Dhan clamp. The Groww-measured
+  settle-EVIDENCE overlay (`docs/groww/probe/settle_evidence.json`,
+  DEC-SETTLE-EVIDENCE-ADOPTION-001) only ever tunes the GROWW intraday
+  cutoff — it never participates in any Dhan clamp. The
   `VendorPullProfile` carries the `today_completeness` binding field
-  (Decision 4); WS-D ships the clamp/absence pin (§15 item 6). (The Dhan
+  (Decision 4); WS-D ships the clamp/absence pins — per window class,
+  INCLUDING the forming-daily-bar ABSENCE pin and the back-walk pin over
+  weekend + holiday-adjacent days (§15 item 6). (The Dhan
   track has fold-queued their side; the explicit `to_date=today` arm was
   the residual this ruling closes.)
 - **Dhan auto-arm** is additionally BLOCKED by Decision 7 until
@@ -1311,7 +1395,7 @@ def run_full_pipeline(
 @dataclass(frozen=True)
 class VendorPullProfile:
     vendor: str                              # "groww" | "dhan"
-    write_domain: Path                       # primary root | <root>/feeds/dhan
+    write_domain: WriteDomain                # ALLOWED-SUBTREE SET + foreign-domain EXCLUSION (NG-3 — the single-Path form REFUTED: nested feeds/ roots are not disjoint prefixes; Decision 4 typing law)
     capabilities: VendorCapability           # {spot, futures?, options_shape, metadata?, daily_source}
     daily_source: Literal["native", "derived"]  # RULING C — native binds run_spot_daily FIRST
     history_floor: Callable[[date], date]    # adapter-owned depth law
@@ -1322,7 +1406,8 @@ class VendorPullProfile:
     account_key_resolver: Callable[[], str | None]
     lock_domain: LockDomain                  # trio-at-primary-root | feed-root flock
     market_hours_guard: Callable[[], bool]   # Groww: guard_active_default; Dhan: lambda: False — the no-guard binding IS a Callable[[], bool], never None (CONC-01 type fix; the ctor type at pull_jobs.py:443 is non-Optional)
-    today_completeness: TodayCompletenessBinding        # P3 — Groww: classifier_gate; Dhan v1: clamp_to_prev_session
+    today_completeness: TodayCompletenessBinding        # P3 — Groww: classifier_gate; Dhan v1: clamp_to_prev_session over EVERY window END, native-daily included (NG-1)
+    no_intent_persist: bool                  # NG-2 — True ⇒ the shared launcher NEVER invokes persist_intent_for_launch (Dhan v1: True; Groww: False — §2.5 .pull_intent row)
     incrementality: IncrementalityCapability | None     # None ⇒ auto-arm REFUSED (Decision 7)
     greeks_seam: Callable[..., GreeksEnrichOutcome] | None
     ledger_markets: tuple[str, ...]          # ("groww", ...) | ("dhan", "dhan-option")
@@ -1369,8 +1454,13 @@ otherwise have to guess):**
   (Decision 7); `TodayCompletenessBinding` = HOW the per-vendor
   today-completeness law holds (`classifier_gate` — the
   DEC-PULL-TODAY-COMPLETENESS-GATE-001 classifier armed at the spine —
-  | `clamp_to_prev_session` — the Dhan v1 window-END clamp, the §9 P3
-  ruling).
+  | `clamp_to_prev_session` — the Dhan v1 window-END clamp over EVERY
+  window, the native-daily `run_spot_daily` window included, the §9 P3
+  ruling + NG-1); `WriteDomain` = the profile's ALLOWED-SUBTREE SET plus
+  the foreign-domain EXCLUSION law (NG-3; Decision 4 — a dest is
+  in-domain iff its realpath falls under one of the profile's subtrees
+  AND under NO other registered profile's; the primary domain = the root
+  MINUS the registered `feeds/` subtrees).
 
 **Invariants every vendor spine must honor (the contract this design
 enforces — invariant 1 at RUNTIME per Pin D1-1, the rest at review
@@ -1380,13 +1470,16 @@ time):**
    **PROMOTED from review-time to a RUNTIME fail-loud pin (assurance
    fold, ISOL-04; the WS-B/WS-C requirement is Pin D1-1, §2.5):** every
    staged write dest's realpath is resolved against the active profile's
-   `write_domain` and a cross-domain write REFUSES with a typed
+   `write_domain` — the ALLOWED-SUBTREE SET with foreign-domain EXCLUSION
+   (the NG-3 typing: a single-Path prefix check FALSE-PASSES nested
+   `feeds/` roots — Decision 4) — and a cross-domain write REFUSES with a
+   typed
    exception — never a keep-first merge (`parquet_writer.py:560-617` does
    not raise on a cross-domain dest; `partition.py` carries no vendor
    dimension — verified); precedent
    `OptionParquetWriter._assert_options_containment`
    (`option_parquet_writer.py:317`); negative-pin battery REQUIRED (both
-   directions + the typed refusal).
+   directions + the typed refusal + the nested-root fixture, Pin D1-1).
 2. ONE rate controller (+ quota tracker where declared) threaded across ALL
    of that vendor's phases — never shared with, or blended into, the peer
    vendor's.
@@ -1441,6 +1534,14 @@ time):**
    observed-holiday overlay must NEVER contaminate the other vendor's
    calendar / prev-session resolution (a Dhan-evidence outage day must not
    move a Groww prev-close baseline, and vice-versa). A WS-D item.
+   **WIRED to P3 at the assurance re-review fold (NG-4 — the invariant
+   already forbade the class but was unwired to the clamp):** the Dhan v1
+   clamp's prev-session resolution uses NO overlay at all
+   (`observed=frozenset()` — the bare calendar back-walk: the overlay's
+   detector keys on GROWW ledger evidence,
+   `brutex/calendars/observed_sessions.py:470`, and Dhan has no ledger,
+   G4); §9 + §15 item 6 carry the binding + the weekend/holiday-adjacent
+   back-walk pin.
 
 The Dhan track's CHANGES-REQUESTED review of this ADR CONFIRMED the §12
 interface implementable against their club #1551 lineage. THEIR binding
@@ -1506,17 +1607,34 @@ the inspection and records the consumption/rename.
   swallow a terminal halt into up to ~3×61k doomed requests on the shared
   100k/day quota (P2). Both fixes are the Dhan track's, queued. Two
   FURTHER preconditions landed at the assurance fold (§15 items 6-7): P3
-  (the Dhan today-window clamp — data correctness, not cross-impact) and
-  P4 (Greeks spot-join domain routing + the vendor provenance bit —
+  (the Dhan today-window clamp — data correctness, not cross-impact;
+  since the re-review fold covering EVERY window END incl. native-daily,
+  NG-1) and
+  P4 (Greeks spot-join domain routing + the vendor provenance bit + the
+  Pin D1-3 read-domain assertion —
   required before ANY second-vendor Greeks binding).
 - **The Dhan v1 chain has NO boot-resume** (the ISOL-02 ruling, §2.5: no
   intent store — manual re-run is the recovery, consistent with the G4
   manual-runs posture; a crash never replays the wrong vendor's scope
-  because there is nothing to replay).
-- **The Dhan v1 today-window is CLAMPED to the previous trading day** (P3):
-  same-day Dhan bars are structurally absent in v1 — an honest freshness
-  trade (never wrong bytes); the classifier-threading upgrade path removes
-  it.
+  because there is nothing to replay — a claim TRUE only WITH the NG-2
+  launcher gate, §2.5: without `no_intent_persist` the SHARED launcher's
+  `persist_intent_for_launch` would have written a Groww-shaped intent
+  for the boot-resume to replay, chain store or no chain store).
+- **The Dhan v1 today-window is CLAMPED to the previous trading day on
+  EVERY window — the native-daily `run_spot_daily` window INCLUDED** (P3,
+  extended at the assurance re-review fold, NG-1): same-day Dhan bars are
+  structurally absent in v1 — an honest freshness trade (never wrong
+  bytes; today's settled daily bar arrives on the NEXT day's run — an
+  accepted one-day daily lag). **CLAIM CORRECTION (Golden Rule #10):** the
+  prior revision made this "structurally absent" claim while the clamp
+  covered ONLY the 1-minute spot/options windows — an OVER-CLAIM: the
+  native-daily stage's END=today would have fetched a FORMING same-day
+  `1day` bar mid-session, keep-first would freeze it, and — the Dhan
+  `1day` being NATIVE with `include_daily` structurally OFF — no derive
+  would EVER overwrite it (unhealable, unlike Groww's derive-refreshed
+  `1day`). The extended clamp MAKES the claim true; the correction is
+  recorded here, not silently rewritten. The classifier-threading upgrade
+  path removes the clamp.
 - The quota arithmetic (§8) uses the DECLARED tile/quota shape; a vendor
   change moves the numbers — the ruling's structure (incrementality gates
   auto-arm) survives, the percentages may not.
@@ -1570,30 +1688,76 @@ the inspection and records the consumption/rename.
    their own `errors.py` docstring promises it) — REQUIRED before the Dhan
    `run_options` binding (§12 invariant 4); their code fix, queued.
 6. **WS-D PRECONDITION P3 (assurance fold, CONC-02 — the Dhan today-window
-   clamp):** the today-completeness law must hold PER VENDOR — the gate is
+   clamp; EXTENDED at the assurance re-review fold, NG-1 + NG-4):** the
+   today-completeness law must hold PER VENDOR — the gate is
    Groww-spine-only (verified: `today_completeness_gate=_today_gate`,
    `brutex/dashboard/pull_controller.py:2157` + `:3228`), so with
    keep-first + no Dhan market-hours guard (Q2) a mid-session Dhan
-   END=today 1-minute pull would freeze still-settling bars FINAL. RULING
-   (§9): v1 = the Dhan 1-minute spot/options window END is CLAMPED to the
-   previous trading day (an explicit `to_date=today` is clamped with an
-   honest note — never wrong bytes); the vendor-agnostic classifier
+   END=today 1-minute pull would freeze still-settling bars FINAL — and
+   the NATIVE-DAILY stage is the WORSE twin (NG-1, a freeze BLOCKER):
+   `run_spot_daily`'s END=today would fetch a FORMING same-day `1day` bar
+   mid-session that keep-first freezes and that NOTHING ever overwrites
+   (`include_daily` structurally OFF — the native `1day` has no
+   derive-refresh path, unlike Groww's), so it could NEVER self-heal.
+   RULING (§9, extended): v1 = EVERY Dhan pull window END — the
+   native-daily `run_spot_daily` window AND the 1-minute spot/options
+   windows — is CLAMPED to the previous trading day (an explicit
+   `to_date=today` is clamped with an honest note — never wrong bytes;
+   today's settled daily bar arrives on the NEXT day's run — the accepted
+   one-day daily lag); the vendor-agnostic classifier
    threading is the named upgrade path; the `VendorPullProfile` carries
-   the `today_completeness` binding field (Decision 4); WS-D ships the
-   clamp/absence pin. (The Dhan track has fold-queued their side; the
+   the `today_completeness` binding field (Decision 4). MECHANISM
+   CONSTRAINT (NG-4): the clamp's "previous trading day" derives from the
+   vendor-agnostic calendar BACK-WALK
+   (`calendars/nse.previous_trading_session`,
+   `brutex/calendars/nse.py:999`) with the observed-session overlay
+   VENDOR-SCOPED per §12 invariant 6 (now WIRED to P3) — for Dhan v1 that
+   means NO overlay at all (`observed=frozenset()`: the overlay's detector
+   keys on GROWW ledger evidence, `market == GROWW_COVERAGE_MARKET` —
+   `brutex/calendars/observed_sessions.py:470` — and Dhan has no ledger,
+   G4); the Groww-measured settle-EVIDENCE overlay
+   (`docs/groww/probe/settle_evidence.json`) only ever tunes the GROWW
+   intraday cutoff — never any Dhan clamp. WS-D ships the clamp/absence
+   pins per window class: the forming-daily-bar ABSENCE pin (a
+   mid-session Dhan chain run stores NO today-dated `1day` bar) + the
+   intraday clamp pin + the back-walk pin over weekend AND
+   holiday-adjacent days. (The Dhan track has fold-queued their side; the
    explicit `to_date=today` arm was the residual.)
 7. **WS-D PRECONDITION P4 (assurance fold, CAPA-01; assurance-register
-   pointer VCA-011) — REQUIRED before ANY second-vendor Greeks binding:**
-   (i) the Greeks SPOT-JOIN reader is ROUTED by `profile.write_domain` —
+   pointer VCA-011; extended at the assurance re-review fold, NG-5 +
+   NG-6) — REQUIRED before ANY second-vendor Greeks binding:**
+   (i) the Greeks SPOT-JOIN reader is ROUTED by the profile's domain —
    verified single-lever today: `spot_close_by_ts_window`
    (`brutex/data/spot_join.py:83`) hard-anchors
-   `lake_root / "bars" / …` (:113) with no domain routing; and (ii) the
+   `lake_root / "bars" / …` (:113) with no domain routing; (ii) the
    Greeks provenance pack gains a VENDOR/SPOT-SOURCE bit — verified: the
    pack currently occupies bits 0-26 ("Total 27 bits < 2^31",
    `brutex/data/greeks_provenance.py:132-133`; statuses bits 23-26,
-   `_STATUS_SHIFT=23` :141), leaving Int32 headroom through bit 30 — so a
+   `_STATUS_SHIFT=23` :141), leaving Int32 headroom through bit 30.
+   **ENCODING LAW (NG-6):** (a) the bit is ADDITIVE-ONLY with
+   **Groww = 0** and **NO greeks pack/formula version bump** — a
+   formula-version bump lives inside the staleness-compare `INPUTS_MASK`
+   (bits 0-19), so it would flip `stamp_is_current_inputs`
+   (`brutex/data/greeks_enrich.py:279` — the
+   DEC-GREEKS-BULK-REENRICH-001 reuse gate) FALSE for EVERY stored Groww
+   Greek and fire a full-lake re-enrich; (b) the bit sits **≥ bit 27 —
+   strictly ABOVE the status field** (statuses occupy bits 23-26,
+   `_STATUS_SHIFT=23`) and is NEVER inserted mid-field (an insertion
+   below bit 27 would shift the status/style decode of every stored
+   stamp). REQUIRED GOLDEN: a stamp-equality pin — every existing stored
+   `greeks_provenance_id` value is BYTE-UNCHANGED under the new pack
+   (Groww=0 at ≥ bit 27 packs to the identical integer). PACK-WIDTH
+   BUDGET (the NG-6 ceiling note): the Int32 headroom ceiling (**≤ bit
+   30** — bit 31 is the sign) bounds the vendor/spot-source encoding; a
+   THIRD vendor — or ANY pack-width growth past bit 30 — requires its
+   OWN pack-width DEC, never a silent overrun. And (iii) the **Pin D1-3
+   RUNTIME read-domain assertion** (§2.5, NG-5) — the READ-side twin of
+   Pin D1-1: a second-vendor Greeks pass handed a PRIMARY-domain spot
+   reader REFUSES with a typed exception; routing (i) binds the right
+   reader, the assertion refuses the wrong one. Together (i)-(iii) make a
    mis-invoked pass (the primary root handed to the second-vendor Greeks
-   stage) is IMPOSSIBLE to stamp undetected. §1.4 Greeks row carries the
+   stage) IMPOSSIBLE to stamp undetected — and refused at runtime before
+   it stamps at all. §1.4 Greeks row carries the
    routing correction of the old "spot lands first" wording.
 
 ### 15.1 Assurance-review disposition record (2026-07-15, byte-verified vs `440e7152`)
@@ -1633,6 +1797,66 @@ lives at `OptionParquetWriter._assert_options_containment`,
   disjointness of the lock files, the per-instance rate controllers, the
   anchored primary scanners, the Decision 5 shipped-truth rows) stand as
   independent coverage — recorded, not re-litigated.
+
+**Assurance RE-review disposition (2026-07-15, vs this file's then-head
+`96486abf` — folded by this revision):** verdict FIX-FIRST for the WS-B
+freeze; the prior review's ten items verified **10/10 CLOSED**; SIX NEW
+gaps (NG-1..NG-6; NG-1/NG-2 the freeze blockers) folded, two of them
+re-aimed by the assurance session's own precision corrections BEFORE
+folding (the corrections recorded per gap):
+
+- **NG-1 (BLOCKER → §9 + §15 P3 + §1.1/§3.2 window notes + the §13 claim
+  correction):** P3's clamp was scoped to the 1-minute windows only — the
+  native `run_spot_daily` END=today would freeze a FORMING,
+  never-derive-overwritten `1day` bar (unhealable: `include_daily`
+  structurally OFF). The clamp now covers EVERY Dhan window END (the
+  accepted one-day daily lag disclosed), a forming-daily-bar ABSENCE pin
+  is required, and §13's "same-day Dhan bars structurally absent"
+  over-claim is corrected in place (made true BY the extended clamp, said
+  so).
+- **NG-2 (BLOCKER → the §2.5 `.pull_intent` row + the Decision 4/§12
+  `no_intent_persist` field):** the ISOL-02 ruling pinned the CHAIN's
+  no-intent-store but NOT the shared LAUNCHER —
+  `persist_intent_for_launch` (`pull_intent.py:481`, launcher call site
+  `app.py:5257` — verified) writes the vendorless root-singleton BEFORE
+  the vendor graph runs. The PROFILE now gates the LAUNCHER; the WS-C pin
+  drives the REAL shared launcher asserting the PRIMARY root's
+  `.pull_intent.json` is byte-UNTOUCHED by a Dhan launch; the P1
+  coupling (persist-default-ON breaks the crash-resume pin once the
+  account flock no longer excludes concurrency) is recorded.
+- **NG-3 (MAJOR; mechanism CORRECTED in-session → the Decision 4 typing
+  paragraph + Pin D1-1 + §12 invariant 1):** the single-`Path`
+  `write_domain` was REFUTED — `feeds/dhan/**` NESTS under the primary
+  root, so a realpath-STARTSWITH check FALSE-PASSES a feeds/dhan dest
+  against the PRIMARY profile (nested roots are not disjoint prefixes).
+  Retyped as an ALLOWED-SUBTREE SET with foreign-domain EXCLUSION
+  (primary = root MINUS registered `feeds/` subtrees); the nested-root
+  negative-pin fixture is required; the earlier "single Path + documented
+  composition" ruling is SUPERSEDED by that refutation (adjudication
+  recorded at Decision 4). The v1 read-composition note stands: NO
+  cross-domain reads in v1 — read routing is a per-consumer binding
+  guarded by Pin D1-3.
+- **NG-4 (MAJOR; mechanism CORRECTED in-session → §9 + §15 P3 + the §12
+  invariant-6 wiring):** the contaminating source is the OBSERVED-SESSION
+  overlay (`previous_trading_session(observed=)`, detector keyed on the
+  GROWW ledger — `observed_sessions.py:470`), NOT the settle-evidence
+  file (that framing dropped; the settle overlay only ever tunes the
+  Groww intraday cutoff — the sentence kept). Invariant 6 already forbade
+  the class but was UNWIRED to P3 — now bound: Dhan v1 resolves with NO
+  overlay at all (the bare calendar back-walk; Dhan has no ledger, G4),
+  with the weekend + holiday-adjacent back-walk pin required.
+- **NG-5 (MAJOR → Pin D1-3 + P4 item (iii)):** the RUNTIME read-domain
+  assertion on the Greeks spot-join — the READ-side twin of Pin D1-1; a
+  second-vendor pass handed a primary-domain spot reader refuses with a
+  typed exception.
+- **NG-6 (MINOR, expanded → the P4 item (ii) encoding law):** the
+  vendor/spot-source bit is additive-only with Groww=0 and NO
+  formula/pack version bump (the `stamp_is_current_inputs` full-lake
+  re-enrich hazard), sits ≥ bit 27 strictly above the status field
+  (never mid-field), carries a stamp-equality GOLDEN (existing
+  `greeks_provenance_id` values byte-unchanged), and is bounded by the
+  ≤ bit 30 Int32 ceiling — a third vendor / any pack-width growth needs
+  its own pack-width DEC.
 
 ## 16. Open questions for operator sign-off (numbered, answerable)
 
@@ -1674,20 +1898,28 @@ lives at `OptionParquetWriter._assert_options_containment`,
   defaults PINNED; the STRUCTURAL skip of absent stages + the
   ABSENT-vs-FAILED vacuously-settled contract with its Dhan-shaped
   PARTIAL-absent parity test (Decision 3, CAPA-02); the RUNTIME
-  write-domain refusal (Pin D1-1, with WS-C) + its negative-pin battery.
+  write-domain refusal (Pin D1-1, with WS-C) + its negative-pin battery
+  incl. the NESTED-ROOT fixture (the NG-3 allowed-subtree-set +
+  foreign-exclusion law).
 - **WS-C:** `VendorPullProfile` / capability registry (incl.
-  `daily_source` + `today_completeness`) + per-vendor job slots +
+  `daily_source` + `today_completeness` + `no_intent_persist`) +
+  per-vendor job slots +
   per-vendor guard binding; the CONC-01 fail-loud construction assertions
   (a non-Groww vendor never resolves `_build_live_controller` /
-  `guard_active_default`); the two-vendor crash-resume pin (§2.5
-  `.pull_intent` row, with WS-D); the Pin D1-1 runtime refusal (with
-  WS-B).
+  `guard_active_default`); the NG-2 launcher intent gate with its
+  REAL-shared-launcher pin (the primary `.pull_intent.json` singleton
+  byte-untouched by a Dhan launch, §2.5); the two-vendor crash-resume pin
+  (§2.5 `.pull_intent` row, with WS-D); the Pin D1-1 runtime refusal
+  (with WS-B).
 - **WS-D:** the Dhan chain binding against the profile (with the Dhan
   track): feed-root derive-lock domain (VERIFIED-AS-BUILT by the Dhan
   track, §3.3 — WS-D consumes their pin, it does not re-verify),
   `run_spot_daily` + `incremental_from` seams, greeks seam; gated on
-  PRECONDITIONS P1-P4 (§15 items 4-7 — P3's clamp/absence pin + P4's
-  spot-join routing + provenance bit land here) and settles the
+  PRECONDITIONS P1-P4 (§15 items 4-7 — P3's clamp/absence pins land here
+  for DAILY + INTRADAY incl. the forming-daily-bar absence pin, the
+  NG-4 bare-back-walk binding + its weekend/holiday-adjacent pin, and
+  P4's spot-join routing + provenance bit + the Pin D1-3 read-domain
+  assertion) and settles the
   two-jobs-vs-chain reconciliation (Decision 5 job-slot row) at binding
   time — the §12.1 binding sketch is the Dhan track's confirmed starting
   point; the vendor-scoped observed-overlay invariant (§12 invariant 6)
@@ -1733,6 +1965,15 @@ lives at `OptionParquetWriter._assert_options_containment`,
   observed-overlay invariant
   (`CAL-OBSERVED-OVERLAY-SINGLE-VENDOR-CONTAMINATION`) · the Decision-5
   precedent re-anchor onto `_pull_job`.
+- The assurance session's RE-review (2026-07-15, vs `96486abf`; the prior
+  ten items verified 10/10 CLOSED; verdict FIX-FIRST for the WS-B freeze)
+  — its six NEW gaps NG-1..NG-6 (NG-3/NG-4 mechanism-corrected by the
+  same session's precision corrections before folding) folded as the
+  §15.1 re-review disposition record: the extended P3 (native-daily END
+  clamp + the NG-4 bare-back-walk binding) · the NG-2
+  `no_intent_persist` launcher gate · the NG-3 `WriteDomain`
+  allowed-subtree-set retyping · Pin D1-3 · the NG-6 provenance-bit
+  encoding law.
 - CLAUDE.md §2 Rules 3/4/6, §6 (Groww verified facts), §8 (hardware
   envelope).
 - DEC-PIPELINE-AUTOPREBUILD-001 (the terminal prebuild being
@@ -1783,4 +2024,5 @@ lives at `OptionParquetWriter._assert_options_containment`,
   `brutex/backup/plan.py` · `brutex/dashboard/app.py` ·
   (assurance fold) `brutex/data/spot_join.py` ·
   `brutex/dashboard/pull_intent.py` ·
-  `brutex/data/option_parquet_writer.py` · `brutex/calendars/nse.py`.
+  `brutex/data/option_parquet_writer.py` · `brutex/calendars/nse.py` ·
+  (assurance re-review fold) `brutex/calendars/observed_sessions.py`.
