@@ -353,7 +353,7 @@ def test_blank_symbol_row_never_poisons_trust_panel(tmp_path: Path) -> None:
     ``forms[0]`` IndexErrors captured by the pool), which the mapping-integrity panel
     matched as an attempted-and-ZERO gating failure: ``is_green=False`` with an
     unnameable empty-string symbol, ``Status,RED`` on the CSV, and ``expiry_failures``
-    re-failing every pull — falsifying the #1760a sub-(c) "inert key" disclosure
+    re-failing every pull — falsifying the #1795a sub-(c) "inert key" disclosure
     (and, per refuter-B OBS-1, failing ``metadata_phase_ok`` so the full pipeline
     stopped after metadata). Post-fix the
     metadata grid SKIPS the blank row (one aggregate WARN): no coverage rows keyed

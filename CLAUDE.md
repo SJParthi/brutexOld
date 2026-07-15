@@ -213,9 +213,9 @@ stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPA
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
 each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
-#1760a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
+#1795a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
 the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
-/ DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1760b–#1760d companion
+/ DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1795b–#1795d companion
 headers), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
 keyed through the COMMON F&O underlying-forms resolver via an injected
 plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
@@ -246,7 +246,7 @@ skipped + counted at the kind-map AND the metadata grid — the round-1-falsifie
 round-2 forensic completion: the pre-fix blank cells ALSO stopped the full
 pipeline after metadata via `metadata_phase_ok`). READ-side dashboard only —
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
-Active-branch blurb + MIGRATION.md #1760a.)
+Active-branch blurb + MIGRATION.md #1795a.)
 Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
@@ -313,7 +313,7 @@ bench regression is caught POST-merge on the self-hosted runner, never a
 merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
 blurb + MIGRATION.md #1753.)
-Earlier: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761 —
+Earlier: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1796 —
 bounded cold lake I/O on the dashboard read path: the SummaryCache COLD
 single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S`
 60 s, fail-safe) + a per-owner-Event fail-fast latch — at most the
@@ -337,7 +337,7 @@ unchanged (parity-pinned); write-side hooks byte-untouched (already under the
 DEC-DASHBOARD-COLD-IO-DEADLINE-002 (PR #1488 LANDED 2026-07-12 —
 this branch is rebased over it; the follow-up is unblocked). READ-side dashboard +
 ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
-record lives in the §1 Active-branch blurb + MIGRATION.md #1761.)
+record lives in the §1 Active-branch blurb + MIGRATION.md #1796.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 —
 the /oneclick/equity + /api/v1/launch/* lake-limiter fix: the equity route (the
 #1665 merge-seam straggler — the ONLY oneclick route left on the bare pool) and
@@ -3379,8 +3379,8 @@ hostile-review pass._
   REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
   MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
   Earlier: `claude/dashboard-read-honesty-pack` (**DEC-DASHBOARD-READ-HONESTY-PACK-001,
-  MIGRATION.md #1760a** — the dashboard underlying-key READ-honesty pack, three READ-side
-  fixes as ONE coordinator-assigned umbrella entry (+ #1760b–#1760d companion headers so
+  MIGRATION.md #1795a** — the dashboard underlying-key READ-honesty pack, three READ-side
+  fixes as ONE coordinator-assigned umbrella entry (+ #1795b–#1795d companion headers so
   the sub-IDs resolve; consolidated from the pre-merge #1751–#1753 after main's PR #1488
   took #1751 — the #1171 umbrella + #1298 companion precedents).
   **(a — DEC-MAPPING-INTEGRITY-FORM-KEY-001, R2)** the /universe
@@ -3741,7 +3741,7 @@ hostile-review pass._
   blocker, unchanged here). CI-gate script + redteam tests + docs only;
   ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no scope/vocab/rate change.)
-  Earlier: `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761** —
+  Earlier: `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1796** —
   bounded cold lake I/O on the dashboard read path (guarantee-audit BUG-1 + BUG-2 — the audit report is
   NOT in-repo, stated honestly; BUG-1 is equally the #1648 honest-limits named follow-up). **BUG-1:**
   `SummaryCache.get_or_refresh`'s COLD cross-thread arm no longer parks waiters in an UNBOUNDED
@@ -3810,7 +3810,7 @@ hostile-review pass._
   stat-spy law test-pinned); the five wedge regressions (W1/W2 summary_cache · W3 lake_stats_manifest ·
   W4 through the REAL `query_candles` in the db_view 21-file gate — zero ci.yml edits · W5
   lake_revision) are join/SIGALRM-watchdog-bounded and EXECUTED failing at the merge-base with their
-  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1761); NEW
+  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1796); NEW
   `tests/unit/test_stat_deadline.py` (+ the mutation.yml proven-pair line, wiring test-pinned) + NEW
   `tests/unit/test_dashboard_cold_degrade_routes.py`; `stat_deadline.py` + `summary_cache.py` +
   `lake_stats_manifest.py` 100.00% line+branch on their gates. NAMED follow-up
@@ -7732,8 +7732,8 @@ hostile-review pass._
   #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
   Earlier: `claude/dashboard-read-honesty-pack`
-  (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md #1760a — the dashboard
-  underlying-key READ-honesty pack, ONE umbrella entry (+ #1760b–#1760d
+  (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md #1795a — the dashboard
+  underlying-key READ-honesty pack, ONE umbrella entry (+ #1795b–#1795d
   companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
   DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
   consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
@@ -7814,7 +7814,7 @@ hostile-review pass._
   tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line)
   Earlier: `claude/dashboard-cold-io-deadline`
-  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1761 — bounded cold lake
+  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1796 — bounded cold lake
   I/O on the dashboard read path: the SummaryCache cold single-flight wait
   gains a TOTAL budget + per-owner-Event fail-fast latch with the honest 503
   degrade on the five summary routes (four JSON `summary_scan_pending`;
@@ -7829,7 +7829,7 @@ hostile-review pass._
   unchanged; the movers_cache sibling wait is the named follow-up
   DEC-DASHBOARD-COLD-IO-DEADLINE-002; READ-side dashboard + one data leaf —
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
-  see §1 + MIGRATION.md #1761 for the full blurb)
+  see §1 + MIGRATION.md #1796 for the full blurb)
   Earlier: `claude/lake-limiter-equity-launch`
   (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 — renumbered
   #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles: main took
