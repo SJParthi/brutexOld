@@ -1599,8 +1599,8 @@ def run_persisted_sweep(
                 f"{cfg.roll_schedule!r} — the kernel must match this tuple's schedule"
             )
         # D12 twin (review round-1 finding 5): a kernel built under the wrong
-        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47 /
-        # VWAP 52-53) on a futures ``1day`` grid — unreachable through the
+        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47; the
+        # VWAP tombstones 52-53 are inert) on a futures ``1day`` grid — unreachable through the
         # production cache (the flag is a pure function of instrument+tf,
         # both in its key) but guarded for a hand-built kernel, exactly like
         # the schedule twin above.

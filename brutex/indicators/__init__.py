@@ -3,7 +3,6 @@
 Per `docs/TRACK1_VOCABULARY.md` — 9 indicator groups:
 - price-action
 - indicator-crossover (EMA 20, EMA 200 crosses)
-- VWAP (mirrored from futures volume for spot indices)
 - Bollinger
 - regime
 - breakout
@@ -19,9 +18,9 @@ Modules:
 - `pivots`         — Standard Pivot Points (P, R1-R5, S1-S5 — R5/S5 added PR-2).
 - `ema`            — EMA (alpha=2/(N+1), SMA-seed at bar N-1).
 - `market_structure` — the resolved BOS/CHoCH signal container (the stateful
-  detector — and the session-anchored VWAP state — live in the shared Rust
-  `trading_core` crate, the single source since
-  DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001).
+  detector lives in the shared Rust `trading_core` crate, the single source
+  since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001; the sibling VWAP state
+  was RETIRED with the bits-52/53 tombstone).
 - `day_extremes`   — Running Day High / Day Low from session open.
 - `prev_day_ohlc`  — Previous Day OHLC anchors (calendar-aware).
 - `conditions`     — Vocabulary: 52 boolean conditions per bar (TBD).

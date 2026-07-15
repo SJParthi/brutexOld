@@ -1,13 +1,15 @@
-"""The 60-condition evaluator — a thin marshalling shim over the shared Rust core.
+"""The 66-condition evaluator — a thin marshalling shim over the shared Rust core.
 
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
-iff condition `i` is true. The vocabulary currently occupies bits 0..59 (60
-conditions), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
+iff condition `i` is true. The vocabulary currently declares bits 0..65 (66
+conditions — 62 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones and the
+SuperTrend bits 64/65 are declared layout-only, `implemented=false`), with
+headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
-Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60 now
-— DEC-VOCAB-U128-CODEGEN-001 grew the vocabulary) lives ONCE, in
+Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60,
+now 66 — DEC-VOCAB-U128-CODEGEN-001 grew the vocabulary) lives ONCE, in
 the Rust `trading-core` crate (`rust/trading-core/`), and is consumed by BOTH
 BruteX (this repo, via the PyO3 `trading_core` wheel) AND TickVault (native
 Rust). This module no longer reimplements the conditions — it marshals the
@@ -69,14 +71,10 @@ class IndicatorSnapshot:
     # Today's open price (computed at session start, constant intraday)
     open_of_day_paisa: int
 
-    # Session-anchored intraday futures VWAP (None during warm-up AND on the 1day
-    # timeframe — ADR-0012 D12; the Group-10 close_above/below_vwap bits then do
-    # not fire). Computed by the shared Rust trading_core.VwapState — the single
-    # source since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001 (DEC-NIFTY-INDICATORS-001).
-    # Defaulted to None so every existing snapshot caller (which predates PR-2 and
-    # has no futures VWAP) keeps working unchanged — only the NIFTY-futures track
-    # populates it.
-    vwap_paisa: int | None = None
+    # NOTE: the former ``vwap_paisa`` field (Group-10 VWAP bits 52/53) was
+    # RETIRED with the VWAP tombstone (the spot-only engine has no traded
+    # volume; the Rust ``VwapState`` was deleted from the crate at 0.4.0).
+    # Bits 52/53 hold their positions forever and never fire.
 
     # Resolved BOS/CHoCH market-structure flags (Group 12, bits 56-59), produced by
     # the look-ahead-clean shared Rust trading_core.MarketStructureState — the
@@ -123,7 +121,7 @@ class PriorBarHistory:
             self.flags = self.flags[-self.prior_n :]
 
 
-# ────── The 60-condition evaluator (delegates to the shared Rust core) ──────
+# ────── The 66-condition evaluator (delegates to the shared Rust core) ──────
 
 
 def pivot_levels_list(pivots: PivotLevels) -> list[int]:
@@ -206,7 +204,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate all 60 atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate the 62 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are
@@ -222,9 +220,12 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask. All 60 bits 0..59 set per condition (PR-2 added VWAP-position
-        bits 52-53 + pivot R5/S5 bits 54-55; DEC-NIFTY-BOS-CHOCH-001 added the
-        BOS/CHoCH bits 56-59, resolved from ``snapshot.market_structure``).
+        u128 bitmask over the 66-bit layout. The 62 IMPLEMENTED bits (0-51,
+        54-63) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
+        DEC-NIFTY-BOS-CHOCH-001 added the BOS/CHoCH bits 56-59, resolved from
+        ``snapshot.market_structure``; the CPR bits 60-63 are computed in-core
+        from the snapshot's pivot levels). The RETIRED VWAP tombstones (52/53)
+        and the declared-only SuperTrend bits (64/65) are never set.
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -251,7 +252,6 @@ def evaluate_atoms(
         snapshot.close_paisa,
         snapshot.ema20_paisa,
         snapshot.ema200_paisa,
-        snapshot.vwap_paisa,
         pivot_levels,
         fib_levels,
         snapshot.day_high_paisa,

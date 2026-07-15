@@ -2,8 +2,8 @@
 
 The G1 Rust-conversion slice: :func:`brutex.engine.stage1a.build_bar_bits`
 gains a default-OFF Rust arm that replaces the per-bar Python driver loop
-(one ``evaluate_with_levels`` + ``VwapState.update`` +
-``MarketStructureState.update`` FFI call PER BAR) with ONE batch
+(one ``evaluate_with_levels`` + ``MarketStructureState.update`` FFI call
+PER BAR) with ONE batch
 ``trading_core.stage1a_bar_bits_batch`` call per ``(instrument, tf)`` build.
 This module owns the Python side of that seam: the env-flag resolution, the
 burn-in whole-series self-check with the autorevert latch, the warn-once
@@ -58,7 +58,7 @@ process — the anti-vacuous-gate signal the golden suite asserts.
   and never a "Rust ⇒ O(1)" claim.
 * The engaged arm still pays the Python prepass (tz/snap/roll/day/anchor
   resolution + the EMA columns) — the amortised win is the removal of the
-  per-bar 22-arg FFI marshal + snapshot/dataclass construction.
+  per-bar 21-arg FFI marshal + snapshot/dataclass construction.
 * Burn-in tax: ≤ :data:`SELF_CHECK_BUILDS` full oracle builds per process.
 * The latch / counters / memo are single-cell mutable module state — the same
   documented exception to the no-global-mutable-state rule as
@@ -144,12 +144,7 @@ class Stage1ABatchInputs:
     high_paisa: list[int]
     low_paisa: list[int]
     close_paisa: list[int]
-    typical_paisa: list[int]
-    volume: list[int]
     tod_seconds: list[int]
-    pre_open: list[bool]
-    session_key: list[int]
-    session_day: list[int]
     contract_reset: list[bool]
     day_index: list[int]
     ema20_paisa: list[int | None]
@@ -340,12 +335,7 @@ def rust_bar_bits_or_none(
             inputs.high_paisa,
             inputs.low_paisa,
             inputs.close_paisa,
-            inputs.typical_paisa,
-            inputs.volume,
             inputs.tod_seconds,
-            inputs.pre_open,
-            inputs.session_key,
-            inputs.session_day,
             inputs.contract_reset,
             inputs.day_index,
             inputs.ema20_paisa,

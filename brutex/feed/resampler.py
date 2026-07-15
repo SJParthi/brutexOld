@@ -45,7 +45,7 @@ growing set). Raise-on-non-monotonic is the established feed-integrity
 convention (the typed
 :class:`~brutex.execution.errors.NonMonotonicBarError` exists for the
 same ``this_ts <= prev_ts`` violation): silently mis-bucketing such a
-bar would double-count VWAP volume and corrupt the aggregated OHLC.
+bar would double-count aggregated volume and corrupt the aggregated OHLC.
 All timestamps must be timezone-aware UTC — naive datetimes are
 rejected early rather than silently ambiguous.
 """
@@ -192,7 +192,7 @@ def resample_bars(
     # O(1) time + O(1) extra space per bar. Raise-on-non-monotonic is the
     # established feed convention (`this_ts <= prev_ts` rejection) — a
     # non-increasing bar would otherwise be silently mis-bucketed
-    # (double-counted VWAP volume / corrupted OHLC).
+    # (double-counted aggregated volume / corrupted OHLC).
     prev_ts: datetime | None = None
 
     for bar in bars:

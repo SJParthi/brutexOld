@@ -24,12 +24,14 @@ from __future__ import annotations
 from typing import Final
 
 from brutex.vocabulary.bits import (
+    BIT_ABOVE_CPR_TC,
     BIT_AFTERNOON,
     BIT_BAR_BEARISH,
     BIT_BAR_BULLISH,
     BIT_BAR_DOJI,
     BIT_BAR_LARGE_BODY,
     BIT_BAR_SMALL_BODY,
+    BIT_BELOW_CPR_BC,
     BIT_CLOSE_ABOVE_EMA20,
     BIT_CLOSE_ABOVE_EMA200,
     BIT_CLOSE_ABOVE_PDH,
@@ -47,6 +49,7 @@ from brutex.vocabulary.bits import (
     BIT_EMA20_BELOW_EMA200,
     BIT_GAP_DOWN_DAY,
     BIT_GAP_UP_DAY,
+    BIT_INSIDE_CPR,
     BIT_INSIDE_DAY,
     BIT_LONG_LOWER_WICK,
     BIT_LONG_UPPER_WICK,
@@ -108,6 +111,18 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         # Group 9: Day type mutual exclusions
         (BIT_GAP_UP_DAY, BIT_GAP_DOWN_DAY),
         (BIT_INSIDE_DAY, BIT_OUTSIDE_DAY),
+        # Group 13: the CPR position bits form an EXACT partition by
+        # construction (evaluator.rs:422-431 — bit 60 strict `close > TC`,
+        # bit 61 strict `close < BC`, bit 62 inclusive `BC <= close <= TC`
+        # over the canonicalised `tc >= bc` pair of
+        # pivots.rs::compute_cpr_levels), so the three are pairwise mutually
+        # exclusive; `narrow_cpr_day` (63) is orthogonal (co-occurs with any).
+        # The RETIRED VWAP tombstones (52/53) never fire, so they carry no
+        # pair — the table prunes IMPOSSIBLE co-occurrence, and a mask
+        # requiring a tombstone is already a zero-trade mask on its own.
+        (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
+        (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
+        (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),
     }
 )
 
@@ -116,7 +131,7 @@ def has_conflict(mask: int) -> bool:
     """Return True if `mask` contains any conflict pair.
 
     Args:
-        mask: u128 strategy mask (60 bits used — ``TOTAL_CONDITIONS``).
+        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 66 declared bits).
 
     Returns:
         True if mask has any conflict pair (i.e., the strategy is

@@ -184,11 +184,12 @@ def default_condition_bits() -> list[int]:
     pivot R5/S5, BOS/CHoCH — from every default sweep).
 
     Deriving from ``IMPLEMENTED_MASK`` (rather than ``range(TOTAL_CONDITIONS)``)
-    is deliberately HONEST: a future LAYOUT-ONLY bit (``implemented=false`` in
-    ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so the
-    default never sweeps a dead condition that could never fire. Today every one
-    of the ``TOTAL_CONDITIONS`` bits is implemented (``IMPLEMENTED_MASK`` is
-    dense ``0..TOTAL_CONDITIONS-1``), so this returns ``[0, 1, ..., 59]``.
+    is deliberately HONEST: a LAYOUT-ONLY or RETIRED bit (``implemented=false``
+    in ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so
+    the default never sweeps a dead condition that could never fire. On the
+    66-condition layout that is the 62 ACTIVE bits ``[0..51, 54..63]`` — the
+    RETIRED VWAP tombstones (52/53) and the declared-only SuperTrend bits
+    (64/65) are excluded.
 
     Returns
     -------

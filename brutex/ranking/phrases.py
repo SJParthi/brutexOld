@@ -1,4 +1,4 @@
-"""The R33 dual-language trade-reason table — FIXED, hand-written, 60 entries.
+"""The R33 dual-language trade-reason table — FIXED, hand-written, 66 entries.
 
 DEC-SWEEP-RESULTS-DEPTH-001 (WP3). Every trade/combo shows WHY it entered in
 BOTH modes — technical (``PDH_CROSS_UP ∧ CLOSE>R2``-style condition names)
@@ -9,7 +9,7 @@ mask's fired-bit count (bench-pinned).
 
 ## The table's provenance + drift guards
 
-One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (60)
+One frozen literal tuple of exactly ``TOTAL_CONDITIONS`` (66)
 :class:`PhraseEntry` rows, ``bit == index``. Each ``plain`` phrase was
 hand-written ONCE from the condition's authoritative semantics — the
 ``description`` field of ``rust/trading-core/conditions.toml`` (the SINGLE
@@ -144,16 +144,21 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
     ),
     PhraseEntry(50, "inside_day", "the day's range stayed inside the previous day's range"),
     PhraseEntry(51, "outside_day", "the day's range engulfed the previous day's range"),
-    # ── VWAP Position (bits 52-53) ──
+    # ── VWAP Position (bits 52-53) — RETIRED tombstones: the positions are
+    # held forever but the evaluator never sets them (the VWAP/volume wipe;
+    # the spot-only engine has no traded volume). The phrases stay honest
+    # should an OLD artifact's mask carry them.
     PhraseEntry(
         52,
         "close_above_vwap",
-        "price was above the session's volume-weighted average price (VWAP)",
+        "price was above the session's volume-weighted average price (VWAP; retired "
+        "condition — never fires on current runs)",
     ),
     PhraseEntry(
         53,
         "close_below_vwap",
-        "price was below the session's volume-weighted average price (VWAP)",
+        "price was below the session's volume-weighted average price (VWAP; retired "
+        "condition — never fires on current runs)",
     ),
     # ── Pivot Proximity Extended (bits 54-55) ──
     PhraseEntry(54, "near_pivot_r5", "price was near resistance level R5"),
@@ -174,6 +179,34 @@ PHRASE_TABLE: Final[tuple[PhraseEntry, ...]] = (
         59,
         "choch_bearish",
         "the trend flipped downward after a rising sequence (bearish change of character)",
+    ),
+    # ── Central Pivot Range (bits 60-63) ──
+    PhraseEntry(60, "above_cpr_tc", "the candle closed above the Central Pivot Range's top (TC)"),
+    PhraseEntry(
+        61, "below_cpr_bc", "the candle closed below the Central Pivot Range's bottom (BC)"
+    ),
+    PhraseEntry(
+        62, "inside_cpr", "the candle closed inside the Central Pivot Range (between BC and TC)"
+    ),
+    PhraseEntry(
+        63,
+        "narrow_cpr_day",
+        "the day's Central Pivot Range was narrow (a tight coil, often before a big move)",
+    ),
+    # ── Supertrend (bits 64-65) — declared layout-only (implemented=false):
+    # the math lands in a later PR, so these bits never fire today. The
+    # phrases exist because the table must cover every declared bit.
+    PhraseEntry(
+        64,
+        "close_above_supertrend",
+        "the candle closed above the SuperTrend line (declared condition — math "
+        "not yet active, never fires on current runs)",
+    ),
+    PhraseEntry(
+        65,
+        "close_below_supertrend",
+        "the candle closed below the SuperTrend line (declared condition — math "
+        "not yet active, never fires on current runs)",
     ),
 )
 

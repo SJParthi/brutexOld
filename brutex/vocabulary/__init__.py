@@ -2,12 +2,15 @@
 
 Per `docs/TRACK1_VOCABULARY.md` (grown 52 → 60 by DEC-VOCAB-U128-CODEGEN-001 /
 ADR-0012 PR-1):
-- 60 boolean conditions packed into a u128 bitmask (bits 0..59 used)
-- 12 indicator groups (EMA, Pivot, PDH/PDL, Fib, Candle, Prior, DayStructure,
-  TimeOfDay, DayType, VWAP Position, Pivot Proximity Extended, Market
-  Structure — `bits.GROUP_RANGES` is the one source of truth)
+- 66 declared boolean conditions packed into a u128 bitmask (bits 0..65;
+  62 ACTIVE — the VWAP bits 52/53 are RETIRED tombstones and the SuperTrend
+  bits 64/65 are declared layout-only)
+- 14 indicator groups (EMA, Pivot, PDH/PDL, Fib, Candle, Prior, DayStructure,
+  TimeOfDay, DayType, VWAP Position (retired), Pivot Proximity Extended,
+  Market Structure, Central Pivot Range, Supertrend — `bits.GROUP_RANGES` is
+  the one source of truth)
 - Strategy mask = u128 with set bits = required-true conditions (AND)
-- Direction (bull/bear) is SEPARATE from the 60 bits
+- Direction (bull/bear) is SEPARATE from the condition bits
 
 This is the shared vocabulary used by:
 - Backtest (BruteX, this repo) — Stage 1A precompute over 5y of bars

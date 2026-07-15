@@ -23,7 +23,6 @@ from decimal import Decimal
 from typing import cast
 
 import pytest
-import trading_core
 from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import (
@@ -137,6 +136,31 @@ def test_first_day_clears_anchor_bits() -> None:
     bars = [_minute_bar(datetime(2024, 1, 2), i, "100", "103", "99", "101") for i in range(3)]
     masks = build_bar_bits(bars)
     assert all((m & ANCHOR_DEPENDENT_MASK) == 0 for m in masks)
+
+
+def test_cold_anchor_day_clears_every_cpr_bit() -> None:
+    """G-CPRCOR-01: the CPR bits 60-63 ride the anchor-dependent clear.
+
+    On a day-1 / placeholder-anchor stream the evaluator sees the ZERO
+    placeholder pivots — ``close > TC == 0`` would fire ``above_cpr_tc``
+    trivially — so ``_pivot_dependent_bits()`` MUST include bits 60-63 and
+    the builder MUST clear them on every cold-anchor bar. Pinned per bar
+    (not just via ``ANCHOR_DEPENDENT_MASK`` membership) so a masking
+    regression can never hide behind the membership pin.
+    """
+    cpr_mask = 0b1111 << 60
+    assert ANCHOR_DEPENDENT_MASK & cpr_mask == cpr_mask  # membership
+    bars = [_minute_bar(datetime(2024, 1, 2), i, "100", "103", "99", "101") for i in range(5)]
+    masks = build_bar_bits(bars)
+    assert masks, "non-vacuous: the cold-anchor stream produced masks"
+    for i, m in enumerate(masks):
+        assert m & cpr_mask == 0, f"bar {i}: a CPR bit fired against placeholder anchors"
+    # The warm counterfactual: a second day (prior day completed) DOES fire a
+    # CPR position bit (the 60/61/62 partition covers every warm bar), so the
+    # cold-day clear above is proven non-vacuous.
+    day2 = [_minute_bar(datetime(2024, 1, 3), i, "100", "103", "99", "101") for i in range(3)]
+    warm = build_bar_bits(bars + day2)[len(bars) :]
+    assert all(m & cpr_mask for m in warm)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -407,19 +431,6 @@ def test_roll_schedule_invalid_shape_rejected_via_wrapper() -> None:
         build_bar_bits([], roll_schedule=(3, 2))
 
 
-def test_negative_session_key_is_an_ffi_overflow() -> None:
-    """The u64-boundary pin motivating the non-negative schedule validation.
-
-    ``VwapState.update``'s ``session_key`` is a Rust ``u64`` — a negative
-    Python int raises ``OverflowError`` AT the FFI, so the builder's ctor
-    validation (negative ordinals rejected) is what keeps that error
-    unreachable from the production path.
-    """
-    state = trading_core.VwapState()
-    with pytest.raises(OverflowError):
-        state.update(10_000, 100, False, -1, date(2025, 6, 24).toordinal(), 9 * 3600)
-
-
 # ── Cursor exhaustion (F10 — loader/schedule desync is LOUD) ──
 
 
@@ -472,45 +483,24 @@ def test_loader_cut_and_cursor_agree_per_bar() -> None:
         assert key == expected
 
 
-def test_spot_path_feeds_exactly_the_default_session_key() -> None:
-    """SPOT session-key drift pin: no schedule ⇒ every VWAP feed gets the constant.
+def test_spot_path_never_derives_a_roll_key() -> None:
+    """SPOT drift pin: no schedule ⇒ NO per-bar roll key, NO roll boundary.
 
-    A recording wrapper around the real ``VwapState`` proves the schedule-absent
-    path feeds EXACTLY ``_DEFAULT_SESSION_KEY`` (== 0) on every bar — the
-    byte-identity precondition every spot golden rides on — and that the
-    futures cursor state stays untouched (``_current_session_key`` remains
-    ``None``).
+    With the retired VWAP feed gone the spot arm computes no session key at
+    all — the constant :data:`_DEFAULT_SESSION_KEY` (== 0) survives only as
+    the documented former-feed record. This pins that a schedule-less build
+    never touches the futures cursor state (``_current_session_key`` stays
+    ``None`` and the roll cursor never advances), so no D11 hard reset can
+    ever fire on the continuous spot-index series — the byte-identity
+    precondition every spot golden rides on.
     """
-
-    class _KeyRecordingVwap:
-        def __init__(self) -> None:
-            self._inner = trading_core.VwapState()
-            self.keys: list[int] = []
-
-        def update(
-            self,
-            typical_paisa: int,
-            volume: int,
-            pre_open: bool,
-            session_key: int,
-            session_day: int,
-            tod_seconds: int,
-        ) -> int | None:
-            self.keys.append(session_key)
-            result = self._inner.update(
-                typical_paisa, volume, pre_open, session_key, session_day, tod_seconds
-            )
-            return result  # noqa: RET504 — keep the FFI return explicit
-
     seg_a, seg_b = _two_contract_stream()
     builder = Stage1AMatrixBuilder()
-    spy = _KeyRecordingVwap()
-    builder._vwap = spy  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
     for bar in seg_a + seg_b:
         builder.push(bar)
-    assert spy.keys == [_DEFAULT_SESSION_KEY] * (len(seg_a) + len(seg_b))
     assert _DEFAULT_SESSION_KEY == 0
     assert builder._current_session_key is None  # pyright: ignore[reportPrivateUsage]
+    assert builder._roll_cursor == 0  # pyright: ignore[reportPrivateUsage]
 
 
 # ── The TOTAL hard reset (D11) ──
@@ -636,7 +626,8 @@ def test_constant_key_single_contract_is_output_invariant() -> None:
 def test_apply_1day_mask_clears_exactly_the_pinned_bit_set() -> None:
     """The flag ANDs the FINAL mask with ``APPLIES_TO_1DAY_MASK`` — nothing else.
 
-    The exact cleared bit set (ToD 44-47 + VWAP 52-53) is pinned by
+    The exact cleared bit set (ToD 44-47; the RETIRED VWAP tombstones 52-53
+    sit outside the mask too but never fire) is pinned by
     ``tests/unit/test_vocabulary.py::test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits``
     (the ONE bit-set source of truth — reused, not re-invented); here we pin
     that the builder applies EXACTLY that mask per bar, non-vacuously.
@@ -646,8 +637,8 @@ def test_apply_1day_mask_clears_exactly_the_pinned_bit_set() -> None:
     unmasked = build_bar_bits(bars)
     masked = build_bar_bits(bars, apply_1day_mask=True)
     assert masked == [m & B.APPLIES_TO_1DAY_MASK for m in unmasked]
-    # Non-vacuous: the volume-bearing stream genuinely fired at least one of
-    # the six intraday-only bits (52/53 fire from bar 0 — VWAP seeds itself).
+    # Non-vacuous: the intraday stream genuinely fired at least one of the
+    # intraday-only ToD bits (bit 44 fires from the 09:15 open).
     cleared = [m & ~B.APPLIES_TO_1DAY_MASK for m in unmasked]
     assert any(cleared)
     # Every cleared bit is inside the vocabulary's own pinned intraday-only set.
@@ -871,7 +862,8 @@ def test_collect_batch_inputs_spot_constant_key_and_no_resets() -> None:
     day1 = [_minute_bar(datetime(2024, 1, 2), i, "100", "110", "90", "105") for i in range(2)]
     day2 = [_minute_bar(datetime(2024, 1, 3), i, "106", "112", "104", "108") for i in range(2)]
     inputs = Stage1AMatrixBuilder().collect_batch_inputs(day1 + day2)
-    assert inputs.session_key == [0, 0, 0, 0]  # _DEFAULT_SESSION_KEY
+    # The retired session_key/session_day columns are gone (the VWAP wipe) —
+    # the spot invariant is now simply "no roll boundary ever fires".
     assert inputs.contract_reset == [False, False, False, False]
     assert inputs.day_index == [0, 0, 1, 1]
     assert inputs.day_has_pivot == [False, True]
@@ -942,9 +934,9 @@ def test_collect_batch_inputs_ema_segments_restart_at_rolls() -> None:
     # Post-roll: the warm-up restarts — None until 20 bars into segment B.
     assert inputs.ema20_paisa[25 + 18] is None
     assert inputs.ema20_paisa[25 + 19] is not None
-    # The owning-expiry ordinals key the sessions per contract.
-    assert set(inputs.session_key[:25]) == {d1.toordinal()}
-    assert set(inputs.session_key[25:]) == {_date(2025, 7, 31).toordinal()}
+    # The roll boundary is the ONE reset row — the owning-expiry key itself
+    # is no longer a batch column (the VWAP wipe); the cursor agreement is
+    # pinned by test_loader_cut_and_cursor_agree_per_bar.
 
 
 def test_collect_batch_inputs_beyond_schedule_raises_the_push_message() -> None:

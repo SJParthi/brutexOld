@@ -264,12 +264,7 @@ def test_hostile_fractal_k_raises_value_error_never_aborts(hostile_k: int) -> No
             inputs.high_paisa,
             inputs.low_paisa,
             inputs.close_paisa,
-            inputs.typical_paisa,
-            inputs.volume,
             inputs.tod_seconds,
-            inputs.pre_open,
-            inputs.session_key,
-            inputs.session_day,
             inputs.contract_reset,
             inputs.day_index,
             inputs.ema20_paisa,
@@ -535,34 +530,33 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         result: int = real_eval(*args)
         return result
 
-    vwap_calls: list[tuple[Any, ...]] = []
     constructions: list[int] = [0]
-    real_vwap_cls = trading_core.VwapState
+    real_ms_cls = trading_core.MarketStructureState
 
-    class _RecordingVwap:
+    class _RecordingStructure:
         def __init__(self) -> None:
             constructions[0] += 1
-            self._inner = real_vwap_cls()
+            self._inner = real_ms_cls()
 
-        def update(self, *args: Any) -> int | None:
-            vwap_calls.append(args)
-            out: int | None = self._inner.update(*args)
+        def update(self, *args: Any) -> tuple[bool, bool, bool, bool]:
+            out: tuple[bool, bool, bool, bool] = self._inner.update(*args)
             return out
 
     monkeypatch.setattr(trading_core, "evaluate_with_levels", _recording_eval)
-    monkeypatch.setattr(trading_core, "VwapState", _RecordingVwap)
+    monkeypatch.setattr(trading_core, "MarketStructureState", _RecordingStructure)
 
-    # The REAL builder walk records the per-bar marshalled values…
+    # The REAL builder walk records the per-bar marshalled values… (the
+    # constructions counter now rides MarketStructureState — the retired
+    # VwapState spy died with the bits-52/53 tombstone.)
     Stage1AMatrixBuilder(roll_schedule=schedule).build(bars)
     push_constructions = constructions[0]
     assert len(eval_calls) == len(bars)
-    assert len(vwap_calls) == len(bars)
 
-    # …and the prepass columns must equal them field-for-field.
+    # …and the prepass columns must equal them field-for-field (the narrowed
+    # 21-arg ABI: pivot_levels sits at index 7 — the vwap arg is gone).
     constructions[0] = 0
     inputs = Stage1AMatrixBuilder(roll_schedule=schedule).collect_batch_inputs(bars)
     assert push_constructions == 1 + sum(inputs.contract_reset)
-    assert constructions[0] == push_constructions  # same reset cursor
 
     for i in range(len(bars)):
         args = eval_calls[i]
@@ -574,20 +568,12 @@ def test_collect_batch_inputs_columns_equal_the_real_push_marshal(
         assert args[5] == inputs.ema20_paisa[i]
         assert args[6] == inputs.ema200_paisa[i]
         d = inputs.day_index[i]
-        assert args[8] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
-        assert args[9] == inputs.day_fib_levels[15 * d : 15 * (d + 1)]
-        assert args[13] == inputs.pivot_bps
-        assert args[14] == inputs.pdh_pdl_bps
-        assert args[15] == inputs.fib_bps
-        assert args[16] == inputs.prior_n
-
-        typical, volume, pre_open, session_key, session_day, tod = vwap_calls[i]
-        assert typical == inputs.typical_paisa[i]
-        assert volume == inputs.volume[i]
-        assert pre_open == inputs.pre_open[i]
-        assert session_key == inputs.session_key[i]
-        assert session_day == inputs.session_day[i]
-        assert tod == inputs.tod_seconds[i]
+        assert args[7] == inputs.day_pivot_levels[12 * d : 12 * (d + 1)]
+        assert args[8] == inputs.day_fib_levels[15 * d : 15 * (d + 1)]
+        assert args[12] == inputs.pivot_bps
+        assert args[13] == inputs.pdh_pdl_bps
+        assert args[14] == inputs.fib_bps
+        assert args[15] == inputs.prior_n
 
     # Day-table shape: one row per distinct builder day roll, all consumed.
     n_days = len(inputs.day_has_pivot)
