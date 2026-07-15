@@ -868,7 +868,8 @@ def _read_cut_1m_frame(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns AND
+    its price-sanity gate — DEC-READ-GUARD-PARITY-001, §11).
 
     **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
     the ``cutoff_min`` filter is applied to the RAW 1-minute frame via the COMMON
@@ -883,6 +884,7 @@ def _read_cut_1m_frame(
     import polars as pl
 
     from brutex.data.lake_day_glob import read_day_intraday_frame
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
     month = read_day_intraday_frame(base, day, symbol=symbol)
@@ -906,6 +908,19 @@ def _read_cut_1m_frame(
     day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
+    # DEC-READ-GUARD-PARITY-001: mirror make_lake_read_1m's price-sanity gate
+    # on the SAME column shape (the docstring above already claims the column
+    # mirror — this closes the GATE mirror). An inverted / non-positive stored
+    # 1m row must be an honest skip+count (ResampleInputError is ALREADY in
+    # movers_read_skip_errors) — never a silently laundered resampled bucket,
+    # never a CandleBar ValueError 500 (movers_resilient deliberately keeps
+    # ValueError out of the skip set as the code-bug class). Validated on the
+    # POST-cut frame — exactly the rows served: a corrupt row strictly AFTER
+    # the as-of cutoff never blanks an earlier-cut view (correct-or-absent,
+    # the #1719 strictly-narrower-degrade law).
+    validate_frame_price_sanity(
+        day_df, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+    )
     return day_df
 
 
