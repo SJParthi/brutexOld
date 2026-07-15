@@ -18,7 +18,20 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
+_Last updated: 2026-07-15 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
+a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
+EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
+DEFAULT-OMITTED (baseline (hlc3,close) → existing run_ids BYTE-IDENTICAL, no
+indicator_version/crate bump, no Rust change — Stage-1A stays Python). REFOLDED
+standalone onto post-ADR-0012 main (branch `claude/refold-1396-sweep-results`,
+ex-club-S2): the source axis rides BESIDE the landed roll_schedule/D12 threading
+at every seam, a non-default cell never takes the DEC-STAGE1A-RUST-BATCH-001
+batch arm, and under the landed DEC-ENGINE-SPOT-ONLY-001 (#1790) the VWAP half
+is inert-by-abstention on the spot-only engine (bits 52/53 abstain) — EMA-source
+cells apply everywhere. The per-round record lives ONLY in the §1 Active-branch
+blurb + MIGRATION.md #1681 — this header carries the pointer, never the story.
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
 `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
@@ -2623,7 +2636,47 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
+- **Active branch:** `claude/refold-1396-sweep-results` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
+  a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
+  {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
+  — the fixed-close-comparison bias hazard, both left in the enum for a cheap round-2), mirroring the
+  `fib_anchor` axis. Operator-ordered: pivots + Fibonacci stay STATIC (standard formulas); VWAP + EMA are
+  the genuinely run-time-dynamic indicators and get real drill-down over their price source. MECHANISM: a
+  pre-FFI Python scalar reduction in `stage1a.py` (`_reduce_vwap_source_paisa` → typical_paisa i64;
+  `_reduce_ema_source_float` → rupees f64; HLC3/CLOSE arms verbatim pre-axis; exhaustive via an
+  explicit-raise catch-all), carried in run-identity `params` via the ONE `price_source_params_fragment`
+  helper, DEFAULT-OMITTED (baseline (hlc3,close) emits NO keys → existing run_ids BYTE-IDENTICAL, golden +
+  SHA verified; NO indicator_version/crate bump; NO Rust change — Stage-1A stays Python; `PriceSource` enum
+  + `price_source_params_fragment` live in `strategies/types.py`). Threaded through orchestrator /
+  kernel-cache (+ a source-mismatch guard) / parallel / supervisor / verify / results_depth / cascade +
+  Stage-3 refinement. CLI `--price-source-cells` (an OFAT `<vwap>:<ema>` lattice); nightly automation
+  EXCLUDES it (stays baseline). REFOLD RECORD (2026-07-15, standalone onto post-ADR-0012 main — the
+  ex-club-S2 engine-sensitive member; original branch `claude/vwap-ema-price-source-axis`, PR #1396):
+  the axis rides BESIDE the landed threading, never replacing it — the kernel cache key + the
+  `run_persisted_sweep` guards carry BOTH the ADR-0012 `roll_schedule`/D12 pair (DEC-STAGE1A-ROLL-RESET-001)
+  AND the source pair; `canonical_trade_params` emits `roll_schedule` (presence ⟺ the futures alias) AND the
+  default-omitted source fragment; `recover_survivor_cell` returns the 5-tuple `(sl, tp, proximity,
+  fib_anchor, price_source)` while KEEPING the kw-only `roll_schedule`; the Stage-3 memo keys on (anchor,
+  roll_schedule, source); the tuple-store digest folds the source fragment BESIDE the #1715
+  selection/gate-config fragments (`allow_nan=False` kept). NEW refold guard: a NON-default cell never takes
+  the DEC-STAGE1A-RUST-BATCH-001 batch Rust arm (`build_bar_bits` source gate — the batch prepass feeds
+  hardcoded HLC3/close reductions and burn-in covers only the first 4 builds/process, so a later non-default
+  cell would ship unverified wrong bits 52-53/0-5; the byte-correct Python builder serves every non-default
+  cell; routing the prepass through the reductions is the Rust owner's documented follow-up). HONESTY under
+  the landed DEC-ENGINE-SPOT-ONLY-001 (#1790, supersedes the futures dynamic track this PR was scoped
+  against): the engine sweep surface is spot-only, so VWAP-source cells are currently INERT-BY-ABSTENTION on
+  every engine instrument (bits 52/53 permanently abstain on volumeless spot — a VWAP-only variant re-keys
+  the run_id while reproducing baseline bits; the non-blocking spot warn still fires); EMA-source cells apply
+  everywhere; the axis stays dormant + opt-in; the committed follow-up (a typed grid-validation REFUSAL for
+  VWAP-variant cells while bits 52/53 are gated) stays contingent on DEC-VOLUME-BITS-LIVE-SYNC-001 (#1787),
+  which has NOT landed. SCOPE/BUDGET (honest, Golden Rule #10): the full 5-cell COMBINED single run does NOT
+  fit ≤2 days (≈2.3-7.4 M4-days) — each non-default cell staged as a SEPARATE cardinality-1 invocation is
+  ≈ baseline ≤ 2 days (pre-Apriori figures, derived from the launch_button k≤6 derivation). VERIFICATION
+  (refold tree): the frozen `_GOLDEN_CONTENT_HASH`/`_GOLDEN_RUN_ID` sweep goldens + P-06 suffix-independence
+  + the 400-case vocab golden pass with fixtures byte-untouched; the member suites + touched-module gates
+  green; ruff/ruff-format clean. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no vocab (60-bit)/rate/scope
+  change.)
+  Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
   only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
@@ -7228,7 +7281,22 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/operator-health-truth`
+- **Active feature branch:** `claude/refold-1396-sweep-results`
+  (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
+  cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
+  {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis; DEFAULT-OMITTED
+  (baseline (hlc3,close) → existing run_ids BYTE-IDENTICAL, no
+  indicator_version/crate bump, no Rust change — Stage-1A stays Python); the
+  STANDALONE refold of PR #1396 onto post-ADR-0012 main (ex-club-S2): threaded
+  BESIDE the landed roll_schedule/D12 threading through orchestrator/
+  kernel-cache/parallel/supervisor/verify/results_depth/cascade + Stage-3; a
+  non-default cell never takes the DEC-STAGE1A-RUST-BATCH-001 batch Rust arm;
+  under DEC-ENGINE-SPOT-ONLY-001 (#1790) the VWAP half is inert-by-abstention
+  on the spot-only engine — EMA-source cells apply everywhere; CLI
+  `--price-source-cells`; each non-default cell staged as a separate
+  cardinality-1 invocation ≤ 2 days/run; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
   completed cleanly" on `flow_state === 'done'` is KILLED — the pull-rate
@@ -8021,7 +8089,7 @@ bruteX/
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
 | Exception hierarchy | `GrowwError, GrowwBadRequestError, GrowwAuthError, GrowwNotFoundError, GrowwRateLimitError, GrowwTimeoutError, GrowwFeedError, GrowwEmptyResponseError` + `is_retryable()` (maps the SDK's `GrowwBaseException`/`GrowwAPIException` tree by class name; an empty/non-JSON body `json.JSONDecodeError` → **retryable** `GrowwEmptyResponseError`, so a transient throttle is re-pulled instead of a terminal "not on Groww" quarantine — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854) | `groww/errors.py`; `groww/api-reference/05-exceptions.md:9-70` |
-| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:595-608` |
+| F&O-eligible stock detection | EQUITY rows whose `underlying_symbol` appears in the FNO contract set (`build_fno_eligible_underlyings`); **212** single stocks verified in the operator instrument master (`EXPECTED_FNO_STOCK_COUNT` — lake scope) | `groww/constants.py:104-105`; `brutex/universe.py:621-654` |
 | NIFTY Total Market lake admission | **REFERENCE_ONLY** — ~750 NSE constituents (large+mid+small+micro) fetched best-effort from niftyindices, matched to Groww NSE cash-equity rows by ISIN / ticker; the ~540 non-F&O matches are admitted reference-only (the ~212 F&O names stay tradable). The fetch is **cache-on-success + bounded-retry + cache-fallback** (live → last-good cache → honest F&O-base degrade), so a transient niftyindices 404 falls back to the cached ~752 instead of collapsing the universe to the ~211 F&O base (this cache/retry predates the batch; regression-pinned in DEC-POSTPULL-DATAQUALITY-BATCH-001 #854). **BRUTE-FORCE engine UNCHANGED** — lake/reference only, never in the 52-vocab | `dashboard/instrument_loader.py` `_ntm_admission` (DEC-NTM-GROWW-REPOINT-001); `universe_constituents.py` `resolve_constituents` |
 | Track 1 brute-force universe | **`NSE-NIFTY`, `NSE-BANKNIFTY`, `BSE-SENSEX`** (all `IDX`, mapped to the neutral `INDEX` segment); resolved master-authoritatively via `by_exchange_symbol` + `groww_symbol_by_pair` (the bare trading symbol → the real groww_symbol, DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001). (LAKE option-pullability for F&O indices/stocks keys on a vendor-canonical `underlying_security_id` token-join (numeric `feed_token`) + a sourced NSE-index alias `NIFTYJR`→`NIFTYNXT50` / `NIFTYMIDSELECT`→`MIDCPNIFTY` (env-extensible `BRUTEX_FNO_INDEX_ALIASES`), with a `universe.load.opt_reclassified` audit — DEC-POSTPULL-DATAQUALITY-BATCH-001 #854; the ENGINE still the 3 indexes) | `groww/constants.py:97-100`; `groww/instruments.py:241-243`; `groww/adapter.py:162-174` |
 | NIFTY-futures series alias (LAKE tooling — NO LONGER an ENGINE series, DEC-ENGINE-SPOT-ONLY-001 #1790) | **`NSE-NIFTY-FUT`** (symbol_id 4, append-only registry row) — the ONE pinned futures-track addressing label (DEC-FUTURES-ADDRESSING-PIN-001), deliberately NOT a lake dir: resolvable by `resolve_futures_series` from the vendor-parsed `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` contract dirs into disjoint IST-date ownership windows (expiry day owned by the EXPIRING contract, the `resolve_near_month` `>=` law) + the `roll_schedule` of owning-expiry ordinals the Stage-1A machinery hard-resets on; interior contract holes REFUSE loudly naming the missing month(s), head/tail unowned spans clamp+WARN, the expiry calendar is an OBSERVE-only cross-check (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001). `parse_fno_symbol("NSE-NIFTY-FUT")` is `None`, so no vendor contract symbol can collide with the alias. **ENGINE-RETIRED (DEC-ENGINE-SPOT-ONLY-001):** `is_engine_sweep_symbol` refuses it — the alias + resolver + loader survive ONLY as lake/REFERENCE_ONLY tooling below the scope gate (reachable via the loud `--allow-out-of-scope` research escape or recorded-work forensics), never a default engine series | `brutex/universe.py` (`NIFTY_FUTURES_SERIES_SYMBOL`); `brutex/data/futures_series.py`; `brutex/feed/series_load.py`; `brutex/strategies/spec.py` (`_SYMBOL_ID_TABLE`) |

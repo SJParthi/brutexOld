@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Final
 from brutex.engine.combo_mask import ResidentBarBuffer
 from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
 from brutex.engine.stage1a import build_bar_bits
-from brutex.strategies.types import FibAnchorKind
+from brutex.strategies.types import FibAnchorKind, PriceSource
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     # Annotation-only — keep CandleBar / ProximityParams out of this module's
@@ -99,6 +99,12 @@ class ResidentSweepKernel:
         built against (DEC-NIFTY-FIB-AXIS-001). Recorded so the sweep can fail-fast
         when a kernel is reused under a DIFFERENT anchor (the ``bar_bits`` matrix is
         anchor-specific — R-1). Defaults to :attr:`FibAnchorKind.PREV_DAY`.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source axis
+        (:class:`~brutex.strategies.types.PriceSource`) the ``bar_bits`` were built
+        against (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Recorded so the sweep can
+        fail-fast when a kernel is reused under a DIFFERENT source (bits 52-53 /
+        0-5 are source-specific). Default ``(HLC3, CLOSE)``.
     roll_schedule
         ADR-0012 futures roll schedule (DEC-STAGE1A-ROLL-RESET-001) the
         ``bar_bits`` were built against — recorded for the schedule-mismatch
@@ -120,10 +126,12 @@ class ResidentSweepKernel:
         "_apply_1day_mask",
         "_bar_bits",
         "_bars",
+        "_ema_source",
         "_fib_anchor",
         "_kernel_columns",
         "_resident",
         "_roll_schedule",
+        "_vwap_source",
     )
 
     def __init__(
@@ -133,6 +141,8 @@ class ResidentSweepKernel:
         proximity: ProximityParams | None = None,
         prior_n: int = 3,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> None:
@@ -140,6 +150,8 @@ class ResidentSweepKernel:
             raise ValueError("ResidentSweepKernel: bars must be non-empty")
         self._bars: tuple[CandleBar, ...] = tuple(bars)
         self._fib_anchor: FibAnchorKind = fib_anchor
+        self._vwap_source: PriceSource = vwap_source
+        self._ema_source: PriceSource = ema_source
         self._roll_schedule: tuple[int, ...] | None = roll_schedule
         self._apply_1day_mask: bool = apply_1day_mask
         self._bar_bits: list[int] = build_bar_bits(
@@ -147,6 +159,8 @@ class ResidentSweepKernel:
             proximity,
             prior_n,
             fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )
@@ -174,6 +188,16 @@ class ResidentSweepKernel:
     def apply_1day_mask(self) -> bool:
         """The D12 flag this kernel's ``bar_bits`` were built against (D12 guard)."""
         return self._apply_1day_mask
+
+    @property
+    def vwap_source(self) -> PriceSource:
+        """The VWAP price-source this kernel's ``bar_bits`` (bits 52-53) were built for."""
+        return self._vwap_source
+
+    @property
+    def ema_source(self) -> PriceSource:
+        """The EMA price-source this kernel's ``bar_bits`` (bits 0-5) were built for."""
+        return self._ema_source
 
     @property
     def bar_bits(self) -> list[int]:
@@ -304,6 +328,8 @@ class ResidentKernelCache:
                 int,
                 FibAnchorKind,
                 tuple[int, ...] | None,
+                PriceSource,
+                PriceSource,
             ],
             ResidentSweepKernel,
         ] = OrderedDict()
@@ -333,10 +359,12 @@ class ResidentKernelCache:
         proximity: ProximityParams | None,
         prior_n: int,
         fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+        vwap_source: PriceSource = PriceSource.HLC3,
+        ema_source: PriceSource = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> ResidentSweepKernel:
-        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)``, building on miss.
+        """Return the kernel for ``(instrument, tf_label, proximity, prior_n, fib_anchor, sources, roll_schedule)``, building on miss.
 
         On a hit the resident kernel is returned (and marked most-recently-used)
         WITHOUT rebuilding ``bar_bits`` or re-marshalling the bar window. On a miss
@@ -361,6 +389,13 @@ class ResidentKernelCache:
             anchor sharing one ``(instrument, tf, proximity, prior_n)`` must get its
             OWN kernel, never a stale prev-day one. Defaults to
             :attr:`FibAnchorKind.PREV_DAY`.
+        vwap_source, ema_source
+            The swept VWAP / EMA price-source
+            (:class:`~brutex.strategies.types.PriceSource`) — part of the key,
+            since ``bar_bits`` bits 52-53 / 0-5 depend on it
+            (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a non-default source sharing one
+            ``(instrument, tf, proximity, prior_n, fib_anchor)`` must get its OWN
+            kernel, never a stale ``(HLC3, CLOSE)`` one. Default ``(HLC3, CLOSE)``.
         roll_schedule
             ADR-0012 futures roll schedule — part of the key
             (belt-and-braces: within one launch the schedule is constant per
@@ -376,7 +411,16 @@ class ResidentKernelCache:
         ResidentSweepKernel
             The (cached or freshly built) kernel for this bar window.
         """
-        key = (instrument, tf_label, proximity, prior_n, fib_anchor, roll_schedule)
+        key = (
+            instrument,
+            tf_label,
+            proximity,
+            prior_n,
+            fib_anchor,
+            roll_schedule,
+            vwap_source,
+            ema_source,
+        )
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -387,6 +431,8 @@ class ResidentKernelCache:
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )

@@ -47,7 +47,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, SweepComboError, SweepRunConfig
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -158,6 +158,46 @@ class TestSweepGridConfig:
         grid = _grid()
         assert grid.instruments == ("NIFTY",)
         assert grid.timeframes == (Timeframe("1minute", 1),)
+
+    def test_vwap_variant_on_spot_index_warns_but_does_not_refuse(self) -> None:
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001 (MINOR-4): a VWAP-variant cell on a spot
+        # index (no traded volume) is a likely operator mistake — warned, NEVER
+        # refused. The default cell in the axis exercises the filter's False arm.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            grid = _grid(
+                instruments=["NIFTY"],
+                price_source_cells=[
+                    PriceSourceCell(),  # default HLC3:CLOSE — filtered out (False arm)
+                    PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE),  # VWAP-variant
+                ],
+            )
+        # Construction SUCCEEDS (non-blocking) and the advisory fired once, naming
+        # the offending source + spot symbol.
+        assert grid.instruments == ("NIFTY",)
+        warns = [e for e in logs if e.get("event") == "stage1a.vwap_source_on_spot"]
+        assert len(warns) == 1
+        assert warns[0]["vwap_variant_sources"] == ["open"]
+        assert warns[0]["spot_instruments"] == ["NIFTY"]
+
+    def test_vwap_variant_on_non_spot_instrument_does_not_warn(self) -> None:
+        # A VWAP-variant on a volume-bearing NON-spot instrument is legitimate —
+        # no advisory (the warn `if` False arm on the spot-instruments side).
+        # REFOLD ADAPTATION (DEC-ENGINE-SPOT-ONLY-001, MIGRATION.md #1790): the
+        # engine sweep scope is now SPOT-ONLY, so the futures alias enters a
+        # grid only through the sanctioned research escape hatch — the advisory
+        # predicate (`is_engine_spot_symbol`) is deliberately independent of the
+        # scope law, so the False arm stays exercised.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            _grid(
+                instruments=["NSE-NIFTY-FUT"],
+                unsafe_allow_out_of_scope_instruments=True,
+                price_source_cells=[PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE)],
+            )
+        assert not any(e.get("event") == "stage1a.vwap_source_on_spot" for e in logs)
 
     def test_axes_are_deduped_preserving_order(self) -> None:
         grid = _grid(
@@ -692,6 +732,48 @@ class TestRunSweepGrid:
         actions = [e.action for e in read_entries(audit_path)]
         assert actions[0] == "GRID_SWEEP_START"
         assert actions[-1] == "GRID_SWEEP_COMPLETE"
+
+    def test_grid_start_audit_emits_price_source_cells_only_when_non_default(
+        self, tmp_path: Path
+    ) -> None:
+        # MINOR-1: the GRID_SWEEP_START audit config line OMITS price_source_cells
+        # for a sole-baseline grid (byte-identical to pre-axis) and EMITS them for a
+        # non-default grid (intended observability). An EMA-variant keeps the run off
+        # the vwap-on-spot advisory path while still exercising the non-default emit.
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+
+        def bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+            return bars
+
+        # Default grid → key ABSENT.
+        default_audit = tmp_path / "default.jsonl"
+        with AuditWriter.open(default_audit) as audit:
+            run_sweep_grid(
+                _grid(),
+                bars_for=bars_for,
+                store_for=make_store_for(tmp_path / "r-default", _grid()),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        default_start = next(
+            e for e in read_entries(default_audit) if e.action == "GRID_SWEEP_START"
+        )
+        assert "price_source_cells" not in default_start.payload
+
+        # Non-default (EMA-variant) grid → key PRESENT with the cells.
+        nd_grid = _grid(price_source_cells=[PriceSourceCell(PriceSource.HLC3, PriceSource.OPEN)])
+        nd_audit = tmp_path / "nd.jsonl"
+        with AuditWriter.open(nd_audit) as audit:
+            run_sweep_grid(
+                nd_grid,
+                bars_for=bars_for,
+                store_for=make_store_for(tmp_path / "r-nd", nd_grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        nd_start = next(e for e in read_entries(nd_audit) if e.action == "GRID_SWEEP_START")
+        assert nd_start.payload["price_source_cells"] == [["hlc3", "open"]]
 
     def test_empty_bars_raises_when_skip_empty_false(self, tmp_path: Path) -> None:
         grid = _grid()

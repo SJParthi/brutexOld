@@ -53,6 +53,7 @@ from brutex.engine.rust_stage1a import (
     warn_fallback_once,
 )
 from brutex.engine.stage1a import Stage1AMatrixBuilder, build_bar_bits
+from brutex.strategies.types import PriceSource
 from structlog.testing import capture_logs
 
 # 09:15:00 IST == 03:45 UTC (the NSE session-open anchor).
@@ -431,6 +432,60 @@ def test_flag_on_fallback_falls_through_without_reconsuming_the_iterator(
     bars = _two_day_feed()
     got = build_bar_bits(bar for bar in bars)  # a one-shot generator
     assert got == _oracle_for(bars)
+
+
+class TestBatchRustArmSourceGate:
+    """DEC-NIFTY-PRICE-SOURCE-AXIS-001 refold gate onto DEC-STAGE1A-RUST-BATCH-001.
+
+    The batch prepass (`collect_batch_inputs`) feeds the kernel PRE-REDUCED
+    scalars with the reductions HARDCODED to the baseline cell (HLC3 typical /
+    close EMA), and the burn-in self-check covers only the first
+    ``SELF_CHECK_BUILDS`` builds per process — so a non-default price-source
+    cell reaching the Rust arm would ship unverified wrong bits 52-53 / 0-5
+    (or falsely latch the kernel OFF process-wide inside burn-in). The gate in
+    ``build_bar_bits`` therefore routes every NON-default cell to the
+    byte-correct Python builder; the default cell keeps the Rust arm.
+    """
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"vwap_source": PriceSource.OPEN},
+            {"ema_source": PriceSource.HLC3},
+            {"vwap_source": PriceSource.CLOSE, "ema_source": PriceSource.OPEN},
+        ],
+    )
+    def test_flag_on_non_default_source_never_touches_the_rust_arm(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, PriceSource]
+    ) -> None:
+        monkeypatch.setenv(STAGE1A_RUST_ENV, "1")
+        monkeypatch.setattr(
+            rust_stage1a,
+            "rust_bar_bits_or_none",
+            lambda *a, **k: pytest.fail("non-default price-source cell reached the Rust arm"),
+        )
+        bars = _two_day_feed()
+        got = build_bar_bits(bars, **kwargs)
+        assert got == Stage1AMatrixBuilder(**kwargs).build(bars)
+
+    def test_flag_on_default_source_still_takes_the_rust_arm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Explicit-default kwargs must NOT disarm the arm (an over-broad gate
+        # mutant — e.g. `or` for `and` — dies here).
+        monkeypatch.setenv(STAGE1A_RUST_ENV, "1")
+        calls: list[int] = []
+        real = rust_stage1a.rust_bar_bits_or_none
+
+        def spy(*args: Any, **kwargs: Any) -> list[int] | None:
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(rust_stage1a, "rust_bar_bits_or_none", spy)
+        bars = _two_day_feed()
+        got = build_bar_bits(bars, vwap_source=PriceSource.HLC3, ema_source=PriceSource.CLOSE)
+        assert calls == [1]
+        assert got == _oracle_for(bars)
 
 
 # ────────────────────────────────────────────────────────────────────────
