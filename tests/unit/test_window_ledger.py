@@ -3176,6 +3176,7 @@ class TestStreakExemptDemotion:
                     None,
                     None,
                     None,
+                    None,
                 )
             ],
             threshold=3,

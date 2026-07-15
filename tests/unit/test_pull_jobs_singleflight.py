@@ -495,16 +495,22 @@ def test_sweep_job_lock_free_worker_takes_the_g10_preload_guard(tmp_path: Path) 
 
 
 def test_sweep_job_with_job_level_ex_lock_self_conflicts_g10(tmp_path: Path) -> None:
-    """The INVERSE pin — the PRE-fix composition MUST self-conflict.
+    """The INVERSE pin — a job-level EX hold MUST self-conflict with G10.
 
-    With ``cross_process_lock=True`` (the route's old default) the job holds
-    the lake pull flock EX for the whole run, and the worker's G10 ``LOCK_SH``
-    acquire on the SAME file — a second open file description in the SAME
-    process — is DENIED (flock(2) locks attach to the open file description).
-    Pins the mechanism the fix removes from the route path, so the
-    flock-per-OFD fact this whole DEC rests on can never silently drift.
+    With ``cross_process_lock=True`` on a job kind that TAKES the pull-writer
+    guards the job holds the lake pull flock EX for the whole run, and the
+    worker's G10 ``LOCK_SH`` acquire on the SAME file — a second open file
+    description in the SAME process — is DENIED (flock(2) locks attach to the
+    open file description). Pins the mechanism the sweep-route fix removes,
+    so the flock-per-OFD fact this whole DEC rests on can never silently
+    drift. Composition note (club-P fold): since
+    DEC-SWEEP-JOB-LOCK-POSTURE-001 a SWEEP-kind job never takes the
+    pull-writer guards regardless of the flag, so the pre-fix hazard shape is
+    exercised through the ONE composition that still holds the EX flock — a
+    ``JOB_KIND_PULL`` run (the original sweep route's job was pull-shaped in
+    exactly this way).
     """
-    from brutex.dashboard.pull_jobs import JOB_KIND_SWEEP
+    from brutex.dashboard.pull_jobs import JOB_KIND_PULL
     from brutex.engine.sweep_singleflight import LakeBusyError, lake_read_guard
 
     outcome: dict[str, str] = {}
@@ -517,7 +523,7 @@ def test_sweep_job_with_job_level_ex_lock_self_conflicts_g10(tmp_path: Path) -> 
             outcome["error"] = str(exc)
 
     job = _sweep_shaped_job(tmp_path)
-    started = job.start(work, total=1, job_kind=JOB_KIND_SWEEP, cross_process_lock=True)
+    started = job.start(work, total=1, job_kind=JOB_KIND_PULL, cross_process_lock=True)
     assert started is True  # the job STARTS — it dies at (the fake) preload
     assert "acquired" not in outcome
     assert "pull single-flight lock held exclusively" in outcome["error"]
