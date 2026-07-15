@@ -23,19 +23,41 @@ production writers ingest uses) by driving the REAL ``cli.cmd_sweep_all`` shim,
 
 Runtime is measured and printed per leg (``rehearsal.<leg>.seconds`` lines in
 the pytest output) so the CI job's budget claim stays evidence-backed.
+
+DETERMINISM (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md #1773): the
+measured wall time is made COMMIT-INVARIANT. The Golden-Rule-#4 run identity
+deliberately folds ``code_commit_sha``, and the Stage-3 optimizer seeds derive
+from that identity (``stage3_refine.seed_from_mask_run_id``; the cascade seed
+is ``int(sweep_id[:16], 16)``) — so before the pin, EVERY commit reshuffled the
+Stage-3 refined rows, flipping whether any candidate survived the DSR gate into
+the Stage-4 1000-permutation Monte-Carlo filter: a per-commit seed LOTTERY that
+made this file's wall time bimodal (~5 s vs ~200 s+ locally; ~33 s vs
+310–321 s under coverage on CI) with ZERO code change. The fix: (a)
+``_sweep_all`` pins a constant ``code_commit_sha`` (the identity input, not the
+seeds, so the WHOLE seeded chain stays production-shaped), and (b) the
+``_log_volume_guard`` fixture extends the DEC-SWEEP-LOG-VOLUME-GUARD-001
+(#1630) INFO bound to this in-process chain (the CLI dispatch guard never
+engages under pytest). This is a test-DETERMINISM/CORRECTNESS fix, NOT a gate
+weakening: the runtime assertion previously measured a commit-hash seed lottery
+plus DEBUG-render overhead, not chain feasibility (its stated purpose); pinned,
+it measures the actual chain on the SAME workload every commit, and a REAL
+chain regression on that workload still fails at 300 s (teeth proven by
+``test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds``).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 from brutex.audit_verify import auto_verify
@@ -59,6 +81,7 @@ pytest.importorskip("cma")
 TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
     "test_r38_full_chain_completes_clean": ("R38", "R7"),
     "test_r38_rehearsal_runtime_is_ci_feasible": ("R38",),
+    "test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds": ("R38",),
     "test_r38_stage3_cells_genuinely_written": ("R38",),
     "test_r38_cascade_genuinely_ran": ("R38",),
     "test_r28_manifest_contract_shape_and_funnel": ("R28",),
@@ -85,6 +108,28 @@ _N_DAYS = 190
 _PER_DAY = 12
 #: The design's rehearsal-sized diffcheck budget (CI_K_SAMPLES, D-10/graft C).
 _CI_K_SAMPLES = 8
+#: The PINNED run-identity commit sha (DEC-R38-REHEARSAL-DETERMINISM-001
+#: #1773) — a deliberately synthetic 40-hex constant, chosen by MEASURING the
+#: rehearsal under three candidate constants (full matrix in the #1773 ledger
+#: entry; same sandbox, INFO log guard active): ``"0"*40`` → 3.41 s and
+#: ``"5eedc0de"*5`` → 3.28 s both draw a DSR-KILLED candidate pool (the
+#: statistical cascade legs never run — less chain coverage), while THIS
+#: constant (``"deadbeef"*5``) → 14.87 s draws ONE candidate through the DSR
+#: gate and exercises the ENTIRE statistical cascade — walk-forward, CPCV,
+#: PBO, SPA/reality-check, Romano-Wolf, lockbox AND the 1000-permutation
+#: Monte-Carlo filter (which kills it: ``stage_survivors.deflated_sharpe ==
+#: 1``, ``monte_carlo == 0``) — the most faithful "full chain in miniature"
+#: (R38) of the three. Margin to the 300 s budget, both measured on the same
+#: 4-vCPU sandbox (Golden Rule #10): ~20× WITHOUT coverage (14.87 s — the
+#: figure quoted in #1773's pin matrix) and ~6× UNDER ``--cov=brutex
+#: --cov-branch`` (50.53 s — ≈ the WITH-COVERAGE unit job's context, the arm
+#: whose pre-fix failures the ledger records). The MC leg is
+#: BOUNDED here because the pinned seed's candidate is signal-LIGHT and the
+#: ``_log_volume_guard`` keeps its per-trade DEBUG events unrendered — the
+#: unlucky pre-pin seeds drew signal-DENSE candidates (~663 entries per
+#: permutation) whose MC re-simulation plus 2.78 M DEBUG renders measured
+#: 310–321 s under coverage on CI.
+_PINNED_CODE_COMMIT_SHA: Final[str] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 
 def _trading_days(start: date, n: int) -> list[date]:
@@ -143,35 +188,47 @@ def _seed_lake(root: Path) -> tuple[Path, Path]:
 
 
 def _sweep_all(lake_root: Path, catalog_path: Path, results_root: Path) -> int:
-    """One full-chain ``cmd_sweep_all`` pass — stage-3 + cascade + diffcheck ON."""
+    """One full-chain ``cmd_sweep_all`` pass — stage-3 + cascade + diffcheck ON.
+
+    ``code_commit_sha`` is PINNED to :data:`_PINNED_CODE_COMMIT_SHA`
+    (DEC-R38-REHEARSAL-DETERMINISM-001 #1773) by patching
+    ``cli._resolve_code_commit_sha`` — the ONE site feeding the grid's
+    ``code_commit_sha`` (``cmd_sweep_all`` exposes no kwarg for it; the
+    ``--code-commit-sha`` CLI seam belongs to ``sweep-verify``, and adding a
+    kwarg would be an engine-side change outside this fix's ruled test-only
+    scope). One frozen sha ⇒ one frozen run identity ⇒ frozen Stage-3/cascade
+    seeds ⇒ the wall-time gate measures the SAME work on every commit.
+    """
     from brutex import cli
 
-    return cli.cmd_sweep_all(
-        lake_root=lake_root,
-        catalog_path=catalog_path,
-        results_root=results_root,
-        exchange="NSE",
-        segment="INDEX",
-        symbols=_SYMBOL,
-        intervals="1minute",
-        start="2024-01-01",
-        end="2024-10-15",
-        directions="BUY",
-        k="1",
-        conditions="0,1,2,3,4",
-        sl="80",
-        tp="50",
-        top=10,
-        mode="A",
-        max_tuples=None,
-        max_combos=None,
-        data_snapshot_hash=None,
-        options_sim=False,
-        stage3_enable=True,
-        stage3_top_k=2,
-        stage3_fevals=8,
-        stage3_restarts=1,
-    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cli, "_resolve_code_commit_sha", lambda: _PINNED_CODE_COMMIT_SHA)
+        return cli.cmd_sweep_all(
+            lake_root=lake_root,
+            catalog_path=catalog_path,
+            results_root=results_root,
+            exchange="NSE",
+            segment="INDEX",
+            symbols=_SYMBOL,
+            intervals="1minute",
+            start="2024-01-01",
+            end="2024-10-15",
+            directions="BUY",
+            k="1",
+            conditions="0,1,2,3,4",
+            sl="80",
+            tp="50",
+            top=10,
+            mode="A",
+            max_tuples=None,
+            max_combos=None,
+            data_snapshot_hash=None,
+            options_sim=False,
+            stage3_enable=True,
+            stage3_top_k=2,
+            stage3_fevals=8,
+            stage3_restarts=1,
+        )
 
 
 def _result_store_hashes(results_root: Path) -> dict[str, str]:
@@ -221,6 +278,47 @@ class _Rehearsal:
         self.manifest_second = json.loads((self.run_dir / "manifest.json").read_text())
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _log_volume_guard() -> Iterator[None]:
+    """Bound the in-process chain's structlog volume at INFO — the #1630 law.
+
+    DEC-SWEEP-LOG-VOLUME-GUARD-001 (#1630) bounds a REAL sweep process at INFO
+    via the ``main()`` dispatch guard (``cli._configure_sweep_logging``) — but
+    this rehearsal drives ``cmd_sweep_all`` IN-PROCESS under pytest, where that
+    guard never engages and structlog's default wrapper filters at NOTSET, so
+    the engine's per-trade DEBUG events (``trade_sim.entry``/``trade_sim.exit``)
+    rendered unfiltered INSIDE the measured wall time
+    (DEC-R38-REHEARSAL-DETERMINISM-001 #1773: 2.78 M such renders cost ~256 s
+    on an MC-surviving seed). This fixture extends the #1630 law to the
+    rehearsal by installing the CLI guard's EXACT sink-level threshold —
+    ``structlog.make_filtering_bound_logger(INFO)`` as the wrapper class — and
+    NOTHING else: the full ``configure_logging`` seam is deliberately NOT
+    called in-process, because it closes + replaces the root logger's handlers
+    (pytest's own logging-plugin capture handlers included) — a suite-wide
+    hazard the real CLI process never has. Snapshot/restore plus first-use
+    cache clears (both directions — an EARLIER in-process configure may have
+    frozen module loggers, and ours must not freeze later ``capture_logs``)
+    keep the rest of the suite's logging state as found. Per the #1630 pin,
+    the audit / flight-recorder hash chains are direct file appends, NOT
+    structlog events — byte-untouched at any level.
+    """
+    import structlog
+    from brutex.observability.logging import _clear_structlog_first_use_cache
+
+    saved_config = structlog.get_config()
+    saved_is_configured = structlog.is_configured()
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    _clear_structlog_first_use_cache()
+    try:
+        yield
+    finally:
+        if saved_is_configured:  # a prior test left structlog configured — restore it
+            structlog.configure(**saved_config)
+        else:
+            structlog.reset_defaults()
+        _clear_structlog_first_use_cache()
+
+
 @pytest.fixture(scope="module")
 def rehearsal(tmp_path_factory: pytest.TempPathFactory) -> _Rehearsal:
     """Run the full chain (first pass + resume pass) exactly ONCE per module."""
@@ -251,7 +349,23 @@ def test_r38_full_chain_completes_clean(rehearsal: _Rehearsal) -> None:
 
 
 def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
-    """The chain-in-miniature stays MINUTES not hours (measured, not assumed)."""
+    """The chain-in-miniature stays MINUTES not hours (measured, not assumed).
+
+    DETERMINISM + HONESTY (DEC-R38-REHEARSAL-DETERMINISM-001 #1773): before
+    the ``_sweep_all`` sha pin + the ``_log_volume_guard`` INFO bound, this
+    assertion measured a commit-hash SEED LOTTERY plus DEBUG-render overhead,
+    NOT chain feasibility (its stated purpose) — the Stage-3 seeds derive from
+    the run identity, which folds ``code_commit_sha``, so per commit the DSR
+    gate either killed the candidate pool (~5 s locally / ~33 s CI) or let one
+    candidate into the 1000-permutation Monte-Carlo (~200 s+ locally /
+    310–321 s under coverage — measured FAILURES of this very assert with zero
+    code change, and a zero-diff empty commit removed them). Pinned, the
+    assertion measures the ACTUAL chain on the SAME workload every commit
+    (pinned-path measurements in the #1773 ledger entry); a REAL chain
+    regression on that workload still fails here at 300 s — teeth proven by
+    ``test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds``.
+    The 300.0 budget itself is UNCHANGED (never weakened).
+    """
     assert rehearsal.seconds_first < 300.0, (
         f"first rehearsal pass took {rehearsal.seconds_first:.1f}s — the CI budget claim broke"
     )
@@ -269,8 +383,36 @@ def test_r38_stage3_cells_genuinely_written(rehearsal: _Rehearsal) -> None:
 
 
 def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
+    """The cascade report exists AND carries the pinned seed's FULL-cascade shape.
+
+    CASCADE-SHAPE DRIFT PIN (DEC-R38-REHEARSAL-DETERMINISM-001 #1773): the
+    "full chain in miniature" claim rests on the PINNED seed drawing ONE
+    candidate through the DSR gate so every statistical cascade leg —
+    walk-forward, CPCV, PBO, SPA/reality-check, Romano-Wolf, lockbox and the
+    1000-permutation Monte-Carlo filter (which kills it) — genuinely EXECUTES.
+    That coverage is a property of the seed choice, not of the code, so a
+    future ``indicator_version`` / wheel / engine change that re-keys the
+    pinned seed could silently revert the rehearsal to a DSR-KILLED fast path
+    (legs never run) while the runtime gate stays green. This assertion makes
+    that rot fail LOUD and forces a conscious re-pin (re-measure candidate
+    constants per the #1773 matrix; never a silent coverage drop).
+    """
     report = json.loads((rehearsal.results_root / "cascade" / "cascade-report.json").read_text())
     assert report["sweep_id"] == rehearsal.run_id
+    # ONE (instrument, tf) group in the rehearsal grid — its per-group report
+    # carries the stage_survivors funnel (cascade_wire.wire_report_to_dict).
+    assert len(report["groups"]) == 1
+    assert report["groups"][0]["report"]["stage_survivors"] == {
+        "hard_gates": 5,
+        "deflated_sharpe": 1,
+        "cpcv": 1,
+        "reality_check_spa": 1,
+        "pbo": 1,
+        "romano_wolf": 1,
+        "walk_forward": 1,
+        "lockbox": 1,
+        "monte_carlo": 0,
+    }, "the pinned seed's full-cascade shape drifted — re-pin consciously (#1773)"
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
 
@@ -405,6 +547,65 @@ def test_r40_diagnostic_bundle_packages_the_run(rehearsal: _Rehearsal) -> None:
 def test_g15_progress_beats_reach_the_pull_jobs_channel(rehearsal: _Rehearsal) -> None:
     """The composed on_progress emits on the EXACT channel pull_jobs consumes."""
     assert rehearsal.beats > 0
+
+
+def test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds(
+    rehearsal: _Rehearsal, tmp_path: Path
+) -> None:
+    """The 300 s gate keeps its TEETH under the sha pin (noise out, teeth intact).
+
+    DEC-R38-REHEARSAL-DETERMINISM-001 (#1773) teeth proof: pinning
+    ``code_commit_sha`` removed the per-commit SEED lottery from the measured
+    quantity — this test proves it removed ONLY the noise, never the gate's
+    bite. The SAME pinned chain re-runs against a FRESH results root (the
+    rehearsal's own tree is untouched — its ``attempt`` counter and store
+    bytes stay exactly what the resume-leg tests assert) with a controlled
+    per-mask delay injected into ``TradeSimWalker.run`` — the per-mask
+    trade-sim step every sweep/cascade/results-depth evaluation walks
+    (class-method patch, so every import style of ``simulate_trades`` is
+    covered). HONEST framing of what each half proves (Golden Rule #10): the
+    PERMANENT load-bearing teeth here is ``calls > 0`` — SEAM LIVENESS, so a
+    refactor that moves per-mask trade-sim off ``TradeSimWalker.run`` (e.g.
+    onto a Rust kernel) fails LOUD instead of leaving this proof vacuous —
+    plus the time-RESPONSE check that the measured wall time contains the
+    injected delay ≥ 1:1 (near-mechanical for serial in-process sleeps inside
+    the timed window; it is a structural proxy, not a magnitude proof). The
+    actual BUDGET-MAGNITUDE bite — that a budget-scale chain regression blows
+    the unchanged ``< 300.0`` assert — is proven by the ONE-TIME executed
+    wedge recorded in the #1773 ledger entry (one wedged-chain-step 301 s
+    sleep → ``test_r38_rehearsal_runtime_is_ci_feasible`` FAILED at 315.8 s
+    on the pinned sha); this companion alone does not prove it — it keeps that
+    recorded proof's premises (seam fires; wall time responds) permanently
+    pinned at CI speed.
+    """
+    from brutex.engine.trade_sim import TradeSimWalker
+
+    delay_s = 0.01  # ~1,044 walker calls on the pinned workload ⇒ ~10 s injected
+    calls = {"n": 0}
+    real_run = TradeSimWalker.run
+
+    def slowed_run(self: TradeSimWalker, *args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        time.sleep(delay_s)
+        return real_run(self, *args, **kwargs)
+
+    results_root = tmp_path / "sweeps-slowed"
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("BRUTEX_SWEEP_DIFFCHECK_K", str(_CI_K_SAMPLES))
+        mp.setattr(TradeSimWalker, "run", slowed_run)
+        t0 = time.monotonic()
+        assert _sweep_all(rehearsal.lake_root, rehearsal.catalog_path, results_root) == 0
+        slowed_seconds = time.monotonic() - t0
+
+    total_injected = delay_s * calls["n"]
+    assert calls["n"] > 0, "the per-mask trade-sim seam never fired — no teeth proven"
+    # The timed window contains the chain's per-mask work >= 1:1 — a genuinely
+    # slowed chain step inflates EXACTLY the number the 300 s assert gates.
+    assert slowed_seconds >= total_injected
+    print(
+        f"\nrehearsal.teeth.slowed_seconds={slowed_seconds:.2f} "
+        f"injected={total_injected:.2f} calls={calls['n']}"
+    )
 
 
 # ────── resume leg ──────

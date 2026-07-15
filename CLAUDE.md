@@ -348,6 +348,29 @@ byte-for-byte). ZERO Rust lands in this slice; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `compute.py` 100%
 line+branch. Any per-round record lives ONLY in the §1 Active-branch blurb +
 MIGRATION.md #1685 — this header carries the pointer, never the story.)
+Earlier: 2026-07-12 (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md
+#1773 — the R38 rehearsal wall-time gate
+(`tests/integration/test_sweep_full_chain_rehearsal.py`, asserts
+`seconds_first < 300.0`) is made COMMIT-INVARIANT: the Golden-Rule-#4 run
+identity folds `code_commit_sha`, so the Stage-3 optimizer seeds — and with
+them whether any candidate survived the DSR gate into the Stage-4
+1000-permutation Monte-Carlo — reshuffled EVERY commit (a seed LOTTERY:
+310.9/317.8/321.6 s measured CI failures vs 4.99 s on the SAME tree with one
+empty commit on top). Fix, TEST-side only (zero brutex/ source lines):
+`_sweep_all` pins a MEASURED constant `code_commit_sha` (the chosen pin
+exercises the FULL statistical cascade incl. a bounded Monte-Carlo leg —
+14.87/14.84/14.62 s across three runs, ~20× margin to the budget) and the
+`_log_volume_guard` fixture extends the #1630 INFO sink-level bound to the
+in-process chain (the CLI dispatch guard never engages under pytest; the
+audit/flight hash chains are direct file appends, byte-untouched). NOT a gate
+weakening: the 300 s assert is byte-unchanged; the assertion previously
+measured a commit-hash lottery + DEBUG-render overhead rather than its stated
+chain-feasibility purpose, and TEETH are proven — a wedged-chain-step
+injection made the real assertion FAIL on the pinned sha (recorded in #1773)
++ a permanent companion test pins the ≥1:1 measured-time response to injected
+per-mask delay. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+scope/vocab/rate change; the per-fix record lives in the §1 Active-branch
+blurb + MIGRATION.md #1773.)
 Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
@@ -3759,6 +3782,46 @@ hostile-review pass._
   no flag, no performance claim. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/lake-schema
   change; `compute.py` 100% line+branch (288 stmts / 54 branches, 0 missed); ruff/ruff-format clean, `mypy
   --strict` clean, pyright 0 new.)
+  Earlier: `claude/r38-rehearsal-determinism` (**DEC-R38-REHEARSAL-DETERMINISM-001,
+  MIGRATION.md #1773** — the R38 rehearsal determinism fix, TESTS + DOCS only (zero
+  `brutex/` source lines; three-file diff — the rehearsal test file + MIGRATION.md +
+  this file): `test_sweep_full_chain_rehearsal.py`'s wall-time gate (`seconds_first
+  < 300.0`) measured a commit-hash SEED LOTTERY — the run identity folds
+  `code_commit_sha` (Golden Rule #4), the Stage-3 optimizer seeds derive from it
+  (`stage3_refine.seed_from_mask_run_id`; cascade seed `int(sweep_id[:16], 16)`), so
+  every commit reshuffled whether ONE candidate survived the DSR gate into the
+  1000-permutation Monte-Carlo filter (measured: 310.9/317.8/321.6 s CI failures on
+  an unlucky sha vs 4.99 s on the SAME tree + one empty commit; ~256 s of the slow
+  mode was structlog DEBUG rendering of 2.78 M `trade_sim.entry/exit` events).
+  FIX: (1) `_sweep_all` pins `_PINNED_CODE_COMMIT_SHA = "deadbeef"×5` by patching
+  `cli._resolve_code_commit_sha` (the ONE site feeding the grid's sha;
+  `cmd_sweep_all` exposes no kwarg — adding one would be an engine-side change
+  outside the ruled test-only scope), chosen by MEASURING three candidate constants:
+  the pick draws ONE candidate through the DSR gate and exercises the ENTIRE
+  statistical cascade — walk-forward, CPCV, PBO, SPA, Romano-Wolf, lockbox AND a
+  bounded MC leg (killed at MC) — at 14.87/14.84/14.62 s across three runs (~20×
+  margin), where the two rejected candidates (`"0"×40` 3.41 s, `"5eedc0de"×5`
+  3.28 s) drew DSR-killed pools that skip the cascade legs; (2) the autouse
+  `_log_volume_guard` fixture extends DEC-SWEEP-LOG-VOLUME-GUARD-001 (#1630) to the
+  in-process chain — the CLI dispatch guard never engages under pytest — installing
+  the guard's EXACT sink-level threshold (`make_filtering_bound_logger(INFO)` as
+  wrapper class) with snapshot/restore + first-use-cache clears; the full
+  `configure_logging` seam is deliberately NOT called in-process (it closes +
+  replaces root-logger handlers — pytest's capture handlers included); the
+  audit/flight-recorder hash chains are direct file appends, NOT structlog —
+  byte-untouched (the #1630 pin); (3) NO MC-cap knob — deterministic at ~20× margin,
+  a cap would need an engine knob. HONESTY (the load-bearing claim): NOT a gate
+  weakening — the 300 s assert is byte-unchanged; pre-fix it measured lottery +
+  logging overhead, not chain feasibility (its stated purpose); pinned, it measures
+  the SAME real chain every commit, and TEETH are PROVEN: a wedged-chain-step
+  injection (301 s sleep on the first `TradeSimWalker.run` call, evidence plugin)
+  made the REAL assertion FAIL at 315.8 s on the pinned sha, and the permanent
+  companion `test_r38_runtime_gate_teeth_slowed_chain_inflates_measured_seconds`
+  pins the ≥1:1 measured-time response to injected per-mask delay (1,044 walker
+  calls on the pinned workload). Cross-commit invariance re-proven from a scratch
+  commit (worktree). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  scope/vocab/rate change; ruff/ruff-format/`mypy --strict` clean, pyright 0 errors
+  (+1 house-pattern private-import warning).)
   Earlier: `claude/results-cascade-verdict-join` (**DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749** —
   the cascade-verdict → display join: the Stage-4 verdicts + per-candidate CPCV
   pass rate + the ranking composite reach top100.json, /results, /screener,
@@ -7646,6 +7709,20 @@ hostile-review pass._
   `brutex/metrics/compute.py` (`TradeFolds` + `_fold_trades` +
   `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
   this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  Earlier: `claude/r38-rehearsal-determinism`
+  (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md #1773 — the R38 rehearsal
+  wall-time gate made COMMIT-INVARIANT, tests + docs only (zero `brutex/`
+  source lines): `_sweep_all` pins a MEASURED constant `code_commit_sha`
+  (the run-identity input the Stage-3/cascade seeds derive from — pre-fix, a
+  per-commit seed lottery flipped the wall time 4.99 s ↔ 310–321 s with zero
+  code change; the chosen pin exercises the FULL statistical cascade incl. a
+  bounded Monte-Carlo leg at 14.87/14.84/14.62 s ≈ 20× margin) + the
+  `_log_volume_guard` fixture extends the #1630 INFO sink-level bound to the
+  in-process chain; the 300 s assert is byte-unchanged and its teeth are
+  PROVEN (a wedged-chain-step injection failed the real assertion at 315.8 s
+  on the pinned sha; a permanent companion test pins the ≥1:1 measured-time
+  response); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line — see §1 + MIGRATION.md #1773 for the full blurb)
   Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking
