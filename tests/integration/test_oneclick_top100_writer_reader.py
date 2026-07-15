@@ -602,9 +602,20 @@ class TestCascadeJoinWriterToWire:
 
     _client = staticmethod(TestEngineWriterThroughRoutes._client)
 
-    def test_frozen_pre_change_fixture_serves_dashes_on_the_wire(self, tmp_path: Path) -> None:
-        """The back-compat oracle end-to-end: a PRE-change artifact serves with
-        NO cascade keys (the clients render '—'), never corrupt."""
+    def test_frozen_pre_change_fixture_reads_corrupt_on_the_wire(self, tmp_path: Path) -> None:
+        """The back-compat oracle end-to-end UNDER the merged #1795 schema-v2 law.
+
+        DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1795) bumped
+        ``TOP100_SCHEMA_VERSION`` 1→2 (per-entry ``resilience`` block —
+        bump-on-any-shape-change) with the documented reader law: an artifact
+        at an UNKNOWN version degrades to a NAMED ``corrupt`` through the route
+        (never a 500, never fabricated rows). So the frozen v1 pre-change
+        fixture now serves ``status="corrupt"``/``row_count=0`` naming the
+        ``schema_version`` mismatch — the wire twin of the unit reconcile's
+        ``test_frozen_pre_change_artifact_reads_absent_never_crashes``. The
+        pre-club version of this test asserted a successful ``ok``-with-dashes
+        serve; superseded by the #1795 bump.
+        """
         import shutil
 
         fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
@@ -613,8 +624,9 @@ class TestCascadeJoinWriterToWire:
         (lake / "sweep_runs").mkdir(parents=True)
         shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, lake / "sweep_runs" / run_id)
         client = self._client(lake)
-        payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
-        assert payload["status"] == "ok", payload["detail"]
-        assert payload["cascade_join"] is None
-        assert all("cascade" not in row for row in payload["rows"])
-        assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])
+        response = client.get(f"/api/v1/oneclick/top100?run_id={run_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "corrupt", payload["detail"]
+        assert payload["row_count"] == 0
+        assert "schema_version" in payload["detail"]
