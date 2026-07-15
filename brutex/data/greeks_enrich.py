@@ -98,6 +98,8 @@ from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_provenance import (
     GREEKS_FORMULA_VERSION,
     INPUTS_MASK,
+    IV_SOURCE_SERVED,
+    IV_SOURCE_SOLVED,
     Q_BIAS_ZERO,
     RATE_SOURCE_ID_CSV,
     RATE_SOURCE_ID_FIXED,
@@ -126,7 +128,13 @@ from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.spot_join import SpotJoin, spot_close_by_ts_window, utc_instant
 from brutex.money import round_money
 from brutex.observability.progress_beat import emit_progress_beat
-from brutex.options.greeks import T_FLOOR_YEARS, GreeksInputError, compute_greeks
+from brutex.options.greeks import (
+    IV_CLAMP_MAX,
+    IV_CLAMP_MIN,
+    T_FLOOR_YEARS,
+    GreeksInputError,
+    compute_greeks,
+)
 from brutex.options.risk_free import (
     CsvRateSource,
     FixedRateSource,
@@ -149,6 +157,8 @@ __all__ = [
     "EXPIRY_MINUTE_IST",
     "GREEKS_FORMULA_VERSION",
     "GREEKS_WORKERS_ENV",
+    "IV_SOURCE_SERVED",
+    "IV_SOURCE_SOLVED",
     "Q_BIAS_ZERO",
     "RATE_SOURCE_ID_CSV",
     "RATE_SOURCE_ID_FIXED",
@@ -169,6 +179,7 @@ __all__ = [
     "GreeksEnrichReport",
     "GreeksEnrichTarget",
     "GreeksProvenance",
+    "compute_bar_overlay",
     "current_inputs_pack",
     "enrich_greeks_for_targets",
     "enrich_option_bars",
@@ -179,6 +190,7 @@ __all__ = [
     "read_spot_join_with_recovery",
     "resolve_greeks_workers",
     "resolve_risk_free_source",
+    "served_iv_usable",
     "stamp_is_current_inputs",
     "t_years_act365",
     "unpack_greeks_provenance",
@@ -783,6 +795,28 @@ def _null_bar(
     )
 
 
+def served_iv_usable(served_iv: float | None) -> bool:
+    """``True`` iff a vendor-served IV can price the Greeks DIRECTLY (no solve).
+
+    The ONE predicate (CLAUDE.md §11 COMMON) both :func:`_compute_bar`'s served
+    branch and the Dhan rolling reuse gate consult, so the stamped
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SERVED` regime and the
+    idempotency compare can NEVER drift (DEC-DHAN-ROLLING-OPTIONS-001 §3). A
+    served IV is usable iff it is present, finite, and inside the kernel's own
+    ``[IV_CLAMP_MIN, IV_CLAMP_MAX]`` clamp — a garbage / out-of-band served IV
+    falls through to the honest solve-from-premium path instead (never a
+    fabricated Greek from a nonsense vol). Groww never supplies a served IV, so
+    this is always ``False`` there and the solve path is byte-identical.
+    """
+    import math
+
+    return (
+        served_iv is not None
+        and math.isfinite(served_iv)
+        and IV_CLAMP_MIN <= served_iv <= IV_CLAMP_MAX
+    )
+
+
 def _compute_bar(
     *,
     ts: datetime,
@@ -799,6 +833,7 @@ def _compute_bar(
     is_call: bool,
     style_flag: int,
     source_id: int,
+    served_iv: float | None = None,
 ) -> FnoGreeksBar:
     """Price one bar's overlay through the pre-screen + the shared kernel.
 
@@ -814,6 +849,19 @@ def _compute_bar(
     verdict (``GreeksResult.admissible``) is deliberately NOT stored this
     round — it is exactly re-derivable downstream as ``abs(delta) >= 0.02
     and vega * 100 >= 1e-6`` over the stored columns.
+
+    ``served_iv`` (DEC-DHAN-ROLLING-OPTIONS-001 §3) is the ONE cross-cutting
+    served-vs-solved seam: when a USABLE vendor IV is supplied
+    (:func:`served_iv_usable` — present, finite, in-clamp), the Greeks are
+    priced DIRECTLY from ``(spot, strike, sigma, T, rate)`` through the SAME
+    shared kernel (no root-solve, no copied math) and stamped
+    :data:`~brutex.data.greeks_provenance.IV_SOURCE_SERVED`. Absent / unusable
+    (the Groww default ``None``) → the byte-identical solve-from-premium path
+    below, stamped :data:`~brutex.data.greeks_provenance.IV_SOURCE_SOLVED`
+    (``pack_greeks_provenance``'s default, so a Groww stamp is unchanged). The
+    shared pre-screens (NO_RATE / AT_EXPIRY / NO_SPOT / BAD_INPUT-on-``close``)
+    apply to BOTH branches; the below-parity screen is solve-branch-only (it
+    exists solely to protect the IV solver).
     """
     import math
 
@@ -852,6 +900,63 @@ def _compute_bar(
         # (DEC-GREEKS-CORRECTNESS-AUDIT-001 IVX-3; the NO_RATE / AT_EXPIRY /
         # NO_SPOT precedence above is unchanged).
         return _null(STATUS_BAD_INPUT, with_spot=spot)
+    if served_iv_usable(served_iv):
+        # ── served-IV branch (Dhan rolling-ATM, DEC-DHAN-ROLLING-OPTIONS-001
+        # §3) ── A vendor-served IV prices the six Greeks DIRECTLY from
+        # (spot, strike, sigma, T, rate) through the SAME shared Rust kernel —
+        # `compute_greeks(sigma=served_iv, ...)` is the kernel's native
+        # price-from-sigma path (NO root-solve, NO copied math). The traded
+        # premium is not consumed here, so the below-parity screen (which
+        # exists only to protect the SOLVER from an indeterminate root) is
+        # deliberately skipped: the Greeks are well-defined for any in-clamp
+        # vol. Groww never supplies a served IV, so this branch is unreachable
+        # there and the solve path below is byte-identical.
+        forward = float(spot) * math.exp(rate.rate * t_years)
+        try:
+            served = compute_greeks(
+                sigma=served_iv,
+                forward=forward,
+                strike=strike_f,
+                t_years=t_years,
+                rate=rate,
+                is_call=is_call,
+            )
+        except GreeksInputError:
+            # A caller-contract reject the served_iv clamp cannot screen — a
+            # non-positive / non-finite strike or forward (a corrupt
+            # resolved_strike). Stamped BAD_INPUT, quarantined to this bar.
+            return _null(STATUS_BAD_INPUT, with_spot=spot)
+        if served is None:
+            # Defensive: the kernel's price-from-sigma path returns a value for
+            # every in-clamp sigma (no root to fail), so this is not reachable
+            # via real inputs — only a stubbed kernel exercises it. Kept so a
+            # future kernel that CAN degrade never fabricates a Greek.
+            return _null(STATUS_NO_SOLUTION, with_spot=spot)
+        return FnoGreeksBar(
+            timestamp=ts,
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            open_interest=oi,
+            iv=served.iv,
+            delta=served.delta,
+            gamma=served.gamma,
+            theta=served.theta,
+            vega=served.vega,
+            rho=served.rho,
+            spot_at_bar=spot,
+            t_years_used=t_years,
+            rate_used=rate.rate,
+            greeks_provenance_id=pack_greeks_provenance(
+                rate_source_id=source_id,
+                rate_version=served.rate_version,
+                style_flag=style_flag,
+                status=STATUS_OK,
+                iv_source=IV_SOURCE_SERVED,
+            ),
+        )
     floor = _no_arb_floor(
         is_call=is_call, spot=float(spot), strike=strike_f, rate=rate.rate, t_years=t_years
     )
@@ -903,6 +1008,14 @@ def _compute_bar(
             status=STATUS_OK,
         ),
     )
+
+
+#: Public seam alias for the per-bar overlay pricer (DEC-DHAN-ROLLING-OPTIONS-001
+#: §3): the Dhan rolling-ATM Greeks pass reuses the SAME pre-screen + kernel core
+#: — passing ``served_iv`` to take the direct served-IV branch — so there is ONE
+#: source of truth for the Greeks math (CLAUDE.md §11 COMMON; the kept private
+#: name serves the Groww call sites in this module unchanged).
+compute_bar_overlay = _compute_bar
 
 
 #: Back-compat private alias — the FIX-7 candidate ladder MOVED VERBATIM to its

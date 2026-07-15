@@ -590,6 +590,28 @@
     <div class="loadmsg" id="dhanpullmsg" style="margin:6px 2px 0; font-size:12px; color:var(--muted);"></div>
   </div>
 
+  <!-- ── DHAN ROLLING-ATM options feed (DEC-DHAN-ROLLING-OPTIONS-001): a SEPARATE
+       standalone read-only Dhan track pulling the ATM-relative ROLLING option series
+       (ATM±N per bar) via POST /v2/charts/rollingoption into feeds/dhan/rolling_options/.
+       This is NOT a per-contract / per-expiry / per-strike pull — Dhan serves NO option
+       chain; the resolved expiry DATE + absolute STRIKE drift per bar and are per-ROW
+       metadata, never partition keys. Reuses the SAME from/to picker + Dhan read-only
+       SSM auth. Servability is UNVERIFIED until a credentialed probe: an unservable key
+       degrades to an honest EMPTY / re-pullable FAILED window, never a fabricated bar.
+       textContent-only status (no innerHTML of any response value) — XSS-safe. ── -->
+  <div style="margin:6px 24px 4px;">
+    <button class="pull-everything-btn" id="pullDhanOptBtn"
+            style="background:linear-gradient(135deg, rgba(38,166,154,.16), rgba(38,166,154,.05)); border-color:var(--teal, #26a69a);"
+            title="Standalone read-only Dhan rolling-ATM index options: ATM±N per bar (NOT per-contract/per-expiry/per-strike — Dhan serves no option chain). 1008 rolling keys (NIFTY/BANKNIFTY/SENSEX × WEEK/MONTH × EC0-3 × ATM±10 × CALL/PUT) 1-minute → feeds/dhan/rolling_options/. Own Dhan read-only AWS-SSM auth (never mints). Reuses the from/to dates above.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b>Pull (Dhan) rolling-ATM options</b>
+        <span class="pe-sub">rolling-ATM (ATM±N per bar), NOT per-contract — Dhan serves no option chain · 1-minute → feeds/dhan/rolling_options/ · honest-empty until probe-verified</span>
+      </span>
+    </button>
+    <div class="loadmsg" id="dhanoptpullmsg" style="margin:6px 2px 0; font-size:12px; color:var(--muted);"></div>
+  </div>
+
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
        background:linear-gradient(90deg, rgba(255,183,77,.10), rgba(255,183,77,.03));
        border:1px solid var(--yellow); border-radius:14px;">
@@ -1787,6 +1809,39 @@ if (DHAN_BTN) {
       if (msg) msg.textContent = "Dhan pull request failed — check connectivity and retry.";
     } finally {
       DHAN_BTN.disabled = false;
+    }
+  };
+}
+
+/* ── DHAN ROLLING-ATM options pull (DEC-DHAN-ROLLING-OPTIONS-001): posts the
+   standalone rolling-ATM route (feeds/dhan/rolling_options/), reusing the from/to
+   picker. Rolling-ATM (ATM±N per bar) — NOT per-contract; Dhan serves no option chain.
+   textContent-only (no innerHTML of any response value) — XSS-safe. ── */
+const DHAN_OPT_BTN = document.getElementById("pullDhanOptBtn");
+if (DHAN_OPT_BTN) {
+  DHAN_OPT_BTN.onclick = async () => {
+    const msg = document.getElementById("dhanoptpullmsg");
+    const dq = pipelineDateQuery();
+    const url = dq
+      ? "/api/v1/universe/pull-rolling-options-dhan?" + dq.slice(1)
+      : "/api/v1/universe/pull-rolling-options-dhan";
+    if (msg) msg.textContent = "Starting Dhan rolling-ATM options pull…";
+    DHAN_OPT_BTN.disabled = true;
+    try {
+      const resp = await fetch(url, { method: "POST" });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 503 credential refusal / 400 bad date — relay the server's own fix text.
+        if (msg) msg.textContent = "Dhan rolling-ATM options pull refused (" + resp.status + "): " + (body.detail || "see logs");
+      } else if (body.started) {
+        if (msg) msg.textContent = "Dhan rolling-ATM options pull started — " + body.total + " rolling keys (ATM±N per bar, NOT per-contract) → feeds/dhan/rolling_options/.";
+      } else {
+        if (msg) msg.textContent = "A Dhan pull is already running (single-flight) — try again after it finishes.";
+      }
+    } catch (e) {
+      if (msg) msg.textContent = "Dhan rolling-ATM options pull request failed — check connectivity and retry.";
+    } finally {
+      DHAN_OPT_BTN.disabled = false;
     }
   };
 }

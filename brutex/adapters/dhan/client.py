@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Protocol, cast
 
 from brutex.adapters.dhan.constants import (
     DHAN_INTERVAL_1MIN,
@@ -86,6 +86,33 @@ def _extract_data(raw: Mapping[str, object]) -> Mapping[str, object]:
     return data if isinstance(data, Mapping) else {}
 
 
+class DhanRollingSdk(Protocol):
+    """The read-path ``dhanhq`` SDK surface for the rolling-ATM option fetch.
+
+    Deliberately SEPARATE from :class:`~brutex.adapters.dhan.reauth.DhanSdk` (the
+    spot ``intraday_minute_data`` surface) — the rolling-ATM track calls the SDK's
+    ``expired_options_data`` (``POST /v2/charts/rollingoption``) instead. Keeping it a
+    distinct Protocol leaves ``DhanSdk`` byte-untouched (the DEC-DHAN-SPOT-PULL-001
+    client/reauth surface + its tests are unaffected), while :meth:`DhanClient.\
+    rolling_option_data` funnels the rolling call through the SAME bounded-retry /
+    DH-901 re-read :meth:`DhanClient._call`: the refresher's live SDK (the real
+    ``dhanhq`` object) satisfies BOTH Protocols, so the one funnel casts to this
+    surface at the rolling call site. Returns the SDK's flat response envelope
+    (``{"status", "data" | "remarks"}``).
+    """
+
+    def expired_options_data(self, **kwargs: object) -> Mapping[str, object]:
+        """Fetch one rolling-ATM option window (the flat response envelope).
+
+        Kept ``**kwargs`` (not a pinned signature) because the VERBATIM camelCase
+        request body is assembled upstream by
+        :func:`~brutex.adapters.dhan.rolling_option_adapter.build_rolling_option_body`
+        and handed through unchanged — the fake satisfies it in tests, the real SDK in
+        production, with no shared import.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class DhanClient:
     """Neutral wrapper over an injected :class:`~brutex.adapters.dhan.reauth.DhanSdkRefresher`.
@@ -139,6 +166,29 @@ class DhanClient:
                 oi=oi,
             )
         )
+
+    def rolling_option_data(self, *, body: Mapping[str, object]) -> Mapping[str, object]:
+        """Fetch one rolling-ATM option window (the parallel-column ``data`` payload).
+
+        The rolling-ATM twin of :meth:`intraday_candles`: it drives the SDK's
+        ``expired_options_data`` (``POST /v2/charts/rollingoption``) through the SAME
+        bounded-retry / DH-901 re-read :meth:`_call` funnel, so the rolling track reuses
+        the whole DEC-DHAN-SPOT-PULL-001 retry/reauth machinery with ZERO duplication.
+        *body* is the VERBATIM camelCase request body assembled by
+        :func:`~brutex.adapters.dhan.rolling_option_adapter.build_rolling_option_body`
+        (no ``dhanClientId`` — the ``client-id`` travels only in the header, SETTLED);
+        it is handed to the live SDK unchanged. The live SDK (the real ``dhanhq``
+        object) satisfies :class:`DhanRollingSdk`, so the funnel casts to that surface
+        at the call site (``DhanSdk`` is deliberately left untouched). Returns the
+        success ``data`` column dict (empty on a success with no columns — an honest
+        no-data span), or raises the classified terminal
+        :class:`~brutex.adapters.dhan.errors.DhanError`.
+
+        This makes a :class:`DhanClient` a drop-in
+        :class:`~brutex.adapters.dhan.rolling_option_adapter.RollingOptionClientProtocol`
+        (the injected client the rolling adapter fetches through).
+        """
+        return self._call(lambda sdk: cast("DhanRollingSdk", sdk).expired_options_data(**body))
 
     def _call(self, invoke: Callable[[DhanSdk], object]) -> Mapping[str, object]:
         """Invoke *invoke* on the live SDK with bounded retry + DH-901 re-read.
@@ -250,6 +300,7 @@ __all__ = [
     "DHAN_MAX_REAUTHS",
     "DhanClient",
     "DhanClientProtocol",
+    "DhanRollingSdk",
     "client_self_paces",
     "client_self_reports_rate_limits",
     "client_self_reports_successes",

@@ -214,7 +214,87 @@ re-pivot) is preserved without banning a legitimately-present token.
 
 ---
 
-## 7. Consequences
+## 7. Decision 6 — Rolling-ATM expired-options + Greeks (`DEC-DHAN-ROLLING-OPTIONS-001`)
+
+The Dhan feed track is extended from spot to **expired-options history** — but Dhan
+serves **NO per-expired-contract candles**. The ONLY historical option surface is the
+ATM-relative **rolling series** (`POST /v2/charts/rollingoption`): a request fixes a
+selector `(underlying, exchangeSegment, expiry_flag ∈ {WEEK, MONTH}, expiry_code ∈
+Near/Next/Far, strike_offset ∈ {ATM, ATM±N}, option_type ∈ {CALL, PUT})` and Dhan
+returns the bar series of *whatever contract that selector resolved to on each
+bar-date*. As spot drifts and expiries roll, the **resolved absolute strike and the
+resolved expiry DATE change per bar** under a fixed selector.
+
+This forces the track's central honesty law: the resolved expiry-date and resolved
+strike are **per-ROW columns** (`resolved_expiry_date`, `resolved_strike`), **NEVER
+partition keys**. The lake root is named `rolling_options/` (never `options/` /
+`fno_candles/` / `bars/`) and the partition path encodes **only the fixed selectors**
+(`rolling_options/{exchange}/{underlying}/{expiry_flag}/EC{code}/{strike_offset_safe}/
+{option_type}/{interval}/{yyyy}/{mm}.parquet`). A single fixed-`expiry_code` partition
+legitimately holds many distinct `resolved_expiry_date` values across a real roll —
+that is the design, not a bug. `parse_fno_symbol` never touches a `rolling_options/`
+path; every dashboard label / `/db` column / doc says **"rolling-ATM" / "ATM±N"**, never
+"per-contract" / "per-expiry" / "per-strike".
+
+**Plan.** The default cartesian is enumerator-fixed at `3 × 2 × 4 × 21 × 2 = 1008` keys
+(`DHAN_ROLLING_PLAN_KEY_COUNT`); an operator from/to scopes only the window (the
+selector grid is invariant).
+
+**Greeks — the ONE cross-cutting seam `iv_source` (served-vs-solved).** The overlay
+reuses the COMMON Greeks math VERBATIM (`greeks_enrich.compute_bar_overlay` →
+`options.greeks.compute_greeks` → the shared `trading_core` Rust kernel — no Greek
+arithmetic is re-implemented, RUST-FIRST satisfied by reuse). Dhan SERVES an implied
+volatility per bar: when it is usable the Greeks are priced DIRECTLY from
+`(resolved_strike, spot, served_iv, T, rate)` with **no root-solve** (`iv_source =
+"served"`); when it is absent/garbage the pricer root-solves from the premium **exactly
+as the Groww path does** (`iv_source = "solved"`); an unsolvable premium stamps
+`no_solution` — never a fabricated Greek. `iv_source` lives in the COMMON pricer +
+provenance (`IV_SOURCE_SOLVED = 0` is the DEFAULT, so the Groww solve path packs the
+**byte-identical** integer it always did, bit 27 clear) — **the Groww solve path is
+byte-identical and there is NO formula-version bump** (the enrich goldens stay frozen).
+Per-bar `T` binds to THAT row's `resolved_expiry_date`; indices price EUROPEAN_EXACT;
+every honest demotion (`NO_RATE` / `NO_SPOT` / `BELOW_INTRINSIC` / `AT_EXPIRY` /
+`BAD_INPUT` / `NO_SOLUTION`) is REUSED and stamps NULL + a status, never a value.
+
+**Honest expiry-source state.** When the response echoes an expiry it is stamped
+`resolved_expiry_source = "echoed"`; when absent it is derived from the NSE calendar
+(`"derived"`); when neither is possible the row is honestly `"unresolved"` — never a
+fabricated date.
+
+**Servability is UNVERIFIED.** All `*.dhan.co` hosts are egress-blocked in-sandbox, so
+`rollingoption` servability (DH-905), the INDEX-vs-OPTIDX `instrument` disambiguation,
+expiry-echo presence, the exact WEEK/MONTH + `expiryCode` → date map, the 30-vs-90-day
+chunk cap, the strike band `N`, SENSEX/BSE_FNO WEEK-tenor servability, and the June-2022
+floor ALL ship as `_UNVERIFIED` sentinels / `history_floor = None` until a credentialed
+`brutex doctor --live --dhan-rolling-probe` transcript flips them (the #898/#1581
+form-probe precedent). Two DISTINCT honest states are never conflated: **EMPTY-FROM-DHAN**
+(holiday/thin/too-old → clean-empty, bounded settle, re-pullable) vs
+**UNVERIFIED-SERVABILITY** (sentinel → PLANNED, one WARN naming key + probe, ZERO bars).
+
+**`/db` surface (this PR).** A MINIMAL first slice ships — a self-contained
+`dhan_rolling_options` dataset discovery + honest column metadata
+(`brutex/dashboard/dhan_rolling_db_view.py`) that reads the `feeds/dhan/rolling_options/`
+scheme and advertises the rolling-ATM columns (`resolved_expiry_date`, `resolved_strike`,
+`strike_offset` = the ATM±N LABEL, `option_type`, `expiry_flag`, `expiry_code`, `iv`,
+`spot`, + the Greeks overlay). It touches NONE of the shared `db_view.py` (the Groww
+spot / F&O candle browser stays byte-identical). The full interactive selector cascade +
+the live candle query route are the deferred follow-up `DEC-DHAN-ROLLING-DB-VIEW-001`.
+
+### Honest limits (Decision 6, Golden Rule #10)
+
+- Servability is UNVERIFIED (above) — the whole options track is a designed-and-tested
+  surface that has **not** been confirmed against a live Dhan account; a probe-unconfirmed
+  capability degrades to a LOUD skip + ZERO bars (window stays PLANNED/re-pullable), never
+  a fabricated bar/strike/expiry/Greek.
+- The `/db` slice is discovery + column metadata ONLY — no interactive cascade / query
+  route yet (`DEC-DHAN-ROLLING-DB-VIEW-001`).
+- Movers on options is not feed-aware yet (`DEC-DHAN-MOVERS-FEED-AWARE-001`); the lean
+  spine's durable-ledger / parallel / `run_until_clean` parity remains the deferred
+  `DEC-FEED-SPINE-GENERALIZE-001`.
+
+---
+
+## 8. Consequences
 
 - Groww output + stored bytes + engine identity are byte-identical — the Dhan track is
   purely additive (no edit to `brutex/adapters/groww/*` or the byte-critical write

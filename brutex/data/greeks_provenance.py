@@ -36,6 +36,9 @@ from typing import Final
 __all__ = [
     "GREEKS_FORMULA_VERSION",
     "INPUTS_MASK",
+    "IV_SOURCE_NAMES",
+    "IV_SOURCE_SERVED",
+    "IV_SOURCE_SOLVED",
     "Q_BIAS_ZERO",
     "RATE_SOURCE_ID_CSV",
     "RATE_SOURCE_ID_FIXED",
@@ -93,6 +96,26 @@ STYLE_UNKNOWN: Final[int] = 0
 STYLE_EUROPEAN_EXACT: Final[int] = 1
 STYLE_AMERICAN_APPROX: Final[int] = 2
 
+#: IV-source flag (bit 27) — how the OK bar's Greeks were priced
+#: (DEC-DHAN-ROLLING-OPTIONS-001 §3, the ONE cross-cutting served-vs-solved seam).
+#: :data:`IV_SOURCE_SOLVED` = ``0`` is the DEFAULT, so the Groww solve path — which
+#: never supplies a served IV — packs the BYTE-IDENTICAL integer it always did
+#: (bit 27 clear); :data:`IV_SOURCE_SERVED` = ``1`` marks a bar priced DIRECTLY from
+#: a vendor-served IV (the Dhan rolling-ATM track) with NO root-solve. The flag is
+#: informational on a stamped-NULL bar (no Greek was priced — it always reads
+#: ``IV_SOURCE_SOLVED`` there) and load-bearing only on an :data:`STATUS_OK` bar,
+#: where a served↔solved transition (a re-pull filling a previously-absent IV) makes
+#: the stamp move and the enricher's reuse gate re-derive (idempotency key).
+IV_SOURCE_SOLVED: Final[int] = 0
+IV_SOURCE_SERVED: Final[int] = 1
+
+#: Machine-readable name per packed IV-source flag — the Utf8 ``iv_source`` column
+#: the Dhan rolling writer mirrors for the ``/db`` surface.
+IV_SOURCE_NAMES: Final[dict[int, str]] = {
+    IV_SOURCE_SOLVED: "solved",
+    IV_SOURCE_SERVED: "served",
+}
+
 #: Per-bar solve statuses (bits 23-26) — the stamped NULL reasons of plan §15.8.
 STATUS_OK: Final[int] = 0
 STATUS_NO_SPOT: Final[int] = 1
@@ -130,8 +153,10 @@ STATUS_DISPLAY_LABELS: Final[dict[int, str]] = {
 
 # Bit layout of the packed Int32 provenance stamp. The INPUT-defining fields
 # (formula/rate/q/T — bits 0-19) decide staleness; style + status (bits 20-26)
-# describe the individual bar. Total 27 bits < 2^31 (Int32-safe, validated by
-# FnoGreeksBar).
+# describe the individual bar; the iv-source flag (bit 27) records how an OK bar
+# was priced. Total 28 used bits < 2^31 (Int32-safe, validated by FnoGreeksBar).
+# The iv-source flag DEFAULTS to 0 (IV_SOURCE_SOLVED), so every pre-existing
+# (Groww) stamp — which never supplies a served IV — is byte-identical.
 _FORMULA_SHIFT: Final[int] = 0
 _RATE_SOURCE_SHIFT: Final[int] = 8
 _RATE_VERSION_SHIFT: Final[int] = 12
@@ -139,6 +164,7 @@ _Q_BIAS_SHIFT: Final[int] = 16
 _TTE_SHIFT: Final[int] = 18
 _STYLE_SHIFT: Final[int] = 20
 _STATUS_SHIFT: Final[int] = 23
+_IV_SOURCE_SHIFT: Final[int] = 27
 _FORMULA_MASK: Final[int] = 0xFF
 _RATE_SOURCE_MASK: Final[int] = 0xF
 _RATE_VERSION_MASK: Final[int] = 0xF
@@ -146,6 +172,7 @@ _Q_BIAS_MASK: Final[int] = 0x3
 _TTE_MASK: Final[int] = 0x3
 _STYLE_MASK: Final[int] = 0x7
 _STATUS_MASK: Final[int] = 0xF
+_IV_SOURCE_MASK: Final[int] = 0x1
 
 #: The provenance bits that define the MODEL INPUTS (formula + rate source +
 #: rate version + q bias + T convention) — the staleness-compare subset; style
@@ -173,6 +200,13 @@ class GreeksProvenance:
         :data:`STYLE_AMERICAN_APPROX` / :data:`STYLE_UNKNOWN`).
     status
         The per-bar solve status (:data:`STATUS_OK` or a stamped NULL reason).
+    iv_source
+        How an OK bar's Greeks were priced (:data:`IV_SOURCE_SOLVED` — the
+        Groww default, an IV root-solved from the traded premium — or
+        :data:`IV_SOURCE_SERVED`, priced directly from a vendor-served IV on
+        the Dhan rolling track). Declared LAST with a default so every existing
+        positional/keyword construction stays valid, and a legacy stamp (bit 27
+        clear) unpacks to :data:`IV_SOURCE_SOLVED` unchanged.
     """
 
     formula_version: int
@@ -182,6 +216,7 @@ class GreeksProvenance:
     tte_convention_id: int
     style_flag: int
     status: int
+    iv_source: int = IV_SOURCE_SOLVED
 
 
 def pack_greeks_provenance(
@@ -193,6 +228,7 @@ def pack_greeks_provenance(
     formula_version: int = GREEKS_FORMULA_VERSION,
     q_bias_id: int = Q_BIAS_ZERO,
     tte_convention_id: int = TTE_ACT365_EXPIRY_1530_IST,
+    iv_source: int = IV_SOURCE_SOLVED,
 ) -> int:
     """Pack the provenance fields into the stored Int32 stamp.
 
@@ -213,6 +249,12 @@ def pack_greeks_provenance(
     ``trading_core`` wheel while the default value keeps its single source of
     truth). Every default-relying call packs the byte-identical integer the
     pre-move eager default packed.
+
+    ``iv_source`` defaults to :data:`IV_SOURCE_SOLVED` (``0`` at bit 27), so a
+    caller that omits it — every pre-existing (Groww) call — packs the
+    BYTE-IDENTICAL integer it always did (bit 27 clear). Only the Dhan
+    rolling-ATM served-IV branch passes :data:`IV_SOURCE_SERVED`
+    (DEC-DHAN-ROLLING-OPTIONS-001 §3).
 
     Raises
     ------
@@ -236,6 +278,7 @@ def pack_greeks_provenance(
         ("tte_convention_id", tte_convention_id, _TTE_MASK),
         ("style_flag", style_flag, _STYLE_MASK),
         ("status", status, _STATUS_MASK),
+        ("iv_source", iv_source, _IV_SOURCE_MASK),
     ):
         if not 0 <= value <= mask:
             msg = (
@@ -251,6 +294,7 @@ def pack_greeks_provenance(
         | (tte_convention_id << _TTE_SHIFT)
         | (style_flag << _STYLE_SHIFT)
         | (status << _STATUS_SHIFT)
+        | (iv_source << _IV_SOURCE_SHIFT)
     )
 
 
@@ -264,6 +308,7 @@ def unpack_greeks_provenance(packed: int) -> GreeksProvenance:
         tte_convention_id=(packed >> _TTE_SHIFT) & _TTE_MASK,
         style_flag=(packed >> _STYLE_SHIFT) & _STYLE_MASK,
         status=(packed >> _STATUS_SHIFT) & _STATUS_MASK,
+        iv_source=(packed >> _IV_SOURCE_SHIFT) & _IV_SOURCE_MASK,
     )
 
 

@@ -58,6 +58,7 @@ from brutex.adapters.dhan.constants import (
     dhan_history_floor,
 )
 from brutex.adapters.dhan.live_controller import build_dhan_live_controller
+from brutex.adapters.dhan.rolling_option_plan import DHAN_ROLLING_PLAN_KEY_COUNT
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
 from brutex.adapters.groww.symbol_form_preference import PersistentSymbolFormPreference
@@ -130,6 +131,11 @@ from brutex.dashboard.dhan_pull import (
     DhanSpotPullFn,
     default_dhan_spot_pull,
     dhan_credentials_error,
+)
+from brutex.dashboard.dhan_rolling_pull import (
+    DhanRollingOptionPullFn,
+    DhanRollingOptionPullReport,
+    default_dhan_rolling_option_pull,
 )
 from brutex.dashboard.discovery_warm import (
     DB_DATASETS_KEY,
@@ -1251,6 +1257,7 @@ def build_app(
     oneclick_trades_reader: oneclick_artifacts.TradesReader | None = None,
     session_rate: SessionRateController | None = None,
     dhan_spot_pull: DhanSpotPullFn | None = None,
+    dhan_rolling_option_pull: DhanRollingOptionPullFn | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
     pull_outcome_probe: Callable[[], LastPullOutcome] | None = None,
@@ -3126,6 +3133,20 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # concurrently (disjoint lake trees) while two Dhan pulls serialise. Its meter
     # clear rides the Dhan session controller.
     _dhan_pull_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_dhan_session_rate.clear_meter,
+        lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
+    )
+
+    # The standalone Dhan ROLLING-ATM option pull job (DEC-DHAN-ROLLING-OPTIONS-001) —
+    # a SEPARATE BackgroundPullJob from the spot ``_dhan_pull_job`` so a rolling-ATM
+    # option pull and a Dhan SPOT pull never collide in-process. Its cross-process
+    # single-flight flock keys on the SAME DHAN WRITE root (``feeds/dhan/`` — the
+    # ``_dhan_job_lake_root_resolver`` nesting), so it serialises with a concurrent
+    # Dhan pull sharing the same account/lake (they write DISJOINT subtrees —
+    # ``rolling_options/`` vs ``bars/`` — but share the one Dhan read-only account
+    # rate budget). Its meter clear rides the SHARED Dhan session controller.
+    _dhan_option_pull_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         on_run_end=_dhan_session_rate.clear_meter,
         lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
@@ -5619,6 +5640,134 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         return JSONResponse(
             await _run_lake(
                 lambda: _launch_dhan_pipeline(from_date=from_date, to_date=to_date, dry_run=dry_run)
+            )
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DHAN ROLLING-ATM OPTION feed pull (DEC-DHAN-ROLLING-OPTIONS-001).
+    # The standalone read-only Dhan rolling-ATM option track (ATM±N per bar, NOT
+    # per-contract — Dhan serves no option chain): pulls the PURE cartesian of 1008
+    # rolling keys (3 indices × {WEEK,MONTH} × EC{0..3} × ATM±10 × {CALL,PUT}) at
+    # 1-minute into ``feeds/dhan/rolling_options/``, on a SEPARATE single-flight
+    # ``_dhan_option_pull_job`` (own flock on ``feeds/dhan/`` — no Groww collision).
+    # ``market_closed=None`` (Dhan uses its OWN account). Servability is UNVERIFIED —
+    # an unservable key degrades to an honest EMPTY / a DH-905 re-pullable FAILED
+    # window; never a fabricated bar (§7 gate, Golden Rule #1).
+    # ─────────────────────────────────────────────────────────────────────────
+    def _default_dhan_rolling_option_pull_production(
+        request: DhanPullRequest,
+    ) -> DhanRollingOptionPullReport:  # pragma: no cover — production wiring: real SSM + dhanhq
+        """The production Dhan rolling-ATM pull seam: the real SSM/dhanhq pull, Dhan-paced."""
+        return default_dhan_rolling_option_pull(request, pace=_dhan_session_rate.get().pace)
+
+    _dhan_rolling_option_pull_fn: DhanRollingOptionPullFn = (
+        dhan_rolling_option_pull
+        if dhan_rolling_option_pull is not None
+        else _default_dhan_rolling_option_pull_production
+    )
+
+    def _launch_dhan_rolling_pipeline(
+        *, from_date: str | None, to_date: str | None, dry_run: bool
+    ) -> dict[str, Any]:
+        """The ``/pull-rolling-options-dhan`` launch body: validate → resolve → start.
+
+        The rolling-ATM options sibling of :func:`_launch_dhan_pipeline`. Credential
+        gate FIRST (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — reuses the SAME read-only
+        Dhan SSM gate as spot); the operator date range is validated EAGERLY (a
+        reversed / non-ISO pick → clean 400); blank ⇒ the canonical default range (the
+        rolling honest-degrade records clean-empty windows for a not-yet-servable span
+        until ``DHAN_ROLLING_HISTORY_FLOOR`` is probe-verified, Golden Rule #1). The
+        pull runs on the SEPARATE single-flight ``_dhan_option_pull_job`` (own flock on
+        ``feeds/dhan/``), and is ``market_hours_exempt`` because Dhan uses its OWN
+        account (the 08:45-15:35 NSE guard exists only to free the SHARED Groww account
+        → the Dhan pull passes ``market_closed=None``).
+
+        A ``dry_run`` start is fully OFFLINE (Golden Rule #1): the production seam
+        (:func:`~brutex.dashboard.dhan_rolling_pull.default_dhan_rolling_option_pull`)
+        short-circuits after planning the pure cartesian — it builds NO adapter, loads
+        NO AWS credentials, issues NO vendor call, and writes nothing — so the start
+        skips the cross-process guards (``cross_process_lock=False``, the
+        ``_greeks_backfill_job`` dry-run precedent), meaning a dry-run never resolves
+        the account-lock key from AWS. The WET run keeps the cross-process lock.
+        """
+        refusal = gate_pull_credentials(
+            dry_run_requested=dry_run, credentials_error=dhan_credentials_error
+        )
+        if refusal is not None:
+            _LOG.error(
+                "universe.pull_rolling_options_dhan.refused_no_credentials",
+                reason=refusal.auth_cause,
+            )
+            raise HTTPException(status_code=503, detail=verdict_message(refusal))
+        from_date = (from_date or "").strip() or None
+        to_date = (to_date or "").strip() or None
+        try:
+            start_dt, end_dt = resolve_candle_range(
+                from_date=from_date, to_date=to_date, year=None, now=datetime.now(UTC)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        dhan_root = feed_lake_root(lake_root, feed="dhan")
+        request = DhanPullRequest(
+            lake_root=lake_root, start=start_dt.date(), end=end_dt.date(), dry_run=dry_run
+        )
+        _LOG.info(
+            "universe.pull_rolling_options_dhan.requested",
+            start=request.start.isoformat(),
+            end=request.end.isoformat(),
+            dry_run=dry_run,
+            dhan_root=str(dhan_root),
+            keys=DHAN_ROLLING_PLAN_KEY_COUNT,
+        )
+
+        def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — job thread
+            """Background body: run the Dhan rolling-ATM option pull."""
+            _dhan_option_pull_job.set_phase("rolling-options")
+            report = _dhan_rolling_option_pull_fn(request)
+            return report.to_dict()
+
+        detail = "dhan rolling-ATM options pipeline"
+        if dry_run:
+            detail = label_synthetic(detail)
+        started = _dhan_option_pull_job.start(
+            _work,
+            total=DHAN_ROLLING_PLAN_KEY_COUNT,
+            detail=detail,
+            # A DRY-RUN is fully OFFLINE: the real seam short-circuits after planning
+            # the pure cartesian (no adapter build, no vendor call, no write), so it
+            # needs NO cross-process guards — skipping them means the dry-run never
+            # resolves the account-lock key from AWS (the `_greeks_backfill_job`
+            # dry-run precedent). The WET run keeps the cross-process lock.
+            cross_process_lock=not dry_run,
+            market_hours_exempt=True,
+        )
+        return {
+            "started": started,
+            "feed": "dhan",
+            "dataset": "rolling-ATM",
+            "total": DHAN_ROLLING_PLAN_KEY_COUNT,
+            "dry_run": dry_run,
+        }
+
+    @app.post("/api/v1/universe/pull-rolling-options-dhan")
+    async def api_universe_pull_rolling_options_dhan(
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
+        dry_run: bool = Query(default=False),
+    ) -> JSONResponse:
+        """POST /api/v1/universe/pull-rolling-options-dhan — the Dhan rolling-ATM pull.
+
+        Thin delegator over :func:`_launch_dhan_rolling_pipeline`, offloaded via
+        ``_run_lake`` (the launch acquires the cross-process single-flight guards
+        synchronously). ``HTTPException``s (400 validation / 503 credential refusal)
+        propagate unchanged. Rolling-ATM (ATM±N per bar) — NOT per-contract.
+        """
+        return JSONResponse(
+            await _run_lake(
+                lambda: _launch_dhan_rolling_pipeline(
+                    from_date=from_date, to_date=to_date, dry_run=dry_run
+                )
             )
         )
 
