@@ -27,11 +27,13 @@ import pytest
 pytest.importorskip("polars", reason="the reader loads per-tuple Parquet stores via ResultsStore")
 
 from brutex.dashboard.sweep_results_view import (
+    DEFAULT_RANK_BY,
     GATE_COORDINATE_SENTINEL,
     GATE_COORDINATE_UNGATED,
     build_sweep_leaderboard,
     gate_coordinate_of,
     load_sweep_scan,
+    resolve_rank_by_param,
 )
 from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.sweep_identity import gate_provenance_token
@@ -457,3 +459,21 @@ class TestGateTrialsContext:
         # the populated one, so the empty-set context stays off this view.
         assert payload["gate_coordinate"] == _COORD_A
         assert payload["gate_reasons"] == []
+
+
+class TestResolveRankByParam:
+    """The public thin delegator over the ONE ``_resolve_rank_by`` fall-back.
+
+    DEC-SWEEP-SERVING-GATE-PROVENANCE-001 (d1 cache-key fix): the route keys
+    its L2 cache on the RESOLVED column — this direct unit lives in the
+    module's own discovery-mapped suite so the delegator never rides on the
+    route suite alone.
+    """
+
+    def test_known_column_passes_through(self) -> None:
+        assert resolve_rank_by_param("net_pnl_paisa") == "net_pnl_paisa"
+
+    def test_none_blank_and_unknown_fall_back_to_default(self) -> None:
+        assert resolve_rank_by_param(None) == DEFAULT_RANK_BY
+        assert resolve_rank_by_param("") == DEFAULT_RANK_BY
+        assert resolve_rank_by_param("sharpe_ratio|p=|g=ungated") == DEFAULT_RANK_BY
