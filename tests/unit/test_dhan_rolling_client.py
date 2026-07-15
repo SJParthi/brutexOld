@@ -23,7 +23,10 @@ from brutex.adapters.dhan.token_store_aws import DhanCachedToken
 _NOW = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
 _SUCCESS = {"status": "success", "data": {"timestamp": [1.0], "close": [101.0]}}
 _DH901 = {"status": "failure", "remarks": {"errorCode": "DH-901", "errorMessage": "bad token"}}
-_DH905 = {"status": "failure", "remarks": {"errorCode": "DH-905", "errorMessage": "no sub"}}
+# DH-902 is the annexure-verified subscription refusal (club-x weave: the spot
+# member's DEC-DHAN-ROLLING-FLOOR-001 review relabel — DH-905 is the INPUT
+# exception / DhanBadRequestError, subscription is 806/DH-902).
+_DH902 = {"status": "failure", "remarks": {"errorCode": "DH-902", "errorMessage": "no sub"}}
 
 _BODY: dict[str, object] = {
     "securityId": 13,
@@ -112,8 +115,8 @@ def test_rolling_success_absent_data_returns_empty_mapping() -> None:
 
 
 def test_rolling_terminal_subscription_error_raised_no_retry() -> None:
-    # DH-905 (servability refusal) is terminal — the shared funnel raises it verbatim.
-    sdk = _FakeRollingSdk(_DH905)
+    # DH-902 (subscription refusal) is terminal — the shared funnel raises it verbatim.
+    sdk = _FakeRollingSdk(_DH902)
     client = _client({"A": sdk}, "A")
     with pytest.raises(DhanSubscriptionError):
         client.rolling_option_data(body=_BODY)
