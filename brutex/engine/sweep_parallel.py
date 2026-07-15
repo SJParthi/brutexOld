@@ -168,9 +168,10 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 import structlog
 
 from brutex.engine.combo_mask import count_combos
-from brutex.engine.results_store import VixTrioConflictError
+from brutex.engine.results_store import ResultsStoreSchemaError, VixTrioConflictError
 from brutex.engine.sweep_mem_budget import BUDGET_WORKERS_ENV, MEM_BUDGET_ENV
 from brutex.engine.sweep_orchestrator import (
+    TUPLE_STORE_CORRUPT_REMEDIATION,
     SweepGridConfig,
     SweepTuple,
     count_sweep_tuples,
@@ -214,6 +215,15 @@ if TYPE_CHECKING:
     from brutex.engine.sweep_progress import SweepProgressSnapshot
 
 _LOG = structlog.get_logger("brutex.engine.sweep_parallel")
+
+#: Prefix a worker's failed marker carries when the tuple failed on the G14
+#: CORRUPT-store class (the worker serialises the caught exception as
+#: ``f"{type(exc).__name__}: {exc}"``, so the class name is the stable,
+#: process-boundary-safe discriminator — the exception OBJECT never crosses the
+#: spawn boundary). Consumed by the parent's ``_apply_outcome`` failed lane to
+#: fire the remediation-carrying ``sweep_grid.tuple_store_corrupt`` WARN
+#: (DB-02 parity, review round 1).
+_STORE_CORRUPT_ERROR_PREFIX: Final[str] = f"{ResultsStoreSchemaError.__name__}: "
 
 # ────────────────────────────────────────────────────────────────────────
 # Config flag — AUTO-default (ADR-0016, DEC-MULTICORE-SWEEP-AUTODEFAULT-001)
@@ -977,7 +987,14 @@ def _run_tuple_in_worker(
             # binds the SAME pickled stamper, so parallel == sequential.
             reference_stamper=ctx.reference_stamper,
         )
-    except (SweepComboError, VixTrioConflictError) as exc:
+    except (SweepComboError, ResultsStoreSchemaError, VixTrioConflictError) as exc:
+        # DB-02 (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796): a
+        # CORRUPT / old-schema finalist store raised at its LOAD boundary is
+        # CONTAINED as a failed outcome (surfaced through the supervisor's
+        # SUPERVISOR_TUPLE_FAILED / sweep_parallel.tuple_failed lane, whose error
+        # string names the store path) instead of crashing the worker → the whole
+        # grid. Only the G14 ResultsStoreSchemaError is caught here, NOT its parent
+        # ResultsStoreError (a run-identity conflict keeps the global abort).
         return TupleWorkResult(
             index=index,
             summary=None,
@@ -1849,6 +1866,31 @@ class ParallelGridDriver:
                 tuple=label,
                 error=outcome.failed_error,
             )
+            # DB-02 remediation parity (review round 1 — the parallel lane is the
+            # production multi-day path and previously lost the heal instruction):
+            # when the worker's failed marker names the G14 ResultsStoreSchemaError
+            # (the worker serialises it as "<TypeName>: <msg>", so the store path is
+            # inside the error string), the parent ALSO fires the SAME
+            # remediation-carrying WARN the sequential/supervisor sites emit. The
+            # failed-marker mechanics above are byte-unchanged.
+            error_text = outcome.failed_error or ""
+            # ASSUMPTION (pinned): ``ResultsStoreSchemaError`` has NO subclasses,
+            # so the exact ``"ResultsStoreSchemaError: "`` prefix is a COMPLETE
+            # discriminator for the DB-02 corrupt-store class across the spawn
+            # boundary. A future subclass would serialise under its OWN
+            # ``type(exc).__name__`` and SILENTLY drop this remediation WARN — that
+            # is forbidden by ``test_engine_sweep_parallel.py::
+            # TestStoreCorruptPrefixIsComplete`` (asserts ``__subclasses__() == []``),
+            # which fails loudly the moment a subclass is introduced.
+            if error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX):
+                _LOG.warning(
+                    "sweep_grid.tuple_store_corrupt",
+                    subject=self._subject,
+                    index=index,
+                    tuple=label,
+                    error=error_text,
+                    remediation=TUPLE_STORE_CORRUPT_REMEDIATION,
+                )
             return
 
         if outcome.kind == "no_bars":

@@ -1335,3 +1335,45 @@ def test_summary_and_guards_are_frozen() -> None:
     assert summary.sweep_id == "x"
     with pytest.raises((AttributeError, TypeError)):
         summary.persisted = 9  # type: ignore[misc]
+
+
+class TestRunSupervisedGridCorruptStoreContained:
+    """DB-02 supervisor twin (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796).
+
+    A corrupt finalist store raised at LOAD on resume is CONTAINED to one tuple
+    (``tuples_failed``), fires the ``sweep_grid.tuple_store_corrupt`` WARN, and does
+    not abort the whole grid.
+    """
+
+    def test_corrupt_store_contained_tuple_failed(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
+        bars = _trending_bars()
+        results_root = tmp_path / "results"
+        victim = next(t for t in iter_sweep_tuples(grid) if t.instrument == "BANKNIFTY")
+        victim_path = tuple_store_path(results_root, victim, grid)
+        victim_path.parent.mkdir(parents=True, exist_ok=True)
+        victim_path.write_bytes(b"CORRUPT\x00\x01" * 40)
+
+        from structlog.testing import capture_logs
+
+        with (
+            _open_guards(tmp_path, grid) as guards,
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            capture_logs() as logs,
+        ):
+            summary = run_supervised_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=make_store_for(results_root, grid),
+                dedup=_dedup(),
+                ingest_audit=ingest,
+                guards=guards,
+            )
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 1
+        assert victim_path.read_bytes() == b"CORRUPT\x00\x01" * 40
+        failed = [e for e in read_entries(tmp_path / "sup.jsonl") if e.action == "TUPLE_FAILED"]
+        assert len(failed) == 1
+        assert "ResultsStoreSchemaError" in failed[0].payload["error"]
+        assert any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)

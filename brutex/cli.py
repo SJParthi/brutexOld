@@ -7335,6 +7335,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # refusal (interior hole, empty series, …) is a clean user error whose
         # message IS the remediation.
         from brutex.calendars.nse import IST
+        from brutex.data.errors import CatalogError
         from brutex.data.futures_series import (
             FuturesSeriesError,
             FuturesSeriesResolution,
@@ -7397,6 +7398,14 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                         )
         except FuturesSeriesError as exc:
             print(f"[brutex] sweep-all REFUSED: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
+        except CatalogError as exc:
+            # An UNREADABLE partition (corrupt/torn bytes surviving one retry, or
+            # a foreign schema) is a LOUD refusal, never a silent drop — a skipped
+            # partition would hole the data_snapshot_hash inputs and silently
+            # change run identity (Golden Rule #4; DEC-CATALOG-READ-INTEGRITY-001,
+            # MIGRATION.md #1797).
+            print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
             return EXIT_USER_ERROR
 
         loaded = {key: len(bars) for key, bars in slices.items() if bars}
@@ -7720,6 +7729,33 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
 
         workers = resolve_sweep_workers(tuple_count=count_sweep_tuples(grid))
         refuse_parallel_on_legacy_path(workers, digest_path=True)
+        # Open the Bloom→LMDB dedup cache EARLY so a corrupt ``data.mdb`` is
+        # handled cleanly: SweepCache.open quarantines + rebuilds a FIRST
+        # corruption transparently (the store is a rebuildable accelerator,
+        # Golden Rule #7); only a SECOND failure raises LmdbCorruptEnvError — or,
+        # for a mid-Bloom-rebuild cursor fault on that second attempt, a raw
+        # lmdb.Error (review round 1 belt) — both a clean user-facing refusal
+        # here (DEC-SWEEP-LMDB-QUARANTINE-REBUILD-001, MIGRATION.md #1795) —
+        # never a raw traceback deep inside the sweep span. ``cache`` is entered
+        # on the run-core OUTER with-tuple below (review round 1 MINOR-2): the
+        # already-open LMDB env must be closed even when either audit-writer
+        # open inside raises. No exit-order dependency exists in either
+        # direction — the audit writers' __exit__ only flush/close their own
+        # files and never touch the cache; SweepCache.__exit__ only closes its
+        # Bloom/LMDB pair.
+        import lmdb
+
+        from brutex.data.lmdb_membership import LmdbCorruptEnvError
+
+        try:
+            cache = SweepCache.open(
+                cache_path,
+                bloom_capacity=cache_knobs.bloom_capacity,
+                map_size_mb=cache_knobs.map_size_mb,
+            )
+        except (LmdbCorruptEnvError, lmdb.Error) as exc:
+            print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+            return EXIT_USER_ERROR
         # Sweep-abort Telegram alert (R2-SL-F8 / R2-CC-G4) — the sweep twin of
         # cmd_fetch's DEC-TELEGRAM-PULL-HALT-001 pattern (_one_fetch_pass): any
         # abort propagating out of the launch/grid/stage-3/options-sim/cascade
@@ -7759,6 +7795,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 diffcheck_k=diffcheck_k,
             ) as core,
             sweep_abort_alert(_emit_pull_halt_alert),
+            cache,
         ):
             core.stage("sweep")
             # India-VIX reference stamper (DEC-VIX-STAMP-WIRE-001): built ONCE per
@@ -7788,11 +7825,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             with (
                 AuditWriter.open(audit_path, resume=audit_path.exists()) as ingest_audit,
                 SweepAuditWriter.open(sup_audit_path, resume=sup_audit_path.exists()) as sup_audit,
-                SweepCache.open(
-                    cache_path,
-                    bloom_capacity=cache_knobs.bloom_capacity,
-                    map_size_mb=cache_knobs.map_size_mb,
-                ) as cache,
             ):
                 # Audit the scope override on the hash-chained launch log (Golden Rule
                 # #8): a research launch that let out-of-scope symbols through is a
@@ -8025,71 +8057,95 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             # (DEC-NIFTY-FIB-AXIS-001). Factored out of this pragma'd shim into a
             # pragma-free, unit-tested helper (review MAJOR 2).
             core.stage("cascade")
-            cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
+            # A CascadeWireError raised anywhere in this cascade tail — a corrupt /
+            # old-schema finalist store reaching Stage-2 (DB-02,
+            # DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md #1796) OR a disk-full
+            # (ENOSPC) at the atomic manifest/report write
+            # (DEC-CASCADE-SIDECAR-ATOMIC-001, MIGRATION.md #1798) — is mapped to a
+            # clean CLI refusal here, exactly like the LmdbCorruptEnvError/CatalogError
+            # refusals earlier in this function: a `[brutex] REFUSED:` line +
+            # EXIT_USER_ERROR, NEVER a raw traceback on the shell (review round 2
+            # MUST-FIX). Caught INSIDE the sweep_abort_alert span so a user-fixable
+            # data/disk refusal never fires the CRITICAL pull-halt Telegram alert
+            # (the refusal is not a pull-wide abort). The nightly SWEEP leg reads
+            # this EXIT_USER_ERROR as a chain-breaking REFUSED
+            # (sweep_binding.sweep_link_result), a cron-red exit >= 2 — no raw
+            # exception escapes cmd_sweep_all.
+            from brutex.engine.cascade_wire import CascadeWireError
 
-            # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
-            # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
-            # manifest records stage-3 enablement + the refined-cell list.
-            cascade_specs.extend(cascade_specs_for_refined_cells(stage3_report.cells, grid=grid))
+            try:
+                cascade_specs = build_stage2_cascade_specs(out_root, grid, top_k=top)
 
-            # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
-            # into the results-depth adapter below (None when the cascade had no
-            # specs — the depth pass then writes the honest not_validated/no_report
-            # entries; no disk re-read, so a stale on-disk report can never leak in).
-            cascade_report = None
-
-            if cascade_specs:
-                # Freeze the per-leaderboard trial statistics into the manifest
-                # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
-                # the sidecars exactly ONCE here; the MANUAL replay reads only the
-                # frozen numbers, never the sidecars.
-                import dataclasses as _dataclasses
-
-                from brutex.engine.cascade_wire import build_leaderboard_trials
-
-                stage3_grid = (
-                    _dataclasses.replace(grid, data_snapshot_hash=stage3_report.train_snapshot_hash)
-                    if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
-                    else None
+                # ALSO enumerate the Stage-3 refined cells (DEC-STAGE3-WIRE-001, review F3)
+                # so Stage-4 sees them — every refined-eval row UNTRIMMED (review F8); the
+                # manifest records stage-3 enablement + the refined-cell list.
+                cascade_specs.extend(
+                    cascade_specs_for_refined_cells(stage3_report.cells, grid=grid)
                 )
-                leaderboard_trials = build_leaderboard_trials(
-                    out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
-                )
-                sweep_id = grid_identity(grid)
-                cascade_report = run_and_write_from_specs(
-                    out_root,
-                    sweep_id=sweep_id,
-                    specs=cascade_specs,
-                    bars_for=_bars_for,
-                    bars_context=BarsContext(
-                        exchange=exchange, segment=segment, start=start, end=end
-                    ),
-                    cascade_config=cascade_config_for_sweep(sweep_id),
-                    stage3=stage3_manifest_record(stage3_report, results_root=out_root),
-                    leaderboard_trials=leaderboard_trials,
-                    # ADR-0012 (review round-1): the SAME resolved schedule map the
-                    # grid swept under drives the Stage-4 futures pools' hard
-                    # resets AND is recorded in the manifest for the MANUAL replay
-                    # — never a schedule-blind re-score of a futures winner.
-                    roll_schedule_by_instrument=roll_schedule_by_instrument,
-                    # No stamper seam: the cascade candidate re-simulations are
-                    # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
-                    # see cascade_wire.build_candidate_input's sanctioned
-                    # literal-None), so the launch stamper deliberately does NOT
-                    # ride into Stage-4.
-                )
-                core.cascade_done(cascade_report)
-                print(
-                    f"[brutex] cascade — pools={len(cascade_report.groups)} "
-                    f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
-                    f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
-                )
-            else:
-                # No cascade specs (an all-no-bars grid or every combo below
-                # min_hits) — a legitimate degenerate-but-CLEAN run. Vacuously
-                # satisfy the R39 ``artifacts`` prerequisite so the clean run is
-                # never false-flagged SUSPECT (DEC-SWEEP-UNKILLABLE-CORE-001).
-                core.mark_cascade_absent()
+
+                # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the IN-MEMORY report is threaded
+                # into the results-depth adapter below (None when the cascade had no
+                # specs — the depth pass then writes the honest not_validated/no_report
+                # entries; no disk re-read, so a stale on-disk report can never leak in).
+                cascade_report = None
+
+                if cascade_specs:
+                    # Freeze the per-leaderboard trial statistics into the manifest
+                    # (DEC-TRIAL-STATS-FREEZE-001, ADR-0008 condition 1): aggregated from
+                    # the sidecars exactly ONCE here; the MANUAL replay reads only the
+                    # frozen numbers, never the sidecars.
+                    import dataclasses as _dataclasses
+
+                    from brutex.engine.cascade_wire import build_leaderboard_trials
+
+                    stage3_grid = (
+                        _dataclasses.replace(
+                            grid, data_snapshot_hash=stage3_report.train_snapshot_hash
+                        )
+                        if stage3_report.enabled and stage3_report.train_snapshot_hash is not None
+                        else None
+                    )
+                    leaderboard_trials = build_leaderboard_trials(
+                        out_root, grid, stage3_cells=stage3_report.cells, stage3_grid=stage3_grid
+                    )
+                    sweep_id = grid_identity(grid)
+                    cascade_report = run_and_write_from_specs(
+                        out_root,
+                        sweep_id=sweep_id,
+                        specs=cascade_specs,
+                        bars_for=_bars_for,
+                        bars_context=BarsContext(
+                            exchange=exchange, segment=segment, start=start, end=end
+                        ),
+                        cascade_config=cascade_config_for_sweep(sweep_id),
+                        stage3=stage3_manifest_record(stage3_report, results_root=out_root),
+                        leaderboard_trials=leaderboard_trials,
+                        # ADR-0012 (review round-1): the SAME resolved schedule map the
+                        # grid swept under drives the Stage-4 futures pools' hard
+                        # resets AND is recorded in the manifest for the MANUAL replay
+                        # — never a schedule-blind re-score of a futures winner.
+                        roll_schedule_by_instrument=roll_schedule_by_instrument,
+                        # No stamper seam: the cascade candidate re-simulations are
+                        # DISCARDED trade streams (DEC-VIX-STAMP-WIRE-001 round-6 —
+                        # see cascade_wire.build_candidate_input's sanctioned
+                        # literal-None), so the launch stamper deliberately does NOT
+                        # ride into Stage-4.
+                    )
+                    core.cascade_done(cascade_report)
+                    print(
+                        f"[brutex] cascade — pools={len(cascade_report.groups)} "
+                        f"candidates={cascade_report.n_input} survivors={cascade_report.n_survived} "
+                        f"· report: {out_root / 'cascade' / 'cascade-report.json'}"
+                    )
+                else:
+                    # No cascade specs (an all-no-bars grid or every combo below
+                    # min_hits) — a legitimate degenerate-but-CLEAN run. Vacuously
+                    # satisfy the R39 ``artifacts`` prerequisite so the clean run is
+                    # never false-flagged SUSPECT (DEC-SWEEP-UNKILLABLE-CORE-001).
+                    core.mark_cascade_absent()
+            except CascadeWireError as exc:
+                print(f"[brutex] REFUSED: {exc}", file=sys.stderr)
+                return EXIT_USER_ERROR
 
             # ── P3 INTEGRATION ADAPTER (DEC-SWEEP-RESULTS-DEPTH-001), part 2 of 2 ──
             # The ONE run-end results-depth block — trade capture → aggregates →
