@@ -338,6 +338,28 @@ DEC-DASHBOARD-COLD-IO-DEADLINE-002 (PR #1488 LANDED 2026-07-12 —
 this branch is rebased over it; the follow-up is unblocked). READ-side dashboard +
 ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
 record lives in the §1 Active-branch blurb + MIGRATION.md #1761.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 —
+the /oneclick/equity + /api/v1/launch/* lake-limiter fix: the equity route (the
+#1665 merge-seam straggler — the ONLY oneclick route left on the bare pool) and
+ALL THREE launch offloads (the #1642 HONEST-LIMITS named follow-up, CLOSED) now
+ride the app's OWN 32-token `_run_lake` LakeOffload limiter instead of AnyIO's
+DEFAULT 40-token pool — `register_launch_routes` gains the kw-only `run_lake=`
+injection seam (None → the lazy `run_in_threadpool`, byte-identical for direct
+callers), so a WEDGED lake volume pins lake tokens, never the default pool the
+deadline-guarded liveness routes live on. TEETH: the combined 44-request (22
+equity + 22 launch/state) realserver starvation regression (`held_peak <= 32`
+on the SHARED limiter — fails-before MEASURED: /pull/rate starved 5522 ms,
+held_peak 40), counting-offload dispatch pins + the api_pull_rate stays-default
+negative twin, order-exact launch dispatch pins, and the import-free AST drift
+pin (`tests/unit/test_dashboard_threadpool_pin.py` — Counter-equality over the
+FIVE sanctioned default-pool sites: api_pull_rate · api_sweep_progress ·
+api_preopen_xlsx · api_preopen_zip · api_logs). HONEST: isolation not a
+deadline — a wedged worker stays wedged until the volume recovers; the fix
+bounds the pile at 32 isolated tokens, it does not end it. READ-ONLY dashboard
+liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; healthy-lake payloads
+byte-identical; the per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #1757 — this header carries the one-line summary, never the
+story.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -3798,6 +3820,64 @@ hostile-review pass._
   dashboard + ONE new data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the
   pre-change baseline.)
+  Earlier: `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757** —
+  renumbered #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles
+  (main took #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, PR #1488;
+  #1752–#1756 are the coordinator's reserved post-#1488 drain block — PRs
+  #1486/#1487/#1485/#1482 + one further reserved slot) —
+  the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
+  app.py:7815, now :7928 — the #1665 merge-seam straggler, the ONLY oneclick
+  route still on the bare default pool) joins its six siblings on
+  `await _run_lake(_resolve)`, and
+  `register_launch_routes` gains the kw-only injection seam
+  `run_lake: Callable[..., Awaitable[Any]] | None = None` (None → the
+  lazily-imported default-pool `run_in_threadpool`, byte-identical for direct
+  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8908
+  (pre-fix :8699) passes the app's `_run_lake`; no-fastapi-at-import contract +
+  one-way import direction preserved) so ALL THREE /api/v1/launch/* offloads
+  (`build_launch_state` · `run_preconditions` · `launch_sweep` — 21 partition
+  dir stats + disk_usage + the `<lake>/sweeps/.launch/` pidfile + the launch.log
+  tail + the POST's flock/atomic writes, ALL lake I/O) ride the 32-token
+  limiter, closing #1642's HONEST-LIMITS named follow-up. TEETH: the combined
+  44-request realserver starvation regression (22 equity + 22 launch/state
+  wedged → exactly ≤32 enter the SHARED limiter, /pull/rate + /state answer
+  < 2.5 s vs the 6 s stall; fails-before MEASURED on the reverted files —
+  the shipped test fails FIRST at the starved /pull/rate probe (5522 ms);
+  held_peak 40 = the default pool's exact size, measured by the same wedge
+  run's diagnostic probe-less variant;
+  `held_peak <= 32` also kills a partial wiring or a second minted limiter);
+  counting-LakeOffload dispatch pins via the `build_app(lake_offload=)` seam
+  (equity `_resolve` positive + the api_pull_rate stays-default negative twin);
+  order-exact launch dispatch pins (`["run_preconditions", "launch_sweep"]` +
+  the 412 single-dispatch arm + the None-arm back-compat branch); and the
+  import-free AST drift pin (`tests/unit/test_dashboard_threadpool_pin.py` —
+  Counter-EQUALITY over (file, enclosing-def) vs the FIVE sanctioned
+  default-pool sites (api_pull_rate · api_sweep_progress · api_preopen_xlsx ·
+  api_preopen_zip · api_logs), importer-set belt {app.py, launch_button.py},
+  anti-vacuousness + detector teeth per the #1492-G3 idiom — the guaranteed
+  reversion-gate kill, pure ast, no importorskip). The stale app.py:7405
+  (now :7515) section comment reconciled to name `_run_lake` (the wording now
+  at :7519).
+  HONEST: ISOLATION not a
+  deadline — a wedged worker stays wedged until the volume recovers and a
+  client abort never cancels the offload (the token is held to thread
+  completion); the AST pin cannot see an aliased call (disclosed residual,
+  owned by the behavioral pins); the launch POST queues FIFO on the lake
+  limiter under an outage (it queued on the default pool before); app.py:8070's
+  log tail (pre-fix :7953) stays DELIBERATELY default-pool (~/.brutex/logs
+  LOCAL disk).
+  REFUTER ROUND-3 FOLD (finding G, MINOR — prose-claim drift, made TRUE at the
+  source): the pin's "each named deliberate in-code at its site" claim was
+  ahead of the code — only api_sweep_progress carried an at-site pool-choice
+  naming, and api_logs's at-site comment affirmatively said the OPPOSITE
+  (stale since #1642 moved the lake reads onto the limiter); the four unmarked
+  sanctioned sites now carry at-site "Deliberately on the DEFAULT AnyIO pool
+  (not the lake limiter)" namings with site-specific reasons (api_logs's stale
+  sentence REPLACED, never stacked), and the pin's docstring + _SANCTIONED
+  comment reworded to the precise central-enumeration + at-site truth.
+  READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
+  on the discovery gate's stem suite; app.py rides the whole-package floor.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -7750,6 +7830,22 @@ hostile-review pass._
   DEC-DASHBOARD-COLD-IO-DEADLINE-002; READ-side dashboard + one data leaf —
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1761 for the full blurb)
+  Earlier: `claude/lake-limiter-equity-launch`
+  (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 — renumbered
+  #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles: main took
+  #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (PR #1488) and
+  #1752–#1756 are the coordinator's reserved post-#1488 drain block for PRs
+  #1486/#1487/#1485/#1482 + one further reserved slot — the lake-limiter
+  completion for the two straggler route families: GET /api/v1/oneclick/equity
+  joins its six siblings on `await _run_lake(_resolve)` and the THREE
+  /api/v1/launch/* offloads ride the NEW kw-only `run_lake=` injection seam on
+  `register_launch_routes` (None → the lazy default-pool `run_in_threadpool`,
+  byte-identical for direct callers) — a wedged lake volume pins the 32 lake
+  tokens, never the default pool; teeth = the combined 44-request realserver
+  starvation regression + counting-offload dispatch pins + the import-free AST
+  drift pin over brutex/dashboard/'s five sanctioned bare sites; READ-ONLY
+  dashboard liveness; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on

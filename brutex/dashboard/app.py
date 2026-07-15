@@ -2406,6 +2406,10 @@ def build_app(
         if bridge_lake_root is None:
             bridge_result = BridgeReadResult(None, BRIDGE_SOURCE_UNWIRED, None)
         else:
+            # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — the
+            # deadline-guarded RateBridgeCache memo (#1522) caps the worker hold per
+            # outage, and this liveness poll must stay startable through a lake
+            # outage; sanctioned in the threadpool pin allowlist (#1757).
             bridge_result = await run_in_threadpool(_rate_bridge_cache.get, bridge_lake_root)
         snapshot = bridge_result.snapshot
         if snapshot is not None:
@@ -7753,6 +7757,9 @@ def build_app(
         title = f"Pre-Open Market: {start_d.isoformat()} to {end_d.isoformat()}"
         # The workbook serialisation is CPU-bound over every report row — off the
         # event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         return Response(
             content=await run_in_threadpool(render_xlsx, rows, title=title),
             media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
@@ -7828,6 +7835,9 @@ def build_app(
         rows = await _run_lake(_build_rows, lake_root.parent) if isinstance(lake_root, Path) else []
         # One xlsx per year + zip packing is CPU-bound over every report row —
         # off the event loop like the row build (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter) — a pure
+        # CPU render of rows already fetched via _run_lake above, no lake I/O at
+        # render time; sanctioned in the threadpool pin allowlist (#1757).
         blob = await run_in_threadpool(
             render_report_zip, rows, mode=report_mode, min_pct=Decimal(str(min_pct))
         )
@@ -8323,8 +8333,11 @@ def build_app(
     # The ONE integration-adapter surface over the sweep-oneclick artifact
     # CONTRACTS (manifest.json / top100.json / events.jsonl / trades pages) —
     # thin closures over the 100%-unit-tested `oneclick_artifacts` +
-    # `oneclick_view` modules, offloaded via `run_in_threadpool` (the app.py
-    # doctrine). Unknown run dirs are HONEST 200 `status:"awaiting"` payloads
+    # `oneclick_view` modules, offloaded via the app's 32-token `_run_lake`
+    # lake limiter (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — every artifact
+    # read lives under the lake root, so a wedged lake volume pins lake
+    # tokens, never the default pool). Unknown run dirs are HONEST 200
+    # `status:"awaiting"` payloads
     # (polls must never error-loop); ONLY a genuinely bad request — missing/
     # unsafe run_id, a junk BRUTEX_ONECLICK_FIXTURE_ROOT — is a 400.
 
@@ -8737,7 +8750,7 @@ def build_app(
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(
@@ -8873,8 +8886,12 @@ def build_app(
         path = resolve_log_file()
         # A bounded read, but still DISK I/O — on a stalled/contended volume a
         # synchronous tail would wedge the event loop with every other request
-        # behind it, so it rides the same threadpool offload as the lake reads
-        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001).
+        # behind it, so it runs off the loop on a threadpool worker
+        # (DEC-DASHBOARD-EVENTLOOP-OFFLOAD-001). Deliberately on the DEFAULT
+        # AnyIO pool (not the lake limiter) — resolve_log_file() tails the LOCAL
+        # rotating log under ~/.brutex/logs, not lake I/O, and riding _run_lake
+        # would let a lake outage starve the log route; sanctioned in the
+        # threadpool pin allowlist (#1757).
         records = await run_in_threadpool(tail_records, path, max_lines=lines)
         return JSONResponse({"lines": records, "path": str(path)})
 
@@ -9741,7 +9758,11 @@ def build_app(
     # INTERIM Run-Sweep launch page (DEC-SWEEP-LAUNCH-BUTTON-INTERIM-001):
     # strictly additive registration — /launch + /api/v1/launch/* live in
     # brutex/dashboard/launch_button.py (single-flight detached CLI launch).
-    register_launch_routes(app, lake_root_resolver=store_lake_root_resolver(instrument_store))
+    register_launch_routes(
+        app,
+        lake_root_resolver=store_lake_root_resolver(instrument_store),
+        run_lake=_run_lake,
+    )
 
     return app
 
