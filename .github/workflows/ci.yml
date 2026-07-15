@@ -2707,11 +2707,16 @@ jobs:
           # 100% line+branch on results_rollup.py from its dedicated suite.
           if compgen -G "tests/unit/test_engine_results_rollup.py" > /dev/null; then
             pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_rollup.py
-            # The COMMON LogGate leaf (the PR #1436 CodeQL cycle fix) rides the
-            # same suite — 100% line+branch on the leaf too.
-            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_rollup.py
           else
             echo "(brutex.engine.results_rollup test file not present yet — gate inactive)"
+          fi
+          # The COMMON LogGate leaf (the PR #1436 CodeQL cycle fix) ships at
+          # 100% line+branch from its OWN dedicated import-verified suite
+          # (the coverage_gate_discovery NEW-module law — the CI-red fix round).
+          if compgen -G "tests/unit/test_observability_log_gate.py" > /dev/null; then
+            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_observability_log_gate.py
+          else
+            echo "(brutex.observability.log_gate test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated
