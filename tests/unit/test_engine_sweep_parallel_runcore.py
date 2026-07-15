@@ -34,10 +34,22 @@ TRACEABILITY: Final[dict[str, tuple[str, ...]]] = {
 
 
 def test_g3_writer_actor_ticks_on_progress_per_applied_tuple(tmp_path: Path) -> None:
-    """The registered hook observes one MONOTONE snapshot per applied tuple."""
+    """The hook observes one MONOTONE running snapshot per applied tuple, then a
+    single terminal-DONE finish tick.
+
+    Parity with the sequential ``run_supervised_grid`` completion publish
+    (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001, closing the parallel-path G3 gap): the
+    writer-actor apply path fires ONE ``state="running"`` tick per applied tuple
+    (evaluated 1..total, in enumeration order), then — after
+    ``progress.finish()`` flips the state — re-publishes ONE terminal snapshot
+    (``state="done"``, ``evaluated == total``) so the dashboard's cross-process
+    ``sweep-progress.json`` lands on DONE (pinned by
+    ``test_parallel_run_writes_sweep_progress_file``)."""
+    from brutex.engine.sweep_progress import STATE_DONE, STATE_RUNNING
+
     grid = _grid()
     total = count_sweep_tuples(grid)
-    evaluated: list[int] = []
+    ticks: list[tuple[str, int]] = []
     out = tmp_path / "out"
     with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
         summary = run_parallel_grid(
@@ -47,12 +59,17 @@ def test_g3_writer_actor_ticks_on_progress_per_applied_tuple(tmp_path: Path) -> 
             ingest_audit=ing,
             guards=guards,
             workers=3,
-            on_progress=lambda snap: evaluated.append(snap.evaluated),
+            on_progress=lambda snap: ticks.append((snap.state, snap.evaluated)),
         )
     assert summary.tuples_run == total
-    assert len(evaluated) == total  # ONE tick per applied tuple — never fewer
-    assert evaluated == sorted(evaluated)  # writer-actor ordering ⇒ monotone
-    assert evaluated[-1] == total
+    per_tuple, finish = ticks[:-1], ticks[-1]
+    # ONE running tick per applied tuple — never fewer — monotone in writer-actor
+    # enumeration order.
+    assert len(per_tuple) == total
+    assert [state for state, _ in per_tuple] == [STATE_RUNNING] * total
+    assert [ev for _, ev in per_tuple] == list(range(1, total + 1))
+    # ... THEN exactly one terminal-DONE finish tick (evaluated unchanged == total).
+    assert finish == (STATE_DONE, total)
 
 
 def test_on_tuple_fires_per_successful_tuple_in_parallel(tmp_path: Path) -> None:

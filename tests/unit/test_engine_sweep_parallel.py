@@ -2462,6 +2462,56 @@ class TestWorkerCorruptStoreContained:
         assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
         assert not any(e.get("event") == "sweep_grid.tuple_store_corrupt" for e in logs)
 
+    def test_schema_failed_marker_fires_corrupt_warn(self, tmp_path: Path) -> None:
+        """The parity arm's TRUE branch: a ResultsStoreSchemaError-prefixed failed
+        marker fires the PARALLEL-lane DB-02 remediation WARN.
+
+        The FALSE-branch twin is ``test_non_schema_failed_marker_fires_no_corrupt_warn``.
+        A worker serialises a quarantine-unfixable ``ResultsStoreSchemaError`` as
+        ``"ResultsStoreSchemaError: <msg>"`` (the object never crosses the pickle
+        boundary), so ``_apply``'s parent-side discriminator
+        (``error_text.startswith(_STORE_CORRUPT_ERROR_PREFIX)``) fires the SAME
+        heal-instruction ``sweep_grid.tuple_store_corrupt`` WARN the sequential /
+        supervisor sites emit (DEC-SWEEP-STORE-CORRUPT-CONTAIN-001, MIGRATION.md
+        #1796) — the parallel lane's own TRUE branch, previously unpinned.
+        """
+        grid = _grid()
+        out = tmp_path / "out"
+        tuple_ = next(iter_sweep_tuples(grid))
+        outcome = mod._Outcome(
+            index=0,
+            tuple_=tuple_,
+            kind="failed",
+            summary=None,
+            failed_error=(
+                f"{mod._STORE_CORRUPT_ERROR_PREFIX}unreadable results store "
+                f"at {out}/x.parquet: boom"
+            ),
+            audit_records=(),
+        )
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            driver = mod.ParallelGridDriver(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=2,
+            )
+            acc = mod._Accumulator()
+            with capture_logs() as logs:
+                driver._apply(outcome, acc)
+        assert acc.tuples_failed == 1
+        # the pre-existing generic failed WARN still fires ...
+        assert any(e.get("event") == "sweep_parallel.tuple_failed" for e in logs)
+        # ... AND the DB-02 remediation WARN fires with the heal instruction.
+        corrupt = [e for e in logs if e.get("event") == "sweep_grid.tuple_store_corrupt"]
+        assert len(corrupt) == 1
+        assert corrupt[0].get("remediation") == mod.TUPLE_STORE_CORRUPT_REMEDIATION
+
 
 class TestStoreCorruptPrefixIsComplete:
     """R2-review-round-2 SHOULD-FIX 2: the cross-process corrupt-store prefix is COMPLETE.

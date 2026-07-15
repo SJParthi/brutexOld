@@ -1990,6 +1990,16 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
+        # The terminal-DONE "finish" publish: after ``progress.finish()`` flips
+        # the state to DONE, re-publish the snapshot to ``on_progress`` so the
+        # dashboard's cross-process ``sweep-progress.json`` lands on a DONE
+        # snapshot — parity with the sequential ``run_supervised_grid``
+        # completion publish, closing the parallel-path G3 gap
+        # (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001; pinned by
+        # ``test_parallel_run_writes_sweep_progress_file``). This is ONE terminal
+        # tick after the per-tuple ticks — ``evaluated`` is unchanged (== total),
+        # ``state`` becomes DONE — exactly mirroring the sequential path's
+        # "one per applied tuple + the finish publish" tick sequence.
         if self._on_progress is not None:
             publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
         self._guards.audit.append(

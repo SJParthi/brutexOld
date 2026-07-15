@@ -503,15 +503,23 @@ def test_r38_adversarial_poisoned_lake_refuses_with_nothing_touched(
     tmp_path: Path,
 ) -> None:
     """A garbage lake partition fails the chain LOUDLY at preload — with ZERO
-    results-root artifacts created (R42 row 1: preflight fail = nothing touched)."""
-    import polars as pl
+    results-root artifacts created (R42 row 1: preflight fail = nothing touched).
+
+    Under DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (MIGRATION.md #1799) the catalog
+    reconcile CATCHES the corrupt-partition ``PolarsError`` per file, records it
+    on ``ReconcileResult.unreadable``, and ``cmd_sweep_all`` REFUSES the launch
+    LOUDLY with a clean ``EXIT_USER_ERROR`` (a descriptive stderr message + a
+    ``sweep_launch.corrupt_partitions_refused`` structlog error) rather than
+    letting a raw ``ComputeError`` crash the process — the refusal fires at
+    preload, so nothing under the results root is ever touched."""
+    from brutex import cli
 
     lake_root, catalog_path = _seed_lake(tmp_path)
     month = next(lake_root.rglob("*.parquet"))
     month.write_bytes(b"\x00poisoned-not-parquet")
     results_root = tmp_path / "sweeps"
-    with pytest.raises(pl.exceptions.ComputeError):
-        _sweep_all(lake_root, catalog_path, results_root)
+    # LOUD clean refusal (EXIT_USER_ERROR), never a raw ComputeError crash.
+    assert _sweep_all(lake_root, catalog_path, results_root) == cli.EXIT_USER_ERROR
     assert not results_root.exists()
 
 
