@@ -888,3 +888,118 @@ class TestDriftDriverDry:
         driver = _load("flip_soak_driver")
         assert "soak.p99_drift" not in driver.HARD_GATE_RULE_NAMES
         assert set(driver.HARD_GATE_RULE_NAMES) == {"soak.rss_ceiling", "soak.fd_growth"}
+
+
+# ── 6. The drift-leg RETRY_ENV_MOVED path (security MAJOR-1) ──────────
+
+
+class TestDriftRetryEnvMoved:
+    """A transient env move classifies RETRY, never a kernel FAIL."""
+
+    @staticmethod
+    def _leg(driver: ModuleType, tmp_path: Path, runner: object) -> object:
+        return driver.run_drift_leg(
+            flag="BRUTEX_SWEEP_RUST_ENUM",
+            minutes=0.01,
+            lake_root=str(tmp_path),
+            results_root=tmp_path / "d",
+            scale="default",
+            dry=True,  # dry so the ambient env is never mutated; runner overrides
+            max_windows=2,
+            window_runner=runner,  # type: ignore[arg-type]
+        )
+
+    def test_is_lake_busy_matches_by_name(self) -> None:
+        driver = _load("flip_soak_driver")
+
+        class LakeBusyError(Exception):  # name-matched, not the real class
+            pass
+
+        assert driver._is_lake_busy(LakeBusyError("busy"))
+        assert not driver._is_lake_busy(ValueError("nope"))
+
+    def test_simulated_lake_busy_window_is_retry_not_fail(self, tmp_path: Path) -> None:
+        """A LakeBusy-classified window → env_retries, zero run_failures."""
+        driver = _load("flip_soak_driver")
+
+        def runner(_index: int) -> tuple[list[float], str, str]:
+            return [0.001], driver.WINDOW_ENV_MOVED, ""
+
+        result = self._leg(driver, tmp_path, runner)
+        assert result.env_retries >= 1
+        assert result.run_failures == 0
+        assert result.hard_gate_breaches == 0
+
+    def test_per_window_snapshot_move_is_env_move(self, tmp_path: Path) -> None:
+        """A data_snapshot_hash that moves between windows classifies ENV_MOVED."""
+        driver = _load("flip_soak_driver")
+        snaps = iter(["base111", "moved222", "moved222", "moved222"])
+
+        def runner(_index: int) -> tuple[list[float], str, str]:
+            return [0.001], driver.WINDOW_OK, next(snaps)
+
+        result = self._leg(driver, tmp_path, runner)
+        assert result.env_retries >= 1
+        assert result.run_failures == 0
+
+    def test_real_kernel_failure_still_fails(self, tmp_path: Path) -> None:
+        """A genuine non-zero kernel rc counts as a run failure that FAILs the leg."""
+        driver = _load("flip_soak_driver")
+
+        def runner(_index: int) -> tuple[list[float], str, str]:
+            return [0.001], driver.WINDOW_KERNEL_FAIL, ""
+
+        result = self._leg(driver, tmp_path, runner)
+        assert result.run_failures == 1
+        assert result.env_retries == 0
+
+    def test_emit_pass_folds_env_retries_to_retry(self, emit_pass: ModuleType) -> None:
+        twin = {
+            "verdict": "PASS",
+            "scale": "default",
+            "engagement": {"engaged_count": 1, "bad_markers_found": 0},
+            "wall_clock": {"off_s": 1.0, "on_s": 1.0, "ratio": 1.0},
+            "twin": {
+                "off_manifest_sha256": "a" * 64,
+                "on_manifest_sha256": "a" * 64,
+                "files_compared": 1,
+                "byte_identical": True,
+                "data_snapshot_hash_off": "s",
+                "data_snapshot_hash_on": "s",
+                "snapshot_present": True,
+            },
+        }
+        env_moved = {"hard_gate_breaches": 0, "run_failures": 0, "env_retries": 2, "windows": 3}
+        obj = emit_pass.assemble(
+            flag="BRUTEX_SWEEP_RUST_ENUM",
+            twin=twin,
+            drift=env_moved,
+            run_url="terminal",
+            minutes="1",
+            git_sha="f" * 40,
+            branch="test",
+        )
+        assert obj["verdict"] == "RETRY_ENV_MOVED"
+        # A genuine kernel failure still FAILs; a clean drift PASSes.
+        failed = dict(env_moved, run_failures=1, env_retries=0)
+        assert (
+            emit_pass.assemble(
+                flag="BRUTEX_SWEEP_RUST_ENUM",
+                twin=twin,
+                drift=failed,
+                run_url="terminal",
+                minutes="1",
+            )["verdict"]
+            == "FAIL"
+        )
+        clean = dict(env_moved, env_retries=0)
+        assert (
+            emit_pass.assemble(
+                flag="BRUTEX_SWEEP_RUST_ENUM",
+                twin=twin,
+                drift=clean,
+                run_url="terminal",
+                minutes="1",
+            )["verdict"]
+            == "PASS"
+        )

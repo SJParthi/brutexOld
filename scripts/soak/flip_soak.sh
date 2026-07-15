@@ -367,7 +367,10 @@ if [ "$DRIFT_DRY" = "1" ]; then
     drift_cmd+=(--dry)
 fi
 "${drift_cmd[@]}" || DRIFT_RC=$?
-if [ "$DRIFT_RC" -ne 0 ]; then
+# rc 1 = a genuine hard-gate breach / kernel failure → FAIL (exit 8). rc 3 =
+# RETRY_ENV_MOVED (the lake moved under the drift leg) → NOT a kernel FAIL:
+# fold it through emit_pass, which computes the final RETRY verdict + exit 3.
+if [ "$DRIFT_RC" -ne 0 ] && [ "$DRIFT_RC" -ne 3 ]; then
     echo "FLIP-SOAK FAIL (drift leg hard-gate breach or run error — see $OUT_DIR/drift.json)"
     exit 8
 fi

@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter, sleep
@@ -75,6 +76,19 @@ DRY_WINDOW_SECONDS: float = 0.05
 #: Dry-mode ops per clock re-check batch.
 DRY_OPS_PER_BATCH: int = 64
 
+#: Per-window outcome classes. A transient env move (a peer pull/heal holding
+#: the lake lock → ``LakeBusyError``, or the per-window ``data_snapshot_hash``
+#: moving under the arm) is NOT a kernel failure — it is retried (bounded) and,
+#: if it persists / is observed, folds to the RETRY_ENV_MOVED verdict, never a
+#: FAIL that would falsely blame the Rust kernel (security MAJOR-1).
+WINDOW_OK: str = "ok"
+WINDOW_KERNEL_FAIL: str = "kernel_fail"
+WINDOW_ENV_MOVED: str = "env_moved"
+
+#: Bounded per-window retry budget for a transient env move — a single lake
+#: blip must not abort the whole soak (security MAJOR-1(b)).
+DEFAULT_MAX_WINDOW_ATTEMPTS: int = 3
+
 
 @dataclass(frozen=True, slots=True)
 class DriftResult:
@@ -91,6 +105,7 @@ class DriftResult:
     hard_gate_breaches: int
     breach_rules: tuple[str, ...]
     run_failures: int
+    env_retries: int
 
     def to_json_obj(self) -> dict[str, object]:
         """The fragment object ``emit_pass.py`` folds into PASS.json."""
@@ -106,6 +121,7 @@ class DriftResult:
             "hard_gate_breaches": self.hard_gate_breaches,
             "breach_rules": list(self.breach_rules),
             "run_failures": self.run_failures,
+            "env_retries": self.env_retries,
         }
 
 
@@ -173,11 +189,30 @@ def _dry_window(window_seconds: float) -> list[float]:
     return latencies
 
 
+def _is_lake_busy(exc: BaseException) -> bool:
+    """True when *exc* is (or subclasses) ``LakeBusyError`` — matched BY NAME.
+
+    ``cmd_sweep_all`` raises ``brutex.engine.sweep_singleflight.LakeBusyError``
+    when a peer pull/heal holds the lake pull lock exclusively (G10 preload
+    guard). Matching by class name keeps this driver importable beside the
+    registry without a hard dependency on the exact module path.
+    """
+    return any(base.__name__ == "LakeBusyError" for base in type(exc).__mro__)
+
+
 def _real_window(
     spec: FlagSpec, *, lake_root: str, results_root: Path, scale: str, index: int
-) -> tuple[list[float], bool]:
-    """One real ON-arm run in-process; returns (latency samples, ok)."""
+) -> tuple[list[float], str, str]:
+    """One real ON-arm run in-process; returns (latency samples, outcome, snapshot).
+
+    ``outcome`` is one of :data:`WINDOW_OK` / :data:`WINDOW_KERNEL_FAIL` /
+    :data:`WINDOW_ENV_MOVED` — a ``LakeBusyError`` (a peer pull/heal holds the
+    lake lock) is classified ENV_MOVED, never a kernel failure. ``snapshot`` is
+    the window's ``data_snapshot_hash`` (empty when unavailable), used by the
+    caller to detect a per-window lake move.
+    """
     import brutex.cli as brutex_cli
+    from flag_registry import snapshot_token
 
     window_root = results_root / f"w{index:04d}"
     window_root.mkdir(parents=True, exist_ok=True)
@@ -189,8 +224,39 @@ def _real_window(
         rc = brutex_cli.main(argv)
     except SystemExit as exc:  # argparse exits carry the status in .code
         rc = exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:  # LakeBusyError is a transient env move, not a bug
+        if _is_lake_busy(exc):
+            return [perf_counter() - t0], WINDOW_ENV_MOVED, ""
+        raise
     wall = perf_counter() - t0
-    return [wall], rc == 0
+    outcome = WINDOW_OK if rc == 0 else WINDOW_KERNEL_FAIL
+    return [wall], outcome, snapshot_token(window_root)
+
+
+#: A window runner: given the 0-based window index, returns
+#: ``(latency_samples, outcome, snapshot)`` (see :func:`_real_window`).
+WindowRunner = Callable[[int], "tuple[list[float], str, str]"]
+
+
+def _default_window_runner(
+    spec: FlagSpec,
+    *,
+    dry: bool,
+    lake_root: str,
+    results_root: Path,
+    scale: str,
+    window_seconds: float,
+) -> WindowRunner:
+    """The production window runner — dry synthetic ops or a real ON-arm run."""
+
+    def runner(index: int) -> tuple[list[float], str, str]:
+        if dry:
+            return _dry_window(window_seconds), WINDOW_OK, ""
+        return _real_window(
+            spec, lake_root=lake_root, results_root=results_root, scale=scale, index=index
+        )
+
+    return runner
 
 
 def run_drift_leg(
@@ -204,37 +270,67 @@ def run_drift_leg(
     rss_ceiling_kib: int | None = None,
     max_windows: int | None = None,
     window_seconds: float = DRY_WINDOW_SECONDS,
+    max_window_attempts: int = DEFAULT_MAX_WINDOW_ATTEMPTS,
+    window_runner: WindowRunner | None = None,
 ) -> DriftResult:
-    """Run the drift leg and fold the verdict (pure of I/O beyond the runs)."""
+    """Run the drift leg and fold the verdict (pure of I/O beyond the runs).
+
+    A transient env move (``LakeBusyError`` or a per-window
+    ``data_snapshot_hash`` change) is retried up to *max_window_attempts* and,
+    when observed, folds to a RETRY (``env_retries > 0``) verdict — never a
+    kernel FAIL (security MAJOR-1). Only a genuine non-zero kernel rc counts as
+    a ``run_failure`` that fails the leg. ``window_runner`` overrides the
+    default runner (the test seam for simulating both classes).
+    """
     spec = spec_for(flag)
     ceiling = rss_ceiling_kib if rss_ceiling_kib is not None else spec.rss_ceiling_kib
     breaches: list[str] = []
     monitor = _build_monitor(ceiling, breaches)
+    runner = window_runner or _default_window_runner(
+        spec,
+        dry=dry,
+        lake_root=lake_root,
+        results_root=results_root,
+        scale=scale,
+        window_seconds=window_seconds,
+    )
 
     deadline = perf_counter() + minutes * 60.0
     windows = 0
     run_failures = 0
+    env_retries = 0
+    baseline_snapshot: str | None = None
     rss_peak: int | None = None
     fd_baseline: int | None = None
     fd_final: int | None = None
-    if not dry:
+    # A real leg sets the flag env for the whole loop (an injected runner drives
+    # its own state, so it never mutates the ambient env).
+    manage_env = not dry and window_runner is None
+    if manage_env:
         os.environ[flag] = "1"
         for key, value in spec.extra_env:
             os.environ[key] = value
     try:
         while True:
-            if dry:
-                latencies = _dry_window(window_seconds)
-                ok = True
-            else:
-                latencies, ok = _real_window(
-                    spec,
-                    lake_root=lake_root,
-                    results_root=results_root,
-                    scale=scale,
-                    index=windows,
-                )
-            if not ok:
+            # Per-window bounded retry: a transient env move is retried; the
+            # last non-env outcome (or the exhausted-retry env move) is folded.
+            outcome = WINDOW_ENV_MOVED
+            latencies: list[float] = []
+            snapshot = ""
+            for attempt in range(max_window_attempts):
+                latencies, outcome, snapshot = runner(windows)
+                if outcome == WINDOW_OK and snapshot and baseline_snapshot not in (None, snapshot):
+                    # The lake's data_snapshot_hash moved under this window —
+                    # treat exactly like a LakeBusyError (env move, not a bug).
+                    outcome = WINDOW_ENV_MOVED
+                if outcome != WINDOW_ENV_MOVED:
+                    break
+                env_retries += 1
+                if attempt + 1 < max_window_attempts:
+                    continue  # retry the same window
+            if outcome == WINDOW_OK and snapshot and baseline_snapshot is None:
+                baseline_snapshot = snapshot
+            if outcome == WINDOW_KERNEL_FAIL:
                 run_failures += 1
             rss_kib, fd_count = _probe()
             if rss_kib is not None:
@@ -249,12 +345,16 @@ def run_drift_leg(
                 break
             if perf_counter() >= deadline:
                 break
-            if not ok:
+            if outcome == WINDOW_KERNEL_FAIL:
                 # A failing run would loop failures for the whole budget —
                 # abort the leg after the first (recorded, verdict FAIL).
                 break
+            if outcome == WINDOW_ENV_MOVED:
+                # The lake is moving under us — stop and fold to RETRY_ENV_MOVED
+                # (rerun outside the nightly window), never a kernel FAIL.
+                break
     finally:
-        if not dry:
+        if manage_env:
             os.environ.pop(flag, None)
 
     p99_ratio = _p99_ratio(monitor)
@@ -271,6 +371,7 @@ def run_drift_leg(
         hard_gate_breaches=len(hard),
         breach_rules=tuple(breaches),
         run_failures=run_failures,
+        env_retries=env_retries,
     )
 
 
@@ -336,14 +437,22 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(
         json.dumps(result.to_json_obj(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    clean = result.hard_gate_breaches == 0 and result.run_failures == 0
-    verdict = "PASS" if clean else "FAIL"
+    # Verdict precedence: a genuine kernel failure or a hard-gate breach FAILs
+    # (exit 1); otherwise a transient env move folds to RETRY_ENV_MOVED (exit 3,
+    # rerun outside the nightly window); otherwise clean PASS (exit 0).
+    failed = result.hard_gate_breaches > 0 or result.run_failures > 0
+    if failed:
+        verdict, rc = "FAIL", 1
+    elif result.env_retries > 0:
+        verdict, rc = "RETRY_ENV_MOVED", 3
+    else:
+        verdict, rc = "PASS", 0
     print(
         f"FLIP-SOAK DRIFT {verdict} (windows={result.windows} "
         f"rss_peak_kib={result.rss_peak_kib} hard_breaches={result.hard_gate_breaches} "
-        f"run_failures={result.run_failures})"
+        f"run_failures={result.run_failures} env_retries={result.env_retries})"
     )
-    return 0 if clean else 1
+    return rc
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised via subprocess in tests

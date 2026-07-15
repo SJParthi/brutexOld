@@ -256,15 +256,24 @@ def assemble(
 
     spec = spec_for(flag)
     twin_verdict = str(twin.get("verdict", VERDICT_FAIL))
-    drift_clean = drift is None or (
-        drift.get("hard_gate_breaches") == 0 and drift.get("run_failures") == 0
+    # A drift leg that hit a hard-gate breach or a genuine kernel failure is a
+    # FAIL; one that only saw a transient env move (env_retries) folds to
+    # RETRY_ENV_MOVED (security MAJOR-1), never a kernel FAIL.
+    drift_failed = drift is not None and (
+        drift.get("hard_gate_breaches") not in (0, None)
+        or drift.get("run_failures") not in (0, None)
+    )
+    drift_env_moved = (
+        drift is not None and not drift_failed and drift.get("env_retries") not in (0, None)
     )
     if twin_verdict == VERDICT_RETRY:
         verdict = VERDICT_RETRY
-    elif twin_verdict == VERDICT_PASS and drift_clean:
-        verdict = VERDICT_PASS
-    else:
+    elif twin_verdict != VERDICT_PASS or drift_failed:
         verdict = VERDICT_FAIL
+    elif drift_env_moved:
+        verdict = VERDICT_RETRY  # twin PASS but the lake moved during the drift leg
+    else:  # twin PASS and drift clean
+        verdict = VERDICT_PASS
 
     soak_block: dict[str, object] = {
         "minutes": float(minutes),
