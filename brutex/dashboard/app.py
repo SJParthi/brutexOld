@@ -5901,7 +5901,11 @@ def build_app(
         when absent/corrupt/unresolvable — never a fabricated record.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
-        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        # Lake-root sidecar read ⇒ rides the 32-token lake limiter, not the
+        # bare default pool (DEC-DASHBOARD-LAKE-IO-LIMITER-001/-002 — the same
+        # re-route the limiter applied to every other lake-touching closure;
+        # still off the event loop, DEC-CROSSVERIFY-PRODUCER-001 unchanged).
+        snapshot["last_run"] = await _run_lake(_crossverify_last_run)
         return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
