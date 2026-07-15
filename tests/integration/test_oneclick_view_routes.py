@@ -553,6 +553,31 @@ class TestStrategyPage:
     def test_ticker_strip_present(self) -> None:
         assert 'id="bxTickerStrip"' in _template("strategy.html")
 
+    def test_buy_and_hold_benchmark_wiring(self) -> None:
+        """B1 (DEC-RESULTS-TRUST-HONESTY-001): the STORED baseline drives the
+        winner-card benchmark cell + the dashed equity overlay — served
+        verbatim from /api/v1/oneclick/baseline, never recomputed client-side
+        (the paisa parse is digit-wise over the exact stored 2-dp strings)."""
+        html = _template("strategy.html")
+        assert "/api/v1/oneclick/baseline?run_id=" in html
+        assert 'id="stBench"' in html
+        assert 'id="stBenchDetail"' in html
+        assert "benchmark: awaiting stored baseline artifact (R27)" in html
+        assert "function rupees2paisa(s)" in html
+        assert "function benchSeriesPaisa()" in html
+        assert "bx-buyhold-line" in html
+        assert "stored by the results-depth pass — never recomputed" in html
+        # The overlay shares ONE y-scale with the equity line (magnitude honesty)
+        # and states its per-unit / session-indexed envelope on the note line.
+        assert "ONE shared y-scale" in html
+        assert "buy & hold overlay (dashed, per-unit, stored R27 baseline" in html
+        assert "equity shows the loaded page" in html
+        # The excess stat is arithmetic over STORED values only.
+        assert "combo net vs buy & hold (per-unit):" in html
+        # DOM law: card + detail values land via textContent only.
+        assert "cell.textContent" in html
+        assert "detail.textContent" in html
+
 
 # ---------------------------------------------------------------------------
 # F-M4: failure → errorCard + Retry; "Loading…" never terminal

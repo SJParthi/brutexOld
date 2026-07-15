@@ -102,9 +102,15 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
+from brutex.engine.period_stats import (
+    encode_judged_years,
+    encode_period_stats,
+    fold_period_stats,
+)
 from brutex.engine.reference_wire import aggregate_trade_vix
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
 from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
+from brutex.engine.session_lens import ist_trade_date
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
 from brutex.engine.sweep_driver import (
@@ -145,6 +151,13 @@ from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
+from brutex.ranking.temporal import (
+    TemporalGateInput,
+    TemporalGateStats,
+    TemporalRobustnessConfig,
+    TemporalTriple,
+    judged_years,
+)
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.types import FibAnchorKind, Side
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
@@ -539,6 +552,23 @@ class SweepRunConfig:
         sentinel short-circuit, and a same-address collision differing only in
         the nullable DSR metric is a tuple-scoped skip (C5), never a silent
         overwrite.
+    temporal
+        Opt-in :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`
+        activating the **temporal-robustness year gate + the per-period
+        finalist-stats capture** (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). ``None``
+        (the default) is byte-identical legacy behaviour — no per-bar year
+        table, no per-mask fold, no rank filter, no stored columns (the
+        gate-OFF zero-work spy pin + the frozen goldens enforce it). Active
+        (either mode — ``"observe"`` captures + counts would-be kills without
+        filtering): an O(N_bars) per-tuple year/session precompute + an
+        O(trades)/mask exit-year fold feed the pre-rank SURVIVORS filter
+        (hard doors → temporal → overfit; the DSR candidate pool is
+        UNTOUCHED), and every persisted finalist gains the four optional
+        temporal columns. IDENTITY RULING: this config does NOT enter
+        ``mask_run_id``/``canonical_trade_params`` (the verified DSR
+        precedent — a pure rejection gate changes WHICH rows persist, never
+        any row's bytes); provenance rides the hash-chained audit payload,
+        emitted only when configured.
 
     Raises
     ------
@@ -577,6 +607,7 @@ class SweepRunConfig:
     #: contained). ``None`` — every spot config — emits NO params key, so spot
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
+    temporal: TemporalRobustnessConfig | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
@@ -699,6 +730,18 @@ class SweepRunSummary:
     #: ``True`` iff this run wrote the tuple's completion sentinel (strictly
     #: last, after ``mark_many``).
     sentinel_written: bool = False
+    # ── Temporal year-gate tallies (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) —
+    #    additive defaulted fields, all-zero/False unless ``cfg.temporal`` ran ──
+    #: Hard-door survivors REMOVED by the temporal gate (``mode="gate"``).
+    temporal_gated: int = 0
+    #: Survivors that WOULD have been removed (``mode="observe"`` — counted,
+    #: logged, audited; nothing filtered).
+    temporal_observed_kills: int = 0
+    #: The WHOLE gate abstained — judged years below the config floor (no
+    #: combo rejected; one ``sweep_run.temporal_gate`` WARN fired).
+    temporal_abstained: bool = False
+    #: How many calendar years the tuple's window JUDGED (the P1 denominator).
+    temporal_judged_years: int = 0
 
 
 def canonical_trade_params(
@@ -783,6 +826,158 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
     )
 
 
+class _TemporalRuntime:
+    """One tuple's temporal-gate runtime (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+    Built ONCE per tuple (only when ``cfg.temporal`` is active — the gate-OFF
+    arm never constructs one, spy-pinned) by :func:`_build_temporal_runtime`:
+    the O(N_bars) IST year-per-bar table, the data-grounded distinct-session
+    census, the judged-year set, and the per-mask fold sink
+    :func:`_iter_mask_metrics` drives. The sink reduces each kept mask's
+    trades to ONE 3-int :class:`~brutex.ranking.temporal.TemporalTriple`
+    (≈17 B) and parks it in a one-slot holder the caller drains — the batch
+    arm appends it beside ``pairs``; the bounded arm hands it straight to
+    ``SurvivorColumns.append`` so no O(kept) triple list is retained there.
+    """
+
+    __slots__ = (
+        "_acc",
+        "_last_triple",
+        "base_year",
+        "cfg",
+        "judged",
+        "judged_offsets",
+        "n_judged",
+        "stats",
+        "triples",
+        "year_of_bar",
+    )
+
+    def __init__(
+        self,
+        cfg: TemporalRobustnessConfig,
+        year_of_bar: Sequence[int],
+        base_year: int,
+        n_years: int,
+        judged: tuple[int, ...],
+    ) -> None:
+        self.cfg = cfg
+        self.year_of_bar = year_of_bar
+        self.base_year = base_year
+        self.judged = judged
+        self.n_judged = len(judged)
+        self.judged_offsets = tuple(year - base_year for year in judged)
+        self.stats = TemporalGateStats()
+        #: The reusable per-mask year accumulator (≤ a handful of slots —
+        #: allocated ONCE, zeroed after each reduction; zero retained
+        #: per-mask state beyond the 3-int triple).
+        self._acc = [0] * max(n_years, 1)
+        #: BATCH arm only — the per-candidate triples aligned with ``pairs``.
+        self.triples: list[TemporalTriple] = []
+        self._last_triple: TemporalTriple | None = None
+
+    def sink(
+        self,
+        mask: int,
+        trades: Sequence[Any],
+        exit_indices: Sequence[int] | None,
+    ) -> None:
+        """Fold ONE kept mask's trades into its per-judged-year triple.
+
+        The FAST arm indexes the pre-built ``year_of_bar`` table by each
+        trade's certified exit-bar index — two array indexings + one int add
+        per trade — guarded by the exit-index CONSISTENCY BELT (length +
+        bounds; the DEC-SWEEP-EXIT-INDEX-FASTPATH-001 demote law): an
+        inconsistent stream demotes to the per-trade
+        ``ist_trade_date(exit_ts).year`` fold, which is identical by
+        construction (``exit_ts`` IS the exit bar's timestamp —
+        property-pinned equal), never to a wrong year.
+        """
+        n_bars = len(self.year_of_bar)
+        acc = self._acc
+        use_fast = exit_indices is not None and len(exit_indices) == len(trades)
+        if use_fast and exit_indices is not None:
+            for index in exit_indices:
+                if not 0 <= index < n_bars:
+                    use_fast = False
+                    break
+        if use_fast and exit_indices is not None:
+            for trade, index in zip(trades, exit_indices, strict=True):
+                acc[self.year_of_bar[index] - self.base_year] += trade.pnl_paisa
+        else:
+            for trade in trades:
+                acc[ist_trade_date(trade.exit_ts).year - self.base_year] += trade.pnl_paisa
+        profitable = 0
+        max_pos = 0
+        sum_pos = 0
+        for offset in self.judged_offsets:
+            pnl = acc[offset]
+            if pnl > 0:
+                profitable += 1
+                sum_pos += pnl
+                max_pos = max(max_pos, pnl)
+        # Zero the reusable accumulator (O(#window years) ≤ a handful).
+        for slot in range(len(acc)):
+            acc[slot] = 0
+        self._last_triple = TemporalTriple(
+            profitable_judged_years=profitable,
+            max_pos_year_pnl_paisa=max_pos,
+            sum_pos_year_pnl_paisa=sum_pos,
+        )
+
+    def take_last(self, mask: int) -> TemporalTriple:
+        """Drain the one-slot holder — fail LOUD if the sink never ran (wiring)."""
+        triple = self._last_triple
+        if triple is None:
+            raise SweepComboError(
+                f"temporal fold missing for mask 0x{mask:032x} — the sink was not "
+                f"invoked for this kept mask (wiring bug), never a silent pass-all"
+            )
+        self._last_triple = None
+        return triple
+
+    def gate_input(self) -> TemporalGateInput:
+        """The BATCH rank seam bundle (triples aligned with ``pairs``)."""
+        return TemporalGateInput(
+            cfg=self.cfg, n_judged_years=self.n_judged, triples=self.triples, stats=self.stats
+        )
+
+    def columns_gate_input(self) -> TemporalGateInput:
+        """The BOUNDED rank seam bundle (triples live in the SurvivorColumns)."""
+        return TemporalGateInput(
+            cfg=self.cfg, n_judged_years=self.n_judged, triples=None, stats=self.stats
+        )
+
+
+def _build_temporal_runtime(
+    bars: Sequence[CandleBar], cfg: TemporalRobustnessConfig
+) -> _TemporalRuntime:
+    """ONE O(N_bars) pass: the year-per-bar table + the judged-year census.
+
+    ``year_of_bar`` maps each bar index to its IST calendar year (the
+    :func:`~brutex.engine.session_lens.ist_trade_date` law — the ONE UTC→IST
+    conversion boundary); ``sessions_per_year`` counts DISTINCT IST session
+    dates per year from the tuple's OWN bars (data-grounded — immune to window
+    holes; bars are chronological, so distinct dates are date transitions),
+    feeding the :func:`~brutex.ranking.temporal.judged_years` edge-year rule.
+    """
+    from array import array
+
+    year_of_bar = array("h")
+    sessions_per_year: dict[int, int] = {}
+    last_date = None
+    for bar in bars:
+        bar_date = ist_trade_date(bar.timestamp)
+        year_of_bar.append(bar_date.year)
+        if bar_date != last_date:
+            sessions_per_year[bar_date.year] = sessions_per_year.get(bar_date.year, 0) + 1
+            last_date = bar_date
+    judged = judged_years(sessions_per_year, cfg)
+    base_year = min(sessions_per_year) if sessions_per_year else 0
+    n_years = (max(sessions_per_year) - base_year + 1) if sessions_per_year else 1
+    return _TemporalRuntime(cfg, year_of_bar, base_year, n_years, judged)
+
+
 def ranked_combo_to_result_row(
     rc: RankedCombo,
     *,
@@ -797,6 +992,9 @@ def ranked_combo_to_result_row(
     sl_paisa: int | None,
     tp_paisa: int | None,
     reference_stamper: TradeReferenceStamper | None = None,
+    temporal: TemporalRobustnessConfig | None = None,
+    temporal_judged_years: Sequence[int] | None = None,
+    start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -875,6 +1073,23 @@ def ranked_combo_to_result_row(
         with or without stamping (regression-pinned); ONLY the three nullable
         VIX columns differ. ``None`` (default) = unstamped → the honest
         ``(None, None, None)`` trio, never a fabricated level.
+    temporal
+        The tuple's :class:`~brutex.ranking.temporal.TemporalRobustnessConfig`
+        (both modes — ``observe`` captures too), or ``None`` for no capture
+        (byte-identical legacy row — DEC-SWEEP-TEMPORAL-ROBUSTNESS-001). When
+        active AND the finalist has trades, the re-simulated stream is folded
+        through :func:`brutex.engine.period_stats.fold_period_stats` at the
+        accepted O(finalists) re-sim seam (zero hot-path cost) and the four
+        optional temporal columns are stamped. A ZERO-trade finalist (a
+        Stage-3 refined row) stores ``None`` — honest, matching its
+        placeholder price anchors.
+    temporal_judged_years
+        The tuple's judged-year set (from the per-tuple census) — stored as
+        the serve-time denominator. Ignored when *temporal* is ``None``.
+    start_equity_paisa
+        The equity base anchoring the per-period dd walk (the
+        ``build_equity_curve`` law; the dd values are invariant to the
+        constant offset — threaded for basis-law fidelity).
 
     Returns
     -------
@@ -916,6 +1131,24 @@ def ranked_combo_to_result_row(
     # the honest (None, None, None) — never fabricated (Golden Rule #1).
     vix_mean, vix_min, vix_max = aggregate_trade_vix(trades)
 
+    # Tier-1 per-period capture (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, both
+    # modes): folded from the SAME re-simulated trades above — cross-sum
+    # consistency with the row's own totals is guaranteed by construction
+    # (the store validator re-proves it at append). Zero-trade finalists
+    # store None — honest, never fabricated empties.
+    year_json: str | None = None
+    quarter_json: str | None = None
+    month_json: str | None = None
+    judged_json: str | None = None
+    if temporal is not None and trades:
+        period = fold_period_stats(trades, start_equity_paisa=start_equity_paisa)
+        year_json = encode_period_stats(period.by_year)
+        quarter_json = encode_period_stats(period.by_quarter)
+        month_json = encode_period_stats(period.by_month)
+        judged_json = encode_judged_years(
+            temporal_judged_years if temporal_judged_years is not None else ()
+        )
+
     return ResultRow(
         run_id=run_id,
         instrument=instrument,
@@ -943,6 +1176,10 @@ def ranked_combo_to_result_row(
         vix_mean=vix_mean,
         vix_min=vix_min,
         vix_max=vix_max,
+        stats_by_year_json=year_json,
+        stats_by_quarter_json=quarter_json,
+        stats_by_month_json=month_json,
+        temporal_judged_years_json=judged_json,
     )
 
 
@@ -1177,6 +1414,8 @@ def _iter_mask_metrics(
     cfg: SweepRunConfig,
     direction_label: str,
     run_id_of: Callable[[int], str],
+    *,
+    temporal_sink: Callable[[int, Sequence[Any], Sequence[int] | None], None] | None = None,
 ) -> Iterator[tuple[int, ResultMetrics]]:
     """Yield ``(mask, metrics)`` for *masks* in order — THE one chunked eval spine.
 
@@ -1200,6 +1439,13 @@ def _iter_mask_metrics(
     the exact :class:`SweepComboError` fingerprint, or the loud chunk-level
     error); a metrics-tail failure raises :func:`_combo_error`; ``MemoryError``
     re-raises BARE at every level (OOM = GLOBAL stop, DEC-LAKE-WRITE-HALT-001).
+
+    ``temporal_sink`` (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001, kw-only, default
+    ``None`` = byte-identical control flow — zero allocation, zero branch
+    taken beyond one ``is None`` test; the gate-OFF spy pin): when set, it is
+    invoked ONCE per yielded mask with ``(mask, trades, exit_indices)`` —
+    inside the metrics try-block, so a sink failure rides the SAME
+    :func:`_combo_error` tuple-skip fingerprint as a metrics-tail failure.
     """
     chunk_size = _trade_sim_chunk_masks(len(bars))
     for chunk_start in range(0, len(masks), chunk_size):
@@ -1251,6 +1497,8 @@ def _iter_mask_metrics(
                     tf_minutes=cfg.tf_minutes,
                     exit_indices=exit_indices,
                 )
+                if temporal_sink is not None:
+                    temporal_sink(mask, trades, exit_indices)
             except MemoryError:
                 raise
             except Exception as exc:
@@ -1545,23 +1793,31 @@ def run_persisted_sweep(
         else:
             _LOG.info("sweep_run.bounded_rank_engaged", **engaged_payload)
 
-    audit.append(
-        action=_ACTION_START,
-        subject=subject,
-        payload={
-            "instrument": cfg.instrument,
-            "tf": cfg.tf,
-            "direction": direction_label,
-            "mode": cfg.mode,
-            "k": cfg.k,
-            "n_bits": n_unique,
-            "n_masks_enumerated": n_masks,
-            "data_snapshot_hash": cfg.data_snapshot_hash,
-            "indicator_version": cfg.indicator_version,
-            "code_commit_sha": cfg.code_commit_sha,
-            "params": params,
-        },
-    )
+    start_payload: dict[str, Any] = {
+        "instrument": cfg.instrument,
+        "tf": cfg.tf,
+        "direction": direction_label,
+        "mode": cfg.mode,
+        "k": cfg.k,
+        "n_bits": n_unique,
+        "n_masks_enumerated": n_masks,
+        "data_snapshot_hash": cfg.data_snapshot_hash,
+        "indicator_version": cfg.indicator_version,
+        "code_commit_sha": cfg.code_commit_sha,
+        "params": params,
+    }
+    if cfg.temporal is not None:
+        # Provenance WITHOUT re-key (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): the
+        # gate config rides the hash-chained SWEEP_START payload, emitted ONLY
+        # when configured — the default audit bytes are unchanged (pinned).
+        start_payload["temporal_gate"] = {
+            "mode": cfg.temporal.mode,
+            "min_profitable_years_fraction": cfg.temporal.min_profitable_years_fraction,
+            "max_single_year_pnl_share": cfg.temporal.max_single_year_pnl_share,
+            "min_edge_year_sessions": cfg.temporal.min_edge_year_sessions,
+            "min_judged_years": cfg.temporal.min_judged_years,
+        }
+    audit.append(action=_ACTION_START, subject=subject, payload=start_payload)
 
     if kernel is None:
         bar_bits = build_bar_bits(
@@ -1754,7 +2010,20 @@ def run_persisted_sweep(
     # an EXACT owned-bytes watermark that degrades gracefully to a
     # SweepMemoryBudgetError tuple-skip if even the columns outgrow the budget.
     pairs: list[tuple[int, ResultMetrics]] = []
-    columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
+    columns = (
+        SurvivorColumns(
+            with_overfit=cfg.overfit is not None, with_temporal=cfg.temporal is not None
+        )
+        if plan.bounded
+        else None
+    )
+    # Temporal runtime (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): built ONLY when the
+    # gate is configured — the temporal=None arm never constructs the year
+    # table, the sink, or the predicates (the gate-OFF zero-work spy pin; the
+    # frozen goldens pin the bytes).
+    temporal_runtime = (
+        _build_temporal_runtime(bars, cfg.temporal) if cfg.temporal is not None else None
+    )
     sim: ResidentTradeSim | None = None
     if kept:
         # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
@@ -1786,12 +2055,27 @@ def run_persisted_sweep(
             kernel_columns=kernel.kernel_columns if kernel is not None else None,
         )
         for mask, metrics in _iter_mask_metrics(
-            sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
+            sim,
+            kept,
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            run_id_of,
+            temporal_sink=None if temporal_runtime is None else temporal_runtime.sink,
         ):
             if columns is None:
                 pairs.append((mask, metrics))
+                if temporal_runtime is not None:
+                    # BATCH arm: retain the triple aligned with `pairs` (the
+                    # rank seam's per-candidate stream).
+                    temporal_runtime.triples.append(temporal_runtime.take_last(mask))
                 continue
-            columns.append(mask, metrics)
+            columns.append(
+                mask,
+                metrics,
+                temporal=None if temporal_runtime is None else temporal_runtime.take_last(mask),
+            )
             if columns.owned_nbytes() > plan.budget_bytes:
                 raise SweepMemoryBudgetError(
                     f"{subject}: "
@@ -1802,7 +2086,11 @@ def run_persisted_sweep(
                     )
                 )
     if columns is None:
-        ranked = rank_combos(pairs, overfit=cfg.overfit)
+        ranked = rank_combos(
+            pairs,
+            overfit=cfg.overfit,
+            temporal=None if temporal_runtime is None else temporal_runtime.gate_input(),
+        )
         finalists = ranked if cfg.top_k is None else ranked[: cfg.top_k]
         n_ranked = len(ranked)
         backtested = len(pairs)
@@ -1811,9 +2099,13 @@ def run_persisted_sweep(
         # Bounded rank: the SAME shared ranking internals over the columns
         # (bit-identical to `rank_combos(pairs)[:top_k]` — property-pinned),
         # then the finalists' full metrics recomputed O(top_k) via the SAME
-        # eval spine (the V16 re-simulation precedent).
+        # eval spine (the V16 re-simulation precedent; NO temporal_sink there
+        # — the finalists' triples already gated them).
         selected = rank_survivor_columns(
-            columns, overfit=cfg.overfit, top_k=plan.require_bounded_top_k()
+            columns,
+            overfit=cfg.overfit,
+            top_k=plan.require_bounded_top_k(),
+            temporal=None if temporal_runtime is None else temporal_runtime.columns_gate_input(),
         )
         finalists = _rebuild_bounded_finalists(
             selected, sim, bars, bar_bits, cfg, direction_label, run_id_of
@@ -1821,6 +2113,18 @@ def run_persisted_sweep(
         n_ranked = selected.n_ranked
         backtested = columns.n_kept
         sidecar_sharpes = columns.sharpe_values()
+
+    if temporal_runtime is not None and temporal_runtime.stats.abstained:
+        # Whole-gate abstention — LOUD by design (Golden Rule #10): a
+        # sub-floor window cannot evidence cross-year robustness, so NO combo
+        # was rejected; the operator should know the gate stood down.
+        _LOG.warning(
+            "sweep_run.temporal_gate",
+            abstained=True,
+            judged_years=temporal_runtime.n_judged,
+            min_judged_years=temporal_runtime.cfg.min_judged_years,
+            subject=subject,
+        )
 
     persisted = 0
     for rc in finalists:
@@ -1840,6 +2144,9 @@ def run_persisted_sweep(
             # re-simulation feeds the persisted row, so the run's stamper
             # lands here.
             reference_stamper=reference_stamper,
+            temporal=cfg.temporal,
+            temporal_judged_years=None if temporal_runtime is None else temporal_runtime.judged,
+            start_equity_paisa=cfg.start_equity_paisa,
         )
         try:
             store.append(row)
@@ -1926,6 +2233,13 @@ def run_persisted_sweep(
         # Additive sentinel tally (DEC-MARK-MANY-SENTINEL-001) — chain-safe.
         "sentinel_written": sentinel_written,
     }
+    if temporal_runtime is not None:
+        # Temporal counters (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) — emitted ONLY
+        # when configured, so the default COMPLETE payload bytes are unchanged.
+        tallies["temporal_gated"] = temporal_runtime.stats.killed
+        tallies["temporal_observed_kills"] = temporal_runtime.stats.observed_kills
+        tallies["temporal_abstained"] = temporal_runtime.stats.abstained
+        tallies["temporal_judged_years"] = temporal_runtime.n_judged
     audit.append(
         action=_ACTION_FLUSH,
         subject=subject,
@@ -1949,6 +2263,14 @@ def run_persisted_sweep(
         trial_sum_sharpe_sq=trial_sum_sharpe_sq,
         trial_sidecar_written=sidecar_written,
         sentinel_written=sentinel_written,
+        temporal_gated=0 if temporal_runtime is None else temporal_runtime.stats.killed,
+        temporal_observed_kills=(
+            0 if temporal_runtime is None else temporal_runtime.stats.observed_kills
+        ),
+        temporal_abstained=(
+            False if temporal_runtime is None else temporal_runtime.stats.abstained
+        ),
+        temporal_judged_years=0 if temporal_runtime is None else temporal_runtime.n_judged,
     )
 
 

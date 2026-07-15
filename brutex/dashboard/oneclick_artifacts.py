@@ -70,6 +70,7 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 
 import structlog
 
+from brutex.engine.baseline import BaselineSeries, load_baseline
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
@@ -101,6 +102,7 @@ __all__ = [
     "ArtifactProbe",
     "ArtifactStatus",
     "AwaitingTradesReader",
+    "BaselineResult",
     "CachedPayloadMissingError",
     "ChainNotVerifiedError",
     "EventsPage",
@@ -121,6 +123,7 @@ __all__ = [
     "discover_runs",
     "fixture_results_root",
     "is_safe_run_id",
+    "load_baseline_result",
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
@@ -1544,6 +1547,175 @@ def load_top100(run_dir: Path) -> Top100Result:
             cascade_join,
         )
     return Top100Result("ok", tuple(rows), "", revision, preset, cascade_join)
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineResult:
+    """One resolved buy-&-hold baseline read (DEC-RESULTS-TRUST-HONESTY-001 · B1).
+
+    Attributes
+    ----------
+    status
+        ``ok`` = a validated stored series is served; ``awaiting`` = the
+        artifact chain is not there yet (absent top100 / array-root interim
+        top100 with no baselines map / no baseline recorded for the
+        instrument / baseline file absent); ``corrupt`` = present-but-damaged
+        (bad top100 JSON, a non-string-map ``baselines`` key, an UNSAFE
+        filename ref, or a baseline file failing the engine's validating
+        loader). NEVER a fabricated series (Golden Rule #1).
+    instrument
+        The RESOLVED instrument token (``None`` until resolvable).
+    filename
+        The baselines-map filename ref that was (or would be) read.
+    series
+        The validated :class:`~brutex.engine.baseline.BaselineSeries` on the
+        ``ok`` arm — STORED values only, never recomputed at serve.
+    instruments
+        The sorted instrument keys of the run's baselines map (empty when the
+        map itself is unavailable) — the honest "what IS stored" hint.
+    detail
+        Human-readable awaiting/defect note (empty when ``ok``).
+    revision
+        The served baseline FILE's ``mtime_ns:size`` stat token (``ok`` arm),
+        else ``None``.
+    """
+
+    status: ArtifactStatus
+    instrument: str | None
+    filename: str | None
+    series: BaselineSeries | None
+    instruments: tuple[str, ...]
+    detail: str
+    revision: str | None
+
+
+def _load_baselines_map(run_dir: Path) -> tuple[dict[str, str] | None, str]:
+    """Read the top100.json ROOT's ``baselines`` map → ``(map, detail)``.
+
+    ``(None, detail)`` = unavailable, with the detail carrying the honest
+    cause; the ARRAY-root interim contract (the shape :func:`load_top100`
+    pages rows from) carries NO baselines map and reads as an awaiting-style
+    absence, never corrupt. A present-but-wrong-typed ``baselines`` key IS
+    damage (``detail`` starts ``corrupt:`` — the caller maps it).
+    """
+    path = run_dir / TOP100_FILENAME
+    text, error = _read_artifact_text(path, artifact=TOP100_FILENAME)
+    if text is None:
+        if error is None:
+            return None, f"{AWAITING_DETAIL} — {TOP100_FILENAME} absent"
+        return None, f"corrupt: {error}"
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return None, f"corrupt: {TOP100_FILENAME} is not valid JSON"
+    if isinstance(obj, list):
+        return None, (
+            f"{TOP100_FILENAME} has an ARRAY root (the interim contract) — no baselines "
+            "map; re-run the results-depth pass to write the object-root artifact"
+        )
+    if not isinstance(obj, dict):
+        return None, f"corrupt: {TOP100_FILENAME} root is neither object nor array"
+    baselines = obj.get("baselines")
+    if baselines is None:
+        return None, f"{TOP100_FILENAME} object root carries no baselines map"
+    if not isinstance(baselines, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in baselines.items()
+    ):
+        return None, f"corrupt: {TOP100_FILENAME} baselines is not a string→string map"
+    return dict(baselines), ""
+
+
+def load_baseline_result(run_dir: Path, instrument: str | None) -> BaselineResult:
+    """Resolve one run's stored buy-&-hold baseline (R27) for the serve route.
+
+    Resolution law (DEC-RESULTS-TRUST-HONESTY-001 · B1 — STORED bytes only,
+    never a recompute): the filename comes from the run's top100.json object
+    root ``baselines`` map (the #1275 writer's instrument → filename record);
+    *instrument* ``None`` auto-selects IFF exactly ONE baseline is stored
+    (the common single-instrument sweep), else the awaiting detail NAMES the
+    stored instruments so the caller can re-ask precisely. The filename ref
+    is validated as ONE safe path segment BEFORE any disk touch (a tampered
+    map can never traverse — the ``sidecar_paths_from_ref`` posture), and the
+    file is read through the engine's VALIDATING :func:`load_baseline` (any
+    damage → ``corrupt``, never a half-trusted series).
+    """
+    baselines, detail = _load_baselines_map(run_dir)
+    if baselines is None:
+        if detail.startswith("corrupt: "):
+            return BaselineResult(
+                "corrupt", instrument, None, None, (), detail.removeprefix("corrupt: "), None
+            )
+        return BaselineResult("awaiting", instrument, None, None, (), detail, None)
+    instruments = tuple(sorted(baselines))
+    if instrument is None:
+        if len(instruments) == 1:
+            instrument = instruments[0]
+        else:
+            return BaselineResult(
+                "awaiting",
+                None,
+                None,
+                None,
+                instruments,
+                (
+                    f"instrument required — {len(instruments)} baseline(s) stored"
+                    + (f": {', '.join(instruments)}" if instruments else "")
+                ),
+                None,
+            )
+    filename = baselines.get(instrument)
+    if filename is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            None,
+            None,
+            instruments,
+            f"no stored baseline for {instrument!r}"
+            + (f" — stored: {', '.join(instruments)}" if instruments else ""),
+            None,
+        )
+    if not is_safe_run_id(filename):
+        _LOG.warning(
+            "oneclick.baseline_ref_unsafe",
+            run_dir=str(run_dir),
+            instrument=instrument,
+            filename=filename,
+        )
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"baseline filename ref {filename!r} is not one safe path segment",
+            None,
+        )
+    path = run_dir / filename
+    revision = artifact_revision(path)
+    if revision is None:
+        return BaselineResult(
+            "awaiting",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{AWAITING_DETAIL} — {filename} absent",
+            None,
+        )
+    series = load_baseline(path)
+    if series is None:
+        # load_baseline already logged the named reason (baseline.load_invalid).
+        return BaselineResult(
+            "corrupt",
+            instrument,
+            filename,
+            None,
+            instruments,
+            f"{filename} failed validation — rebuild via the results-depth pass",
+            None,
+        )
+    return BaselineResult("ok", instrument, filename, series, instruments, "", revision)
 
 
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:

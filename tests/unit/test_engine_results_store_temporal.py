@@ -1,0 +1,350 @@
+"""The four optional ResultRow temporal columns (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+
+Storage-side laws pinned here:
+
+* **Emit-on-present writer** — an all-``None`` store flushes BYTE-IDENTICAL
+  parquet to the pre-extension writer (proven against the COMMITTED
+  ``results_store_pre_extension_v1.parquet`` fixture bytes, which today's flush
+  reproduces exactly — the same polars/zstd-build sensitivity caveat as the
+  ``_GOLDEN_CONTENT_HASH`` pins, backed by the version-robust schema check).
+* **All-or-none per row** — a partial temporal set is a torn capture, rejected.
+* **Cross-sum validation** at construction + the G14 typed wrap at load.
+* **The D16 append conflict/enrichment rule** — all three cases.
+* **Round-trip** — populated + ``None`` cells survive flush→load exactly.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from brutex.engine.period_stats import encode_period_stats
+from brutex.engine.results_store import (
+    ResultRow,
+    ResultsStore,
+    ResultsStoreError,
+    ResultsStoreSchemaError,
+)
+from structlog.testing import capture_logs
+
+pytest.importorskip("polars")  # flush/load need the [data] extra
+
+#: The committed PRE-extension store (see its golden suite) — the byte oracle
+#: for the all-None emit-on-present arm.
+_PRE_EXTENSION_FIXTURE: Path = (
+    Path(__file__).parent.parent / "golden" / "fixtures" / "results_store_pre_extension_v1.parquet"
+)
+
+#: The pre-extension column set (identity → limbs → money → counts → metrics →
+#: deflated → prices) — what an all-None flush must emit EXACTLY.
+_PRE_EXTENSION_COLUMNS = [
+    "run_id",
+    "instrument",
+    "tf",
+    "direction",
+    "mode",
+    "condition_names",
+    "mask_bits_lo",
+    "mask_bits_hi",
+    "net_pnl_paisa",
+    "gross_profit_paisa",
+    "gross_loss_paisa",
+    "max_drawdown_paisa",
+    "expectancy_paisa",
+    "total_trades",
+    "winning_trades",
+    "losing_trades",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "profit_factor",
+    "win_rate",
+    "max_drawdown_pct",
+    "deflated_sharpe",
+    "avg_entry_price",
+    "avg_exit_price",
+]
+
+_TEMPORAL_COLUMNS = [
+    "stats_by_year_json",
+    "stats_by_quarter_json",
+    "stats_by_month_json",
+    "temporal_judged_years_json",
+]
+
+# ── A consistent temporal bucket set for a 40-trade / −123450-paisa / 18-win row ──
+_MONTHS = {
+    "2021-01": (10, 50_000, 6, 20_000),
+    "2021-02": (5, -30_000, 2, 35_000),
+    "2021-04": (12, -160_000, 5, 180_000),
+    "2022-11": (13, 16_550, 5, 40_000),
+}
+_QUARTERS = {
+    "2021Q1": (15, 20_000, 8, 45_000),
+    "2021Q2": (12, -160_000, 5, 180_000),
+    "2022Q4": (13, 16_550, 5, 40_000),
+}
+_YEARS = {
+    "2021": (27, -140_000, 13, 200_000),
+    "2022": (13, 16_550, 5, 40_000),
+}
+_JUDGED = '["2020","2021","2022"]'
+
+
+def _rid(seed: int) -> str:
+    return f"{seed:064x}"
+
+
+def _row(seed: int = 1, *, with_temporal: bool = False, **overrides: object) -> ResultRow:
+    kwargs: dict[str, object] = {
+        "run_id": _rid(seed),
+        "instrument": "NIFTY",
+        "tf": "5m",
+        "direction": "bull",
+        "mode": "A",
+        "mask_bits": 1,
+        "net_pnl_paisa": -123_450,
+        "gross_profit_paisa": 250_000,
+        "gross_loss_paisa": 373_450,
+        "max_drawdown_paisa": 200_000,
+        "expectancy_paisa": -3_086,
+        "total_trades": 40,
+        "winning_trades": 18,
+        "losing_trades": 22,
+        "sharpe_ratio": 0.5,
+        "sortino_ratio": 0.75,
+        "calmar_ratio": 0.6,
+        "profit_factor": 1.4,
+        "win_rate": 0.45,
+        "max_drawdown_pct": 12.5,
+        "avg_entry_price": Decimal("14020.80"),
+        "avg_exit_price": Decimal("14100.01"),
+    }
+    if with_temporal:
+        kwargs.update(
+            stats_by_year_json=encode_period_stats(_YEARS),
+            stats_by_quarter_json=encode_period_stats(_QUARTERS),
+            stats_by_month_json=encode_period_stats(_MONTHS),
+            temporal_judged_years_json=_JUDGED,
+        )
+    kwargs.update(overrides)
+    return ResultRow(**kwargs)  # type: ignore[arg-type]
+
+
+class TestEmitOnPresent:
+    def test_all_none_flush_is_byte_identical_to_the_pre_extension_fixture(
+        self, tmp_path: Path
+    ) -> None:
+        """THE emit-on-present proof: flushing the pre-extension golden's exact
+        literals through the EXTENDED writer reproduces the COMMITTED fixture
+        bytes — the schema extension is provably invisible on the all-None arm.
+        (Byte-level, so polars/zstd-build sensitive like _GOLDEN_CONTENT_HASH;
+        the schema test below is the version-robust twin.)"""
+        from tests.golden.test_results_store_pre_extension_golden import _expected_rows
+
+        store = ResultsStore(path=tmp_path / "a.parquet")
+        for row in _expected_rows():
+            store.append(row)
+        store.flush()
+        assert (tmp_path / "a.parquet").read_bytes() == _PRE_EXTENSION_FIXTURE.read_bytes()
+
+    def test_all_none_flush_emits_exactly_the_pre_extension_columns(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        store = ResultsStore(path=tmp_path / "a.parquet")
+        store.append(_row(1))
+        store.flush()
+        assert pl.read_parquet(tmp_path / "a.parquet").columns == _PRE_EXTENSION_COLUMNS
+
+    def test_temporal_flush_appends_the_four_utf8_columns_last(self, tmp_path: Path) -> None:
+        import polars as pl
+
+        store = ResultsStore(path=tmp_path / "a.parquet")
+        store.append(_row(1, with_temporal=True))
+        store.flush()
+        df = pl.read_parquet(tmp_path / "a.parquet")
+        assert df.columns == _PRE_EXTENSION_COLUMNS + _TEMPORAL_COLUMNS
+        assert all(df.schema[name] == pl.Utf8 for name in _TEMPORAL_COLUMNS)
+
+    def test_temporal_flush_is_deterministic(self, tmp_path: Path) -> None:
+        for tag in ("a", "b"):
+            store = ResultsStore(path=tmp_path / f"{tag}.parquet")
+            store.append(_row(1, with_temporal=True))
+            store.append(_row(2))
+            store.flush()
+        assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+
+
+class TestRoundTrip:
+    def test_populated_and_none_rows_round_trip_exactly(self, tmp_path: Path) -> None:
+        """A MIXED store: nulls stay None, populated cells stay byte-exact."""
+        store = ResultsStore(path=tmp_path / "a.parquet")
+        with_stats = _row(1, with_temporal=True)
+        without = _row(2)
+        store.append(with_stats)
+        store.append(without)
+        store.flush()
+        loaded = ResultsStore.load(tmp_path / "a.parquet")
+        got_with = loaded.get(_rid(1))
+        got_without = loaded.get(_rid(2))
+        assert got_with == with_stats
+        assert got_without == without
+        assert got_with is not None and got_without is not None
+        assert got_with.stats_by_year_json == encode_period_stats(_YEARS)
+        assert got_without.stats_by_year_json is None
+        assert got_without.temporal_judged_years_json is None
+
+    def test_pre_extension_file_loads_none(self) -> None:
+        """A store written BEFORE the extension loads honest None — never a
+        fabricated value, never a 'corrupt' verdict (the optional-column LAW)."""
+        loaded = ResultsStore.load(_PRE_EXTENSION_FIXTURE)
+        for row in loaded.rows():
+            assert row.stats_by_year_json is None
+            assert row.stats_by_quarter_json is None
+            assert row.stats_by_month_json is None
+            assert row.temporal_judged_years_json is None
+
+
+class TestConstructionValidation:
+    def test_partial_temporal_set_is_a_torn_capture(self) -> None:
+        with pytest.raises(ResultsStoreError, match="all-present or all-None"):
+            _row(1, with_temporal=True, temporal_judged_years_json=None)
+
+    def test_single_present_field_is_a_torn_capture(self) -> None:
+        with pytest.raises(ResultsStoreError, match="all-present or all-None"):
+            _row(1, stats_by_year_json="{}")
+
+    def test_cross_sum_violation_rejected(self) -> None:
+        tampered = dict(_YEARS)
+        tampered["2021"] = (27, -139_999, 13, 200_000)
+        with pytest.raises(ResultsStoreError, match="temporal stats invalid"):
+            _row(1, with_temporal=True, stats_by_year_json=encode_period_stats(tampered))
+
+    def test_totals_mismatch_rejected(self) -> None:
+        """The buckets must sum to THIS row's totals — fabrication impossible."""
+        with pytest.raises(ResultsStoreError, match="temporal stats invalid"):
+            _row(
+                1,
+                with_temporal=True,
+                total_trades=41,
+                winning_trades=18,
+                losing_trades=22,
+            )
+
+    def test_non_canonical_spelling_is_canonicalised_at_construction(self) -> None:
+        loose = '{ "2022": [13, 16550, 5, 40000], "2021": [27, -140000, 13, 200000] }'
+        row = _row(1, with_temporal=True, stats_by_year_json=loose)
+        assert row.stats_by_year_json == encode_period_stats(_YEARS)
+
+    def test_zero_trade_row_with_empty_maps_is_legal(self) -> None:
+        row = _row(
+            1,
+            with_temporal=True,
+            stats_by_year_json="{}",
+            stats_by_quarter_json="{}",
+            stats_by_month_json="{}",
+            temporal_judged_years_json="[]",
+            net_pnl_paisa=0,
+            gross_profit_paisa=0,
+            gross_loss_paisa=0,
+            expectancy_paisa=0,
+            total_trades=0,
+            winning_trades=0,
+            losing_trades=0,
+        )
+        assert row.stats_by_year_json == "{}"
+
+
+class TestLoadDamageWrap:
+    def test_corrupt_temporal_json_raises_typed_schema_error_naming_path(
+        self, tmp_path: Path
+    ) -> None:
+        """G14: a tampered stored cell surfaces as ResultsStoreSchemaError
+        naming the store path — never a raw ValueError/KeyError."""
+        import polars as pl
+
+        good = tmp_path / "good.parquet"
+        store = ResultsStore(path=good)
+        store.append(_row(1, with_temporal=True))
+        store.flush()
+        bad = tmp_path / "bad.parquet"
+        pl.read_parquet(good).with_columns(
+            pl.lit('{"2021":[9,9,9,9]}', dtype=pl.Utf8).alias("stats_by_year_json")
+        ).write_parquet(bad)
+        with pytest.raises(ResultsStoreSchemaError, match=str(bad)):
+            ResultsStore.load(bad)
+
+
+class TestAppendEnrichmentRule:
+    """The D16 conflict law — all three cases + the reverse direction."""
+
+    def test_none_vs_populated_enriches_in_place_and_logs(self) -> None:
+        store = ResultsStore(path=Path("/unused.parquet"))
+        assert store.append(_row(1)) is True
+        with capture_logs() as logs:
+            assert store.append(_row(1, with_temporal=True)) is False
+        events = [e for e in logs if e["event"] == "results_store.temporal_enriched"]
+        assert len(events) == 1
+        assert events[0]["run_id"] == _rid(1)
+        assert tuple(events[0]["enriched_fields"]) == tuple(_TEMPORAL_COLUMNS)
+        stored = store.get(_rid(1))
+        assert stored is not None
+        assert stored.stats_by_year_json == encode_period_stats(_YEARS)
+        assert len(store) == 1
+
+    def test_populated_vs_none_keeps_the_populated_row_silently(self) -> None:
+        store = ResultsStore(path=Path("/unused.parquet"))
+        enriched = _row(1, with_temporal=True)
+        store.append(enriched)
+        with capture_logs() as logs:
+            assert store.append(_row(1)) is False
+        assert [e for e in logs if e["event"] == "results_store.temporal_enriched"] == []
+        assert store.get(_rid(1)) == enriched
+
+    def test_populated_vs_same_is_the_idempotent_no_op(self) -> None:
+        store = ResultsStore(path=Path("/unused.parquet"))
+        store.append(_row(1, with_temporal=True))
+        assert store.append(_row(1, with_temporal=True)) is False
+        assert len(store) == 1
+
+    def test_populated_vs_different_is_a_reproducibility_breach(self) -> None:
+        store = ResultsStore(path=Path("/unused.parquet"))
+        other_years = dict(_YEARS)
+        other_years["2021"] = (27, -140_000, 13, 111_111)  # dd differs — legal cell
+        store.append(_row(1, with_temporal=True))
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            store.append(
+                _row(1, with_temporal=True, stats_by_year_json=encode_period_stats(other_years))
+            )
+
+    def test_non_temporal_difference_is_still_a_conflict(self) -> None:
+        """The enrichment carve-out NEVER relaxes the required-field law."""
+        store = ResultsStore(path=Path("/unused.parquet"))
+        store.append(_row(1))
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            store.append(_row(1, sharpe_ratio=9.9))
+
+    def test_non_temporal_difference_with_enrichment_shape_is_a_conflict(self) -> None:
+        """None-vs-populated temporal + a differing required field: conflict —
+        the merge is refused before any temporal comparison matters."""
+        store = ResultsStore(path=Path("/unused.parquet"))
+        store.append(_row(1))
+        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
+            store.append(_row(1, with_temporal=True, sharpe_ratio=9.9))
+
+    def test_enrichment_survives_a_flush_load_cycle(self, tmp_path: Path) -> None:
+        """The capture-toggled-redo path end to end: old store on disk (no
+        capture) → load_or_create-style load → re-append WITH capture →
+        flush → the columns are present."""
+        path = tmp_path / "a.parquet"
+        first = ResultsStore(path=path)
+        first.append(_row(1))
+        first.flush()
+        redo = ResultsStore.load(path)
+        redo.append(_row(1, with_temporal=True))
+        redo.flush()
+        final = ResultsStore.load(path)
+        stored = final.get(_rid(1))
+        assert stored is not None
+        assert stored.stats_by_month_json == encode_period_stats(_MONTHS)

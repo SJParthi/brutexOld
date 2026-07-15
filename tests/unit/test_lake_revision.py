@@ -346,6 +346,33 @@ class TestSweepResultsRevisionNoSignal:
         monkeypatch.setattr(os, "stat", _denying_stat)
         assert sweep_results_revision(tmp_path) is None
 
+    def test_report_probe_failure_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dirs + chain probes OK but a non-missing OSError on the cascade-report
+        stat → ``None`` (the THIRD composite component —
+        DEC-SWEEP-TEMPORAL-ROBUSTNESS-001).
+        """
+        (tmp_path / "sweeps").mkdir()
+        real_stat = os.stat
+
+        def _denying_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if str(path).endswith("cascade-report.json"):
+                raise PermissionError(13, "denied", str(path))
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(os, "stat", _denying_stat)
+        assert sweep_results_revision(tmp_path) is None
+
+    def test_all_absent_composite_is_stable(self, tmp_path: Path) -> None:
+        """The happy composite path: an empty lake reads the stable
+        three-component ``absent|absent|absent`` sentinel (dirs | audit chain |
+        cascade report — DEC-SWEEP-TEMPORAL-ROBUSTNESS-001) on every call.
+        """
+        token = sweep_results_revision(tmp_path)
+        assert token == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        assert token == sweep_results_revision(tmp_path)
+
 
 class TestRateBridgeRevision:
     """The CLI rate-bridge file's stat token (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001)."""
