@@ -75,7 +75,7 @@ connection; REST passes `accessKey=` on every call.
 | Surface | Observed value | Confidence |
 |---|---|---|
 | WebSocket | `ws://nimblewebstream.lisuns.com:4575` | medium (2 independent third-party repos + vendor-FAQ telnet test of port 4575) |
-| REST | `http://nimblerest.lisuns.com:4531` / TLS `https://…:4532` | medium (≥4 third-party repos; TLS port seen once) |
+| REST | `http://nimblerest.lisuns.com:4531` / TLS `https://…:4532` | medium (≥4 third-party repos); TLS port medium-low (seen once) |
 | TLS WebSocket (`wss://`) | UNVERIFIED (zero evidence) | UNVERIFIED |
 
 Vendor's own words: "End point URL and Port number will be provided by
