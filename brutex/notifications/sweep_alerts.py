@@ -337,6 +337,11 @@ class GreeksBackfillReportLike(Protocol):
         """Bars carried in the latest-wins writes."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
+    @property
+    def cancelled(self) -> bool:
+        """Operator's cooperative Stop halted the run (DEC-JOB-CANCEL-CONTROL-001)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
 
 class CrossverifyReportLike(Protocol):
     """The report slice the cross-verify summary alert reads.
@@ -1640,8 +1645,16 @@ class SweepAlerter:
         read never sees; a ✅ while such a stamp persists would be a false
         green; those need a lake repair, not a re-run). A zero-target run
         still reads honestly ("0/0 contracts re-stamped") — an
-        operator-initiated one-shot deserves an answer. Best-effort; silent
-        no-op when Telegram is disabled.
+        operator-initiated one-shot deserves an answer. A CANCELLED run
+        (DEC-JOB-CANCEL-CONTROL-001 — the operator's cooperative Stop) reads
+        the distinct ⏹ head naming the stop + the resume promise, under a
+        DISTINCT ``…:cancelled`` dedupe key — a LABELING convention only: at
+        the 0.0-window ``RUN_COMPLETE`` kind
+        (:data:`~brutex.notifications.telegram.DEDUPE_WINDOW_SECONDS`) the
+        dedupe_key does NO notifier-side suppression, so the resumed run's
+        own completion summary (same content-addressed ``backfill_id``)
+        fires regardless of the key choice. Best-effort; silent no-op when
+        Telegram is disabled.
         """
         clauses: list[str] = []
         if report.errored > 0:
@@ -1651,16 +1664,37 @@ class SweepAlerter:
                 f"{report.stale_unfixable} unfixable (driver-unactionable rows — "
                 "lake repair needed)"
             )
-        if clauses:
+        if report.cancelled:
+            # Operator's cooperative Stop (DEC-JOB-CANCEL-CONTROL-001): an
+            # honest ⏹ PARTIAL — never a ✅ for a run the operator halted, and
+            # never the ⚠️ "with failures" wording for a deliberate stop (any
+            # errored/unfixable clauses still ride along). The DISTINCT
+            # `…:cancelled` dedupe_key is a LABELING convention only (it names
+            # the outcome on the event record — the soak_drift precedent):
+            # at the 0.0-window RUN_COMPLETE kind the dedupe_key does NO
+            # notifier-side suppression (DEDUPE_WINDOW_SECONDS —
+            # check_dedupe_locked returns False for window <= 0.0), so the
+            # resumed run's completion summary (same content-addressed
+            # backfill_id) fires regardless of the key.
+            head = (
+                f"⏹ Greeks backfill CANCELLED by operator — "
+                f"{report.enriched}/{report.planned} contracts re-stamped v2 before "
+                f"the stop; resumable (re-run resumes)"
+                + ("; " + "; ".join(clauses) if clauses else "")
+            )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}:cancelled"
+        elif clauses:
             head = (
                 f"⚠️ Greeks backfill complete with failures — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2; " + "; ".join(clauses)
             )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}"
         else:
             head = (
                 f"✅ Greeks backfill complete — "
                 f"{report.enriched}/{report.planned} contracts re-stamped v2"
             )
+            dedupe_key = f"greeks-backfill:{report.backfill_id[:12]}"
         message = escape_markdown_v2(
             f"{head}; already current={report.already_current}, "
             f"bars written={report.bars_written} (backfill {report.backfill_id[:12]})."
@@ -1669,7 +1703,7 @@ class SweepAlerter:
             kind=TelegramEventKind.RUN_COMPLETE,
             severity=TelegramSeverity.INFO,
             message=message,
-            dedupe_key=f"greeks-backfill:{report.backfill_id[:12]}",
+            dedupe_key=dedupe_key,
         )
 
     # ── Callback adapters for the existing seams ────────────────────
