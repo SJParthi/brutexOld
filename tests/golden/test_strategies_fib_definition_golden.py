@@ -19,17 +19,18 @@ import json
 
 from brutex.strategies import fib_definitions as F
 from brutex.vocabulary.bits import (
-    BIT_CLOSE_ABOVE_VWAP,
+    BIT_ABOVE_CPR_TC,
     BIT_EARLY_MORNING,
     BIT_EMA20_ABOVE_EMA200,
     BIT_NEAR_FIB_50,
 )
 
-# A fixed swept mask: trend-up + above-VWAP + Fib-50 + early-morning (one bit per
-# decoder group, so the composed sentence exercises trend→level→structure→time).
+# A fixed swept mask: trend-up + above-CPR-TC + Fib-50 + early-morning (the
+# retired VWAP member was re-pointed to the new CPR bit at the 60→66 reshape —
+# the composed sentence still exercises trend→level→time across groups).
 _GOLDEN_MASK = (
     (1 << BIT_EMA20_ABOVE_EMA200)
-    | (1 << BIT_CLOSE_ABOVE_VWAP)
+    | (1 << BIT_ABOVE_CPR_TC)
     | (1 << BIT_NEAR_FIB_50)
     | (1 << BIT_EARLY_MORNING)
 )
@@ -46,15 +47,15 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    "candidate_mask_hex": "00000000000000000fffffffffffffff",
-    "spec_mask_hex": "00000000000000000010100000400010",
+    "candidate_mask_hex": "0000000000000000ffcfffffffffffff",
+    "spec_mask_hex": "00000000000000001000100000400010",
 }
 
 _GOLDEN_SIMPLE = (
-    "Buy on 15m when trend is up, price beats the day's average price, "
-    "at the halfway bounce zone and first hour (uptrend)."
+    "Buy on 15m when trend is up, at the halfway bounce zone, "
+    "above the pivot-range ceiling and first hour (uptrend)."
 )
-_GOLDEN_PRO = "Buy 15m [uptrend]: EMA20>EMA200, close>VWAP, Fib 50% and early morning."
+_GOLDEN_PRO = "Buy 15m [uptrend]: EMA20>EMA200, Fib 50%, close>CPR-TC and early morning."
 
 
 def test_fib_prev_day_declaration_is_frozen() -> None:

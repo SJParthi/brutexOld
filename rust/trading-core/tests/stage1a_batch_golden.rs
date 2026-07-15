@@ -73,7 +73,7 @@ fn load_fixture() -> Fixture {
         .join("stage1a_batch_golden.json");
     let text = fs::read_to_string(&path).expect("fixture readable");
     let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
-    assert_eq!(fixture.schema, "stage1a-batch-golden-v1");
+    assert_eq!(fixture.schema, "stage1a-batch-golden-v2");
     fixture
 }
 

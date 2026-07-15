@@ -847,8 +847,10 @@ mod tests {
     /// 60-bit layout; mechanically re-derived for the 66-bit reshape as
     /// `old & !(0b11 << 52)` — sound because the deleted VWAP state only ever
     /// fed bits 52/53, and the new CPR bits 60-63 are cleared on this COLD
-    /// (day_has_pivot = false) stream by the updated REAL_ANCHOR_DEP. Phase B
-    /// re-derives from the regenerated Python oracle to confirm).
+    /// (day_has_pivot = false) stream by the updated REAL_ANCHOR_DEP;
+    /// CONFIRMED by Phase B against the regenerated Python oracle —
+    /// `Stage1AMatrixBuilder(prior_n=3).build` reproduces these literals
+    /// bit-for-bit).
     const PIN1_MASKS: [u128; 8] = [
         0x40240000000,
         0x140240000000,
@@ -951,7 +953,8 @@ mod tests {
         v.applies_to_1day_mask = REAL_APPLIES_1DAY;
         let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
         // Oracle-derived for the 60-bit layout, mechanically re-derived for
-        // the 66-bit reshape as `old & !(0b11 << 52)` (see PIN1_MASKS).
+        // the 66-bit reshape as `old & !(0b11 << 52)` (see PIN1_MASKS;
+        // CONFIRMED by Phase B against the regenerated Python oracle).
         assert_eq!(
             masks,
             vec![

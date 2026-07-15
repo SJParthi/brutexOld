@@ -106,7 +106,6 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["close_paisa"],
         case["ema20_paisa"],
         case["ema200_paisa"],
-        case["vwap_paisa"],
         pivot_levels,
         fib_levels,
         case["day_high_paisa"],
@@ -161,7 +160,6 @@ class TestProductionPathParity:
                 case["close_paisa"],
                 case["ema20_paisa"],
                 case["ema200_paisa"],
-                case["vwap_paisa"],
                 case["prev_pdh_paisa"],
                 case["prev_pdl_paisa"],
                 case["prev_pdc_paisa"],
@@ -216,7 +214,6 @@ class TestProductionPathParity:
             24_005_00,
             None,
             None,
-            None,  # vwap_paisa — no session VWAP in this hand-built gap-day case
             pivot_levels,
             fib_levels,
             24_010_00,
@@ -320,41 +317,12 @@ class TestFfiOverflowGuards:
     (SIGABRT) or returning a poisoning non-finite value.
 
     These exercise the PRODUCTION Rust entry points BruteX's ``stage1a`` engine
-    drives directly (``trading_core.VwapState`` / ``trading_core.compute_ema``),
-    NOT the pure-Python shims (which use unbounded ``int`` arithmetic and never
-    overflow), so they reproduce the exact adversarial-sweep findings.
+    drives directly (``trading_core.compute_ema``; the former ``VwapState``
+    guard trio died with the pyclass at crate 0.4.0 — the bits-52/53 VWAP
+    tombstone), NOT the pure-Python shims (which use unbounded ``int``
+    arithmetic and never overflow), so they reproduce the exact
+    adversarial-sweep findings.
     """
-
-    def test_vwap_huge_typical_paisa_raises_not_aborts(self) -> None:
-        """FIX 1: feeding a near-``i64::MAX`` ``typical_paisa × volume`` for a few
-        bars previously overflowed the native ``cum_pv`` ``i128`` accumulator →
-        panic → ``abort`` (SIGABRT, exit 134, uncatchable). Now a catchable
-        ``ValueError`` naming the offending field is raised BEFORE delegating.
-        """
-        v = trading_core.VwapState()
-        huge = 9_000_000_000_000_000_000  # ~9.2e18, near i64::MAX
-
-        def _feed_huge() -> None:
-            for i in range(3):
-                v.update(huge, huge, False, 1, 100, 9 * 3600 + 15 * 60 + i)
-
-        with pytest.raises(ValueError, match="typical_paisa"):
-            _feed_huge()
-
-    def test_vwap_huge_volume_raises_naming_volume(self) -> None:
-        """The ``volume`` operand (the other i64 feeding the i128 accumulation) is
-        guarded too; an out-of-range volume names ``volume``."""
-        v = trading_core.VwapState()
-        huge = 9_000_000_000_000_000_000
-        with pytest.raises(ValueError, match="volume"):
-            v.update(10_000, huge, False, 1, 100, 9 * 3600 + 15 * 60)
-
-    def test_vwap_real_magnitude_bar_unaffected(self) -> None:
-        """A real futures bar (paisa + lot volume) sits far below the ceiling, so
-        the guard never fires and the native VWAP output is byte-unchanged."""
-        v = trading_core.VwapState()
-        # typical 20_000 paisa, volume 500 → cum_pv 10_000_000, cum_vol 500 → 20_000.
-        assert v.update(20_000, 500, False, 1, 100, 9 * 3600 + 16 * 60) == 20_000
 
     def test_compute_ema_finite_but_huge_seed_raises_not_inf(self) -> None:
         """FIX 4: two finite-but-huge closes (1e308) overflow the SMA seed sum to

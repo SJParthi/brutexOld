@@ -19,7 +19,7 @@ from brutex.indicators.prev_day_ohlc import DailyCandle
 from brutex.strategies import fib_definitions as F
 from brutex.strategies.errors import StrategyRegistrationError
 from brutex.vocabulary.bits import (
-    BIT_CLOSE_ABOVE_VWAP,
+    BIT_ABOVE_CPR_TC,
     BIT_EMA20_ABOVE_EMA200,
     BIT_NEAR_FIB_50,
     IMPLEMENTED_MASK,
@@ -403,7 +403,7 @@ def test_weekly_static_cold_start_returns_none() -> None:
 
 # ─────────────────────────── decoder bridge (Simple + Pro) ───────────────────────────
 def test_render_definition_default_timeframe_long() -> None:
-    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_CLOSE_ABOVE_VWAP)
+    mask = (1 << BIT_NEAR_FIB_50) | (1 << BIT_EMA20_ABOVE_EMA200) | (1 << BIT_ABOVE_CPR_TC)
     exp = F.render_definition(F.PREV_DAY, mask, F.Direction.LONG)
     assert exp.direction_label == "Buy"
     assert exp.simple_sentence  # non-empty

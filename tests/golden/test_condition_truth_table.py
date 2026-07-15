@@ -47,7 +47,12 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
-_EXPECTED_SHA256 = "e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33"
+# DELIBERATE RE-LOCK (the 60→66 vocab reshape): the table now projects the
+# 62 IMPLEMENTED bits per selected case (22 cases × 62 = 1364 rows); the
+# tombstoned VWAP bits (52/53) + the declared-only SuperTrend bits (64/65)
+# carry no row. Old digest:
+# e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33.
+_EXPECTED_SHA256 = "ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126"
 
 
 def _read_rows() -> list[dict[str, str]]:

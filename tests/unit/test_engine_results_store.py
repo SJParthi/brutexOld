@@ -229,11 +229,14 @@ class TestReadableMask:
         with pytest.raises(TypeError, match="condition_names"):
             _row(condition_names="forged")
 
-    @pytest.mark.parametrize("mask", [0, 1, MASK_BITS_MAX])
+    @pytest.mark.parametrize("mask", [0, 1, 1 << 63, MASK_BITS_MAX])
     def test_mask_bits_boundary_values_accepted(self, mask: int) -> None:
+        # 1 << 63 (the u64 sign bit) became a VALID declared condition —
+        # narrow_cpr_day — at the 60→66 reshape, so it moved from the
+        # rejected list to the accepted boundary set.
         assert _row(mask_bits=mask).mask_bits == mask
 
-    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 63])
+    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 66])
     def test_mask_bits_out_of_range_rejected(self, bad: int) -> None:
         with pytest.raises(ResultsStoreError, match="mask_bits"):
             _row(mask_bits=bad)

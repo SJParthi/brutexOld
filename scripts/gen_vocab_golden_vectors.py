@@ -1,29 +1,50 @@
 #!/usr/bin/env python3
 """Generate the cross-language golden answer-key for the condition vocabulary.
 
-Phase 0 of the shared-core migration (DEC-SHARED-CORE-001, proposed): freeze the
+Phase 0 of the shared-core migration (DEC-SHARED-CORE-001): freeze the
 *current* Python ``evaluate_atoms`` output over a diverse, deterministic set of
 inputs into a language-neutral JSON fixture. This fixture is the **oracle**:
 
 * the Python test (``tests/golden/test_vocab_golden.py``) asserts Python still
   reproduces every frozen ``u128`` mask — locking the behaviour against accidental
   drift;
-* the future Rust ``trading-core`` crate MUST reproduce the same ``u128`` mask for
-  the same inputs **bit-for-bit** before BruteX/TickVault switch to it.
+* the Rust ``trading-core`` crate MUST reproduce the same ``u128`` mask for
+  the same inputs **bit-for-bit** (``rust/trading-core/tests/golden_vectors.rs``)
+  before BruteX/TickVault trust it.
 
 The cases are built with a fixed seed so the fixture is reproducible. Prices are
 int64 paisa. Run with ``python scripts/gen_vocab_golden_vectors.py`` to (re)write
-``tests/golden/fixtures/vocab_golden_vectors.json``.
+``tests/golden/fixtures/vocab_golden_vectors.json`` (atomic, and ONLY after the
+coverage verdict passes), or with ``--check`` to fail if the on-disk fixture is
+stale versus a fresh in-memory generation (the truth-table staleness pattern).
+
+## The 60→66 reshape migration invariant (frozen inputs)
+
+The vocab reshape (VWAP bits 52/53 tombstoned; CPR bits 60-63 implemented;
+SuperTrend 64/65 declared layout-only) regenerated this fixture under a FROZEN
+seeded-RNG input stream: the retired VWAP draw is still CONSUMED (burned) in
+exactly its historical position and recorded as the INERT ``vwap_paisa``
+fixture field (it feeds no evaluator input — ``IndicatorSnapshot`` carries no
+VWAP), so every one of the 400 case INPUTS is byte-identical to the
+pre-reshape frozen fixture and only ``expected_mask`` moved. The permanent
+migration test (``tests/golden/test_vocab_golden_migration.py``) pins that
+invariant per case against a committed copy of the old masks + per-case input
+SHA-256s. The CPR bits need NO new draws — they derive from the prev-day
+OHLC anchors the generator already draws.
 """
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import random
+import sys
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.indicators.fib_levels import compute_fib_levels
 from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import compute_pivot_levels
@@ -44,6 +65,8 @@ _MASK_HEX_WIDTH = 32
 IST = timezone(timedelta(hours=5, minutes=30))
 _SEED = 20260603
 _N_RANDOM = 400
+
+_OUT_PATH = Path(__file__).resolve().parents[1] / "tests/golden/fixtures/vocab_golden_vectors.json"
 
 #: Time-of-day samples that land in each Group-8 window + the excluded edges.
 _TOD_SAMPLES: tuple[time, ...] = (
@@ -68,7 +91,7 @@ _PRIOR_FLAG_PATTERNS: tuple[tuple[bool, ...], ...] = (
 
 def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
     """Build one diverse, deterministic case + its frozen ``evaluate_atoms`` u128 mask."""
-    # Previous-day anchors (drive pivots + Fib); keep pdh > pdl, pdc inside.
+    # Previous-day anchors (drive pivots + Fib + CPR); keep pdh > pdl, pdc inside.
     pdl = rng.randint(1_500_000, 4_500_000)
     pdh = pdl + rng.randint(20_000, 400_000)
     pdc = rng.randint(pdl, pdh)
@@ -135,9 +158,13 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
     ema20 = None if rng.random() < 0.12 else max(1, close + rng.randint(-30_000, 30_000))
     ema200 = None if rng.random() < 0.12 else max(1, close + rng.randint(-60_000, 60_000))
 
-    # Session VWAP (PR-2): above/below the close, or warming-up/1day-NA (None).
-    # Mirrors the EMA distribution so the Group-10 close_above/below_vwap bits
-    # (52/53) are exercised BOTH ways across the 400 cases (the coverage audit).
+    # RETIRED VWAP draw — BURNED, never fed to the evaluator (GOLD-02): the
+    # exact historical conditional pair of RNG draws is still consumed here so
+    # the seeded stream feeding every LATER draw (market structure, tod, prox,
+    # prior) is unshifted and the 400 case INPUTS stay byte-identical to the
+    # pre-reshape frozen fixture. The value is recorded as the INERT
+    # ``vwap_paisa`` fixture field (``IndicatorSnapshot`` has no VWAP field;
+    # bits 52/53 are tombstones the evaluator never sets).
     vwap = None if rng.random() < 0.12 else max(1, close + rng.randint(-40_000, 40_000))
 
     # BOS/CHoCH (DEC-NIFTY-BOS-CHOCH-001): the four resolved Group-12 flags
@@ -175,7 +202,6 @@ def _build_case(rng: random.Random, case_id: int) -> dict[str, Any]:
         close_paisa=close,
         ema20_paisa=ema20,
         ema200_paisa=ema200,
-        vwap_paisa=vwap,
         pivots=pivots,
         fib=fib,
         day_high_paisa=day_high,
@@ -223,25 +249,32 @@ def generate() -> dict[str, Any]:
     """Build the full deterministic fixture payload."""
     rng = random.Random(_SEED)  # noqa: S311 — deterministic fixture generation, not crypto
     cases = [_build_case(rng, i) for i in range(_N_RANDOM)]
-    # Coverage audit: every IMPLEMENTED bit must be set in >=1 case AND clear in
-    # >=1 case, so the oracle exercises every condition the evaluator actually
-    # computes both ways. PR-2 flipped VWAP (52/53) + pivot R5/S5 (54/55) to
-    # implemented; DEC-NIFTY-BOS-CHOCH-001 flipped the BOS/CHoCH bits (56-59) — so
-    # all 60 bits are now part of this both-ways gate (the generator snaps close
-    # onto R5/S5, varies the VWAP above/below close, and fires each of the four
-    # resolved BOS/CHoCH flags ~25% of the time). No condition bit is layout-only
-    # any more; only the reserved u128 headroom (60..127) stays inert.
+    # Coverage audit over the 62 ACTIVE bits (IMPLEMENTED_MASK = bits 0-51 +
+    # 54-63): every IMPLEMENTED bit must be set in >=1 case AND clear in >=1
+    # case, so the oracle exercises every condition the evaluator actually
+    # computes both ways. The CPR bits 60-63 derive from the prev-day anchors
+    # (60-62 partition every warm case; 63 fires whenever pdc sits close
+    # enough to the pdh/pdl midpoint that the CPR width is <= 30 bps of P).
+    # The NON-implemented bits — the RETIRED VWAP tombstones 52/53, the
+    # declared-only SuperTrend bits 64/65 and every reserved bit >= 66 — are
+    # excluded from the both-ways gate and must NEVER be set in any case
+    # (the must-never-set gate below).
     set_seen = 0
     clr_seen = 0
+    stray = 0
     for c in cases:
         mask = int(c["expected_mask"], 16)
         set_seen |= mask
         clr_seen |= (~mask) & IMPLEMENTED_MASK
+        stray |= mask & ~IMPLEMENTED_MASK
     full = (1 << TOTAL_CONDITIONS) - 1
     return {
-        # version 2: u128 mask, `expected_mask` is a STRING, the both-ways gate is
-        # partitioned over the implemented bits (DEC-VOCAB-U128-CODEGEN-001).
-        "version": 2,
+        # version 3: the 60→66 reshape — VWAP 52/53 tombstoned (``vwap_paisa``
+        # is an inert RNG-burn record, no longer an evaluator input), CPR
+        # 60-63 implemented, SuperTrend 64/65 declared layout-only. The case
+        # INPUTS are byte-identical to the version-2 fixture (the migration
+        # invariant). Version 2 was the u64→u128 hex-string move.
+        "version": 3,
         "generated_from": "brutex.vocabulary.evaluator.evaluate_atoms",
         "seed": _SEED,
         "total_conditions": TOTAL_CONDITIONS,
@@ -249,23 +282,62 @@ def generate() -> dict[str, Any]:
         "n_cases": len(cases),
         "bits_set_somewhere": f"{set_seen:0{_MASK_HEX_WIDTH}x}",
         "bits_clear_somewhere": f"{clr_seen:0{_MASK_HEX_WIDTH}x}",
+        "bits_stray_nonimplemented": f"{stray:0{_MASK_HEX_WIDTH}x}",
         "full_mask": f"{full:0{_MASK_HEX_WIDTH}x}",
         "cases": cases,
     }
 
 
-def main() -> int:
-    """Write the fixture and report coverage."""
-    payload = generate()
+def render(payload: dict[str, Any]) -> str:
+    """Serialise the payload to the canonical on-disk JSON text."""
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def coverage_ok(payload: dict[str, Any]) -> bool:
+    """The both-ways gate over the implemented bits + the must-never-set gate."""
     set_ok = int(payload["bits_set_somewhere"], 16) == IMPLEMENTED_MASK
     clr_ok = int(payload["bits_clear_somewhere"], 16) == IMPLEMENTED_MASK
-    out = Path(__file__).resolve().parents[1] / "tests/golden/fixtures/vocab_golden_vectors.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"wrote {payload['n_cases']} cases → {out}")
+    stray_ok = int(payload["bits_stray_nonimplemented"], 16) == 0
     print(f"all implemented bits set-somewhere : {set_ok}")
     print(f"all implemented bits clear-somewhere: {clr_ok}")
-    return 0 if (set_ok and clr_ok) else 1
+    print(f"no non-implemented bit ever set     : {stray_ok}")
+    return set_ok and clr_ok and stray_ok
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Verify coverage FIRST, then atomically write (or ``--check`` staleness)."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="exit non-zero if the on-disk fixture differs from a fresh generation",
+    )
+    args = parser.parse_args(argv)
+    payload = generate()
+    fresh = render(payload)
+    if not coverage_ok(payload):
+        # GOLD-03: the coverage verdict gates the WRITE — a coverage-failing
+        # generation must never land on disk (nor pass --check).
+        print("COVERAGE FAILED — fixture NOT written", file=sys.stderr)
+        return 1
+    if args.check:
+        current = _OUT_PATH.read_text(encoding="utf-8") if _OUT_PATH.exists() else ""
+        if current != fresh:
+            sys.stderr.write(
+                f"{_OUT_PATH} is stale — re-run `python {Path(__file__).name}` to regenerate.\n"
+            )
+            return 1
+        sha = hashlib.sha256(fresh.encode("utf-8")).hexdigest()
+        print(f"OK: fixture up to date ({payload['n_cases']} cases, sha256={sha})")
+        return 0
+    _OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write (tmp + fsync + os.replace) — a crash mid-write can never
+    # leave a torn fixture behind (GOLD-03).
+    atomic_write_simple(_OUT_PATH, lambda tmp: tmp.write_text(fresh, encoding="utf-8"))
+    sha = hashlib.sha256(fresh.encode("utf-8")).hexdigest()
+    print(f"wrote {payload['n_cases']} cases → {_OUT_PATH}")
+    print(f"sha256={sha}")
+    return 0
 
 
 if __name__ == "__main__":

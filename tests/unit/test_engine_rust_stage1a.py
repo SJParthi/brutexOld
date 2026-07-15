@@ -17,7 +17,7 @@ and the `collect_batch_inputs` prepass glue:
   raise IDENTICAL exceptions ON vs OFF;
 * the oracle-probe column parity pin: `collect_batch_inputs`' columns equal
   the per-bar values a REAL `Stage1AMatrixBuilder.build` marshals into
-  `evaluate_with_levels` / `VwapState.update`, field-for-field, over a
+  `evaluate_with_levels`, field-for-field, over a
   multi-day + multi-roll + Muhurat-boundary feed;
 * Muhurat WARN parity (same event/fields/count from the prepass, incl. the
   documented burn-in double-emission).

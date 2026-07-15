@@ -578,7 +578,8 @@ class TestSpecIdentityDedupChain:
             prior_n=0,
             symbol_label="NSE-NIFTY",
         )
-        # One REAL evaluate_spec call (the 24-arg pre-built-levels ABI): the
+        # One REAL evaluate_spec call (the 23-arg pre-built-levels ABI —
+        # the retired vwap arg is gone at crate 0.4.0): the
         # empty mask is a subset of every bar's bits, so it always fires.
         bar_bits, fires, direction_u8 = trading_core.evaluate_spec(
             f"{spec.condition_mask:032x}",
@@ -590,7 +591,6 @@ class TestSpecIdentityDedupChain:
             105_00,  # close
             None,  # ema20
             None,  # ema200
-            None,  # vwap
             [100_00] * 12,  # pivot levels (p,r1..r3,s1..s3,pdh,pdl,pdc,r5,s5)
             [100_00] * 15,  # fib levels
             110_00,  # day_high

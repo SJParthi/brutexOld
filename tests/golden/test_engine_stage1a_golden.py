@@ -32,7 +32,12 @@ the 09:16 early-morning cutoff → no time bit. ⇒ bits {40, 41}.
 * 09:30 IST ∈ [09:16, 10:00) → ``EARLY_MORNING`` (44).
 * ``open 210 > PDC 200 + 0.5%`` (gap threshold ``200·50/10000 = 1`` rupee) →
   ``GAP_UP_DAY`` (48); not inside/outside (``day_low 205 > PDL 200``).
-* EMA still warming up (2 bars). ⇒ bits {13, 15, 30, 34, 42, 44, 48}.
+* the flat prior day collapses the CPR onto one price:
+  ``P = (200+200+200)/3 = 200``, ``BC = (200+200)/2 = 200``,
+  ``TC = 2·200 − 200 = 200`` (width 0) → ``close 212 > TC 200`` ⇒
+  ``ABOVE_CPR_TC`` (60), and ``0 ≤ P·30 bps`` trivially ⇒
+  ``NARROW_CPR_DAY`` (63) — the 60→66 reshape.
+* EMA still warming up (2 bars). ⇒ bits {13, 15, 30, 34, 42, 44, 48, 60, 63}.
 """
 
 from __future__ import annotations
@@ -80,6 +85,8 @@ _EXPECTED_MASK_1 = _mask_of(
     B.BIT_CLOSE_IN_UPPER_THIRD,
     B.BIT_EARLY_MORNING,
     B.BIT_GAP_UP_DAY,
+    B.BIT_ABOVE_CPR_TC,
+    B.BIT_NARROW_CPR_DAY,
 )
 
 
@@ -91,4 +98,5 @@ def test_stage1a_golden_matrix() -> None:
 def test_stage1a_golden_literal_values() -> None:
     # Pin the exact integers so a renumbering of bits OR an adapter regression
     # is caught even if the bit-name constants drift (defence in depth).
-    assert build_bar_bits([_DAY1, _DAY2]) == [3298534883328, 303483462918144]
+    # (Re-derived for the 60→66 reshape: day 2 gains bits 60 + 63.)
+    assert build_bar_bits([_DAY1, _DAY2]) == [3298534883328, 10376597024924540928]

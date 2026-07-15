@@ -36,6 +36,10 @@ wider than the 10 bps ``near`` tolerance and the 0.5 % gap threshold, so:
   + ``CLOSE_ABOVE_PDL`` (15) + ``GAP_UP_DAY`` (48); the prior day was flat so
   every pivot/Fib level collapses onto that single price, far from today's
   close ⇒ no ``near_*`` bit; inside/outside need a two-sided range ⇒ neither.
+  The 60→66 reshape adds the CPR pair: a FLAT prior day makes
+  ``P = BC = TC =`` that single price (width 0), so today's higher close is
+  strictly above TC ⇒ ``ABOVE_CPR_TC`` (60), and the zero width is trivially
+  ≤ 30 bps of P ⇒ ``NARROW_CPR_DAY`` (63).
 
 So bar ``i`` (day ``i // 4``, band ``i % 4``) is the closed form in
 :func:`_expected_mask`, asserted bar-for-bar AND pinned by SHA-256.
@@ -75,7 +79,10 @@ _BANDS = [
 _BARS_PER_DAY = len(_BANDS)
 
 #: SHA-256 of the frozen 16-mask matrix (the README "SHA-256 manifest" guard).
-_EXPECTED_SHA256 = "c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c"
+# DELIBERATE RE-LOCK (the 60→66 reshape — days 2-4 gain the hand-derived
+# CPR bits 60+63; see the closed form). Old digest:
+# c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
+_EXPECTED_SHA256 = "a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3"
 
 
 def _price(day_index: int) -> Decimal:
@@ -116,6 +123,10 @@ def _expected_mask(i: int) -> int:
     if day_index >= 1:  # rising vs the prior (flat) day → above-PDH/PDL + gap-up
         mask |= (1 << B.BIT_CLOSE_ABOVE_PDH) | (1 << B.BIT_CLOSE_ABOVE_PDL)
         mask |= 1 << B.BIT_GAP_UP_DAY
+        # The flat prior day's CPR collapses to one price: P = BC = TC =
+        # prev price ⇒ close (1000 pts higher) is strictly above TC (60),
+        # and width 0 ≤ 30 bps of P ⇒ narrow (63) — the 60→66 reshape.
+        mask |= (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_NARROW_CPR_DAY)
     return mask
 
 
