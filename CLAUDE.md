@@ -36,6 +36,24 @@ badge CSS into the shared bx-oneclick-panels.css. SUPERSEDES PR #1470
 changes — ENGINE UNCHANGED (NIFTY/BANKNIFTY/SENSEX). This header carries the
 pointer, never the story — the full record lives in the §1 Active-branch
 blurb + MIGRATION.md #1796.)
+Earlier: 2026-07-15 (DEC-OPTIONS-PREBUILD-RETIRE-001, MIGRATION.md #1831,
+branch `claude/options-prebuild-retire` — derived-timeframe prebuild RETIRED
+for OPTIONS (CE/PE): option data stays 1-minute-native per the operator ruling
+of 2026-07-15 as relayed via the coordinator (ADR-0021 RULING B, draft
+PR #1555) — supersedes-IN-PART DEC-PIPELINE-AUTOPREBUILD-001 (#1145), the
+OPTIONS arm only (the spot + futures prebuild law stands byte-identically).
+BOTH producers gated (the pipeline's sequential + parallel paths — the gated
+spine reports the honest by-design no-op, never a fake "0 contracts"; the
+lake-heal recall's daily arm — counted + ONE capped batch log) and the READ
+side gated with the 1-minute fallback (the movers CE/PE prev-close/prev-OI
+baselines skip the frozen 1day and walk the prior session's 1-minute; the
+doctor derived-freshness verdicts exclude CE/PE), all via the ONE COMMON
+`fno_candle_lake.is_option_contract_coords` predicate; already-stored derived
+option TFs stay INERT (never deleted — disk reclaim is an optional operator
+action). READ/producer gating only — ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
+carries the pointer, never the story — the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1831.)
 Earlier: 2026-07-15 (Club G docs merge vehicle, branch
 `integration/club-g-docs` — the docs-only fold of TWO PRs as ONE merge
 event off main tip d6ac9f85: #1506 DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md
@@ -2750,8 +2768,63 @@ hostile-review pass._
   same-day fold over main `c22495cb` (Club G docs — #1780/#1781
   DEC-GDFL-VENDOR-DOCS-001 + DEC-GDFL-INGEST-DESIGN-001; docs-only, zero
   template/JS overlap): union docs reconciled only, main's numbered max
-  stays #1794 so #1796 holds with no renumber. The
+  stays #1794 so #1796 holds with no renumber. Then merged forward over main
+  `ffe6d8fef` (#1831 DEC-OPTIONS-PREBUILD-RETIRE-001 — pipeline/movers/lake
+  files fully disjoint from this diff; union docs reconciled only; main's
+  numbered max moved to #1831 but #1796 stays unclaimed on main, so it holds
+  with no renumber). The
   full record lives in MIGRATION.md #1796.)
+  Earlier: `claude/options-prebuild-retire` (**DEC-OPTIONS-PREBUILD-RETIRE-001, MIGRATION.md #1831** —
+  derived-timeframe prebuild RETIRED for OPTIONS (CE/PE): option data is
+  1-minute-native — fills resolve on the next 1-minute bar worst-case, so
+  derived option TFs are pure cost (the documented #1145 options-lake
+  footprint multiple). AUTHORITY recorded honestly: the operator ruling of
+  2026-07-15 as relayed via the coordinator (ADR-0021 RULING B, draft
+  PR #1555) — never claimed as a direct-user approval in the implementing
+  session. Supersedes-IN-PART DEC-PIPELINE-AUTOPREBUILD-001 (#1145) — the
+  OPTIONS arm only; spot + futures prebuild byte-identical. ONE COMMON gate
+  predicate (NEW `fno_candle_lake.is_option_contract_coords` — F&O segment +
+  the canonical `parse_fno_symbol` grammar, CE/PE only; FUT/spot/undecodable
+  read False) drives all four sites: (1) PRODUCER, pipeline — BOTH paths stop
+  discovering/materialising CE/PE (`run_gated_prebuild`'s options callables
+  stay None; the parallel path plans zero OPTIONS items); the options no-op
+  phase reports the honest by-design note (NEW COMMON
+  `OPTIONS_PREBUILD_SKIPPED_NOTE`, attempted=() — the spot-noop mirror) and
+  the started log replaces the numeric `options_contracts` with the static
+  law-naming `options_prebuild` token (never a fake count); the injected
+  options arms are RETAINED STRUCTURAL (direct-unit-covered, unreachable —
+  the DEC-CROSSVERIFY-SPOT-ONLY-001 precedent). (2) PRODUCER, heal recall —
+  `lake_heal._run_recall` skips the whole recall for healed CE/PE (no 1day
+  derive, no TF rebuild), counted in the additive
+  `RecallReport.option_daily_skipped` + logged ONCE per batch
+  (`lake_heal.recall_option_daily_skipped`, `RECALL_OPTION_SKIP_LOG_CAP`=10
+  capped symbols, the law named); FUT + spot recall byte-identical; the stale
+  `_prebuild_kind_from_coords` docstring corrected. (3) READ, movers —
+  `resolve_prev_close`/`resolve_prev_oi` skip the derived-1day read for CE/PE
+  and go straight to the bounded 1-minute prior-session walk-back (a FROZEN
+  retirement-eve option 1day would serve a wrong %CHNG for weeks — the design
+  review's M1; executed fails-before: frozen close 100/OI 900 served where
+  the true 1-minute prior session held 123.45/1234); SPOT + FUT 1day-first
+  byte-identical (pinned); read-spy pins prove the option 1day is never
+  opened; the equal-when-both-fresh equivalence pinned. (4) READ, doctor —
+  `check_derived_freshness` excludes CE/PE dirs (a frozen option TF must
+  never red the doctor; stale FUT still FAILs — pinned). ABSENCE PINS: a full
+  prebuild run on a REAL lake (both paths) writes ZERO derived option TF
+  files; the heal-recall pin FAILS-BEFORE (pre-change the recall DID write
+  the CE 1day). HONEST: not retroactive — stored derived option TFs stay on
+  disk, inert (viewable in /db as stored bytes; never rebuilt, never
+  deleted); the option movers baseline now costs one bounded ≤14-day
+  1-minute walk-back per contract instead of a 1day read (disclosed);
+  crossverify untouched (1-minute-only by law). TESTS: fails-before proven on
+  the pre-change tree for the frozen-prev-close/OI flips, the heal-producer
+  absence pin and the doctor verdicts; every touched gated module re-measured
+  100.00% line+branch (pipeline_prebuild · gated_prebuild · lake_heal ·
+  movers_futures · fno_candle_lake · doctor via the discovery/static gates;
+  movers_snapshot 100.00% over the movers unit+integration family per its
+  discovery-exclusion convention); ruff/ruff-format clean; `mypy --strict`
+  clean (459 files); pyright 0 errors. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `integration/club-g-docs` (**Club G docs merge
   vehicle** — the docs-only fold of TWO PRs as ONE merge event off main tip
   d6ac9f85: **#1506** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780 — the
@@ -7500,6 +7573,21 @@ hostile-review pass._
   close-as-superseded); DISPLAY zone only, ZERO Python source changes; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
   + MIGRATION.md #1796 for the full blurb)
+  Earlier: `claude/options-prebuild-retire`
+  (DEC-OPTIONS-PREBUILD-RETIRE-001, MIGRATION.md #1831 — derived-timeframe
+  prebuild RETIRED for OPTIONS (CE/PE): options are 1-minute-native per the
+  operator ruling of 2026-07-15 as relayed via the coordinator (ADR-0021
+  RULING B, draft PR #1555); supersedes-IN-PART DEC-PIPELINE-AUTOPREBUILD-001
+  — the OPTIONS arm only. Both producers gated (pipeline seq+parallel via the
+  un-injected options callables + the honest by-design no-op note; the
+  lake-heal daily recall via the COMMON `is_option_contract_coords` gate,
+  counted + one capped batch log), the movers CE/PE prev-close/prev-OI
+  baselines skip the frozen 1day for the bounded 1-minute prior-session
+  walk-back (SPOT + FUT byte-identical, pinned), the doctor
+  derived-freshness verdicts exclude CE/PE; stored derived option TFs stay
+  inert on disk (never deleted). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1831 for the full
+  blurb)
   Earlier: `integration/club-g-docs`
   (Club G docs merge vehicle — the docs-only fold of #1506
   DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780) + #1508

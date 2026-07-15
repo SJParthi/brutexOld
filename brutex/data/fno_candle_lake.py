@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Protocol
 
-from brutex.data.fno_symbol import FNO_INSTRUMENT_TYPES
+from brutex.data.fno_symbol import FNO_INSTRUMENT_TYPES, OPTION_TYPES, parse_fno_symbol
 
 #: The logical table name surfaced in ``/db`` + registered in ``schema_meta``.
 FNO_CANDLE_LAKE_TABLE: Final[str] = "fno_candles"
@@ -61,6 +61,33 @@ FNO_CANDLE_LAKE_SCHEMA_VERSION: Final[int] = 3
 FNO_CANDLE_LAKE_PATH_TEMPLATE: Final[str] = (
     "bars/{exchange}/FNO/{groww_symbol}/{interval}/{year:04d}/{month:02d}.parquet"
 )
+
+
+def is_option_contract_coords(segment: str, symbol: str) -> bool:
+    """``True`` iff ``(segment, symbol)`` names a CE/PE OPTION contract partition.
+
+    The ONE 1-minute-native gate predicate (CLAUDE.md §11 COMMON) behind
+    DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator (ADR-0021 RULING B, draft PR #1555): option
+    data stays 1-minute-native, so derived-timeframe producers (the pipeline
+    prebuild, the lake-heal daily recall) and the derived-``1day`` readers
+    (the movers prev-close/prev-OI baselines, the doctor freshness probe)
+    all gate on exactly this predicate — never a re-minted copy.
+
+    A coordinate is an option contract iff its lake segment is the F&O
+    candle-lake segment (:data:`FNO_CANDLE_LAKE_SEGMENT`) AND its symbol
+    parses under the canonical contract grammar
+    (:func:`brutex.data.fno_symbol.parse_fno_symbol`) to a CE/PE
+    ``instrument_type``. A FUT contract, a spot coordinate, and an
+    UNDECODABLE F&O symbol all read ``False`` — futures/spot keep their
+    derived timeframes byte-identically, and an unparsable symbol
+    conservatively keeps its pre-ruling behaviour (never guessed to be an
+    option). Pure — no I/O.
+    """
+    if segment != FNO_CANDLE_LAKE_SEGMENT:
+        return False
+    parts = parse_fno_symbol(symbol)
+    return parts is not None and parts.instrument_type in OPTION_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,5 +305,6 @@ __all__ = [
     "FnoCandleColumn",
     "SchemaMetaWriter",
     "fno_candle_lake_schema_meta",
+    "is_option_contract_coords",
     "register_fno_candle_lake",
 ]
