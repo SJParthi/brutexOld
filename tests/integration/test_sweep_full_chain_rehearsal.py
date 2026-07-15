@@ -250,10 +250,48 @@ def test_r38_full_chain_completes_clean(rehearsal: _Rehearsal) -> None:
     assert status["error_type"] is None
 
 
+def _coverage_instrumented() -> bool:
+    """True when coverage.py is actively tracing THIS process.
+
+    Distinguishes the unit job (whole-suite ``pytest --cov=brutex
+    --cov-branch`` — every traced line pays the tracer) from the dedicated
+    ``sweep-rehearsal`` CI job, which runs this file standalone with NO
+    coverage. Probes the LIVE tracer (``coverage.Coverage.current()``), never
+    "is the package importable" — [dev] always installs coverage.
+    """
+    try:
+        import coverage
+    except ImportError:
+        return False
+    return coverage.Coverage.current() is not None
+
+
+#: The STRICT sweep-compute ceiling — asserted where the process is NOT
+#: coverage-traced (the dedicated `sweep-rehearsal` job, measured ~7 s there),
+#: so ci.yml's "a real sweep slowdown trips the in-test ceiling" claim keeps
+#: its full teeth on every push.
+_RUNTIME_CEILING_S = 300.0
+#: The documented 3x instrumentation allowance for a coverage-traced process:
+#: under the unit job's whole-package `--cov=brutex --cov-branch` tracing the
+#: SAME first pass measures the TRACER, not sweep compute (315.4 s vs ~7 s
+#: uninstrumented — run 29269883269, 2026-07-13), so the strict tier would
+#: flake on tracer+contention noise while catching nothing the dedicated job
+#: does not. 900 s stays "minutes not hours" — the assertion is never deleted.
+_RUNTIME_CEILING_COVERAGE_S = 3 * _RUNTIME_CEILING_S
+
+
 def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
-    """The chain-in-miniature stays MINUTES not hours (measured, not assumed)."""
-    assert rehearsal.seconds_first < 300.0, (
-        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s — the CI budget claim broke"
+    """The chain-in-miniature stays MINUTES not hours (measured, not assumed).
+
+    Two-tier ceiling (the CLAUDE.md §2 Rule 5 two-tier philosophy): strict
+    300 s where uninstrumented (the dedicated rehearsal job); the documented
+    3x instrumentation allowance where coverage.py is actively tracing (the
+    unit job's whole-package branch tracing).
+    """
+    ceiling = _RUNTIME_CEILING_COVERAGE_S if _coverage_instrumented() else _RUNTIME_CEILING_S
+    assert rehearsal.seconds_first < ceiling, (
+        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s"
+        f" (ceiling {ceiling:.0f}s) — the CI budget claim broke"
     )
 
 
