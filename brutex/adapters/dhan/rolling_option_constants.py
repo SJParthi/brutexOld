@@ -47,12 +47,17 @@ DHAN_ROLLING_INSTRUMENT: Final[str] = "INDEX"
 DHAN_ROLLING_INSTRUMENT_OPTIDX_UNVERIFIED: Final[str] = "OPTIDX"
 
 #: The SDK interval code for 1-minute rolling-option candles (SDK ``interval=1``).
-#: The rolling-ATM track is ALWAYS 1-minute — the 19 derived intraday TFs + the
-#: daily anchor are DERIVED from the stored 1-minute by the prebuild stage, never
-#: separately fetched (CLAUDE.md §3).
+#: The rolling-ATM track is stored + served 1-MINUTE-NATIVE **by design**
+#: (DEC-DHAN-OPTIONS-NO-PREBUILD-001, ruling relayed via coordinator 2026-07-15):
+#: derived-timeframe materialization is deliberately NOT built for options — on
+#: the Dhan feed the prebuild stage is SPOT-ONLY. Option fills resolve on the
+#: next 1-minute bar worst-case, so a derived option TF is cost without benefit;
+#: nothing is ever separately fetched, and nothing coarser is ever derived
+#: (negative-pinned in ``tests/unit/test_dhan_rolling_no_prebuild_pin.py``).
 DHAN_ROLLING_INTERVAL: Final[int] = 1
 
-#: The single canonical interval this rolling-ATM track fetches (1-minute only).
+#: The single canonical interval this rolling-ATM track fetches — AND stores AND
+#: serves (1-minute-native by design; see :data:`DHAN_ROLLING_INTERVAL`).
 DHAN_ROLLING_FETCH_INTERVAL: Final[str] = "1minute"
 
 #: The intended transport read timeout for a rolling-option call (seconds). The
@@ -169,12 +174,18 @@ DHAN_ROLLING_COVERAGE_MARKET: Final[str] = "dhan-option"
 #: change; until then the pull NEVER fabricates a floor.
 DHAN_ROLLING_HISTORY_FLOOR: Final[date | None] = None
 
-#: The operator's REQUESTED reachable-today start (research-supported PARTIAL). A
-#: recorded marker ONLY — deliberately NOT the honest floor authority
-#: (:data:`DHAN_ROLLING_HISTORY_FLOOR` is ``None`` and drives planning). Surfaced as
-#: the adapter's ``earliest_history`` CAPABILITY (a display/metadata field), so it is
-#: NOT one of the AST-pinned decision-branch sentinels; no PLANNING branch reads it —
-#: planning gates on the ``None`` floor above.
+#: The operator's REQUESTED reachable-today start (research-supported PARTIAL) —
+#: since DEC-DHAN-ROLLING-FLOOR-UNIFY-001 (ruling relayed via coordinator
+#: 2026-07-15) the REQUESTED-START TERM of the unified rolling-options floor law
+#: ``dhan_rolling_options_floor(today) = max(dhan_history_floor(today), THIS)``
+#: (:func:`~brutex.adapters.dhan.constants.dhan_rolling_options_floor`). At
+#: adoption the resolved floor equals this date byte-for-byte (the rolling term
+#: sits below it until strictly after 2027-05-25); afterwards the SPOT rolling
+#: today−5y(+margin) law takes over — the two laws can never diverge silently.
+#: Deliberately still NOT a measured servability edge
+#: (:data:`DHAN_ROLLING_HISTORY_FLOOR` is ``None`` — UNVERIFIED); also surfaced
+#: as the adapter's ``earliest_history`` CAPABILITY (a display/metadata field),
+#: so it is NOT one of the AST-pinned decision-branch sentinels.
 DHAN_ROLLING_HISTORY_FLOOR_REQUESTED: Final[date] = date(2022, 6, 1)
 
 #: Whole-track rolling servability (the DH-905 gate) — UNVERIFIED until a

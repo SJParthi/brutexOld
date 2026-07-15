@@ -30,6 +30,12 @@ _PAYLOAD: dict[str, list[object]] = {
 }
 
 
+#: Frozen IST "today" for every fixed-date call — at this date the unified
+#: rolling-options floor (DEC-DHAN-ROLLING-FLOOR-UNIFY-001) resolves to the
+#: requested 2022-06-01 start, safely below the fixtures' 2024 ranges.
+_FROZEN_TODAY = date(2026, 7, 15)
+
+
 class _FakeClient:
     """A rolling-option client returning a fixed payload (or empty on demand)."""
 
@@ -58,6 +64,7 @@ def test_run_pull_writes_into_feeds_dhan_rolling_options(tmp_path: Path) -> None
         keys=keys,
         start=date(2024, 6, 1),
         end=date(2024, 6, 15),
+        today=_FROZEN_TODAY,  # frozen — the unified floor must never eat these fixed 2024 ranges
     )
     assert report.market == "dhan-option"
     assert report.total_bars == len(keys)  # 1 bar per key/partition
@@ -80,6 +87,7 @@ def test_run_pull_empty_payload_is_clean_empty(tmp_path: Path) -> None:
         keys=keys,
         start=date(2024, 6, 1),
         end=date(2024, 6, 15),
+        today=_FROZEN_TODAY,  # frozen — the unified floor must never eat these fixed 2024 ranges
     )
     assert report.total_bars == 0
     assert report.failed_windows == 0
@@ -98,7 +106,11 @@ def test_default_pull_seam_is_fake_driven(tmp_path: Path) -> None:
         return adapter
 
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=False
+        lake_root=tmp_path,
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 8),
+        dry_run=False,
+        today=_FROZEN_TODAY,
     )
     report = default_dhan_rolling_option_pull(request, adapter_factory=_factory, band=0)
     assert isinstance(report, DhanRollingOptionPullReport)
@@ -111,7 +123,11 @@ def test_default_pull_seam_is_fake_driven(tmp_path: Path) -> None:
 def test_default_pull_seam_paces(tmp_path: Path) -> None:
     ticks: list[int] = []
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=False
+        lake_root=tmp_path,
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 8),
+        dry_run=False,
+        today=_FROZEN_TODAY,
     )
     report = default_dhan_rolling_option_pull(
         request,
@@ -135,7 +151,11 @@ def test_default_pull_dry_run_builds_no_adapter_and_calls_no_vendor(tmp_path: Pa
         return adapter
 
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=True
+        lake_root=tmp_path,
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 8),
+        dry_run=True,
+        today=_FROZEN_TODAY,
     )
     report = default_dhan_rolling_option_pull(
         request,
@@ -167,7 +187,11 @@ def test_default_pull_dry_run_builds_no_adapter_and_calls_no_vendor(tmp_path: Pa
 
 def test_report_to_dict_labels_rolling_atm(tmp_path: Path) -> None:
     request = DhanPullRequest(
-        lake_root=tmp_path, start=date(2024, 6, 1), end=date(2024, 6, 8), dry_run=False
+        lake_root=tmp_path,
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 8),
+        dry_run=False,
+        today=_FROZEN_TODAY,
     )
     payload = default_dhan_rolling_option_pull(
         request, adapter_factory=lambda: _adapter(_PAYLOAD), band=0
@@ -228,3 +252,40 @@ def test_universe_template_rolling_button_is_honest() -> None:
         regions += 1
         _assert_per_contract_only_negated(html[idx : idx + 2000])
     assert regions == 2
+
+
+# ── the unified rolling-options floor threading (DEC-DHAN-ROLLING-FLOOR-UNIFY-001) ─
+
+
+def test_run_pull_threads_today_to_the_floor_clamp(tmp_path: Path) -> None:
+    # A synthetic FUTURE today (rolling term binds: floor 2023-08-08) threads
+    # through run_dhan_rolling_option_pull → the spine → the plan chokepoint, so
+    # a pre-floor start is clamped end-to-end.
+    keys = enumerate_rolling_option_keys(band=0)
+    report = run_dhan_rolling_option_pull(
+        lake_root=tmp_path,
+        adapter=_adapter(_PAYLOAD),
+        keys=keys,
+        start=date(2022, 6, 1),
+        end=date(2023, 9, 5),
+        today=date(2028, 8, 1),
+    )
+    assert report.outcomes, "post-floor span must still pull"
+    assert min(o.start for o in report.outcomes) == date(2023, 8, 8)
+
+
+def test_default_pull_seam_threads_request_today(tmp_path: Path) -> None:
+    # The production seam passes DhanPullRequest.today into the spine — the SAME
+    # launch-resolved instant clamps the plan (never a mid-run clock re-read).
+    request = DhanPullRequest(
+        lake_root=tmp_path,
+        start=date(2022, 6, 1),
+        end=date(2023, 9, 5),
+        dry_run=False,
+        today=date(2028, 8, 1),
+    )
+    report = default_dhan_rolling_option_pull(
+        request, adapter_factory=lambda: _adapter(_PAYLOAD), band=0
+    )
+    assert report.ingest.outcomes, "post-floor span must still pull"
+    assert min(o.start for o in report.ingest.outcomes) == date(2023, 8, 8)

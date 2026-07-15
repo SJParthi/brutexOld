@@ -56,8 +56,12 @@ from brutex.adapters.dhan.constants import (
     DHAN_FLOOR_MARGIN_DAYS,
     DHAN_SPOT_INDEX_SYMBOLS,
     dhan_history_floor,
+    dhan_rolling_options_floor,
 )
 from brutex.adapters.dhan.live_controller import build_dhan_live_controller
+from brutex.adapters.dhan.rolling_option_constants import (
+    DHAN_ROLLING_HISTORY_FLOOR_REQUESTED,
+)
 from brutex.adapters.dhan.rolling_option_plan import DHAN_ROLLING_PLAN_KEY_COUNT
 from brutex.adapters.groww.expiry_scope import normalize_expiry_scope
 from brutex.adapters.groww.instruments import PARSE_SKIPS_META_KEY
@@ -5674,9 +5678,20 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         The rolling-ATM options sibling of :func:`_launch_dhan_pipeline`. Credential
         gate FIRST (DEC-PULL-LOUD-CREDENTIAL-REFUSAL-001 — reuses the SAME read-only
         Dhan SSM gate as spot); the operator date range is validated EAGERLY (a
-        reversed / non-ISO pick → clean 400); blank ⇒ the canonical default range (the
-        rolling honest-degrade records clean-empty windows for a not-yet-servable span
-        until ``DHAN_ROLLING_HISTORY_FLOOR`` is probe-verified, Golden Rule #1). The
+        reversed / non-ISO pick → clean 400); blank ⇒ the canonical default range,
+        whose start the UNIFIED rolling-options floor then CLAMPS
+        (DEC-DHAN-ROLLING-FLOOR-UNIFY-001 — ``dhan_rolling_options_floor(today) =
+        max(dhan_history_floor(today), the requested 2022-06-01 start)``, the spot
+        route's exact floor posture): ``today_ist`` is resolved ONCE here and
+        threaded on the request; a range ending on/before the unified floor is a
+        LOUD **HTTP 400** naming both terms (zero vendor calls, zero job start),
+        and a partially-pre-floor start is clamped at the rolling plan chokepoint
+        (``max(start, floor)`` — one ``dhan.rolling_option.window_floor_clamped``
+        INFO; NEVER doomed pre-floor requests recorded as clean-empty SUCCESS
+        windows). Within the post-floor span the rolling honest-degrade still
+        records clean-empty windows for a not-yet-servable date (the true floor
+        stays UNVERIFIED until ``DHAN_ROLLING_HISTORY_FLOOR`` is probe-verified,
+        Golden Rule #1). The
         pull runs on the SEPARATE single-flight ``_dhan_option_pull_job`` (own flock on
         ``feeds/dhan/``), and is ``market_hours_exempt`` because Dhan uses its OWN
         account (the 08:45-15:35 NSE guard exists only to free the SHARED Groww account
@@ -5707,10 +5722,33 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # DEC-DHAN-ROLLING-FLOOR-UNIFY-001: the IST "today" is resolved EXACTLY ONCE
+        # per launch and threaded (the pull never re-reads the clock mid-plan). A
+        # range ending on/before the UNIFIED floor is refused LOUDLY (zero vendor
+        # calls, zero job start) instead of recording doomed pre-floor clean-empty
+        # windows; end_dt.date() is the EXCLUSIVE day.
+        today_ist = now_ist().date()
+        floor = dhan_rolling_options_floor(today_ist)
+        if end_dt.date() <= floor:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "requested range ends before the unified Dhan rolling-options "
+                    f"floor ({floor.isoformat()} = max(today−5y+"
+                    f"{DHAN_FLOOR_MARGIN_DAYS}d margin, the requested "
+                    f"{DHAN_ROLLING_HISTORY_FLOOR_REQUESTED.isoformat()} start)) — "
+                    "the rolling-options track never requests pre-floor data; "
+                    "nothing was pulled"
+                ),
+            )
         lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
         dhan_root = feed_lake_root(lake_root, feed="dhan")
         request = DhanPullRequest(
-            lake_root=lake_root, start=start_dt.date(), end=end_dt.date(), dry_run=dry_run
+            lake_root=lake_root,
+            start=start_dt.date(),
+            end=end_dt.date(),
+            dry_run=dry_run,
+            today=today_ist,
         )
         _LOG.info(
             "universe.pull_rolling_options_dhan.requested",
@@ -5742,13 +5780,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             cross_process_lock=not dry_run,
             market_hours_exempt=True,
         )
-        return {
+        rolling_payload: dict[str, Any] = {
             "started": started,
             "feed": "dhan",
             "dataset": "rolling-ATM",
             "total": DHAN_ROLLING_PLAN_KEY_COUNT,
             "dry_run": dry_run,
         }
+        # EMIT-ON-CLAMP additive keys (DEC-DHAN-ROLLING-FLOOR-UNIFY-001, the spot
+        # launcher's exact posture): a start before the unified floor names the
+        # clamp on the start payload (the plan chokepoint clamps from the SAME
+        # threaded today).
+        if request.start < floor:
+            rolling_payload["floor"] = floor.isoformat()
+            rolling_payload["effective_start"] = max(request.start, floor).isoformat()
+        return rolling_payload
 
     @app.post("/api/v1/universe/pull-rolling-options-dhan")
     async def api_universe_pull_rolling_options_dhan(
