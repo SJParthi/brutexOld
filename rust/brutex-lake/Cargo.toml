@@ -1,6 +1,6 @@
 # brutex-lake — the data-lake Rust conversion crate (ADR-0020, PR-1).
 #
-# DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). PR-1 re-hosts the
+# DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). PR-1 re-hosts the
 # ONE parquet render seam (`brutex/data/parquet_writer.py::_render_bytes`,
 # frame → parquet bytes) on a Rust build of polars pinned to the EXACT git
 # tag matching the installed Python wheel — the byte-identity-by-lockstep

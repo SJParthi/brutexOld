@@ -508,7 +508,7 @@ jobs:
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
-            # feed/replay.py pair (DEC-FEED-RUST-CORE-001, MIGRATION #1741
+            # feed/replay.py pair (DEC-FEED-RUST-CORE-001, MIGRATION #1797
             # REFUTER ROUND 6): the seam module previously had ZERO mutation
             # coverage — R6a's `<= i -> < i` warn-drain mutant survived the
             # whole corpus until the dedicated regression landed. Its test

@@ -1,6 +1,6 @@
 //! # brutex-lake — the data-lake Rust render seam (ADR-0020, PR-1)
 //!
-//! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Re-hosts the ONE
+//! DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). Re-hosts the ONE
 //! bars-writer parquet render (`brutex/data/parquet_writer.py::_render_bytes`
 //! — frame → parquet bytes; zstd level 3, `row_group_size = 100_000`,
 //! statistics OFF) on a Rust build of polars REV-pinned at the commit the

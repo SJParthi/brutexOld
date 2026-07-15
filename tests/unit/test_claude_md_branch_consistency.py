@@ -198,11 +198,11 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1774 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
     # data/today_completeness.py pair's rationale comment cites THAT
     # decision's entry, not this one.
-    # 1741 = DEC-FEED-RUST-CORE-001 (2026-07-12, refuter round 6): the
+    # 1797 = DEC-FEED-RUST-CORE-001 (2026-07-12, refuter round 6): the
     # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
     # the 3-file discovery-set field) cites THAT decision's entry, not this
     # one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1741, 1750, 1774}),
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774, 1797}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

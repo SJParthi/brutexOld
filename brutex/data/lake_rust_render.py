@@ -1,6 +1,6 @@
 """Flag-gated Rust parquet-render seam — the ADR-0020 PR-1 facade.
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). When — and ONLY when —
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). When — and ONLY when —
 ``BRUTEX_LAKE_RUST_RENDER`` is set truthy, :meth:`ParquetWriter._render_bytes`
 routes its frame → parquet-bytes render through the ``brutex_lake`` crate (a
 Rust build of polars REV-pinned at the commit the installed Python wheel's

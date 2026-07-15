@@ -1,6 +1,6 @@
 # Runbook — the lake Rust-render version lockstep (ADR-0020 PR-1)
 
-**Decision:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726) ·
+**Decision:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1796) ·
 **Surfaces:** `rust/brutex-lake/` (crate) · `brutex/data/lake_rust_render.py`
 (facade) · `brutex/data/parquet_writer.py::_render_bytes` (seam) ·
 `.github/workflows/lake-rust-parity.yml` (the parity lane).

@@ -410,7 +410,7 @@ class TestOrderingLaws:
     ) -> tuple[Sequence[Any], Sequence[Any], str, str]:
         """Drive OFF then ON over *table*, raising *exc_type* in both arms.
 
-        R8 diagnosability hardening (MIGRATION #1741 REFUTER ROUND 8 — the
+        R8 diagnosability hardening (MIGRATION #1797 REFUTER ROUND 8 — the
         R7c one-time anomaly closed unreproducible-unknown): the only state
         consistent with that symptom is the ON arm's bad-tick screen reading
         DISABLED, so each arm asserts the screen is enabled immediately
@@ -511,7 +511,7 @@ class TestOrderingLaws:
     def test_boundary_warn_on_last_kept_row_fires_before_positivity_stop(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """R6a regression (MIGRATION #1741 REFUTER ROUND 6): the warn-drain
+        """R6a regression (MIGRATION #1797 REFUTER ROUND 6): the warn-drain
         boundary mutant ``<= i -> < i`` in ``_bars_from_scan``.
 
         Kernel shape: ``kept=[0, 2]``, ``warns=[(2, 0, 1, 0, 1)]``,

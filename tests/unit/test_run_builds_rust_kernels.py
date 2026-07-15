@@ -21,7 +21,7 @@ It is DYNAMIC (CLAUDE.md §11): the native kernels are DISCOVERED from
 ``rust/*/pyproject.toml`` (maturin crates), not hard-coded — add a third
 PyO3 crate and import it, and this guard covers it automatically.
 
-Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1726):
+Two kernel classes (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1796):
 
 - REQUIRED — module-top imported by ``brutex/`` ⇒ a build PREREQUISITE, so
   the turnkey build path (``make run-raw`` + ``bootstrap.sh``) must build it
@@ -125,7 +125,7 @@ KERNELS = _discover_maturin_kernels()
 # Registration REQUIRES a documented reason — an unregistered new crate that
 # nothing imports still fails test_kernel_is_imported_by_brutex loudly.
 OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
-    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726 PR-1 / ADR-0020):
+    # DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796 PR-1 / ADR-0020):
     # brutex_lake is the default-OFF lake render crate. It is consumed ONLY
     # through the import-guarded facade brutex/data/lake_rust_render.py
     # (`importlib.import_module("brutex_lake")` inside the guard — an absent

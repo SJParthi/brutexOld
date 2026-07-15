@@ -1,6 +1,6 @@
 # brutex-lake — the data-lake Rust render seam (ADR-0020 PR-1)
 
-`DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726). This crate re-hosts
+`DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1796). This crate re-hosts
 the ONE bars-writer parquet render seam
 (`brutex/data/parquet_writer.py::_render_bytes` — frame → parquet bytes) on a
 Rust build of polars REV-pinned at the commit the installed Python wheel's
