@@ -41,7 +41,17 @@ p-value floor ``1/101`` still admits a PASS at the production
 ``mc_alpha=0.01``, so filter #9 keeps teeth in both directions while the
 worst-case draw is bounded 10×) + a scoped INFO logging bound (the dispatch
 guard's posture, ``reset_configuration``-fenced so no other test is
-affected). The 300.0 s ceiling + the production default 1000 are UNTOUCHED.
+affected). The production default 1000 is UNTOUCHED. The runtime ceiling law
+is the folded TWO-TIER of commit b12257e (the test-file half of PR #1522's
+1711bf99, applied verbatim by a sibling session — merge-reconciled here):
+the STRICT 300 s tier stays fully armed where the process is NOT
+coverage-traced (exactly the dedicated ``sweep-rehearsal`` CI job), and an
+actively-traced process asserts the documented 3x instrumentation allowance
+(900 s). The two layers are COMPLEMENTARY, never redundant: this budget
+bounds the WORKLOAD at root cause (first pass ~3-4 s on a worst draw); the
+two-tier ceiling is the defensive allowance for the coverage TRACER the
+unit job's whole-package ``--cov=brutex --cov-branch`` adds on top — an
+allowance for instrumentation, never an excuse for workload.
 """
 
 from __future__ import annotations
@@ -316,10 +326,51 @@ def test_r38_full_chain_completes_clean(rehearsal: _Rehearsal) -> None:
     assert status["error_type"] is None
 
 
+def _coverage_instrumented() -> bool:
+    """True when coverage.py is actively tracing THIS process.
+
+    Distinguishes the unit job (whole-suite ``pytest --cov=brutex
+    --cov-branch`` — every traced line pays the tracer) from the dedicated
+    ``sweep-rehearsal`` CI job, which runs this file standalone with NO
+    coverage. Probes the LIVE tracer (``coverage.Coverage.current()``), never
+    "is the package importable" — [dev] always installs coverage.
+    """
+    try:
+        import coverage
+    except ImportError:
+        return False
+    return coverage.Coverage.current() is not None
+
+
+#: The STRICT sweep-compute ceiling — asserted where the process is NOT
+#: coverage-traced (the dedicated `sweep-rehearsal` job, measured ~7 s there),
+#: so ci.yml's "a real sweep slowdown trips the in-test ceiling" claim keeps
+#: its full teeth on every push.
+_RUNTIME_CEILING_S = 300.0
+#: The documented 3x instrumentation allowance for a coverage-traced process:
+#: under the unit job's whole-package `--cov=brutex --cov-branch` tracing the
+#: SAME first pass measures the TRACER, not sweep compute (315.4 s vs ~7 s
+#: uninstrumented — run 29269883269, 2026-07-13), so the strict tier would
+#: flake on tracer+contention noise while catching nothing the dedicated job
+#: does not. 900 s stays "minutes not hours" — the assertion is never deleted.
+_RUNTIME_CEILING_COVERAGE_S = 3 * _RUNTIME_CEILING_S
+
+
 def test_r38_rehearsal_runtime_is_ci_feasible(rehearsal: _Rehearsal) -> None:
-    """The chain-in-miniature stays MINUTES not hours (measured, not assumed)."""
-    assert rehearsal.seconds_first < 300.0, (
-        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s — the CI budget claim broke"
+    """The chain-in-miniature stays MINUTES not hours (measured, not assumed).
+
+    Two-tier ceiling (the CLAUDE.md §2 Rule 5 two-tier philosophy): strict
+    300 s where uninstrumented (the dedicated rehearsal job); the documented
+    3x instrumentation allowance where coverage.py is actively tracing (the
+    unit job's whole-package branch tracing). Complementary to — never a
+    substitute for — the DEC-REHEARSAL-MC-BUDGET-001 root-cause budget
+    (``_rehearsal_env``: MC=100 + the INFO logging bound), which bounds the
+    workload itself; this ceiling is the defensive tracer-allowance layer.
+    """
+    ceiling = _RUNTIME_CEILING_COVERAGE_S if _coverage_instrumented() else _RUNTIME_CEILING_S
+    assert rehearsal.seconds_first < ceiling, (
+        f"first rehearsal pass took {rehearsal.seconds_first:.1f}s"
+        f" (ceiling {ceiling:.0f}s) — the CI budget claim broke"
     )
 
 

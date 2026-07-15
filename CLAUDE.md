@@ -27,7 +27,12 @@ byte-identical production default 1000, pinned) + the R38 fixture's MC=100
 (the smallest budget whose p-value floor 1/101 still admits a filter-#9 PASS
 at mc_alpha=0.01) + scoped INFO logging bound — closing the SYSTEMIC
 `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns (main itself failed
-at 452.6 s, run 29249947445); the 300.0 s ceiling stands. ENGINE
+at 452.6 s, run 29249947445); the ceiling law is the folded b12257e two-tier
+(strict 300 s where NOT coverage-traced — the dedicated sweep-rehearsal job
+keeps full teeth; the documented 3× instrumentation allowance 900 s where
+coverage.py is actively tracing — complementary: the root-cause budget bounds
+the workload, the two-tier is the defensive tracer allowance); the production
+MC default 1000 is untouched. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the
 frozen `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass
 UNMODIFIED; touched modules 100% line+branch. This header carries the pointer, never
@@ -2660,8 +2665,15 @@ hostile-review pass._
   `test_r38_rehearsal_runtime_is_ci_feasible` 300 s overruns at root cause (an expensive
   per-commit seed draw sent candidates into cascade filter #9's 1000-permutation
   pure-Python re-simulation with unconfigured-DEBUG rendering; main itself failed at
-  452.6 s — run 29249947445; this PR's check at 304.2 s/318.0 s); the 300.0 s ceiling +
-  the production 1000 default are UNTOUCHED. ENGINE UNCHANGED —
+  452.6 s — run 29249947445; this PR's check at 304.2 s/318.0 s); the production 1000
+  default is UNTOUCHED, and the runtime ceiling law is the folded b12257e TWO-TIER
+  (merge-reconcile 2026-07-15 — the test-file half of PR #1522's 1711bf99, pushed by a
+  sibling session: strict 300 s where the process is NOT coverage-traced — the dedicated
+  sweep-rehearsal job keeps full teeth; the documented 3× instrumentation allowance
+  900 s where coverage.py is actively tracing, probed via the LIVE
+  `coverage.Coverage.current()` — COMPLEMENTARY, both stand: the root-cause budget
+  bounds the WORKLOAD, the two-tier ceiling is the defensive tracer allowance; the
+  full record lives in MIGRATION.md #1795's merge-reconcile note). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap/run-identity change; the frozen
   `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` + vocab + pre-extension goldens pass UNMODIFIED; touched
   modules 100% line+branch.)
@@ -7229,8 +7241,11 @@ hostile-review pass._
   (fail-loud; env unset = the byte-identical production 1000 default) + the
   R38 fixture's MC=100 (the smallest both-directions-teeth budget at
   mc_alpha=0.01) + scoped INFO logging bound, closing the systemic
-  rehearsal 300 s overruns with the ceiling untouched; see §1 Active branch
-  for the full blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
+  rehearsal 300 s overruns at root cause; the runtime ceiling law is the
+  folded b12257e two-tier — strict 300 s uninstrumented / the documented 3×
+  allowance 900 s under an actively-tracing coverage.py, complementary to
+  the root-cause budget; production MC default 1000 untouched; see §1
+  Active branch for the full blurb; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/bulk-spot-completeness-flag`
   (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794 — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles, main took
