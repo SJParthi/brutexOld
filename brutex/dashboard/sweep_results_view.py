@@ -1202,10 +1202,18 @@ def _verdict_marker_row_keys(verdict: VerdictMarker | None) -> dict[str, Any]:
 
     Renamed from ``_cascade_row_keys`` at the club S2 fold: main's
     DEC-RESULTS-CASCADE-VERDICT-JOIN-001 landed a SECOND emitter of that name
-    (the report-join keys below) — the two coexist deliberately (marker keys
-    always-present/null-filled; join keys emit-on-present) and their shared
-    ``cascade_rejected_at``/``cascade_provisional`` values come from the SAME
-    report, so a double-join row carries equal values.
+    (the report-join keys below), so KEY OWNERSHIP is split to keep the two
+    coexisting cleanly — the landed join (:func:`_cascade_row_keys`) OWNS the
+    join-scoped ``cascade_rejected_at``/``cascade_provisional``/``cascade_detail``
+    (emit-on-present, fail-only for rejected_at), while this marker keeps ONLY
+    its DISTINCTIVE contribution: the ``cascade_verdict`` chip
+    (passed/rejected/ambiguous) + the corrected ``cascade_dsr*`` trio
+    (DEC-RESULTS-TRUST-HONESTY-001). This marker no longer duplicates the
+    join-owned keys, so a row carrying BOTH a marker and a join never
+    double-emits them (the landed join's tests require the key ABSENT on a
+    passing / no-rejected row — a null-filled marker duplicate would break
+    them); the rejected STAGE token reads from the join's ``cascade_rejected_at``
+    / ``cascade_status_text``, this marker's rejected signal is the chip.
 
     ``None`` marker = this run_id is absent from the cascade report (or no
     report exists) — NO keys are emitted (emit-on-present per the landed
@@ -1232,16 +1240,12 @@ def _verdict_marker_row_keys(verdict: VerdictMarker | None) -> dict[str, Any]:
     if verdict.ambiguous:
         return {
             "cascade_verdict": "ambiguous",
-            "cascade_rejected_at": None,
-            "cascade_provisional": None,
             "cascade_dsr": None,
             "cascade_dsr_n_trials": None,
             "cascade_dsr_n_source": None,
         }
     return {
         "cascade_verdict": "passed" if verdict.passed else "rejected",
-        "cascade_rejected_at": verdict.rejected_at,
-        "cascade_provisional": verdict.provisional,
         "cascade_dsr": verdict.dsr_corrected,
         "cascade_dsr_n_trials": verdict.dsr_n_trials,
         "cascade_dsr_n_source": verdict.dsr_n_source,

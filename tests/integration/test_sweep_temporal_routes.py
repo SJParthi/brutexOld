@@ -398,15 +398,27 @@ class TestLeaderboardTemporalEnvelope:
         assert board["cascade_report"]["groups"] == 1
         by_id = {r["run_id"]: r for r in board["rows"]}
         assert by_id[_RUN_TEMPORAL]["cascade_verdict"] == "rejected"
+        # ``cascade_rejected_at`` is join-owned (club S2 fold): the route loads
+        # the landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 join over the SAME
+        # (versioned) report, so the stage token rides ``_cascade_row_keys``.
         assert by_id[_RUN_TEMPORAL]["cascade_rejected_at"] == "walk_forward"
         assert by_id[_RUN_TEMPORAL]["temporal_judged_years"] == ["2021"]
-        assert by_id[_RUN_BARE]["cascade_verdict"] is None
+        # Emit-on-present: an unjudged row carries NO cascade marker key.
+        assert "cascade_verdict" not in by_id[_RUN_BARE]
         assert by_id[_RUN_BARE]["stats_by_year"] is None
 
-    def test_hostile_stage_token_stays_json_data(self, client: TestClient, lake: Path) -> None:
-        """XSS posture: a hostile ``rejected_at`` token from a (corrupt/foreign)
-        report flows to the wire as a JSON STRING only — the client renders it
-        through ``esc()`` (template-pinned) and never into a class name.
+    def test_hostile_stage_token_from_unversioned_report_never_reaches_the_wire(
+        self, client: TestClient, lake: Path
+    ) -> None:
+        """XSS posture (club S2 fold): a hostile ``rejected_at`` token lives in
+        the join-owned ``cascade_rejected_at`` now — the landed
+        DEC-RESULTS-CASCADE-VERDICT-JOIN-001 join is STRICT (it REJECTS an
+        unversioned/malformed report, logging ``cascade_report_load_failed``),
+        so a hand-forged version-less report's hostile token NEVER reaches the
+        wire; the lenient marker still serves only the fixed-vocabulary
+        ``cascade_verdict`` chip (never attacker data). A WELL-FORMED versioned
+        report's ``rejected_at`` is XSS-tested as JSON data in
+        ``test_sweep_results_view_cascade.py`` on the join emitter.
         """
         _write_store(lake, [_row(_RUN_TEMPORAL, temporal=True)])
         hostile = '<img src=x onerror=alert(1)>"onmouseover="evil'
@@ -434,8 +446,11 @@ class TestLeaderboardTemporalEnvelope:
         )
         board = client.get("/api/v1/sweep/leaderboard").json()
         row = next(r for r in board["rows"] if r["run_id"] == _RUN_TEMPORAL)
+        # The lenient marker still serves the safe fixed-vocab verdict chip …
         assert row["cascade_verdict"] == "rejected"
-        assert row["cascade_rejected_at"] == hostile  # data, verbatim — client escapes
+        # … but the hostile token from the unversioned report is DROPPED (the
+        # strict join rejected the malformed report — it never reaches the wire).
+        assert "cascade_rejected_at" not in row
 
     def test_report_write_invalidates_the_cached_leaderboard(
         self, client: TestClient, lake: Path
@@ -446,7 +461,8 @@ class TestLeaderboardTemporalEnvelope:
         _write_store(lake, [_row(_RUN_TEMPORAL, temporal=True)])
         before = client.get("/api/v1/sweep/leaderboard").json()
         assert before["cascade_report"]["present"] is False
-        assert before["rows"][0]["cascade_verdict"] is None
+        # Emit-on-present: pre-report, the row carries NO cascade marker key.
+        assert "cascade_verdict" not in before["rows"][0]
         _write_report(lake)
         after = client.get("/api/v1/sweep/leaderboard").json()
         assert after["cascade_report"]["present"] is True

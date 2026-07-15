@@ -110,7 +110,17 @@ def run_sweep(tmp_path: Path, tag: str, cfg: SweepRunConfig) -> SweepRunSummary:
 
 #: The hand-pinned gate-ON store content hash for the frozen fixture
 #: (generated 2026-07-09; polars/zstd-build sensitive — module docstring).
-_GOLDEN_TEMPORAL_CONTENT_HASH = "f5f318f0b1be3afebbedf4b2570c019c581f2c34c11ae113ea291a46314c5cc0"
+#: RE-LOCKED 2026-07-15 at the club S2 merge fold (was
+#: f5f318f0b1be3afebbedf4b2570c019c581f2c34c11ae113ea291a46314c5cc0): main's
+#: REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001) landed before this branch
+#: merged, so the store schema gained three always-emitted nullable Float64
+#: columns and the BYTES moved — the row VALUES, survivor set and exclusion
+#: literals below are unchanged (those pins passed unmodified across the
+#: re-lock), and the frozen MAIN sweep golden (`_GOLDEN_CONTENT_HASH` in
+#: test_engine_sweep_run_golden.py) stayed byte-untouched. NO fill_mode pin:
+#: #1522 (DEC-FILL-WORST-CASE-001) is OUT of club S2, so the SweepRunConfig
+#: fill default is already PRECISE and the gate-ON hash is reproduced exactly.
+_GOLDEN_TEMPORAL_CONTENT_HASH = "8341bed7b4281709d81b64f61bf05c438b18c26b87a7d097015bbfb937ad8647"
 
 #: The exclusion truth at DEFAULT thresholds (the operator demand, frozen).
 _SURVIVOR_MASKS = (1 << 0,)

@@ -9,13 +9,22 @@ it and asserts every temporal field against hand-locked literals — the
 sibling of ``test_results_store_pre_extension_golden.py`` on the OTHER side of
 the extension boundary.
 
-Provenance: generated once on 2026-07-09 from the literals mirrored in
-:func:`_expected_rows` (flush is byte-deterministic; sha256 at generation time
-``ac6a5f3cf535cd3417afb01c6aa14eed80a89e45071d42132edc8bcfa63aa1b7``, NOT
+Provenance: generated 2026-07-09 from the literals mirrored in
+:func:`_expected_rows`; REGENERATED 2026-07-15 at the club S2 merge fold —
+main's REFERENCE-ONLY VIX trio (DEC-VIX-STAMP-WIRE-001, three always-emitted
+nullable Float64 columns) landed on main before this branch merged, so the
+pre-merge fixture's schema was stale and the branch-introduced fixture was
+regenerated through the MERGED writer (the house branch-introduced-goldens-
+regenerated-at-merge-reconcile precedent; origin/main goldens byte-untouched).
+Flush is byte-deterministic; sha256 at regeneration time
+``f9c94617799ab02913db02750b68c157c666097c80985a421e7935af0bd1b7fd``, NOT
 asserted — the pin is LOGICAL field values, the house golden philosophy). Do
-NOT regenerate: a future column extension must load THIS file with its new
-fields as honest ``None`` (the optional-column LAW), exactly as the
-pre-extension fixture guards this one.
+NOT regenerate again: a future column extension must load THIS file with its
+new fields as honest ``None`` (the optional-column LAW), exactly as the
+pre-extension fixture guards this one. The sibling club-generated
+``results_store_pre_temporal_v1.parquet`` (same regeneration event) is the
+byte oracle for the emit-on-present all-``None`` arm in
+``tests/unit/test_engine_results_store_temporal.py``.
 """
 
 from __future__ import annotations

@@ -22,7 +22,10 @@ def test_results_ships_the_temporal_columns() -> None:
     assert '["temporal_judged_years", "Years", yearStrip]' in html
     assert '["max_year_share", "Yr share"' in html
     assert '["year_gate_passed", "Yr gate", yearGateBadge]' in html
-    assert '["cascade_verdict", "Cascade", cascadeBadge]' in html
+    # Club S2 fold: the ONE cascade badge is main's landed join column
+    # (DEC-RESULTS-CASCADE-VERDICT-JOIN-001); 1459's duplicate marker badge
+    # was dropped — its corrected-DSR column stays.
+    assert '["cascade_status", "Cascade", (r) => cascadeBadge(r)]' in html
     assert 'class="tempo-btn" data-run="' in html
 
 
@@ -38,11 +41,16 @@ def test_badge_classes_are_a_client_side_whitelist() -> None:
     """CSS classes come ONLY from literals chosen by boolean/sign checks — a
     payload string is never concatenated into a class attribute."""
     html = _render_results_html()
-    for cls in ("b-pass", "b-fail", "b-abstain", "b-amb", "b-prov"):
+    # Club S2 fold: the temporal year-gate badge classes stay; 1459's marker
+    # badge classes (b-amb / b-prov) left with its dropped duplicate cascade
+    # badge — main's landed cascbadge family covers the verdict cell.
+    for cls in ("b-pass", "b-fail", "b-abstain"):
         assert f'class="badge {cls}"' in html
-    # The verdict string is COMPARED, never inserted as a class.
-    assert 'if (v === "ambiguous")' in html
-    assert 'if (v === "passed")' in html
+    for cls in ("cascbadge fail", "cascbadge pass", "cascbadge prov"):
+        assert f'"{cls}"' in html
+    # The status string is COMPARED, never inserted as a class.
+    assert 'r.cascade_status === "fail"' in html
+    assert 'r.cascade_status === "pass"' in html
 
 
 def test_drill_builder_is_textcontent_only() -> None:
@@ -61,7 +69,9 @@ def test_escaped_payload_strings_in_cell_renderers() -> None:
     """Server strings in the innerHTML-composed table cells go through esc()."""
     html = _render_results_html()
     assert "esc(r.run_id)" in html
-    assert "esc(r.cascade_rejected_at)" in html
+    # Club S2 fold: the rejected-at escape moved with the dropped marker badge;
+    # main's landed badge escapes the whole detail via esc(bits.join(" · ")).
+    assert 'esc(bits.join(" · "))' in html
     assert "(r.year_gate_reasons || []).map((t) => esc(t))" in html
 
 

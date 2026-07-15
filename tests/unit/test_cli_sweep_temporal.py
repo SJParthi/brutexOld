@@ -19,6 +19,13 @@ from brutex.cli import (
 )
 from brutex.ranking.temporal import MODE_GATE, MODE_OBSERVE, TemporalRobustnessConfig
 
+# This file drives ``main([... "sweep-all" ...])`` for OTHER behavior (the junk
+# ``$BRUTEX_TEMPORAL`` exit-1 path), so it opts into the conftest guard that keeps
+# the DEC-SWEEP-LOG-VOLUME-GUARD-001 ``main()`` dispatch from configuring
+# PROCESS-GLOBAL structlog state — otherwise a capsys-bound PrintLogger would leak
+# a closed stream into later tests in the same process.
+pytestmark = pytest.mark.usefixtures("_inert_sweep_logging_guard")
+
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:

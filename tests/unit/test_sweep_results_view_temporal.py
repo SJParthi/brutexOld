@@ -19,16 +19,20 @@ import pytest
 
 pytest.importorskip("polars", reason="the reader loads per-tuple Parquet stores via ResultsStore")
 
-import brutex.engine.cascade_wire as cw
 from brutex.dashboard.sweep_results_view import (
     SweepScan,
-    _cascade_row_keys,
     _temporal_row_keys,
+    _verdict_marker_row_keys,
     build_sweep_leaderboard,
     load_sweep_scan,
     store_error_payload,
 )
-from brutex.engine.cascade_wire import VerdictMarker
+from brutex.engine.cascade_wire import (
+    AMBIGUOUS_MARKER,
+    CascadeWireReport,
+    VerdictMarker,
+    write_report,
+)
 from brutex.engine.period_stats import encode_judged_years, encode_period_stats
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.metrics.cascade import CandidateVerdict, CascadeReport, FilterStage
@@ -54,9 +58,12 @@ TEMPORAL_ROW_KEYS = frozenset(
 )
 CASCADE_ROW_KEYS = frozenset(
     {
+        # Club S2 fold — KEY OWNERSHIP split against the landed
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 join: the marker keeps ONLY its
+        # DISTINCTIVE keys (the verdict chip + the corrected DSR trio); the
+        # join-scoped ``cascade_rejected_at``/``cascade_provisional`` are owned
+        # by ``_cascade_row_keys`` and no longer duplicated here.
         "cascade_verdict",
-        "cascade_rejected_at",
-        "cascade_provisional",
         # DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected
         # cascade DSR + its run-level deflation stamps.
         "cascade_dsr",
@@ -151,8 +158,8 @@ def _write_report(lake_root: Path, verdicts: tuple[CandidateVerdict, ...]) -> Pa
         stage_survivors={},
         pool_pbo=None,
     )
-    report = cw.CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "5m", group),))
-    return cw.write_report(lake_root / "sweeps", report)
+    report = CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "5m", group),))
+    return write_report(lake_root / "sweeps", report)
 
 
 class TestTemporalRowKeys:
@@ -161,7 +168,16 @@ class TestTemporalRowKeys:
         must consciously update this frozen set (and results.html).
         """
         assert frozenset(_temporal_row_keys(_row(seed=1))) == TEMPORAL_ROW_KEYS
-        assert frozenset(_cascade_row_keys(None)) == CASCADE_ROW_KEYS
+        assert (
+            frozenset(
+                _verdict_marker_row_keys(
+                    VerdictMarker(passed=True, rejected_at=None, provisional=False)
+                )
+            )
+            == CASCADE_ROW_KEYS
+        )
+        # Emit-on-present: the None marker emits NOTHING (club S2 fold).
+        assert _verdict_marker_row_keys(None) == {}
 
     def test_pre_extension_row_is_all_none(self) -> None:
         keys = _temporal_row_keys(_row(seed=1))
@@ -205,42 +221,44 @@ class TestTemporalRowKeys:
 
 
 class TestCascadeRowKeys:
-    def test_not_judged_is_all_none(self) -> None:
-        keys = _cascade_row_keys(None)
-        assert keys == {
-            "cascade_verdict": None,
-            "cascade_rejected_at": None,
-            "cascade_provisional": None,
-            "cascade_dsr": None,
-            "cascade_dsr_n_trials": None,
-            "cascade_dsr_n_source": None,
-        }
+    def test_not_judged_emits_nothing(self) -> None:
+        # Club S2 fold: emit-on-present conformance to the landed
+        # DEC-RESULTS-CASCADE-VERDICT-JOIN-001 no-report byte-identity law —
+        # an unjudged/no-report row carries NO marker keys (absence renders
+        # "—" client-side, never "passed").
+        assert _verdict_marker_row_keys(None) == {}
 
-    def test_passed_and_provisional(self) -> None:
-        passed = _cascade_row_keys(VerdictMarker(passed=True, rejected_at=None, provisional=False))
+    def test_passed_reads_the_verdict_chip(self) -> None:
+        # Club S2 fold: ``cascade_provisional`` is join-owned now — the marker's
+        # passed signal is the ``cascade_verdict`` chip (both provisional and
+        # non-provisional passes read "passed"; the provisional flag rides the
+        # landed ``_cascade_row_keys`` join).
+        passed = _verdict_marker_row_keys(
+            VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        )
         assert passed["cascade_verdict"] == "passed"
-        assert passed["cascade_provisional"] is False
-        provisional = _cascade_row_keys(
+        assert "cascade_provisional" not in passed
+        provisional = _verdict_marker_row_keys(
             VerdictMarker(passed=True, rejected_at=None, provisional=True)
         )
         assert provisional["cascade_verdict"] == "passed"
-        assert provisional["cascade_provisional"] is True
+        assert "cascade_provisional" not in provisional
 
-    def test_rejected_carries_the_stage_token(self) -> None:
-        keys = _cascade_row_keys(
+    def test_rejected_reads_the_verdict_chip(self) -> None:
+        # Club S2 fold: the rejected STAGE token (``cascade_rejected_at``) is
+        # join-owned now; the marker's rejected signal is the chip.
+        keys = _verdict_marker_row_keys(
             VerdictMarker(
                 passed=False, rejected_at=FilterStage.WALK_FORWARD.value, provisional=False
             )
         )
         assert keys["cascade_verdict"] == "rejected"
-        assert keys["cascade_rejected_at"] == "walk_forward"
+        assert "cascade_rejected_at" not in keys
 
     def test_ambiguous_is_a_loud_question_never_a_coin_flip(self) -> None:
-        keys = _cascade_row_keys(cw.AMBIGUOUS_MARKER)
+        keys = _verdict_marker_row_keys(AMBIGUOUS_MARKER)
         assert keys == {
             "cascade_verdict": "ambiguous",
-            "cascade_rejected_at": None,
-            "cascade_provisional": None,
             # A conflicting figure is never coin-flip-served (BLOCKER 5).
             "cascade_dsr": None,
             "cascade_dsr_n_trials": None,
@@ -252,7 +270,7 @@ class TestCascadeRowKeys:
         N/source stamps pass through verbatim (full precision, never rounded);
         an unstamped (pre-change) marker reads honest None, never 0.
         """
-        keys = _cascade_row_keys(
+        keys = _verdict_marker_row_keys(
             VerdictMarker(
                 passed=True,
                 rejected_at=None,
@@ -265,7 +283,9 @@ class TestCascadeRowKeys:
         assert keys["cascade_dsr"] == 0.0031218374618234
         assert keys["cascade_dsr_n_trials"] == 8_400_000
         assert keys["cascade_dsr_n_source"] == "leaderboard"
-        bare = _cascade_row_keys(VerdictMarker(passed=True, rejected_at=None, provisional=False))
+        bare = _verdict_marker_row_keys(
+            VerdictMarker(passed=True, rejected_at=None, provisional=False)
+        )
         assert bare["cascade_dsr"] is None
         assert bare["cascade_dsr_n_trials"] is None
         assert bare["cascade_dsr_n_source"] is None
@@ -334,12 +354,19 @@ class TestLeaderboardFold:
         by_id = {r["run_id"]: r for r in board.rows}
         populated, bare = by_id[_run_id(1)], by_id[_run_id(2)]
         assert frozenset(populated) >= TEMPORAL_ROW_KEYS | CASCADE_ROW_KEYS
-        assert frozenset(bare) >= TEMPORAL_ROW_KEYS | CASCADE_ROW_KEYS
+        # Club S2 fold (emit-on-present): the report-UNJUDGED row carries the
+        # temporal family but NO cascade marker keys — absence renders "—".
+        assert frozenset(bare) >= TEMPORAL_ROW_KEYS
+        assert not (frozenset(bare) & CASCADE_ROW_KEYS)
         assert populated["temporal_judged_years"] == ["2021", "2022"]
+        # Club S2 fold: the marker's rejected signal is the chip; the
+        # ``cascade_rejected_at`` stage token is join-owned (emitted by
+        # ``_cascade_row_keys`` when a cascade join is passed — absent here,
+        # this board carries the marker only).
         assert populated["cascade_verdict"] == "rejected"
-        assert populated["cascade_rejected_at"] == "lockbox"
+        assert "cascade_rejected_at" not in populated
         assert bare["stats_by_year"] is None
-        assert bare["cascade_verdict"] is None  # not judged — never "passed"
+        assert "cascade_verdict" not in bare  # not judged — never "passed" (emit-on-present)
 
     def test_envelope_coverage_and_report_keys(self, tmp_path: Path) -> None:
         _write_store(tmp_path, [_row(seed=1, temporal=True), _row(seed=2)])
