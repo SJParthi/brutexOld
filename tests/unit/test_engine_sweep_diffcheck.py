@@ -33,6 +33,7 @@ from brutex.engine.sweep_diffcheck import (
     DiffCheckHook,
     DiffCheckMismatch,
     DiffCheckReport,
+    ProductionSimulate,
     RefTrade,
     drawdown_bit_key,
     reference_drawdown,
@@ -1114,3 +1115,167 @@ class TestDiffCheckHook:
         sample = _ref_trade(1, 10)
         for field in COMPARED_TRADE_FIELDS:
             assert isinstance(getattr(sample, field), int | datetime)
+
+
+# ── executed-population injection (DEC-SWEEP-APRIORI-DEFAULT-001, round 3) ──
+
+
+class TestExecutedPopulation:
+    """``mask_population=`` — the R45 hook samples the EXECUTED work.
+
+    Round-3 BLOCKER (MIGRATION.md #1752): under the Apriori extinction
+    default the raw C(n, k) walk is UNBOUNDED (the ``effective_max_combos``
+    auto-raise), so the hook must sample the tuple's injected candidate
+    list — never re-materialise the raw enumeration — and honestly SKIP an
+    extinct tuple (zero executed masks) with one counted INFO.
+    """
+
+    @staticmethod
+    def _spying_production(seen: list[list[bool]]) -> ProductionSimulate:
+        def spy(b: Sequence[CandleBar], s: Sequence[bool], **kw: object) -> Sequence[RefTrade]:
+            seen.append(list(s))
+            return _matching_production_simulate(
+                b,
+                s,
+                direction="BUY",
+                tf_minutes=1,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
+            )
+
+        return cast("ProductionSimulate", spy)
+
+    def test_r45_population_is_the_sample_pool_not_the_raw_walk(self) -> None:
+        """An injected 1-mask population checks exactly that mask — the raw
+        k=2 enumeration over bits (0, 1, 2) would offer 2 conflict-free."""
+        bars, bits = _bars_and_bits()
+        seen: list[list[bool]] = []
+        hook = _hook(_SuspectStub(), production_simulate=self._spying_production(seen))
+        report = hook.run_for_tuple(
+            bars=bars,
+            bar_bits=bits,
+            tuple_=_Tuple(),
+            grid=_Grid(),
+            budget_left=100,
+            mask_population=[0b101],
+        )
+        assert report == DiffCheckReport(checked=1, mismatches=0, masks_mismatched=())
+        assert report.skipped_empty is False
+        assert seen == [[(b & 0b101) == 0b101 for b in bits]]
+
+    def test_population_conflicts_pruned_exactly_like_production(self) -> None:
+        """The injected population rides the SAME ``has_conflict`` prune the
+        production enumeration loop applies — {0,1} (0b011) never samples."""
+        bars, bits = _bars_and_bits()
+        seen: list[list[bool]] = []
+        hook = _hook(_SuspectStub(), production_simulate=self._spying_production(seen))
+        report = hook.run_for_tuple(
+            bars=bars,
+            bar_bits=bits,
+            tuple_=_Tuple(),
+            grid=_Grid(),
+            budget_left=100,
+            mask_population=[0b011, 0b110],
+        )
+        assert report.checked == 1
+        assert seen == [[(b & 0b110) == 0b110 for b in bits]]
+
+    def test_r45_extinct_population_is_a_counted_skip_never_silent(self) -> None:
+        """Zero executed masks ⇒ ``skipped_empty`` + ONE INFO — no raw walk,
+        no budget spent, no SUSPECT."""
+        bars, bits = _bars_and_bits()
+        sink = _SuspectStub()
+        with capture_logs() as logs:
+            report = _hook(sink).run_for_tuple(
+                bars=bars,
+                bar_bits=bits,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=100,
+                mask_population=[],
+            )
+        assert report == DiffCheckReport(
+            checked=0, mismatches=0, masks_mismatched=(), skipped_empty=True
+        )
+        assert sink.suspect is False
+        skips = [e for e in logs if e["event"] == "sweep_diffcheck.apriori_empty_skip"]
+        assert len(skips) == 1
+        assert skips[0]["log_level"] == "info"
+        assert skips[0]["tuple_digest"] == "dig-1"
+        assert skips[0]["k"] == 2
+        assert skips[0]["population"] == 0
+
+    def test_all_conflicted_population_skips_with_the_raw_population_count(self) -> None:
+        bars, bits = _bars_and_bits()
+        with capture_logs() as logs:
+            report = _hook(_SuspectStub()).run_for_tuple(
+                bars=bars,
+                bar_bits=bits,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=100,
+                mask_population=[0b011],  # bits {0, 1} conflict — zero survive
+            )
+        assert report.skipped_empty is True
+        assert report.checked == 0
+        skips = [e for e in logs if e["event"] == "sweep_diffcheck.apriori_empty_skip"]
+        assert len(skips) == 1
+        assert skips[0]["population"] == 1  # the pre-prune injected count, honestly
+
+    def test_r45_population_mismatch_still_marks_suspect(self) -> None:
+        """The never-adopt law is population-source-independent: a diverging
+        production leg over the INJECTED population latches SUSPECT."""
+        bars, bits = _bars_and_bits()
+        sink = _SuspectStub()
+        hook = _hook(sink, production_simulate=lambda *a, **k: [])
+        report = hook.run_for_tuple(
+            bars=bars,
+            bar_bits=bits,
+            tuple_=_Tuple(),
+            grid=_Grid(),
+            budget_left=100,
+            mask_population=[0b101],
+        )
+        assert report.checked == 1
+        assert report.mismatches == 1
+        assert sink.suspect is True
+        assert sink.mismatches[0].mask_hex == f"{0b101:032x}"
+
+    def test_population_sampling_is_deterministic_same_identity_same_picks(self) -> None:
+        """D-11 over an injected population: two runs under the SAME identity
+        sample the SAME masks (min(K, len(population)) picks) — and every
+        pick comes from the population."""
+        bars, bits = _bars_and_bits()
+        population = [0b101, 0b110, 0b100, 0b010, 0b001]
+
+        def _picks() -> list[str]:
+            sink = _SuspectStub()
+            hook = _hook(sink, production_simulate=lambda *a, **k: [])
+            report = hook.run_for_tuple(
+                bars=bars,
+                bar_bits=bits,
+                tuple_=_Tuple(),
+                grid=_Grid(),
+                budget_left=2,
+                mask_population=list(population),
+            )
+            assert report.checked == 2
+            return [m.mask_hex for m in sink.mismatches]
+
+        first, second = _picks(), _picks()
+        assert first == second
+        assert set(first) <= {f"{m:032x}" for m in population}
+
+    def test_none_population_is_the_legacy_raw_enumeration(self) -> None:
+        """Explicit ``mask_population=None`` ≡ the pre-round-3 default call."""
+        bars, bits = _bars_and_bits()
+        report = _hook(_SuspectStub()).run_for_tuple(
+            bars=bars,
+            bar_bits=bits,
+            tuple_=_Tuple(),
+            grid=_Grid(),
+            budget_left=10,
+            mask_population=None,
+        )
+        assert report == DiffCheckReport(checked=2, mismatches=0, masks_mismatched=())
+        assert report.skipped_empty is False

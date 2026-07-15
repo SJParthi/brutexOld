@@ -85,7 +85,8 @@ memory in bounded mode is O(kept), NOT O(1).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -112,7 +113,7 @@ from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGat
 from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.session_lens import ist_trade_date
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
-from brutex.engine.sweep_apriori import apriori_enabled
+from brutex.engine.sweep_apriori import apriori_enabled, resolve_max_mask_bars
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -207,6 +208,24 @@ _TRADE_SIM_CHUNK_MASKS: Final[int] = 256
 #: chunk up to ~16k bars and still exceeds the kernel's 2^20 rayon threshold on
 #: big windows (the parallel arm stays reachable in single-process runs).
 _TRADE_SIM_CHUNK_CELLS: Final[int] = 4 << 20
+
+#: Per-cell hit-count memo capacity (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
+#: #1752). Counts are a PURE function of ``(bar_bits, mask)`` — per-mask
+#: independent — so memoising them across a cell's k-ladder is identity-free by
+#: construction (memo-on == memo-off bytes, parity-pinned). Beyond this cap the
+#: memo becomes pure PASS-THROUGH (computed values are still returned, just not
+#: retained), bounding the memo at ~100 MiB worst case (MEASURED, review fix
+#: round 1 m3 — the earlier "~48 B/entry ≈ 50 MiB" figure ignored the boxed
+#: PyLong keys/values: a full 2^20-entry ``dict[int, int]`` is ~40 MiB of dict
+#: shell + ~60 MiB of PyLong objects). Worst case across the 8-worker parallel
+#: envelope: ~800 MiB — inside the CLAUDE.md §8 48 GB envelope. AXIS-ORDER
+#: caveat (review fix round 1 m6): ``iter_sweep_tuples`` nests proximity /
+#: fib-anchor INSIDE k and both are cell-key determinants, so with
+#: ``|proximities| × |fib_anchors| > 1`` the drivers' single-cell
+#: reset-on-change memo delivers ZERO cross-k reuse (correctness unaffected —
+#: the memo is pure pass-through; a multi-cell memo is a deliberately-deferred
+#: perf follow-up). Every returned count stays identical either way.
+HIT_MEMO_MAX_ENTRIES: Final[int] = 1_048_576
 
 
 def _trade_sim_chunk_masks(n_bars: int) -> int:
@@ -1574,6 +1593,8 @@ def run_persisted_sweep(
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
     reference_stamper: TradeReferenceStamper | None = None,
+    hit_count_memo: MutableMapping[int, int] | None = None,
+    on_mask_population: Callable[[Sequence[int]], None] | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -1688,6 +1709,33 @@ def run_persisted_sweep(
         persisted ``run_id`` and every non-VIX column is byte-identical with
         or without the stamper (regression-pinned); ONLY the three nullable
         VIX columns differ.
+    hit_count_memo
+        Optional per-CELL superset-hit-count memo (DEC-SWEEP-APRIORI-DEFAULT-001,
+        MIGRATION.md #1752): a ``{mask: hits}`` mapping the caller owns across a
+        cell's whole k-ladder, wrapped around the ONE shared ``_count_hits``
+        (consumed by BOTH the Apriori frequent-frontier build and the Stage-1B
+        pre-filter, so target-level counts seed the next tuple's frontier for
+        free). Counts are a pure function of ``(bar_bits, mask)`` — per-mask
+        independent — so memo-on is BIT-IDENTICAL to memo-off (parity-pinned);
+        beyond :data:`HIT_MEMO_MAX_ENTRIES` the memo is pure pass-through.
+        ``None`` (default — every legacy call site) is byte-identical to the
+        pre-memo path. The grid drivers pass a memo ONLY when the Apriori
+        exploration mode is enabled.
+    on_mask_population
+        Optional observability capture (DEC-SWEEP-APRIORI-DEFAULT-001,
+        review fix round 3): fired EXACTLY once on the APRIORI arm — after
+        the candidate generation, before the enumeration loop — with the
+        tuple's already-materialised candidate list, so the R45 diffcheck
+        can sample the EXECUTED mask population instead of re-walking the
+        raw C(n, k) enumeration (which the extinction-mode auto-raise
+        unbounds). NEVER fired on the legacy arm (its ``mask_source`` is a
+        lazy generator; materialising it for a capture would re-create the
+        very cost this closes — the diffcheck's own raw walk stays the
+        legacy population). Fail-soft: a raising capture is WARNed
+        (``sweep_run.mask_population_capture_failed``) and the sweep
+        continues — an observability seam never kills a tuple (the R45
+        I-3 law). ``None`` (default — every legacy call site) is
+        byte-identical.
 
     Returns
     -------
@@ -1875,10 +1923,31 @@ def run_persisted_sweep(
     # numpy fallback, so they are bit-identical (Golden Rule #4). Consumed by BOTH
     # the Stage-1B pre-filter below AND (when ``BRUTEX_SWEEP_APRIORI`` is on) the
     # Apriori frequent-frontier build, so the two provably agree on frequency.
-    def _count_hits(masks: Sequence[int]) -> list[int]:
+    def _count_hits_uncached(masks: Sequence[int]) -> list[int]:
         if kernel is not None:
             return kernel.count_hits(masks)
         return count_supermasks(bar_bits, masks)
+
+    # Per-cell memo wrap (DEC-SWEEP-APRIORI-DEFAULT-001): counts are a pure
+    # function of (bar_bits, mask) and per-mask independent (both counters are
+    # per-mask maps), so serving memoised counts + computing only the missing
+    # sub-batch is BIT-IDENTICAL to computing the whole batch — identical counts
+    # in identical order (parity-pinned memo-on vs memo-off). Beyond
+    # HIT_MEMO_MAX_ENTRIES the memo is pure pass-through: computed values ride a
+    # call-local overlay, never retained. ``hit_count_memo is None`` (every
+    # legacy call site) short-circuits to the uncached counter — zero behavior.
+    def _count_hits(masks: Sequence[int]) -> list[int]:
+        if hit_count_memo is None:
+            return _count_hits_uncached(masks)  # byte-identical legacy arm
+        overlay: dict[int, int] = {}
+        missing = [m for m in masks if m not in hit_count_memo]
+        if missing:
+            for m, c in zip(missing, _count_hits_uncached(missing), strict=True):
+                if len(hit_count_memo) < HIT_MEMO_MAX_ENTRIES:
+                    hit_count_memo[m] = c
+                else:
+                    overlay[m] = c
+        return [hit_count_memo[m] if m in hit_count_memo else overlay[m] for m in masks]
 
     # Sentinel-authoritative redo (DEC-MARK-MANY-SENTINEL-001): with a digest
     # and NO paired sentinel, the marks cannot be trusted (a crash inside the
@@ -1918,18 +1987,88 @@ def run_persisted_sweep(
     # SweepAprioriBudgetError at its breaker via a lazy import too, so neither
     # module tops the other — no import cycle).
     mask_source: Iterable[int]
-    if apriori_enabled():
+    apriori_on = apriori_enabled()
+    #: The per-level census + wall-timings the FLUSH/COMPLETE audit payload
+    #: carries on the apriori arm (DEC-SWEEP-APRIORI-DEFAULT-001) — empty and
+    #: never emitted on the legacy arm (EMIT-ON-apriori, payload byte-identical).
+    apriori_levels: list[dict[str, object]] = []
+    apriori_generator_ms = 0.0
+    apriori_max_mask_bars = 0
+    if apriori_on:
         from brutex.engine.sweep_apriori import generate_apriori_candidates
 
-        mask_source = generate_apriori_candidates(
+        apriori_max_mask_bars = resolve_max_mask_bars()
+
+        # Census recorder (DEC-SWEEP-APRIORI-DEFAULT-001): the generator calls
+        # its injected counter EXACTLY once per level 1..k-1, in level order
+        # (the frozen call-order invariant — call j IS level j, pinned by the
+        # census-vs-log bit-equality test), so wrapping the ONE shared counter
+        # reproduces the module's own ``sweep.apriori.census`` rows bit-for-bit:
+        # ``candidates = len(masks)`` is the raw |C_j| and
+        # ``sum(c >= min_hits) `` is the frequent |F_j|. Timings are wall-clock
+        # OBSERVABILITY only — they ride the audit payload + structlog, never
+        # the sidecar / store / sentinel (nothing non-deterministic enters a
+        # byte-compared artifact, Golden Rule #7).
+        def _census_count_hits(masks: Sequence[int]) -> list[int]:
+            t0 = time.monotonic()
+            counts = _count_hits(masks)
+            apriori_levels.append(
+                {
+                    "level": len(apriori_levels) + 1,
+                    "candidates": len(masks),
+                    "frequent": sum(c >= cfg.min_hits for c in counts),
+                    "count_ms": round((time.monotonic() - t0) * 1000.0, 3),
+                }
+            )
+            return counts
+
+        t_gen = time.monotonic()
+        apriori_candidates = generate_apriori_candidates(
             bar_bits,
             condition_bits=cfg.condition_bits,
             k=cfg.k,
             min_hits=cfg.min_hits,
-            count_hits=_count_hits,
+            count_hits=_census_count_hits,
             n_bars=len(bar_bits),
+            # The budget resolved ONCE above (review fix round 1 n4) — passing
+            # it forward halves the per-tuple env re-resolve, so a junk
+            # BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS warns once per tuple here,
+            # not twice; the value is identical by construction.
+            max_mask_bars=apriori_max_mask_bars,
             cell_label=subject,
         )
+        apriori_generator_ms = round((time.monotonic() - t_gen) * 1000.0, 3)
+        # The TARGET row mirrors ``_emit_census``'s target level: raw |C_k|
+        # with ``frequent`` omitted (null — Stage-1B is the authority; its
+        # truth is the ``backtested`` tally on the same payload) and no
+        # counter call of its own (``count_ms`` null). ``k == 1`` therefore
+        # yields exactly ONE row (zero counter calls), matching the module.
+        # ``k == 0`` mirrors the module 1:1 too (review fix round 1 m9): the
+        # frozen generator emits NO census row for the single empty mask, so
+        # this wrapper must not invent one — the levels list stays EMPTY.
+        if cfg.k > 0:
+            apriori_levels.append(
+                {
+                    "level": cfg.k,
+                    "candidates": len(apriori_candidates),
+                    "frequent": None,
+                    "count_ms": None,
+                }
+            )
+        if on_mask_population is not None:
+            # R45 executed-population handoff (review fix round 3): the
+            # candidate list is ALREADY materialised in memory — hand the
+            # reference to the caller (the diffcheck's sample population);
+            # nothing is recomputed. Fail-soft per the I-3 law.
+            try:
+                on_mask_population(apriori_candidates)
+            except Exception as exc:  # an observability capture never kills the tuple
+                _LOG.warning(
+                    "sweep_run.mask_population_capture_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+        mask_source = apriori_candidates
     else:
         mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
     for mask in mask_source:
@@ -2217,7 +2356,7 @@ def run_persisted_sweep(
         )
         sentinel_written = True
 
-    tallies = {
+    tallies: dict[str, Any] = {
         "enumerated": enumerated,
         "conflict_pruned": conflict_pruned,
         "skipped_dedup": skipped_dedup,
@@ -2240,6 +2379,19 @@ def run_persisted_sweep(
         tallies["temporal_observed_kills"] = temporal_runtime.stats.observed_kills
         tallies["temporal_abstained"] = temporal_runtime.stats.abstained
         tallies["temporal_judged_years"] = temporal_runtime.n_judged
+    if apriori_on:
+        # EMIT-ON-apriori census artifact (DEC-SWEEP-APRIORI-DEFAULT-001,
+        # MIGRATION.md #1752): the per-level |C_j|/|F_j| curve + wall timings
+        # land on the FLUSH + COMPLETE audit payloads (hash-chained JSONL —
+        # additive keys are chain-safe, the DEC-TRIAL-STATS-WRITE-001
+        # precedent) + the ``sweep_run.complete`` log. A LEGACY tuple carries
+        # NO key, so its payload is byte-identical (frozen-key-set pinned).
+        # Timings live ONLY here — never in the sidecar / store / sentinel.
+        tallies["apriori"] = {
+            "max_mask_bars": apriori_max_mask_bars,
+            "generator_ms": apriori_generator_ms,
+            "levels": apriori_levels,
+        }
     audit.append(
         action=_ACTION_FLUSH,
         subject=subject,
@@ -2275,6 +2427,7 @@ def run_persisted_sweep(
 
 
 __all__ = [
+    "HIT_MEMO_MAX_ENTRIES",
     "ComboDedup",
     "SweepAprioriBudgetError",
     "SweepAprioriUnsupportedError",

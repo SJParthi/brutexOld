@@ -2338,3 +2338,419 @@ class TestBrokenProcessPoolQuarantine:
                 driver.run()
         actions = [e.action for e in read_sup_entries(tmp_path / "sup.jsonl")]
         assert "SUPERVISOR_ABORT" in actions
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The parallel driver's apriori wiring: the spawn workers' env-inherited
+# per-cell hit-count memo, the #1608 watchdog work cap (min(raw, k×budget)
+# iff apriori is ON — legacy raw byte-identical), the EMIT-ON-apriori
+# START/COMPLETE payload keys, and the DISTINCT tuples_failed_apriori_budget
+# counter on the parallel summary.
+
+
+def _run_parallel_summary(
+    tmp: Path, grid: SweepGridConfig, workers: int = 2
+) -> tuple[Any, Path, Path, Path]:
+    """Run the parallel grid; return (summary, results_root, supervisor_audit, ingest_audit).
+
+    The per-tuple SWEEP_START/FLUSH/COMPLETE lines ride the INGEST chain (the
+    workers' ``BufferedAuditCollector`` records replay onto it); the
+    SUPERVISOR_START/COMPLETE lines ride the supervisor chain.
+    """
+    out = tmp / "out"
+    with (
+        AuditWriter.open(tmp / "ingest.jsonl") as ingest,
+        _guards(tmp, grid) as guards,
+    ):
+        summary = mod.run_parallel_grid(
+            grid,
+            bars_for=_bars_for,
+            root=out,
+            ingest_audit=ingest,
+            guards=guards,
+            workers=workers,
+        )
+    return summary, out, tmp / "sup.jsonl", tmp / "ingest.jsonl"
+
+
+class TestWorkerHitCountMemo:
+    """``mod._worker_hit_count_memo`` — the per-worker single-cell memo seam."""
+
+    def test_off_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        monkeypatch.setattr(mod, "_WORKER_HIT_MEMO", None)
+        grid = _grid()
+        ctx = mod._WorkerContext(grid=grid, root=Path("/tmp/z"))
+        tuple_ = next(iter_sweep_tuples(grid))
+        assert mod._worker_hit_count_memo(tuple_, ctx) is None
+        # The legacy arm never even seeds the module global.
+        assert mod._WORKER_HIT_MEMO is None
+
+    def test_on_shares_one_memo_across_the_cell_k_ladder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        monkeypatch.setattr(mod, "_WORKER_HIT_MEMO", None)
+        grid = _grid()  # ONE instrument × ONE tf ⇒ one cell; k ∈ {1, 2}
+        ctx = mod._WorkerContext(grid=grid, root=Path("/tmp/z"))
+        tuples = list(iter_sweep_tuples(grid))
+        memos = [mod._worker_hit_count_memo(t, ctx) for t in tuples]
+        assert all(isinstance(m, dict) for m in memos)
+        # direction/k are excluded from the cell key ⇒ the SAME dict everywhere.
+        assert all(m is memos[0] for m in memos[1:])
+
+    def test_resets_on_a_cell_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        monkeypatch.setattr(mod, "_WORKER_HIT_MEMO", None)
+        grid = _grid(timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)], k_values=[1])
+        ctx = mod._WorkerContext(grid=grid, root=Path("/tmp/z"))
+        tuples = list(iter_sweep_tuples(grid))
+        by_tf: dict[str, dict[int, int]] = {}
+        for t in tuples:
+            memo = mod._worker_hit_count_memo(t, ctx)
+            assert memo is not None
+            by_tf.setdefault(t.tf.label, memo)
+        assert by_tf["1minute"] is not by_tf["5minute"]
+
+    def test_memo_survives_a_populated_cell_revisit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A SAME-cell revisit keeps the populated memo (never a spurious reset)."""
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        monkeypatch.setattr(mod, "_WORKER_HIT_MEMO", None)
+        grid = _grid()
+        ctx = mod._WorkerContext(grid=grid, root=Path("/tmp/z"))
+        tuple_ = next(iter_sweep_tuples(grid))
+        memo = mod._worker_hit_count_memo(tuple_, ctx)
+        assert memo is not None
+        memo[0b1] = 42
+        again = mod._worker_hit_count_memo(tuple_, ctx)
+        assert again is not None
+        assert again is memo
+        assert again[0b1] == 42
+
+
+class TestTupleWorkAprioriCap:
+    """The #1608 watchdog work estimate: ``min(Σ_{j<=k} C(n,j) × bars, k×budget)``
+    iff apriori ON (the LADDER-CUMULATIVE raw — review fix round 1 M1)."""
+
+    @staticmethod
+    def _cumulative_raw(k: int, n_unique: int, n_bars: float) -> float:
+        from brutex.engine.combo_mask import count_combos
+
+        return float(sum(count_combos(j, n_unique) for j in range(1, k + 1))) * n_bars
+
+    def test_cap_engages_iff_apriori_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import MAX_MASK_BARS_ENV, SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        monkeypatch.setenv(MAX_MASK_BARS_ENV, "100")
+        grid = _grid()  # condition_bits [0..4] → n_unique = 5
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            for t in iter_sweep_tuples(grid):
+                raw = self._cumulative_raw(t.k, 5, 240.0)
+                assert driver._tuple_work(t, 240) == min(raw, float(t.k) * 100.0)
+                # The cap genuinely BINDS here (cumulative raw ≥ 1200 > k×100) —
+                # the min is not vacuous, so a dropped-min mutant dies.
+                assert driver._tuple_work(t, 240) == float(t.k) * 100.0
+
+    def test_cap_never_raises_a_small_raw_estimate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")  # default (huge) budget
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            for t in iter_sweep_tuples(grid):
+                # cumulative raw ≪ k×DEFAULT_MAX_MASK_BARS ⇒ min() returns the
+                # LADDER-CUMULATIVE raw estimate (every level 1..k is counted —
+                # a target-k apriori tuple genuinely walks all of them).
+                assert driver._tuple_work(t, 240) == self._cumulative_raw(t.k, 5, 240.0)
+
+    def test_deep_k_estimates_never_collapse_past_the_binomial_peak(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fix round 1 M1 — the deep-k pin: at n_unique=60 / 2.2M bars
+        the k=57..60 capped estimates sit at the k×budget bound (NOT the
+        collapsing single-level ``C(60,k)`` raw, which reads ~free at k=60)
+        and are MONOTONE non-collapsing — a deep-k estimate never falls below
+        a small-k tuple's, so the grid TAIL can never fall back to the flat
+        300 s bound (#1608 false-abort + resume-livelock)."""
+        from brutex.engine.combo_mask import count_combos
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS, SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")  # default (huge) budget
+        n_bars = 2_200_000
+        grid = _grid(condition_bits=list(range(60)), k_values=[1, 57, 58, 59, 60])
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            by_k = {t.k: driver._tuple_work(t, n_bars) for t in iter_sweep_tuples(grid)}
+            # The deep-k region caps at k×budget (the cumulative raw is ~2^60×bars).
+            for k in (57, 58, 59, 60):
+                assert by_k[k] == float(k) * float(DEFAULT_MAX_MASK_BARS)
+            # MONOTONE non-collapsing: estimate(k) never falls below estimate at
+            # any smaller k in the apriori arm.
+            import itertools
+
+            ks = sorted(by_k)
+            for lo, hi in itertools.pairwise(ks):
+                assert by_k[hi] >= by_k[lo]
+            # The regression teeth: the OLD single-level raw at k=60 is
+            # C(60,60)×n_bars = n_bars — BELOW the base-bound work equivalent
+            # (300 s × the throughput floor), i.e. it would have read the deep
+            # tail as ~free work and re-armed the flat 300 s bound…
+            old_raw_k60 = float(count_combos(60, 60)) * float(n_bars)
+            base_bound_work = 300.0 * mod.STALL_MIN_MASK_BARS_PER_SEC
+            assert old_raw_k60 < base_bound_work
+            # …while the fixed estimate dwarfs it (>> the 300 s-equivalent work),
+            # so the k=60 effective stall bound genuinely scales past the base.
+            assert by_k[60] > base_bound_work
+            assert driver._effective_stall_seconds(by_k[60]) > 300.0
+
+    def test_legacy_arm_is_raw_even_with_a_tiny_budget_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.combo_mask import count_combos
+        from brutex.engine.sweep_apriori import MAX_MASK_BARS_ENV, SWEEP_APRIORI_ENV
+
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        monkeypatch.setenv(MAX_MASK_BARS_ENV, "100")
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            for t in iter_sweep_tuples(grid):
+                # Predicate-gated: apriori OFF keeps the raw estimate byte-identical.
+                assert driver._tuple_work(t, 240) == float(count_combos(t.k, 5)) * 240.0
+
+    def test_effective_stall_stays_finite_under_the_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cap's POINT: the capped work yields a FINITE, bounded stall budget."""
+        import math
+
+        from brutex.engine.sweep_apriori import MAX_MASK_BARS_ENV, SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        monkeypatch.setenv(MAX_MASK_BARS_ENV, "100")
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing, stall_seconds=300.0)
+            work = max(driver._tuple_work(t, 240) for t in iter_sweep_tuples(grid))
+            bound = driver._effective_stall_seconds(work)
+            assert math.isfinite(bound)
+            assert bound == 300.0  # capped work ≪ the throughput floor ⇒ base wins
+
+
+class TestAprioriWorkHelpers:
+    """The §11 COMMON work-estimate helpers (review fix round 1 M1/m7/n4)."""
+
+    def test_apriori_tuple_work_is_the_capped_cumulative_min(self) -> None:
+        from brutex.engine.combo_mask import count_combos
+
+        # n_unique=5, n_bars=240, budget=100: the cap binds at every k.
+        for k in (1, 2, 3):
+            cumulative = float(sum(count_combos(j, 5) for j in range(1, k + 1))) * 240.0
+            assert mod.apriori_tuple_work(k=k, n_unique=5, n_bars=240, max_mask_bars=100) == min(
+                cumulative, float(k) * 100.0
+            )
+        # A huge budget: the cumulative raw wins verbatim.
+        assert (
+            mod.apriori_tuple_work(k=3, n_unique=5, n_bars=240, max_mask_bars=10**15)
+            == float(5 + 10 + 10) * 240.0
+        )
+
+    def test_ladder_stall_bound_matches_the_driver_math(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI-watchdog helper = capped work / the resolved throughput floor —
+        the EXACT quantity ``_effective_stall_seconds`` scales by (m7)."""
+        from brutex.engine.sweep_apriori import MAX_MASK_BARS_ENV
+
+        monkeypatch.setenv(MAX_MASK_BARS_ENV, "100")
+        bound = mod.apriori_ladder_stall_bound_seconds(k=2, n_unique=5, n_bars=240)
+        # min((5+10)×240, 2×100) = 200 mask·bar at the default 2.5e8 floor.
+        assert bound == 200.0 / mod.STALL_MIN_MASK_BARS_PER_SEC
+
+    def test_deep_ladder_bound_exceeds_the_flat_default(self) -> None:
+        """The m7 point: a default-budget k=60 ladder bound is HOURS, not 300 s —
+        the Telegram watchdog scaled by it can never false-CRITICAL a healthy
+        mid-ladder extinction level."""
+        bound = mod.apriori_ladder_stall_bound_seconds(k=60, n_unique=60, n_bars=2_200_000)
+        assert bound > 300.0
+
+    def test_budget_env_is_resolved_once_per_driver_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review fix round 1 n4: the driver resolves BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS
+        ONCE at construction — per-dispatch ``_tuple_work`` calls never re-resolve,
+        so a junk env value warns once per run instead of ~O(tuples) times."""
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        calls = {"n": 0}
+        real = mod.resolve_max_mask_bars
+
+        def _counting(*args: object, **kwargs: object) -> int:
+            calls["n"] += 1
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(mod, "resolve_max_mask_bars", _counting)
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            assert calls["n"] == 1  # resolved at construction
+            for t in iter_sweep_tuples(grid):
+                driver._tuple_work(t, 240)
+            assert calls["n"] == 1  # never re-resolved per dispatch
+
+    def test_legacy_driver_never_resolves_the_budget_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        calls = {"n": 0}
+        real = mod.resolve_max_mask_bars
+
+        def _counting(*args: object, **kwargs: object) -> int:
+            calls["n"] += 1
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(mod, "resolve_max_mask_bars", _counting)
+        grid = _grid()
+        with AuditWriter.open(tmp_path / "i.jsonl") as ing, _guards(tmp_path, grid) as guards:
+            driver = _driver(tmp_path, grid, guards, ing)
+            for t in iter_sweep_tuples(grid):
+                driver._tuple_work(t, 240)
+        assert calls["n"] == 0  # the legacy arm never touches the budget knob
+
+
+class TestParallelAprioriWiring:
+    """END-TO-END spawn wiring: env inheritance, payload keys, the trip counter."""
+
+    def test_spawn_workers_inherit_env_and_payloads_carry_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL 2-worker spawn run under the apriori env (the #1630 env-propagation
+        pattern): the workers' OWN ``run_persisted_sweep`` takes the apriori branch
+        (proven by the worker-produced EMIT-ON-apriori census key riding the
+        BufferedAuditCollector back to the parent chain), the START record carries
+        the mode, the COMPLETE record carries the ZERO trip counter, and the tree is
+        byte-identical to a sequential apriori run (worker-memo parity)."""
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS, SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        grid = _grid()
+        summary, par_root, sup_path, ingest_path = _run_parallel_summary(
+            tmp_path / "par", grid, workers=2
+        )
+        assert summary.tuples_failed == 0
+        assert summary.tuples_failed_apriori_budget == 0  # default-zero on a clean run
+        entries = list(read_sup_entries(sup_path))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["apriori"] == {
+            "enabled": True,
+            "max_mask_bars": DEFAULT_MAX_MASK_BARS,
+        }
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 0
+        tuple_completes = [
+            e for e in read_ingest_entries(ingest_path) if e.action == "SWEEP_COMPLETE"
+        ]
+        assert len(tuple_completes) == 4
+        for e in tuple_completes:
+            artifact = e.payload["apriori"]  # the worker took the apriori branch
+            assert artifact["max_mask_bars"] == DEFAULT_MAX_MASK_BARS
+            # Level 1's raw candidate row is the n_unique singleton frontier.
+            assert artifact["levels"][0]["candidates"] == 5
+        # Worker-memo parity: the spawn tree ≡ the sequential apriori tree.
+        seq_root, _seq_audit, _ckpt = _run_sequential(tmp_path / "seq", grid)
+        assert _tree(par_root) == _tree(seq_root)
+        assert len(_tree(par_root)) > 0
+
+    def test_legacy_spawn_payloads_carry_no_apriori_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EMIT-ON-apriori law: a legacy parallel run's payloads are key-free."""
+        from brutex.engine.sweep_apriori import SWEEP_APRIORI_ENV
+
+        monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+        grid = _grid()
+        summary, _root, sup_path, ingest_path = _run_parallel_summary(tmp_path, grid, workers=2)
+        assert summary.tuples_failed_apriori_budget == 0
+        entries = list(read_sup_entries(sup_path))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "apriori" not in start.payload
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert "tuples_failed_apriori_budget" not in complete.payload
+        tuple_completes = [
+            e for e in read_ingest_entries(ingest_path) if e.action == "SWEEP_COMPLETE"
+        ]
+        assert len(tuple_completes) == 4
+        for e in tuple_completes:
+            assert "apriori" not in e.payload
+
+    def test_budget_trips_count_distinctly_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A REAL spawn run under a tiny mask·bar budget: every tuple trips the
+        breaker deterministically, the DISTINCT counter equals the trip count on
+        BOTH the summary and the COMPLETE payload, and the checkpoint freezes."""
+        from brutex.engine.sweep_apriori import MAX_MASK_BARS_ENV, SWEEP_APRIORI_ENV
+
+        monkeypatch.setenv(SWEEP_APRIORI_ENV, "1")
+        # level-1 work = 5 masks × 240 bars = 1200 mask·bar > 10 ⇒ every tuple trips.
+        monkeypatch.setenv(MAX_MASK_BARS_ENV, "10")
+        grid = _grid()
+        summary, _root, sup_path, _ingest = _run_parallel_summary(tmp_path, grid, workers=2)
+        assert summary.tuples_failed == 4
+        assert summary.tuples_failed_apriori_budget == 4
+        entries = list(read_sup_entries(sup_path))
+        complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
+        assert complete.payload["tuples_failed"] == 4
+        assert complete.payload["tuples_failed_apriori_budget"] == 4
+
+    def test_apply_counts_only_budget_prefixed_failures(self, tmp_path: Path) -> None:
+        """``_apply``'s counter keys on the ANCHORED ``SweepAprioriBudgetError: ``
+        prefix — a generic failure increments ``tuples_failed`` ONLY, and a
+        LOOK-ALIKE class name (``SweepAprioriBudgetErrorX``) is never
+        miscounted as a budget trip (review fix round 1 m8)."""
+        grid = _grid()
+        tuples = list(iter_sweep_tuples(grid))
+        budget_failed = mod.TupleWorkResult(
+            index=1,
+            summary=None,
+            failed_error="SweepAprioriBudgetError: apriori cell 'x': k=2 exceeds budget",
+            audit_records=(),
+        )
+        generic_failed = mod.TupleWorkResult(
+            index=2, summary=None, failed_error="ValueError: boom", audit_records=()
+        )
+        look_alike_failed = mod.TupleWorkResult(
+            index=3,
+            summary=None,
+            failed_error="SweepAprioriBudgetErrorX: an impostor class name",
+            audit_records=(),
+        )
+        acc, _next_index, _seen = _drive_with_fake(
+            tmp_path,
+            grid,
+            result_for={1: budget_failed, 2: generic_failed, 3: look_alike_failed},
+        )
+        assert acc.tuples_failed == 3
+        assert acc.tuples_failed_apriori_budget == 1  # the impostor never counts
+        assert acc.had_failure is True
+        assert len(tuples) == 4  # the remaining tuple completed normally
+        assert acc.tuples_run == 1
+
+    def test_accumulator_default_is_zero(self) -> None:
+        assert mod._Accumulator().tuples_failed_apriori_budget == 0

@@ -1126,3 +1126,183 @@ class TestRunSweepGridRollSchedule:
         base = _run("none", None)
         assert _run("empty", {}) == base
         assert _run("foreign", {"NSE-NIFTY-FUT": _FUT_SCHEDULE}) == base
+
+
+# ────── DEC-SWEEP-APRIORI-DEFAULT-001 (MIGRATION.md #1752) ──────
+# The grid driver's apriori wiring: the ONE hit_memo_cell_key builder, the
+# per-cell memo threading (reset on a cell change, None on legacy), the
+# EMIT-ON-apriori START/COMPLETE payload keys, and the DISTINCT
+# tuples_failed_apriori_budget counter.
+
+
+class TestHitMemoCellKey:
+    """The memo's cell key == the kernel-cache determinant set (§11 COMMON)."""
+
+    def test_key_components(self) -> None:
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        grid = _grid()
+        tuple_ = next(iter_sweep_tuples(grid))
+        key = hit_memo_cell_key(tuple_, grid, (738885,))
+        assert key == (
+            tuple_.instrument,
+            tuple_.tf.label,
+            None,  # proximity None flattens to None
+            grid.prior_n,
+            tuple_.fib_anchor.value,
+            (738885,),
+            False,  # apply_1day_mask for a spot 1minute tuple
+        )
+
+    def test_direction_sl_tp_k_are_excluded(self) -> None:
+        """The key survives the whole cell's k-ladder — the memo's point."""
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        grid = _grid(
+            directions=[Side.BUY, Side.SELL],
+            k_values=[1, 2],
+            stop_losses=[80, None],
+            take_profits=[50, None],
+        )
+        keys = {hit_memo_cell_key(t, grid, None) for t in iter_sweep_tuples(grid)}
+        assert len(keys) == 1  # ONE cell across every direction/k/sl/tp tuple
+
+    def test_proximity_flattens_to_bps(self) -> None:
+        from brutex.engine.sweep_orchestrator import hit_memo_cell_key
+
+        prox = ProximityParams(pivot_proximity_bps=12)
+        grid = _grid(proximities=[prox])
+        tuple_ = next(iter_sweep_tuples(grid))
+        key = hit_memo_cell_key(tuple_, grid, None)
+        assert key[2] == (
+            prox.pivot_proximity_bps,
+            prox.pdh_pdl_proximity_bps,
+            prox.fib_proximity_bps,
+        )
+
+
+class TestRunSweepGridAprioriWiring:
+    """START/COMPLETE keys + memo threading + the budget-trip counter."""
+
+    @staticmethod
+    def _capture_memos(
+        tmp_path: Path, grid: SweepGridConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[SweepGridSummary, list[object], Path]:
+        """Run the grid with a fake run_one_tuple capturing hit_count_memo."""
+        memos: list[object] = []
+
+        def _fake(grid_: object, tuple_: object, **kwargs: object) -> object:
+            memos.append(kwargs["hit_count_memo"])
+            return None  # classify as no-bars: no engine work
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _fake)
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        return summary, memos, audit_path
+
+    def test_legacy_start_and_complete_payloads_carry_no_apriori_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1, 2])
+        _summary, memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        assert memos == [None, None]  # legacy: memo structurally absent
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert "apriori" not in start.payload
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert "tuples_failed_apriori_budget" not in complete.payload
+
+    def test_apriori_start_records_the_mode_and_complete_the_counter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.engine.sweep_apriori import DEFAULT_MAX_MASK_BARS
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2])
+        _summary, memos, audit_path = self._capture_memos(tmp_path, grid, monkeypatch)
+        # ONE memo dict shared across the whole cell's k-ladder.
+        assert len(memos) == 2
+        assert isinstance(memos[0], dict)
+        assert memos[0] is memos[1]
+        start = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_START")
+        assert start.payload["apriori"] == {
+            "enabled": True,
+            "max_mask_bars": DEFAULT_MAX_MASK_BARS,
+        }
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 0
+
+    def test_memo_resets_on_a_cell_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two cells (two timeframes) → two DISTINCT memo dicts (reset-on-change)."""
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(timeframes=[Timeframe("1minute", 1), Timeframe("5minute", 5)], k_values=[1, 2])
+        _summary, memos, _audit = self._capture_memos(tmp_path, grid, monkeypatch)
+        # Enumeration order: tf-major → [1m k1, 1m k2, 5m k1, 5m k2].
+        assert len(memos) == 4
+        assert memos[0] is memos[1]
+        assert memos[2] is memos[3]
+        assert memos[0] is not memos[2]
+
+    def test_budget_trip_counts_distinctly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SweepAprioriBudgetError is counted APART from generic failures —
+        by EXACT isinstance, so a LOOK-ALIKE class name is never miscounted
+        (review fix round 1 m8)."""
+        from brutex.engine.sweep_run import SweepAprioriBudgetError
+
+        class SweepAprioriBudgetErrorX(SweepComboError):
+            """The impostor: a name-PREFIX collision that must never count."""
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        grid = _grid(k_values=[1, 2, 3])
+
+        def _fake(grid_: object, tuple_: object, **kwargs: object) -> object:
+            k = tuple_.k  # type: ignore[attr-defined]
+            if k == 1:
+                raise SweepAprioriBudgetErrorX("an impostor class name")
+            if k == 2:
+                raise SweepAprioriBudgetError("apriori cell 'x': k=2 ... exceeds ...")
+            if k == 3:
+                raise SweepComboError("generic combo failure")
+            return None
+
+        monkeypatch.setattr("brutex.engine.sweep_orchestrator.run_one_tuple", _fake)
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: [],
+                store_for=make_store_for(tmp_path / "results", grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        assert summary.tuples_failed == 3
+        assert summary.tuples_failed_apriori_budget == 1  # the k=2 trip ONLY
+        complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
+        assert complete.payload["tuples_failed_apriori_budget"] == 1
+
+    def test_summary_field_defaults_zero(self) -> None:
+        """The defaulted-field back-compat law (the quarantined_prior precedent)."""
+        summary = SweepGridSummary(
+            tuples_total=1,
+            tuples_run=1,
+            tuples_skipped_no_bars=0,
+            enumerated=1,
+            conflict_pruned=0,
+            skipped_dedup=0,
+            evaluated=1,
+            ranked=0,
+            persisted=0,
+            tuples_failed=0,
+        )
+        assert summary.tuples_failed_apriori_budget == 0
