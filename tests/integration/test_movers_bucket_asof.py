@@ -247,6 +247,10 @@ class TestSpotBucketAsof:
 
     def test_bucket_end_clamps_to_session_close(self, tmp_path: Path) -> None:
         # 1hour @ 15:15 resolves through 15:29 (clamped), reading the 15:29 bar.
+        # Closes sit above _bar's -3.00 low offset so the fixture bars stay
+        # price-SANE — the read gate (DEC-READ-GUARD-PARITY-001) honestly
+        # refuses a fixture bar with a non-positive low, exactly like a
+        # corrupt stored row (the pre-fix closes 1.00/2.00 built low=-2.00).
         bars = [
             _bar(hour=15, minute=15, close=Decimal("100.00")),
             _bar(hour=15, minute=29, close=Decimal("200.00")),

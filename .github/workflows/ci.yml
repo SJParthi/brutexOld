@@ -987,6 +987,7 @@ jobs:
             pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
             pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
             pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
+            pytest --cov=brutex.crossverify.owed         --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_owed.py
             pytest --cov=brutex.crossverify.s3_publish   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_s3_publish.py
             pytest --cov=brutex.crossverify.pull_leg     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_pull_leg.py
             pytest --cov=brutex.crossverify.prebuild_leg --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_prebuild_leg.py

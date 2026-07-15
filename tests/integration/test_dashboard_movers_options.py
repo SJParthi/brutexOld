@@ -123,6 +123,12 @@ def _seed_options_lake(tmp_path: Path) -> None:
     CE LTP 164 (+OI 1100) vs prior-day close 100 / prior-day OI 1000 → pct +64%,
     oi_chg +100, oi% +10%. PE LTP 80 (+OI 900) vs prior-day close 90 / prior-day
     OI 1200 → pct −11.11%, oi_chg −300, oi% −25%. Spot LTP 23622.90.
+
+    DEC-OPTIONS-PREBUILD-RETIRE-001: the option baselines are seeded as the
+    PRIOR SESSION'S last 1-minute bars (the 1-minute-native source the CE/PE
+    resolvers now read); the stored option ``1day`` rows are KEPT with the
+    SAME values as inert frozen legacy — the served numbers prove the gate
+    recovers the identical baseline from 1-minute.
     """
     _write(
         tmp_path,
@@ -130,6 +136,7 @@ def _seed_options_lake(tmp_path: Path) -> None:
         symbol=_CE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="100", volume=10, oi=1000, day=date(2024, 6, 12)),
             _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050),
             _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100),
         ],
@@ -147,6 +154,7 @@ def _seed_options_lake(tmp_path: Path) -> None:
         symbol=_PE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="90", volume=10, oi=1200, day=date(2024, 6, 12)),
             _min_bar(hour=9, minute=15, close="85", volume=50, oi=950),
             _min_bar(hour=9, minute=16, close="80", volume=150, oi=900),
         ],
@@ -1791,7 +1799,7 @@ class TestRegistryStrikeStep:
     def test_movers_template_renders_the_low_confidence_marker(self) -> None:
         # The frontend honesty marker (a trailing " ~" keyed off the row field) is
         # present in the served template — display-only, string-pinned.
-        import brutex.dashboard as dashboard_pkg
+        from brutex import dashboard as dashboard_pkg
 
         template = (Path(dashboard_pkg.__file__).parent / "templates" / "movers.html").read_text(
             encoding="utf-8"
@@ -2446,15 +2454,19 @@ _G_CE = "NSE-NIFTY-30Sep25-24000-CE"  # expiry 2025-09-30 ≥ snapshot → near 
 
 
 def _seed_contiguity_option(tmp_path: Path, *, prior_day: date) -> None:
-    """One CE contract: session bars on Mon 2025-09-29 + ONE prior 1-day bar on
-    *prior_day* (close 100, OI 1000). NO underlying spot (an honest None spot —
-    keeps the golden fully deterministic)."""
+    """One CE contract: session bars on Mon 2025-09-29 + the prior session's
+    last 1-MINUTE bar on *prior_day* (close 100, OI 1000 — the 1-minute-native
+    baseline source, DEC-OPTIONS-PREBUILD-RETIRE-001) + ONE stored 1-day bar
+    on the same *prior_day* with the SAME values (inert frozen legacy — the
+    gate ignores it; identical served numbers prove the recovery). NO
+    underlying spot (an honest None spot — keeps the golden deterministic)."""
     _write(
         tmp_path,
         segment="FNO",
         symbol=_G_CE,
         interval="1minute",
         bars=[
+            _min_bar(hour=15, minute=29, close="100", volume=10, oi=1000, day=prior_day),
             _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=_G_DAY),
             _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=_G_DAY),
         ],
@@ -2547,6 +2559,11 @@ class TestOptionsContiguityGoldens:
             symbol=ce,
             interval="1minute",
             bars=[
+                # The 2024-11-01 Diwali Muhurat evening session's last bar —
+                # the 1-minute-native baseline (DEC-OPTIONS-PREBUILD-RETIRE-001).
+                _min_bar(
+                    hour=18, minute=59, close="100", volume=10, oi=1000, day=date(2024, 11, 1)
+                ),
                 _min_bar(hour=9, minute=15, close="150", volume=100, oi=1050, day=day),
                 _min_bar(hour=9, minute=16, close="164", volume=400, oi=1100, day=day),
             ],

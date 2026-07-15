@@ -2282,13 +2282,17 @@ def list_option_series(
 # ─── Lake STATS-manifest read integration (DEC-LAKE-STATS-MANIFEST-001) ──────
 #
 # The read half of the per-file stats manifest (the #867/#1025 named future
-# work): when a request opts in (``use_stats_manifest=True`` — the production
+# work, since SHIPPED by DEC-LAKE-STATS-MANIFEST-001 — MIGRATION.md #1614):
+# when a request opts in (``use_stats_manifest=True`` — the production
 # /db routes do; the pure-function default stays ``False`` so every direct
 # caller keeps the byte-identical legacy query pattern) AND the kill switch
 # (``BRUTEX_LAKE_STATS_MANIFEST``) is not ``off``, the candle pagers consult
 # the dataset's validated stats shard to (a) answer the page TOTAL from the
 # stamped per-file DISTINCT-key counts and (b) PRUNE the page query's file list
-# to only the files the requested page needs — true O(page) in partition depth.
+# to only the files the requested page needs — O(page-files) Parquet work
+# plus an O(D) per-request revalidation stat sweep (D = the ONE dataset's
+# month files), NOT literal O(page)/O(1) — the MIGRATION.md #1614 honest
+# envelope.
 # ANY validation/read failure falls back to the byte-identical legacy live
 # scan (one ``lake.stats_manifest.fallback`` log naming the clause) and the
 # read side reseeds the shard best-effort — the reader NEVER serves a number
@@ -2583,7 +2587,7 @@ def _stats_star_columns(
     under a key that folds in the validated file-state fingerprint
     (:func:`_stats_fingerprint`) — a memoised order can never be served for a
     file state other than the one it described (no staleness envelope at
-    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the O(page) win
+    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the pruned-read win
     is smaller — the production routes always inject the cache). Returns
     ``None`` on a describe failure (the caller degrades to legacy).
     """
@@ -2655,7 +2659,9 @@ def _stats_pruned_page(
 ) -> tuple[list[str], list[tuple[Any, ...]]] | None:
     """Execute the page over ONLY the files it needs — or ``None`` ⇒ run legacy.
 
-    The manifest page path (true O(page) in partition depth): plan the minimal
+    The manifest page path (O(page-files) Parquet work — the plan walk and
+    the request's revalidation are each O(D) in the dataset's month files,
+    so NOT literal O(page) in partition depth): plan the minimal
     file sublist + rebased local ``OFFSET`` via :meth:`_StatsReadContext.plan_page`,
     then execute the IDENTICAL SQL shape the legacy page uses (same
     SELECT/WHERE/QUALIFY/ORDER/LIMIT — only the ``read_parquet(?)`` binding
@@ -3135,9 +3141,14 @@ def query_candles(
     computation per write-generation and O(1) on a cached repeat (see
     *count_cache*). That scan is flat enough to pass the shared-CI < 8×
     depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``); genuine
-    row-group pruning would need stats-compatible raw-column predicates, and
-    a write-time page manifest (true O(page) reads) stays the named future
-    work (#867 / #1025). This mirrors the
+    row-group pruning would need stats-compatible raw-column predicates.
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the dataset's month files), NOT literal O(page). This
+    mirrors the
     :func:`brutex.data.lake_read.dedup_qualify_sql` /
     :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope;
     a prev/next paging click therefore RE-SCANS the partition — flat only in
@@ -3186,8 +3197,10 @@ def query_candles(
         Opt into the per-file lake STATS manifest (DEC-LAKE-STATS-MANIFEST-001):
         the page ``total`` + the default-range span are answered from the
         dataset's VALIDATED stats shard and the page query's file list is
-        PRUNED to only the files the page needs — true O(page) in partition
-        depth. Served ONLY after full per-request revalidation (parse + key
+        PRUNED to only the files the page needs — O(page-files) Parquet
+        work plus an O(D) per-request revalidation stat sweep (D = the
+        dataset's month files), NOT literal O(page). Served ONLY after
+        full per-request revalidation (parse + key
         echo + file-set + per-file stat token + month bounds); ANY failure —
         including a mid-request pruned-read error or a moved stat token —
         re-runs the WHOLE request on the byte-identical legacy path (one
@@ -5147,8 +5160,13 @@ def query_option_candles(
     materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
     top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
     **O(rows)** on the first computation per write-generation and O(1) on a
-    cached repeat (see *count_cache*). A write-time page manifest (true O(page)
-    reads) stays the named future work (#867 / #1025).
+    cached repeat (see *count_cache*).
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the series' month files), NOT literal O(page).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /

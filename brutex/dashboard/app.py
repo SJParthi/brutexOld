@@ -4593,6 +4593,22 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # movers are NEVER left blocked by a failed pull.
             prebuild_ok = False
 
+            if spot_only and not dry_run:
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the moment this REAL
+                # spot-only pull COMMITS to owing the day a cross-verify —
+                # BEFORE the pull/prebuild chain runs — write the durable
+                # owed marker, so a box that dies/sleeps/closes anywhere
+                # downstream (the crossverify tail below is the launcher's
+                # LAST step) leaves a persistent sentinel the next run's
+                # step-D3 owed catchup completes. Best-effort + kill-switch
+                # coherent (mark_owed_for_pull marks nothing under
+                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
+                # failed pull); the runner clears the marker at the day's
+                # completed material verdict.
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                mark_owed_for_pull(lake_root, launch_day, source="dashboard-pipeline")
+
             # ONE durable &-form winner map for the WHOLE pipeline run
             # (DEC-FORM-WINNER-PERSIST-001): the metadata phase's %26 win reorders
             # the historical phase's very first fetch for that underlying (both key
@@ -6086,6 +6102,23 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             return None
         return load_last_run(lake_root)
 
+    def _crossverify_owed_days() -> list[str]:
+        """Owed-day names for the panel (DEC-CROSSVERIFY-OWED-SENTINEL-001).
+
+        A NAMES-only ``os.scandir`` of ``<lake_root>/.crossverify/owed/`` —
+        no entry is ever OPENED, so a planted FIFO/device symlink can never
+        hang the poll; corruption-tolerant (junk entries WARN + skip inside
+        :func:`~brutex.crossverify.owed.list_owed_days`); honest ``[]`` on
+        no resolvable lake root — never a 500. Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.owed import list_owed_days
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return []
+        return [owed.isoformat() for owed in list_owed_days(lake_root)]
+
     @app.get("/api/v1/crossverify/progress")
     async def api_crossverify_progress() -> JSONResponse:
         """GET /api/v1/crossverify/progress — the producer job snapshot.
@@ -6098,10 +6131,19 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         failed keys + detail), so a finished failure survives a page reload
         AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
         O(1) small-sidecar stat+read per poll, off the event loop; ``null``
-        when absent/corrupt/unresolvable — never a fabricated record.
+        when absent/corrupt/unresolvable — never a fabricated record. The
+        EMIT-ON-PRESENT ``owed_days`` field (DEC-CROSSVERIFY-OWED-SENTINEL-001)
+        lists days whose pull committed to a cross-verify that never reached a
+        completed verdict — the no-owed payload stays byte-identical.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
         snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        owed_days = await run_in_threadpool(_crossverify_owed_days)
+        if owed_days:
+            # EMIT-ON-PRESENT + additive-only (DEC-CROSSVERIFY-OWED-SENTINEL-001):
+            # the no-owed wire stays BYTE-IDENTICAL to the pre-change payload
+            # (pinned); an owed day reads loud on the /universe panel.
+            snapshot["owed_days"] = owed_days
         return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
