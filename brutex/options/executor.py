@@ -170,7 +170,9 @@ class RejectReason(Enum):
     LOT_SIZE_UNKNOWN = "lot_size_unknown"
     #: The entry or exit bar carries ``volume == 0`` — a stale/carried price
     #: with zero trades in the minute, so a fill at its open (even with 1-tick
-    #: slippage) is unachievable. Opt-out via ``reject_stale_bars=False``.
+    #: slippage) is unachievable. UNCONDITIONAL (DEC-FILL-WORST-CASE-ONLY-001;
+    #: the ``reject_stale_bars`` opt-out is deleted — a fabricated fill can
+    #: never be priced, whatever the caller mood).
     STALE_BAR = "stale_bar"
     #: The signal's entry date falls in a cost-regime window whose statutory
     #: rate is UNVERIFIED offline (pre-2024-10-01 ETC — NSE/BSE slab-era
@@ -451,7 +453,6 @@ def materialize_trade(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     delta_chain: DeltaChain | None = None,
-    reject_stale_bars: bool = True,
 ) -> MaterializedTrade | RejectedTrade:
     """Materialize + price one option trade for *signal* under *rule*.
 
@@ -471,12 +472,6 @@ def materialize_trade(
         intra-state GST, 1 lot).
     delta_chain
         Required only for delta-target rules.
-    reject_stale_bars
-        When ``True`` (default), an entry OR exit bar with ``volume == 0``
-        is rejected as :data:`RejectReason.STALE_BAR` — its OHLC is a
-        stale/carried price no real order could have filled at. Pass
-        ``False`` to opt out (accept zero-volume bars as before).
-        Fill-law-independent — the fill law never changes a reject.
 
     Returns
     -------
@@ -545,12 +540,12 @@ def materialize_trade(
     if pair is None:
         return RejectedTrade(leg=leg, reason=RejectReason.NO_DATA)
 
-    # Zero-volume staleness guard (opt-out via reject_stale_bars=False): a
-    # minute bar with volume == 0 carries a stale/carried OHLC — nothing
-    # traded, so pricing a fill at its open (even 1-tick-slipped) fabricates
-    # an unachievable execution. Checked BEFORE the tick floor: staleness
-    # makes the price itself meaningless.
-    if reject_stale_bars and (pair.entry_bar.volume == 0 or pair.exit_bar.volume == 0):
+    # Zero-volume staleness guard — UNCONDITIONAL (DEC-FILL-WORST-CASE-ONLY-001,
+    # superseding the opt-out knob): a minute bar with volume == 0 carries a
+    # stale/carried OHLC — nothing traded, so pricing a fill at its open
+    # (even 1-tick-slipped) fabricates an unachievable execution. Checked
+    # BEFORE the tick floor: staleness makes the price itself meaningless.
+    if pair.entry_bar.volume == 0 or pair.exit_bar.volume == 0:
         _LOG.warning(
             "options.reject.stale_bar",
             rule=rule.name,
@@ -733,7 +728,6 @@ def run_rule_over_signals(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     delta_chain_provider: DeltaChainProvider | None = None,
-    reject_stale_bars: bool = True,
 ) -> OptionsRuleResult:
     """Price every *signal* under *rule* and aggregate into an :class:`OptionsRuleResult`.
 
@@ -749,9 +743,6 @@ def run_rule_over_signals(
         Cost-model parameters.
     delta_chain_provider
         Required for a delta-target rule — yields the per-signal delta chain.
-    reject_stale_bars
-        Threaded to :func:`materialize_trade` — default ``True`` rejects
-        zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`.
 
     Returns
     -------
@@ -793,7 +784,6 @@ def run_rule_over_signals(
             gst_split=gst_split,
             n_lots=n_lots,
             delta_chain=chain,
-            reject_stale_bars=reject_stale_bars,
         )
         if isinstance(outcome, RejectedTrade):
             if outcome.reason == RejectReason.NO_DATA:
@@ -847,7 +837,6 @@ def execute_options_sim(
     n_lots: int = 1,
     delta_chain_provider: DeltaChainProvider | None = None,
     audit: AuditAppend | None = None,
-    reject_stale_bars: bool = True,
 ) -> tuple[OptionsRuleResult, ...]:
     """Run the options sim across every *rule* and return one result per rule.
 
@@ -870,10 +859,6 @@ def execute_options_sim(
         Required only if *rules* includes a delta-target rule.
     audit
         Optional audit sink; one row per rule result when supplied.
-    reject_stale_bars
-        Threaded to :func:`materialize_trade` — default ``True`` rejects
-        zero-volume entry/exit bars as :data:`RejectReason.STALE_BAR`;
-        pass ``False`` to opt out at the sim API surface.
 
     Returns
     -------
@@ -890,7 +875,6 @@ def execute_options_sim(
             gst_split=gst_split,
             n_lots=n_lots,
             delta_chain_provider=delta_chain_provider,
-            reject_stale_bars=reject_stale_bars,
         )
         results.append(result)
         if audit is not None:
