@@ -265,8 +265,12 @@ spot timeline by timestamp alignment.
 
 ## Strategy Specification
 
-- **Entry rule:** signal at bar N → enter at bar N+1 OPEN.
-- **Forced exit:** 15:20 IST. Overrides everything.
+- **Entry rule:** signal at bar N → enter on bar N+1, filled at that
+  bar's ADVERSE EXTREME (BUY = HIGH / SELL = LOW — the ONE worst-case
+  fill law, DEC-FILL-WORST-CASE-ONLY-001 #1825; timing unchanged from
+  the historical "bar N+1 OPEN" rule, only the PRICE moved).
+- **Forced exit:** 15:20 IST. Overrides everything (fills at the 15:20
+  bar's adverse extreme).
 - **Mode A** — stop-loss + take-profit grid:
   - SL ∈ [5, 200] paisa, 40 steps
   - TP ∈ [10, 500] paisa, 50 steps
@@ -746,21 +750,32 @@ ALL 30+ metrics displayed in the JSON report and PNG charts.
 3. **UTC storage internal, IST display only.** Session: 03:45-10:00 UTC.
 4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
    bar accessor catches violations at runtime (debug build only).
-5. **Precise fills (corrected 2026-05-16):** entry at bar N+1 OPEN
-   (exact value); exit at bar M+1 OPEN (exact value). NO pessimistic
-   fill on spot. Operator clarified: spot indices (NIFTY/BANKNIFTY/
-   SENSEX) are computed averages and are NOT directly tradable — there
-   is no order book to slip against, so pessimistic fill is fiction.
-   Pessimistic-fill convention applies ONLY to Track 2 options (where
-   real order books exist).
-6. **NO slippage on spot (corrected 2026-05-16):** spot indices have
-   no executable venue, so any slippage adjustment is meaningless.
-   Track 1 backtest uses the exact bar OPEN price at entry and exit.
-   Slippage applies ONLY in Track 2 options per
-   `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (delta-bucketed × ToD ×
-   VIX). At 1-minute granularity we never have tick-level access,
-   so spot's "1-tick adverse" rule (from v1 spec, now retired) is
-   doubly inappropriate: no venue + no tick data.
+5. **WORST-CASE fills — the ONE fill law (SUPERSEDED 2026-07-12→15 by
+   operator directive: DEC-FILL-WORST-CASE-001 #1786 made worst-case
+   the default; DEC-FILL-WORST-CASE-ONLY-001 #1825 deleted the PRECISE
+   opt-out — worst-case is now the ONLY fill model):** fill-bar TIMING
+   is unchanged (signal at bar N → the fill bar is N+1; forced 15:20;
+   same-bar SL-first tie), but the fill PRICE assumes the worst the
+   decided bar printed — entry at the entry bar's ADVERSE EXTREME
+   (BUY at HIGH / SELL at LOW); an SL/TP fills at
+   `min(level, bar low)` for a BUY exit / `max(level, bar high)` for a
+   SELL exit (the with-the-level clamp — never better than the level,
+   never better than the bar); open-anchored events (forced 15:20,
+   Mode-B signal exits) and `end_of_data`/`session_gap` price the
+   decided bar's adverse extreme. The historical "precise fills /
+   spot-is-not-tradable-so-pessimism-is-fiction" clause (corrected
+   2026-05-16) is CONSCIOUSLY superseded: the operator now wants the
+   anti-illusion floor — the backtest can only UNDERSTATE. INTERIM
+   HONESTY: until the PR-B 1-minute execution grid lands, the adverse
+   extreme is the DECISION-TF bar's (a 5-minute entry takes the whole
+   5-minute range's adverse depth) — strictly MORE pessimistic than
+   the operator's next-1-minute-bar target law, never optimistic.
+6. **NO tick slippage on spot (unchanged):** spot indices have no
+   executable venue, so no ±tick adjustment is applied on Track 1 —
+   the worst-case bar-extreme anchor of rule 5 IS the whole spot fill
+   law. The ±1-tick adverse addition applies ONLY in Track 2
+   options/futures per `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (flat
+   1-tick on the worst-case anchor).
 7. **NO brokerage / NO STT / NO costs.** Track 1 is signal research only
    (operator confirmed 2026-05-16). Track 2 handles realism via expired
    options data (see `docs/track2/`).
