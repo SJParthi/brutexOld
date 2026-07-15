@@ -3127,15 +3127,21 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
 
     # The standalone Dhan SPOT feed pull job (DEC-DHAN-PULL-SURFACE-001) — a
     # SEPARATE BackgroundPullJob so it never collides with Groww's ``_pull_job``.
-    # Its cross-process single-flight flock keys on the DHAN WRITE root
-    # (``feeds/dhan/`` — the ``_dhan_job_lake_root_resolver`` nesting), distinct
-    # from Groww's top-root flock, so a Dhan pull and a Groww pull can run
-    # concurrently (disjoint lake trees) while two Dhan pulls serialise. Its meter
-    # clear rides the Dhan session controller.
+    # BOTH cross-process guards key on DHAN identities
+    # (DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001): the lake flock on the DHAN WRITE root
+    # (``feeds/dhan/`` — the ``_dhan_job_lake_root_resolver`` nesting, distinct
+    # from Groww's top-root flock) AND the ACCOUNT flock on the Dhan CLIENT-ID
+    # (``_dhan_account_key_resolver`` — pre-fix this defaulted to the GROWW
+    # api-key resolver, so a wet Dhan pull took the Groww account lock and the
+    # two vendors falsely serialised) — so a Dhan pull and a Groww pull genuinely
+    # run concurrently (disjoint vendor accounts + disjoint lake trees) while two
+    # Dhan pulls sharing the client-id serialise. Its meter clear rides the Dhan
+    # session controller.
     _dhan_pull_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         on_run_end=_dhan_session_rate.clear_meter,
         lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
+        account_key_resolver=_dhan_account_key_resolver,
     )
 
     # The standalone Dhan ROLLING-ATM option pull job (DEC-DHAN-ROLLING-OPTIONS-001) —
@@ -3145,11 +3151,16 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
     # ``_dhan_job_lake_root_resolver`` nesting), so it serialises with a concurrent
     # Dhan pull sharing the same account/lake (they write DISJOINT subtrees —
     # ``rolling_options/`` vs ``bars/`` — but share the one Dhan read-only account
-    # rate budget). Its meter clear rides the SHARED Dhan session controller.
+    # rate budget). Its ACCOUNT flock likewise keys on the Dhan CLIENT-ID
+    # (``_dhan_account_key_resolver``, DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 — never
+    # the Groww api-key), so it contends with the sibling Dhan spot job (same
+    # account budget) and never with a Groww pull. Its meter clear rides the
+    # SHARED Dhan session controller.
     _dhan_option_pull_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         on_run_end=_dhan_session_rate.clear_meter,
         lake_root_resolver=_dhan_job_lake_root_resolver(instrument_store),
+        account_key_resolver=_dhan_account_key_resolver,
     )
 
     # The bulk Greeks v1→v2 backfill job (DEC-GREEKS-BULK-REENRICH-001) — a
@@ -10227,6 +10238,43 @@ def _dhan_job_lake_root_resolver(instrument_store: Any) -> Callable[[], Path | N
     Groww job's own top-root resolver.
     """
     return _dhan_feed_root_resolver(_job_lake_root_resolver(instrument_store))
+
+
+def _dhan_account_key_resolver() -> str | None:
+    """Resolve the DHAN account-lock key — the Dhan client-id, never the Groww api-key.
+
+    DEC-DHAN-ACCOUNT-LOCK-ISOLATE-001 (found by the ADR-0021 §5/§12 review
+    2026-07-15): the two Dhan jobs' ACCOUNT-keyed single-flight must key on the
+    DHAN credential, so a wet Dhan pull contends with other Dhan pulls sharing the
+    one read-only Dhan account (the 5 r/s + 100,000 req/day budget, CLAUDE.md §6b)
+    and NEVER takes — or is refused by — the GROWW account flock. Pre-fix both
+    Dhan jobs inherited :func:`~brutex.dashboard.pull_jobs._default_account_key_resolver`
+    (the Groww api-key), so a wet Dhan pull and a Groww pull falsely serialised on
+    ONE account lock despite disjoint vendor accounts and disjoint lake trees.
+
+    Failure posture mirrors the Groww default EXACTLY: a
+    :class:`~brutex.config.credentials_types.CredentialsError` (AWS unreachable /
+    parameters not seeded) maps to ``None`` — the account lock is then SKIPPED
+    with one loud ``pull_job.account_lock_skipped`` line (``feed="dhan"``) and the
+    Dhan feed-root lake flock still guards same-lake peers. Distinct credential
+    STRINGS yield distinct lock files by construction (the account lock
+    fingerprints the string it is given); the Dhan client-id and the Groww
+    api-key are separate credentials read from separate SSM parameters. Lazy
+    imports keep app import light (the #889 pattern the Groww default uses).
+    """
+    from brutex.config.credentials_dhan_aws import load_dhan_aws_credentials
+    from brutex.config.credentials_types import CredentialsError
+
+    try:
+        return load_dhan_aws_credentials().client_id
+    except CredentialsError as exc:
+        _LOG.warning(
+            "pull_job.account_lock_skipped",
+            feed="dhan",
+            reason="Dhan credentials unavailable — account-keyed single-flight not taken",
+            error=str(exc),
+        )
+        return None
 
 
 def _resume_singleflight_probe(
