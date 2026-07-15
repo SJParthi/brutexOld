@@ -123,6 +123,11 @@ jobs:
     # so the derivation runs in POSIX shell on a cheap GitHub-hosted VM — it
     # must never queue behind an asleep self-hosted Mac.
     runs-on: ubuntu-24.04
+    # Least-privilege: the plan job never checks out and never writes an issue,
+    # so it drops the top-level issues:write (only the flip-soak job's failure
+    # watchdog needs it) — a shell-arithmetic job holds a read-only token.
+    permissions:
+      contents: read
     timeout-minutes: 5
     outputs:
       timeout_minutes: ${{ steps.derive.outputs.timeout_minutes }}
@@ -207,7 +212,11 @@ jobs:
           SCALE: ${{ github.event.inputs.grid_scale || 'default' }}
           SOAK_MINUTES: ${{ needs.plan.outputs.soak_minutes }}
         run: |
-          echo "Runner: $(uname -a)"
+          # Redact host detail: `uname -sm` (kernel + machine arch — the
+          # hardware proof this step exists for) NEVER `-a`, whose nodename +
+          # kernel-build string leak the operator box's hostname into a
+          # world-readable actions log.
+          echo "Runner: $(uname -sm)"
           echo "Flag: $FLAG  Ref: $REF  Scale: $SCALE  Minutes: $SOAK_MINUTES"
 
       - name: Guard — the real lake must be reachable
@@ -220,7 +229,10 @@ jobs:
             echo "::error::BRUTEX_LAKE_ROOT is unset or not a directory on this runner. Export it in the runner daemon's environment, or run the terminal fallback: bash scripts/soak/flip_soak.sh <FLAG> <lake-root>" >&2
             exit 1
           fi
-          echo "Lake root: $BRUTEX_LAKE_ROOT (read-only source; all writes are scratch)"
+          # Redact the path: the absolute lake root leaks the operator box's
+          # local directory layout into a world-readable log — print only that
+          # a reachable read-only lake was found (all writes are scratch).
+          echo "Lake root: reachable (read-only source; all writes are scratch)"
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -294,6 +306,9 @@ jobs:
           fi
 
       - name: Run the flip soak (twin leg + drift leg + PASS fold)
+        # FLIP_SOAK_ARM_CMD is a TEST-ONLY dry-mode seam (the fake-lake stub
+        # CLI) and is deliberately NEVER set here — production runs the real
+        # registry twin argv; setting it in production would soak a fake kernel.
         # G2 belt-and-suspenders: the SAME derived bound as a per-step
         # timeout, so even a silently no-op'd job-level expression cannot
         # let the run outrun soak_minutes + 90 + m/6.

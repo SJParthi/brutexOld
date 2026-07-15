@@ -135,6 +135,50 @@ class TestFlipSoakWorkflowWiring:
         ci_text = (_REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         assert "flip-soak" not in ci_text
 
+    def test_plan_job_least_privilege_permissions(self) -> None:
+        """Workflow NIT (a): the shell-arithmetic plan job drops issues:write.
+
+        The top-level grant is ``contents: read`` + ``issues: write`` (only the
+        flip-soak job's failure watchdog needs the latter); the plan job — which
+        never checks out and never files an issue — carries its own read-only
+        ``permissions`` block so it never holds a write-capable token.
+        """
+        # Isolate ONLY the plan job body: the text between the ``  plan:`` job
+        # header (two-space indent, under ``jobs:``) and the next job header
+        # ``  flip-soak:``. The top-level ``permissions:`` block sits at
+        # column 0 BEFORE ``jobs:``, so it is deliberately excluded — otherwise
+        # its ``issues: write`` grant would leak into this region.
+        match = re.search(
+            r"^  plan:\n(?P<body>.*?)^  flip-soak:", self._TEXT, re.DOTALL | re.MULTILINE
+        )
+        assert match is not None, "the plan job header must precede the flip-soak job header"
+        plan = match.group("body")
+        # A job-level permissions block (indented under the job) scoped to
+        # read-only, distinct from the top-level (column-0) block.
+        assert re.search(r"^    permissions:\n      contents: read\n", plan, re.MULTILINE), (
+            "the plan job must declare its own least-privilege permissions: contents: read"
+        )
+        assert "issues: write" not in plan, "the plan job must not inherit/hold issues:write"
+
+    def test_logs_are_redacted(self) -> None:
+        """Workflow NIT (b): no host/path leaks into the world-readable log."""
+        # `uname -a` leaks nodename + kernel build string; `uname -sm` is the
+        # kernel + machine arch (the hardware proof) without the host identity.
+        assert "uname -a" not in self._TEXT
+        assert "uname -sm" in self._TEXT
+        # The lake guard prints existence, never the absolute path — an
+        # `echo` interpolating $BRUTEX_LAKE_ROOT would leak the box's layout.
+        assert 'echo "Lake root: $BRUTEX_LAKE_ROOT' not in self._TEXT
+        assert "Lake root: reachable" in self._TEXT
+
+    def test_arm_cmd_seam_documented_as_test_only(self) -> None:
+        """Workflow NIT (c): FLIP_SOAK_ARM_CMD is a test-only seam, never set here."""
+        assert "FLIP_SOAK_ARM_CMD" in self._TEXT
+        assert "TEST-ONLY" in self._TEXT
+        # The seam must never appear as a workflow env assignment (that would
+        # soak the fake-lake stub kernel in production).
+        assert not re.search(r"^\s*FLIP_SOAK_ARM_CMD:\s", self._TEXT, re.MULTILINE)
+
 
 # ── 2. Registry pins ─────────────────────────────────────────────────
 
