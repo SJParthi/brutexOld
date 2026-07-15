@@ -34,6 +34,57 @@ no lake/schema/scope/vocab/rate change. This header carries pointers, never
 round narration; each member's full record lives in its §1 Active-branch
 blurb + its MIGRATION.md entry (#1433 carries no §1 blurb of its own — its
 record lives in MIGRATION.md #1733).)
+Earlier: 2026-07-15 (Club G docs merge vehicle, branch
+`integration/club-g-docs` — the docs-only fold of TWO PRs as ONE merge
+event off main tip d6ac9f85: #1506 DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md
+#1780 — the summarize-only GDFL vendor-docs archive + the definitive
+granularity/depth verdict at docs/vendors/gdfl/) + #1508
+DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781 — the GDFL 1-second L1
+snapshot ingest/read DESIGN doc; design only, zero adapter code). The only
+union files are docs/MIGRATION.md + this CLAUDE.md; both members' ledger
+numbers (#1780/#1781) are free on the landing main — kept unchanged.
+DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change. This header carries
+pointers, never the story; each member's full record lives in its §1
+Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-13 (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 —
+the GDFL 1-second L1 snapshot ingest/read DESIGN doc at
+`docs/vendors/gdfl/INGEST_DESIGN.md` — DESIGN ONLY, zero adapter code, the
+build gated on the operator confirming the GDFL purchase: a new `snap1s/`
+lake tree (raw-vendor-ticker keyed, keep-first `(timestamp, seq)`, a
+byte-identity re-ingest law), the CSV parse taxonomy + ticker AMBIGUITY law
+(raw archival never blocked by resolution; never a guessed expiry), the
+read-time 1s collapse + LTQ>0-only 1m derivation into provenance-isolated
+`-G1S` symbols under bars/ (the suffix fails the right-anchored F&O grammar,
+so every parse-derived surface skips or honestly-buckets it), /db surfaces
+mirroring the expired-options pager, a 44-row edge matrix + the
+honest-limits/UNVERIFIED register, and the two-panel reconciliation appendix;
+raw GDFL data NEVER committed + `snap1s/` and the derived `*-G1S` bar dirs
+EXCLUDED from off-box backup until the licensing read (a named
+DEC-BACKUP-OFFBOX-001 divergence). DOCS ONLY — zero source change; ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item
+record lives in the §1 Active-branch blurb + MIGRATION.md #1781 — this
+header carries the one-line summary, never the story.)
+Earlier: 2026-07-13 (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780 —
+the SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
+verdict at docs/vendors/gdfl/: GDFL's finest history granularity is 1-second L1
+SNAPSHOT data (its vendor API enum token is TICK — irregular within-second
+cadence, NOT a fixed one-row-per-second grid, NOT sub-second exchange
+tick-by-tick; the 1-second class is the CEILING for Indian retail data per the
+prior verified 2026-07-09 tick-feed research), NO 1-second OHLC bar periodicity
+exists anywhere in the API, and the days-scale (unconfirmed figure — never
+years-scale on any reading) snapshot-history window makes a
+2022→now 1-second-class BACKFILL impossible — forward capture only. Every fact
+evidence-tiered; ZERO verbatim vendor prose / vendor source trees / raw sample
+data committed (the coordinator's summarize-only licensing ruling — PyPI
+re-fetch URLs + SHA256 digests pinned instead); the 63-blocked-site-URLs
+capture honesty + the operator manual-upload list live in the archive's
+MANIFEST.md; the extract/ingest design is deliberately SPLIT OUT under
+DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger).
+DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the per-item record lives
+in the §1 Active-branch blurb + MIGRATION.md #1780 — this header carries the
+one-line summary, never the story.)
 Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
@@ -2765,6 +2816,134 @@ hostile-review pass._
   `lake_source.py` + `oneclick_artifacts.py` + `sweep_results_view.py` + `rate_bridge_cache.py` +
   `sweep_progress_cache.py` + `fno_cascade.py` ALL 100% line+branch standalone; ruff/ruff-format clean,
   `mypy --strict` 0 new, pyright 0 errors on touched files.)
+  Earlier: `integration/club-g-docs` (**Club G docs merge
+  vehicle** — the docs-only fold of TWO PRs as ONE merge event off main tip
+  d6ac9f85: **#1506** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780 — the
+  SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
+  VERDICT at `docs/vendors/gdfl/`) · **#1508** DEC-GDFL-INGEST-DESIGN-001
+  (MIGRATION.md #1781 — the GDFL 1-second L1 snapshot ingest/read DESIGN doc
+  at `docs/vendors/gdfl/INGEST_DESIGN.md`; DESIGN ONLY, zero adapter code).
+  File-disjoint by construction except the two union files
+  (`docs/MIGRATION.md` + this `CLAUDE.md`); both members' ledger numbers
+  (#1780/#1781) are free on the landing main — kept unchanged, no renumber.
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope/vocab/rate
+  change. Each member's full record lives in its own MIGRATION.md entry; the
+  per-member blurbs are demoted to Earlier: below.)
+  Earlier: `claude/gdfl-ingest-design` (**DEC-GDFL-INGEST-DESIGN-001,
+  MIGRATION.md #1781** — the GDFL (Global Datafeeds) 1-second L1 snapshot
+  ingest/store/derive/read DESIGN at `docs/vendors/gdfl/INGEST_DESIGN.md`:
+  DESIGN ONLY — zero adapter code lands in the PR; the build is gated on the
+  operator confirming the GDFL purchase. Judge-reconciled across TWO
+  independent 3-designer panels (ours + the sibling session's; every
+  accept/reject with its deciding argument in the doc's §11 appendix).
+  Decided: a THIRD lake tree
+  `snap1s/<source>/<exchange>/<segment>/<raw_ticker>/<YYYY>-<MM>.parquet`
+  (month files on the options/-tree precedent, `source=csv_dump` in v1 with
+  ws_live/rest_hist reserved — cross-source agreement is a REPORT, never a
+  merge; keyed on the RAW vendor ticker — resolution is mapping METADATA,
+  never a storage gate; 9-column deterministic parquet keyed
+  `(timestamp, seq)` with seq = stable file order; keep-first merge on the
+  verbatim flock/atomic/LakeWriteHalt machinery; a BYTE-IDENTITY re-ingest
+  law over an append-only flocked sha manifest, with an ordered ROW-prefix
+  superset-extend arm and an explicit `--replace` quarantine flow); the
+  exact-header CSV parse taxonomy (structural corruption FILE-fatal, scattered
+  blips row-skip+counted, the min(100,1%) mass rail; a today-dated dump
+  refused before session close); the ticker AMBIGUITY law (multi-grammar
+  expiry-fragment candidates validated against registry expiries as-of the
+  file date + the Groww master + strike-grid plausibility; exactly-one-valid
+  resolves, else `unresolved` — the DERIVE refuses loudly naming candidates,
+  archival never blocks; `-I` futures stored verbatim, their derive gated
+  behind the audited `--assume-calendar-roll` because GDFL's roll convention
+  is UNVERIFIED); shared-ledger windows under `market="gdfl-snap1s"` (a
+  header-only file is FAILED `empty_file`, never EMPTY — the skipped-audit
+  rotation can never adopt it) + the REQUIRED Phase-1 companion edit giving
+  `db_view._window_market_bucket` a `gdfl` bucket; a dedicated hash-chained
+  `gdfl-ingest` audit file; the read-time `collapse_to_1s` view + LTQ>0-only
+  1m derivation (volume = ΣLTQ over payload-distinct prints, stamped
+  `volume_basis="sum_ltq_undercount"`; idle/quote-only minutes ABSENT — never
+  forward-filled; close-instant prints stored raw, dropped+counted at/after
+  the session's REAL close on the session-aware `[session.open,
+  session.close)` grid — the 15:29 label on a regular day) into
+  provenance-isolated **`-G1S`**-suffixed contract symbols under
+  the true `bars/NSE/FNO/` (the suffix fails `parse_fno_symbol`'s
+  right-anchored grammar so movers/cascade/prebuild/Greeks/futures_series all
+  skip or honestly-bucket it by default; the `G1S-` PREFIX is REFUTED — it
+  parses as an exchange token and would JOIN the real chain; run identity is
+  provenance-distinct via the snapshot-hash slice header, no formula change);
+  19 TFs + 1day via the direct per-symbol
+  `materialize_lake_timeframes(..., kind=)` loop (the seam is single-symbol
+  with a REQUIRED `kind: PrebuildKind`); /db
+  discovery + pager mirroring the expired-options pattern with a
+  generation-keyed count memo; a 44-row edge matrix naming a planned test per
+  measured/UNVERIFIED case; honest limits (NO API backfill — GDFL tick-class
+  history is days-scale, the 01-Jul-2025 samples are vendor DUMPS and dump
+  availability ≠ API depth; L1-only; derived-bar fidelity stamped; emission
+  semantics UNVERIFIED with the identical-consecutive-rows counter as the
+  standing probe) + the licensing gate (raw GDFL data NEVER committed;
+  `snap1s/` + the derived `*-G1S` bar dirs EXCLUDED from off-box restic
+  replication until the subscriber agreement is read — a named
+  DEC-BACKUP-OFFBOX-001 divergence); rollout: Phase 0 = this doc; Phase 1 =
+  CSV importer + raw store + `brutex gdfl ingest` (purchase-gated); Phase 2 =
+  derive + /db wiring (own DEC); Phase 3+ = census/heal/stats follow-up DECs
+  + the API/WS capture leg (own DEC + ADR — DEC-LIVE-REMOVE-001 stands).
+  Companion: the sibling vendor-docs tree (PR #1506) owns
+  docs/vendors/gdfl/'s other files; this doc fills the slot its
+  INGEST_POINTER.md reserves. HOSTILE-REVIEW ROUND 1 folded (4-lens panel —
+  the per-finding record lives in MIGRATION.md #1781): the derive seam
+  restated to the real single-symbol kind-routed loop, the UNCONFIRMED
+  native-1m depth label corrected, the G1 bucket edit made two-token
+  precise. REFUTER ROUND 1 folded (3-refuter panel, MIGRATION.md #1781):
+  the 1m-derive boundary made SESSION-aware (`[session.open, session.close)`
+  — an evening-Muhurat dump now derives REAL bars, regular days unchanged;
+  the coarser-TF 09:15-anchored fold inheritance disclosed) + the re-dump
+  prefix law renamed the ordered ROW-prefix extend (parquet-baseline;
+  byte-prefix only under `--archive-raw`). REFUTER ROUND 2 folded (3-refuter
+  panel, MIGRATION.md #1781): the derive-ledger zero-bar status law — a
+  legitimately zero-bar derive over a RESOLVED symbol (index file /
+  all-quote-only day) records SUCCESS with `bars_appended=0`, never EMPTY,
+  so the market-blind skipped-audit rotation can never adopt a
+  `gdfl-derive-1m` window (§5.2 G3; NEW edge row 43, matrix 42→43; zero
+  ledger change — `record()`'s independent `raw_bars`/`bars_appended`
+  inputs carry it). REFUTER ROUND 3: CLEAN (zero MINOR+; 4 wording/coverage
+  NITs folded, MIGRATION.md #1781 — the R2 worst-case-VOLUME reword
+  (13,655 = the highest-liquidity sample), the §6.4 `prebuild_kind_for`
+  mirrored-law-not-callable-tool clarification, NEW edge row 44 pinning
+  `collapse_to_1s` (matrix 43→44,
+  `test_collapse_to_1s_last_wins_state_sum_flow`), and the §10 Phase-2
+  `snap1s_derive`-family test enumeration). REFUTER ROUND 4: CLEAN (second
+  consecutive — protocol satisfied; 2 cosmetic NITs folded, MIGRATION.md
+  #1781 — the R8 field-count bucket aligned to §4.3's
+  default-FILE-FAIL/`--allow-row-skips` disposition, + the `-001` suffix at
+  §9.5). DOCS-ONLY — zero brutex/rust/test/CI source
+  change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake stays
+  REFERENCE_ONLY; no scope/vocab/rate change.)
+  Earlier: `claude/gdfl-vendor-docs` (**DEC-GDFL-VENDOR-DOCS-001,
+  MIGRATION.md #1780** — the SUMMARIZE-ONLY GDFL (globaldatafeeds.in) vendor-docs
+  archive + the definitive granularity/depth VERDICT at `docs/vendors/gdfl/`
+  (README · VERDICT · MANIFEST · api/REST_API + api/WEBSOCKET_API ·
+  sdk/PACKAGES · INGEST_POINTER). VERDICT (operator-directed framing): GDFL's
+  finest history granularity is 1-second L1 SNAPSHOT data — the vendor API enum
+  token is TICK (`HistoryTickResult`) — second-stamped L1 quote/trade snapshots
+  with irregular within-second cadence, NOT a fixed one-row-per-second grid and
+  NOT sub-second exchange tick-by-tick; the 1-second class is the CEILING for
+  Indian retail data (prior verified 2026-07-09 tick-feed research), NO 1-second
+  OHLC bar periodicity exists (`GetHistory` enum = TICK/MINUTE/HOUR/DAY/WEEK/
+  MONTH), and the days-scale (unconfirmed figure — never years-scale)
+  snapshot-history window ⇒ a 2022→now 1-second-class
+  BACKFILL is impossible — forward capture from subscription day only. Every
+  fact carries an evidence tier (SDK-VERIFIED · RAW-SAMPLE-MEASURED ·
+  PRIOR-VERIFIED-NOTE · OFFICIAL-SNIPPET-UNCONFIRMED · UNVERIFIED · NOT STATED
+  IN SDK); the summarize-only licensing ruling commits ZERO verbatim vendor
+  prose / source trees / raw sample rows (pinned PyPI SHA256 digests re-fetch
+  the originals); the 75-attempt capture log (63 site URLs egress-blocked) +
+  the 5-item operator manual-upload list live in the archive's MANIFEST.md;
+  the reconstructed 10-gate credentialed probe list guards any future adoption.
+  The extract/ingest design is deliberately split out under
+  DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger).
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change; the live-feed leg stays
+  OUT of BruteX per DEC-LIVE-REMOVE-001.)
   Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
@@ -7413,6 +7592,42 @@ hostile-review pass._
   rate-bridge/sweep-progress copy-twins delegate to the ONE
   `NonBlockingFileMemoBase`, both suites unmodified); READ-side only,
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `integration/club-g-docs`
+  (Club G docs merge vehicle — the docs-only fold of #1506
+  DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780) + #1508
+  DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781); DOCS-ONLY — zero
+  brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1780–#1781 for
+  the full blurbs)
+  Earlier: `claude/gdfl-ingest-design`
+  (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 — the GDFL 1-second L1
+  snapshot ingest/store/derive/read DESIGN doc at
+  `docs/vendors/gdfl/INGEST_DESIGN.md`; DESIGN ONLY — zero adapter code, the
+  build gated on the operator confirming the GDFL purchase; the new `snap1s/`
+  raw tree (vendor-ticker keyed, keep-first `(timestamp, seq)`, byte-identity
+  re-ingest law) + the CSV parse taxonomy + the ticker ambiguity law (raw
+  archival never blocked by resolution) + provenance-isolated `-G1S` derived
+  1m bars under bars/ + /db read surfaces mirroring the options pager + the
+  44-row edge matrix + the honest-limits/licensing gate (raw GDFL data never
+  committed; `snap1s/` + `*-G1S` bars excluded from off-box backup until the
+  licensing read — a named DEC-BACKUP-OFFBOX-001 divergence); DOCS-ONLY —
+  zero source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1781 for the full blurb)
+  Earlier: `claude/gdfl-vendor-docs`
+  (DEC-GDFL-VENDOR-DOCS-001, MIGRATION.md #1780 — the SUMMARIZE-ONLY GDFL
+  vendor-docs archive + the definitive granularity/depth verdict at
+  `docs/vendors/gdfl/`: GDFL's finest history granularity is 1-second L1
+  SNAPSHOT data (vendor enum TICK — irregular cadence, not a fixed 1-second
+  grid, not sub-second tick-by-tick; the ceiling for Indian retail data), NO
+  1-second OHLC bar periodicity exists, days-scale (unconfirmed figure — never
+  years-scale) snapshot history ⇒ backfill
+  impossible / forward capture only; evidence-tiered, zero verbatim vendor
+  prose/source/data committed (summarize-only licensing ruling; pinned PyPI
+  SHA256 re-fetch digests); the ingest design is split out under
+  DEC-GDFL-INGEST-DESIGN-001 (coordinator-reserved, not yet in the ledger);
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1780 for the full blurb)
   Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
