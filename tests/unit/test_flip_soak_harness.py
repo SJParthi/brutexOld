@@ -42,6 +42,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Protocol
 
 import pytest
 
@@ -937,11 +938,24 @@ class TestDriftDriverDry:
 # ── 6. The drift-leg RETRY_ENV_MOVED path (security MAJOR-1) ──────────
 
 
+class _DriftLegResult(Protocol):
+    """Structural view of ``flip_soak_driver.DriftResult`` — the fields read here.
+
+    The driver module is loaded dynamically (``_load``), so its ``DriftResult``
+    dataclass is not statically importable; this Protocol gives pyright the
+    exact attribute surface these tests consume.
+    """
+
+    env_retries: int
+    run_failures: int
+    hard_gate_breaches: int
+
+
 class TestDriftRetryEnvMoved:
     """A transient env move classifies RETRY, never a kernel FAIL."""
 
     @staticmethod
-    def _leg(driver: ModuleType, tmp_path: Path, runner: object) -> object:
+    def _leg(driver: ModuleType, tmp_path: Path, runner: object) -> _DriftLegResult:
         return driver.run_drift_leg(
             flag="BRUTEX_SWEEP_RUST_ENUM",
             minutes=0.01,
