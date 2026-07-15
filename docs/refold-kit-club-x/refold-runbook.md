@@ -202,10 +202,18 @@ from this runbook.
    pinned to 1800 (if the script auto-detects, override/verify it prints
    exactly `#1800`; anything else = STOP and report).
 
-3. **Fix-commit apply order.** Cherry-pick / `git am` the two fix commits
+3. **Fix-commit apply order.** Cherry-pick / `git am` the THREE fix commits
    BEFORE building the 2-parent merge with post-P main, in this order:
    1. `9569609` — `fix(dhan): halt the rolling pull on a terminal stop` (F2)
    2. `7dd58ed` — `fix(dhan): key the account flock on the Dhan client id` (F1)
+   3. the newest `claude/dhan-x-fixes` tip —
+      `test(dhan): production-wired P1 killing test for the Dhan account-lock
+      isolation` — the assurance-session P1 verbatim killing test for the F1
+      account-lock isolation fix (test-only; drives the REAL `build_app`
+      wiring so the Dhan job's acquired account-lock path derives from the
+      Dhan client-id and is NOT the Groww path, and a held Groww flock does
+      not mutually-exclude a wet Dhan pull). It sits on top of `7dd58ed`, so
+      cherry-pick it LAST of the three.
    Then build the merge, and push everything as ONE event.
 
 4. **PR body is FINAL.** Never rewrite the PR body from any snapshot — leave
