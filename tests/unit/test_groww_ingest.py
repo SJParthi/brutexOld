@@ -410,18 +410,40 @@ class TestIngestSpot:
         # DEC-CANDLE-DROP-FUTURE-BAR-001: a vendor bar dated AFTER the window end (a clock-skew /
         # out-of-window phantom) is dropped before the lake write, never writing a future partition.
         # 2021-01-25 09:30 IST is IN-SESSION (survives the session filter) but PAST the Jan-20 end.
+        # DEC-AUDIT-ALERT-CLAMP-OBS-001 (DATA-2): the drop now emits ONE aggregated
+        # ``ingest.future_bar_dropped`` WARNING per window naming the count, instead of
+        # the phantom vanishing silently — while the KEPT bar is byte-identical.
         future_ts = datetime(2021, 1, 25, 4, 5, tzinfo=UTC)
         sink = _Sink()
-        report = ingest_spot(
-            _Adapter(bars=[_bar(_IN_SESSION_TS), _bar(future_ts)]),  # type: ignore[arg-type]
-            sink,
-            instrument=_INST,
-            interval="1minute",
-            start=date(2021, 1, 1),
-            end=date(2021, 1, 20),  # 1 window; the Jan-25 bar is past the end
-        )
+        with capture_logs() as logs:
+            report = ingest_spot(
+                _Adapter(bars=[_bar(_IN_SESSION_TS), _bar(future_ts)]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 20),  # 1 window; the Jan-25 bar is past the end
+            )
         assert report.bars_appended == 1  # only the in-window Jan-4 bar; the Jan-25 phantom dropped
         assert sink.appends == [1]
+        warns = [e for e in logs if e["event"] == "ingest.future_bar_dropped"]
+        assert len(warns) == 1  # one aggregated WARNING per window, never per bar
+        assert warns[0]["dropped"] == 1  # the mixed-in future phantom is COUNTED
+
+    def test_no_future_bar_emits_no_drop_warn(self) -> None:
+        # DEC-AUDIT-ALERT-CLAMP-OBS-001 (DATA-2): a clean in-window pull emits NO
+        # ``ingest.future_bar_dropped`` WARNING (byte-identical to before).
+        sink = _Sink()
+        with capture_logs() as logs:
+            ingest_spot(
+                _Adapter(bars=[_bar(_IN_SESSION_TS)]),  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1minute",
+                start=date(2021, 1, 1),
+                end=date(2021, 1, 20),
+            )
+        assert [e for e in logs if e["event"] == "ingest.future_bar_dropped"] == []
 
     def test_intraday_mixed_session_bars_filtered(self) -> None:
         # One in-session + one out-of-session bar → only the in-session bar kept.

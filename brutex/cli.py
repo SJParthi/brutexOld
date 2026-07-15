@@ -3824,11 +3824,64 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # rotating file + the kept JSON data endpoint, not the dead page.
     print(f"[brutex] logs → {log_path}  ·  tail via GET http://{host}:{port}/api/v1/logs")
     _log.info("dashboard.ready", host=host, port=port, log_file=str(log_path))
-    # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
-    # root handlers (console + rotating JSON file) instead of uvicorn's own
-    # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
-    # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
-    uvicorn.run(app, host=host, port=port, log_config=None)
+    # Idle heartbeat + serve-lifetime keep-awake (DEC-AUDIT-ALERT-CLAMP-OBS-001):
+    # a real overnight incident saw the server go DARK for 8h10m — the mechanism
+    # (dead vs sleeping vs wedged) was undiagnosable because an idle server emits
+    # nothing. The heartbeat makes a dark log gap mean genuine death, and the
+    # OPT-IN serve keep-awake (default OFF — never silently change power policy)
+    # closes the gap where post-pull macOS sleep takes the whole server down. Both
+    # are released when uvicorn.run returns (Ctrl-C / signal).
+    from contextlib import ExitStack
+
+    from brutex.observability.power_keepawake import keep_awake, serve_keep_awake_enabled
+    from brutex.observability.server_heartbeat import start_server_heartbeat
+
+    with ExitStack() as serve_stack:
+        heartbeat = start_server_heartbeat(log=_log)
+        if heartbeat is not None:
+            serve_stack.callback(heartbeat.stop)
+        if serve_keep_awake_enabled():
+            # keep_awake yields True iff the assertion is actually ENGAGED
+            # (darwin + caffeinate spawned); on a non-macOS host / spawn
+            # failure it degrades to a logged no-op — the banner must not
+            # claim "holds the host awake" there (Golden Rule #10).
+            engaged = serve_stack.enter_context(keep_awake("brutex serve"))
+            if engaged:
+                _log.info(
+                    "server.keepawake.serve_enabled",
+                    env="BRUTEX_SERVE_KEEP_AWAKE",
+                    note="host held awake for the serve lifetime",
+                )
+                print("[brutex] serve keep-awake ENABLED — this process holds the host awake.")
+            else:
+                _log.warning(
+                    "server.keepawake.serve_unavailable",
+                    env="BRUTEX_SERVE_KEEP_AWAKE",
+                    note=(
+                        "keep-awake requested but UNAVAILABLE on this host "
+                        "(non-macOS, or caffeinate failed) — the host MAY sleep"
+                    ),
+                )
+                print(
+                    "[brutex] serve keep-awake requested, but keep-awake is UNAVAILABLE on "
+                    "this host (non-macOS, or caffeinate failed) — the process does NOT "
+                    "hold the host awake."
+                )
+        else:
+            _log.info(
+                "server.keepawake.serve_disabled",
+                env="BRUTEX_SERVE_KEEP_AWAKE",
+                note="default OFF — the server does NOT prevent system sleep",
+            )
+            print(
+                "[brutex] NOTE: this server does NOT prevent system sleep "
+                "(set BRUTEX_SERVE_KEEP_AWAKE=1 to hold the host awake for the serve lifetime)."
+            )
+        # log_config=None lets uvicorn's access/error loggers PROPAGATE into our
+        # root handlers (console + rotating JSON file) instead of uvicorn's own
+        # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
+        # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+        uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
 
@@ -7321,6 +7374,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     store per tuple (idempotent, lossless re-run — Golden Rule #7).
     """
     from brutex.data.catalog import Catalog
+    from brutex.data.errors import CatalogError
     from brutex.data.timeframes import trading_minutes_for_lake_interval
     from brutex.engine.sweep_apriori import apriori_enabled, effective_max_combos
     from brutex.engine.sweep_audit import SweepAuditWriter
@@ -7548,8 +7602,23 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # only front-loads the failure).
     from brutex.engine.tuple_complete import resume_store_guard_enabled
 
+    # ── RES-7 (DEC-AUDIT-SWEEP-ERRORSURFACE-001): resolve the sweep
+    # rank-memory env knobs EAGERLY too — BRUTEX_SWEEP_MEM_BUDGET_BYTES and
+    # BRUTEX_SWEEP_BOUNDED_RANK are otherwise resolved LAZILY per tuple deep
+    # in the grid runner (sweep_run.py), so a config typo escapes as an
+    # uncaught ValueError MID-sweep and fires a FALSE CRITICAL "sweep halted"
+    # alert after work has already begun. The runner re-resolves per tuple;
+    # for a VALID value that re-resolution reads the identical env → the
+    # identical budget/mode, so this changes nothing on good config.
+    from brutex.engine.sweep_mem_budget import (
+        resolve_bounded_rank_mode,
+        resolve_mem_budget_bytes,
+    )
+
     try:
         resume_store_guard_enabled()
+        resolve_bounded_rank_mode()
+        resolve_mem_budget_bytes()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -7610,7 +7679,33 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         # across the PRELOAD ONLY — a concurrent pull/heal (EX holder) refuses
         # this launch loudly; once the bars are in memory the guard is released.
         slices: dict[tuple[str, str], list[Any]] = {}
-        with lake_read_guard(resolved_lake), Catalog.open(catalog) as cat:
+        # RES-5 (secondary fail-safe): the PRIMARY concurrent-sweep exclusion is
+        # the sweep single-flight flock taken below (held for the WHOLE sweep).
+        # This narrower guard covers only the SHORT catalog-preload window: if a
+        # second sweep-all races in while the first still holds the DuckDB
+        # catalog lock, DuckDB raises "Conflicting lock is held … (PID)" which
+        # Catalog.open wraps in a CatalogError. Convert THAT specific case to a
+        # clean "another sweep is running" refusal (EXIT_USER_ERROR) instead of
+        # a raw traceback — but re-raise any OTHER CatalogError (genuine catalog
+        # corruption / a real open failure) LOUDLY, never masking it as
+        # contention. A sweep that gets past this window is still refused by the
+        # sweep single-flight lock below.
+        try:
+            _catalog_ctx = Catalog.open(catalog)
+        except CatalogError as exc:
+            # NOTE: this substring match is coupled to DuckDB's lock-conflict
+            # message text ("Conflicting lock is held …") and could drift across
+            # DuckDB versions; a message change would fall through to the loud
+            # re-raise below (fail-safe), never silently mask real contention.
+            if "Conflicting lock" not in str(exc):
+                raise
+            print(
+                f"[brutex] another sweep is already running on this output dir "
+                f"(catalog {catalog} is locked); refusing to start a second one",
+                file=sys.stderr,
+            )
+            return EXIT_USER_ERROR
+        with lake_read_guard(resolved_lake), _catalog_ctx as cat:
             for symbol in symbol_list:
                 for interval in interval_list:
                     slices[(symbol, interval)] = load_sweep_slice(
@@ -8503,11 +8598,22 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
         ``cmd_sweep_all``; this read only classifies the prior cycle's progress
         for the daemon's BLAKE3 audit line. Any read/parse error degrades to "no
         checkpoint" (FRESH) — it can never crash the daemon.
+
+        This does a self-consistent read (``expected_sweep_id=checkpoint.sweep_id``
+        below classifies WHATEVER checkpoint is present), so the hardened
+        identity-gated ``SweepCheckpointStore.load`` is deliberately NOT reused
+        here (RES-4 review) — its ``sweep_id``/``total_combos`` gate would
+        misclassify a legitimate prior-cycle checkpoint as FRESH. ``ValueError``
+        is in the catch because an undecodable/torn checkpoint makes
+        ``read_text`` raise ``UnicodeDecodeError`` (a ``ValueError``), which is
+        NOT ``OSError``/``json.JSONDecodeError``/``SweepCheckpointError`` — so
+        without it the daemon would crash RAW on invalid-UTF-8 bytes,
+        contradicting this docstring's "can never crash the daemon" contract.
         """
         try:
             data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             checkpoint = SweepCheckpoint.from_dict(data)
-        except (OSError, json.JSONDecodeError, SweepCheckpointError):
+        except (OSError, json.JSONDecodeError, ValueError, SweepCheckpointError):
             return CheckpointView.from_loaded(None, expected_sweep_id="")
         return CheckpointView.from_loaded(checkpoint, expected_sweep_id=checkpoint.sweep_id)
 

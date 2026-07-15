@@ -117,7 +117,7 @@ jobs:
     name: Open issue on failure
     runs-on: ubuntu-24.04
     needs: [python-supply-chain, rust-cargo-audit, rust-cargo-deny]
-    if: failure() && github.event_name == 'schedule'
+    if: (failure() || cancelled()) && github.event_name == 'schedule'
     permissions:
       contents: read
       issues: write

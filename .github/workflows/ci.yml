@@ -1757,6 +1757,22 @@ jobs:
           else
             echo "(brutex.data.candle_fields test file not present yet — gate inactive)"
           fi
+          # DEC-AUDIT-ALERT-CLAMP-OBS-001: strict gate on the idle server
+          # heartbeat (pure observability daemon, no dashboard import — the
+          # spawn/clock/RSS-probe seams are injected, so it is standalone-gateable).
+          if compgen -G "tests/unit/test_server_heartbeat.py" > /dev/null; then
+            pytest --cov=brutex.observability.server_heartbeat --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_server_heartbeat.py
+          else
+            echo "(brutex.observability.server_heartbeat test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-KEEPAWAKE-001: strict gate on the macOS keep-awake guard
+          # (pure observability context manager, injected spawn/platform seams —
+          # standalone-gateable at 100% line+branch with no real caffeinate).
+          if compgen -G "tests/unit/test_power_keepawake.py" > /dev/null; then
+            pytest --cov=brutex.observability.power_keepawake --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_power_keepawake.py
+          else
+            echo "(brutex.observability.power_keepawake test file not present yet — gate inactive)"
+          fi
           # DEC-STORED-DATA-VALIDATION-001: the frame-level stored-OHLC price-sanity
           # checks (positivity + ordering) consumed by the prebuild 1-minute read
           # boundary + the lake invariant scanner. Pure polars expressions,

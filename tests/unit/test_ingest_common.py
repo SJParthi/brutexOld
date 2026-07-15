@@ -165,25 +165,30 @@ class TestDropBarsAfter:
     def test_keeps_bars_on_or_before_the_window_end(self) -> None:
         end = date(2024, 1, 10)
         bars = [self._bar(date(2024, 1, 8)), self._bar(date(2024, 1, 9)), self._bar(end)]
-        kept = drop_bars_after(bars, end)
+        kept, dropped = drop_bars_after(bars, end)
         assert kept == bars  # boundary bar (on the end date) is KEPT — byte-unchanged
+        assert dropped == 0  # nothing past the boundary — no count surfaced
 
     def test_drops_a_future_phantom_bar(self) -> None:
         end = date(2024, 1, 10)
         future = self._bar(date(2024, 1, 15))  # a clock-skew / out-of-window phantom
-        kept = drop_bars_after([self._bar(date(2024, 1, 9)), future], end)
+        good = self._bar(date(2024, 1, 9))
+        kept, dropped = drop_bars_after([good, future], end)
         assert future not in kept
+        assert kept == [good]  # the good bar is byte-identical (KEPT)
         assert len(kept) == 1
+        assert dropped == 1  # the mixed-in future phantom is COUNTED, not silent
 
     def test_empty_input_is_empty(self) -> None:
-        assert drop_bars_after([], date(2024, 1, 10)) == []
+        assert drop_bars_after([], date(2024, 1, 10)) == ([], 0)
 
     def test_uses_ist_trading_date_not_utc_date(self) -> None:
         # 20:00 UTC on the end date = 01:30 IST the NEXT day → IST date is end+1 → DROPPED.
         end = date(2024, 1, 10)
         late_utc = self._bar(end, hour_utc=20)  # 20:00 UTC Jan-10 = 01:30 IST Jan-11
-        kept = drop_bars_after([late_utc], end)
+        kept, dropped = drop_bars_after([late_utc], end)
         assert kept == []  # the IST date (Jan-11) is strictly after the end
+        assert dropped == 1
 
 
 class TestNowIst:

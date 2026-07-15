@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,7 @@ from brutex.data.rate_bridge import (
     rate_bridge_path,
     read_rate_snapshot,
 )
+from structlog.testing import capture_logs
 
 #: The FROZEN pre-change ``/api/v1/pull/rate`` payload key set (the byte-compat pin) —
 #: a literal list, deliberately NOT derived from ``PullRateView`` (a field added there
@@ -654,3 +655,219 @@ class TestDegradePaths:
         assert body["bridge_source"] == "unwired"
         assert body["bridge_probe_age_s"] is None
         assert body["flow_state"] == "idle"
+
+
+class TestDeadWallTimeEvidence:
+    """VIEW-1 (DEC-RATE-METER-LIFECYCLE-001 audit-C3, hardened): a CLI bridge whose
+    ``wall_time`` is non-finite (+inf/NaN) or MATERIALLY in the future can no longer be
+    clamped to a maximally-fresh ``0.0`` and fabricate a permanent "flowing". Such a
+    bridge is DEAD EVIDENCE — idle, ``bridge_source == 'unverified'``, WARNed once — while
+    ordinary few-seconds clock skew stays trusted."""
+
+    def _publish_raw(self, lake_root: Path, wall_time_token: str) -> None:
+        """Write the bridge file directly with a literal ``wall_time`` JSON token."""
+        rate_bridge_path(lake_root).parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            '{"schema": 3, "effective_rps": 3.3, "current_rps": 8.0, "recent_minute": 200, '
+            '"recent_429": 0, "ceiling_per_min": 500, "recent_1s": 3, "recent_600s": 1800, '
+            '"recent_3600s": 9000, "wall_time": ' + wall_time_token + ", "
+            '"monotonic": 12345.0, "pull_active": true}'
+        )
+        rate_bridge_path(lake_root).write_text(body)
+
+    def test_positive_infinity_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        self._publish_raw(tmp_path, "1e999")  # json parses 1e999 -> Infinity
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+        assert set(body) == _PRE_CHANGE_KEYS | _ADDITIVE_KEYS
+
+    def test_nan_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        self._publish_raw(tmp_path, "NaN")  # json.loads parses NaN by default
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+
+    def test_materially_future_wall_time_is_dead_idle_unverified(self, tmp_path: Path) -> None:
+        publish_rate_snapshot(
+            tmp_path,
+            effective_rps=3.3,
+            current_rps=8.0,
+            recent_minute=200,
+            recent_429=0,
+            ceiling_per_min=500,
+            wall_time=time.time() + 10_000_000.0,  # 10^7 s in the future
+            monotonic=time.monotonic(),
+        )
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "idle"
+        assert body["req_per_sec_achieved"] == 0.0
+        assert body["bridge_source"] == "unverified"
+
+    def test_tiny_future_skew_is_tolerated_flowing(self, tmp_path: Path) -> None:
+        """A few seconds of ordinary cross-host NTP skew stays trusted (live/flowing)."""
+        publish_rate_snapshot(
+            tmp_path,
+            effective_rps=3.3,
+            current_rps=8.0,
+            recent_minute=200,
+            recent_429=0,
+            ceiling_per_min=500,
+            wall_time=time.time() + 3.0,  # within BRIDGE_FUTURE_SKEW_TOLERANCE_S
+            monotonic=time.monotonic(),
+        )
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c:
+            body = c.get("/api/v1/pull/rate").json()
+        assert body["flow_state"] == "flowing"
+        assert body["req_per_sec_achieved"] == 3.3
+        assert body["bridge_source"] == "live"
+
+
+#: The structlog event the dead-bridge WARN emits (dedup target).
+_DEAD_WARN = "pull_rate.bridge_dead_wall_time"
+
+
+def _count_dead_warns(logs: Sequence[Mapping[str, Any]]) -> int:
+    """Number of captured ``pull_rate.bridge_dead_wall_time`` WARN events."""
+    return sum(1 for e in logs if e.get("event") == _DEAD_WARN)
+
+
+class TestDeadWallTimeWarnDedup:
+    """Hostile-review MINOR: the dead-bridge WARN is DEDUPED per distinct dead
+    ``wall_time`` stamp. A dead CLI bridge (a stuck +inf/NaN/future stamp) is a
+    PERSISTENT condition and the widget polls this route site-wide every ~3 s, so an
+    unthrottled WARN would fire ~20/min FOREVER. The WARN fires ONCE per distinct dead
+    stamp, re-arms when the bridge recovers, and never fires for a healthy bridge —
+    the correctness verdict (dead → idle/unverified) is UNCHANGED (CLAUDE.md §11
+    deduped-per-key WARN convention; Golden Rule #10 honesty)."""
+
+    def _publish_raw(self, lake_root: Path, wall_time_token: str) -> None:
+        """Write the bridge file directly with a literal ``wall_time`` JSON token."""
+        rate_bridge_path(lake_root).parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            '{"schema": 3, "effective_rps": 3.3, "current_rps": 8.0, "recent_minute": 200, '
+            '"recent_429": 0, "ceiling_per_min": 500, "recent_1s": 3, "recent_600s": 1800, '
+            '"recent_3600s": 9000, "wall_time": ' + wall_time_token + ", "
+            '"monotonic": 12345.0, "pull_active": true}'
+        )
+        rate_bridge_path(lake_root).write_text(body)
+
+    def test_persistent_dead_bridge_warns_once_across_polls(self, tmp_path: Path) -> None:
+        # ONE app instance polled 5 times against a STUCK +inf bridge → exactly ONE
+        # WARN (not 5), while EVERY poll still reads the dead verdict honestly.
+        self._publish_raw(tmp_path, "1e999")  # json parses 1e999 -> Infinity
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c, capture_logs() as logs:
+            bodies = [c.get("/api/v1/pull/rate").json() for _ in range(5)]
+        assert _count_dead_warns(logs) == 1
+        for body in bodies:
+            assert body["flow_state"] == "idle"
+            assert body["req_per_sec_achieved"] == 0.0
+            assert body["bridge_source"] == "unverified"
+
+    def test_new_distinct_dead_stamp_re_warns(self, tmp_path: Path) -> None:
+        # A DISTINCT dead episode (+inf → a materially-future finite stamp) is a new
+        # condition and re-warns exactly once. ttl_s=0 makes every poll revalidate the
+        # rewritten file (the default 2 s TTL would serve the stale dead memo).
+        cache = RateBridgeCache(ttl_s=0.0)
+        self._publish_raw(tmp_path, "1e999")  # dead: +inf
+        future = time.time() + 10_000_000.0  # dead: materially in the future
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            first = c.get("/api/v1/pull/rate").json()
+            self._publish_raw(tmp_path, repr(future))  # a DIFFERENT dead stamp
+            second = c.get("/api/v1/pull/rate").json()
+        assert _count_dead_warns(logs) == 2
+        assert first["bridge_source"] == "unverified"
+        assert second["bridge_source"] == "unverified"
+        assert first["flow_state"] == "idle"
+        assert second["flow_state"] == "idle"
+
+    def test_recovery_re_arms_dedup_then_new_dead_episode_re_warns(self, tmp_path: Path) -> None:
+        # dead(+inf) → HEALTHY (fresh valid bridge, re-arms the dedup, no warn) →
+        # dead(+inf) again → the SAME +inf re-warns because the recovery reset the
+        # baseline. 3 polls, 2 warns; the healthy poll flows and never warns.
+        cache = RateBridgeCache(ttl_s=0.0)
+        self._publish_raw(tmp_path, "1e999")  # dead
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            dead1 = c.get("/api/v1/pull/rate").json()
+            _publish_now(tmp_path, effective_rps=3.3, current_rps=8.0)  # HEALTHY
+            healthy = c.get("/api/v1/pull/rate").json()
+            self._publish_raw(tmp_path, "1e999")  # dead again (same +inf stamp)
+            dead2 = c.get("/api/v1/pull/rate").json()
+        assert _count_dead_warns(logs) == 2
+        assert dead1["bridge_source"] == "unverified"
+        assert dead1["flow_state"] == "idle"
+        assert healthy["bridge_source"] == "live"
+        assert healthy["flow_state"] == "flowing"
+        assert dead2["bridge_source"] == "unverified"
+        assert dead2["flow_state"] == "idle"
+
+    def test_live_future_rewriting_bridge_warns_once(self, tmp_path: Path) -> None:
+        # THE FIX (hostile-review MINOR): a LIVE publisher whose clock is materially in
+        # the future REWRITES the bridge each poll with a DISTINCT future ``wall_time``.
+        # The OLD exact-stamp dedup re-warned EVERY poll (~20/min forever); keying on
+        # the dead CLASS collapses every materially-future stamp to the ONE "future"
+        # class → exactly ONE warn across 5 rewriting polls, while every poll still
+        # reads the dead verdict honestly. ttl_s=0 forces a re-read of each rewrite.
+        cache = RateBridgeCache(ttl_s=0.0)
+        base_future = time.time() + 10_000_000.0
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            bodies = []
+            for i in range(5):
+                # A DIFFERENT future stamp every poll — same dead CLASS ("future").
+                self._publish_raw(tmp_path, repr(base_future + float(i)))
+                bodies.append(c.get("/api/v1/pull/rate").json())
+        assert _count_dead_warns(logs) == 1
+        for body in bodies:
+            assert body["flow_state"] == "idle"
+            assert body["req_per_sec_achieved"] == 0.0
+            assert body["bridge_source"] == "unverified"
+
+    def test_absent_bridge_re_arms_dedup_then_new_dead_episode_re_warns(
+        self, tmp_path: Path
+    ) -> None:
+        # NIT (reviewer #4) teeth: dead(+inf) → ABSENT (file removed, re-arms the
+        # dedup, no warn) → dead(+inf) again → the SAME +inf re-warns because the
+        # absent poll reset the baseline. 3 polls, 2 warns. A mutation deleting the
+        # absent-bridge re-arm (app.py ``else: _last_warned_dead_class = None``) would
+        # leave the stale "pos_inf" baseline across the absent poll → the second
+        # dead(+inf) would be suppressed → 1 warn → this test FAILS.
+        cache = RateBridgeCache(ttl_s=0.0)
+        self._publish_raw(tmp_path, "1e999")  # dead: +inf
+        with (
+            _client(DashboardState(), _FakeStore(tmp_path), rate_bridge_cache=cache) as c,
+            capture_logs() as logs,
+        ):
+            dead1 = c.get("/api/v1/pull/rate").json()
+            rate_bridge_path(tmp_path).unlink()  # ABSENT bridge — re-arms the dedup
+            absent = c.get("/api/v1/pull/rate").json()
+            self._publish_raw(tmp_path, "1e999")  # dead again (same +inf stamp)
+            dead2 = c.get("/api/v1/pull/rate").json()
+        assert _count_dead_warns(logs) == 2
+        assert dead1["bridge_source"] == "unverified"
+        assert dead1["flow_state"] == "idle"
+        # Absent bridge → the panel-only projection (unwired/idle), never a dead warn.
+        assert absent["flow_state"] == "idle"
+        assert dead2["bridge_source"] == "unverified"
+        assert dead2["flow_state"] == "idle"
+
+    def test_healthy_bridge_never_warns(self, tmp_path: Path) -> None:
+        _publish_now(tmp_path, effective_rps=3.3, current_rps=8.0)
+        with _client(DashboardState(), _FakeStore(tmp_path)) as c, capture_logs() as logs:
+            body = c.get("/api/v1/pull/rate").json()
+        assert _count_dead_warns(logs) == 0
+        assert body["bridge_source"] == "live"
+        assert body["flow_state"] == "flowing"
