@@ -2004,6 +2004,16 @@ jobs:
           else
             echo "(brutex.config.env_flags test file not present yet — gate inactive)"
           fi
+          # DEC-PREBUILD-FRAME-WRITE-001 (review fold): the batched frame→bar
+          # converter leaf `brutex.data.frame_bars` (moved out of
+          # spot_daily_resample to break the sink↔spot_daily_resample CodeQL
+          # py/cyclic-import cycle). NEW leaf -> its own strict 100%
+          # line+branch gate.
+          if compgen -G "tests/unit/test_frame_bars.py" > /dev/null; then
+            pytest --cov=brutex.data.frame_bars --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_frame_bars.py
+          else
+            echo "(brutex.data.frame_bars test file not present yet — gate inactive)"
+          fi
           # DEC-LAKE-FOOTPRINT-MEASURED-001 (MIGRATION.md #1253): the measured
           # lake-footprint multiplier + the pipeline prebuild's PRE-RUN disk
           # guard (observed schema_meta multiplier, conservative 6.5x

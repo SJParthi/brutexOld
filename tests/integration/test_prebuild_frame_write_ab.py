@@ -53,9 +53,13 @@ from typing import Any
 
 import pytest
 from brutex.data import frame_write_gate as gate
+
+# ONE import style for the writer module (CodeQL py/import-and-import-from):
+# the module object is needed for module-global monkeypatching
+# (`pw_module.record_partition_stats`), so everything rides it.
+from brutex.data import parquet_writer as pw_module
 from brutex.data.frame_write_gate import PREBUILD_FRAME_WRITE_ENV
 from brutex.data.models import CandleBar
-from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.sink import ParquetBarSink
 from brutex.data.timeframe_materialize import (
     MaterializeResult,
@@ -114,7 +118,7 @@ def _seed_bars(
         )
         for i in range(n)
     ]
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=root))
+    sink = ParquetBarSink(writer=pw_module.ParquetWriter(lake_root=root))
     sink.append(exchange=_EXCHANGE, segment=segment, symbol=symbol, interval="1minute", bars=bars)
 
 
@@ -297,7 +301,7 @@ def test_case4_union_never_delete_and_merge_delta(
         for i in range(3)
     ]
     for root in (root_off, root_on):
-        ParquetWriter(lake_root=root).write(
+        pw_module.ParquetWriter(lake_root=root).write(
             exchange=_EXCHANGE,
             segment="INDEX",
             symbol="NIFTY",
@@ -474,7 +478,7 @@ def test_case10_warm_rerun_zero_renders_zero_fsyncs(
     _derive(root_on, "1", monkeypatch, symbol="NIFTY")
     tree_before = {"off": _tree(root_off), "on": _tree(root_on)}
 
-    original_render = ParquetWriter._render_frame_bytes
+    original_render = pw_module.ParquetWriter._render_frame_bytes
     original_fsync = os.fsync
     original_replace = os.replace
     for flag, root, arm in (("0", root_off, "off"), ("1", root_on, "on")):
@@ -493,7 +497,9 @@ def test_case10_warm_rerun_zero_renders_zero_fsyncs(
             original_replace(src, dst, **kw)
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(ParquetWriter, "_render_frame_bytes", staticmethod(counting_render))
+            mp.setattr(
+                pw_module.ParquetWriter, "_render_frame_bytes", staticmethod(counting_render)
+            )
             mp.setattr(os, "fsync", counting_fsync)
             mp.setattr(os, "replace", counting_replace)
             result = _derive(root, flag, monkeypatch, symbol="NIFTY")
@@ -562,7 +568,9 @@ def test_case12_multi_chunk_frame_byte_law(tmp_path: Path, monkeypatch: pytest.M
 
     root_multi, root_single = tmp_path / "multi", tmp_path / "single"
     for root, frame in ((root_multi, multi), (root_single, single)):
-        sink = ParquetBarSink(writer=ParquetWriter(lake_root=root, partition_log_level="debug"))
+        sink = ParquetBarSink(
+            writer=pw_module.ParquetWriter(lake_root=root, partition_log_level="debug")
+        )
         sink.append_frame(
             exchange=_EXCHANGE,
             segment="INDEX",
@@ -581,7 +589,6 @@ def test_case13_seeded_stats_shard_hook_parity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import brutex.data.lake_stats_manifest as lsm
-    import brutex.data.parquet_writer as pw_module
 
     root_off, root_on = tmp_path / "off", tmp_path / "on"
     for root in (root_off, root_on):
@@ -662,18 +669,18 @@ def test_defaults_negative_pin_zero_fast_lane_code(
     tree equals the explicit flag-'0' tree (provably inert at defaults)."""
     calls = {"append_frame": 0, "write_frame": 0}
     original_af = ParquetBarSink.append_frame
-    original_wf = ParquetWriter.write_frame
+    original_wf = pw_module.ParquetWriter.write_frame
 
     def spy_af(self: ParquetBarSink, **kwargs: Any) -> Any:
         calls["append_frame"] += 1
         return original_af(self, **kwargs)
 
-    def spy_wf(self: ParquetWriter, **kwargs: Any) -> Any:
+    def spy_wf(self: pw_module.ParquetWriter, **kwargs: Any) -> Any:
         calls["write_frame"] += 1
         return original_wf(self, **kwargs)
 
     monkeypatch.setattr(ParquetBarSink, "append_frame", spy_af)
-    monkeypatch.setattr(ParquetWriter, "write_frame", spy_wf)
+    monkeypatch.setattr(pw_module.ParquetWriter, "write_frame", spy_wf)
 
     root_default, root_off = tmp_path / "default", tmp_path / "off"
     for root in (root_default, root_off):

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, TypedDict
 
 import pytest
 from brutex.data import frame_write_gate as gate
@@ -42,7 +42,26 @@ pytest.importorskip("polars")
 import polars as pl
 
 _T0 = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)
-_COORDS = {"exchange": "NSE", "segment": "INDEX", "symbol": "NIFTY", "interval": "5minute"}
+
+
+class _Coords(TypedDict):
+    """Exact-key coordinate kwargs — a plain dict[str, str] would make pyright
+    reject ``**_COORDS`` unpacking against ``append_frame``'s non-str keyword
+    params (``absent_open_interest`` / ``stats``); the TypedDict pins the key
+    set so the unpack type-checks precisely."""
+
+    exchange: str
+    segment: str
+    symbol: str
+    interval: str
+
+
+_COORDS: Final[_Coords] = {
+    "exchange": "NSE",
+    "segment": "INDEX",
+    "symbol": "NIFTY",
+    "interval": "5minute",
+}
 
 _SCHEMA: dict[str, Any] = {
     "ts_utc": pl.Datetime(time_unit="us", time_zone="UTC"),

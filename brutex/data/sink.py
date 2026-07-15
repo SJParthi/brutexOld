@@ -354,7 +354,11 @@ class ParquetBarSink:
             # null timestamp raises CandleBar's own loud error exactly as
             # the flag-OFF branch would). Observable, never silent.
             note_degrade(DegradeReason.SCHEMA_MISMATCH, stats, symbol=symbol, interval=interval)
-            from brutex.data.spot_daily_resample import frame_to_candle_bars
+            # Lazy import of the LEAF converter home (brutex.data.frame_bars —
+            # never spot_daily_resample, whose own lazy sink/writer imports
+            # would re-form the CodeQL py/cyclic-import cycle this leaf broke;
+            # drift-pinned by TestImportCycleDriftPin).
+            from brutex.data.frame_bars import frame_to_candle_bars
 
             return self.append(
                 exchange=exchange,

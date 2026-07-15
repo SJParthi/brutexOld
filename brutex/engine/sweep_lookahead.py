@@ -77,7 +77,19 @@ from typing import TYPE_CHECKING, Final, overload
 
 import structlog
 
-from brutex.config.env_flags import FALSY_LITERALS, TRUTHY_LITERALS, env_flag_tristate
+# Since DEC-PREBUILD-FRAME-WRITE-001 the env-flag vocabulary (the
+# truthy/falsy literal sets + the `env_flag_tristate` classifier) LIVES in
+# the wheel-free `brutex.config.env_flags` leaf (the prebuild frame-write
+# kill switch in `brutex.data` needs the same vocabulary WITHOUT importing
+# the engine package, whose `__init__` requires the compiled `fno_math`
+# wheel); this module re-exports the classifier byte-compatibly (in
+# `__all__`, identity-pinned by tests/unit/test_config_env_flags.py) so
+# every existing `from brutex.engine.sweep_lookahead import
+# env_flag_tristate` consumer (`rust_metrics` / `rust_stage1a` /
+# `sweep_apriori` / `results_depth_pass`) is untouched. The literal SETS
+# themselves are consumed only through the classifier — import them from
+# `brutex.config.env_flags` directly if a new consumer ever needs them.
+from brutex.config.env_flags import env_flag_tristate
 from brutex.feed.lookahead import LookAheadBarrier
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -91,27 +103,6 @@ _LOG = structlog.get_logger("brutex.engine.sweep_lookahead")
 #: The opt-in env flag. Unset / falsy ⇒ the guard is OFF (the default) and
 #: the sweep hot path is byte-identical and cost-unchanged.
 SWEEP_LOOKAHEAD_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_LOOKAHEAD_GUARD"
-
-#: The accepted truthy literals (case-insensitive, whitespace-stripped).
-#: Since DEC-PREBUILD-FRAME-WRITE-001 the literal sets + the
-#: :func:`env_flag_tristate` classifier LIVE in the wheel-free
-#: :mod:`brutex.config.env_flags` leaf (the prebuild frame-write kill switch
-#: in ``brutex.data`` needs the same vocabulary WITHOUT importing the engine
-#: package, whose ``__init__`` requires the compiled ``fno_math`` wheel);
-#: this module re-exports them byte-compatibly — every existing
-#: ``from brutex.engine.sweep_lookahead import env_flag_tristate`` consumer
-#: (``rust_metrics`` / ``rust_stage1a`` / ``sweep_apriori`` /
-#: ``results_depth_pass``) is untouched.
-_TRUTHY: Final[frozenset[str]] = TRUTHY_LITERALS
-
-#: The accepted falsy literals (case-insensitive, whitespace-stripped) — the
-#: explicit kill-switch vocabulary, the mirror of :data:`_TRUTHY` (see the
-#: relocation note there): a default-ON sibling flag
-#: (``brutex.engine.rust_metrics``, DEC-SWEEP-RUST-METRICS-DEFAULT-ON-001)
-#: recognises an explicit OFF via :func:`env_flag_tristate`; this module's
-#: own default-OFF flag needs no falsy branch — anything non-truthy is
-#: already OFF.
-_FALSY: Final[frozenset[str]] = FALSY_LITERALS
 
 __all__ = [
     "SWEEP_LOOKAHEAD_GUARD_ENV",

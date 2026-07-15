@@ -2686,8 +2686,20 @@ hostile-review pass._
   REFERENCE_ONLY; no lake-schema/scope/vocab/rate change; `frame_write_gate.py`
   (117/30) + `env_flags.py` (12/4) + `parquet_writer.py` (626/222) + `sink.py`
   (80/18) + `timeframe_materialize.py` (181/58) ALL 100.00% line+branch on
-  their gates; the new battery 202 passed + 1 env-gated skip; ruff/ruff-format
-  clean; `mypy --strict` clean; pyright 0 new vs the origin/main baseline.)
+  their gates; the new battery 202 passed + 1 env-gated skip (239 + 2 after
+  the reconcile fold); ruff/ruff-format clean; `mypy --strict` clean; pyright
+  0 new vs the origin/main baseline. CI/CODEQL RECONCILE FOLD (2026-07-15 —
+  the per-item record lives in MIGRATION.md #1795): the 16 head pyright
+  errors fixed (TypedDict `_COORDS` kwargs; the bench probe import repointed
+  to `pipeline_prebuild` + made load-bearing) and the 4 CodeQL alerts closed
+  at root cause — `frame_to_candle_bars` rehomed to the NEW leaf
+  `brutex/data/frame_bars.py` (kills the `sink ↔ spot_daily_resample`
+  py/cyclic-import; byte-compatible re-exports kept; drift-pinned by
+  `TestImportCycleDriftPin` + a NEW dedicated 100% gate 22/6 + ci.yml
+  stanza), the two dead `sweep_lookahead` literal-set aliases DELETED (the
+  classifier re-export + identity pin stand), the integration A/B suite on
+  ONE writer-module import style; entry renumbered #1793 → #1795 at the
+  merge-reconcile.)
   Earlier: `claude/bulk-spot-completeness-flag`
   (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took

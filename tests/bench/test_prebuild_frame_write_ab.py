@@ -272,6 +272,7 @@ def test_thread_scaling_signal_recorded(tmp_path: Path) -> None:
     2 workers > 1.5× over 1 worker (today's measured baseline: 1.0×). Recorded,
     never asserted here — the M4-Pro lane owns the pinned figures.
     """
-    from brutex.dashboard.prebuild_parallel import run_pipeline_prebuild_parallel  # noqa: F401
+    from brutex.dashboard.pipeline_prebuild import run_pipeline_prebuild_parallel
 
+    assert callable(run_pipeline_prebuild_parallel)  # the harness entry exists
     pytest.skip("Phase-2 harness measurement — see the DEC record")

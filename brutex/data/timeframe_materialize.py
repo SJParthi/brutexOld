@@ -56,13 +56,17 @@ import structlog
 
 from brutex.data.derive_lock import derive_write_lock
 
-# Re-export: `frame_to_candle_bars` LIVES in `spot_daily_resample` — the
-# import-graph LEAF of the pair (this module already imports its daily-derive
-# seam) — so the shared batched converter (DEC-PREBUILD-GIL-VECTORIZE-001) is
-# one-directional and the former `spot_daily_resample ↔ timeframe_materialize`
-# cycle (CodeQL py/cyclic-import) cannot re-form. Kept in `__all__` for the
-# original call sites/tests.
-from brutex.data.spot_daily_resample import frame_to_candle_bars
+# Re-export: `frame_to_candle_bars` LIVES in `brutex.data.frame_bars` — the
+# TRUE import-graph LEAF (DEC-PREBUILD-FRAME-WRITE-001 review fold; it moved
+# on from `spot_daily_resample` when the frame-write lane's sink/parquet_writer
+# degrade paths re-formed a CodeQL py/cyclic-import cycle with that module's
+# own lazy sink/writer imports) — so the shared batched converter
+# (DEC-PREBUILD-GIL-VECTORIZE-001) stays one-directional and neither the
+# former `spot_daily_resample ↔ timeframe_materialize` cycle nor the
+# `sink ↔ spot_daily_resample` one can re-form (drift-pinned by
+# `TestImportCycleDriftPin`). Kept in `__all__` for the original call
+# sites/tests.
+from brutex.data.frame_bars import frame_to_candle_bars
 from brutex.data.timeframes import (
     ALL_TF_MINUTES,
     DAILY_TF_MINUTES,

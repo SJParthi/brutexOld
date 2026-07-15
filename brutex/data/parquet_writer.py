@@ -1192,10 +1192,12 @@ class ParquetWriter:
         today's bytes AND today's failure semantics for free (a poison row
         raises ``CandleBar.__post_init__``'s exact loud error → the
         prebuild's per-symbol quarantine; V3 C8, zero new exception types).
-        Lazy import: ``spot_daily_resample`` pulls the groww constants +
-        calendars — never a module-level dep of the writer.
+        Lazy import from the LEAF converter home ``brutex.data.frame_bars`` —
+        never ``spot_daily_resample``, whose own lazy sink/writer imports
+        would re-form the CodeQL ``py/cyclic-import`` cycle the leaf broke
+        (drift-pinned by ``TestImportCycleDriftPin``).
         """
-        from brutex.data.spot_daily_resample import frame_to_candle_bars
+        from brutex.data.frame_bars import frame_to_candle_bars
 
         return self.write(
             exchange=exchange,

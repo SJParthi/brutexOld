@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, TypedDict
 
 import pytest
 from brutex.data import frame_write_gate as gate
@@ -39,7 +39,26 @@ pytest.importorskip("polars")
 import polars as pl
 
 _T0 = datetime(2024, 3, 4, 3, 45, tzinfo=UTC)  # 09:15 IST, a regular session
-_COORDS = {"exchange": "NSE", "segment": "INDEX", "symbol": "NIFTY", "interval": "5minute"}
+
+
+class _Coords(TypedDict):
+    """Exact-key coordinate kwargs — a plain dict[str, str] would make pyright
+    reject ``**_COORDS`` unpacking against ``append_frame``'s non-str keyword
+    params (``absent_open_interest`` / ``stats``); the TypedDict pins the key
+    set so the unpack type-checks precisely."""
+
+    exchange: str
+    segment: str
+    symbol: str
+    interval: str
+
+
+_COORDS: Final[_Coords] = {
+    "exchange": "NSE",
+    "segment": "INDEX",
+    "symbol": "NIFTY",
+    "interval": "5minute",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -202,3 +221,68 @@ class TestAppendFrame:
             merge_mode="latest-wins",
         )
         assert _dest(lake).read_bytes() == _dest(twin_root).read_bytes()
+
+
+class TestImportCycleDriftPin:
+    """AST drift pin: the `sink ↔ spot_daily_resample` CodeQL `py/cyclic-import`
+    cycle stays BROKEN (DEC-PREBUILD-FRAME-WRITE-001 review fold).
+
+    `frame_to_candle_bars` lives in the `brutex.data.frame_bars` LEAF; the
+    frame-write degrade paths (`sink.py` / `parquet_writer.py`) must import it
+    from THERE — an import of `spot_daily_resample` (whose daily-derive writer
+    lazily imports the sink + writer back) would re-form the cycle. The leaf
+    itself must import none of its consumers.
+    """
+
+    @staticmethod
+    def _imported_modules(path: Path) -> set[str]:
+        """Every module named by ANY import statement (module or function level)."""
+        import ast
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        out: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                out.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                out.add(node.module)
+        return out
+
+    _SRC = Path(__file__).resolve().parents[2] / "brutex" / "data"
+
+    def test_sink_never_imports_spot_daily_resample(self) -> None:
+        assert "brutex.data.spot_daily_resample" not in self._imported_modules(
+            self._SRC / "sink.py"
+        )
+
+    def test_parquet_writer_never_imports_spot_daily_resample(self) -> None:
+        assert "brutex.data.spot_daily_resample" not in self._imported_modules(
+            self._SRC / "parquet_writer.py"
+        )
+
+    def test_frame_bars_is_a_leaf(self) -> None:
+        """The converter home imports NONE of its consumers (either level)."""
+        forbidden = {
+            "brutex.data.sink",
+            "brutex.data.parquet_writer",
+            "brutex.data.spot_daily_resample",
+            "brutex.data.timeframe_materialize",
+        }
+        assert not forbidden & self._imported_modules(self._SRC / "frame_bars.py")
+
+    def test_import_order_smoke_both_directions(self) -> None:
+        """Real import-order smoke: either module first, in a fresh interpreter."""
+        import subprocess
+        import sys
+
+        for first, second in (
+            ("brutex.data.sink", "brutex.data.spot_daily_resample"),
+            ("brutex.data.spot_daily_resample", "brutex.data.sink"),
+        ):
+            proc = subprocess.run(
+                [sys.executable, "-c", f"import {first}; import {second}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert proc.returncode == 0, proc.stderr
