@@ -1344,6 +1344,16 @@ jobs:
           else
             echo "(brutex.engine.trial_stats test file not present yet — gate inactive)"
           fi
+          # 19i1e · brutex.engine.period_stats — the per-period finalist-stats
+          # canonical JSON + key grammar + cross-sum validators + the finalist
+          # fold / segmented-dd walk (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001; ONE
+          # COMMON home consumed by sweep_run's projector, ResultRow
+          # construction/load validation, and the dashboard parse).
+          if compgen -G "tests/unit/test_engine_period_stats.py" > /dev/null; then
+            pytest --cov=brutex.engine.period_stats --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_period_stats.py
+          else
+            echo "(brutex.engine.period_stats test file not present yet — gate inactive)"
+          fi
           # 19i1c · brutex.engine.stage3_wire — Stage-3 launcher wiring
           # (DEC-STAGE3-WIRE-001; the train-slice helper, survivor-cell
           # recovery by run-id match, the audited refinement post-pass, the
