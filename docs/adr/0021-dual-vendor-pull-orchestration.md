@@ -95,19 +95,30 @@ ownership; coordinated).
 
 ### 1.3 The Dhan adapter contract (the Dhan feed track's DECLARATIONS, 2026-07-15)
 
-**Evidence honesty (Golden Rule #10):** the task brief named two team memory
-files as the Dhan track's evidence base —
+**Evidence honesty (Golden Rule #10) — timeline preserved, base updated at
+the 2026-07-15 review fold:** the task brief named two team memory files as
+the Dhan track's evidence base —
 `/tmp/claude/memory/team/project/dhan-api-verified-facts.md` and
-`/tmp/claude/memory/team/project/dhan-track-state.md`. **Neither file exists
-at authoring time** (verified 2026-07-15 against the live memory store; the
-store DOES hold sibling Dhan-era records, e.g.
-`dhan-intraday-float-timestamp-2026-07-15.md`,
-`dhan-funds-margin-gate-2026-07-14.md`, confirming the Dhan track is live).
-The rows below are therefore recorded from the Dhan feed track's RELAYED
-contract (declared 2026-07-15 via the coordinator, grounded in their club
-PR #1551, branch `integration/club-x-dhan` @ `b6341fc3`), quoted as THEIR
-declarations — not this track's own probe. Every row must be re-confirmed
-against their landed code at WS-D binding time; UNVERIFIED items are marked.
+`/tmp/claude/memory/team/project/dhan-track-state.md`. **Neither existed at
+the authoring commit** (`578ad3b` @ 2026-07-15 10:36:12Z; verified then
+against the live memory store, which DID hold sibling Dhan-era records —
+e.g. `dhan-intraday-float-timestamp-2026-07-15.md` — confirming the track
+was live); **both LANDED ~7 minutes later** (mtime 2026-07-15 10:43:03Z,
+verified via `stat` at the same-day adversarial-review fold). They are NOW
+the primary declared evidence base for this section and are cited below;
+the original rows came from the Dhan feed track's RELAYED contract (declared
+2026-07-15 via the coordinator, grounded in their club PR #1551, branch
+`integration/club-x-dhan` @ `b6341fc3`) and the memory files CONFIRM the
+relayed values (90-day intraday cap per request · 5 r/s + 100,000/day data
+limits with no per-minute cap · 24h ROLLING JWT · rolling-only options with
+NO per-expired-contract history · `DEC-DHAN-ROLLING-FLOOR-001`) with three
+MATERIAL deltas folded in below: (i) their recorded gap list G2/G3 still
+EXPECTS an options prebuild + a FUT node — COUNTERMANDED after item 9;
+(ii) Dhan expired index FUTURES history is marked UNVERIFIED in their own
+facts file (item 2); (iii) Dhan INDIA VIX intraday availability + securityId
+are marked UNVERIFIED (item 10). Everything stays THEIR declaration — not
+this track's own probe. Every row must be re-confirmed against their landed
+code at WS-D binding time; UNVERIFIED items are marked.
 
 1. **OPTIONS SHAPE:** no per-expired-contract option history exists on Dhan.
    Only ATM-relative ROLLING series (`POST /v2/charts/rollingoption`):
@@ -118,7 +129,13 @@ against their landed code at WS-D binding time; UNVERIFIED items are marked.
    primary `options/` tree, so fixed-contract readers structurally cannot
    touch it (their declared layout, ratified by Decision 1).
 2. **FUTURES:** capability ABSENT on Dhan (operator ruling — the node is
-   dropped entirely from the Dhan graph, not flagged/optional).
+   dropped entirely from the Dhan graph, not flagged/optional). The vendor
+   FACT carries the memory file's own status, not only the ruling:
+   `dhan-api-verified-facts.md` marks Dhan expired index FUTURES history
+   **UNVERIFIED** ("docs do not confirm; nothing in the stack pulls futures.
+   Probe before building") — the graph consequence is identical (node
+   dropped), and any future revisit needs BOTH a decisive probe AND a fresh
+   operator ruling.
 3. **PAGING + RATE:** the intraday endpoint hard-caps **90 days/request**
    (spot); rolling options use **30-day tiles**. Data-API limits: **5 r/s +
    100,000 requests/day, NO per-minute cap** — a different SHAPE from
@@ -159,11 +176,41 @@ against their landed code at WS-D binding time; UNVERIFIED items are marked.
    Dhan-side market-hours policy would be a NEW decision to surface (open
    question Q2, §18), not an inherited one. The Groww guard's rationale is
    Groww-account-specific by its own docstring (§1.4).
-9. **GREEKS:** the Dhan Greeks pass reuses the COMMON kernel
-   (`greeks_enrich.compute_bar_overlay`, iv_source served/solved, provenance
-   bit 27, NO formula bump — the DEC-GREEKS-CORRECTNESS-AUDIT-001 lineage)
-   and is CLI-only today; the sequencer needs a callable seam for it as the
-   final Dhan phase (Decision 4 + §13).
+9. **GREEKS:** the Dhan Greeks pass reuses the COMMON kernel with iv_source
+   served/solved and NO formula bump (the
+   DEC-GREEKS-CORRECTNESS-AUDIT-001 lineage) and is CLI-only today; the
+   sequencer needs a callable seam for it as the final Dhan phase
+   (Decision 4 + §13). **Declaration-vs-main correction (review fold):**
+   their declared symbol `greeks_enrich.compute_bar_overlay` + "provenance
+   bit 27" (quoted verbatim from `dhan-track-state.md`) do NOT exist on main
+   @ `d6ac9f8` — the in-tree kernel entries are
+   `greeks_enrich.enrich_option_bars` (`brutex/data/greeks_enrich.py:555`) /
+   `_compute_bar` (:786), and the packed provenance stamp is a **27-bit
+   pack occupying bits 0-26** (statuses at bits 23-26;
+   `brutex/data/greeks_provenance.py:133` "Total 27 bits < 2^31") — there is
+   no "bit 27" field. The declared symbol is therefore branch-only /
+   UNVERIFIED against main; the WS-D binding targets the REAL kernel names
+   and must re-confirm whatever their club branch actually exports.
+10. **INDIA VIX (UNVERIFIED on Dhan):** `dhan-api-verified-facts.md` marks
+   Dhan VIX intraday availability UNVERIFIED and the INDIAVIX securityId
+   (~21) community-observed UNVERIFIED (only NIFTY=13/IDX_I is doc-cited;
+   resolve at runtime from the scrip master). The Dhan graph (§3.2) carries
+   the marker; the graphs are instrument-list-parametric (§1.2), so the Dhan
+   chain degrades honestly to 3 symbols if the probe refutes VIX.
+
+**RULING-B/A COUNTERMAND of the Dhan track's recorded TODO (review fold —
+routed via the coordinator, never assumed coordinated):**
+`dhan-track-state.md`'s own gap list records **G2** as a strict sequencer
+"SPOT→prebuild→FUT→prebuild→OPTIONS→prebuild→Greeks" and **G3** as
+"prebuild-after-options UNWIRED in `dhan_rolling_pull.py`" — i.e. the Dhan
+track's recorded plan still EXPECTS an OPTIONS PREBUILD and a FUT node. Both
+are WRONG by the operator rulings this ADR records: RULING B — no options
+prebuild on ANY vendor; RULING A + item 2 — no Dhan futures node at all.
+This countermand must be actively pushed to the Dhan track through the
+coordinator (correcting their G2/G3 TODO) BEFORE their sequencer work
+starts; §1.1's "the Dhan side pins its own options-prebuild ABSENCE in its
+own PR" is a coordination OBLIGATION, not an assumption — their recorded
+plan currently contradicts it.
 
 ### 1.4 Verified BruteX orchestration facts (this track's own verification, 2026-07-15)
 
@@ -246,8 +293,11 @@ corrected in place):
   is the first key field (`brutex/data/window_ledger.py:291`;
   `WindowLedgerRecord` :281); `GROWW_COVERAGE_MARKET="groww"`
   (`brutex/adapters/ingest_common.py:304`) + the `groww-future` /
-  `groww-option` bucket tokens; ledger queries filter by `market`
-  (window_ledger.py:1025).
+  `groww-option` bucket tokens; market-scoped consumers exist end-to-end —
+  representative: the operator remediation `reopen_skipped(market=...)`
+  (window_ledger.py:1022 — a market-FILTERED mutation helper, named
+  correctly per the review fold, not a read query) beside the market-keyed
+  progress/rollup reads.
 - **Market-hours guard** (`brutex/calendars/market_hours.py`):
   `BLOCK_START=08:45` (:43) / `BLOCK_END=15:35` (:47) IST, pure clockless
   predicate, kill switch `BRUTEX_MARKET_HOURS_GUARD` (:51),
@@ -283,9 +333,15 @@ corrected in place):
   DEC-PULL-SCOPED-ALL-ONECLICK-001).
 - **Greeks:** `run_greeks_enrich_pass`
   (`brutex/data/greeks_enrich_pass.py:147`) is the COMMON lake-scoped
-  fenced pass (DEC-CLI-GREEKS-ENRICH-001) — vendor-agnostic; it needs spot
-  in the SAME lake domain for the spot join (satisfied: spot lands FIRST in
-  every vendor graph, §4).
+  fenced pass (DEC-CLI-GREEKS-ENRICH-001). Precision (review fold): the
+  KERNEL (the `greeks_enrich` solve/enrich machinery) is vendor-agnostic;
+  the PASS's target DISCOVERY is bound to the PRIMARY F&O candle-lake
+  layout (`FNO_CANDLE_LAKE_SEGMENT` / `bars/<exch>/FNO` CE/PE contract
+  dirs) and cannot discover `feeds/dhan/rolling_options/**` — so the Dhan
+  seam (§1.3 item 9, Decision 4) must bind at KERNEL level with its own
+  discovery over the feed domain, never by pointing this pass at the Dhan
+  tree. Both need spot in the SAME lake domain for the spot join
+  (satisfied: spot lands FIRST in every vendor graph, §4).
 - **Lake scanners are anchored, `feeds/` is invisible (re-verified):**
   `lake_content_token` (`brutex/data/lake_heal.py:2086`) walks EXACTLY
   `BAR_DIR_NAME` + `OPTIONS_DIR_NAME` under the root (:2131-2134); the
@@ -319,10 +375,21 @@ corrected in place):
   ruling) → this file takes ADR-0021.
 - **Engine determinism:** run identity includes `data_snapshot_hash`
   (CLAUDE.md §2 Rule 4, DEC-SNAPSHOT-HASH-FULL-001) — the engine reads
-  exactly ONE vendor tree (the primary/Groww surfaces). Backup
-  (DEC-BACKUP-OFFBOX-001 / DEC-SWEEP-NIGHTLY-AUTOMATION-001): the include
-  set is the whole `<lake_root>`, so a NESTED `feeds/dhan/` subtree is
-  backed up for free.
+  exactly ONE vendor tree (the primary/Groww surfaces).
+- **Backup — the TWO systems are DISTINCT (review-fold correction; the
+  earlier single row conflated them):** the OFF-BOX restic backup
+  (DEC-BACKUP-OFFBOX-001) is fail-safe WHOLE-ROOT
+  (`brutex/backup/plan.py:9-14`) — a NESTED `feeds/dhan/` subtree IS backed
+  up for free on that lane. The NIGHTLY R50 backup
+  (DEC-SWEEP-NIGHTLY-AUTOMATION-001) is an explicit ALLOWLIST
+  (`brutex/nightly/backup.py:130-136` — window_ledger · registry.duckdb ·
+  instruments.duckdb · catalog.duckdb · audit, plus the sweeps/results
+  namespaces; `bars/` is excluded BY LAW, :398-408) — an unlisted `feeds/`
+  subtree is STRUCTURALLY UNREACHABLE to it. Bounded today (Dhan bytes are
+  re-pullable, like `bars/`, and Dhan has no durable ledger yet — gap G4),
+  but a FUTURE Dhan window ledger under `feeds/dhan/` is non-re-pullable
+  state and needs a nightly-allowlist addition (recorded as a Decision 7 /
+  WS-D obligation, §2.3).
 
 ---
 
@@ -370,8 +437,10 @@ without touching a line of locking code. Same for the per-partition flocks:
 they key on `sha256(realpath(dest))` (`brutex/data/partition_lock.py:339`),
 and dest paths in disjoint domains never collide.
 
-(d) **Nested, not sibling.** The whole-root off-box backup include set
-(DEC-BACKUP-OFFBOX-001) covers `feeds/dhan/` for free; one volume serves the
+(d) **Nested, not sibling.** The whole-root OFF-BOX backup include set
+(DEC-BACKUP-OFFBOX-001 — that lane only; the NIGHTLY backup is an allowlist
+that does NOT cover `feeds/`, §1.4 backup row) covers `feeds/dhan/` for
+free; one volume serves the
 disk guard; and the primary scanners are all anchored at `bars/` +
 `options/` (§1.4 scanner row — re-verified: `lake_content_token` walks
 exactly those two trees; no root-recursive walker exists), so `feeds/` is
@@ -396,9 +465,11 @@ ATM-relative rolling rows as fixed-contract history.
    high-blast-radius change with no benefit over rationale (c)'s free
    disjointness. Rejected.
 3. **Sibling root outside the primary** (a second Dhan lake root on its own
-   volume/env var): loses the free whole-root backup coverage, adds a second
-   volume/config surface + a second disk-guard domain. Rejected; per-vendor
-   disk volumes stay out of scope (§17).
+   volume/env var): loses the free whole-root OFF-BOX backup coverage (the
+   restic lane specifically — the nightly allowlist covers neither shape,
+   §1.4 backup row), adds a second volume/config surface + a second
+   disk-guard domain. Rejected; per-vendor disk volumes stay out of scope
+   (§17).
 
 ### 2.3 Belt-and-braces
 
@@ -406,7 +477,10 @@ Where a Dhan window ledger lands (post their G4 work, Decision 7), it uses
 `market` tokens `"dhan"` / `"dhan-option"` — the `GROWW_COVERAGE_MARKET`
 precedent (`brutex/adapters/ingest_common.py:304`;
 `brutex/data/window_ledger.py:291`) — so provenance is carried IN-BAND in
-the ledger too, not only by path placement.
+the ledger too, not only by path placement. That ledger is non-re-pullable
+state under `feeds/dhan/` — it MUST join the NIGHTLY backup allowlist when
+it lands (the nightly lane exists precisely to protect non-re-pullable
+state; §1.4 backup row — a WS-D obligation).
 
 ### 2.4 Honest costs
 
@@ -436,6 +510,12 @@ not a flagged node; the stage simply does not exist on that vendor's graph
 operator ruling).
 
 ### 3.1 The Groww graph
+
+Note on METADATA (review fold): the operator's FINAL ruled graph text omits
+a METADATA node; it is inserted here as the structural prerequisite of the
+ruled per-contract options capability (`get_expiries` → `get_contracts` is
+the addressing RULING A itself names) — a refinement of the ruled text, not
+a deviation.
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
@@ -483,7 +563,9 @@ operator ruling).
    SPOT  (NIFTY/BANKNIFTY/SENSEX + INDIAVIX; 1minute; rolling floor
    │      dhan_history_floor(today) = today − 5y + 7d — their
    │      `DEC-DHAN-ROLLING-FLOOR-001`; TRUE depth UNVERIFIED, probe
-   │      pending — the sequencer never hard-assumes 5y)
+   │      pending — the sequencer never hard-assumes 5y; INDIAVIX
+   │      availability itself UNVERIFIED on Dhan — probe-gated,
+   │      degrades to 3 symbols, §1.3 item 10)
    ├─ G1 gate
    ▼
    SPOT PREBUILD  (derived TFs inside the Dhan write domain)
@@ -565,6 +647,31 @@ ADDITIVE optional staged callables:
    placements share the same prebuild engine
    (`run_pipeline_prebuild_guarded` with `include_spot` /
    contract-kind selection).
+3. **The GREEKS stage placement supersedes-IN-PART
+   DEC-PULL-SIX-STEP-ORDER-001's post-step law** (review fold — previously
+   an unrecorded silent supersession): today Greeks runs INSIDE the
+   historical phase via the `pull_contract_candles` seam with the
+   strict-gate `PriorStepsVerdict` threading + `_GREEKS_STRICT_WITHHELD`
+   (`brutex/dashboard/historical_pull.py:1842` + :2477), while §3.1 draws
+   GREEKS as a SEQUENCER stage after options with its own gate. WS-B must
+   pick and pin the Groww binding: EITHER `run_options` carries the spine's
+   internal Greeks seam (then the Groww profile binds `run_greeks=None` and
+   the §3.1 GREEKS node is the spine-internal pass, drawn for capability
+   honesty) OR Greeks is EXTRACTED to a real staged callable — in which
+   case the six-step post-step placement + the strict-gate verdict
+   threading are superseded-in-part and the mapping of
+   `PriorStepsVerdict`/`BRUTEX_PIPELINE_STRICT_GATE` onto the staged gates
+   must be specified in the WS-B PR. Either choice is a CONSCIOUS,
+   ledgered decision, never drift.
+4. **The movers-warm gate is RE-SPECIFIED for the staged graph** (review
+   fold — "movers warm unchanged" cannot be literally true once the
+   terminal prebuild is abolished): today the warm fires iff the TERMINAL
+   `PrebuildOutcome.ok` over the clean set
+   (DEC-PREBUILD-CLEANSET-001; `brutex/dashboard/pipeline_pull.py:121`).
+   Staged-graph law: the warm fires iff spot-prebuild ok ∧ futures-prebuild
+   ok ∧ the options stage settled (there is no terminal prebuild to gate
+   on) — a supersession-in-part of the DEC-PIPELINE-AUTOPREBUILD-001 warm
+   arm, pinned in WS-B.
 
 ---
 
@@ -595,6 +702,20 @@ without a graph engine: no capability ⇒ no callable ⇒ no node. The Groww
 profile binds today's spines byte-identically. The Dhan profile binds the
 Dhan track's spines (their implementation, against this interface — §12).
 
+**Ownership collision to broker BEFORE WS-C (review fold — Golden Rule #11
+COMMON):** `dhan-track-state.md` records that club PR #1551 already carries
+a vendor binding/REGISTRY layer —
+`brutex/feeds/{binding,registry,groww_binding,dhan_binding}.py` +
+`brutex/data/feed_root.py` — squarely overlapping this profile/binder role
+(their content is UNINSPECTED from this track; a coordination risk, not a
+proven duplication). Two competing vendor-abstraction surfaces would violate
+the ONE-source-of-truth law, and a feeds registry is orchestration-shaped
+even though it lives in the adapter track's stack. WS-C must inspect that
+layer first and either (a) declare `VendorPullProfile` the EVOLUTION/home of
+it (WS-C consumes/renames), or (b) record why they are genuinely distinct
+layers — decided in the WS-C PR with the coordinator brokering ownership,
+never two silent parallel abstractions.
+
 ---
 
 ## 6. Decision 5 — Concurrency + isolation matrix (the zero-cross-impact rows)
@@ -604,7 +725,8 @@ Dhan track's spines (their implementation, against this interface — §12).
 | Job slot | its own `BackgroundPullJob` (per-vendor injected lock factories + guard — the ctor seams exist, `pull_jobs.py:435-443`) | its own `BackgroundPullJob` (same seams; precedent: the concurrent `_crossverify_job`, app.py:3132) | separate job objects + worker threads | the dashboard PROCESS if both run in-process (see residuals) |
 | Rate / quota | ONE `SessionRateController` (8 r/s + 500/min — DEC-GROWW-RATE-PERMIN-001) | ONE `SessionRateController` + `DailyQuotaTracker` (5 r/s + 100k/day — §1.3 item 3) | per-instance controllers (`pull_controller.py:992`; construction sites §1.4) — zero shared budget | none: a Groww 429 storm steps ONLY Groww's AIMD ladder; a Dhan quota exhaustion halts ONLY the Dhan chain |
 | Auth | Groww TOTP/daily-token SSM re-read (CLAUDE.md §6) | Dhan 24h JWT SSM re-read (§1.3 item 7) | separate credentials + separate reauth machinery; account single-flight keys per vendor account | none |
-| Locks | account + lake-root + lease trio at the primary root | ONE feed-root flock at `feeds/dhan/` | disjoint files by construction (Decision 1 rationale (c)); per-partition flocks are path-keyed (`partition_lock.py:339`) so they never collide across domains | none |
+| Locks | account + lake-root + lease trio at the primary root | ONE feed-root flock at `feeds/dhan/` | disjoint files by construction (Decision 1 rationale (c)); per-partition flocks are path-keyed (`partition_lock.py:339`) so they never collide across domains | HONEST ASYMMETRY (review fold): Dhan declares NO account-level single-flight and NO cross-host lease — flock is single-host, yet §9 discloses TickVault CO-TENANCY on the Dhan account (shared 100k/day budget). Two hosts sharing the Dhan account have no account exclusion/cross-host detection. Accepted for v1 under the single-box envelope (CLAUDE.md §8) + named as a Dhan-track follow-up (the DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 / DEC-ACCOUNT-LEASE-CROSSHOST-001 parity gap) — never claimed equivalent to the Groww posture |
+| Pull-OBSERVABILITY singletons (review fold — the previously missing row) | the ONE `RateLimitPanel` (`brutex/dashboard/app.py:446`) fed by `make_rate_observer`/`RatePanelSampler` over the app's ONE `_session_rate` (:2268, :3779); `GET /api/v1/pull/rate` + the DEC-RATE-METER-LIFECYCLE-001 meter registration (`register_pull_meter`, `pull_controller.py:1140` — the "no in-process pull running ⇒ no meter registered" process invariant, with its documented eviction blast radius); the DEC-OPERATOR-HEALTH-TRUTH-001 health-hub pull lane + `last_pull` retained terminal keyed on the ONE `_pull_job` slot (app.py:3094; `pull_jobs.py:1561`); the process-global `MetricRegistry` pull-health gauges | **DARK in v1 — a NAMED gap** (the pull-plumbing twin of the §2.4 lake-read invisibility): the Dhan chain surfaces NONE of these Groww-slot readouts | **WS-D PIN:** the Dhan chain NEVER registers into the Groww panel / pull-rate meter / health-hub pull lane — registering would blend/evict the Groww readout, break the meter-lifecycle invariant, and mis-color the health-hub pull lane (three DECs of readout honesty). Per-vendor observability surfaces land in WS-E | the Dhan chain is observably dark on these surfaces until WS-E (disclosed; its own job snapshot + structlog stage events are the interim visibility) |
 | Prebuild derive lock | `derive_write_lock(primary root)` | `derive_write_lock(dhan feed root)` — WS-D invariant | lake-root-keyed lock (`pipeline_prebuild.py:801`) → per-domain keys → the two prebuilds may overlap | host CPU (below) |
 | Failure domain | per-vendor job thread/process; `MarketHoursHalt` / throttle / auth expiry / mass-empty halt the GROWW chain only | per-vendor job thread/process; quota exhaustion / JWT expiry halt the DHAN chain only | fail-closed within a vendor (§3.3); no shared exception path | the honest shared residuals below |
 | Scheduling lane | dashboard job OR the nightly/CLI lane | dashboard job OR the nightly/CLI lane | the nightly/CLI lane MAY run the two chains as TWO OS PROCESSES for hard process isolation | — |
@@ -655,7 +777,37 @@ for OPTION contracts (DEC-PIPELINE-AUTOPREBUILD-001 —
    (`brutex/nightly/pipeline_binding.py:346`). Neither entry passes options
    callables directly — they call the guarded pipeline entry, which wires
    options internally at sites 1-2. (No other production caller wires the
-   options prebuild — grep-verified.)
+   options PREBUILD — grep-verified; the heal RECALL below is a distinct
+   producer path, not a prebuild wiring.)
+5. **The lake-heal derived RECALL is a SECOND production writer of derived
+   option TFs** (review fold — the original audit missed it):
+   `lake_heal._run_recall` (`brutex/data/lake_heal.py:1459`) re-derives the
+   `1day` partition for EVERY symbol whose 1-minute was healed with NO kind
+   gate on the DAILY arm — `derive_daily_for_targets` (:1493) runs for FNO
+   CE/PE contracts too (`include_oi=t.segment=="FNO"`, the positional F&O
+   daily resampler); only the INTRADAY rebuild is CE/PE-gated
+   (`_prebuild_kind_from_coords` → `None`, :1361; `_rebuild_tf_months`
+   returns `(0, 0)` at :1414-1417 WITHOUT quarantine-moving the stale
+   months). So after WS-A, an L2/L3 heal touching an option contract's
+   1-minute would still CREATE/REWRITE a derived option `1day` — violating
+   RULING B through a path the pipeline-scoped absence pin cannot catch.
+   Two adjacent in-tree defects recorded for WS-A: (a) the
+   `_prebuild_kind_from_coords` docstring's justification — "options
+   intraday is never materialised — `materialize_lake_timeframes` raises
+   for OPTIONS by design" (:1366-1368) — is STALE/FALSE:
+   `timeframe_materialize` fully supports `PrebuildKind.OPTIONS`
+   (`brutex/data/timeframe_materialize.py:19-21` docstring +
+   `intraday_resampler_for` :236 routing FUTURES **and** OPTIONS to the
+   OI-aware resampler) since DEC-PIPELINE-AUTOPREBUILD-001, and the module's
+   ONLY shape raise (:620) is the `months` + `include_daily` refusal — no
+   OPTIONS raise exists; (b) post-retirement RESIDUE: today a healed option
+   contract's poisoned materialised intraday TF months are skipped by
+   `_rebuild_tf_months` and rebuilt LAZILY by the NEXT pipeline options
+   prebuild after `remove_derive_stamp` (:1483) — after WS-A nothing
+   rebuilds them, so stored derived option intraday TFs would diverge
+   PERMANENTLY from their healed 1-minute source while `/db` keeps
+   listing/serving them (it lists physically-stored partitions). Both are
+   resolved by the WS-A scope in §7.2.
 
 ### 7.2 The change (WS-A)
 
@@ -666,31 +818,93 @@ for OPTION contracts (DEC-PIPELINE-AUTOPREBUILD-001 —
   ("options are 1-minute-native by design — derived option TFs retired"),
   never the misleading "not injected" wording on a by-design retirement
   (the note-surgery precedent of DEC-PULL-SCOPED-ALL-ONECLICK-001).
+- **The heal-recall daily arm joins the WS-A scope** (§7.1 site 5):
+  `_run_recall`'s `1day` re-derive is GATED for CE/PE (or a conscious
+  exemption is ledgered in the superseding DEC — the default is the gate:
+  RULING B says options never get derived TFs, and the recall exists to
+  keep DERIVED data coherent with healed 1-minute — for options the
+  coherent state is ABSENCE); the stale `_prebuild_kind_from_coords`
+  docstring (§7.1 site 5 defect (a)) is corrected in the same PR.
 - A SUPERSEDING DEC entry (supersedes-in-part
   DEC-PIPELINE-AUTOPREBUILD-001 — the options arm ONLY; the spot+futures
   prebuild law stands).
-- An **ABSENCE PIN test**: a pipeline run over a lake holding option
-  contracts writes NO derived option timeframe partitions (asserted on the
-  tree, not on a report field), and the options phase report reads the
-  by-design note.
-- A **READER AUDIT recorded here** (re-verified against the tree):
-  - the movers options readers are 1-minute-native BY DESIGN — the locked
-    as-of + Greeks-overlay semantics (DEC-FNO-TF-DERIVE-OI-001; in-tree
-    markers: `brutex/dashboard/movers_options.py:48`,
-    `movers_futures.py:839`, `movers_stored_read.py:41`) — they never read
-    derived option TFs;
+- An **ABSENCE PIN test, WIDENED beyond the pipeline** (review fold): (i) a
+  pipeline run over a lake holding option contracts writes NO derived
+  option timeframe partitions (asserted on the tree, not on a report
+  field), and the options phase report reads the by-design note; AND (ii)
+  an L2/L3 HEAL touching an option contract's 1-minute writes NO derived
+  option `1day`/TF partition (the §7.1 site-5 path — the pipeline-scoped
+  pin alone cannot catch it).
+- A **READER AUDIT recorded here** (re-verified against the tree; the
+  review fold REFUTED-IN-PART the original "movers never read derived
+  option TFs" claim — corrected below):
+  - the movers options SESSION reads are 1-minute-native BY DESIGN — the
+    locked as-of + Greeks-overlay semantics (DEC-FNO-TF-DERIVE-OI-001;
+    in-tree markers: `brutex/dashboard/movers_options.py:48`,
+    `movers_futures.py:839`, `movers_stored_read.py:41`) — the SESSION path
+    never reads derived option TFs;
+  - **BUT the movers options prev-day BASELINES DO read the derived option
+    `1day` FIRST** (the review-fold correction): the per-contract
+    `resolve_prev_close(... segment=FNO, symbol=<option contract>)` /
+    `resolve_prev_oi(...)` calls (`movers_options.py:1367` + :1370) read
+    the contract's derived `1day` partition as the PRIMARY path
+    (`movers_snapshot.py:1279`; `movers_futures.py:988` + :1028), with the
+    bounded 1-minute walk-back (`_prior_session_last_from_minute`,
+    `_PREV_SESSION_MAX_BACK_DAYS=14` — `movers_snapshot.py:1209` + :1212)
+    firing ONLY when the `1day` is absent or holds no prior bar —
+    `movers_stored_read.py:47-52` documents the dependency verbatim.
+    Consequences the disposition below must close: (A) CORRECTNESS — after
+    retirement, a live option contract that HAD a `1day` at cutover keeps
+    accreting 1-minute while its `1day` freezes; the resolver prefers a
+    PRESENT-but-stale `1day` whenever it holds ANY prior bar, so the movers
+    options screen would serve a FROZEN retirement-eve close as prev-close
+    → wrong %CHNG for up to the contract's remaining life, flagged only by
+    the DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 " *" marker (which stamps,
+    never corrects); (B) LATENCY — contracts born after retirement pay the
+    per-contract multi-day 1-minute walk-back (≤14 calendar days probed,
+    month-bounded reads) on every fresh candidate compute — values
+    converge honestly; the cost is disclosed here, absorbed by the
+    candidate cache between generations;
+  - **the DOCTOR is a consumer the original audit missed** (review fold):
+    `check_derived_freshness` (`brutex/doctor.py:359`) walks
+    `bars/*/*/*` symbol dirs SORTED (:398) — FNO CE/PE contract dirs are IN
+    that walk — and probes the FIRST symbol carrying both a `1minute` base
+    and stored derived TFs, FAILing loudly on any drift from a fresh
+    re-derivation. A post-retirement frozen option TF can seat that probe
+    ⇒ a recurring loud doctor FAIL across the transition window (up to
+    ~30 days per contract — the `expiry − 30d` window law). The
+    disposition below must keep the doctor green: either the stored option
+    TFs are disposed of, or CE/PE symbol dirs are excluded from the
+    freshness walk under the superseding DEC (with its own pin);
   - the ENGINE never reads options (CLAUDE.md §2 Rule 3 — F&O lake is
     REFERENCE_ONLY; DEC-ENGINE-SPOT-ONLY-001);
   - crossverify is 1-minute-only by law (DEC-CROSSVERIFY-PRODUCER-001);
   - `/db` lists only PHYSICALLY-STORED partitions (discovery walks the
     lake, `brutex/dashboard/db_view.py:1219` + :1239) — an absent derived
-    option TF simply does not appear; no fabrication risk.
-- **Already-stored derived option TFs** (written by the pre-ruling
-  prebuild) are left INERT in place — data is never destroyed; disk reclaim
-  is an OPTIONAL operator action (sign-off question Q1). New pulls simply
-  stop producing them.
+    option TF simply does not appear; no fabrication risk. A PRESENT frozen
+    one, however, keeps being listed/served — another reason the
+    disposition below is not optional.
+- **Already-stored derived option TFs (written by the pre-ruling prebuild)
+  are NOT zero-risk to leave inert** (the review fold falsified the earlier
+  "leave INERT — zero risk" recommendation; Q1 rewritten accordingly).
+  WS-A must ship ONE disposition:
+  - **(a) RECOMMENDED — quarantine-move (or delete) every option-contract
+    derived-TF + derived-`1day` partition at retirement.** Derived data is
+    re-derivable from the stored 1-minute (nothing irreplaceable is
+    destroyed; the quarantine-move keeps the house
+    data-never-destroyed posture — the DEC-LAKE-HEAL-001 before-image
+    pattern), the frozen-baseline hazard (A) dies structurally, the
+    doctor stays green, and `/db` stops serving frozen TFs.
+  - **(b) Leave stored bytes inert + gate every reader:** the baseline
+    resolvers take the 1-minute fallback for FNO CE/PE (or
+    freshness-check the `1day` before serving), AND the doctor freshness
+    walk excludes CE/PE dirs under the superseding DEC. More moving parts,
+    permanent frozen bytes on disk; kept as the fallback option only.
+  - Leaving the bytes inert WITHOUT reader gating is REJECTED — it serves
+    wrong %CHNG (A) and a recurring doctor FAIL.
 - The Dhan side pins its own options-prebuild ABSENCE in its own PR (their
-  file ownership; coordinated — §1.1 ruled item).
+  file ownership; coordinated — and per the §1.3 COUNTERMAND their recorded
+  G2/G3 TODO must first be corrected through the coordinator).
 
 ---
 
@@ -759,7 +973,11 @@ misorder) — and **OBSERVABLY**:
   silent hole).
 - The per-vendor `stopped_after` vocabulary extends with the staged names.
 - Per-vendor pull-progress job surfaces (already job-scoped —
-  `BackgroundPullJob` snapshots).
+  `BackgroundPullJob` snapshots). Precision (review fold): job-scoped
+  covers the SNAPSHOTS only — the single-slot rate panel /
+  `/api/v1/pull/rate` / health-hub pull lane stay Groww-slot surfaces, on
+  which the Dhan chain is DARK in v1 (the Decision 5 observability row +
+  its WS-D never-register pin; per-vendor surfaces land in WS-E).
 - The intra-spine six-step machinery (PullStep / StepOrderMonitor /
   `pull.step.*` events) is retained PER VENDOR unchanged.
 - ONE `BRUTEX_PIPELINE_STRICT_GATE` applies to BOTH vendors in v1
@@ -837,6 +1055,33 @@ the vendor has NO incrementality capability (Decision 7 consequences apply);
 a callable returning `None` for a key means "no prior coverage — pull from
 the floor".
 
+**Sketch disambiguations (review fold — the rules the Dhan session would
+otherwise have to guess):**
+
+- **Legacy XOR staged, fail-loud:** the legacy combined params
+  (`run_historical` / terminal `run_prebuild`) and the NEW staged params
+  (`run_futures` / `run_options` / `run_prebuild_*` / `run_greeks`) are
+  MUTUALLY EXCLUSIVE — a caller passing members of BOTH families gets a
+  typed refusal at call time (the fail-loud junk-mix law; no precedence, no
+  silent winner). Legacy-only callers are byte-identical (Decision 3);
+  staged-only callers get the staged graph.
+- **Per-stage gate composition:** each staged callable gets its own gate in
+  the canonical order (§3.3), generalizing the `spot_phase_ok` family; the
+  ONE `BRUTEX_PIPELINE_STRICT_GATE` env applies per stage on BOTH vendors
+  in v1 (§10) — the strict-gate verdict threading for Greeks follows the
+  §4.1 supersession-3 choice.
+- **One-line field sketches for the named types** (full shapes are WS-B/
+  WS-C deliverables): `PhaseKey` = a frozen `(vendor, stage, instrument?)`
+  token — the key `incremental_from` resolves coverage for;
+  `VendorCapability` = a frozen set-like declaration
+  `{spot: bool, futures: bool, options_shape: per_contract|rolling_atm|None,
+  metadata: bool}`; `LockDomain` = the vendor's lock recipe
+  (`trio_at_primary_root` | `feed_root_flock(path)`); `PagingProfile` = the
+  adapter's chunk/tile law (`max_days_per_request` per phase kind);
+  `IncrementalityCapability` = HOW `incremental_from` is derived
+  (`durable_ledger(markets)` | `lake_tail_scan`) — `None` = absent
+  (Decision 7).
+
 **Invariants every vendor spine must honor (the contract this design
 enforces at review time):**
 
@@ -862,11 +1107,21 @@ enforces at review time):**
   every "byte-identical default" claim is a WS-B test obligation, not a
   present-tense fact.
 - The Dhan contract rows (§1.3) are the Dhan track's DECLARATIONS; the two
-  named memory-file sources were absent at authoring time (noted in §1.3)
-  and the relayed contract is the citation. Re-confirm at WS-D.
+  named memory-file sources were absent at the authoring commit and landed
+  ~7 minutes later — they are NOW cited as the primary declared evidence
+  base (timeline + deltas recorded in §1.3, incl. the RULING-B/A
+  countermand of their G2/G3 TODO). Still THEIR declarations — re-confirm
+  at WS-D.
 - Dhan TRUE 1-minute depth is UNVERIFIED (docs-vs-SDK contradiction; probe
   pending) — the rolling floor law may over-promise; the sequencer degrades
-  honestly (adapter-owned floor resolver).
+  honestly (adapter-owned floor resolver). Dhan INDIA VIX availability +
+  securityId are likewise UNVERIFIED (§1.3 item 10 — probe-gated, honest
+  3-symbol degrade).
+- The WS-A retirement carries REAL reader consequences until its
+  disposition ships (§7.2): the movers options prev-day baselines read the
+  derived option `1day` FIRST, and the doctor's freshness walk covers CE/PE
+  dirs — "leave stored option TFs inert, zero risk" is FALSE (Q1
+  rewritten).
 - The shared residual failure domains (Decision 5) are real: disk volume,
   host CPU/RAM, in-process dashboard co-residency, Greeks pool, GIL.
 - The quota arithmetic (§8) uses the DECLARED tile/quota shape; a vendor
@@ -902,8 +1157,18 @@ enforces at review time):**
 
 ## 16. Open questions for operator sign-off (numbered, answerable)
 
-- **Q1** — Stored derived option TFs already on disk: leave INERT
-  (recommended — data never destroyed, zero risk) vs reclaim the space?
+- **Q1 (REWRITTEN at the review fold — the earlier "leave INERT, zero
+  risk" was FALSE):** stored derived option TFs already on disk feed the
+  movers prev-close/OI baselines `1day`-FIRST and sit in the doctor's
+  freshness walk (§7.2) — leaving them inert un-gated serves a FROZEN
+  retirement-eve prev-close (wrong %CHNG until contract expiry) and a
+  recurring doctor FAIL. Choose the disposition: **(a)
+  quarantine-move/delete the option-contract derived partitions at
+  retirement (RECOMMENDED — re-derivable from stored 1-minute, doctor
+  stays green, hazard dies structurally)** vs (b) leave bytes inert +
+  gate the baseline resolvers to the 1-minute fallback for FNO CE/PE +
+  exclude CE/PE from the doctor freshness walk (fallback option; frozen
+  bytes stay on disk)?
 - **Q2** — Any Dhan-side pull-window / intra-day quota-budget policy,
   despite no inherited market-hours guard? (Context: TickVault co-tenancy
   on the Dhan account + the shared 100k/day budget, §9.) Default: none.
@@ -917,8 +1182,11 @@ enforces at review time):**
 ## 17. Implementation plan (workstreams; branch-now / land-after-coordination per the merge train)
 
 - **WS-A (RULED, first PR after this design lands):** Groww
-  options-prebuild retirement + absence pin + reader audit + the
-  superseding DEC entry (§7).
+  options-prebuild retirement + the heal-recall CE/PE daily-arm gate + the
+  stale `_prebuild_kind_from_coords` docstring correction + the WIDENED
+  absence pin (pipeline AND heal paths) + the stored-option-TF disposition
+  (Q1) keeping the movers baselines honest and the doctor green + the
+  reader audit + the superseding DEC entry (§7).
 - **WS-B:** staged sequencer seams — additive `run_full_pipeline` params +
   the F&O spine `step_filter`; byte-identical defaults PINNED.
 - **WS-C:** `VendorPullProfile` / capability registry + per-vendor job
@@ -934,8 +1202,10 @@ enforces at review time):**
 - Operator directives + RULINGS A/B — 2026-07-15, via coordinator + the
   Dhan feed track (§1.1).
 - The Dhan adapter contract — the Dhan feed track's declarations,
-  2026-07-15; club PR #1551, `integration/club-x-dhan` @ `b6341fc3`
-  (§1.3; named memory files absent at authoring — recorded honestly).
+  2026-07-15; club PR #1551, `integration/club-x-dhan` @ `b6341fc3`; the
+  team memory files `dhan-api-verified-facts.md` + `dhan-track-state.md`
+  (absent at the authoring commit, landed ~7 min later — cited since the
+  same-day review fold; timeline + deltas in §1.3).
 - CLAUDE.md §2 Rules 3/4/6, §6 (Groww verified facts), §8 (hardware
   envelope).
 - DEC-PIPELINE-AUTOPREBUILD-001 (the terminal prebuild being
@@ -947,9 +1217,12 @@ enforces at review time):**
   DEC-AWS-ONLY-CREDS-001 · DEC-FNO-TF-DERIVE-OI-001 ·
   DEC-CROSSVERIFY-PRODUCER-001 · DEC-ENGINE-SPOT-ONLY-001 ·
   DEC-SNAPSHOT-HASH-FULL-001 · DEC-BACKUP-OFFBOX-001 ·
+  DEC-SWEEP-NIGHTLY-AUTOMATION-001 ·
   DEC-PULL-TODAY-COMPLETENESS-GATE-001 ·
   DEC-CLI-GREEKS-ENRICH-001 · DEC-GREEKS-CORRECTNESS-AUDIT-001 ·
-  DEC-PULL-SCOPED-ALL-ONECLICK-001.
+  DEC-PULL-SCOPED-ALL-ONECLICK-001 · DEC-PREBUILD-CLEANSET-001 ·
+  DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 · DEC-LAKE-HEAL-001 ·
+  DEC-RATE-METER-LIFECYCLE-001 · DEC-OPERATOR-HEALTH-TRUTH-001.
 - Future / not-yet-landed ids (backticked by convention):
   `DEC-DUAL-VENDOR-PIPELINE-001` (this design, at sign-off) ·
   `DEC-FEED-SPINE-GENERALIZE-001` + `DEC-DHAN-ROLLING-FLOOR-001` (the Dhan
@@ -967,4 +1240,11 @@ enforces at review time):**
   `brutex/data/lake_invariants.py` · `brutex/data/today_completeness.py` ·
   `brutex/data/greeks_enrich_pass.py` · `brutex/calendars/market_hours.py` ·
   `brutex/config/paths.py` · `brutex/nightly/pipeline_binding.py` ·
-  `brutex/dashboard/pull_scope.py` · `scripts/ci/no-dhan-guard.sh`.
+  `brutex/dashboard/pull_scope.py` · `scripts/ci/no-dhan-guard.sh` ·
+  (review fold) `brutex/dashboard/movers_options.py` ·
+  `brutex/dashboard/movers_snapshot.py` ·
+  `brutex/dashboard/movers_futures.py` ·
+  `brutex/dashboard/movers_stored_read.py` · `brutex/doctor.py` ·
+  `brutex/data/timeframe_materialize.py` · `brutex/data/greeks_enrich.py` ·
+  `brutex/data/greeks_provenance.py` · `brutex/nightly/backup.py` ·
+  `brutex/backup/plan.py` · `brutex/dashboard/app.py`.
