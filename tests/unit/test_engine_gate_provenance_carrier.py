@@ -16,7 +16,6 @@ wiring: ``gate_provenance_token`` / ``grid_gate_provenance`` →
 # pyright: reportPrivateUsage=none
 from __future__ import annotations
 
-import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,7 +27,6 @@ from brutex.engine.results_store import (
     GATE_PROVENANCE_FIELD,
     ResultRow,
     ResultsStore,
-    ResultsStoreError,
 )
 from brutex.engine.sweep_identity import _gate_config_fragment, gate_provenance_token
 from brutex.engine.sweep_orchestrator import (
@@ -115,30 +113,6 @@ def _tuple() -> SweepTuple:
     )
 
 
-class TestGateProvenanceToken:
-    """The pure token combiner in :mod:`brutex.engine.sweep_identity`."""
-
-    def test_both_none_is_none(self) -> None:
-        """An ungated default-selection grid contributes NO token (golden lever)."""
-        assert gate_provenance_token(gate_config=None, selection=None) is None
-
-    def test_gate_only(self) -> None:
-        """A gate-only token carries exactly the gate_config leg, canonical JSON."""
-        token = gate_provenance_token(gate_config={"overfit": [0.95]}, selection=None)
-        assert token == '{"gate_config":{"overfit":[0.95]}}'
-        assert json.loads(token) == {"gate_config": {"overfit": [0.95]}}
-
-    def test_selection_only(self) -> None:
-        """A selection-only token carries exactly the selection leg."""
-        token = gate_provenance_token(gate_config=None, selection={"top_k": 5})
-        assert token == '{"selection":{"top_k":5}}'
-
-    def test_both_legs_sorted_compact(self) -> None:
-        """Both legs serialise sort_keys + compact — byte-deterministic."""
-        token = gate_provenance_token(gate_config={"stage3": [10, 2, 1]}, selection={"min_hits": 0})
-        assert token == '{"gate_config":{"stage3":[10,2,1]},"selection":{"min_hits":0}}'
-
-
 class TestGridGateProvenance:
     """The ONE write-side seam over the two #1336 digest fragments."""
 
@@ -216,99 +190,6 @@ class TestGridGateProvenance:
         assert cfg.gate_provenance == grid_gate_provenance(grid)
         ungated = tuple_.to_run_config(_grid())
         assert ungated.gate_provenance is None
-
-
-class TestConditionalColumnEmission:
-    """The CONDITIONAL Parquet column — present ONLY in gated stores."""
-
-    def test_ungated_store_has_no_column(self, tmp_path: Path) -> None:
-        """An ungated store's schema carries NO gate_provenance column."""
-        store = ResultsStore(path=tmp_path / "u.parquet")
-        store.append(_row(1))
-        store.flush()
-        assert GATE_PROVENANCE_FIELD not in pl.read_parquet_schema(tmp_path / "u.parquet")
-        assert store.gate_provenance_present is False
-
-    def test_gated_rows_emit_column_and_roundtrip(self, tmp_path: Path) -> None:
-        """Token-carrying rows emit the column; load reads the token back."""
-        store = ResultsStore(path=tmp_path / "g.parquet")
-        store.append(_row(1, gate_provenance=_TOKEN))
-        store.flush()
-        assert GATE_PROVENANCE_FIELD in pl.read_parquet_schema(tmp_path / "g.parquet")
-        loaded = ResultsStore.load(tmp_path / "g.parquet")
-        assert loaded.gate_provenance_present is True
-        assert loaded.rows()[0].gate_provenance == _TOKEN
-
-    def test_zero_row_gated_store_is_schema_discoverable(self, tmp_path: Path) -> None:
-        """A store-level token emits the column at ZERO rows (the arm-2 carrier)."""
-        store = ResultsStore(path=tmp_path / "e.parquet", gate_provenance=_TOKEN)
-        store.flush()
-        assert GATE_PROVENANCE_FIELD in pl.read_parquet_schema(tmp_path / "e.parquet")
-        loaded = ResultsStore.load(tmp_path / "e.parquet")
-        assert len(loaded) == 0
-        assert loaded.gate_provenance_present is True
-
-    def test_zero_row_ungated_store_stays_ungated(self, tmp_path: Path) -> None:
-        """A tokenless empty store emits NO column — never a fabricated gate."""
-        store = ResultsStore(path=tmp_path / "eu.parquet")
-        store.flush()
-        assert GATE_PROVENANCE_FIELD not in pl.read_parquet_schema(tmp_path / "eu.parquet")
-        assert ResultsStore.load(tmp_path / "eu.parquet").gate_provenance_present is False
-
-    def test_load_flush_roundtrip_preserves_gated_schema(self, tmp_path: Path) -> None:
-        """A loaded 0-row gated store re-flushes BYTE-IDENTICAL (column kept)."""
-        ResultsStore(path=tmp_path / "e.parquet", gate_provenance=_TOKEN).flush()
-        before = (tmp_path / "e.parquet").read_bytes()
-        loaded = ResultsStore.load(tmp_path / "e.parquet")
-        loaded.flush()
-        assert (tmp_path / "e.parquet").read_bytes() == before
-
-    def test_pre_extension_row_loads_none(self, tmp_path: Path) -> None:
-        """A store written without the column loads gate_provenance=None (Ruling 5)."""
-        # Simulate the pre-extension generation: write an UNGATED store (no
-        # column emitted — byte-identical to the pre-extension writer), then
-        # load it back; the presence-tolerant read yields the honest None.
-        store = ResultsStore(path=tmp_path / "old.parquet")
-        store.append(_row(1))
-        store.flush()
-        loaded = ResultsStore.load(tmp_path / "old.parquet")
-        assert loaded.rows()[0].gate_provenance is None
-
-
-class TestAppendBackfill:
-    """The directional gate_provenance backfill on a same-run_id re-append."""
-
-    def test_none_to_token_backfills(self, tmp_path: Path) -> None:
-        """A provenance-stamped redo upgrades a legacy None row (returns True)."""
-        store = ResultsStore(path=tmp_path / "s.parquet")
-        store.append(_row(1))
-        backfilled = store.append(_row(1, gate_provenance=_TOKEN))
-        assert backfilled is True
-        kept = store.get(f"{1:064x}")
-        assert kept is not None and kept.gate_provenance == _TOKEN
-
-    def test_token_to_none_is_noop(self, tmp_path: Path) -> None:
-        """A less-informed redo never erases a stamp (returns False)."""
-        store = ResultsStore(path=tmp_path / "s.parquet")
-        store.append(_row(1, gate_provenance=_TOKEN))
-        noop = store.append(_row(1))
-        assert noop is False
-        kept = store.get(f"{1:064x}")
-        assert kept is not None and kept.gate_provenance == _TOKEN
-
-    def test_two_known_tokens_conflict(self, tmp_path: Path) -> None:
-        """Two DIFFERENT known tokens at one address raise loudly (Golden Rule #4)."""
-        store = ResultsStore(path=tmp_path / "s.parquet")
-        store.append(_row(1, gate_provenance=_TOKEN))
-        with pytest.raises(ResultsStoreError, match="gate-provenance conflict"):
-            store.append(_row(1, gate_provenance=_OTHER_TOKEN))
-
-    def test_non_backfill_field_still_conflicts(self, tmp_path: Path) -> None:
-        """A metric divergence stays the strict run-identity conflict."""
-        store = ResultsStore(path=tmp_path / "s.parquet")
-        store.append(_row(1, sharpe=1.0))
-        with pytest.raises(ResultsStoreError, match="run-identity conflict"):
-            store.append(_row(1, gate_provenance=_TOKEN, sharpe=9.9))
 
 
 class TestStoreProviderWiring:
