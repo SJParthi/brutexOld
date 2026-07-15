@@ -2659,7 +2659,10 @@ hostile-review pass._
   `bx-oneclick-panels.css` (the moved panel + choreography CSS under the
   `.bx-scpanel`/`.bx-stpanel` scopes). bx-oneclick.js gains the ADDITIVE
   `getTop100` promise memo + `onRunChange`/`lastManifest`/`getManifestOnce`
-  seams; the ONE id rename `ocTradesSource`→`stTradesSource`; the T-N2
+  seams; the extracted strategy panel + its two markup copies carry the ONE
+  id rename `ocTradesSource`→`stTradesSource` (bx-oneclick.js keeps its own
+  operator combos-table `ocTradesSource` badge — the rename is panel- +
+  template-side only); the T-N2
   hook-parity fence asserts BOTH markup copies carry the SAME hooks.
   THE ONE REBASE DELTA vs #1470: main's DEC-RESULTS-CASCADE-VERDICT-JOIN-001
   (#1749) landed its Stage-4 cascade verdict render INLINE in strategy.html
@@ -7305,7 +7308,8 @@ hostile-review pass._
   REFOLDED onto current main tip 1ad31ac: the extracted shared modules
   (bx-portal-state / bx-screener-panel / bx-strategy-panel / bx-operator-portal
   + bx-oneclick-panels.css) + the additive BXOneclick getTop100/onRunChange
-  seam + the ocTradesSource→stTradesSource rename, with main's
+  seam + the strategy-panel/template-side ocTradesSource→stTradesSource
+  rename, with main's
   DEC-RESULTS-CASCADE-VERDICT-JOIN-001 (#1749) cascade verdict render RELOCATED
   from strategy.html into the extracted bx-strategy-panel.js (stCascade/
   stCascadeDeep markup mirrored into BOTH copies + the moved `.cascade-fail`
