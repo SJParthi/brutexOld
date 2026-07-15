@@ -212,6 +212,41 @@ The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DE
 stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
 each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
+#1760a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
+the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
+/ DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1760b–#1760d companion
+headers), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
+keyed through the COMMON F&O underlying-forms resolver via an injected
+plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
+alarm live; the round-5 CROSS-OWNER guard — a normalize-colliding sibling's
+coverage can never mask an own-key attempted-and-zero — plus the MI-6
+attempted-match tooth, and the round-7 materialize-once memo so a
+single-shot `covered_years` iterator value can never exhaust into a
+false-RED; the writer's KEYING byte-untouched — the writer file
+gains only the sub-(c) blank-row isolation; default-None byte-identical), the /movers
+stored-first intraday read gains the VERIFY-EQUALITY freshness guard (a stored
+TF day frame is served only when it EQUALS the in-memory resample of the
+1-minute base — the round-1 day-max predicate was refuted by the executed
+#1031 interior-hole re-pull chain; stale ⇒ the existing 1m-resample fallback +
+one capped `movers.stored_stale_fallback` WARN, dedupe key (exchange, symbol,
+interval) per the #1649a precedent; the round-2 month-edge fold widens
+`read_stored_day_frame` to probe the PRIOR UTC month's file for sub-05:30-IST
+bucket labels on the 1st of an IST month — a fresh month-edge lake now serves
+its COMPLETE stored frame instead of a permanent false-stale WARN or main's
+silent bucket drop; fresh lakes byte-identical, pinned; the round-3 fold gates
+the probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+route-pinned; round-7: the equality wording corrected to the executed
+truth — value-exact, dtype-INSENSITIVE polars `.equals`, drift-pinned;
+daily arm = named
+follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made
+total for the blank-symbol degenerate (IndexError → self-key; blank rows
+skipped + counted at the kind-map AND the metadata grid — the round-1-falsified
+"inert key" metadata seam closed, `_first_nonempty_over_forms` made total;
+round-2 forensic completion: the pre-fix blank cells ALSO stopped the full
+pipeline after metadata via `metadata_phase_ok`). READ-side dashboard only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1760a.)
 Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
@@ -3296,6 +3331,156 @@ hostile-review pass._
   dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
   MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
+  Earlier: `claude/dashboard-read-honesty-pack` (**DEC-DASHBOARD-READ-HONESTY-PACK-001,
+  MIGRATION.md #1760a** — the dashboard underlying-key READ-honesty pack, three READ-side
+  fixes as ONE coordinator-assigned umbrella entry (+ #1760b–#1760d companion headers so
+  the sub-IDs resolve; consolidated from the pre-merge #1751–#1753 after main's PR #1488
+  took #1751 — the #1171 umbrella + #1298 companion precedents).
+  **(a — DEC-MAPPING-INTEGRITY-FORM-KEY-001, R2)** the /universe
+  mapping-integrity trust panel keys its eligible↔coverage compare through the COMMON F&O
+  underlying-forms resolver: the coverage WRITER keys cells on the PRIMARY F&O form
+  (`metadata_pull._resolve_underlying_forms` — `BAJAJ-AUTO` rows land under `BAJAJAUTO`,
+  MIGRATION.md #974) while the eligible set is SPOT-spelled, so the exact-key compare at
+  mapping_integrity.py read a fully-covered hyphenated name `not_attempted` forever and
+  its attempted-and-ZERO silent-vanish alarm (the M&M class) was structurally DEAD.
+  `reconcile_mapping_integrity(key_forms=)` — kw-only appended-last plain-data map (the
+  #1482 injection template; default `None` = exact-key byte-identical, all 20 prior unit
+  pins pass unmodified) — unions covered years + matches attempts across the ordered
+  forms superset (primary + normalized + raw, the #1128 legacy-key-era law, never
+  primary-only); display + whitelist stay the SPOT spelling; the empty-forms degenerate
+  degrades to the exact raw key via `or (symbol,)`; the map is built ONCE per cached
+  compute in app.py (zero new imports/reads; nav-latency/outage plumbing untouched); the
+  writer's KEYING is byte-untouched (refuter-round-1 honesty: the writer FILE gains only
+  the sub-(c) blank-row grid isolation); with-legs dual-spelling rows both resolve against
+  WRITER-keyed coverage (a legacy-RAW-keyed era leaves the primary-spelled arm a neutral
+  non-gating `not_attempted` — the fold is one-directional spot→forms, round-1-executed);
+  CSV golden byte-unmodified; route-executed fail-before regressions + the end-to-end
+  REAL-writer belt (the fake-SDK harness → the route reads green). REFUTER ROUND 5
+  folded (Z5-1 + Q5-1, both reproduced MINORs): the forms-union gains the CROSS-OWNER
+  guard — a form that is a DIFFERENT eligible symbol's own key (exact spot spelling OR
+  primary form, per exchange; ownership derived purely from the injected
+  eligible+key_forms data, the leaf stays dashboard-import-free) still RESOLVES coverage
+  (the with-legs law's pin passes unmodified) but can never RESCUE a symbol whose OWN
+  forms read attempted-and-zero, so two normalize-colliding eligible names (`{AB, A-B}`
+  — the executed route repro read GREEN where main read RED; nil real-master
+  reachability, executed check) can never mask each other's silent-vanish; the own spot
+  key always stays in the fold (main-parity floor — the guard's worst case is today's
+  exact-key verdict); and the previously-toothless attempted-match multi-form iteration
+  (the surviving MI-6 `forms[:1]` mutant) gains dedicated killers on the final guarded
+  semantics — 8 new unit pins + the route-executed colliding-pair port (RED + named,
+  the non-colliding union unchanged in the SAME store), all 8 applied mutants killed;
+  the guard mechanises the GATING direction only (a cross-owned form may still upgrade
+  a non-gating state in the unreachable collision world — no RED is ever masked).
+  REFUTER ROUND 7 folded (H1-2, reproduced MINOR): the round-2/5 fold read each
+  `covered_years` value TWICE (own_years + years — the raw key is in both), so a
+  single-shot `Iterable[int]` iterator value (annotation-legal; zero in-repo
+  producers) exhausted into a false-RED `none` where main read GREEN — closed by
+  the `_probe_years` per-call memo materializing each (exchange, form) probe
+  EXACTLY ONCE (re-iterable inputs byte-identical, the existing pin family green
+  unmodified; two new-signature regressions proven failing with the memo
+  stash-reverted — they pass `key_forms` explicitly, so they cannot even run at
+  merge-base).
+  **(b — DEC-MOVERS-STORED-FRESHNESS-001, R7)** the
+  /movers spot stored-first intraday read gains the FOURTH member of its decision
+  family — a VERIFY-EQUALITY freshness guard (REFUTER ROUND 1 folded): a stored TF day
+  frame is served only when it EQUALS — value-exact, column-name+order-exact,
+  dtype-INSENSITIVE polars `.equals` (the round-7 wording truth; value-exactness
+  is the load-bearing property) — the
+  in-memory `resample_1m_to_tf` of the UNCUT 1-minute base day frame, the SAME resampler
+  the fallback runs and the prebuild wrote the partition with (one implementation, §11;
+  fresh ⇒ byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 contract, probed + pinned).
+  The round-1 day-max predicate (`stored_max_open_min + minutes > base_day_max_min` —
+  itself the fix of the naive `>=` false-stale and the CUT-domain arithmetic trap) was
+  REFUTED by the executed #1031 interior-hole re-pull chain (holey pull → prebuild →
+  hole re-pull: a TAIL check read 565+5=570 > 569 = fresh and served stale volume
+  1110-vs-2136 / stale LTP ₹20,000-vs-₹20,040 silently) — equality SUBSUMES it and also
+  mechanises the live-edge sliver, the R7-M2 reverse-truncation and the value-poison
+  residuals; interval=1minute is the identity arm (zero extra I/O, read-spy-pinned);
+  base-absent fail-opens to serve-stored (the ONE remaining unverified serve); STALE ⇒
+  the EXISTING `_read_session_bars` fallback (only provenance flips into
+  `resampled_reads`, no new payload field) + ONE capped `movers.stored_stale_fallback`
+  WARN (a `_StoredStaleWarnState` mirroring the #1539 idiom, cap 20, dedupe key
+  (exchange, symbol, interval) — widened from (symbol, interval) per refuter defect 2 +
+  the #1649a dual-listing precedent, so a dual-listed symbol's second stale exchange is
+  named). The test_movers_stored_read.py:351 stale-serve pin is FLIPPED deliberately
+  ((1,0)→(0,1), snapshots==reference, one WARN — the bugfix-reversion-check proof), the
+  round-1 repro ports (interior-hole whole-day + aligned-cutoff + dual-exchange) land as
+  fail-before regressions, and two pre-existing idle-serves-poison dashboard pins are
+  flipped/reworked; the FULL fresh-lake equality/provenance pin family passes
+  UNMODIFIED. HONEST: +1 month-bounded 1m read per stored-served TF>1minute candidate
+  (2→3; stale 4; candidate-cache-memoised) PLUS one in-memory ≤session-size resample +
+  frame compare per guarded read (CPU-only — the "near-zero I/O" shared-frame
+  restructure is the named follow-up DEC-MOVERS-1M-FRAME-SHARE-001). REFUTER ROUND 2
+  folded (1 reproduced MINOR + 2 wording NITs): (B2) a stray 09:00 pre-open bar's 4hour
+  label (05:15 IST — the SAME IST day) is 23:45 UTC of the prior day, so on the 1st of
+  an IST month the prebuild files that bucket under the PRIOR UTC month's parquet — the
+  month-bounded stored read missed it (a genuinely FRESH NSE/BSE lake read permanently
+  false-stale, un-healable by a re-prebuild, falsifying the round-1 "NSE/BSE can never
+  hit it" claim; pre-guard, on main, the bucket-MISSING frame served silently) —
+  `read_stored_day_frame` now probes the prior month's file exactly on that edge
+  (`_prior_month_label_probe_applies`: 1st-of-month × derived TF × session-filtered;
+  every derived TF's lowest 09:15-anchored rung 555 mod m < 330 = 05:30 IST; healthy
+  path ZERO extra reads, spy-pinned; a genuinely STALE prior-month-filed bucket still
+  reads stale — the heal-away regression); (N1) the session-exempt disclosure's
+  "≥2hour" was an executed UNDERCOUNT — any TF with 555 % m ≠ 0 misfiles a
+  pre-(555 mod m) bar onto the prior IST date, pre-00:15 bars already hit
+  10minute/30minute/1hour (not healable by a re-prebuild; bounded by the dedupe + cap);
+  (N2) "R7-M2 caught too" is scoped to PARTIAL truncation — TOTAL day truncation rides
+  the disclosed base-absent fail-open, serving stored silently; the DAILY arm + the
+  stale default-DATE (movers_warm) stay OPEN — named follow-up
+  DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the team memory's
+  two-arm scope. REFUTER ROUND 3 folded (1 reproduced MINOR, R3-N1): the probe's
+  `day - timedelta(days=1)` raised OverflowError for the ONE well-formed ISO date
+  `0001-01-01` (= date.min — accepted by `parse_snapshot_date`, which 400s only
+  MALFORMED dates), escaping the per-symbol `movers_read_skip_errors()` isolation
+  and 500ing the route on any derived TF (pre-probe code served the honest empty
+  200) — closed with the `day > date.min` FOURTH probe conjunct (no prior day ⇒ no
+  prior-month file, definitionally inapplicable; the explicit gate over a blanket
+  except) + predicate/read and route-level 200 regressions, both proven failing
+  with the gate reverted. REFUTER ROUND 7 folded (H1-1, docs accuracy): the
+  round-1 "dtype-exact" `.equals` claim was executed-FALSE — polars 1.42.1
+  `DataFrame.equals` is dtype-INSENSITIVE (Float64 ≡ Float32 with equal values;
+  name/order mismatches + precision-losing casts still unequal) — behavior fully
+  safe (value-exactness is the load-bearing property: any pun that compares equal
+  serves exactly the reference-resample values), so wording is corrected at all
+  three claim sites + the NEW `TestDtypeInsensitiveEqualsPin` drift pin (a
+  hand-recast value-identical partition serves from_stored with zero warns) locks
+  the documented semantics against a future polars bump.
+  **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
+  for str input (guarantee-audit): the literal `""` returned IndexError — falsifying its
+  own "Never empty" docstring — and ONE blank-symbol EQ row (parser-retained in the
+  universe) poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol`
+  (`""` → itself; `fno_underlying_forms("")` deliberately stays `()`; whitespace-only
+  unchanged at the resolver; non-empty byte-identical, structural + pinned) and
+  `build_underlying_kind_map` skips blank/whitespace rows BEFORE resolving with ONE
+  aggregate `movers.underlying_kind_blank_symbol_skipped` WARN per build (≤5
+  exch:security_id samples; no broad except — the isolation is the pre-check). REFUTER
+  ROUND 1 folded: the "inert (exch, '') key" disclosure was FALSIFIED for metadata_pull
+  by execution — the blank pair's `()` forms made `_first_nonempty_over_forms` index
+  `forms[0]`, an IndexError per YEAR cell captured into N DURABLE `failed` coverage rows
+  keyed `('NSE','')` re-failing every pull and gating the mapping-integrity panel
+  permanently RED with an empty-string symbol; `metadata_pull._resolve_underlying_forms`
+  now SKIPS blank rows (the same isolation idiom, ONE aggregate
+  `metadata.underlying_blank_symbol_skipped` WARN; zero vendor calls, zero grid/coverage
+  rows, panel unpoisoned), `_first_nonempty_over_forms` is TOTAL (kw-only `empty`; `()`
+  forms → the honest no-data result, zero fetches), the sample cap is hoisted to the ONE
+  COMMON `fno_underlying.BLANK_SYMBOL_SAMPLE_CAP`, and the falsified docstring + ledger
+  envelope are corrected (composite_pull's inert-read-key claim was verified TRUE and
+  stands). ROUND 2 forensic completion (refuter-B OBS-1/OBS-2, both executed): the
+  pre-fix blank cells' durable failures ALSO failed `pipeline_pull.metadata_phase_ok`,
+  so `run_full_pipeline` STOPPED after metadata — one blank row blocked the ENTIRE
+  candle phase, not just the panel (the round-1 narration understated the severity);
+  and durable junk `''`/`'  '` coverage rows persisted by PRE-fix eras are NOT
+  retroactively cleaned — the fixed panel honestly gates RED on them (main-parity
+  fail-safe; `''` is unmintable by any released code; remediation = delete the rows).
+  ALL THREE: READ-side dashboard only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no lake/schema/scope/vocab/rate change; healthy/fresh lakes byte-identical (pinned);
+  `mapping_integrity.py` + `fno_underlying.py` + `movers_underlying_class.py` +
+  `metadata_pull.py` + `movers_stored_read.py` + `lake_day_glob.py` 100% line+branch on
+  their stem-matched suites, `movers_snapshot.py` 100% on the movers
+  family (its documented discovery-gate exclusion stands); ruff/ruff-format clean,
+  `mypy --strict` clean, pyright errors at the pre-change baseline.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
@@ -7362,6 +7547,41 @@ hostile-review pass._
   #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
   #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/dashboard-read-honesty-pack`
+  (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md #1760a — the dashboard
+  underlying-key READ-honesty pack, ONE umbrella entry (+ #1760b–#1760d
+  companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
+  DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
+  consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
+  #1751), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
+  keyed through the COMMON F&O underlying-forms resolver via the injected
+  plain-data `key_forms` map (the writer's KEYING byte-untouched — the writer
+  file gains only the sub-(c) blank-row isolation; default-None
+  byte-identical; the hyphenated/aliased silent-vanish alarm live; the round-5
+  CROSS-OWNER guard — a normalize-colliding sibling's coverage can never mask
+  an own-key attempted-and-zero — plus the MI-6 attempted-match tooth;
+  round-7: the materialize-once memo — a single-shot `covered_years`
+  iterator value can no longer exhaust into a false-RED), the
+  /movers stored-first intraday read freshness-guarded by VERIFY-EQUALITY
+  (a stored TF day frame serves only when it equals the in-memory resample of
+  the 1-minute base — the round-1 day-max predicate was refuted by the
+  executed #1031 interior-hole re-pull chain; stale prebuilt TF ⇒ the existing
+  1m-resample fallback + one capped `movers.stored_stale_fallback` WARN,
+  dedupe key (exchange, symbol, interval); the :351 stale-serve pin
+  deliberately FLIPPED; the round-2 month-edge fold probes the PRIOR UTC
+  month's file for sub-05:30-IST bucket labels on the 1st of an IST month —
+  a fresh month-edge lake serves its COMPLETE stored frame, never a permanent
+  false-stale WARN or main's silent bucket drop; the round-3 fold gates the
+  probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+  route-pinned; round-7: the equality wording corrected to value-exact,
+  dtype-INSENSITIVE polars `.equals`, drift-pinned; daily arm = named follow-up
+  DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made total
+  for the blank-symbol degenerate (IndexError → self-key; blank rows skipped
+  + counted at the kind-map AND the metadata grid — the round-1-falsified
+  "inert key" metadata seam closed; round-2: the pre-fix blank cells also
+  stopped the full pipeline after metadata via `metadata_phase_ok`);
+  READ-side dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
   Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
