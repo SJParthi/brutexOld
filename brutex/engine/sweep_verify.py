@@ -79,6 +79,7 @@ from brutex.engine.tuple_complete import (
     completion_sentinel_path,
     read_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.models import BruteXError
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
@@ -495,14 +496,82 @@ def _schedules_from_entries(
     return schedules
 
 
+def _fill_modes_from_entries(
+    entries: Sequence[AuditEntry], audit_path: Path
+) -> tuple[FillMode, ...]:
+    """Derive ONE generation's recorded fill-mode SET from its scoped entries.
+
+    DEC-FILL-WORST-CASE-001 (fix round 3, the refuter-confirmed mixed-mode
+    MAJOR): a run's audit entries carry ``fill_mode`` on their ``params`` —
+    since fix round 3 ALWAYS AND EXPLICITLY (including the literal
+    ``"precise"`` token) on NEW ``SWEEP_START``/``SWEEP_LAUNCH`` lines; this
+    is the AUDIT wire only — ``canonical_trade_params`` / the run identity /
+    the tuple digests / the cascade manifest keep the emit-on-non-PRECISE
+    elision byte-untouched. Reader law: an entry with an explicit token uses
+    it (a junk token still refuses as tampered); a LEGACY entry with NO key
+    contributes PRECISE. The result is the ORDERED (first-appearance),
+    DEDUPED set of modes the scoped generation recorded.
+
+    A MULTI-mode set is a legal, first-class answer — NOT a refusal: two
+    launches under different fill modes share ONE generation triple
+    legitimately (a habitual-PRECISE operator forgetting the flag once, an
+    A/B mode comparison, an aborted WORST_CASE launch whose ``SWEEP_START``
+    landed while no store did) because the run identities and the
+    ``_tuple_digest`` store addresses fold the mode and stay distinct. The
+    fix-round-2 same-generation "conflict" refusal was RETIRED here as both
+    unreachable and wrong: under the two-member vocabulary PRECISE was
+    recorded by KEY ABSENCE, so a mixed generation silently folded to
+    WORST_CASE instead — the PRECISE stores read forever-unverifiable
+    ``unattributed_store`` warns, and once the WORST_CASE stores were
+    absent/removed the tree read a FALSE ``grid_mismatch``/corrupt with
+    ``checked_stores=0`` and no operator escape (the recorded mode
+    unconditionally overrode the flag). Mode-SET attribution makes the mix
+    DETECTABLE and each store verifiable under its OWN mode
+    (:func:`verify_identity`'s ``fill_modes`` union planning).
+
+    GENERATION-SCOPED (fix round 2): *entries* are the ONE generation's
+    context entries :func:`recorded_audit_facts` already selects — NEVER the
+    whole audit file (the whole-file fold was the round-2 MAJOR-2).
+
+    Raises
+    ------
+    SweepVerifyError
+        If a recorded ``fill_mode`` is not a known mode token (a
+        hand-edited/tampered line — refuse, Golden Rule #1).
+    """
+    recorded: dict[FillMode, None] = {}
+    for entry in entries:
+        params = entry.payload.get("params")
+        if not isinstance(params, dict) or "fill_mode" not in params:
+            # The LEGACY law: a pre-fix-round-3 entry records PRECISE by key
+            # absence (the elision-law era) — it contributes PRECISE.
+            recorded.setdefault(FillMode.PRECISE)
+            continue
+        raw = params["fill_mode"]
+        try:
+            mode = FillMode(str(raw))
+        except ValueError:
+            raise SweepVerifyError(
+                f"malformed recorded fill_mode in {audit_path} (seq {entry.seq}): "
+                f"{raw!r} is not a known fill mode"
+            ) from None
+        recorded.setdefault(mode)
+    return tuple(recorded)
+
+
 def recorded_audit_facts(
     audit_path: Path,
     *,
     snapshot: str | None = None,
     indicator_version: str | None = None,
     code_commit_sha: str | None = None,
-) -> tuple[RecordedContext | None, dict[str, tuple[int, ...]], tuple[str, ...]]:
-    """Read the audit ONCE and derive ONE generation's context + schedules.
+) -> tuple[
+    RecordedContext | None,
+    dict[str, tuple[int, ...]],
+    tuple[str, ...],
+    tuple[FillMode, ...],
+]:
+    """Read the audit ONCE and derive ONE generation's context + schedules + fill modes.
 
     The ``cmd_sweep_verify`` seam (review round-4 finding 5 — ONE shared parse
     replacing the prior double read; review round-5 finding 6 — GENERATION
@@ -535,19 +604,38 @@ def recorded_audit_facts(
     schedules disagreeing is real corruption (the resume gate refuses a
     schedule-only drift at launch), not any sanctioned cadence.
 
-    Returns ``(None, {}, ())`` when the audit file is absent, and
-    ``(None, {}, other_generations)`` when the explicit flags match no
-    recorded entry (the explicit-flags path — the caller supplies the full
-    context).
+    The fourth element is the SCOPED generation's recorded fill-mode SET
+    (DEC-FILL-WORST-CASE-001 fix rounds 2+3): derived from the SAME
+    ``matching`` entry selection as the context + schedules via
+    :func:`_fill_modes_from_entries` — NEVER an independent whole-audit pass
+    (the round-2 MAJOR-2). Since fix round 3 the element is a TUPLE — a
+    same-generation mixed-mode root (two launches under different modes
+    sharing one context triple: distinct run identities, distinct
+    ``_tuple_digest`` store addresses, so the mix is LEGAL and — under the
+    WORST_CASE production default — routine) records BOTH modes, and the
+    caller verifies each store under its OWN mode
+    (:func:`verify_identity`'s ``fill_modes`` union planning). A matched
+    generation's set is always NON-empty (a legacy no-key entry contributes
+    PRECISE); the EMPTY tuple means "nothing recorded" — absent audit, no
+    context entries, or no generation matching the explicit flags — and the
+    caller decides honestly (``--fill-mode`` flag, else BOTH modes; fix
+    round 3 finding 3 — the old arm fabricated PRECISE and silently dropped
+    the operator's flag).
+
+    Returns ``(None, {}, (), ())`` when the audit file is absent, and
+    ``(None, {}, other_generations, ())`` when the explicit flags match no
+    recorded entry (the explicit-flags path — the caller supplies the
+    context strings via flags and picks the fill-mode posture as above).
 
     Raises
     ------
     SweepVerifyError
         If the audit log is unreadable/corrupt, a context-bearing payload is
-        malformed, or the SCOPED generation's schedules disagree.
+        malformed, the SCOPED generation's schedules disagree, or a recorded
+        fill-mode token is unknown.
     """
     if not audit_path.exists():
-        return None, {}, ()
+        return None, {}, (), ()
     # Hash-chain-VERIFIED read (review round-8 finding 12): these facts gate
     # the Tier-2 identity re-derivation, the F16 recorded schedules, and the
     # Tier-3 context_match gate — verdict-grade outcomes must never derive
@@ -555,7 +643,7 @@ def recorded_audit_facts(
     entries = _verified_entries_from_audit(audit_path)
     pairs = _launch_context_pairs(entries, audit_path)
     if not pairs:
-        return None, {}, ()
+        return None, {}, (), ()
     candidates = [
         ctx
         for _entry, ctx in pairs
@@ -565,7 +653,7 @@ def recorded_audit_facts(
     ]
     if not candidates:
         others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs))
-        return None, {}, others
+        return None, {}, others, ()
     target = candidates[-1]
     matching = [entry for entry, ctx in pairs if ctx == target]
     others = tuple(dict.fromkeys(ctx.data_snapshot_hash for _entry, ctx in pairs if ctx != target))
@@ -573,6 +661,7 @@ def recorded_audit_facts(
         _context_from_entries(matching, audit_path),
         _schedules_from_entries(matching, audit_path),
         others,
+        _fill_modes_from_entries(matching, audit_path),
     )
 
 
@@ -1220,6 +1309,14 @@ def _verify_store_rows(
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
         roll_schedule=cfg.roll_schedule,
+        # DEC-FILL-WORST-CASE-001: the OWNING grid carries this store's
+        # ATTRIBUTED fill mode — the plan maps each store path to the grid
+        # whose mode minted it (fix round 3: `verify_identity` plans the
+        # UNION over the generation's recorded mode SET, and the mode folds
+        # into the `_tuple_digest` store address, so path attribution IS
+        # mode attribution), so every store's row identities re-derive
+        # under the SAME mode they were minted with.
+        fill_mode=cfg.fill_mode,
     )
     expected_label = _direction_label(tuple_.direction)
     bits_mask = 0
@@ -1282,6 +1379,7 @@ def verify_identity(
     stage3: Stage3ManifestRecord | None = None,
     vocabulary_trusted: bool = False,
     roll_schedule_by_instrument: Mapping[str, tuple[int, ...]] | None = None,
+    fill_modes: Sequence[FillMode] | None = None,
 ) -> TreeVerifyReport:
     """Tier 2: re-derive every expected path + every row identity — grid, no bars.
 
@@ -1313,16 +1411,43 @@ def verify_identity(
         params — :func:`recorded_roll_schedules_from_audit` — never the
         operator's memory). ``None`` (the default / every spot tree) is the
         byte-identical pre-launch derivation.
+    fill_modes
+        The generation's recorded fill-mode SET (DEC-FILL-WORST-CASE-001 fix
+        round 3 — ``recorded_audit_facts``' 4th element, ordered + deduped).
+        The plan becomes the UNION over the set — each mode plans via
+        ``replace(grid, fill_mode=mode)``, and because the mode folds into
+        every ``_tuple_digest`` store address the per-mode expected sets are
+        disjoint, so a FOUND store's plan attribution IS its mode
+        attribution: its rows re-derive under the owning grid's mode. A
+        same-generation mixed-mode root (LEGAL — distinct run identities +
+        store addresses; routine under the WORST_CASE production default)
+        thereby verifies EVERY store under its own mode instead of reading
+        the other mode's stores as ``unattributed_store`` warns — or, once
+        those stores are absent, a FALSE ``grid_mismatch``. A mode with no
+        stores on disk (an aborted launch whose ``SWEEP_START`` landed while
+        no store did) contributes only ``missing_expected_store`` INFO lines
+        — verify judges FOUND stores, the pre-round-3 semantics preserved.
+        ``None`` (the default) plans exactly ``(grid.fill_mode,)`` —
+        byte-identical to the pre-round-3 single-mode derivation.
 
     Raises
     ------
     SweepVerifyError
-        If *root* is not a directory or the stage3 record is malformed.
+        If *root* is not a directory, the stage3 record is malformed, or
+        *fill_modes* is given EMPTY (an empty set plans nothing — every
+        found store would false-read unattributed; the no-recorded-modes
+        posture is the CALLER's honest decision, never a silent default).
     """
     if not root.is_dir():
         raise SweepVerifyError(f"results root not found or not a directory: {root}")
+    if fill_modes is not None and not fill_modes:
+        raise SweepVerifyError("verify_identity: fill_modes must be non-empty when given")
+    modes = (grid.fill_mode,) if fill_modes is None else tuple(dict.fromkeys(fill_modes))
     findings: list[VerifyFinding] = []
-    plan = plan_expected_stores(root, grid, stage3=stage3)
+    plan: dict[Path, tuple[SweepTuple, SweepGridConfig, bool]] = {}
+    for mode in modes:
+        mode_grid = grid if mode is grid.fill_mode else replace(grid, fill_mode=mode)
+        plan.update(plan_expected_stores(root, mode_grid, stage3=stage3))
     found = _outside_quarantine(root, sorted(root.glob("**/*.parquet")))
 
     if plan and found and not any(path in plan for path in found):

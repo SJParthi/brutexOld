@@ -72,6 +72,7 @@ from brutex.engine.sweep_run import (
 )
 from brutex.engine.sweep_supervisor import SweepGuards, grid_identity, run_supervised_grid
 from brutex.engine.sweep_watchdog import SweepWatchdog
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking import RankedCombo
 from brutex.strategies.types import Side
@@ -311,6 +312,9 @@ class TestOracleEqualsBatchStructural:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the stamper seams
+            # under test predate the worst-case mode — pin PRECISE explicitly.
+            fill_mode=FillMode.PRECISE,
         )
 
     def test_iter_mask_metrics_hands_sim_stamper_to_reattribution(
@@ -662,6 +666,8 @@ def _run_cfg(**overrides: object) -> SweepRunConfig:
         "tf_minutes": 1,
         "sl_paisa": 80,
         "tp_paisa": 50,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]
@@ -833,6 +839,8 @@ def _grid(**overrides: object) -> orch_mod.SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return orch_mod.SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1238,6 +1246,9 @@ class TestStage3WireSeam:
                 tf_minutes=1,
                 start_equity_paisa=10_000_000,
                 reference_stamper=_STAMPER,
+                # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the stamper wiring
+                # under test is fill-mode-independent; pin PRECISE explicitly.
+                fill_mode=FillMode.PRECISE,
             )
             evaluate(80, 50)
         assert captured == [_STAMPER]

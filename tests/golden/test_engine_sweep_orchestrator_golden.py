@@ -32,6 +32,7 @@ from brutex.engine.sweep_orchestrator import (
     tuple_store_path,
 )
 from brutex.engine.sweep_run import ComboDedup
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter, verify_chain
 from brutex.strategies.types import Side
 
@@ -80,6 +81,10 @@ def _grid() -> SweepGridConfig:
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the lossless-resume
+        # golden's persisted-count expectations were built under the legacy
+        # exact fills — pin PRECISE explicitly.
+        fill_mode=FillMode.PRECISE,
     )
 
 

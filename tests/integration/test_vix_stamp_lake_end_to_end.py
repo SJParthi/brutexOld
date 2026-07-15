@@ -36,6 +36,7 @@ from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.reference_wire import build_vix_stamper
 from brutex.engine.results_store import ResultsStore
 from brutex.engine.sweep_run import ComboDedup, SweepRunConfig, run_persisted_sweep
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
@@ -150,6 +151,8 @@ def _run_cfg() -> SweepRunConfig:
         tf_minutes=1,
         sl_paisa=80,
         tp_paisa=50,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        fill_mode=FillMode.PRECISE,
     )
 
 

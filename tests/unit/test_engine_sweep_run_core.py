@@ -47,6 +47,7 @@ from brutex.engine.sweep_run_core import (
 )
 from brutex.engine.sweep_singleflight import SweepAlreadyRunningError
 from brutex.engine.sweep_supervisor import grid_identity
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.cascade import FilterStage
 from brutex.notifications.sweep_alerts import SweepAlerter
 from brutex.observability.flight_recorder import iter_run_records
@@ -113,6 +114,13 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "data_snapshot_hash": "snap0001",
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): this suite's hand-built
+        # expectations predate the worst-case default; the R45 closure now
+        # runs under BOTH modes (the Stage-2 naive worst-case arm —
+        # test_r45_diffcheck_closure_checks_real_masks parametrizes the mode,
+        # and test_diffcheck_enabled_under_worst_case_fill_mode pins the
+        # Stage-1 disable bridge GONE).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1367,10 +1375,14 @@ def test_diffcheck_disabled_is_none(tmp_path: Path) -> None:
         assert core.diffcheck is None
 
 
-def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [FillMode.PRECISE, FillMode.WORST_CASE])
+def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path, mode: FillMode) -> None:
+    # DEC-FILL-WORST-CASE-001 Stage 2: the R45 parity holds under BOTH fill
+    # modes — the production leg simulates under grid.fill_mode and the
+    # naive reference independently re-derives the SAME mode.
     from brutex.engine.stage1a import build_bar_bits
 
-    grid = _grid()
+    grid = _grid(fill_mode=mode)
     tuple_ = next(iter_sweep_tuples(grid))
     bits = build_bar_bits(_BARS, tuple_.proximity, grid.prior_n, tuple_.fib_anchor)
     with _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
@@ -1385,6 +1397,29 @@ def test_r45_diffcheck_closure_checks_real_masks(tmp_path: Path) -> None:
     payload = cast("dict[str, Any]", ok_rows[0]["payload"])
     assert payload["checked"] == 2
     assert payload["mismatches"] == 0
+
+
+def test_diffcheck_enabled_under_worst_case_fill_mode(tmp_path: Path) -> None:
+    # DEC-FILL-WORST-CASE-001 Stage 2 (the Stage-1 disable-bridge regression,
+    # REPURPOSED): the naive worst-case arm landed, so a WORST_CASE grid gets
+    # a REAL diffcheck closure — no skip, no diffcheck_disabled_fill_mode
+    # WARN — and the bridge token is GONE from the run core's source.
+    import inspect
+
+    from brutex.engine import sweep_run_core as run_core_module
+    from structlog.testing import capture_logs
+
+    grid = _grid(fill_mode=FillMode.WORST_CASE)
+    with capture_logs() as logs, _core(tmp_path, grid, diffcheck_k=2) as (core, _s):
+        assert core.diffcheck is not None
+        assert core.suspect is False
+    assert not [
+        log for log in logs if log.get("event") == "sweep_run_core.diffcheck_disabled_fill_mode"
+    ]
+    # Source-negative pin: the Stage-1 bridge's WARN event token no longer
+    # exists as an emitted event (this test file is its ONLY remaining home).
+    source = inspect.getsource(run_core_module)
+    assert "diffcheck_disabled_fill_mode" not in source
 
 
 def test_r45_diffcheck_production_leg_carries_the_bound_run_stamper(

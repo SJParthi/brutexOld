@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import date, datetime
+from typing import ClassVar
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -38,6 +39,7 @@ from brutex.costs.futures_costs import (
     stt_futures_rate_bps_x100,
 )
 from brutex.costs.types import UnverifiedCostRegimeError
+from brutex.execution.fill_mode import FillMode
 
 _IST = ZoneInfo("Asia/Kolkata")
 _ENTRY = datetime(2025, 1, 2, 9, 16, tzinfo=_IST)
@@ -498,3 +500,297 @@ class TestChargePathViaSyntheticCitedFixture:
         assert out.cost_free is False
         assert out.ipft_paisa == 0  # BSE: the assumed-0 options-precedent stance
         assert out.exch_paisa > 0
+
+
+class TestWorstCaseApplyFuturesFill:
+    """DEC-FILL-WORST-CASE-001 — the adverse-extreme ± the SAME tick arm."""
+
+    def test_worst_case_long_fills_entry_high_exit_low(self) -> None:
+        # long: buy = entry HIGH + tick; sell = exit LOW − tick.
+        buy, sell, slip = apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="long",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=2_201_000,
+            entry_low_paisa=2_199_000,
+            exit_high_paisa=2_211_000,
+            exit_low_paisa=2_209_000,
+        )
+        assert (buy, sell, slip) == (2_201_005, 2_208_995, 2 * TICK_PAISA)
+
+    def test_worst_case_short_fills_entry_low_exit_high(self) -> None:
+        # short: opening SELL = entry LOW − tick; cover BUY = exit HIGH + tick.
+        buy, sell, slip = apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="short",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=2_201_000,
+            entry_low_paisa=2_199_000,
+            exit_high_paisa=2_211_000,
+            exit_low_paisa=2_209_000,
+        )
+        assert (buy, sell, slip) == (2_211_005, 2_198_995, 2 * TICK_PAISA)
+
+    def test_flat_bar_worst_case_equals_precise_never_better(self) -> None:
+        # THE NAMED FLAT-BAR COUNTEREXAMPLE (DEC-FILL-WORST-CASE-001): on a
+        # flat entry bar (high == open) a bare buy-at-HIGH would fill at
+        # `high < open + tick` — BETTER than today's precise fill. Keeping the
+        # +tick ON TOP of the extreme makes the flat bar EXACTLY EQUAL, so the
+        # worst-case fill can never beat precise (tick discipline preserved).
+        precise = apply_futures_fill(2_200_000, 2_210_000, side="long")
+        worst_flat = apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="long",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=2_200_000,  # flat: high == open
+            entry_low_paisa=2_200_000,
+            exit_high_paisa=2_210_000,  # flat: low == open
+            exit_low_paisa=2_210_000,
+        )
+        assert worst_flat == precise
+        # And on a NON-flat bar worst is strictly adverse on both legs.
+        worst_range = apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="long",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=2_200_500,
+            entry_low_paisa=2_199_500,
+            exit_high_paisa=2_210_500,
+            exit_low_paisa=2_209_500,
+        )
+        assert worst_range[0] > precise[0]  # buy fill worse (higher)
+        assert worst_range[1] < precise[1]  # sell fill worse (lower)
+
+    def test_worst_case_short_flat_bar_equals_precise(self) -> None:
+        precise = apply_futures_fill(2_200_000, 2_210_000, side="short")
+        worst = apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="short",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=2_200_000,
+            entry_low_paisa=2_200_000,
+            exit_high_paisa=2_210_000,
+            exit_low_paisa=2_210_000,
+        )
+        assert worst == precise
+
+    def test_worst_case_floors_at_one_tick(self) -> None:
+        # A one-tick exit LOW would sell at ₹0.00 without the floor; the
+        # realized-slippage line reads the floored truth (sell leg moved 0).
+        buy, sell, slip = apply_futures_fill(
+            100,
+            10,
+            side="long",
+            fill_mode=FillMode.WORST_CASE,
+            entry_high_paisa=110,
+            entry_low_paisa=95,
+            exit_high_paisa=15,
+            exit_low_paisa=TICK_PAISA,
+        )
+        assert (buy, sell) == (115, TICK_PAISA)
+        assert slip == TICK_PAISA
+
+    def test_worst_case_long_missing_anchors_fails_loud(self) -> None:
+        # Never a silent PRECISE degrade: the side's two adverse anchors are
+        # REQUIRED under worst_case.
+        with pytest.raises(ValueError, match="worst_case .long. needs"):
+            apply_futures_fill(100, 200, side="long", fill_mode=FillMode.WORST_CASE)
+        with pytest.raises(ValueError, match="entry_high_paisa"):
+            apply_futures_fill(
+                100, 200, side="long", fill_mode=FillMode.WORST_CASE, exit_low_paisa=190
+            )
+
+    def test_worst_case_short_missing_anchors_fails_loud(self) -> None:
+        with pytest.raises(ValueError, match="worst_case .short. needs"):
+            apply_futures_fill(
+                100, 200, side="short", fill_mode=FillMode.WORST_CASE, entry_high_paisa=110
+            )
+
+    def test_precise_ignores_supplied_extremes(self) -> None:
+        # PRECISE with extremes present is byte-identical to PRECISE without
+        # (the extremes are worst-case anchors, not precise inputs).
+        assert apply_futures_fill(
+            2_200_000,
+            2_210_000,
+            side="long",
+            entry_high_paisa=2_290_000,
+            entry_low_paisa=2_190_000,
+            exit_high_paisa=2_290_000,
+            exit_low_paisa=2_190_000,
+        ) == apply_futures_fill(2_200_000, 2_210_000, side="long")
+
+
+class TestWorstCaseTradeInput:
+    """DEC-FILL-WORST-CASE-001 — FuturesTradeInput's additive fill-mode surface."""
+
+    _EXTREMES: ClassVar[dict[str, object]] = {
+        "entry_bar_high_paisa": 2_201_000,
+        "entry_bar_low_paisa": 2_199_000,
+        "exit_bar_high_paisa": 2_211_000,
+        "exit_bar_low_paisa": 2_209_000,
+    }
+
+    def test_default_is_precise_with_no_extremes(self) -> None:
+        # The additive-defaulted-field pattern: a pre-worst-case construction
+        # is byte-identical (PRECISE, extremes None).
+        t = _trade()
+        assert t.fill_mode is FillMode.PRECISE
+        assert t.entry_bar_high_paisa is None
+        assert t.exit_bar_low_paisa is None
+
+    def test_worst_case_requires_all_four_extremes(self) -> None:
+        with pytest.raises(ValueError, match="missing .'entry_bar_high_paisa'"):
+            _trade(fill_mode=FillMode.WORST_CASE)
+        partial = dict(self._EXTREMES)
+        partial.pop("exit_bar_low_paisa")
+        with pytest.raises(ValueError, match="missing .'exit_bar_low_paisa'"):
+            _trade(fill_mode=FillMode.WORST_CASE, **partial)
+
+    def test_worst_case_with_extremes_constructs(self) -> None:
+        t = _trade(fill_mode=FillMode.WORST_CASE, **self._EXTREMES)
+        assert t.fill_mode is FillMode.WORST_CASE
+
+    def test_junk_fill_mode_string_fails_loud(self) -> None:
+        # A junk string would compare `is FillMode.WORST_CASE` False and
+        # SILENTLY price PRECISE — the exact trap the guard closes.
+        with pytest.raises(ValueError, match="not a FillMode member"):
+            _trade(fill_mode="worst_case")
+
+    @pytest.mark.parametrize("label", ["entry", "exit"])
+    def test_extreme_ordering_validated_against_open(self, label: str) -> None:
+        with pytest.raises(ValueError, match=f"{label}_bar_high_paisa"):
+            _trade(**{f"{label}_bar_high_paisa": 1})
+        with pytest.raises(ValueError, match=f"{label}_bar_low_paisa"):
+            _trade(**{f"{label}_bar_low_paisa": 99_999_999})
+
+    def test_sub_tick_low_extreme_is_legal(self) -> None:
+        # A degenerate sub-tick LOW must NOT crash the boundary — the fill
+        # floor absorbs it (never a sim crash on one degenerate bar).
+        t = _trade(
+            fill_mode=FillMode.WORST_CASE,
+            entry_bar_open_paisa=10,
+            exit_bar_open_paisa=10,
+            entry_bar_high_paisa=20,
+            entry_bar_low_paisa=1,
+            exit_bar_high_paisa=20,
+            exit_bar_low_paisa=1,
+        )
+        out = compute_futures_trade_cost(t)
+        assert out.sell_fill_paisa == TICK_PAISA  # floored, not crashed
+
+
+class TestWorstCaseComputeCost:
+    def test_worst_case_threads_through_compute_futures_trade_cost(self) -> None:
+        # Hand-recomputed (NIFTY long, cost-free index, lot 75):
+        #   buy = entry HIGH 2,201,000 + 5 = 2,201,005
+        #   sell = exit LOW 2,209,000 − 5 = 2,208,995
+        #   gross = (2,208,995 − 2,201,005) × 75 = 7,990 × 75 = 599,250
+        out = compute_futures_trade_cost(
+            _trade(
+                fill_mode=FillMode.WORST_CASE,
+                entry_bar_high_paisa=2_201_000,
+                entry_bar_low_paisa=2_199_000,
+                exit_bar_high_paisa=2_211_000,
+                exit_bar_low_paisa=2_209_000,
+            )
+        )
+        assert (out.buy_fill_paisa, out.sell_fill_paisa) == (2_201_005, 2_208_995)
+        assert out.gross_pnl_paisa == 599_250
+        assert out.net_pnl_paisa == 599_250  # cost-free index: net == gross
+        assert out.slippage_paisa == 2 * TICK_PAISA * 75
+
+    def test_worst_case_never_beats_precise_on_the_same_bars(self) -> None:
+        # The unconditional per-trade floor on this re-pricing layer: same
+        # bars, same side — worst-case gross ≤ precise gross (equality only
+        # on flat bars; here strict).
+        precise = compute_futures_trade_cost(_trade())
+        worst = compute_futures_trade_cost(
+            _trade(
+                fill_mode=FillMode.WORST_CASE,
+                entry_bar_high_paisa=2_200_500,
+                entry_bar_low_paisa=2_199_500,
+                exit_bar_high_paisa=2_210_500,
+                exit_bar_low_paisa=2_209_500,
+            )
+        )
+        assert worst.gross_pnl_paisa < precise.gross_pnl_paisa
+
+    def test_worst_case_cost_bearing_levies_round_adversely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FIX-ROUND-2 (the adverse-levy-rounding law, MIGRATION.md #1798):
+        # the FULL cost-bearing worst-case charge stack under the synthetic
+        # cited fixture — every nearest-rounded levy CEILs under WORST_CASE
+        # so a rounding boundary can never make the worst net beat precise
+        # (the refuter's options-leg STT counterexample, closed on BOTH
+        # legs). Hand-recomputed (RELIANCE long, lot 500, entry 2025-01-02;
+        # extremes ±₹1 around the ₹1,300.00 / ₹1,310.00 opens):
+        #   worst buy 130,105 · sell 130,895 → notionals 65,052,500 /
+        #   65,447,500 · gross 395,000 (precise: 130,005/130,995 → 495,000).
+        #   brokerage: flat ₹20/leg wins the min → 4,000 (mode-invariant).
+        #   STT(2000): 65,447,500×2000//1e7 = 13,089 → ceil₹ 13,100
+        #     (precise raw 13,099 → nearest 13,100 — equal here).
+        #   ETC(173): ⌈1,125.41⌉+⌈1,132.24⌉ = 1,126+1,133 = 2,259
+        #     (precise nearest: 1,125+1,133 = 2,258 — the ceil diverges).
+        #   SEBI(10): ⌈65.05⌉+⌈65.45⌉ = 132 (precise 65+65 = 130).
+        #   IPFT(10): same shape → 132 (precise 130).
+        #   stamp(200): 65,052,500×200//1e7 = 1,301 → ceil₹ 1,400
+        #     (precise raw 1,300 → nearest 1,300).
+        #   GST: base 6,523 → 1,174 → ceil₹ 1,200 (precise 1,173 → 1,200).
+        #   total 22,223 (precise 22,118); net 372,777 <= 472,882.
+        monkeypatch.setitem(fc._ETC_FUTURES_REGIMES_BY_EXCHANGE, "NSE", _SYNTH_ETC)
+        monkeypatch.setattr(fc, "_NSE_IPFT_FUTURES_REGIMES", _SYNTH_IPFT)
+        monkeypatch.setattr(fc, "_STAMP_FUTURES_REGIMES", _SYNTH_STAMP)
+        common: dict[str, object] = {
+            "instrument": "RELIANCE",
+            "contract_symbol": "NSE-RELIANCE-30Jan25-FUT",
+            "lot_size": 500,
+            "entry_bar_open_paisa": 130_000,
+            "exit_bar_open_paisa": 131_000,
+        }
+        precise = compute_futures_trade_cost(_trade(**common))
+        worst = compute_futures_trade_cost(
+            _trade(
+                **common,
+                fill_mode=FillMode.WORST_CASE,
+                entry_bar_high_paisa=130_100,
+                entry_bar_low_paisa=129_900,
+                exit_bar_high_paisa=131_100,
+                exit_bar_low_paisa=130_900,
+            )
+        )
+        assert (worst.buy_fill_paisa, worst.sell_fill_paisa) == (130_105, 130_895)
+        assert worst.gross_pnl_paisa == 395_000
+        assert worst.brokerage_paisa == 4_000
+        assert (worst.stt_paisa, precise.stt_paisa) == (13_100, 13_100)
+        assert (worst.exch_paisa, precise.exch_paisa) == (2_259, 2_258)
+        assert (worst.sebi_paisa, precise.sebi_paisa) == (132, 130)
+        assert (worst.ipft_paisa, precise.ipft_paisa) == (132, 130)
+        assert (worst.stamp_paisa, precise.stamp_paisa) == (1_400, 1_300)
+        assert (worst.gst_paisa, precise.gst_paisa) == (1_200, 1_200)
+        assert (worst.total_charges_paisa, precise.total_charges_paisa) == (22_223, 22_118)
+        assert worst.net_pnl_paisa == 372_777
+        assert worst.net_pnl_paisa <= precise.net_pnl_paisa
+
+
+class TestWorstCaseBrokerageArm:
+    def test_turnover_arm_ceils_under_worst_case(self) -> None:
+        # FIX-ROUND-2: the min(₹20, 0.03%×turnover) TURNOVER arm is a
+        # nearest-rounded charge, so it joins the adverse-rounding law:
+        # 1,000,500 paisa × 0.03% = 300.15 paisa → nearest 300 (PRECISE) /
+        # ceil 301 (WORST_CASE). The flat ₹20 arm is rounding-free.
+        assert futures_brokerage_leg_paisa(1_000_500, "groww") == 300
+        assert futures_brokerage_leg_paisa(1_000_500, "groww", worst_case=True) == 301
+
+    def test_flat_arm_and_zerodha_are_mode_invariant(self) -> None:
+        # A big notional lands on the flat ₹20 cap in both modes; zerodha is
+        # flat-only, so worst_case is inert there.
+        assert futures_brokerage_leg_paisa(65_002_500, "groww") == 2_000
+        assert futures_brokerage_leg_paisa(65_002_500, "groww", worst_case=True) == 2_000
+        assert futures_brokerage_leg_paisa(1_000_500, "zerodha") == 2_000
+        assert futures_brokerage_leg_paisa(1_000_500, "zerodha", worst_case=True) == 2_000

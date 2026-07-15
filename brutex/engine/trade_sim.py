@@ -27,7 +27,16 @@ research, not execution).
 
 The spec leaves two fill questions open (scoping doc §5 Q1/Q2); this module
 **decides** them as a configurable :class:`FillPolicy` whose default is the
-conservative choice (DEC-TRADESIM-001):
+conservative choice (DEC-TRADESIM-001). Orthogonally, the policy carries the
+global :class:`~brutex.execution.fill_mode.FillMode`
+(DEC-FILL-WORST-CASE-001): under ``WORST_CASE`` every fill PRICE below is
+replaced by the **adverse-max law** — entry / forced / next-open / signal
+fills at the fill bar's adverse extreme (BUY at HIGH, SELL at LOW for entry;
+the mirror for exits), an AT_LEVEL SL/TP fill at ``min(level, bar low)``
+(BUY exit) / ``max(level, bar high)`` (SELL exit), and end-of-data /
+session-gap at the last stored bar's adverse extreme — while every TIMING
+rule, trigger comparison, exit reason, excursion fold, and exit-index
+convention stays byte-identical to ``PRECISE`` (the library default):
 
 * **Entry** — *locked* to the next bar's OPEN (signal on bar ``N`` → enter at
   ``N+1`` OPEN; ``TRACK1_BACKTEST_SPEC.md`` line 240). Not a knob.
@@ -88,7 +97,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
@@ -106,6 +115,7 @@ from brutex.engine.exit_index import bars_strictly_increasing
 # Stage-2 walker reuses it rather than redefining the rounding rule (the task's
 # explicit reuse instruction); the sibling-private import is deliberate.
 from brutex.engine.stage1a import _price_to_paisa  # pyright: ignore[reportPrivateUsage]
+from brutex.execution.fill_mode import FillMode
 from brutex.strategies.types import Side
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -151,7 +161,9 @@ class FillPolicy:
 
     Only the two questions the spec leaves genuinely open (scoping doc §5
     Q1/Q2) are knobs; the rest are locked by the spec and documented on the
-    module:
+    module (WHERE a fill happens — bar + event — is always the locked rule;
+    ``fill_mode`` moves only the PRICE chosen within that bar,
+    DEC-FILL-WORST-CASE-001):
 
     * entry is ALWAYS the next bar's OPEN (spec line 240),
     * the 15:20 IST forced exit ALWAYS fills at the forced bar's OPEN and
@@ -169,14 +181,45 @@ class FillPolicy:
     same_bar
         Tie-break when a single bar touches both the stop and the target.
         Defaults to :data:`SameBarTie.SL_FIRST` (pessimistic).
+    fill_mode
+        The global :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001). The LIBRARY-level default is
+        :data:`~brutex.execution.fill_mode.FillMode.PRECISE` so every direct
+        construction — and every historical golden — is byte-identical
+        legacy; the WORST_CASE production default is applied at the CONFIG
+        layer (``SweepRunConfig`` / ``SweepGridConfig`` / the CLI launch),
+        never silently here. Under ``WORST_CASE`` the module-docstring
+        adverse-max law replaces every fill PRICE; timing / triggers /
+        reasons / excursion folds are untouched. NOTE the honest interaction
+        with SL/TP anchoring: levels anchor on the ACTUAL entry fill, so
+        under ``WORST_CASE`` they anchor on the adverse-extreme entry —
+        trigger timing can therefore differ between modes (documented,
+        accepted — the honest simulation of the worst realized entry).
     """
 
     stop_loss: LevelFill = LevelFill.AT_LEVEL
     take_profit: LevelFill = LevelFill.AT_LEVEL
     same_bar: SameBarTie = SameBarTie.SL_FIRST
+    fill_mode: FillMode = FillMode.PRECISE
+
+    def __post_init__(self) -> None:
+        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a static type is NOT a
+        # runtime guard — a junk fill_mode string would compare
+        # `is FillMode.WORST_CASE` False at every fill site and SILENTLY walk
+        # PRECISE (the exact silent-fallback trap the fail-loud resolver
+        # exists to prevent). The cast defeats mypy's annotation-trusting
+        # narrowing so the guard is not "unreachable" (the FuturesTradeInput
+        # precedent).
+        if not isinstance(cast("object", self.fill_mode), FillMode):
+            msg = (
+                f"FillPolicy.fill_mode {self.fill_mode!r} is not a FillMode member; "
+                f"allowed: {sorted(m.value for m in FillMode)}"
+            )
+            raise ValueError(msg)
 
 
-#: The conservative default fill policy (AT_LEVEL SL/TP + pessimistic same-bar).
+#: The conservative default fill policy (AT_LEVEL SL/TP + pessimistic same-bar,
+#: PRECISE legacy fill prices — the library-level byte-identical default).
 DEFAULT_FILL_POLICY: Final[FillPolicy] = FillPolicy()
 
 
@@ -235,12 +278,17 @@ class TradeDetail:
     exit_reason
         Why the position closed — one of :data:`EXIT_REASONS`.
     entry_fill_paisa
-        The exact entry fill price (int64 paisa) — the entry bar's OPEN.
+        The exact entry fill price (int64 paisa) — under
+        :data:`~brutex.execution.fill_mode.FillMode.PRECISE` the entry bar's
+        OPEN; under ``WORST_CASE`` the entry bar's adverse extreme (HIGH for
+        BUY, LOW for SELL — the DEC-FILL-WORST-CASE-001 adverse-max law).
     exit_fill_paisa
-        The exact exit fill price (int64 paisa) — the level / open / close the
-        trade actually filled at. Invariant (by :meth:`TradeSimWalker._close`'s
-        P&L arithmetic): ``pnl_paisa == exit − entry`` for BUY and
-        ``entry − exit`` for SELL.
+        The exact exit fill price (int64 paisa) — the price the trade
+        actually filled at under the walk's fill mode (PRECISE: the level /
+        open / close the event's locked rule names; WORST_CASE: the
+        adverse-max counterpart). Invariant (by
+        :meth:`TradeSimWalker._close`'s P&L arithmetic): ``pnl_paisa ==
+        exit − entry`` for BUY and ``entry − exit`` for SELL.
     """
 
     trade: ClosedTrade
@@ -380,6 +428,10 @@ class TradeSimWalker:
         self._sl_paisa = stop_loss_paisa
         self._tp_paisa = take_profit_paisa
         self._policy = policy
+        # Cached once (O(1) per bar discipline): the adverse-max law engages
+        # only under WORST_CASE (DEC-FILL-WORST-CASE-001); PRECISE keeps every
+        # fill price byte-identical legacy.
+        self._worst_case = policy.fill_mode is FillMode.WORST_CASE
         self._reference_stamper = reference_stamper
         self._detail_sink = detail_sink
         self._position: _OpenPosition | None = None
@@ -620,7 +672,7 @@ class TradeSimWalker:
                     self._pending_exit = None
                     closed = self._close(
                         pos,
-                        exit_price_paisa=_price_to_paisa(pos.last_bar.close),
+                        exit_price_paisa=self._last_bar_exit_paisa(pos),
                         exit_ts=pos.last_bar.timestamp,
                         exit_idx=pos.last_idx,
                         reason=_ExitReason.SESSION_GAP,
@@ -646,19 +698,21 @@ class TradeSimWalker:
         return closed
 
     def finish(self) -> ClosedTrade | None:
-        """Close any still-open position at the last bar's CLOSE (end of data).
+        """Close any still-open position at the last bar (end of data).
 
         Call once after the final :meth:`push`. A position can still be open at
         end of data when the feed stops before 15:20 IST and no stop / target /
         signal fired (or a next-open exit was pending with no next bar). Returns
-        ``None`` when the walker is already flat.
+        ``None`` when the walker is already flat. PRECISE prices the close at
+        the last bar's CLOSE; WORST_CASE at its adverse extreme
+        (DEC-FILL-WORST-CASE-001 — see :meth:`_last_bar_exit_paisa`).
         """
         pos = self._position
         if pos is None:
             return None
         return self._close(
             pos,
-            exit_price_paisa=_price_to_paisa(pos.last_bar.close),
+            exit_price_paisa=self._last_bar_exit_paisa(pos),
             exit_ts=pos.last_bar.timestamp,
             exit_idx=pos.last_idx,
             reason=_ExitReason.END_OF_DATA,
@@ -667,14 +721,24 @@ class TradeSimWalker:
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _open_position(self, bar: CandleBar, idx: int, *, entry_day_ist: date) -> None:
-        """Open a position at ``bar``'s OPEN (the next-bar-open entry fill).
+        """Open a position on ``bar`` (the next-bar entry fill).
+
+        PRECISE fills at ``bar``'s OPEN (the legacy locked rule); WORST_CASE
+        fills at the entry bar's ADVERSE extreme — BUY at HIGH, SELL at LOW
+        (the open-anchored arm of the adverse-max law,
+        DEC-FILL-WORST-CASE-001). The SL/TP levels anchor on this ACTUAL
+        entry fill (:meth:`_levels`), and MFE/MAE measure from it — both by
+        construction, no extra wiring.
 
         ``entry_day_ist`` is the fill bar's IST session date, threaded from the
         (A) fill site — which already resolved it for the forced check — so the
         (A2) open-position session guard costs no extra UTC→IST conversion
         (DEC-TRADESIM-OPEN-SESSION-GUARD-001).
         """
-        entry_price = _price_to_paisa(bar.open)
+        if self._worst_case:
+            entry_price = _price_to_paisa(bar.high if self._direction is Side.BUY else bar.low)
+        else:
+            entry_price = _price_to_paisa(bar.open)
         sl_level, tp_level = self._levels(entry_price)
         self._position = _OpenPosition(
             entry_idx=idx,
@@ -716,23 +780,32 @@ class TradeSimWalker:
         pos.last_idx = idx
         pos.last_bar = bar
 
-        # (1) A next-open exit scheduled on a prior bar fills at THIS bar's open.
+        # (1) A next-open exit scheduled on a prior bar fills on THIS bar —
+        # PRECISE at its open; WORST_CASE at its adverse extreme (the
+        # open-anchored adverse-max arm, DEC-FILL-WORST-CASE-001). The
+        # excursion fold stays the legacy (open, open) in BOTH modes — the
+        # fold logic is deliberately untouched, only the fill PRICE moves.
         if self._pending_exit is not None:
             reason = self._pending_exit
             self._pending_exit = None
             open_paisa = _price_to_paisa(bar.open)
             self._update_excursion(pos, open_paisa, open_paisa)
             return self._close(
-                pos, exit_price_paisa=open_paisa, exit_ts=bar.timestamp, exit_idx=idx, reason=reason
+                pos,
+                exit_price_paisa=self._open_anchored_exit_paisa(bar, open_paisa),
+                exit_ts=bar.timestamp,
+                exit_idx=idx,
+                reason=reason,
             )
 
-        # (2) Forced 15:20 IST exit overrides everything — fill at the open.
+        # (2) Forced 15:20 IST exit overrides everything — fill at the open
+        # (PRECISE) / the adverse extreme (WORST_CASE); fold unchanged.
         if forced:
             open_paisa = _price_to_paisa(bar.open)
             self._update_excursion(pos, open_paisa, open_paisa)
             return self._close(
                 pos,
-                exit_price_paisa=open_paisa,
+                exit_price_paisa=self._open_anchored_exit_paisa(bar, open_paisa),
                 exit_ts=bar.timestamp,
                 exit_idx=idx,
                 reason=_ExitReason.FORCED,
@@ -755,9 +828,26 @@ class TradeSimWalker:
                 else self._policy.take_profit
             )
             if fill is LevelFill.AT_LEVEL:
+                # PRECISE fills exactly at the level. WORST_CASE applies the
+                # adverse-max law WITH the level (DEC-FILL-WORST-CASE-001):
+                # a BUY exits (sells) at min(level, bar low) — a gap-through
+                # bar fills at the extreme, while a gap PAST the level in the
+                # trade's favour (e.g. a long-TP bar entirely ABOVE the
+                # target, low > tp) stays clamped AT the level so the
+                # worst-case fill can never overstate vs today's at-level
+                # fill (the proven counterexample); a SELL exits (covers) at
+                # max(level, bar high), the exact mirror.
+                if self._worst_case:
+                    exit_paisa = (
+                        min(level_paisa, low_paisa)
+                        if self._direction is Side.BUY
+                        else max(level_paisa, high_paisa)
+                    )
+                else:
+                    exit_paisa = level_paisa
                 return self._close(
                     pos,
-                    exit_price_paisa=level_paisa,
+                    exit_price_paisa=exit_paisa,
                     exit_ts=bar.timestamp,
                     exit_idx=idx,
                     reason=reason,
@@ -798,6 +888,36 @@ class TradeSimWalker:
             # Same bar spans both levels — break the tie by policy.
             return stop if self._policy.same_bar is SameBarTie.SL_FIRST else target
         return stop if stop is not None else target
+
+    def _open_anchored_exit_paisa(self, bar: CandleBar, open_paisa: int) -> int:
+        """The exit fill for an OPEN-anchored event on *bar* (pending / forced).
+
+        PRECISE returns *open_paisa* (the legacy locked rule — the bar's OPEN,
+        already converted by the caller so the hot path pays no second
+        conversion). WORST_CASE returns the bar's ADVERSE extreme — a BUY
+        position exits (sells) at the LOW, a SELL position exits (covers) at
+        the HIGH (the open-anchored arm of the adverse-max law, no level
+        exists for these events — DEC-FILL-WORST-CASE-001). O(1): at most one
+        extra Decimal→paisa conversion, paid only on a worst-case exit bar.
+        """
+        if not self._worst_case:
+            return open_paisa
+        return _price_to_paisa(bar.low if self._direction is Side.BUY else bar.high)
+
+    def _last_bar_exit_paisa(self, pos: _OpenPosition) -> int:
+        """The end-of-data / session-gap exit fill — the last stored bar's price.
+
+        PRECISE prices the retroactive close at ``pos.last_bar``'s CLOSE (the
+        legacy ``finish()`` rule); WORST_CASE at its ADVERSE extreme — BUY at
+        LOW, SELL at HIGH (DEC-FILL-WORST-CASE-001). Both are a REAL stored
+        price at a REAL stored instant (never fabricated, Golden Rule #1);
+        the honest stale-price envelope of the ``session_gap`` close
+        (DEC-TRADESIM-OPEN-SESSION-GUARD-001) carries over unchanged.
+        """
+        bar = pos.last_bar
+        if not self._worst_case:
+            return _price_to_paisa(bar.close)
+        return _price_to_paisa(bar.low if self._direction is Side.BUY else bar.high)
 
     def _update_excursion(self, pos: _OpenPosition, high_paisa: int, low_paisa: int) -> None:
         """Fold a ``(high, low)`` pair into the running MFE/MAE (both ``>= 0``)."""

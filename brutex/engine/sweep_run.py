@@ -90,7 +90,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMappin
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, NoReturn, Protocol, cast, runtime_checkable
 
 import structlog
 
@@ -133,7 +133,7 @@ from brutex.engine.sweep_stream import (
     SurvivorColumns,
     rank_survivor_columns,
 )
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import FillPolicy, simulate_trades
 from brutex.engine.trial_stats import (
     TrialStatsError,
     read_tuple_trial_stats,
@@ -148,6 +148,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
     write_completion_sentinel,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.compute import ResultMetrics
 from brutex.models import BruteXError
 from brutex.money import round_money
@@ -627,11 +628,31 @@ class SweepRunConfig:
     #: run_ids stay byte-identical.
     roll_schedule: tuple[int, ...] | None = None
     temporal: TemporalRobustnessConfig | None = None
+    #: The global fill mode (DEC-FILL-WORST-CASE-001): the PRODUCTION default
+    #: is the WORST_CASE anti-illusion floor — every fill at the bar's worst
+    #: price under the adverse-max law, so a persisted result can only
+    #: UNDERSTATE. Folded into the run identity via
+    #: :func:`canonical_trade_params` EMIT-ON-NON-PRECISE (the roll_schedule
+    #: conditional-emit template): a PRECISE config reproduces every
+    #: historical run_id byte-for-byte, a WORST_CASE config re-keys. Both
+    #: modes are legal on every instrument — no presence invariant needed.
+    fill_mode: FillMode = FillMode.WORST_CASE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
+        # DEC-FILL-WORST-CASE-001 fix round 2 (NIT-4): a junk fill_mode string
+        # would compare `is FillMode.PRECISE` False everywhere downstream and
+        # silently mint a WORST_CASE-keyed identity while the walker prices
+        # whatever the string is not — fail LOUD at the config boundary (the
+        # FuturesTradeInput isinstance-guard precedent; the cast defeats
+        # mypy's annotation-trusting "unreachable" narrowing).
+        if not isinstance(cast("object", self.fill_mode), FillMode):
+            raise ValueError(
+                f"SweepRunConfig.fill_mode {self.fill_mode!r} is not a FillMode member; "
+                f"allowed: {sorted(m.value for m in FillMode)}"
+            )
         # Instrument ⟺ schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
         # the futures alias REQUIRES a schedule, everything else FORBIDS one —
         # presence is a pure function of the identity field, never a caller mood.
@@ -772,6 +793,7 @@ def canonical_trade_params(
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     roll_schedule: tuple[int, ...] | None = None,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
 
@@ -829,6 +851,14 @@ def canonical_trade_params(
     }
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
+    if fill_mode is not FillMode.PRECISE:
+        # DEC-FILL-WORST-CASE-001 (the roll_schedule conditional-emit
+        # template): the fill mode genuinely changes every fill price a combo
+        # simulates, so a non-PRECISE run is a DIFFERENT computation and MUST
+        # re-key (Golden Rule #4). PRECISE — the legacy mode — emits NO key,
+        # so every historical run identity is byte-identical; the recount /
+        # verify law is therefore "no fill_mode key = PRECISE legacy".
+        params["fill_mode"] = fill_mode.value
     return params
 
 
@@ -842,6 +872,7 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
         roll_schedule=cfg.roll_schedule,
+        fill_mode=cfg.fill_mode,
     )
 
 
@@ -1016,6 +1047,7 @@ def ranked_combo_to_result_row(
     temporal: TemporalRobustnessConfig | None = None,
     temporal_judged_years: Sequence[int] | None = None,
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA,
+    fill_mode: FillMode = FillMode.PRECISE,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -1080,6 +1112,12 @@ def ranked_combo_to_result_row(
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
         reproduce the ranked combo's trades exactly.
+    fill_mode
+        The run's :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001) — MUST match the sweep's for the same
+        reason (a WORST_CASE finalist re-simulated PRECISE would restate
+        every fill price). Default PRECISE keeps legacy callers
+        byte-identical; production threads ``cfg.fill_mode``.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -1127,6 +1165,7 @@ def ranked_combo_to_result_row(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        policy=FillPolicy(fill_mode=fill_mode),
         reference_stamper=reference_stamper,
     )
     if trades:
@@ -1411,6 +1450,7 @@ def _reattribute_chunk_failure(
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
+                policy=FillPolicy(fill_mode=cfg.fill_mode),
                 reference_stamper=reference_stamper,
             )
         except MemoryError:
@@ -1477,6 +1517,7 @@ def _iter_mask_metrics(
                 direction=cfg.direction,
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
+                policy=FillPolicy(fill_mode=cfg.fill_mode),
             )
             # Batch-contract guard: the batch call must RETURN exactly one
             # (trades, exit_indices) pair per mask (both arms do, by
@@ -1854,12 +1895,25 @@ def run_persisted_sweep(
         "data_snapshot_hash": cfg.data_snapshot_hash,
         "indicator_version": cfg.indicator_version,
         "code_commit_sha": cfg.code_commit_sha,
-        "params": params,
+        # AUDIT WIRE ONLY (DEC-FILL-WORST-CASE-001 fix round 3): the
+        # recorded params carry the fill mode ALWAYS AND EXPLICITLY —
+        # including the literal "precise" — so a same-generation
+        # mixed-mode root is DETECTABLE (two launches under different
+        # modes legally share one context triple; the run identities +
+        # store addresses fold the mode and stay distinct, but under
+        # the round-2 emit-on-non-PRECISE audit law the PRECISE half
+        # was recorded by KEY ABSENCE and the mix silently folded to
+        # WORST_CASE). The run-identity `params` stays the elision-law
+        # canonical_trade_params dict BYTE-UNTOUCHED — this copy
+        # annotates the audit line only, never the hash inputs.
+        "params": {**params, "fill_mode": cfg.fill_mode.value},
     }
     if cfg.temporal is not None:
         # Provenance WITHOUT re-key (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001): the
         # gate config rides the hash-chained SWEEP_START payload, emitted ONLY
-        # when configured — the default audit bytes are unchanged (pinned).
+        # when configured — the default audit bytes are unchanged (pinned;
+        # "default" now means fill_mode-annotated params per the round-3
+        # DEC-FILL-WORST-CASE-001 audit wire above).
         start_payload["temporal_gate"] = {
             "mode": cfg.temporal.mode,
             "min_profitable_years_fraction": cfg.temporal.min_profitable_years_fraction,
@@ -2288,6 +2342,9 @@ def run_persisted_sweep(
             temporal=cfg.temporal,
             temporal_judged_years=None if temporal_runtime is None else temporal_runtime.judged,
             start_equity_paisa=cfg.start_equity_paisa,
+            # The finalist projection MUST re-simulate under the run's own
+            # fill mode or the parity contract breaks (DEC-FILL-WORST-CASE-001).
+            fill_mode=cfg.fill_mode,
         )
         try:
             store.append(row)

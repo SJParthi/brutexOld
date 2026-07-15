@@ -55,6 +55,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.engine.sweep_stream import BoundedFinalist, BoundedRankResult
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.strategies.types import Side
 from structlog.testing import capture_logs
@@ -113,6 +114,8 @@ def _make_config(**overrides: object) -> SweepRunConfig:
         "sl_paisa": 80,
         "tp_paisa": 50,
         "top_k": 3,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]
@@ -429,6 +432,8 @@ class TestGridTupleSkip:
             indicator_version="ind-v1",
             code_commit_sha="deadbeef",
             top_k=3,
+            # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+            fill_mode=FillMode.PRECISE,
         )
         results_root = tmp_path / "results"
         from brutex.engine.sweep_orchestrator import make_store_for

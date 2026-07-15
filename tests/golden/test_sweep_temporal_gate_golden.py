@@ -27,6 +27,7 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
+from brutex.execution.fill_mode import FillMode
 from brutex.engine.sweep_run import (
     ComboDedup,
     SweepRunConfig,
@@ -96,6 +97,12 @@ def golden_config(**overrides: object) -> SweepRunConfig:
         "sl_paisa": 80,
         "tp_paisa": 50,
         "temporal": GOLDEN_TEMPORAL,
+        # FROZEN GOLDEN PINS THE **PRECISE** LEGACY MODE (DEC-FILL-WORST-CASE-001,
+        # club S2 fold): the gate-ON hash + the displacement/survivor literals
+        # below were minted under exact fills; the SweepRunConfig field default
+        # is now the WORST_CASE production floor, so this config pins PRECISE
+        # explicitly — the test_engine_sweep_run_golden.py precedent.
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]

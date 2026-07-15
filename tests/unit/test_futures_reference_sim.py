@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from brutex.data.models import CandleBar
+from brutex.execution.fill_mode import FillMode
 from brutex.futures import reference_sim
 from brutex.futures.executor import (
     FuturesBarWindow,
@@ -85,7 +86,11 @@ class TestNaiveReference:
         # land on the SAME integer.
         resolver, source = _Resolver(), _Source(window=_window())
         naive = naive_reference_futures_pnl(_signal(), resolver=resolver, source=source)
-        prod = materialize_futures_trade(_signal(), resolver=resolver, source=source)
+        # Legacy-mode pin (DEC-FILL-WORST-CASE-001): the naive default is
+        # PRECISE, so the production leg pins the SAME mode (same-mode law).
+        prod = materialize_futures_trade(
+            _signal(), resolver=resolver, source=source, fill_mode=FillMode.PRECISE
+        )
         assert isinstance(prod, MaterializedFuturesTrade)
         assert naive == prod.net_pnl_paisa == 749_250
 
@@ -93,14 +98,18 @@ class TestNaiveReference:
         resolver, source = _Resolver(), _Source(window=_window())
         sig = _signal(direction=TradeDirection.BEAR)
         naive = naive_reference_futures_pnl(sig, resolver=resolver, source=source)
-        prod = materialize_futures_trade(sig, resolver=resolver, source=source)
+        prod = materialize_futures_trade(
+            sig, resolver=resolver, source=source, fill_mode=FillMode.PRECISE
+        )
         assert isinstance(prod, MaterializedFuturesTrade)
         assert naive == prod.net_pnl_paisa == -750_750
 
     def test_n_lots_scaling_agrees(self) -> None:
         resolver, source = _Resolver(), _Source(window=_window())
         naive = naive_reference_futures_pnl(_signal(), resolver=resolver, source=source, n_lots=3)
-        prod = materialize_futures_trade(_signal(), resolver=resolver, source=source, n_lots=3)
+        prod = materialize_futures_trade(
+            _signal(), resolver=resolver, source=source, n_lots=3, fill_mode=FillMode.PRECISE
+        )
         assert isinstance(prod, MaterializedFuturesTrade)
         assert naive == prod.net_pnl_paisa
 
@@ -156,7 +165,9 @@ class TestDifferentialSpotCheck:
     def test_r45_differential_naive_reference_clean(self) -> None:
         resolver, source = _Resolver(), _Source(window=_window())
         sig = _signal()
-        prod = materialize_futures_trade(sig, resolver=resolver, source=source)
+        prod = materialize_futures_trade(
+            sig, resolver=resolver, source=source, fill_mode=FillMode.PRECISE
+        )
         assert isinstance(prod, MaterializedFuturesTrade)
         report = differential_spot_check(
             [sig], [prod.net_pnl_paisa], resolver=resolver, source=source
@@ -196,3 +207,93 @@ class TestDifferentialSpotCheck:
             differential_spot_check(
                 [_signal()], [None], resolver=_Resolver(), source=_Source(), policy_skipped=[]
             )
+
+
+class TestWorstCaseNaiveReference:
+    """DEC-FILL-WORST-CASE-001 — the independently RE-STATED worst-case law."""
+
+    def test_worst_case_bull_agrees_bit_for_bit_with_production(self) -> None:
+        # entry HIGH 22,010.00 + 0.05 = 22,010.05 buy; exit LOW 22,090.00 −
+        # 0.05 = 22,089.95 sell; (22,089.95 − 22,010.05) × 75 = ₹5,992.50 →
+        # 599,250 paisa. Two independent pipelines, same integer.
+        resolver, source = _Resolver(), _Source(window=_window())
+        naive = naive_reference_futures_pnl(
+            _signal(), resolver=resolver, source=source, fill_mode=FillMode.WORST_CASE
+        )
+        prod = materialize_futures_trade(
+            _signal(), resolver=resolver, source=source, fill_mode=FillMode.WORST_CASE
+        )
+        assert isinstance(prod, MaterializedFuturesTrade)
+        assert naive == prod.net_pnl_paisa == 599_250
+
+    def test_worst_case_bear_agrees_bit_for_bit_with_production(self) -> None:
+        # bear: sell = entry LOW 21,990.00 − 0.05; buy = exit HIGH 22,110.00
+        # + 0.05; (21,989.95 − 22,110.05) × 75 = −₹9,007.50 → −900,750.
+        resolver, source = _Resolver(), _Source(window=_window())
+        sig = _signal(direction=TradeDirection.BEAR)
+        naive = naive_reference_futures_pnl(
+            sig, resolver=resolver, source=source, fill_mode=FillMode.WORST_CASE
+        )
+        prod = materialize_futures_trade(
+            sig, resolver=resolver, source=source, fill_mode=FillMode.WORST_CASE
+        )
+        assert isinstance(prod, MaterializedFuturesTrade)
+        assert naive == prod.net_pnl_paisa == -900_750
+
+    def test_worst_case_flat_bar_equals_precise_naive(self) -> None:
+        # The flat-bar counterexample restated on the NAIVE side: high == open
+        # == low ⇒ worst-case fills == precise fills (the +tick is kept).
+        flat_entry = CandleBar(
+            timestamp=_ENTRY.astimezone(UTC),
+            open=Decimal("22000.00"),
+            high=Decimal("22000.00"),
+            low=Decimal("22000.00"),
+            close=Decimal("22000.00"),
+            volume=10,
+            open_interest=None,
+        )
+        flat_exit = CandleBar(
+            timestamp=_EXIT.astimezone(UTC),
+            open=Decimal("22100.00"),
+            high=Decimal("22100.00"),
+            low=Decimal("22100.00"),
+            close=Decimal("22100.00"),
+            volume=10,
+            open_interest=None,
+        )
+        window = FuturesBarWindow(
+            entry_bar=flat_entry, exit_bar=flat_exit, path=(flat_entry, flat_exit)
+        )
+        source = _Source(window=window)
+        worst = naive_reference_futures_pnl(
+            _signal(), resolver=_Resolver(), source=source, fill_mode=FillMode.WORST_CASE
+        )
+        precise = naive_reference_futures_pnl(_signal(), resolver=_Resolver(), source=source)
+        assert worst == precise
+
+    def test_worst_case_differential_clean(self) -> None:
+        resolver, source = _Resolver(), _Source(window=_window())
+        sig = _signal()
+        prod = materialize_futures_trade(
+            sig, resolver=resolver, source=source, fill_mode=FillMode.WORST_CASE
+        )
+        assert isinstance(prod, MaterializedFuturesTrade)
+        report = differential_spot_check(
+            [sig],
+            [prod.net_pnl_paisa],
+            resolver=resolver,
+            source=source,
+            fill_mode=FillMode.WORST_CASE,
+        )
+        assert report == DifferentialReport(mismatches=(), n_checked=1, n_skipped_policy=0)
+
+    def test_worst_case_unpriceable_still_none(self) -> None:
+        assert (
+            naive_reference_futures_pnl(
+                _signal(instrument="RELIANCE"),
+                resolver=_Resolver(),
+                source=_Source(),
+                fill_mode=FillMode.WORST_CASE,
+            )
+            is None
+        )

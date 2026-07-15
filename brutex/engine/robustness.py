@@ -30,7 +30,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
-from brutex.engine.trade_sim import simulate_trades
+from brutex.engine.trade_sim import DEFAULT_FILL_POLICY, FillPolicy, simulate_trades
 from brutex.metrics.cpcv import (
     DEFAULT_N_GROUPS,
     DEFAULT_N_TEST_GROUPS,
@@ -56,6 +56,7 @@ def combo_returns(
     prior_n: int = 3,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
+    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> list[float]:
     """Run a combo over bars → its PER-TRADE return series.
@@ -76,6 +77,13 @@ def combo_returns(
         :func:`~brutex.engine.stage1a.build_bar_bits`
         (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001, review round-2 finding 2).
         Defaults (``None`` / ``False``) are the byte-identical spot path.
+    policy
+        The :class:`~brutex.engine.trade_sim.FillPolicy` — incl. the global
+        ``fill_mode`` (DEC-FILL-WORST-CASE-001). A re-deriver MUST source it
+        from the SAME config/params it sources sl/tp from (never
+        independently from env); the library default
+        (:data:`~brutex.engine.trade_sim.DEFAULT_FILL_POLICY`, PRECISE)
+        keeps legacy callers byte-identical.
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to the
         trade sim — the closed trades behind this return series carry
@@ -110,6 +118,7 @@ def combo_returns(
         tf_minutes=tf_minutes,
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
+        policy=policy,
         reference_stamper=reference_stamper,
     )
     return [trade.pnl_paisa / start_equity_paisa for trade in trades]

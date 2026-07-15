@@ -31,6 +31,7 @@ from brutex.costs.types import (
     TradeInput,
     UnsupportedTradeOutcomeError,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
 __all__ = ["compute_trade_cost"]
@@ -91,6 +92,51 @@ def _round_to_rupee(amount_paisa: int) -> int:
     return -(((-amount_paisa + 50) // 100) * 100)
 
 
+def _round_levy_paisa(amount_x_bps_x100: int, *, worst_case: bool) -> int:
+    """Mode-aware paisa rounding for a rate-scaled levy product.
+
+    DEC-FILL-WORST-CASE-001 fix-round-2 (the adverse-levy-rounding law):
+    under PRECISE (``worst_case=False``) this IS :func:`_round_to_paisa` —
+    byte-identical legacy nearest-paisa half-up. Under WORST_CASE every
+    nearest-rounded levy in the cost stack instead rounds ADVERSELY
+    (ceiling toward +∞ — a levy is a charge, so "adverse" = larger). WHY:
+    nearest rounding on a levy computed from the SMALLER worst-case sell
+    notional can round DOWN across a boundary the precise levy rounded UP,
+    making the worst-case NET strictly BETTER than precise (the refuter's
+    executed ₹0.5-STT-boundary counterexample — see
+    ``_round_levy_rupee``); ceiling the worst-case levy restores the
+    unconditional net floor (the dominance proof lives in MIGRATION.md
+    #1798 + ``tests/property/test_futures_options_worst_case_floor.py``).
+    """
+    if not worst_case:
+        return _round_to_paisa(amount_x_bps_x100)
+    # Ceiling toward +∞ for any sign: -((-x) // u) == ceil(x / u).
+    return -((-amount_x_bps_x100) // 10_000_000)
+
+
+def _round_levy_rupee(amount_paisa: int, *, worst_case: bool) -> int:
+    """Mode-aware statutory rupee rounding (STT / stamp duty / GST).
+
+    DEC-FILL-WORST-CASE-001 fix-round-2: under PRECISE this IS
+    :func:`_round_to_rupee` — byte-identical legacy nearest-rupee half-up.
+    Under WORST_CASE the statutory levy rounds ADVERSELY (ceiling to the
+    next whole rupee). WHY (the refuter's executed counterexample): a
+    worst-case sell notional 25 paisa smaller than precise crossed a ₹0.5
+    STT rounding boundary DOWNWARD — STT dropped ₹1 while gross dropped
+    only 25 paisa, so the worst-case NET beat precise by 75 paisa
+    (falsifying the shipped unconditional net-floor property). With the
+    ceiling, a sell-side levy's shortfall vs precise is ≤ 0 whenever the
+    raw gap is below half a rupee, and ≤ 2×(rate × Δnotional) otherwise —
+    summed over all levies that is ≪ the gross drop Δ, so
+    ``net_worst <= net_precise`` holds unconditionally again (the full
+    dominance proof: MIGRATION.md #1798 + the floor-property docstring).
+    """
+    if not worst_case:
+        return _round_to_rupee(amount_paisa)
+    # Ceiling to the next whole rupee (100 paise) toward +∞ for any sign.
+    return -((-amount_paisa) // 100) * 100
+
+
 # ─────────────────────────────────────────────────────────────────
 # Lot-size lookup (proxy to brutex.options.lot_size_history)
 # ─────────────────────────────────────────────────────────────────
@@ -120,7 +166,8 @@ def _lookup_lot_size(instrument: str, trade_date: object) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Slippage application (TRACK2_OPTIONS_SPEC §9 — flat 1-tick adverse)
+# Slippage application (TRACK2_OPTIONS_SPEC §9 — flat 1-tick adverse;
+# DEC-FILL-WORST-CASE-001 — the same tick around the worst-case anchor)
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -128,11 +175,32 @@ def _apply_slippage(
     entry_open_paisa: int,
     exit_open_paisa: int,
     side: str,
+    *,
+    fill_mode: FillMode = FillMode.PRECISE,
+    entry_high_paisa: int | None = None,
+    entry_low_paisa: int | None = None,
+    exit_high_paisa: int | None = None,
+    exit_low_paisa: int | None = None,
 ) -> tuple[int, int, int]:
-    """Apply 1-tick adverse slippage per side.
+    """Apply 1-tick adverse slippage per side around the mode's fill anchor.
 
     Long side: buy 1 tick higher, sell 1 tick lower.
     Short side: sell 1 tick lower, buy 1 tick higher (cover).
+
+    The ANCHOR each tick applies to is the fill mode's
+    (DEC-FILL-WORST-CASE-001): under :data:`FillMode.PRECISE` (the default —
+    every legacy call byte-identical) the bar OPEN; under
+    :data:`FillMode.WORST_CASE` the option's own minute-bar ADVERSE EXTREME
+    — a buy anchors on the bar HIGH, a sell on the bar LOW (long: entry
+    HIGH + tick / exit LOW − tick; short mirrored: opening sell at entry
+    LOW − tick, cover at exit HIGH + tick). Keeping the SAME ± tick on top
+    of the extreme preserves the tick discipline: on a flat bar
+    (``high == open``) a bare buy-at-HIGH would be one tick BETTER than
+    today's precise fill — with the tick it is exactly equal, so worst-case
+    is NEVER better than precise. (The worst-case buy therefore deliberately
+    prices one tick OUTSIDE the printed range — the honest adverse floor,
+    not a printable price.) The side's two adverse anchors are REQUIRED
+    under WORST_CASE (fail-loud — never a silent PRECISE degrade).
 
     Returns ``(buy_fill_paisa, sell_fill_paisa, realized_slippage_per_share)``.
 
@@ -144,35 +212,57 @@ def _apply_slippage(
     the DEC-TRACK2-COSTS-SPEC-RECONCILE-001 adverse re-pin, the short
     ENTRY — would otherwise slip to a ₹0.00 sell fill (a "free" sale),
     which is economically impossible — nothing trades below one tick. The
-    floor only affects those degenerate tick-boundary cases; the normal
-    path (prices ≥ 2 ticks) is unchanged.
+    floor only affects those degenerate tick-boundary cases (under
+    WORST_CASE a sub-tick bar LOW lands here too); the normal path (prices
+    ≥ 2 ticks) is unchanged.
 
     ``realized_slippage_per_share`` is the slippage TRULY baked into the
-    post-floor fills (NIT-1): the buy leg's adverse rise from its raw open
-    plus the sell leg's adverse drop to its raw open, both measured against
-    the floored fills. On the normal path (fills ≥ 2 ticks) it equals the
-    nominal ``2 × tick``; when the 1-tick floor fires on the sell leg the
-    realized sell-leg movement is 0, so the per-share value is exactly
-    ``1 × tick`` — never over-stating the slippage that the notionals/PnL
-    actually carry.
+    post-floor fills (NIT-1): the buy leg's adverse rise from its raw
+    anchor plus the sell leg's adverse drop to its raw anchor, both
+    measured against the floored fills. On the normal path (fills ≥ 2
+    ticks) it equals the nominal ``2 × tick``; when the 1-tick floor fires
+    on the sell leg the realized sell-leg movement is 0, so the per-share
+    value is exactly ``1 × tick`` — never over-stating the slippage that
+    the notionals/PnL actually carry. Under WORST_CASE the open→extreme
+    move is fill-ANCHOR semantics carried by the gross P&L, not slippage.
     """
     tick = C.TICK_PAISA
+    worst = fill_mode is FillMode.WORST_CASE
     if side.startswith("long"):
         # buy leg ← entry bar, sell leg ← exit bar.
-        buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+        if worst:
+            if entry_high_paisa is None or exit_low_paisa is None:
+                msg = (
+                    "_apply_slippage: fill_mode=worst_case (long) needs "
+                    "entry_high_paisa + exit_low_paisa — refusing to silently "
+                    "price PRECISE (DEC-FILL-WORST-CASE-001)"
+                )
+                raise ValueError(msg)
+            buy_raw, sell_raw = entry_high_paisa, exit_low_paisa
+        else:
+            buy_raw, sell_raw = entry_open_paisa, exit_open_paisa
+    # RESOLVED (was MINOR-4): the §8 ADVERSE rule is authoritative
+    # (DEC-TRACK2-COSTS-SPEC-RECONCILE-001, supersedes the #963 MINOR-4
+    # pin, which had byte-pinned the favorable ``entry_open + tick`` sell
+    # fill while the spec disagreed with itself): SELL entry at
+    # ``entry_open − 1 tick``, BUY cover at ``exit_open + 1 tick`` —
+    # adverse on both legs (buy higher, sell lower). The §4 pseudocode +
+    # its "# CHECK SIGN" marker were rewritten to agree with §8. This
+    # branch stays production-unreachable under DEC-EXEC-008 (BUY-only).
+    # buy leg (cover) ← exit bar, sell leg ← entry bar. The WORST_CASE
+    # arm mirrors: sell anchors entry LOW, cover anchors exit HIGH.
+    elif worst:
+        if entry_low_paisa is None or exit_high_paisa is None:
+            msg = (
+                "_apply_slippage: fill_mode=worst_case (short) needs "
+                "entry_low_paisa + exit_high_paisa — refusing to silently "
+                "price PRECISE (DEC-FILL-WORST-CASE-001)"
+            )
+            raise ValueError(msg)
+        buy_raw, sell_raw = exit_high_paisa, entry_low_paisa
     else:
-        # RESOLVED (was MINOR-4): the §8 ADVERSE rule is authoritative
-        # (DEC-TRACK2-COSTS-SPEC-RECONCILE-001, supersedes the #963 MINOR-4
-        # pin, which had byte-pinned the favorable ``entry_open + tick`` sell
-        # fill while the spec disagreed with itself): SELL entry at
-        # ``entry_open − 1 tick``, BUY cover at ``exit_open + 1 tick`` —
-        # adverse on both legs (buy higher, sell lower). The §4 pseudocode +
-        # its "# CHECK SIGN" marker were rewritten to agree with §8. This
-        # branch stays production-unreachable under DEC-EXEC-008 (BUY-only).
-        # buy leg (cover) ← exit bar, sell leg ← entry bar.
         buy_raw, sell_raw = exit_open_paisa, entry_open_paisa
-        buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
+    buy_fill, sell_fill = buy_raw + tick, sell_raw - tick
     # Floor every fill at one tick — no instrument trades below ₹0.05.
     buy_fill, sell_fill = max(buy_fill, tick), max(sell_fill, tick)
     # Realized per-share slippage = the adverse movement TRULY baked into the
@@ -253,12 +343,25 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
         )
         raise UnsupportedTradeOutcomeError(msg)
 
-    # ── Step 1: apply slippage (1-tick flat adverse) ────────────────────
+    # ── Step 1: apply slippage (1-tick flat adverse, around the fill
+    #    mode's anchor — DEC-FILL-WORST-CASE-001) ──────────────────────────
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         trade.entry_bar_open_paisa,
         trade.exit_bar_open_paisa,
         trade.side,
+        fill_mode=trade.fill_mode,
+        entry_high_paisa=trade.entry_bar_high_paisa,
+        entry_low_paisa=trade.entry_bar_low_paisa,
+        exit_high_paisa=trade.exit_bar_high_paisa,
+        exit_low_paisa=trade.exit_bar_low_paisa,
     )
+
+    # DEC-FILL-WORST-CASE-001 fix-round-2 (the adverse-levy-rounding law):
+    # under WORST_CASE every nearest-rounded levy below rounds ADVERSELY
+    # (ceiling) so rupee/paisa rounding boundaries can never make the
+    # worst-case NET beat precise; PRECISE keeps the legacy nearest
+    # rounding byte-identical.
+    worst_case = trade.fill_mode is FillMode.WORST_CASE
 
     # ── Step 2: lookup lot size ─────────────────────────────────────────
     n_shares_per_lot = _lookup_lot_size(trade.instrument, trade.entry_dt_ist.date())
@@ -277,7 +380,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # DEC-COST-003: rates locked per Finance Act 2026
     stt_rate_bps_x100 = C.stt_options_rate_bps_x100(trade.entry_dt_ist.date())
     stt_paisa_raw = (sell_notional_paisa * stt_rate_bps_x100) // 10_000_000
-    stt_paisa = _round_to_rupee(stt_paisa_raw)
+    stt_paisa = _round_levy_rupee(stt_paisa_raw, worst_case=worst_case)
 
     # ── Step 6: exchange transaction charge (both sides on premium) ─────
     # Date-regime-selected like STT (COMMON rate_for_date mechanism). Only
@@ -287,24 +390,36 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # and rejects such trades before reaching this point, so this raise is
     # the authoritative defence-in-depth choke point for direct callers.
     exch_rate_bps_x100 = C.exchange_charge_bps_x100(trade.instrument, trade.entry_dt_ist.date())
-    exch_buy_paisa = _round_to_paisa(buy_notional_paisa * exch_rate_bps_x100)
-    exch_sell_paisa = _round_to_paisa(sell_notional_paisa * exch_rate_bps_x100)
+    exch_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * exch_rate_bps_x100, worst_case=worst_case
+    )
+    exch_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * exch_rate_bps_x100, worst_case=worst_case
+    )
     exch_paisa = exch_buy_paisa + exch_sell_paisa
 
     # ── Step 7: SEBI turnover fee (both sides) ──────────────────────────
-    sebi_buy_paisa = _round_to_paisa(buy_notional_paisa * C.SEBI_FEE_BPS_X100)
-    sebi_sell_paisa = _round_to_paisa(sell_notional_paisa * C.SEBI_FEE_BPS_X100)
+    sebi_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * C.SEBI_FEE_BPS_X100, worst_case=worst_case
+    )
+    sebi_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * C.SEBI_FEE_BPS_X100, worst_case=worst_case
+    )
     sebi_paisa = sebi_buy_paisa + sebi_sell_paisa
 
     # ── Step 8: IPFT (both sides; NSE only — BSE near-zero) ─────────────
     ipft_rate_bps_x100 = C.ipft_bps_x100(trade.instrument)
-    ipft_buy_paisa = _round_to_paisa(buy_notional_paisa * ipft_rate_bps_x100)
-    ipft_sell_paisa = _round_to_paisa(sell_notional_paisa * ipft_rate_bps_x100)
+    ipft_buy_paisa = _round_levy_paisa(
+        buy_notional_paisa * ipft_rate_bps_x100, worst_case=worst_case
+    )
+    ipft_sell_paisa = _round_levy_paisa(
+        sell_notional_paisa * ipft_rate_bps_x100, worst_case=worst_case
+    )
     ipft_paisa = ipft_buy_paisa + ipft_sell_paisa
 
     # ── Step 9: stamp duty (buy leg only, statutory rupee rounding) ─────
     stamp_paisa_raw = (buy_notional_paisa * C.STAMP_DUTY_OPTIONS_BPS_X100) // 10_000_000
-    stamp_paisa = _round_to_rupee(stamp_paisa_raw)
+    stamp_paisa = _round_levy_rupee(stamp_paisa_raw, worst_case=worst_case)
 
     # ── Step 10: GST 18% on services only (DEC-COST-001) ────────────────
     # Round TOTAL once at 18%. NOT CGST + SGST separately at 9% each.
@@ -320,7 +435,7 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
     # See COSTS_VERIFIED.md §20 known limitations.
     gst_base_paisa = brokerage_paisa + exch_paisa + sebi_paisa + ipft_paisa
     gst_paisa_raw = (gst_base_paisa * C.GST_TOTAL_BPS_X100) // 10_000_000
-    gst_paisa = _round_to_rupee(gst_paisa_raw)
+    gst_paisa = _round_levy_rupee(gst_paisa_raw, worst_case=worst_case)
 
     # ── Step 11: total charges ──────────────────────────────────────────
     total_charges_paisa = (

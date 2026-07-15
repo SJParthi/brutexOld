@@ -21,13 +21,24 @@ pinned reject order, hash-chained audit) without touching the options path (R12)
   resolves by earliest-expiry-≥-entry-date — deterministic, never
   liquidity-picked. A missing futures bar at the exact entry/exit minute is an
   honest counted ``NO_DATA`` reject — never a nearest-bar substitute.
-* **R15 — OPTIMISTIC = PRECISE fill only:** entry/exit fill at the minute bar's
-  OPEN ± one tick, adverse per side (never the favorable bar extreme). A
-  gap-open beyond an SL/TP fills at the REAL open (the spot sweep already fixed
-  the exit timestamp; this module never re-evaluates levels). A volume-0
-  PRINTED futures bar is REAL and TRADABLE (the ``STALE_BAR`` reject is OPT-IN
-  via ``reject_stale_bars=True``, default OFF). The pessimistic/worst leg is
-  DEFERRED — structurally absent, not faked.
+* **R15 fill modes (DEC-FILL-WORST-CASE-001):** under
+  :data:`~brutex.execution.fill_mode.FillMode.PRECISE` entry/exit fill at the
+  minute bar's OPEN ± one tick, adverse per side (never the favorable bar
+  extreme — the original OPTIMISTIC = PRECISE law); under ``WORST_CASE`` —
+  the PRODUCTION DEFAULT on this executor's config surface
+  (:data:`~brutex.execution.fill_mode.DEFAULT_FILL_MODE`; explicit
+  ``fill_mode=FillMode.PRECISE`` is the byte-identical opt-out) — they fill
+  at the minute bar's ADVERSE EXTREME ± the SAME tick (long: entry HIGH +
+  tick / exit LOW − tick; short mirrored), so worst-case is NEVER better
+  than precise even on a flat bar. The formerly-DEFERRED pessimistic/worst
+  leg therefore now LANDS (superseding the "structurally absent" note this
+  module carried since Phase 5). Either mode: a gap-open beyond an SL/TP
+  fills on the REAL exit bar — its open (PRECISE) / its adverse extreme
+  (WORST_CASE); the spot sweep already fixed the exit timestamp and this
+  module never re-evaluates levels. A volume-0 PRINTED futures bar is REAL
+  and TRADABLE (the ``STALE_BAR`` reject is OPT-IN via
+  ``reject_stale_bars=True``, default OFF) in BOTH modes — the mode moves
+  fill PRICES only, never a reject/timing decision.
 
 ## Routing lives ABOVE the executor
 
@@ -78,6 +89,7 @@ from brutex.costs.futures_costs import (
 from brutex.costs.types import Broker, GstSplit, UnverifiedCostRegimeError
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.models import CandleBar
+from brutex.execution.fill_mode import DEFAULT_FILL_MODE, FillMode
 from brutex.money import rupees_to_paisa
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 from brutex.options.strike_rules import TradeDirection
@@ -622,6 +634,7 @@ def materialize_futures_trade(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     reject_stale_bars: bool = False,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> MaterializedFuturesTrade | RejectedFuturesTrade:
     """Materialize + price one futures trade for *signal*.
 
@@ -644,7 +657,14 @@ def materialize_futures_trade(
         OPT-IN (default ``False``): reject a volume-0 entry/exit bar as
         ``STALE_BAR``. The default FILLS it — R14/R15 lock "a volume-0 printed
         futures bar is real + tradable" (expiry-afternoon volume collapse is
-        counted as-is).
+        counted as-is). Mode-independent — a fill mode never changes a reject.
+    fill_mode
+        The global :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001). This executor IS the production config
+        surface for the futures leg, so the default is the shared leaf's
+        :data:`~brutex.execution.fill_mode.DEFAULT_FILL_MODE` (worst-case);
+        an explicit ``FillMode.PRECISE`` is the byte-identical legacy
+        opt-out (golden-pinned).
 
     Returns
     -------
@@ -726,6 +746,16 @@ def materialize_futures_trade(
             n_lots=n_lots,
             broker=broker,
             gst_split=gst_split,
+            fill_mode=fill_mode,
+            # The fill-bar extremes travel in BOTH modes (the input record is
+            # complete either way; PRECISE never reads them) — the WORST_CASE
+            # adverse anchors (DEC-FILL-WORST-CASE-001). CandleBar guarantees
+            # low ≤ open ≤ high, so the ordering validation cannot fire on a
+            # real lake bar.
+            entry_bar_high_paisa=rupees_to_paisa(window.entry_bar.high),
+            entry_bar_low_paisa=rupees_to_paisa(window.entry_bar.low),
+            exit_bar_high_paisa=rupees_to_paisa(window.exit_bar.high),
+            exit_bar_low_paisa=rupees_to_paisa(window.exit_bar.low),
         )
     )
     entry_fill = breakdown.buy_fill_paisa if leg.side == "long" else breakdown.sell_fill_paisa
@@ -853,6 +883,7 @@ def run_futures_over_signals(
     gst_split: GstSplit = "intra_state",
     n_lots: int = 1,
     reject_stale_bars: bool = False,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> FuturesRuleResult:
     """Price every *signal* and aggregate into a :class:`FuturesRuleResult`.
 
@@ -867,8 +898,9 @@ def run_futures_over_signals(
     instrument, direction
         The run's row identity — every signal must match (fail-loud on a mixed
         batch; the result row aggregates ONE combo's trades).
-    resolver, source, broker, gst_split, n_lots, reject_stale_bars
-        Threaded to :func:`materialize_futures_trade`.
+    resolver, source, broker, gst_split, n_lots, reject_stale_bars, fill_mode
+        Threaded to :func:`materialize_futures_trade` (``fill_mode`` defaults
+        to the production worst-case, DEC-FILL-WORST-CASE-001).
 
     Returns
     -------
@@ -906,6 +938,7 @@ def run_futures_over_signals(
             gst_split=gst_split,
             n_lots=n_lots,
             reject_stale_bars=reject_stale_bars,
+            fill_mode=fill_mode,
         )
         if isinstance(outcome, RejectedFuturesTrade):
             counts[outcome.reason] += 1
@@ -959,6 +992,7 @@ def execute_futures_sim(
     audit: AuditAppend | None = None,
     reject_stale_bars: bool = False,
     spot_check_k: int = 8,
+    fill_mode: FillMode = DEFAULT_FILL_MODE,
 ) -> FuturesRuleResult:
     """Run the futures translation sim for one winning run.
 
@@ -983,6 +1017,11 @@ def execute_futures_sim(
         Optional hash-chained audit sink; one row when supplied.
     spot_check_k
         Differential sample size (``min(k, len(signals))``; ``<= 0`` disables).
+    fill_mode
+        The run's :class:`~brutex.execution.fill_mode.FillMode`
+        (DEC-FILL-WORST-CASE-001; default = the production worst-case).
+        Threaded to BOTH legs of the R45 differential — production and the
+        naive reference compare same-mode vs same-mode, never cross-mode.
 
     Returns
     -------
@@ -1001,6 +1040,7 @@ def execute_futures_sim(
         source=source,
         n_lots=n_lots,
         reject_stale_bars=reject_stale_bars,
+        fill_mode=fill_mode,
     )
 
     if result.n_rejected_cost_regime_unverified:
@@ -1032,6 +1072,7 @@ def execute_futures_sim(
                 source=source,
                 n_lots=n_lots,
                 reject_stale_bars=reject_stale_bars,
+                fill_mode=fill_mode,
             )
             if (
                 isinstance(outcome, RejectedFuturesTrade)
@@ -1053,6 +1094,7 @@ def execute_futures_sim(
             source=source,
             n_lots=n_lots,
             policy_skipped=policy_skipped,
+            fill_mode=fill_mode,
         )
         suspect = report.suspect
         n_checked = report.n_checked

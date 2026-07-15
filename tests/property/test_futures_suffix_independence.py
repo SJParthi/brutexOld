@@ -15,6 +15,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from brutex.data.models import CandleBar
+from brutex.execution.fill_mode import FillMode
 from brutex.futures.executor import (
     FuturesBarWindow,
     FuturesRuleResult,
@@ -134,7 +135,16 @@ class TestSuffixIndependence:
         signal = FuturesSignal(
             instrument="NIFTY", direction=TradeDirection.BULL, entry_ts=_ENTRY, exit_ts=exit_ts
         )
-        out = materialize_futures_trade(signal, resolver=_Resolver(), source=_DictSource(bars))
+        out = materialize_futures_trade(
+            signal,
+            resolver=_Resolver(),
+            source=_DictSource(bars),
+            # Legacy-mode pin (DEC-FILL-WORST-CASE-001): this property derives
+            # the PRECISE open+tick fill independently; the suffix-independence
+            # property above runs the (worst-case) executor DEFAULT and is
+            # comparative, so it covers the WORST_CASE arm for free.
+            fill_mode=FillMode.PRECISE,
+        )
         assert isinstance(out, MaterializedFuturesTrade)
         assert out.buy_fill_paisa == prices[0] + 5
 

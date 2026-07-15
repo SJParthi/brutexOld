@@ -28,6 +28,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.deflate import deflate_sweep
 from brutex.engine.robustness import combo_returns, cpcv_robustness
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA
+from brutex.engine.trade_sim import DEFAULT_FILL_POLICY, FillPolicy
 from brutex.engine.validation import OOSValidation, validate_out_of_sample
 from brutex.metrics.compute import ResultMetrics
 from brutex.metrics.deflated_sharpe import DeflatedSharpeResult
@@ -113,6 +114,7 @@ def validate_candidate(
     prior_n: int = 3,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
+    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> CandidateVerdict:
     """Run a candidate combo through OOS + DSR + CPCV → one composed verdict.
@@ -135,6 +137,17 @@ def validate_candidate(
         :func:`~brutex.engine.robustness.combo_returns` (the CPCV producer) —
         so roll-stitched futures bars are never validated schedule-blind.
         Defaults (``None`` / ``False``) are the byte-identical spot path.
+    policy
+        The :class:`~brutex.engine.trade_sim.FillPolicy` — incl. the global
+        ``fill_mode`` (DEC-FILL-WORST-CASE-001) — threaded into BOTH composed
+        re-simulations (:func:`validate_out_of_sample` AND
+        :func:`~brutex.engine.robustness.combo_returns`, the CPCV producer)
+        so a candidate is never validated under a different fill mode than
+        its sweep ran. A re-deriver MUST source it from the SAME
+        config/params it sources sl/tp from (never independently from env);
+        the library default
+        (:data:`~brutex.engine.trade_sim.DEFAULT_FILL_POLICY`, PRECISE)
+        keeps legacy callers byte-identical.
     reference_stamper
         Optional India-VIX stamper (DEC-VIX-STAMP-WIRE-001) threaded to BOTH
         re-simulations (the OOS holdout + the CPCV return series). REFERENCE
@@ -164,6 +177,7 @@ def validate_candidate(
         prior_n=prior_n,
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask,
+        policy=policy,
         reference_stamper=reference_stamper,
     )
     deflated = deflate_sweep(sweep_results).get(required_mask)
@@ -180,6 +194,7 @@ def validate_candidate(
             prior_n=prior_n,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
+            policy=policy,
             reference_stamper=reference_stamper,
         )
     )

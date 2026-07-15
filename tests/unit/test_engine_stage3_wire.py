@@ -67,6 +67,7 @@ from brutex.engine.sweep_orchestrator import (
     tuple_store_path,
 )
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.strategies.types import FibAnchorKind, Side
@@ -165,6 +166,9 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "stage3_max_fevals": 6,
         "stage3_max_restarts": 1,
         **_CTX,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): these suites predate the
+        # worst-case fill mode — pin PRECISE explicitly (never regenerate).
+        "fill_mode": FillMode.PRECISE,
     }
     base.update(overrides)
     return SweepGridConfig(**base)  # type: ignore[arg-type]
@@ -1113,3 +1117,52 @@ class TestManifestRecordRelPath:
         (tmp_path / "root").mkdir()
         with pytest.raises(Stage3WireError, match="not under"):
             stage3_manifest_record(self._report_with_cell(outside), results_root=tmp_path / "root")
+
+
+# ────── The WORST_CASE evaluator threading pin (fix round 2) ──────
+
+
+class TestEvaluatorFillModeThreading:
+    """FIX-ROUND-2 MINOR seam pin (MIGRATION.md #1798): stage3_wire's
+    ``_make_evaluator`` binds ``policy=FillPolicy(fill_mode=fill_mode)``.
+
+    The refuters' executed mutant — severing that kwarg (a bare
+    ``FillPolicy()``) — survived the whole covering set because no test
+    executed a WORST_CASE stage-3 evaluation whose objective diverges from
+    PRECISE: every existing ``_make_evaluator`` test either pins PRECISE
+    (fill-mode-invariant by construction) or asserts wiring, never a
+    mode-divergent metric value. On this suite's own ``_trending_bars(3)``
+    the two modes diverge hard at ``evaluate(80, 50)`` — the worst-case
+    SL/TP re-anchoring flips every TP winner into an SL loser — so the
+    pinned pair kills the mutant.
+    """
+
+    def test_worst_case_evaluation_diverges_from_precise(self) -> None:
+        from brutex.engine import stage3_wire as stage3_mod
+
+        bars = _trending_bars(3)
+        bar_bits = build_bar_bits(bars)
+        metrics: dict[FillMode, ResultMetrics] = {}
+        for mode in (FillMode.WORST_CASE, FillMode.PRECISE):
+            evaluate = stage3_mod._make_evaluator(
+                bars=bars,
+                bar_bits=bar_bits,
+                mask=0,
+                side=Side.BUY,
+                tf_minutes=1,
+                start_equity_paisa=10_000_000,
+                fill_mode=mode,
+                reference_stamper=None,
+            )
+            metrics[mode] = evaluate(80, 50)
+        worst, precise = metrics[FillMode.WORST_CASE], metrics[FillMode.PRECISE]
+        # Hand-derived pins (same 45 trades in both modes — pure fill/level
+        # divergence): worst-case fills at the bar extremes anchor SL/TP on
+        # the adverse entry, turning every trade into an SL loser
+        # (gross_profit 0), while precise nets +300.
+        assert worst.total_trades == precise.total_trades == 45
+        assert worst.net_pnl_paisa == -6_750
+        assert worst.gross_profit_paisa == 0
+        assert worst.gross_loss_paisa == 6_750
+        assert precise.net_pnl_paisa == 300
+        assert worst.net_pnl_paisa < precise.net_pnl_paisa

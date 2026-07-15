@@ -48,6 +48,7 @@ from brutex.calendars.nse import IST
 from brutex.data.models import CandleBar
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import DEFAULT_START_EQUITY_PAISA, metrics_for_mask
+from brutex.engine.trade_sim import DEFAULT_FILL_POLICY, FillPolicy
 from brutex.metrics.compute import ResultMetrics
 from brutex.ranking import passes_gates
 from brutex.strategies.types import Side
@@ -175,6 +176,7 @@ def validate_out_of_sample(
     prior_n: int = 3,
     roll_schedule: tuple[int, ...] | None = None,
     apply_1day_mask: bool = False,
+    policy: FillPolicy = DEFAULT_FILL_POLICY,
     reference_stamper: TradeReferenceStamper | None = None,
 ) -> OOSValidation:
     """Measure one combo on a train period vs the unseen test period that follows.
@@ -203,6 +205,13 @@ def validate_out_of_sample(
         :func:`~brutex.engine.stage1a.build_bar_bits`
         (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001); defaults are the byte-identical
         spot path.
+    policy
+        The :class:`~brutex.engine.trade_sim.FillPolicy` — incl. the global
+        ``fill_mode`` (DEC-FILL-WORST-CASE-001) — threaded into BOTH halves'
+        trade sims. A re-deriver MUST source it from the SAME config/params
+        it sources sl/tp from (never independently from env); the library
+        default (:data:`~brutex.engine.trade_sim.DEFAULT_FILL_POLICY`,
+        PRECISE) keeps legacy callers byte-identical.
     reference_stamper
         Optional India-VIX
         :class:`~brutex.engine.reference_series.TradeReferenceStamper`
@@ -243,6 +252,7 @@ def validate_out_of_sample(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
+        policy=policy,
         reference_stamper=reference_stamper,
     )
     test_metrics = metrics_for_mask(
@@ -254,6 +264,7 @@ def validate_out_of_sample(
         stop_loss_paisa=stop_loss_paisa,
         take_profit_paisa=take_profit_paisa,
         start_equity_paisa=start_equity_paisa,
+        policy=policy,
         reference_stamper=reference_stamper,
     )
     gates_held = passes_gates(test_metrics)

@@ -38,6 +38,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.engine.trial_stats import read_tuple_trial_stats, trial_stats_sidecar_path
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking.overfit import OverfitGateConfig
 from brutex.strategies.types import Side
@@ -98,6 +99,10 @@ def _config(k: int, overfit: OverfitGateConfig | None = None) -> SweepRunConfig:
         tp_paisa=50,
         min_hits=_MIN_HITS,
         overfit=overfit,
+        # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the parity fixture's
+        # persisted-count expectations were built under the legacy exact
+        # fills — pin PRECISE explicitly.
+        fill_mode=FillMode.PRECISE,
     )
 
 

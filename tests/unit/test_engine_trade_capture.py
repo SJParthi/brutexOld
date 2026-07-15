@@ -35,6 +35,7 @@ from brutex.engine.trade_capture import (
     derived_exit_fill,
 )
 from brutex.engine.trade_sim import TradeDetail, simulate_trades
+from brutex.execution.fill_mode import FillMode
 from brutex.metrics.types import ClosedTrade
 from brutex.strategies.types import Side
 
@@ -644,6 +645,8 @@ class TestCaptureOverRealSweepStore:
             tf_minutes=1,
             sl_paisa=80,
             tp_paisa=50,
+            # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): pin PRECISE explicitly.
+            fill_mode=FillMode.PRECISE,
         )
         store = ResultsStore(path=tmp_path / "store.parquet")
         dedup = ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))

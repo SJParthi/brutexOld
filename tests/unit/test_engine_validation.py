@@ -155,6 +155,33 @@ class TestValidateOOS:
         b = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1, train_frac=0.6)
         assert a == b
 
+    def test_policy_fill_mode_threads_into_both_halves(self) -> None:
+        # NIT-2 (DEC-FILL-WORST-CASE-001 fix round 2): the validator is no
+        # longer fill-mode-blind — the policy reaches BOTH halves' trade
+        # sims. The ±1.00-range fixture makes the modes diverge (worst-case
+        # entries fill at the bar HIGH), and an explicit PRECISE policy is
+        # byte-identical to the default (the legacy pin).
+        from brutex.engine.trade_sim import FillPolicy
+        from brutex.execution.fill_mode import FillMode
+
+        bars = _multiday(4, bars_per_day=5)
+        default = validate_out_of_sample(bars, 0, direction=Side.BUY, tf_minutes=1)
+        precise = validate_out_of_sample(
+            bars, 0, direction=Side.BUY, tf_minutes=1, policy=FillPolicy()
+        )
+        worst = validate_out_of_sample(
+            bars,
+            0,
+            direction=Side.BUY,
+            tf_minutes=1,
+            policy=FillPolicy(fill_mode=FillMode.WORST_CASE),
+        )
+        assert precise == default
+        assert worst.train_metrics.net_pnl_paisa != default.train_metrics.net_pnl_paisa
+        assert worst.test_metrics.net_pnl_paisa != default.test_metrics.net_pnl_paisa
+        # The anti-illusion direction: worst-case can only UNDERSTATE.
+        assert worst.train_metrics.net_pnl_paisa < default.train_metrics.net_pnl_paisa
+
 
 class TestSharpeHeld:
     def test_none_train_sharpe_fails(self) -> None:
