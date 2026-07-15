@@ -11,6 +11,7 @@ from brutex.adapters.dhan.parser import (
     CandleParseError,
     DhanVendorDriftError,
     parse_candle_columns,
+    parse_daily_candle_columns,
     parse_epoch_utc,
 )
 
@@ -191,3 +192,74 @@ def test_present_volume_with_drop_volume_still_length_checked() -> None:
     cols = _columns(volume=[0, 0])
     with pytest.raises(DhanVendorDriftError):
         parse_candle_columns(cols, drop_volume=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# parse_daily_candle_columns — the NATIVE-daily midnight-IST mirror
+# (DEC-DHAN-NATIVE-DAILY-001, implementing DEC-SCOPE-MINIMAL-CORE-001)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_daily_parse_restamps_to_midnight_ist_stored_utc() -> None:
+    # The raw epoch (09:15 IST on 2022-06-01) normalizes to the day's IST date
+    # and is re-stamped to midnight-IST stored UTC — 2022-05-31 18:30 UTC, the
+    # exact spot_daily_resample convention (00:00 IST ⇔ 18:30 UTC prior day).
+    bars = parse_daily_candle_columns(_columns())
+    assert len(bars) == 1
+    assert bars[0].timestamp == datetime(2022, 5, 31, 18, 30, tzinfo=UTC)
+    assert bars[0].timestamp.tzinfo == UTC
+    # Prices ride parse_candle_columns verbatim.
+    assert bars[0].close == Decimal("100.5")
+    assert bars[0].volume == 0  # drop_volume=True ALWAYS on the daily mirror
+
+
+def test_daily_parse_keep_first_on_duplicate_ist_date() -> None:
+    # TWO raw bars normalizing to the SAME IST date keep the FIRST occurrence.
+    second_epoch = int(datetime(2022, 6, 1, 9, 0, tzinfo=UTC).timestamp())
+    cols = _columns(
+        open=[100.0, 200.0],
+        high=[101.0, 201.0],
+        low=[99.0, 199.0],
+        close=[100.5, 200.5],
+        volume=[0, 0],
+        timestamp=[_EPOCH_0915_IST, second_epoch],
+    )
+    bars = parse_daily_candle_columns(cols)
+    assert len(bars) == 1
+    assert bars[0].close == Decimal("100.5")  # the FIRST physical copy wins
+
+
+def test_daily_parse_distinct_dates_preserve_order() -> None:
+    day2 = int(datetime(2022, 6, 2, 3, 45, tzinfo=UTC).timestamp())
+    cols = _columns(
+        open=[100.0, 110.0],
+        high=[101.0, 111.0],
+        low=[99.0, 109.0],
+        close=[100.5, 110.5],
+        volume=[0, 0],
+        timestamp=[_EPOCH_0915_IST, day2],
+    )
+    bars = parse_daily_candle_columns(cols)
+    assert [b.timestamp for b in bars] == [
+        datetime(2022, 5, 31, 18, 30, tzinfo=UTC),
+        datetime(2022, 6, 1, 18, 30, tzinfo=UTC),
+    ]
+
+
+def test_daily_parse_empty_payload_is_honest_no_data() -> None:
+    assert parse_daily_candle_columns({}) == []
+
+
+def test_daily_parse_absent_volume_tolerated() -> None:
+    # The daily mirror always rides drop_volume=True — an absent volume array
+    # (the IDX daily shape) parses.
+    cols = _columns()
+    del cols["volume"]
+    assert len(parse_daily_candle_columns(cols)) == 1
+
+
+def test_daily_parse_vendor_drift_propagates() -> None:
+    cols = _columns()
+    del cols["close"]
+    with pytest.raises(DhanVendorDriftError):
+        parse_daily_candle_columns(cols)

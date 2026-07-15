@@ -116,7 +116,7 @@ def test_fetch_ohlcv_unresolved_symbol_raises_out_of_scope() -> None:
 
 def test_fetch_ohlcv_unsupported_interval_fails_loud() -> None:
     adapter = DhanMarketAdapter(client=_FakeClient([]), security_ids={"NIFTY": 13})
-    with pytest.raises(ValueError, match="unsupported Dhan spot interval"):
+    with pytest.raises(ValueError, match="unsupported Dhan interval"):
         adapter.fetch_ohlcv(
             symbol="NIFTY",
             exchange=Exchange.NSE,

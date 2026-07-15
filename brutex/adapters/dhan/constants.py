@@ -79,6 +79,51 @@ DHAN_DAILY_QUOTA: Final[int] = 100_000
 DHAN_RATE_LIMIT_PER_MIN: Final[int | None] = None
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Native-daily pull (DEC-DHAN-NATIVE-DAILY-001, implementing
+# DEC-SCOPE-MINIMAL-CORE-001) — the 1-DAY spot series is pulled NATIVELY from
+# Dhan's daily endpoint (``POST /v2/charts/historical`` via the SDK's
+# ``historical_daily_data``) and runs FIRST in the pull chain; it is never
+# derived from 1-minute and never overwritten by the prebuild (the Dhan
+# prebuild derives INTRADAY timeframes only). The Groww law
+# `DEC-1MINUTE-ONLY-DERIVE-1DAY-001` stays Groww-only — a DIFFERENT feed's
+# law; no shared code path may conflate the two.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The lake interval label the native daily bars are stored under. The SAME
+#: ``1day`` partition label the derived-1day law uses, so readers are
+#: structurally blind to the source; the stored timestamp convention is the
+#: midnight-IST law (mirrored from ``brutex/data/spot_daily_resample.py``).
+DHAN_DAILY_INTERVAL: Final[str] = "1day"
+
+#: The FIXED daily-history PROJECT floor: never request daily bars before
+#: 2020-01-01. This is a PROJECT choice, NOT a vendor cap — the daily
+#: endpoint's depth is doc-stated "instrument inception" (CLAUDE.md §6b), so
+#: the vendor likely serves earlier bars; the project's locked scope range is
+#: 2020-01-01 → today (the ``GROWW_HISTORY_FLOOR`` precedent, CLAUDE.md §2
+#: Rule 3). DELIBERATELY a fixed date, unlike the ROLLING intraday
+#: :func:`dhan_history_floor` — daily depth is not the 5-year intraday
+#: window; the two floors must never be conflated.
+DHAN_DAILY_HISTORY_FLOOR: Final[date] = date(2020, 1, 1)
+
+#: Per-request window cap for the DAILY endpoint — UNDOCUMENTED/UNVERIFIED
+#: (no official statement of a ``/v2/charts/historical`` per-request range
+#: cap exists in the mirrored docs or the SDK source), so the plan tiles
+#: DEFENSIVELY at 365 days per request via the COMMON ``plan_windows``
+#: machinery (the ``chunks.py`` 90-day intraday idiom). A probe-kit stage
+#: measuring the real daily range cap is a named follow-up refinement
+#: (deliberately NOT built here — the defensive tile is correct either way).
+DHAN_DAILY_WINDOW_DAYS: Final[int] = 365
+
+#: The observe-only daily-vs-minute consistency tolerance: WARN when a
+#: symbol·day's |native daily close − 1-minute aggregate close| exceeds this
+#: RELATIVE fraction of the native close. PROVISIONAL/UNVERIFIED — a vendor
+#: daily bar and a minute aggregate legitimately differ (auction prints,
+#: closing-price rounding), so 0.005 (0.5%) is a design-time guess, not a
+#: measured figure; a measured tolerance comes later. The observer NEVER
+#: rewrites either side (kill switch ``BRUTEX_DHAN_DAILY_CONSISTENCY``).
+DHAN_DAILY_CONSISTENCY_TOLERANCE: Final[float] = 0.005
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Ledger namespace + lake feed id (own namespace → no Groww collision)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -306,7 +351,11 @@ __all__ = [
     "BANKNIFTY_SERVABILITY_UNVERIFIED",
     "BANKNIFTY_SYMBOL",
     "DHAN_COVERAGE_MARKET",
+    "DHAN_DAILY_CONSISTENCY_TOLERANCE",
+    "DHAN_DAILY_HISTORY_FLOOR",
+    "DHAN_DAILY_INTERVAL",
     "DHAN_DAILY_QUOTA",
+    "DHAN_DAILY_WINDOW_DAYS",
     "DHAN_ENGINE_INDEX_SYMBOLS",
     "DHAN_ERR_AUTHORIZATION",
     "DHAN_ERR_DATA_FETCH",

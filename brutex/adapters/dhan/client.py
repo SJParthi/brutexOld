@@ -113,6 +113,41 @@ class DhanRollingSdk(Protocol):
         ...
 
 
+class DhanDailySdk(Protocol):
+    """The read-path ``dhanhq`` SDK surface for the NATIVE daily fetch.
+
+    DEC-DHAN-NATIVE-DAILY-001 (implementing DEC-SCOPE-MINIMAL-CORE-001).
+    Deliberately SEPARATE from :class:`~brutex.adapters.dhan.reauth.DhanSdk` (the
+    spot ``intraday_minute_data`` surface) — the native-daily track calls the SDK's
+    ``historical_daily_data`` (``POST /v2/charts/historical``; VERIFIED-SDK: the
+    official ``dhanhq`` 2.2.0 wheel's ``_historical_data.py``). Keeping it a
+    distinct Protocol leaves ``DhanSdk`` byte-untouched (the :class:`DhanRollingSdk`
+    precedent), while :meth:`DhanClient.daily_candles` funnels the daily call
+    through the SAME bounded-retry / DH-901 re-read :meth:`DhanClient._call`: the
+    refresher's live SDK (the real ``dhanhq`` object) satisfies BOTH Protocols, so
+    the one funnel casts to this surface at the daily call site. Returns the SDK's
+    flat response envelope (``{"status", "data" | "remarks"}``).
+    """
+
+    def historical_daily_data(
+        self,
+        security_id: int,
+        exchange_segment: str,
+        instrument_type: str,
+        from_date: str,
+        to_date: str,
+        expiry_code: int = ...,
+        oi: bool = ...,
+    ) -> Mapping[str, object]:
+        """Fetch one daily-candle window (the flat response envelope).
+
+        The signature mirrors the VERIFIED wheel's ``historical_daily_data``
+        exactly; ``expiry_code`` is deliberately never passed by the client
+        (the SDK default ``0`` — a spot index has no expiry).
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class DhanClient:
     """Neutral wrapper over an injected :class:`~brutex.adapters.dhan.reauth.DhanSdkRefresher`.
@@ -164,6 +199,42 @@ class DhanClient:
                 to_date=to_date,
                 interval=interval,
                 oi=oi,
+            )
+        )
+
+    def daily_candles(
+        self,
+        *,
+        security_id: int,
+        from_date: str,
+        to_date: str,
+        exchange_segment: str = SEGMENT_INDEX,
+        instrument: str = INSTRUMENT_INDEX,
+    ) -> Mapping[str, object]:
+        """Fetch one NATIVE daily-candle window (the parallel-column ``data`` payload).
+
+        DEC-DHAN-NATIVE-DAILY-001: the daily twin of :meth:`intraday_candles` —
+        drives the SDK's ``historical_daily_data`` (``POST /v2/charts/historical``)
+        through the SAME bounded-retry / DH-901 re-read :meth:`_call` funnel (same
+        error classification via ``errors.py`` over both remark spellings, same
+        terminal-stop propagation, same ``pace``/``on_rate_limit``/``on_success``
+        hooks) — zero duplication. The live SDK satisfies :class:`DhanDailySdk`,
+        so the funnel casts to that surface at the call site (``DhanSdk`` is
+        deliberately left untouched — the :class:`DhanRollingSdk` precedent).
+        ``expiry_code`` is never passed (SDK default ``0`` — a spot index has no
+        expiry); ``oi=False`` always (a spot index carries no open interest).
+        Returns the success ``data`` column dict (empty on a success with no
+        columns — an honest no-data span), or raises the classified terminal
+        :class:`~brutex.adapters.dhan.errors.DhanError`.
+        """
+        return self._call(
+            lambda sdk: cast("DhanDailySdk", sdk).historical_daily_data(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument,
+                from_date=from_date,
+                to_date=to_date,
+                oi=False,
             )
         )
 
@@ -300,6 +371,7 @@ __all__ = [
     "DHAN_MAX_REAUTHS",
     "DhanClient",
     "DhanClientProtocol",
+    "DhanDailySdk",
     "DhanRollingSdk",
     "client_self_paces",
     "client_self_reports_rate_limits",
