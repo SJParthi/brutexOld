@@ -6658,7 +6658,7 @@ def _window_counts_since(
     return _fold_status_counts(cursor.fetchall())
 
 
-#: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
+#: The canonical 17-column ledger row projection, in ``LedgerRowTuple`` order
 #: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
 #: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
 #: this module deliberately carries no module-level ``window_ledger_store``
@@ -6676,6 +6676,7 @@ _LEDGER_ROW_COLUMNS: Final[tuple[str, ...]] = (
     "bars_net_new",
     "empty_retries",
     "transient_retries",
+    "streak_provenance",
 )
 
 
@@ -6684,8 +6685,10 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
 
     DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
     parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
-    the required cells, ``None``-passthrough on the optional trio), so the fast
-    path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
+    the required cells, ``None``-passthrough on the optional
+    ``bars_net_new`` / ``empty_retries`` / ``transient_retries`` /
+    ``streak_provenance`` columns), so the fast path's tuples are byte-equal to
+    :func:`window_ledger_rows_cached`'s. A
     ``None`` in ANY column the legacy parse either requires or DERIVES
     (``empty_streak`` / ``in_pull_fetches`` carry legacy per-row derivation
     rules this projection deliberately does not duplicate) raises ``ValueError``
@@ -6709,6 +6712,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         bars_net_new,
         empty_retries,
         transient_retries,
+        streak_provenance,
     ) = raw
     required = (
         market,
@@ -6745,6 +6749,7 @@ def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
         None if bars_net_new is None else int(bars_net_new),
         None if empty_retries is None else int(empty_retries),
         None if transient_retries is None else int(transient_retries),
+        None if streak_provenance is None else str(streak_provenance),
     )
 
 
