@@ -88,7 +88,6 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-<<<<<<< HEAD
 # Slice-4 PR-1 (feat(ranking): Rust ranking conversion): src/ranking.rs joins
 # the scope — the rank-time gates / z-scores / composite / rank-order kernels
 # are ENGINE-critical (they feed the persisted leaderboard when
@@ -122,9 +121,9 @@
 # (metrics 358 + trade_sim 168 + python 65 + lib 9 + ranking 321). +1 is well
 # inside the mutation.yml shard-budget bands (ceil(921/8) = 116/shard) — no
 # shard-dial change.
-# CLUB R1 weave note: examine_globs is the UNION of slice-4 (ranking.rs) and
-# slice-1 (enum_kernel.rs) scopes — both members' count blocks above stand.
-=======
+# CLUB R1 weave note: examine_globs is the UNION of the slice-4 (ranking.rs),
+# slice-1 (enum_kernel.rs) and slice-7 (src/exec/) scopes — all three members'
+# count blocks above stand.
 #   src/exec/ffi.rs — 265 mutants; the PyO3 wrapper sheet carries ZERO
 #                 in-crate kill surface (`cargo test` never invokes the
 #                 wrappers — the cores they delegate to ARE gated above),
@@ -135,20 +134,13 @@
 #                 an in-crate wrapper-calling test module + scope entry is
 #                 a NAMED follow-up riding DEC-EXEC-RUST-STAGE2-001.
 #   src/exec/mod.rs — re-export surface, 0 mutants.
->>>>>>> refs/club/1443
 examine_globs = [
     "src/metrics.rs",
     "src/trade_sim.rs",
     "src/python.rs",
     "src/lib.rs",
-<<<<<<< HEAD
     "src/ranking.rs",
     "src/enum_kernel.rs",
-]
-# The provably-unviable whole-fn constructor-guess class on the two pyclass
-# shim methods ONLY (rationale + verification in the count block above).
-exclude_re = ['replace Resident\w+::enumerate_prefilter -> PyResult']
-=======
     # --- slice-7 exec (DEC-EXEC-RUST-CORE-001) ---
     "src/exec/money.rs",
     "src/exec/fills.rs",
@@ -158,4 +150,6 @@ exclude_re = ['replace Resident\w+::enumerate_prefilter -> PyResult']
     "src/exec/exec_futures.rs",
     # --- end slice-7 exec ---
 ]
->>>>>>> refs/club/1443
+# The provably-unviable whole-fn constructor-guess class on the two pyclass
+# shim methods ONLY (rationale + verification in the count block above).
+exclude_re = ['replace Resident\w+::enumerate_prefilter -> PyResult']

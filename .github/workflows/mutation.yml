@@ -12,12 +12,8 @@
 #    the tests don't actually cover that logic branch. Runs on EVERY
 #    trigger (push to main, weekly schedule, manual dispatch).
 #
-<<<<<<< HEAD
-# 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix,
-=======
 # 2. rust-mutation — `cargo-mutants` over rust/fno-math/, 8-shard matrix
 #    (6→8 at the slice-7 exec scope growth, DEC-EXEC-RUST-CORE-001),
->>>>>>> refs/club/1443
 #    engine-critical scope defined ONCE in rust/fno-math/.cargo/mutants.toml.
 #    Schedule + workflow_dispatch ONLY (see the job-level `if:` comment).
 #
@@ -527,7 +523,6 @@ jobs:
           # again, give
           # THAT pair the same wrap (a one-token 3rd-field pair edit) sized to its
           # measured CI baseline. rate_common runs LAST so a survivor there never
-<<<<<<< HEAD
           # masks the proven wrap-less modules.
           # RECORDED DECISION (DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 fixer round 1):
           # the compute.py pair deliberately stays the single unit file — the
@@ -546,7 +541,6 @@ jobs:
           # against tests/unit/test_metrics_compute.py alone (spot-verified;
           # MIGRATION.md #1685) — and the golden/differential suites still run
           # on every push via ci.yml's normal test tiers.
-=======
           # masks the 10 proven modules.
           # slice-7 exec pairs (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724):
           # exec_rust.py (final local zero-survivor runs 2026-07-11: 84/84
@@ -571,7 +565,6 @@ jobs:
           # zero-survivor bar could be met inside the slice budget — wiring
           # it rides DEC-EXEC-COSTS-MUTMUT-001 (the named follow-up), never
           # a silently-red weekly gate (Golden Rule #10).
->>>>>>> refs/club/1443
           for pair in \
             "brutex/metrics/compute.py:tests/unit/test_metrics_compute.py:" \
             "brutex/orchestrator/state.py:tests/unit/test_orchestrator_state.py:" \
@@ -587,13 +580,10 @@ jobs:
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
-<<<<<<< HEAD
             "brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:" \
             "brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:" \
-=======
             "brutex/exec_rust.py:tests/unit/test_exec_rust_seam.py:" \
             "brutex/costs/calculator.py:tests/unit/test_costs_calculator.py:" \
->>>>>>> refs/club/1443
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             mod="${pair%%:*}"
             tmo="${pair##*:}"
@@ -798,11 +788,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-<<<<<<< HEAD
-=======
         # 6 -> 8 shards (slice-7 exec, DEC-EXEC-RUST-CORE-001: scope 599 ->
         # 836 mutants — see the arithmetic in the run step below).
->>>>>>> refs/club/1443
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     defaults:
       run:
@@ -846,7 +833,6 @@ jobs:
           # DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597):
           # - SCOPE lives in rust/fno-math/.cargo/mutants.toml (ONE source of truth,
           #   CLAUDE.md Rule 11 COMMON; local `cargo mutants` from this dir == CI):
-<<<<<<< HEAD
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs + ranking.rs = 921
           #   mutants measured 2026-07-12 on the merged tree (`cargo mutants
           #   --list | wc -l`; the slice-4 ranking.rs conversion added 321 over
@@ -864,10 +850,10 @@ jobs:
           #   whole-fn `-> PyResult` constructor guesses on the two pyclass
           #   shims — rationale + verification in that file's count block).
           #   CLUB R1 weave (integration/club-r1-fnomath): the merged tree
-          #   carries BOTH slice scopes — ranking.rs AND enum_kernel.rs — so
-          #   the union scope is ~1,125 mutants BY ARITHMETIC over the two
-          #   member measurements above (921 + 204; NOT a fresh --list run).
-=======
+          #   carries ALL THREE slice scopes — ranking.rs + enum_kernel.rs +
+          #   src/exec/ — so the union scope is ~1,362 mutants BY ARITHMETIC
+          #   over the member measurements (921 + 204 enum + 237 exec;
+          #   NOT a fresh --list run).
           #   metrics.rs + trade_sim.rs + python.rs + lib.rs = 599 mutants measured
           #   2026-07-08 (`cargo mutants --list | wc -l` on the post-merge HEAD —
           #   the race-6 merge folded main's width-generic u128 trade_sim kernel,
@@ -875,13 +861,11 @@ jobs:
           #   + the slice-7 src/exec/ cores (DEC-EXEC-RUST-CORE-001, MIGRATION.md
           #   #1724) = 836 total measured 2026-07-11 (per-file split documented
           #   in mutants.toml; the exec/ffi.rs exclusion is documented there).
->>>>>>> refs/club/1443
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
           #   baseline in ~14 s (measured, run 28815951509 exit 4).
           # - --jobs 2 REMOVED: --in-place precludes --jobs (hard CLI error);
-<<<<<<< HEAD
           #   wall-clock parallelism = this 8-way shard matrix (6->8 = the #1597
           #   shard dial taken TWICE for the slice-4 ranking.rs re-measure: the
           #   920-mutant scope on 6 shards puts the +20%-band worst end at
@@ -889,7 +873,6 @@ jobs:
           #   ceil(921/8)=116 mutants x 29-40 s/mutant serial (CI per-lane measured
           #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
           #   ~= 61-82 min nominal, ~98 at +20% on the worst end -> >= 22 min
-=======
           #   wall-clock parallelism = this 8-way shard matrix (5->6 = the #1597
           #   pre-decided +1-shard dial at the 599 re-measure; 6->8 = the SAME
           #   dial taken twice at the slice-7 836 re-measure, because +1 alone
@@ -898,7 +881,6 @@ jobs:
           #   ceil(836/8)=105 mutants x 29-40 s/mutant serial (CI per-lane measured
           #   4-9 s build + 25-31 s test) ~= 51-70 min + ~5.5 min baseline/setup
           #   ~= 56-76 min nominal, ~91 at +20% on the worst end -> >= 29 min
->>>>>>> refs/club/1443
           #   margin per shard.
           #   wall-clock parallelism = this 8-way shard matrix (6->8 vs main's
           #   #1597 6-shard fno-math config — fno-math was never 7 shards on
@@ -911,14 +893,15 @@ jobs:
           #   ceil(803/8)=101/shard ~= 49-67 min nominal, ~81 at +20%
           #   -> >= 39 min margin).
           #   CLUB R1 weave note (honest margin arithmetic, derived not
-          #   measured): the union ~1,125-mutant scope on this 8-shard
-          #   matrix reads ceil(1125/8)=141/shard x 29-40 s ~= 68-94 min
-          #   nominal + ~5.5 min setup, ~120 min at +20% on the worst end —
-          #   AT the 120-min cap with no margin. The #1597 pre-decided dial
-          #   (8->10) is the NAMED follow-up for the next mutation-workflow
-          #   change (the 8-shard shape is pinned by
-          #   tests/unit/test_engine_rust_enum.py and both members' own
-          #   budget blocks; not re-dialed inside the club weave).
+          #   measured): the union ~1,362-mutant scope on this 8-shard
+          #   matrix reads ceil(1362/8)=171/shard x 29-40 s ~= 83-114 min
+          #   nominal + ~5.5 min setup — the +20% worst end (~143 min) is
+          #   OVER the 120-min cap. The #1597 pre-decided dial (8->12 per
+          #   the members' own +2 pattern) is the NAMED follow-up for the
+          #   next mutation-workflow change (the 8-shard shape is pinned by
+          #   tests/unit/test_engine_rust_enum.py and all three members'
+          #   own budget blocks; not re-dialed inside the club weave —
+          #   flagged in the club PR body for the coordinator).
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/8 \

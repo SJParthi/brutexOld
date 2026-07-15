@@ -188,7 +188,6 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1597 = DEC-MUTATION-RUNTIME-003 (merged in from main 2026-07-08): its
     # sharded-matrix / wedge-proofed-loop rationale comments in mutation.yml
     # and the 3-field pair-format note in the wiring pin's docstring cite
-<<<<<<< HEAD
     # THAT decision's entry, not this one.
     # 1685 = DEC-SWEEP-COMPUTE-FOLD-DECOMP-001 (Slice 0 of the Rust sweep-core
     # conversion): its recorded compute.py pair-scope decision comment above
@@ -199,13 +198,11 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # 1774 = DEC-PULL-TODAY-COMPLETENESS-GATE-001 (2026-07-12): the
     # data/today_completeness.py pair's rationale comment cites THAT
     # decision's entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1750, 1774}),
-=======
-    # THAT decision's entry, not this one. 1724 = DEC-EXEC-RUST-CORE-001
-    # (slice 7 / P8): its exec mutmut-pair + cargo-mutants shard-growth
+    # 1724 = DEC-EXEC-RUST-CORE-001 (slice 7 / P8): its exec mutmut-pair +
+    # cargo-mutants shard-growth comments cite ITS OWN entry, not this one.
+    # 1738 = DEC-SWEEP-ENUM-RUST-001 (slice 1): its enum-kernel pair + shard
     # comments cite ITS OWN entry, not this one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1724}),
->>>>>>> refs/club/1443
+    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1724, 1738, 1750, 1774}),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),

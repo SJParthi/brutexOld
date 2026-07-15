@@ -2670,8 +2670,85 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-<<<<<<< HEAD
-- **Active branch:** `claude/rust-sweep-enum-slice1` (**DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738** —
+- **Active branch:** `claude/rust-exec-costs-slice7` (**DEC-EXEC-RUST-CORE-001,
+  MIGRATION.md #1724** — slice 7 / P8 of the Rust conversion program: the
+  options/futures execution + costs INTEGER CORES gain a Rust twin in
+  `rust/fno-math/src/exec/` (money law · both fill laws · both charge stacks ·
+  the post-I/O materialize tails + MAE/MFE — pure `Result<_,String>` cores,
+  zero floats/dates/strings/I/O), dispatched behind the NEW default-OFF
+  `BRUTEX_EXEC_RUST` tristate seam `brutex/exec_rust.py` at the FOUR sites
+  (`compute_trade_cost` / `compute_futures_trade_cost` / `materialize_trade` /
+  `materialize_futures_trade`) with the verbatim Python bodies kept as the
+  permanent oracles (deletion = DEC-EXEC-PY-BODY-DELETE-001; the flip =
+  DEC-EXEC-RUST-FLIP-001; Stage-2 tables/f64/codegen port =
+  DEC-EXEC-RUST-STAGE2-001). Rates/regime tables/refusal raises/leg selection/
+  orchestration/logging STAY Python (rates cross as ARGUMENTS — a rate change
+  never rebuilds the wheel). PARITY (the one-paisa-drift-fails law): the frozen
+  522-case cross-language golden corpus (`exec_costs_golden_vectors.json` +
+  regen-refused generator — money boundary vectors ±0.005-class ties/negatives/
+  zero/i64-extremes as strings, fills, both stacks across every VERIFIED regime
+  boundary date on the valid side + tie-provoking notionals, materialize
+  verdict edges) consumed by BOTH languages (`exec_golden.rs` cargo-side +
+  `test_exec_rust_golden.py` engaged-asserted seam arm); 8 hypothesis
+  Rust==Python differential properties; the DEFAULT-OFF == TODAY bomb-kernel
+  byte-identity pin; a dedicated ci.yml dual-arm step (`BRUTEX_EXEC_RUST=1`
+  over the 19-file covering set). GATES: `exec_rust.py` 100% line+branch
+  standalone (new ci gate) + local mutmut ZERO-survivor — 145/145 KILLED
+  (final, post-round-2 hardening; history 84/84 → 94/94); all four
+  dispatch modules' per-module gates measure 100%; mutation.yml gains the
+  exec_rust + calculator mutmut pairs (both locally de-survivored;
+  futures_costs deferred to DEC-EXEC-COSTS-MUTMUT-001 — early survivors, never
+  a silently-red weekly gate) + the fno-math cargo-mutants
+  scope 599→836 (matrix 6→8 shards; `exec/ffi.rs` documented OUT — no in-crate
+  kill surface, exercised by the Python dual-arm gates). HONEST: COLD path —
+  payoff UNKNOWN-expected-small, value = one-language consistency NOT speed
+  (no speedup claim; the OFF-cost bench pins the seam is free); the futures
+  arm has zero production callers today; ships INERT (default-OFF); the full
+  836-mutant cargo kill loop was NOT run in-session — a 74-mutant bounded
+  spot-check (0 missed) is the local evidence, the first green scheduled
+  mutation.yml 8-shard run is the completion proof (the #1597 pattern).
+  COORDINATOR LAND-CLEARANCE (2026-07-11): the accepted residuals — the
+  futures-executor production wiring (or its explicit re-scope, the #1543
+  seam), the DEC-EXEC-RUST-STAGE2-001 orchestration-port decision, the
+  DEC-EXEC-COSTS-MUTMUT-001 futures_costs zero-survivor pair, and the
+  measured payoff figure replacing UNKNOWN-expected-small — are all four
+  REQUIRED pre-flip gates before DEC-EXEC-RUST-FLIP-001 may flip the
+  default (MIGRATION.md #1724).
+  REVIEW ROUND 1 folded (5-reviewer panel, same branch pre-merge): the
+  `bench(...)` interior commit subject reworded via commit-tree (trees
+  byte-identical; conv-commits green over all 9); the calculator ternary
+  pragma narrowed to the else-literal only (the KILLABLE "long" mutant now
+  enumerated + killed, sed-proven both directions); stale-wheel skew raises
+  the NAMED `StaleExecWheelError` with the rebuild remediation at the
+  `_kernel_fn` resolve guard (never a bare AttributeError, never a silent
+  fallback); the futures wire slicing moved INSIDE the narrow try (a short
+  wire falls back to the Python arm, regression-pinned); the differential
+  n_lots domain raised to the spec 1..10_000; the `__post_init__` prose
+  honesty-corrected (TradeCostBreakdown has none — the Rust
+  `ChargeStack::validated()` check + the parity gates guard the
+  options-breakdown values).
+  REVIEW ROUND 2 folded (3-refuter panel, same branch pre-merge): every
+  kernel-returned wire is length+element-type VALIDATED inside the seam
+  BEFORE any indexing (`_wire_fault`/`_verdict_fault` → warn-once
+  `KernelWireFault` fallback — kills the 17/18-slot futures-wire IndexError
+  crash, the ≥20-slot silent truncation, the right-length wrong-type silent
+  adoption; parametrized 16/17/18/20 + wrong-type regressions at the seam
+  AND both real executor dispatches, value == the OFF arm); the R3-F3
+  zero-log escape closed structurally (a contract fault warn-onces INSIDE
+  the seam — the options executor's broad prep catch can no longer swallow
+  an un-warned TypeError); the calculator mutmut SUSPICIOUS trip de-flaked
+  (a FIRST-collected fast total-composition pin + `--test-time-base 45` on
+  the unwrapped mutmut branch; proven 125/125 KILLED 0-suspicious on two
+  consecutive CI-mirrored runs, exec_rust re-proven 145/145 post-hardening);
+  the pre-existing options SHORT gross-sign code-vs-spec contradiction
+  (buy−sell vs §4/§13 sell−buy; production-unreachable — DEC-EXEC-008
+  BUY-only) REGISTERED as CALCULATOR_SPEC §16 item 20, never silently
+  decided; ci.yml 19f1 comment re-measured — 200/70 final (198/68 at the
+  round-2 head); the OFF-arm docstring
+  discloses the one-time first-dispatch fno_math import. ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
+  untouched; no scope/vocab/rate/lake-schema change).
+  Earlier: `claude/rust-sweep-enum-slice1` (**DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738** —
   Rust kernel track slice 1, CONFORMED to the design-of-record (`docs/design/sweep_core/
   DESIGN_FINAL_RUST_SWEEP_CORE.md` @ a3c61e9b; the DEC-RUST-FIRST-MANDATE-001 umbrella's first kernel PR —
   the umbrella ledger row #1713 is queued/in-flight, cited as QUEUED never asserted merged). PROVENANCE:
@@ -4132,86 +4209,6 @@ hostile-review pass._
   gate); ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline;
   fast-equals-legacy + bounded-equals-unbounded parity pinned exhaustively; benches
   `test_db_window_ledger_page_o1.py` + `test_db_candles_baseline_bound_o1.py`.)
-=======
-- **Active branch:** `claude/rust-exec-costs-slice7` (**DEC-EXEC-RUST-CORE-001,
-  MIGRATION.md #1724** — slice 7 / P8 of the Rust conversion program: the
-  options/futures execution + costs INTEGER CORES gain a Rust twin in
-  `rust/fno-math/src/exec/` (money law · both fill laws · both charge stacks ·
-  the post-I/O materialize tails + MAE/MFE — pure `Result<_,String>` cores,
-  zero floats/dates/strings/I/O), dispatched behind the NEW default-OFF
-  `BRUTEX_EXEC_RUST` tristate seam `brutex/exec_rust.py` at the FOUR sites
-  (`compute_trade_cost` / `compute_futures_trade_cost` / `materialize_trade` /
-  `materialize_futures_trade`) with the verbatim Python bodies kept as the
-  permanent oracles (deletion = DEC-EXEC-PY-BODY-DELETE-001; the flip =
-  DEC-EXEC-RUST-FLIP-001; Stage-2 tables/f64/codegen port =
-  DEC-EXEC-RUST-STAGE2-001). Rates/regime tables/refusal raises/leg selection/
-  orchestration/logging STAY Python (rates cross as ARGUMENTS — a rate change
-  never rebuilds the wheel). PARITY (the one-paisa-drift-fails law): the frozen
-  522-case cross-language golden corpus (`exec_costs_golden_vectors.json` +
-  regen-refused generator — money boundary vectors ±0.005-class ties/negatives/
-  zero/i64-extremes as strings, fills, both stacks across every VERIFIED regime
-  boundary date on the valid side + tie-provoking notionals, materialize
-  verdict edges) consumed by BOTH languages (`exec_golden.rs` cargo-side +
-  `test_exec_rust_golden.py` engaged-asserted seam arm); 8 hypothesis
-  Rust==Python differential properties; the DEFAULT-OFF == TODAY bomb-kernel
-  byte-identity pin; a dedicated ci.yml dual-arm step (`BRUTEX_EXEC_RUST=1`
-  over the 19-file covering set). GATES: `exec_rust.py` 100% line+branch
-  standalone (new ci gate) + local mutmut ZERO-survivor — 145/145 KILLED
-  (final, post-round-2 hardening; history 84/84 → 94/94); all four
-  dispatch modules' per-module gates measure 100%; mutation.yml gains the
-  exec_rust + calculator mutmut pairs (both locally de-survivored;
-  futures_costs deferred to DEC-EXEC-COSTS-MUTMUT-001 — early survivors, never
-  a silently-red weekly gate) + the fno-math cargo-mutants
-  scope 599→836 (matrix 6→8 shards; `exec/ffi.rs` documented OUT — no in-crate
-  kill surface, exercised by the Python dual-arm gates). HONEST: COLD path —
-  payoff UNKNOWN-expected-small, value = one-language consistency NOT speed
-  (no speedup claim; the OFF-cost bench pins the seam is free); the futures
-  arm has zero production callers today; ships INERT (default-OFF); the full
-  836-mutant cargo kill loop was NOT run in-session — a 74-mutant bounded
-  spot-check (0 missed) is the local evidence, the first green scheduled
-  mutation.yml 8-shard run is the completion proof (the #1597 pattern).
-  COORDINATOR LAND-CLEARANCE (2026-07-11): the accepted residuals — the
-  futures-executor production wiring (or its explicit re-scope, the #1543
-  seam), the DEC-EXEC-RUST-STAGE2-001 orchestration-port decision, the
-  DEC-EXEC-COSTS-MUTMUT-001 futures_costs zero-survivor pair, and the
-  measured payoff figure replacing UNKNOWN-expected-small — are all four
-  REQUIRED pre-flip gates before DEC-EXEC-RUST-FLIP-001 may flip the
-  default (MIGRATION.md #1724).
-  REVIEW ROUND 1 folded (5-reviewer panel, same branch pre-merge): the
-  `bench(...)` interior commit subject reworded via commit-tree (trees
-  byte-identical; conv-commits green over all 9); the calculator ternary
-  pragma narrowed to the else-literal only (the KILLABLE "long" mutant now
-  enumerated + killed, sed-proven both directions); stale-wheel skew raises
-  the NAMED `StaleExecWheelError` with the rebuild remediation at the
-  `_kernel_fn` resolve guard (never a bare AttributeError, never a silent
-  fallback); the futures wire slicing moved INSIDE the narrow try (a short
-  wire falls back to the Python arm, regression-pinned); the differential
-  n_lots domain raised to the spec 1..10_000; the `__post_init__` prose
-  honesty-corrected (TradeCostBreakdown has none — the Rust
-  `ChargeStack::validated()` check + the parity gates guard the
-  options-breakdown values).
-  REVIEW ROUND 2 folded (3-refuter panel, same branch pre-merge): every
-  kernel-returned wire is length+element-type VALIDATED inside the seam
-  BEFORE any indexing (`_wire_fault`/`_verdict_fault` → warn-once
-  `KernelWireFault` fallback — kills the 17/18-slot futures-wire IndexError
-  crash, the ≥20-slot silent truncation, the right-length wrong-type silent
-  adoption; parametrized 16/17/18/20 + wrong-type regressions at the seam
-  AND both real executor dispatches, value == the OFF arm); the R3-F3
-  zero-log escape closed structurally (a contract fault warn-onces INSIDE
-  the seam — the options executor's broad prep catch can no longer swallow
-  an un-warned TypeError); the calculator mutmut SUSPICIOUS trip de-flaked
-  (a FIRST-collected fast total-composition pin + `--test-time-base 45` on
-  the unwrapped mutmut branch; proven 125/125 KILLED 0-suspicious on two
-  consecutive CI-mirrored runs, exec_rust re-proven 145/145 post-hardening);
-  the pre-existing options SHORT gross-sign code-vs-spec contradiction
-  (buy−sell vs §4/§13 sell−buy; production-unreachable — DEC-EXEC-008
-  BUY-only) REGISTERED as CALCULATOR_SPEC §16 item 20, never silently
-  decided; ci.yml 19f1 comment re-measured — 200/70 final (198/68 at the
-  round-2 head); the OFF-arm docstring
-  discloses the one-time first-dispatch fno_math import. ENGINE
-  UNCHANGED — NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; trading-core FROZEN
-  untouched; no scope/vocab/rate/lake-schema change).
->>>>>>> refs/club/1443
   Earlier: `claude/movers-bucket-asof-fix` (**DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001,
   MIGRATION.md #1601** — an explicit `/movers` bucket-anchor TIME pick now resolves to the
   COMPLETED bucket (broker-matching close) instead of a PARTIAL forming bucket. The TIME
@@ -7483,8 +7480,16 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-<<<<<<< HEAD
-- **Active feature branch:** `claude/rust-sweep-enum-slice1`
+- **Active feature branch:** `claude/rust-exec-costs-slice7`
+  (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724 — slice 7 / P8 of the Rust
+  conversion program: the options/futures execution + costs integer cores in
+  `rust/fno-math/src/exec/` behind the default-OFF `BRUTEX_EXEC_RUST` seam,
+  Python bodies kept as the permanent oracles; 522-case cross-language golden
+  corpus + hypothesis differentials + the DEFAULT-OFF == TODAY pin; cold path,
+  payoff UNKNOWN-expected-small — consistency not speed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; see §1 Active branch for the full
+  blurb)
+  Earlier: `claude/rust-sweep-enum-slice1`
   (DEC-SWEEP-ENUM-RUST-001, MIGRATION.md #1738 — Rust kernel track slice 1,
   CONFORMED to the design-of-record §1.3: the sweep's mask-source segment
   served by the RANGED fused `enumerate_prefilter` kernel on the resident
@@ -7862,17 +7867,6 @@ hostile-review pass._
   (72 files bound twice per click → 2); healthy-lake payloads byte-identical;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
   see §1 + MIGRATION.md #1719 for the full blurb)
-=======
-- **Active feature branch:** `claude/rust-exec-costs-slice7`
-  (DEC-EXEC-RUST-CORE-001, MIGRATION.md #1724 — slice 7 / P8 of the Rust
-  conversion program: the options/futures execution + costs integer cores in
-  `rust/fno-math/src/exec/` behind the default-OFF `BRUTEX_EXEC_RUST` seam,
-  Python bodies kept as the permanent oracles; 522-case cross-language golden
-  corpus + hypothesis differentials + the DEFAULT-OFF == TODAY pin; cold path,
-  payoff UNKNOWN-expected-small — consistency not speed; ENGINE UNCHANGED —
-  NIFTY/BANKNIFTY/SENSEX + NSE-NIFTY-FUT; see §1 Active branch for the full
-  blurb)
->>>>>>> refs/club/1443
   Earlier: `claude/movers-bucket-asof-fix`
   (DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001, MIGRATION.md #1601 — an explicit `/movers`
   bucket-anchor TIME pick resolves to the COMPLETED bucket (broker-matching close)
