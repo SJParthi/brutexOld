@@ -30,11 +30,14 @@ wheel is built by maturin and installed in every CI job that imports
   solves IV from the traded price first (historical path). BruteX's thin
   ``brutex.options.greeks`` wrapper delegates here; the ``GREEKS_*`` constants
   mirror the kernel's clamp / floor / admission constants.
-* ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
-  session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
-  per bar so the per-bar compute runs in Rust (the bit-identical
-  backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
-  / ``DEC-NIFTY-BOS-CHOCH-001``).
+* ``MarketStructureState`` — the stateful, look-ahead-clean BOS/CHoCH detector
+  BruteX's ``stage1a`` engine drives per bar so the per-bar compute runs in Rust
+  (the bit-identical backtest==live path; ``DEC-NIFTY-BOS-CHOCH-001``). The
+  former ``VwapState`` twin was DELETED with the bits 52-53 tombstone (the
+  VWAP/volume wipe — the spot-only engine has no traded volume); the 0.4.0
+  shim REFUSES a stale wheel that still exposes it (see below).
+* ``NARROW_CPR_WIDTH_BPS`` — the Central Pivot Range narrow-day threshold
+  (bits 60-63; the ONE named constant, cross-pinnable from Python tests).
 * ``stage1a_bar_bits_batch`` — the batch Stage-1A bar-bits kernel
   (``DEC-STAGE1A-RUST-BATCH-001``): one call per ``(instrument, tf)`` build over
   prepass-resolved columns/day-tables, returning one u128 mask per bar. The
@@ -96,10 +99,10 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "GREEKS_VEGA_ADMISSION_FLOOR",
     "IMPLEMENTED_MASK",
     "MarketStructureState",
+    "NARROW_CPR_WIDTH_BPS",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
     "TOTAL_CONDITIONS",
-    "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",
@@ -150,6 +153,22 @@ def _assert_compiled_surface(
 _compiled = importlib.import_module("._trading_core", __name__)
 _assert_compiled_surface(_compiled)
 
+# Version-SENSITIVE staleness teeth (the 0.4.0 vocabulary reshape): the
+# missing-symbol handshake above is one-directional — a STALE 0.3.x wheel
+# carries every 0.4.0 symbol EXCEPT the new ones, but it ALSO still exposes
+# the deleted ``VwapState`` and would otherwise die later as a bare
+# ``TypeError`` on the narrowed evaluate ABIs. Refuse it loudly here.
+if hasattr(_compiled, "VwapState"):
+    raise ImportError(
+        "trading_core: the installed compiled wheel "
+        f"(trading_core._trading_core at {getattr(_compiled, '__file__', '<unknown location>')}) "
+        "is STALE — it still exposes the DELETED VwapState (removed with the "
+        "bits 52-53 VWAP tombstone in crate 0.4.0), so its evaluate ABIs "
+        "predate the reshape. Rebuild + reinstall the wheel from the current "
+        "source: run `maturin develop --release` inside rust/trading-core "
+        "(with the project venv active)."
+    )
+
 # The freshness handshake above MUST run before this re-export so a stale
 # wheel raises the actionable message, not a bare from-import failure.
 from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
@@ -160,11 +179,11 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     GREEKS_T_FLOOR_YEARS,
     GREEKS_VEGA_ADMISSION_FLOOR,
     IMPLEMENTED_MASK,
+    NARROW_CPR_WIDTH_BPS,
     PIVOT_LEVELS_LEN,
     SPEC_SCHEMA_VERSION,
     TOTAL_CONDITIONS,
     MarketStructureState,
-    VwapState,
     __version__,
     compute_ema,
     compute_fib_levels,
@@ -210,11 +229,11 @@ __all__ = [
     "GREEKS_T_FLOOR_YEARS",
     "GREEKS_VEGA_ADMISSION_FLOOR",
     "IMPLEMENTED_MASK",
+    "NARROW_CPR_WIDTH_BPS",
     "PIVOT_LEVELS_LEN",
     "SPEC_SCHEMA_VERSION",
     "TOTAL_CONDITIONS",
     "MarketStructureState",
-    "VwapState",
     "__version__",
     "compute_ema",
     "compute_fib_levels",

@@ -51,7 +51,6 @@ def main() -> int:
             c["close_paisa"],
             c["ema20_paisa"],
             c["ema200_paisa"],
-            c["vwap_paisa"],
             c["prev_pdh_paisa"],
             c["prev_pdl_paisa"],
             c["prev_pdc_paisa"],
