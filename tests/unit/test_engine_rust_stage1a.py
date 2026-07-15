@@ -29,7 +29,7 @@ import dataclasses
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 import trading_core
@@ -55,6 +55,23 @@ from brutex.engine.rust_stage1a import (
 from brutex.engine.stage1a import Stage1AMatrixBuilder, build_bar_bits
 from brutex.strategies.types import PriceSource
 from structlog.testing import capture_logs
+
+
+class _SourceKwargs(TypedDict, total=False):
+    """The VWAP/EMA price-source axis kwargs unpacked into ``build_bar_bits`` /
+    ``Stage1AMatrixBuilder`` (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+
+    A precise TypedDict (not ``dict[str, PriceSource]``) so a ``**kwargs`` unpack
+    is validated against ONLY these two source keys — both of which accept a
+    ``PriceSource`` — instead of every other ``build_bar_bits`` parameter
+    (``proximity`` / ``prior_n`` / ``fib_anchor`` / ``roll_schedule`` /
+    ``apply_1day_mask``), which a ``dict[str, PriceSource]`` value type would
+    force the checker to reject (pyright ``reportArgumentType``).
+    """
+
+    vwap_source: PriceSource
+    ema_source: PriceSource
+
 
 # 09:15:00 IST == 03:45 UTC (the NSE session-open anchor).
 _OPEN_UTC_H, _OPEN_UTC_M = 3, 45
@@ -456,7 +473,7 @@ class TestBatchRustArmSourceGate:
         ],
     )
     def test_flag_on_non_default_source_never_touches_the_rust_arm(
-        self, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, PriceSource]
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: _SourceKwargs
     ) -> None:
         monkeypatch.setenv(STAGE1A_RUST_ENV, "1")
         monkeypatch.setattr(

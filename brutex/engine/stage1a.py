@@ -362,27 +362,31 @@ def _reduce_vwap_source_paisa(
     ``/2`` and ``/4`` CAN tie at ½ paisa → ROUND_HALF_UP becomes load-bearing;
     add a golden then.)
     """
+    # Single-return dispatch (CodeQL py/mixed-returns): assign in each real arm,
+    # raise LOUDLY on the impossible 6th member, then ONE explicit ``return`` — so
+    # the function has exactly one return path and no implicit fall-through-to-None
+    # under any control-flow model (the ``match`` completes only via an assigning
+    # case or the raising wildcard). The selected scalar is byte-identical to the
+    # pre-refactor inline returns (Override 1 / the golden); the ``case _: raise``
+    # stays mypy's exhaustiveness marker (all 5 real members are exercised by
+    # test_vwap_reduction_all_five for runtime exhaustiveness).
+    result: int
     match source:
         case PriceSource.OPEN:
-            return open_paisa
+            result = open_paisa
         case PriceSource.HIGH:
-            return high_paisa
+            result = high_paisa
         case PriceSource.LOW:
-            return low_paisa
+            result = low_paisa
         case PriceSource.CLOSE:
-            return close_paisa
+            result = close_paisa
         case PriceSource.HLC3:
             # VERBATIM the pre-axis line so the (HLC3, CLOSE) baseline is
             # byte-identical (Override 1 / the golden).
-            return _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+            result = _price_to_paisa((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
         case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
-            # A future enum member (hl2/ohlc4/…) added WITHOUT a reduction arm raises
-            # LOUDLY here at runtime (never silently computes HLC3). All 5 real
-            # members are exercised by test_vwap_reduction_all_five (runtime
-            # exhaustiveness). An explicit ``raise`` — not ``assert_never`` — keeps
-            # every path returning-or-raising so CodeQL can prove no implicit-None
-            # fall-through and no uninitialized read.
             raise AssertionError(f"unreachable PriceSource: {source!r}")
+    return result
 
 
 def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
@@ -413,26 +417,31 @@ def _reduce_ema_source_float(source: PriceSource, bar: CandleBar) -> float:
     ``Open`` / ``Close`` are single Decimal→f64 casts of the rupee price,
     trivially identical to today's hardcoded ``float(bar.open/close)``.
     """
+    # Single-return dispatch (CodeQL py/mixed-returns): assign in each real arm,
+    # raise LOUDLY on the impossible 6th member, then ONE explicit ``return`` — so
+    # the function has exactly one return path and no implicit fall-through-to-None
+    # under any control-flow model (the ``match`` completes only via an assigning
+    # case or the raising wildcard). The selected scalar is byte-identical to the
+    # pre-refactor inline returns (Override 1 / the golden); the ``case _: raise``
+    # stays mypy's exhaustiveness marker (all 5 real members are exercised by
+    # test_ema_reduction_all_five for runtime exhaustiveness).
+    result: float
     match source:
         case PriceSource.OPEN:
-            return float(bar.open)
+            result = float(bar.open)
         case PriceSource.HIGH:
-            return float(bar.high)
+            result = float(bar.high)
         case PriceSource.LOW:
-            return float(bar.low)
+            result = float(bar.low)
         case PriceSource.CLOSE:
-            return float(bar.close)
+            result = float(bar.close)
         case PriceSource.HLC3:
             # Decimal-divide THEN a single float() cast (never float-add-then-divide
             # — not IEEE-754-identical). VERBATIM the pre-axis HLC3 line.
-            return float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
+            result = float((bar.high + bar.low + bar.close) / _HLC3_DIVISOR)
         case _:  # pragma: no cover — unreachable: PriceSource is a closed 5-member enum
-            # A future enum member added WITHOUT a reduction arm raises LOUDLY here at
-            # runtime (never silently computes HLC3). All 5 real members are exercised
-            # by test_ema_reduction_all_five (runtime exhaustiveness). An explicit
-            # ``raise`` — not ``assert_never`` — keeps every path returning-or-raising
-            # so CodeQL can prove no implicit-None fall-through and no uninitialized read.
             raise AssertionError(f"unreachable PriceSource: {source!r}")
+    return result
 
 
 @dataclass
