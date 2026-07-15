@@ -458,30 +458,37 @@ implemented = true
 
 # ════════════════════════════════════════════════════════════════════════════════
 # NEW bits (>= 52) — DEC-VOCAB-U128-CODEGEN-001 / ADR-0012 D4.
-# LAYOUT ONLY: every bit below is `implemented = false` — the bit position is
-# RESERVED + declared now, the evaluator emits 0 for it. The indicator math
-# (VWAP, pivot R5/S5, BOS/CHoCH) lands in PR-2, which flips `implemented = true`
-# alongside the real boolean branch. NEVER set true without real math.
+# Grow-only territory: bits here were declared AFTER the original 52. Each
+# condition carries its own `implemented` flag — most are live (R5/S5 54-55,
+# BOS/CHoCH 56-59, CPR 60-63); bits 52-53 are TOMBSTONED (`reserved = true`,
+# `implemented = false` — positions held forever, never renumbered) and bits
+# 64-65 are LAYOUT-ONLY declarations awaiting their math. NEVER set
+# `implemented = true` without real indicator math.
 # ════════════════════════════════════════════════════════════════════════════════
 
 # ─────────────────────── Group 10: VWAP Position (bits 52-53) ───────────────────
-# Session-anchored intraday futures VWAP (ADR-0012 D12). Masked on 1day
-# (a session VWAP is degenerate with one bar per session) — applies_to_1day=false.
+# TOMBSTONED (the VWAP/volume wipe): the engine is SPOT-ONLY
+# (DEC-ENGINE-SPOT-ONLY-001) and spot indices carry no traded volume, so a
+# session VWAP can never resolve on any engine instrument. The VWAP math was
+# DELETED; these positions are held forever per the grow-only law
+# (`reserved = true`, `implemented = false` — the evaluator emits 0 for them).
 [[condition]]
 bit = 52
 name = "close_above_vwap"
 group = "VWAP Position"
-description = "close strictly above the session-anchored intraday VWAP (futures)"
+description = "TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly above the session-anchored intraday VWAP; position held, evaluator emits 0"
+reserved = true
 applies_to_1day = false
-implemented = true
+implemented = false
 
 [[condition]]
 bit = 53
 name = "close_below_vwap"
 group = "VWAP Position"
-description = "close strictly below the session-anchored intraday VWAP (futures)"
+description = "TOMBSTONE (VWAP wipe — spot-only engine, no volume): was close strictly below the session-anchored intraday VWAP; position held, evaluator emits 0"
+reserved = true
 applies_to_1day = false
-implemented = true
+implemented = false
 
 # ─────────────────────── Group 11: Pivot Proximity Extended (bits 54-55) ────────
 # R5/S5 proximity (ADR-0012 D3/D4 — the pivot ladder extended past R4/S4).
@@ -538,3 +545,66 @@ group = "Market Structure"
 description = "bearish change of character (trend flips down after a higher-high sequence)"
 applies_to_1day = true
 implemented = true
+
+# ─────────────────────── Group 13: Central Pivot Range (bits 60-63) ─────────────
+# CPR from the SAME prev-day OHLC anchor the floor-trader pivots use (Ochoa /
+# PivotBoss standard): P = (PDH+PDL+PDC)/3 (the pivot P, round-half-even),
+# BC = (PDH+PDL)/2 (round-half-even), TC = 2P − BC — then CANONICALIZED
+# TC = max(tc_raw, bc_raw), BC = min (the raw pair inverts on roughly half of
+# real days). Bits 60/61 are strict comparisons, 62 is the inclusive band
+# (the three form an exact partition), 63 fires iff the relative width
+# (TC−BC)/P is at or under NARROW_CPR_WIDTH_BPS (30 bps — see
+# `indicators/pivots.rs`). No prev-day anchor ⇒ all four cleared upstream via
+# the anchor-dependent clear (never fabricated).
+[[condition]]
+bit = 60
+name = "above_cpr_tc"
+group = "Central Pivot Range"
+description = "close strictly above the CPR top central (TC) level"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 61
+name = "below_cpr_bc"
+group = "Central Pivot Range"
+description = "close strictly below the CPR bottom central (BC) level"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 62
+name = "inside_cpr"
+group = "Central Pivot Range"
+description = "close inside the CPR band (BC <= close <= TC, inclusive)"
+applies_to_1day = true
+implemented = true
+
+[[condition]]
+bit = 63
+name = "narrow_cpr_day"
+group = "Central Pivot Range"
+description = "narrow-CPR day: (TC - BC) is at or under 30 bps of the pivot P (trending-day setup)"
+applies_to_1day = true
+implemented = true
+
+# ─────────────────────── Group 14: Supertrend (bits 64-65) ──────────────────────
+# LAYOUT-ONLY declaration: the names + positions are claimed now; the Supertrend
+# (ATR-band trailing stop) math ships ZERO code in this PR — the evaluator emits
+# 0 for both bits. The `implemented = true` flip is a later stacked PR
+# hard-gated on u128 mask dispatch + an M4-Pro throughput measurement.
+[[condition]]
+bit = 64
+name = "close_above_supertrend"
+group = "Supertrend"
+description = "declared, not yet implemented: close strictly above the Supertrend line (math lands in a later PR)"
+applies_to_1day = true
+implemented = false
+
+[[condition]]
+bit = 65
+name = "close_below_supertrend"
+group = "Supertrend"
+description = "declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)"
+applies_to_1day = true
+implemented = false
