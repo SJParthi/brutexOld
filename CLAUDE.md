@@ -18,7 +18,20 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-13 (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 —
+_Last updated: 2026-07-15 (Club G docs merge vehicle, branch
+`integration/club-g-docs` — the docs-only fold of TWO PRs as ONE merge
+event off main tip d6ac9f85: #1506 DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md
+#1780 — the summarize-only GDFL vendor-docs archive + the definitive
+granularity/depth verdict at docs/vendors/gdfl/) + #1508
+DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781 — the GDFL 1-second L1
+snapshot ingest/read DESIGN doc; design only, zero adapter code). The only
+union files are docs/MIGRATION.md + this CLAUDE.md; both members' ledger
+numbers (#1780/#1781) are free on the landing main — kept unchanged.
+DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate change. This header carries
+pointers, never the story; each member's full record lives in its §1
+Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-13 (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 —
 the GDFL 1-second L1 snapshot ingest/read DESIGN doc at
 `docs/vendors/gdfl/INGEST_DESIGN.md` — DESIGN ONLY, zero adapter code, the
 build gated on the operator confirming the GDFL purchase: a new `snap1s/`
@@ -2661,7 +2674,21 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/gdfl-ingest-design` (**DEC-GDFL-INGEST-DESIGN-001,
+- **Active branch:** `integration/club-g-docs` (**Club G docs merge
+  vehicle** — the docs-only fold of TWO PRs as ONE merge event off main tip
+  d6ac9f85: **#1506** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780 — the
+  SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
+  VERDICT at `docs/vendors/gdfl/`) · **#1508** DEC-GDFL-INGEST-DESIGN-001
+  (MIGRATION.md #1781 — the GDFL 1-second L1 snapshot ingest/read DESIGN doc
+  at `docs/vendors/gdfl/INGEST_DESIGN.md`; DESIGN ONLY, zero adapter code).
+  File-disjoint by construction except the two union files
+  (`docs/MIGRATION.md` + this `CLAUDE.md`); both members' ledger numbers
+  (#1780/#1781) are free on the landing main — kept unchanged, no renumber.
+  DOCS-ONLY — ZERO brutex/ source change; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope/vocab/rate
+  change. Each member's full record lives in its own MIGRATION.md entry; the
+  per-member blurbs are demoted to Earlier: below.)
+  Earlier: `claude/gdfl-ingest-design` (**DEC-GDFL-INGEST-DESIGN-001,
   MIGRATION.md #1781** — the GDFL (Global Datafeeds) 1-second L1 snapshot
   ingest/store/derive/read DESIGN at `docs/vendors/gdfl/INGEST_DESIGN.md`:
   DESIGN ONLY — zero adapter code lands in the PR; the build is gated on the
@@ -7380,7 +7407,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/gdfl-ingest-design`
+- **Active feature branch:** `integration/club-g-docs`
+  (Club G docs merge vehicle — the docs-only fold of #1506
+  DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780) + #1508
+  DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781); DOCS-ONLY — zero
+  brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1780–#1781 for
+  the full blurbs)
+  Earlier: `claude/gdfl-ingest-design`
   (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 — the GDFL 1-second L1
   snapshot ingest/store/derive/read DESIGN doc at
   `docs/vendors/gdfl/INGEST_DESIGN.md`; DESIGN ONLY — zero adapter code, the
