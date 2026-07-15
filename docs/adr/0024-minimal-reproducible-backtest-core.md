@@ -94,7 +94,13 @@ train drains, per the governance phasing rule.
    `brutex/config/credentials_aws.py`, `brutex/adapters/groww/token_store_aws.py`,
    `brutex/adapters/groww/aws_client.py`, `deploy/aws_token_minter/`, the
    `up.sh` STS/SSM health checks, the `token-broker` extra + the mypy
-   boto3/botocore overrides.
+   boto3/botocore overrides. Pinned Phase-B precondition (assurance-verified):
+   BOTH the `token-broker` (SSM) and `crossverify` (S3) extras pin boto3 and
+   SHARE the mypy boto3/botocore override — any boto3/S3 scrub is scoped to
+   the `crossverify` extra + `crossverify/s3_publish.py` + the backup S3/B2
+   remote path ONLY; the `token-broker` extra, its boto3 pin, and the shared
+   mypy overrides survive verbatim (pyproject.toml:103-105 · :116-118 ·
+   :340-341), else the Groww SSM credential read bricks.
 5. **Isolated dual vendors.** Groww remains the Track-1 historical vendor
    (DEC-DHAN-GROWW-REMIGRATE-001 / ADR-0009); the `Dhan feed track` (in-flight
    sibling PR stack #1492/#1501/#1551 — its decision IDs are that track's, not
