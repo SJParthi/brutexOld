@@ -41,9 +41,10 @@
      added its OWN document click/keydown listener and never removed it, so a
      page that REBUILDS its controls (the MutationObserver re-wires the fresh
      nodes) accumulated document listeners whose closures also retained every
-     replaced instance's detached DOM tree (measured in headless Chromium:
-     4,001 document listeners after 1,000 rebuilds; ~103 surviving detached
-     nodes per rebuild; document click dispatch degraded 0.20 ms -> 4.60 ms).
+     replaced instance's detached DOM tree (PR #1368's author measured this
+     in headless Chromium — quoted here, not re-measured: 4,001 document
+     listeners after 1,000 rebuilds; ~103 surviving detached nodes per
+     rebuild; document click dispatch degraded 0.20 ms -> 4.60 ms).
      Instances now REGISTER here; the two document listeners are attached
      exactly ONCE, and an entry whose root has left the document is pruned on
      every document event AND on every auto() re-wire pass — releasing the
