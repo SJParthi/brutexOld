@@ -54,6 +54,8 @@ from brutex.dashboard.db_view import (
     _WINDOW_KEY_COLUMNS,
     WINDOW_PAGE_CACHE_CAPACITY,
     _build_window_payload_duckdb,
+    _close_cursor,
+    _compute_cursor,
     _ledger_scan_source,
     _ledger_stamp_token,
     _window_counts_from_records,
@@ -63,6 +65,7 @@ from brutex.dashboard.db_view import (
     build_window_payload,
     make_window_payload_caches,
     phase_progress_payload,
+    query_window_ledger_page,
 )
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data import window_ledger_store as wls
@@ -943,7 +946,12 @@ def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -
     _write_delta(tmp_path, [_row("BANKNIFTY", "SUCCESS", bars=3)])
     conn = duckdb.connect()
     now = {"t": 100.0}
-    counts_inner, page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    # The SWR revalidator runs INLINE (the injectable swr_runner seam —
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001) so the past-floor
+    # serve-last-known + background-store sequence is deterministic.
+    counts_inner, page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
     counts = _FamilyCountingCache(counts_inner)
     page = _FamilyCountingCache(page_inner)
     first = build_window_payload(
@@ -965,14 +973,22 @@ def test_midpull_floor_throttles_recomputes_bounded_and_logged(tmp_path: Path) -
     assert not any(r["symbol"] == "SENSEX" for r in stale["windows"])
     assert _events(logs, "movers_cache.stale_served")  # never a silent illusion
     # The floor AGES OUT (past even the 120 s cap, whatever the measured
-    # durations) → fresh recompute of BOTH families sees the delta row.
+    # durations) → the SWR arm serves the PRIOR payload ONCE MORE (never a
+    # blocking inline fold) while the revalidators — inline here — land the
+    # fresh fold of BOTH families; the NEXT poll serves the delta row.
     now["t"] += 121.0
-    aged = build_window_payload(
+    aged_stale = build_window_payload(
         tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
     )
-    assert counts.computes == {"window-counts": 2}
+    assert counts.computes == {"window-counts": 2}  # the revalidate DID fold fresh…
     assert page.computes == {"window-page": 2}
-    assert any(r["symbol"] == "SENSEX" for r in aged["windows"])
+    assert not any(r["symbol"] == "SENSEX" for r in aged_stale["windows"])  # …served next
+    fresh = build_window_payload(
+        tmp_path, conn=conn, count_cache=counts, page_cache=page, generation=0
+    )
+    assert counts.computes == {"window-counts": 2}  # the landed store — no re-fold
+    assert page.computes == {"window-page": 2}
+    assert any(r["symbol"] == "SENSEX" for r in fresh["windows"])
 
 
 def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
@@ -983,7 +999,9 @@ def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
     _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
     conn = duckdb.connect()
     now = {"t": 50.0}
-    counts_inner, _page_inner = make_window_payload_caches(clock=lambda: now["t"])
+    counts_inner, _page_inner = make_window_payload_caches(
+        clock=lambda: now["t"], swr_runner=lambda job: job()
+    )
     cache = _FamilyCountingCache(counts_inner)
     path = wls.ledger_path(tmp_path)
     rows = phase_progress_payload(conn, path, current_phase="spot", count_cache=cache, generation=0)
@@ -997,11 +1015,17 @@ def test_phase_progress_counts_ride_the_same_floor(tmp_path: Path) -> None:
     assert cache.computes == {"window-counts": 1}  # floor-stale serve, no recount
     assert next(r for r in stale_rows if r["phase"] == "spot")["done"] == 1  # prior stamp
     assert _events(logs, "movers_cache.stale_served")
-    now["t"] += 121.0  # past the 120 s cap → the delta row lands
+    now["t"] += 121.0  # past the 120 s cap → the SWR arm: one more last-known
+    # serve while the (inline) revalidator lands the fresh counts.
+    swr_rows = phase_progress_payload(
+        conn, path, current_phase="spot", count_cache=cache, generation=0
+    )
+    assert cache.computes == {"window-counts": 2}  # the revalidate folded fresh
+    assert next(r for r in swr_rows if r["phase"] == "spot")["done"] == 1  # last-known
     fresh_rows = phase_progress_payload(
         conn, path, current_phase="spot", count_cache=cache, generation=0
     )
-    assert cache.computes == {"window-counts": 2}
+    assert cache.computes == {"window-counts": 2}  # the landed store — no re-fold
     assert next(r for r in fresh_rows if r["phase"] == "spot")["done"] == 2
 
 
@@ -1053,3 +1077,197 @@ def test_unknown_status_values_collapse_to_one_page_key(tmp_path: Path) -> None:
     assert [r["symbol"] for r in failed["windows"]] == ["BANKNIFTY"]
     assert cache.computes == {"window-counts": 1, "window-page": 2}
     assert _UNKNOWN_WINDOW_STATUS not in repr(failed)  # the sentinel never leaks into a payload
+
+
+class TestComputeCursor:
+    """`_compute_cursor` (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001): the
+    flagged window caches may run a compute on a BACKGROUND revalidator daemon
+    concurrent with the request thread's statements on the SAME shared DuckDB
+    connection — whose execute→fetch pending-result state is per-connection
+    (reproduced in-suite: a background counts fold fetched the request's
+    16-column page rows). Every cached compute therefore rides an isolated
+    cursor; fakes without `cursor()` fall back to the conn itself."""
+
+    def test_real_conn_yields_an_independent_cursor(self) -> None:
+        conn = duckdb.connect()
+        cursor = _compute_cursor(conn)
+        assert cursor is not conn  # statement-isolated — its own pending state
+        assert cursor.execute("SELECT 42").fetchone() == (42,)
+
+    def test_conn_without_cursor_falls_back(self) -> None:
+        spy = _SpyConn()  # the suite's fake — records calls, has no cursor()
+        assert _compute_cursor(spy) is spy
+
+    def test_raising_cursor_falls_back(self) -> None:
+        class _Wedged:
+            def cursor(self) -> Any:
+                raise RuntimeError("connection closed")
+
+        wedged = _Wedged()
+        assert _compute_cursor(wedged) is wedged
+
+    def test_background_revalidate_never_corrupts_the_request_statements(
+        self, tmp_path: Path
+    ) -> None:
+        """THE interleave regression (fails without `_compute_cursor`): a
+        revalidator folding counts on the shared conn CONCURRENT with the
+        request thread's page query corrupted each other's pending results
+        (`too many values to unpack (expected 3)`). With isolation, heavy
+        stamp churn + concurrent polls stay clean."""
+        _write_base(tmp_path, [_row("NIFTY", "SUCCESS", bars=5)])
+        conn = duckdb.connect()
+        counts_cache, page_cache = make_window_payload_caches()  # REAL daemon runner
+        errors: list[Exception] = []
+
+        def _poll() -> None:
+            try:
+                for _ in range(10):
+                    build_window_payload(
+                        tmp_path,
+                        conn=conn,
+                        count_cache=counts_cache,
+                        page_cache=page_cache,
+                        generation=0,
+                    )
+            except Exception as exc:  # the oracle collects every failure
+                errors.append(exc)
+
+        import threading as _threading
+        import time as _time
+
+        pollers = [_threading.Thread(target=_poll, daemon=True) for _ in range(4)]
+        for t in pollers:
+            t.start()
+        # Churn the stamp while the pollers run (the mid-pull delta cadence).
+        for i in range(6):
+            _write_delta(tmp_path, [_row(f"SYM{i}", "SUCCESS", bars=1)])
+            _time.sleep(0.02)
+        for t in pollers:
+            t.join(timeout=30)
+        assert not errors, f"interleaved statements corrupted a result: {errors[0]!r}"
+
+    def test_store_locked_read_conn_yields_a_fresh_locked_view(self, tmp_path: Path) -> None:
+        """THE round-1 BLOCKER pin: the PRODUCTION conn (`store.connection`, a
+        `_LockedReadConn`) must never fall back to itself — `cursor()` yields
+        a FRESH view with its own hold state. Pre-fix, `_LockedReadConn` had
+        no `cursor()`, so `_compute_cursor` silently returned the ONE
+        single-thread-per-view instance the SWR revalidator daemons then
+        shared with the request thread — corrupting `_held` cross-thread and
+        leaking the store read lock (a permanent dashboard-read freeze, the
+        exact class this branch exists to fix)."""
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            view = store.connection
+            isolated = _compute_cursor(view)
+            assert isolated is not view, "production store conn fell back to the shared view"
+            assert type(isolated) is type(view)
+            assert isolated.execute("SELECT 42").fetchone() == (42,)
+
+    def test_concurrent_compute_on_store_conn_waits_never_corrupts(self, tmp_path: Path) -> None:
+        """The refuter's deterministic held-lock interleave, at db_view's own
+        seam: the request view HOLDS the read lock mid-statement (executed,
+        not yet fetched) while a background compute rides
+        `_compute_cursor(view)`. Pre-fix (same shared view) the background
+        `execute()` released the holder's lock from a NON-owner thread
+        (`RuntimeError: cannot release un-acquired lock`) and the holder then
+        LEAKED its acquisition — every later read deadlocked. Post-fix the
+        fresh view WAITS, completes cleanly, and the lock ends FREE."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            view = store.connection
+            view.execute("SELECT 1")  # the request thread's live hold — no fetch yet
+            errors: list[Exception] = []
+            finished = _threading.Event()
+
+            def _revalidator() -> None:
+                try:
+                    assert _compute_cursor(view).execute("SELECT 2").fetchone() == (2,)
+                except Exception as exc:  # the oracle collects every failure
+                    errors.append(exc)
+                finally:
+                    finished.set()
+
+            reval = _threading.Thread(target=_revalidator, daemon=True)
+            reval.start()
+            # The isolated view must WAIT on the read lock, never break the holder.
+            assert not finished.wait(timeout=0.3), f"finished against a held lock: {errors!r}"
+            assert view.fetchone() == (1,)  # the holder completes + releases
+            assert finished.wait(timeout=5.0)
+            reval.join(timeout=5.0)
+            assert not errors, f"background compute corrupted the shared hold: {errors[0]!r}"
+            # The lock is FREE: a fresh view's read completes within the bound.
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 3").fetchone() == (3,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), "store read lock leaked — later reads deadlock"
+            probe.join(timeout=5.0)
+
+    def test_legacy_probe_raise_never_leaks_the_store_read_lock(self, tmp_path: Path) -> None:
+        """The `_close_cursor` hygiene regression: the legacy-shape probe
+        raises AFTER a description-only read, leaving its `_LockedReadConn`
+        view HOLDING the store read lock — without the compute's `finally`
+        close, that hold is stranded forever (deadlock on a legacy-shape
+        ledger; pre-fix this leaked on BOTH shapes — the shared request view
+        and, with `cursor()` alone, the per-compute view)."""
+        import threading as _threading
+
+        from brutex.data.instrument_store import InstrumentStore
+
+        _write_legacy_base(tmp_path, "EMPTYCO")
+        with InstrumentStore.open(tmp_path / "instruments.duckdb") as store:
+            rows, total = query_window_ledger_page(store.connection, tmp_path, limit=100, offset=0)
+            assert total == 1  # served by the byte-identical legacy parse
+            assert len(rows) == 1
+            done = _threading.Event()
+
+            def _probe() -> None:
+                assert store.connection.execute("SELECT 42").fetchone() == (42,)
+                done.set()
+
+            probe = _threading.Thread(target=_probe, daemon=True)
+            probe.start()
+            assert done.wait(timeout=5.0), (
+                "the legacy-shape probe's description-only raise stranded the "
+                "store read lock — later dashboard reads deadlock"
+            )
+            probe.join(timeout=5.0)
+
+    def test_close_cursor_never_closes_the_shared_conn(self) -> None:
+        """The fallback arm (`cursor is conn` — the caller's own connection)
+        must never be closed out from under the request thread."""
+
+        class _Conn:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        conn = _Conn()
+        _close_cursor(conn, conn)
+        assert not conn.closed
+
+    def test_close_cursor_tolerates_missing_and_raising_close(self) -> None:
+        """Cleanup is best-effort: a cursor without `close()` is a no-op and a
+        raising `close()` is swallowed — hygiene never masks the compute's own
+        outcome or 500s a poll."""
+
+        class _NoClose:
+            pass
+
+        _close_cursor(_NoClose(), object())  # no close attr — a clean no-op
+
+        class _Boom:
+            def close(self) -> None:
+                raise RuntimeError("wedged mid-close")
+
+        _close_cursor(_Boom(), object())  # swallowed

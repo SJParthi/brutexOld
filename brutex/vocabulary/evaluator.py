@@ -126,6 +126,81 @@ class PriorBarHistory:
 # ────── The 60-condition evaluator (delegates to the shared Rust core) ──────
 
 
+def pivot_levels_list(pivots: PivotLevels) -> list[int]:
+    """The FROZEN 12-int ``evaluate_with_levels`` pivot ABI order (``PIVOT_LEVELS_LEN``).
+
+    ``[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`` — R5/S5 appended in
+    PR-2, never renumbered. Extracted from :func:`evaluate_atoms`'s inline
+    build (DEC-STAGE1A-RUST-BATCH-001) so the per-bar oracle marshal and the
+    batch prepass's day tables are the SAME CODE — the order-drift class is
+    killed at the root (CLAUDE.md §11 COMMON). Byte-identical delegation
+    (the frozen 400-case golden + the per-module gate re-pin it).
+
+    Parameters
+    ----------
+    pivots
+        The day's :class:`~brutex.indicators.pivots.PivotLevels`.
+
+    Returns
+    -------
+    list[int]
+        The 12 pivot levels (int64 paisa) in the frozen evaluator ABI order.
+    """
+    return [
+        pivots.p_paisa,
+        pivots.r1_paisa,
+        pivots.r2_paisa,
+        pivots.r3_paisa,
+        pivots.s1_paisa,
+        pivots.s2_paisa,
+        pivots.s3_paisa,
+        pivots.pdh_paisa,
+        pivots.pdl_paisa,
+        pivots.pdc_paisa,
+        pivots.r5_paisa,
+        pivots.s5_paisa,
+    ]
+
+
+def fib_levels_list(fib: FibLevels) -> list[int]:
+    """The FROZEN 15-int ``evaluate_with_levels`` fib ABI order (``FIB_LEVELS_LEN``).
+
+    ``[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl, up127, up162, up200,
+    up262, dn127, dn162, dn200, dn262]`` — deliberately DISTINCT from the
+    19-entry ``FIB_COMPUTE_LIST_LEN`` compute projection (the evaluator never
+    reads the bullish-retrace tail; DEC-FIB-BULLISH-RETRACE-001). Extracted
+    from :func:`evaluate_atoms`'s inline build — see :func:`pivot_levels_list`
+    for the one-source rationale (DEC-STAGE1A-RUST-BATCH-001).
+
+    Parameters
+    ----------
+    fib
+        The day's :class:`~brutex.indicators.fib_levels.FibLevels`.
+
+    Returns
+    -------
+    list[int]
+        The 15 fib levels (int64 paisa) in the frozen evaluator ABI order.
+    """
+    return [
+        fib.retrace_level_at_pdh_paisa,
+        fib.retrace_23_paisa,
+        fib.retrace_38_paisa,
+        fib.retrace_50_paisa,
+        fib.retrace_62_paisa,
+        fib.retrace_78_paisa,
+        fib.retrace_level_at_pdl_paisa,
+        fib.ext_up_127_paisa,
+        fib.ext_up_162_paisa,
+        fib.ext_up_200_paisa,
+        fib.ext_up_262_paisa,
+        fib.ext_down_127_paisa,
+        fib.ext_down_162_paisa,
+        fib.ext_down_200_paisa,
+        fib.ext_down_262_paisa,
+    ]
+
+
 def evaluate_atoms(
     snapshot: IndicatorSnapshot,
     proximity: ProximityParams,
@@ -154,46 +229,11 @@ def evaluate_atoms(
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
     """
-    pv = snapshot.pivots
-    fib = snapshot.fib
-
-    # Order MUST match trading_core.evaluate_with_levels: p, r1, r2, r3, s1, s2,
-    # s3, pdh, pdl, pdc, then r5, s5 (len = PIVOT_LEVELS_LEN = 12 — R5/S5 appended
-    # in PR-2, never renumbered).
-    pivot_levels = [
-        pv.p_paisa,
-        pv.r1_paisa,
-        pv.r2_paisa,
-        pv.r3_paisa,
-        pv.s1_paisa,
-        pv.s2_paisa,
-        pv.s3_paisa,
-        pv.pdh_paisa,
-        pv.pdl_paisa,
-        pv.pdc_paisa,
-        pv.r5_paisa,
-        pv.s5_paisa,
-    ]
-    # [retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl,
-    #  up127, up162, up200, up262, dn127, dn162, dn200, dn262]
-    # (len = FIB_LEVELS_LEN = 15).
-    fib_levels = [
-        fib.retrace_level_at_pdh_paisa,
-        fib.retrace_23_paisa,
-        fib.retrace_38_paisa,
-        fib.retrace_50_paisa,
-        fib.retrace_62_paisa,
-        fib.retrace_78_paisa,
-        fib.retrace_level_at_pdl_paisa,
-        fib.ext_up_127_paisa,
-        fib.ext_up_162_paisa,
-        fib.ext_up_200_paisa,
-        fib.ext_up_262_paisa,
-        fib.ext_down_127_paisa,
-        fib.ext_down_162_paisa,
-        fib.ext_down_200_paisa,
-        fib.ext_down_262_paisa,
-    ]
+    # The two level lists are built by the SHARED frozen-ABI projections
+    # (DEC-STAGE1A-RUST-BATCH-001) — the same code the batch prepass's day
+    # tables use, so the marshal order lives in exactly one place.
+    pivot_levels = pivot_levels_list(snapshot.pivots)
+    fib_levels = fib_levels_list(snapshot.fib)
 
     # Group 8 reads only the IST wall-clock time-of-day (never the UTC instant);
     # seconds-of-day floors sub-second, matching the golden fixture's parser.

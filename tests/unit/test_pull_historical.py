@@ -4259,3 +4259,184 @@ def test_durable_preference_persists_the_candle_phase_winner(tmp_path: Path) -> 
     assert sdk.candle_symbols == ["NSE-M&M-25Jan24-2400-CE", "NSE-M%26M-25Jan24-2400-CE"]
     assert meta.rows == {form_winner_key("M&M"): "M%26M"}
     store.close()
+
+
+# ── DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline ledger seam ────────────
+
+
+class TestSharedLedgerSeam:
+    """`ledger=` injection + the production `shared_pull_ledger_scope` engagement.
+
+    The mutant-killing wiring pins (the register-site precedent): the injected /
+    scope-shared instance must be the EXACT object `_run_phase` records into and
+    persists — a severed kwarg or a dropped scope consult fails these by identity.
+    """
+
+    def _capture_end(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Capture the ledger `_run_phase` hands to `end_pull_ledger` (then save for real)."""
+        from brutex.data.window_ledger import WindowLedger
+
+        real_end = hp.end_pull_ledger
+        captured: list[object] = []
+
+        def _spy(ledger: WindowLedger | None, lake_root: Path, *, dry_run: bool) -> None:
+            captured.append(ledger)
+            real_end(ledger, lake_root, dry_run=dry_run)
+
+        monkeypatch.setattr(hp, "end_pull_ledger", _spy)
+        return captured
+
+    def test_injected_ledger_is_used_and_begin_skipped(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+
+        def _never(*args: object, **kwargs: object) -> WindowLedger | None:
+            raise AssertionError("begin_pull_ledger must be SKIPPED for an injected ledger")
+
+        monkeypatch.setattr(hp, "begin_pull_ledger", _never)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        report = pull_contract_candles(
+            registry.list_contracts(underlying="NIFTY"),
+            lake_root=tmp_lake,
+            dry_run=False,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            ledger=mine,
+        )
+        assert report.contracts_selected == 3
+        # The phase recorded into + persisted EXACTLY the injected instance.
+        assert captured and captured[-1] is mine
+        assert mine.count > 0  # the phase genuinely planned/recorded on it
+
+    def test_injected_ledger_is_ignored_under_dry_run(
+        self, registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.data.window_ledger import WindowLedger
+
+        mine = WindowLedger()
+        captured = self._capture_end(monkeypatch)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        pull_contract_candles(
+            registry.list_contracts(underlying="NIFTY"),
+            lake_root=Path("/unused"),
+            dry_run=True,
+            intervals=("1day",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            ledger=mine,
+        )
+        # A dry-run NEVER records/persists — the injected instance is ignored.
+        assert captured and captured[-1] is None
+        assert mine.count == 0
+
+    def test_scope_shared_instance_reaches_run_phase(
+        self, registry: RegistryStore, tmp_lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production engagement: under an active scope, `_run_phase`'s own
+        `begin_pull_ledger` (no kwarg passed) returns the scope's ONE instance."""
+        from brutex.data.window_ledger_store import (
+            begin_pull_ledger,
+            shared_pull_ledger_scope,
+        )
+
+        captured = self._capture_end(monkeypatch)
+        sdk = _FakeSDK()
+        sink = _RecordingSink()
+        with shared_pull_ledger_scope():
+            first = begin_pull_ledger(tmp_lake, dry_run=False)
+            pull_contract_candles(
+                registry.list_contracts(underlying="NIFTY"),
+                lake_root=tmp_lake,
+                dry_run=False,
+                intervals=("1day",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+            )
+        assert captured and captured[-1] is first
+
+
+def test_pull_contract_candles_arms_today_gate(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch, tmp_lake: Path
+) -> None:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001 F&O arm site: a LIVE phase resolves the
+    env kill switch ONCE and threads the flag into ``run_groww_option_ingest``."""
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "1")
+    flags: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, today_completeness_gate: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        flags.append(today_completeness_gate)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=tmp_lake,
+        dry_run=False,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert flags
+    assert all(flag is True for flag in flags)
+
+
+def test_pull_contract_candles_dry_run_threads_today_gate_false(
+    registry: RegistryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry-run threads ``False`` WITHOUT touching the env (junk env never crashes
+    a dry-run — the resolve is short-circuited away; belt: the F&O dry-run client
+    returns EMPTY payloads, so the gate could never fire offline anyway)."""
+    from brutex.data.today_completeness import TODAY_COMPLETENESS_GATE_ENV
+
+    monkeypatch.setenv(TODAY_COMPLETENESS_GATE_ENV, "junk-token")
+    flags: list[object] = []
+
+    def _spy_ingest(
+        *_args: object, today_completeness_gate: object = None, **_kw: object
+    ) -> GrowwOptionIngestReport:
+        flags.append(today_completeness_gate)
+        return _empty_ingest_report()
+
+    monkeypatch.setattr(hp, "run_groww_option_ingest", _spy_ingest)
+    sdk = _FakeSDK()
+    sink = _RecordingSink()
+    selected = registry.list_contracts(underlying="NIFTY")
+    pull_contract_candles(
+        selected,
+        lake_root=Path("/unused"),
+        dry_run=True,
+        intervals=("1day",),
+        registry=registry,
+        from_date=_FROM,
+        to_date=_TO,
+        client_factory=lambda _root: _factory(sdk, sink),
+        now=_NOW,
+    )
+    assert flags
+    assert all(flag is False for flag in flags)

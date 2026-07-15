@@ -531,16 +531,18 @@ def test_universe_page_pull_historical_button_removed(client: TestClient) -> Non
     fill is the pipeline's gated final fetch stage (DEC-UNIVERSE-PULL-CONSOLIDATE-001).
 
     The route ``/api/v1/universe/pull-historical`` itself still exists (covered by
-    this file's route tests); it is no longer surfaced as its own button. The ONE
-    ``pullPipelineBtn`` runs the gated chain that includes the historical pull.
+    this file's route tests); it is no longer surfaced as its own button. Since
+    the round-6 two-button split (DEC-PULL-SCOPED-ALL-ONECLICK-001) the
+    selection-aware ``pullFnoBtn`` runs the gated chain that includes the
+    historical pull.
     """
     resp = client.get("/universe")
     assert resp.status_code == 200
     # the redundant per-stage historical button is gone (no null .onclick at load)
     assert 'id="pullHistBtn"' not in resp.text
     assert 'getElementById("pullHistBtn")' not in resp.text
-    # the ONE pull button drives the gated pipeline (which includes the historical stage)
-    assert 'id="pullPipelineBtn"' in resp.text
+    # the ▶ Pull F&O button drives the gated pipeline (which includes the historical stage)
+    assert 'id="pullFnoBtn"' in resp.text
     assert "/api/v1/universe/pull-pipeline" in resp.text
 
 

@@ -722,7 +722,7 @@ class TestTailLaw:
         # Review round-1 findings 4/12/20: ANY positive overhang means the
         # successor contract owning those dates is ABSENT from the lake, so a
         # 10-day truncation now WARNs (pre-fix it was fully silent, drifting
-        # from the #1521 'clamp + WARN' law and this module's own docstring).
+        # from the #1701 'clamp + WARN' law and this module's own docstring).
         root = _mk_lake(tmp_path, _JUN)
         with capture_logs() as logs:
             res = resolve_futures_series(root, start=date(2025, 6, 1), end=date(2025, 7, 6))

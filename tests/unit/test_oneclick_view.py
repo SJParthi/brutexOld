@@ -611,3 +611,58 @@ class TestFixtureFlagStampedEverywhere:
             ov.build_verify_payload("r", _AWAITING, None, False, fixture_root_active=active),
         ]
         assert all(payload["fixture_root_active"] is active for payload in payloads)
+
+
+class TestCascadeStatusText:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the ONE server-built verdict text."""
+
+    def test_pass(self) -> None:
+        assert ov.cascade_status_text("pass") == "PASS"
+
+    def test_provisional_pass_token(self) -> None:
+        assert ov.cascade_status_text("provisional_pass") == "PASS (provisional)"
+
+    def test_pass_with_provisional_flag_never_reads_bare_pass(self) -> None:
+        # Defense-in-depth: the writer mints provisional_pass, but a "pass"
+        # carrying provisional=True must never read as a proven PASS.
+        assert ov.cascade_status_text("pass", provisional=True) == "PASS (provisional)"
+
+    def test_fail_names_the_verbatim_stage(self) -> None:
+        assert ov.cascade_status_text("fail", rejected_at="walk_forward") == ("FAIL @ walk_forward")
+        # Unknown FUTURE token kept verbatim — never a guess.
+        assert ov.cascade_status_text("fail", rejected_at="quantum") == ("FAIL @ quantum")
+
+    def test_fail_without_stage_reads_question_mark(self) -> None:
+        assert ov.cascade_status_text("fail") == "FAIL @ ?"
+
+    def test_not_validated_reasons(self) -> None:
+        assert ov.cascade_status_text("not_validated") == "not validated"
+        assert ov.cascade_status_text("not_validated", reason="no_report") == ("not validated")
+        assert (
+            ov.cascade_status_text("not_validated", reason="not_in_cascade_pool") == "not validated"
+        )
+        assert (
+            ov.cascade_status_text("not_validated", reason="sweep_id_mismatch")
+            == "not validated · sweep_id_mismatch"
+        )
+        assert (
+            ov.cascade_status_text("not_validated", reason="duplicate_candidate_id")
+            == "not validated · duplicate verdict"
+        )
+
+    def test_none_and_unknown_read_em_dash(self) -> None:
+        assert ov.cascade_status_text(None) == "—"
+        assert ov.cascade_status_text("GREEN") == "—"
+
+
+class TestTop100PayloadCascadeJoin:
+    def test_payload_carries_the_root_meta(self) -> None:
+        meta = {"state": "joined", "sweep_id": "s" * 64, "n_input": 3, "n_survived": 1}
+        result = Top100Result("ok", (), "", "1:2", "min_dd_first", meta)
+        payload = ov.build_top100_payload("r1", result, fixture_root_active=False)
+        assert payload["cascade_join"] == meta
+
+    def test_pre_change_result_reads_null(self) -> None:
+        result = Top100Result("ok", (), "", "1:2", "min_dd_first")
+        payload = ov.build_top100_payload("r1", result, fixture_root_active=False)
+        assert payload["cascade_join"] is None

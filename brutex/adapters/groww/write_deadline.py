@@ -54,6 +54,21 @@ fetch SUCCEEDED, so its FAILED records never consume the K-attempt exhaustion bu
 window can never be cemented un-pullable by its own deferrals. The number of abandoned daemons is
 bounded by the distinct wedged partitions, not by the window count.
 
+**Bytes envelope of an abandoned daemon (DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001).** Each zombie's
+EXECUTING frame irreducibly pins whatever ``sink.append`` currently holds — its ``bars``
+argument (~10 MiB for a 30-day 1-minute window) plus, past the render phase, the arrow table —
+until the wedged syscall finally returns; no external fix can free a running frame's locals.
+What this module CAN control is the GUARD layer, and since the one-shot pop handoff in
+:func:`append_with_deadline` it holds NO second strong reference once the call starts: the old
+``lambda`` closure cell (which pinned ``bars`` for the zombie's whole life even if the sink had
+already dropped it) is replaced by a single-slot holder the worker pops inline, and the guard
+frame ``del``\\ s its own ``bars`` parameter so the raised
+:class:`~brutex.data.errors.WriteDeadlineExceeded`'s traceback — held by the spine's handler
+while it records/defers the window — no longer pins the payload either. Net: the payload's
+lifetime is exactly the in-flight ``sink.append`` frame's need, nothing longer; a wedge in the
+flock-ACQUIRE phase (the common contended shape) or a sink that releases its argument early
+frees the bytes even while the thread stays wedged.
+
 This module is import-cheap: it imports only :func:`run_with_deadline`, the constants, the
 partition-lock timeout resolver (a pure env-reader), and the exception type; it does NOT
 import the heavy lake writers (the ``sink`` is injected). O(1) per window — the deadline
@@ -228,17 +243,31 @@ def append_with_deadline(
         _warn_once_if_lock_timeout_inverted(deadline)
     else:
         deadline = deadline_seconds
-    try:
-        return run_with_deadline(
-            lambda: sink.append(
-                exchange=exchange,
-                segment=segment,
-                symbol=symbol,
-                interval=interval,
-                bars=bars,
-            ),
-            deadline,
+    # ONE-SHOT PAYLOAD HANDOFF (DEC-WRITE-DEADLINE-ZOMBIE-SLIM-001): the previous
+    # ``lambda: sink.append(..., bars=bars)`` closure CELL — plus THIS frame's own
+    # ``bars`` parameter, which rides the raised WriteDeadlineExceeded's traceback
+    # up the spine — kept a GUARD-layer strong reference to the whole window's
+    # payload for the abandoned daemon's entire wedge. The worker instead POPS the
+    # payload from a single-slot holder INLINE in the call expression (CPython
+    # transfers argument ownership into the callee frame), and this frame ``del``s
+    # its parameter, so after the call starts NO guard-layer reference (closure /
+    # thread args / traceback frame) survives beyond the in-flight ``sink.append``
+    # frame itself. ``_append_popped`` runs exactly once (the run_with_deadline
+    # worker contract), so the pop can never see an empty holder.
+    payload: list[Sequence[CandleBar]] = [bars]
+    del bars  # this frame rides the deadline exception's traceback — hold no payload ref
+
+    def _append_popped() -> SinkAppendResult:
+        return sink.append(
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            interval=interval,
+            bars=payload.pop(),
         )
+
+    try:
+        return run_with_deadline(_append_popped, deadline)
     except DeadlineExceeded as exc:
         # The GUARD's OWN deadline fired (a wedged fsync/replace that never raised). We match the
         # DeadlineExceeded subclass — NOT the broad TimeoutError — so a real TimeoutError /

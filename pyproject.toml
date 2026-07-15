@@ -103,6 +103,19 @@ groww = [
 token-broker = [
     "boto3>=1.34,<2.0",
 ]
+# DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (MIGRATION.md #1777): the cross-verify
+# producer's S3 publisher needs boto3 for PutObject — BruteX's FIRST sanctioned
+# AWS WRITE surface (s3:PutObject on arn:aws:s3:::tv-prod-cold/crossverify/*
+# ONLY; the SSM read-only pledge of DEC-AWS-ONLY-CREDS-001 is UNCHANGED). Kept
+# a DEDICATED optional extra — exactly like `token-broker` — so local runs and
+# CI never install it (extras name their posture: read-broker vs
+# write-publisher); `bootstrap.sh` deliberately does NOT install it. The real
+# boto3 client build is `# pragma: no cover` behind the PUT-only S3PutClient
+# Protocol; a pure-Python `FakeS3Client` drives the publisher to 100% coverage
+# with no install and no network.
+crossverify = [
+    "boto3>=1.34,<2.0",
+]
 dev = [
     "pytest>=8.0,<10.0",            # was <9.0; PyPI latest 9.0.3 (DEC-P0-012)
     "pytest-cov>=5.0,<8.0",         # was <6.0; PyPI latest 7.1.0 (DEC-P0-012)
@@ -157,7 +170,17 @@ src = ["brutex", "tests"]
 # Red-team fixtures intentionally contain planted bugs. Excluded
 # from the global ruff scan; verified individually by tests/redteam/
 # subprocess invocations.
-extend-exclude = ["tests/redteam/fixtures/*.stripped.py", "tests/redteam/fixtures/planted_*.py"]
+# The #1775 post-close settle probe lives under docs/ and is OUTSIDE every
+# lint/type/coverage gate BY DESIGN (kept py_compile-clean; its module
+# docstring records the posture) — force-excluded here so the pre-commit ruff
+# hooks (which pass --force-exclude) match the CI scope (`ruff check brutex
+# tests`); DEC-SETTLE-EVIDENCE-ADOPTION-001 made the standing posture
+# mechanical when the emitter edits first put the file in a hook-scanned diff.
+extend-exclude = [
+    "tests/redteam/fixtures/*.stripped.py",
+    "tests/redteam/fixtures/planted_*.py",
+    "docs/groww/probe/postclose_settle_probe.py",
+]
 
 [tool.ruff.lint]
 select = [

@@ -1992,13 +1992,20 @@ class TestDemotedSettleReasons:
         from brutex.data.interior_gap_detect import INTERIOR_GAP
         from brutex.data.partial_window_detect import SUSPECTED_PARTIAL
         from brutex.data.session import ALL_FILTERED
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
 
-        # The three detector tags PLUS "DEGRADED" — record()'s defensive
+        # The four detector tags PLUS "DEGRADED" — record()'s defensive
         # fallback for a degraded=True call with no reason (latent: both
         # production spines always pass a concrete tag). Enumerated so a
         # reason-less demotion settle can never fall through to the
         # "vendor confirmed no trades" label (wiring-review fold, PR #1158).
-        expected = frozenset({ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, "DEGRADED"})
+        # TODAY_INCOMPLETE (DEC-PULL-TODAY-COMPLETENESS-GATE-001) is a member
+        # DEFENSIVELY: its demotion is streak-EXEMPT, so a SKIPPED settle
+        # carrying it is structurally unreachable — but were it ever stamped,
+        # the label must never read "vendor confirmed no trades".
+        expected = frozenset(
+            {ALL_FILTERED, INTERIOR_GAP, SUSPECTED_PARTIAL, TODAY_INCOMPLETE, "DEGRADED"}
+        )
         assert expected == DEMOTED_SETTLE_REASONS
 
     def test_reasonless_degraded_record_stamps_a_demoted_reason(self) -> None:
@@ -2643,3 +2650,152 @@ class TestMassExhaustionRail:
         rec = ledger.records()[0]
         assert rec.last_error is not None
         assert "last error GrowwServerError" in rec.last_error
+
+
+class TestStreakExemptDemotion:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: a TODAY_INCOMPLETE demotion is TIME-transient
+    evidence — it preserves the empty_streak (like FAILED) and can NEVER settle SKIPPED,
+    unlike the STRUCTURAL demotions (ALL_FILTERED/INTERIOR_GAP/SUSPECTED_PARTIAL) whose
+    bounded accept-gap settle is byte-unchanged."""
+
+    def test_today_incomplete_preserves_streak_never_skips(self) -> None:
+        # Five consecutive same-evening vendor-lag demotions: status FAILED every
+        # time, the streak NEVER moves, never SKIPPED — kills the streak arm's
+        # ``in`` → ``not in`` membership mutant (a bumping mutant reads streak 5
+        # and, pre-belt, would settle at 3).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger(_threshold=3)
+        for _ in range(5):
+            status = ledger.record(
+                _key(),
+                raw_bars=374,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason=TODAY_INCOMPLETE,
+            )
+            assert status == FAILED
+            rec = ledger.records()[0]
+            assert rec.status == FAILED
+            assert rec.last_error == TODAY_INCOMPLETE
+            assert rec.empty_streak == 0  # preserved — never a step toward SKIPPED
+            assert not ledger.is_skippable(_key())
+
+    def test_structural_reasons_unchanged(self) -> None:
+        # ALL_FILTERED (a STRUCTURAL demotion) still bumps + settles SKIPPED at
+        # the threshold — byte-identity of the existing bounded channel.
+        ledger = WindowLedger(_threshold=3)
+        statuses = [
+            ledger.record(
+                _key(),
+                raw_bars=5,
+                error_type=None,
+                bars_appended=0,
+                now=_NOW,
+                degraded=True,
+                degraded_reason="ALL_FILTERED",
+            )
+            for _ in range(3)
+        ]
+        assert statuses == [FAILED, FAILED, SKIPPED]
+        assert ledger.records()[0].empty_streak == 3
+
+    def test_mixed_history_belt(self) -> None:
+        # A prior clean-EMPTY streak of 2 + a TODAY_INCOMPLETE demotion: no
+        # settle, streak stays 2 (the demotion neither bumps nor consumes the
+        # EMPTY evidence).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger(_threshold=3)
+        for _ in range(2):
+            ledger.record(_key(), raw_bars=0, error_type=None, bars_appended=0, now=_NOW)
+        assert ledger.records()[0].empty_streak == 2
+        status = ledger.record(
+            _key(),
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert status == FAILED
+        rec = ledger.records()[0]
+        assert rec.empty_streak == 2
+        assert rec.status == FAILED
+
+    def test_settle_belt_over_forged_high_streak(self) -> None:
+        # The settle arm's ``not in STREAK_EXEMPT_DEGRADED_REASONS`` BELT: a row
+        # with a (normally unreachable) streak >= threshold restored from disk
+        # must STILL never settle SKIPPED on a TODAY_INCOMPLETE record — kills
+        # the settle arm's ``not in`` → ``in`` membership mutant, which is
+        # invisible through record() alone (the streak arm never lets the
+        # streak reach the threshold).
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        k = _key()
+        ledger = WindowLedger.from_rows(
+            [
+                (
+                    k.market,
+                    k.security_id,
+                    k.interval,
+                    k.start.isoformat(),
+                    k.end.isoformat(),
+                    FAILED,
+                    0,
+                    1,
+                    "GrowwTimeoutError",
+                    _NOW.isoformat(),
+                    _NOW.isoformat(),
+                    5,  # forged: at/over the threshold
+                    1,
+                    None,
+                    None,
+                    None,
+                )
+            ],
+            threshold=3,
+        )
+        status = ledger.record(
+            k,
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert status == FAILED  # never the accept-gap SKIPPED
+        assert ledger.records()[0].empty_streak == 5  # preserved verbatim
+
+    def test_tombstone_set_and_discarded_on_success(self) -> None:
+        # The degraded tombstone semantics are INHERITED (free protection): a
+        # TODAY_INCOMPLETE FAILED is tombstoned so merge-on-save cannot
+        # resurrect a concurrent disk SUCCESS over it; the overnight SUCCESS
+        # discards it.
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+
+        ledger = WindowLedger()
+        ledger.record(
+            _key(),
+            raw_bars=374,
+            error_type=None,
+            bars_appended=0,
+            now=_NOW,
+            degraded=True,
+            degraded_reason=TODAY_INCOMPLETE,
+        )
+        assert ledger.degraded_keys()  # tombstoned
+        ledger.record(_key(), raw_bars=375, error_type=None, bars_appended=375, now=_LATER)
+        assert ledger.records()[0].status == SUCCESS
+        assert not ledger.degraded_keys()  # discarded on the settled re-record
+
+    def test_today_incomplete_in_demoted_settle_reasons(self) -> None:
+        from brutex.data.today_completeness import TODAY_INCOMPLETE
+        from brutex.data.window_ledger import STREAK_EXEMPT_DEGRADED_REASONS
+
+        assert TODAY_INCOMPLETE in DEMOTED_SETTLE_REASONS
+        assert frozenset({TODAY_INCOMPLETE}) == STREAK_EXEMPT_DEGRADED_REASONS

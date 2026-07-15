@@ -253,6 +253,29 @@ def test_real_pull_writes_intent_and_clears_it_on_success(
     _wait_for(lambda: not intent_store.path.exists())
 
 
+def test_click_over_corrupt_intent_file_recovers_never_500(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[F/B — refuter round 6 N-1 inherited note] a bit-rotted (invalid UTF-8)
+    ``.pull_intent.json`` + a REAL /pull-pipeline click: the launcher's
+    held-mutex ``prior_intent = store.load()`` snapshot reads the corrupt
+    file as absent (deleted best-effort) and the click proceeds CLEAN.
+    Executed pre-fix at the round-5 head: the same click was a 500
+    (``UnicodeDecodeError`` out of the snapshot load)."""
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    intent_store.path.write_bytes(b'\xff{"version": 1}')
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert _wait_for_job(client)["state"] == "done"
+    # The completed pull's on_finally clear leaves no intent — the corrupt
+    # bytes are gone for good (never re-tripping a later boot).
+    _wait_for(lambda: not intent_store.path.exists())
+
+
 def test_failed_pull_still_clears_the_intent(
     client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -128,9 +128,10 @@ class ScopeReport:
         ]
         lines.extend(f"  - {verdict.symbol!r}: {verdict.reason}" for verdict in self.refused)
         lines.append(
-            "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3) "
-            "plus the NIFTY-futures series alias 'NSE-NIFTY-FUT' (ADR-0012 / "
-            "DEC-FUTURES-ADDRESSING-PIN-001). "
+            "The engine sweeps ONLY NIFTY/BANKNIFTY/SENSEX spot (CLAUDE.md §2 Rule 3; "
+            "DEC-ENGINE-SPOT-ONLY-001 — the engine is spot-only; the NIFTY-futures "
+            "series alias 'NSE-NIFTY-FUT' is RETIRED from engine scope and remains "
+            "lake/REFERENCE_ONLY). "
             f"Rationale: {_CORP_ACTION_HAZARD} "
             "Remedy: drop the out-of-scope symbol(s), or — CLI research runs ONLY — "
             "re-run with --allow-out-of-scope (loud + audit-stamped; no dashboard "

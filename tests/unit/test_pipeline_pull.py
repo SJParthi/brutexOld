@@ -53,6 +53,8 @@ def _outcome(
     fs_note: str | None = None,
     unchanged_skips: int = 0,
     opens_substituted: int = 0,
+    no_source: tuple[str, ...] = (),
+    no_source_count: int | None = None,
 ) -> PrebuildOutcome:
     """Build a :class:`PrebuildOutcome` (the run_prebuild contract's REAL dataclass)."""
     count = len(failed) if failed_count is None else failed_count
@@ -66,6 +68,8 @@ def _outcome(
         fs_note=fs_note,
         unchanged_skips=unchanged_skips,
         opens_substituted=opens_substituted,
+        no_source=no_source,
+        no_source_count=(len(no_source) if no_source_count is None else no_source_count),
     )
 
 
@@ -965,6 +969,163 @@ def test_pipeline_prebuild_failure_names_capped_with_true_remainder() -> None:
         ),
     )
     assert "prebuild failures: SYM0, SYM1, SYM2 (+9 more)" in report.note
+
+
+def test_pipeline_no_source_clause_named_in_note_capped() -> None:
+    """T14 [fails-before] (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a non-zero
+    no-source count renders the DISTINCT counted+named clause — 1 name plain;
+    5 names → 3 shown + the honest "(+2 more)" remainder — and the report +
+    payload carry the capped names + TRUE count."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_PrebuildSpy(
+            _outcome(symbols_built=7, total_bars=90, no_source=("RELIANCE",))
+        ),
+    )
+    assert report.prebuild_no_source == ("RELIANCE",)
+    assert report.prebuild_no_source_count == 1
+    assert (
+        ", 1 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: RELIANCE" in report.note
+    )
+    # Refuter round 2 (MIGRATION.md #1792): the clause claims ONLY the
+    # timeframe-build exclusion — a surviving previously stored DERIVED
+    # timeframe legitimately keeps the symbol in warm discovery, so a
+    # movers-warm exclusion claim would overstate the proven premise.
+    assert "+ movers warm" not in report.note
+    assert "quarantined" not in report.note  # never misnamed as a quarantine
+    assert "prebuild failures" not in report.note  # …nor as a failure
+    many = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_PrebuildSpy(_outcome(no_source=tuple(f"E{i}" for i in range(5)))),
+    )
+    assert (
+        "5 symbol(s) skipped — no stored 1-minute data (vendor-empty or never pulled), "
+        "excluded from timeframe build: E0, E1, E2 (+2 more)" in many.note
+    )
+
+
+def test_format_capped_names_all_arms_and_failures_arm_byte_identity() -> None:
+    """T14b — the ONE capped-names formatter: under-cap / at-cap / over-cap /
+    producer-capped-names arms; plus the refactored failures arm is
+    byte-identical to the pre-refactor inline expression (the exact-string
+    note pins above are the run-level refactor pin)."""
+    from brutex.dashboard.pipeline_pull import format_capped_names
+
+    assert format_capped_names(("A",), 1) == "A"
+    assert format_capped_names(("A", "B", "C"), 3) == "A, B, C"
+    assert format_capped_names(("A", "B", "C", "D"), 4) == "A, B, C (+1 more)"
+    # The producer already capped the names (10) but the TRUE count is 12:
+    # the remainder derives from the UNCAPPED total (12 − 3), never 10 − 3.
+    names = tuple(f"S{i}" for i in range(10))
+    assert format_capped_names(names, 12) == "S0, S1, S2 (+9 more)"
+    assert format_capped_names((), 0) == ""
+    # Explicit cap override (the CLI reuses the default 3).
+    assert format_capped_names(("A", "B", "C"), 3, cap=2) == "A, B (+1 more)"
+
+
+def test_pipeline_no_source_only_outcome_still_warms() -> None:
+    """T15 [fails-before] — THE behavioral flip
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a no-source-only ``ok=True``
+    prebuild outcome OPENS the movers-warm gate (the #1779 withheld-run-wide
+    residual closed); the note carries the skip clause AND the warmed clause;
+    a REAL-failure ``ok=False`` outcome still withholds (unchanged law,
+    re-pinned)."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=_Spy(_warm(3)),
+        run_prebuild=_PrebuildSpy(_outcome(symbols_built=1, total_bars=7, no_source=("RELIANCE",))),
+    )
+    assert report.segment_movers_warmed == {"spot": 3}  # the warm FIRED
+    assert report.movers_warmed == 3
+    assert "symbol(s) skipped — no stored 1-minute data" in report.note
+    assert "movers spot 3 snapshot(s) warmed" in report.note
+    # The unchanged law re-pinned: a REAL failure still withholds the warm.
+    withheld = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        warm_spot_movers=_Spy(_warm(3)),
+        run_prebuild=_PrebuildSpy(_outcome(failed=("BAD",), no_source=("RELIANCE",), ok=False)),
+    )
+    assert withheld.segment_movers_warmed == {}
+    assert withheld.movers_warmed is None
+    assert withheld.prebuild_no_source == ("RELIANCE",)  # BOTH classes surfaced
+    assert "prebuild failures: BAD" in withheld.note
+
+
+def test_pipeline_no_source_to_dict_emit_on_nonzero_both_arms() -> None:
+    """T16 — the payload keys are EMIT-ON-NONZERO: present (capped names +
+    TRUE count) when non-zero, ABSENT on a clean report (the default wire
+    payload stays byte-identical)."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_PrebuildSpy(_outcome(no_source=("RELIANCE", "IDEA"), no_source_count=13)),
+    )
+    payload = report.to_dict()
+    assert payload["prebuild_no_source"] == ["RELIANCE", "IDEA"]
+    assert payload["prebuild_no_source_count"] == 13
+    clean = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_PrebuildSpy(_outcome()),
+    ).to_dict()
+    assert "prebuild_no_source" not in clean
+    assert "prebuild_no_source_count" not in clean
+
+
+def test_pipeline_default_path_note_and_payload_byte_identical_golden() -> None:
+    """T17 — the default-path byte-identity GOLDEN
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): an all-healthy run's note is
+    EXACTLY the frozen PRE-change literal and ``to_dict()`` is EXACTLY the
+    frozen PRE-change payload (top-level keys frozen; the phase sub-dicts are
+    the sub-reports' own untouched projections) — captured at merge-base
+    349b1a9 before this DEC's edits."""
+    report = run_full_pipeline(
+        run_spot=_Spy(_spot()),
+        run_metadata=_Spy(_metadata()),
+        run_historical=_Spy(_composite(historical=_historical_inner())),
+        run_prebuild=_PrebuildSpy(_outcome(symbols_built=4, total_bars=1234)),
+        warm_spot_movers=_Spy(_warm(3)),
+    )
+    assert report.note == (
+        "pipeline complete — spot clean (3 pair(s)), metadata 12 expiries + 400 contracts, "
+        "historical 5000 bars over 10 contract(s), timeframes pre-built for 4 symbol(s) "
+        "(1234 bars), movers spot 3 snapshot(s) warmed"
+    )
+    assert report.spot is not None
+    assert report.metadata is not None
+    assert report.historical is not None
+    assert report.to_dict() == {
+        "ok": True,
+        "stopped_after": None,
+        "note": report.note,
+        "movers_warmed": 3,
+        "segment_movers_warmed": {"spot": 3},
+        "segment_movers_failed": {},
+        "prebuild_built": 4,
+        "prebuild_total_bars": 1234,
+        "prebuild_failed": [],
+        "prebuild_crashed": None,
+        "fs_allocation_note": None,
+        "prebuild_disk_guarded": False,
+        "prebuild_opens_substituted": 0,
+        "quarantined_symbols": [],
+        "quarantined_count": 0,
+        "post_steps_strict_skipped": False,
+        "spot": report.spot.to_dict(),
+        "metadata": report.metadata.to_dict(),
+        "historical": report.historical.to_dict(),
+    }
 
 
 def test_pipeline_prebuild_runs_on_dirty_fetch_completed_chain() -> None:
@@ -2186,3 +2347,69 @@ class TestShouldStop:
         )
         assert report.stopped_after == PHASE_HISTORICAL
         assert "POISON" in report.quarantined_symbols
+
+
+# --------------------------------------------------------------------------- #
+# DEC-LEDGER-LOAD-SPACE-V1-001 — one ledger load per pipeline run
+# --------------------------------------------------------------------------- #
+
+
+class TestSharedLedgerScopeInPipeline:
+    """The fails-before pin: 2 full ledger loads per pipeline run → 1.
+
+    `run_full_pipeline` wraps the fetch phases in ONE
+    `shared_pull_ledger_scope`, so the spot phase's whole-ledger
+    materialisation is REUSED by the historical phase (pre-fix: each phase's
+    `begin_pull_ledger` re-loaded the full O(rows) ledger — two loads + two
+    co-resident copies). The scope closes BEFORE the post-steps, so the
+    prebuild sees a fresh (un-shared) begin — the lifetime-tightness pin.
+    """
+
+    def test_one_ledger_load_per_pipeline_run(
+        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+
+        import brutex.data.window_ledger_store as wls
+
+        lake = Path(str(tmp_path))
+        real = wls.load_or_migrate_window_ledger
+        loads: list[Path] = []
+
+        def _spy(lake_root: Path, **kwargs: object) -> object:
+            loads.append(lake_root)
+            return real(lake_root, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(wls, "load_or_migrate_window_ledger", _spy)
+
+        phase_ledgers: list[object] = []
+        post_ledgers: list[object] = []
+
+        def run_spot() -> BulkSpotReport:
+            # The spot phase's own begin (what pull_all_spot does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _spot()
+
+        def run_historical(prior: PriorStepsVerdict) -> CompositePullReport:
+            # The historical phase's own begin (what _run_phase does internally).
+            phase_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _composite(historical=_historical_inner())
+
+        def run_prebuild(_excluded: frozenset[str]) -> PrebuildOutcome:
+            # A post-step begin — must be OUTSIDE the scope (fresh load).
+            post_ledgers.append(wls.begin_pull_ledger(lake, dry_run=False))
+            return _outcome()
+
+        report = run_full_pipeline(
+            run_spot=run_spot,
+            run_metadata=_metadata,
+            run_historical=run_historical,
+            run_prebuild=run_prebuild,
+        )
+        assert report.stopped_after is None
+        # ONE shared instance across the two fetch phases (pre-fix: distinct).
+        assert phase_ledgers[0] is phase_ledgers[1]
+        # ONE load for both phases + ONE fresh post-step load (the scope closed
+        # before the prebuild — the ledger is released, not held through it).
+        assert len(loads) == 2
+        assert post_ledgers[0] is not phase_ledgers[0]
