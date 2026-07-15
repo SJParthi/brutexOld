@@ -72,6 +72,7 @@ REQUIRED_TOP_KEYS = (
     "hardware",
     "run_url",
     "grid_scale",
+    "grid",
     "engagement",
     "soak",
     "wall_clock",
@@ -84,6 +85,20 @@ EVIDENCE_HOME = Path("docs") / "soak"
 
 def _is_nonempty_str(value: object) -> bool:
     return isinstance(value, str) and bool(value)
+
+
+def _registry_flags() -> set[str]:
+    """The full registry flag set (built-ins + any test-seam rows).
+
+    Imported lazily so the validator stays importable beside the registry
+    without the brutex package installed; mirrors :func:`assemble`'s sys.path
+    insert. The ``ambient_flags`` one-flag-at-a-time proof (§c) is checked
+    against this set.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from flag_registry import all_specs
+
+    return {spec.flag for spec in all_specs()}
 
 
 def validate_pass_obj(obj: object) -> list[str]:
@@ -122,6 +137,23 @@ def validate_pass_obj(obj: object) -> list[str]:
             errors.append("twin.files_compared must be an int >= 1 (the vacuity guard)")
         if not isinstance(twin.get("byte_identical"), bool):
             errors.append("twin.byte_identical must be a bool")
+        if obj["verdict"] == VERDICT_PASS:
+            # A byte-identity PASS is self-inconsistent unless the manifests
+            # actually matched (a) and the lake-mutation safety rail actually
+            # produced a stable snapshot on BOTH arms (b) — otherwise a
+            # forged/bit-rotted PASS with byte_identical:false, or one whose
+            # snapshot rail silently no-op'd, would validate (MAJOR-1/MAJOR-2).
+            if twin.get("byte_identical") is not True:
+                errors.append("a PASS twin requires byte_identical == true (self-consistency)")
+            snap_off = twin.get("data_snapshot_hash_off")
+            snap_on = twin.get("data_snapshot_hash_on")
+            if not _is_nonempty_str(snap_off) or not _is_nonempty_str(snap_on):
+                errors.append(
+                    "a PASS twin requires a non-empty data_snapshot_hash on BOTH arms "
+                    "(the lake-mutation safety rail must not silently no-op)"
+                )
+            elif snap_off != snap_on:
+                errors.append("a PASS twin requires equal data_snapshot_hash on both arms")
     if has_diff:
         diff = obj["differential"]
         if not isinstance(diff.get("divergence_count"), int):
@@ -149,6 +181,25 @@ def validate_pass_obj(obj: object) -> list[str]:
     ambient = obj["ambient_flags"]
     if not isinstance(ambient, dict) or not ambient:
         errors.append("ambient_flags must be a non-empty object recording EVERY registry flag")
+    elif obj["verdict"] == VERDICT_PASS:
+        # The one-flag-at-a-time proof (§c): ambient_flags must be EXACTLY the
+        # registry flag set with EXACTLY ONE non-null value — the flag under
+        # test. A stacked/ambient second flag qualifies nothing.
+        registry_flags = _registry_flags()
+        if set(ambient) != registry_flags:
+            errors.append(
+                "a PASS ambient_flags must record EXACTLY the registry flag set "
+                f"(missing/extra: {sorted(set(ambient) ^ registry_flags)})"
+            )
+        non_null = {k for k, v in ambient.items() if v is not None}
+        if non_null != {obj["flag"]}:
+            errors.append(
+                "a PASS requires EXACTLY ONE non-null ambient flag equal to the flag under "
+                f"test (flag={obj['flag']!r}, non-null={sorted(non_null)})"
+            )
+    grid = obj.get("grid")
+    if not isinstance(grid, dict) or not grid:
+        errors.append("grid must be a non-empty object recording the RESOLVED grid dimensions")
     return errors
 
 
@@ -201,7 +252,7 @@ def assemble(
 ) -> dict[str, object]:
     """Fold the twin + drift fragments into the PASS.json object."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from flag_registry import DIFFERENTIAL, all_specs, spec_for
+    from flag_registry import DIFFERENTIAL, GRID_SCALES, all_specs, spec_for
 
     spec = spec_for(flag)
     twin_verdict = str(twin.get("verdict", VERDICT_FAIL))
@@ -243,6 +294,12 @@ def assemble(
     ambient: dict[str, object] = {s.flag: None for s in all_specs()}
     ambient[flag] = "1"  # the flag under test — the only non-null entry
 
+    scale = str(twin.get("scale", "default"))
+    # NIT-1 grid provenance: record the RESOLVED grid dimensions beside the
+    # scale NAME so an old evidence file is not ambiguous if GRID_SCALES is
+    # later edited (the settle_evidence measured-beside-transcripts posture).
+    resolved_grid: dict[str, object] = dict(GRID_SCALES.get(scale, {"scale": scale}))
+
     obj: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "flag": flag,
@@ -257,7 +314,8 @@ def assemble(
             "ncpu": os.cpu_count(),
         },
         "run_url": run_url,
-        "grid_scale": str(twin.get("scale", "default")),
+        "grid_scale": scale,
+        "grid": resolved_grid,
         "engagement": twin.get("engagement", {}),
         "soak": soak_block,
         "wall_clock": twin.get("wall_clock", {}),

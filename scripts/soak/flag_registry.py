@@ -221,6 +221,13 @@ class FlagSpec:
             raise ValueError(f"unknown flag_class {self.flag_class!r} for flag {self.flag!r}")
         if not self.flag.startswith("BRUTEX_") or self.flag != self.flag.upper():
             raise ValueError(f"flag {self.flag!r} must be an uppercase BRUTEX_* env var name")
+        # Naming-law belt (NIT-6): an EMPTY engaged/bad marker would make the
+        # engagement gate pass vacuously (grep -Ec of an empty regex matches
+        # every line — the FLIP_SOAK_EXTRA_FLAGS test seam could inject it).
+        if not self.engaged_marker:
+            raise ValueError(f"flag {self.flag!r} has an empty engaged_marker (naming-law belt)")
+        if not self.bad_markers:
+            raise ValueError(f"flag {self.flag!r} has an empty bad_markers (naming-law belt)")
 
 
 def _sweep_twin_spec(*, flag: str, surface_prefix: str, **overrides: object) -> FlagSpec:

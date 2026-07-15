@@ -180,6 +180,29 @@ class TestFlagRegistry:
                 twin_argv=("true",),
             )
 
+    def test_empty_engaged_or_bad_marker_refused(self, registry: ModuleType) -> None:
+        """NIT-6: an empty marker would make the engagement gate pass vacuously."""
+        with pytest.raises(ValueError, match="empty engaged_marker"):
+            registry.FlagSpec(
+                flag="BRUTEX_X",
+                flag_class=registry.SWEEP_TWIN,
+                surface_prefix="x",
+                engaged_marker="",
+                bad_markers=r"x\.(fallback)",
+                divergence_marker=r"x\.divergence",
+                twin_argv=("true",),
+            )
+        with pytest.raises(ValueError, match="empty bad_markers"):
+            registry.FlagSpec(
+                flag="BRUTEX_X",
+                flag_class=registry.SWEEP_TWIN,
+                surface_prefix="x",
+                engaged_marker=r"x\.engaged",
+                bad_markers="",
+                divergence_marker=r"x\.divergence",
+                twin_argv=("true",),
+            )
+
     def test_render_argv_substitutes_roots_and_scale(self, registry: ModuleType) -> None:
         spec = registry.spec_for("BRUTEX_SWEEP_RUST_ENUM")
         argv = registry.render_argv(spec, lake_root="/lake", results_root="/out", scale="smoke")
@@ -284,6 +307,8 @@ else:
 if snap:
     (root / "stamp.json").write_text(json.dumps({"data_snapshot_hash": snap}))
 print("arm", arm, "done")
+if os.environ.get("STUB_CRASH_ARM") == arm:
+    sys.exit(7)  # a crashing sweep — the MINOR-1 arm-error class
 """
 
 
@@ -322,16 +347,36 @@ def _run_flip_soak(
 
 class TestFlipSoakScript:
     def test_happy_twin_pass(self, tmp_path: Path) -> None:
-        result = _run_flip_soak(tmp_path, stub_env={"STUB_EMIT_ENGAGED": "1"})
+        result = _run_flip_soak(
+            tmp_path,
+            stub_env={
+                "STUB_EMIT_ENGAGED": "1",
+                "STUB_SNAPSHOT_OFF": "snap777",
+                "STUB_SNAPSHOT_ON": "snap777",
+            },
+        )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "FLIP-SOAK TWIN PASS" in result.stdout
         fragment = json.loads((tmp_path / "out" / "twin.json").read_text(encoding="utf-8"))
         assert fragment["verdict"] == "PASS"
         assert fragment["twin"]["byte_identical"] is True
         assert fragment["twin"]["files_compared"] == 1
+        assert fragment["twin"]["snapshot_present"] is True
         assert fragment["engagement"]["engaged_count"] >= 1
         assert fragment["engagement"]["bad_markers_found"] == 0
         assert fragment["wall_clock"]["off_s"] >= 0.0
+
+    def test_byte_identity_pass_requires_snapshots_on_both_arms(self, tmp_path: Path) -> None:
+        """MAJOR-2: an empty snapshot on one arm must NOT emit a byte-identity PASS."""
+        result = _run_flip_soak(
+            tmp_path,
+            stub_env={"STUB_EMIT_ENGAGED": "1", "STUB_SNAPSHOT_OFF": "only-off"},
+        )
+        assert result.returncode == 9, result.stdout + result.stderr
+        assert "snapshot_unavailable" in result.stdout
+        fragment = json.loads((tmp_path / "out" / "twin.json").read_text(encoding="utf-8"))
+        assert fragment["verdict"] == "FAIL"
+        assert fragment["twin"]["snapshot_present"] is False
 
     def test_masked_pass_refused_on_bad_marker(self, tmp_path: Path) -> None:
         """The #1479 masked-PASS class: fallback/autorevert = oracle-served."""
@@ -366,6 +411,32 @@ class TestFlipSoakScript:
         other = _run_flip_soak(tmp_path, stub_env={"BRUTEX_SWEEP_WORKER_KERNEL_CACHE": "1"})
         assert other.returncode == 2
         assert "one-flag-at-a-time" in other.stderr
+
+    def test_crashing_arm_reports_arm_error_exit_1(self, tmp_path: Path) -> None:
+        """MINOR-1: a sweep crash surfaces as the documented arm-error exit 1.
+
+        Not the child's raw exit code leaked through `set -e` + `pipefail`.
+        """
+        result = _run_flip_soak(
+            tmp_path, stub_env={"STUB_EMIT_ENGAGED": "1", "STUB_CRASH_ARM": "on"}
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "ON arm execution failed" in result.stderr
+
+    def test_off_arm_crash_reports_arm_error_exit_1(self, tmp_path: Path) -> None:
+        result = _run_flip_soak(tmp_path, stub_env={"STUB_CRASH_ARM": "off"})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "OFF arm execution failed" in result.stderr
+
+    def test_sub_minute_soak_refused_without_dry(self, tmp_path: Path) -> None:
+        """MINOR-2: the terminal one-liner path refuses --minutes < 1 (the plan-job law)."""
+        result = _run_flip_soak(
+            tmp_path,
+            stub_env={"STUB_EMIT_ENGAGED": "1"},
+            extra_args=("--skip-drift", "--minutes", "0"),
+        )
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "--minutes must be >= 1" in result.stderr
 
     def test_missing_lake_root_refused(self, tmp_path: Path) -> None:
         stub = tmp_path / "stub.py"
@@ -458,7 +529,11 @@ class TestFlipSoakScript:
         """Twin PASS + dry drift leg + emit_pass fold → schema-valid PASS."""
         result = _run_flip_soak(
             tmp_path,
-            stub_env={"STUB_EMIT_ENGAGED": "1"},
+            stub_env={
+                "STUB_EMIT_ENGAGED": "1",
+                "STUB_SNAPSHOT_OFF": "snap-x",
+                "STUB_SNAPSHOT_ON": "snap-x",
+            },
             extra_args=("--drift-dry", "--minutes", "0.01"),
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -471,12 +546,20 @@ class TestFlipSoakScript:
         assert obj["soak"]["mode"] == "dry"
         assert obj["soak"]["windows"] >= 1
         assert set(obj["ambient_flags"]) >= {"BRUTEX_SWEEP_RUST_ENUM"}
+        # NIT-1: the RESOLVED grid dimensions are recorded beside the scale name.
+        assert obj["grid_scale"] == "default"
+        assert isinstance(obj["grid"], dict) and obj["grid"]
 
 
 # ── 4. PASS.json schema (emit_pass.py) ───────────────────────────────
 
 
 def _valid_pass_obj(emit_pass: ModuleType) -> dict[str, object]:
+    registry = _load("flag_registry")
+    # The one-flag-at-a-time proof: EXACTLY the registry flag set with the DUT
+    # the only non-null value (§c of the validator).
+    ambient: dict[str, object] = {spec.flag: None for spec in registry.all_specs()}
+    ambient["BRUTEX_SWEEP_RUST_ENUM"] = "1"
     return {
         "schema_version": emit_pass.SCHEMA_VERSION,
         "flag": "BRUTEX_SWEEP_RUST_ENUM",
@@ -488,10 +571,11 @@ def _valid_pass_obj(emit_pass: ModuleType) -> dict[str, object]:
         "hardware": {"model": "arm64", "system": "Darwin", "ncpu": 14},
         "run_url": "terminal",
         "grid_scale": "default",
+        "grid": {"symbols": "NIFTY,BANKNIFTY", "k": "2,5", "top": "1000"},
         "engagement": {"engaged_count": 3, "bad_markers_found": 0},
         "soak": {"windows": 4, "hard_gate_breaches": 0},
         "wall_clock": {"off_s": 10.0, "on_s": 9.5, "ratio": 0.95},
-        "ambient_flags": {"BRUTEX_SWEEP_RUST_ENUM": "1"},
+        "ambient_flags": ambient,
         "twin": {
             "off_manifest_sha256": "a" * 64,
             "on_manifest_sha256": "a" * 64,
@@ -499,6 +583,7 @@ def _valid_pass_obj(emit_pass: ModuleType) -> dict[str, object]:
             "byte_identical": True,
             "data_snapshot_hash_off": "s1",
             "data_snapshot_hash_on": "s1",
+            "snapshot_present": True,
         },
     }
 
@@ -515,6 +600,65 @@ class TestPassSchema:
         obj = _valid_pass_obj(emit_pass)
         obj["hardware"] = {}
         assert any("hardware" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_twin_byte_identical_false_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(a): a self-inconsistent byte_identical:false PASS is refused."""
+        obj = _valid_pass_obj(emit_pass)
+        twin = obj["twin"]
+        assert isinstance(twin, dict)
+        twin["byte_identical"] = False
+        assert any("byte_identical == true" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_twin_empty_snapshot_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(b)/MAJOR-2: an empty snapshot on either arm invalidates a PASS."""
+        obj = _valid_pass_obj(emit_pass)
+        twin = obj["twin"]
+        assert isinstance(twin, dict)
+        twin["data_snapshot_hash_on"] = ""
+        assert any("non-empty data_snapshot_hash" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_twin_unequal_snapshot_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(b): non-equal snapshots must not validate as a PASS."""
+        obj = _valid_pass_obj(emit_pass)
+        twin = obj["twin"]
+        assert isinstance(twin, dict)
+        twin["data_snapshot_hash_off"] = "s1"
+        twin["data_snapshot_hash_on"] = "s2"
+        assert any("equal data_snapshot_hash" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_ambient_two_non_null_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(c): the one-flag-at-a-time proof — a second non-null flag is refused."""
+        obj = _valid_pass_obj(emit_pass)
+        ambient = obj["ambient_flags"]
+        assert isinstance(ambient, dict)
+        ambient["BRUTEX_SWEEP_WORKER_KERNEL_CACHE"] = "1"
+        assert any("EXACTLY ONE non-null" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_ambient_missing_dut_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(c): ambient_flags must record EXACTLY the registry flag set."""
+        obj = _valid_pass_obj(emit_pass)
+        ambient = obj["ambient_flags"]
+        assert isinstance(ambient, dict)
+        del ambient["BRUTEX_SWEEP_WORKER_KERNEL_CACHE"]  # drops a registry flag
+        assert any("EXACTLY the registry flag set" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_pass_ambient_wrong_dut_rejected(self, emit_pass: ModuleType) -> None:
+        """MAJOR-1(c): the single non-null flag must be the flag under test."""
+        obj = _valid_pass_obj(emit_pass)
+        ambient = obj["ambient_flags"]
+        assert isinstance(ambient, dict)
+        ambient["BRUTEX_SWEEP_RUST_ENUM"] = None
+        ambient["BRUTEX_SWEEP_WORKER_KERNEL_CACHE"] = "1"  # the wrong flag is on
+        assert any("EXACTLY ONE non-null" in e for e in emit_pass.validate_pass_obj(obj))
+
+    def test_grid_is_required(self, emit_pass: ModuleType) -> None:
+        """NIT-1: the resolved grid dimensions must be recorded."""
+        obj = _valid_pass_obj(emit_pass)
+        del obj["grid"]
+        assert any("grid" in e for e in emit_pass.validate_pass_obj(obj))
+        obj = _valid_pass_obj(emit_pass)
+        obj["grid"] = {}
+        assert any("grid" in e for e in emit_pass.validate_pass_obj(obj))
 
     def test_twin_xor_differential(self, emit_pass: ModuleType) -> None:
         obj = _valid_pass_obj(emit_pass)
