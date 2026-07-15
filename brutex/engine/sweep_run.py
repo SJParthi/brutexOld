@@ -486,7 +486,7 @@ class SweepRunConfig:
         ``HOLD`` is rejected by :func:`run_persisted_sweep`, not here, so the
         config stays a pure data holder).
     condition_bits
-        The condition bit positions (of the 60-condition vocabulary) to
+        The condition bit positions (of the declared condition vocabulary) to
         brute-force over; duplicates
         are ignored (set semantics) for both the enumeration and the ``k`` bound.
     k
@@ -606,7 +606,7 @@ class SweepRunConfig:
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
         if self.tf_minutes < 1:
             raise ValueError(f"SweepRunConfig.tf_minutes must be >= 1, got {self.tf_minutes}")
-        # Validate every condition bit is in the u64 vocabulary range AT CONFIG
+        # Validate every condition bit is in the u128 mask range AT CONFIG
         # TIME (DEC-SWEEP-DEDUP-LMDB-001): an out-of-range bit otherwise slips
         # past the k-bound check and fails LATE as a bare ValueError raised from
         # the lazy ``iter_masks_k_of_bits`` generator mid-enumeration, aborting

@@ -1,6 +1,6 @@
 """Cross-language Python ↔ Rust parity — the bit-identity contract anchor.
 
-The single source of truth for the 52-condition vocabulary + the pivot/Fib
+The single source of truth for the shared condition vocabulary + the pivot/Fib
 indicators is the Rust ``trading-core`` crate (``DEC-SHARED-CORE-001``,
 ``docs/MIGRATION.md`` #441). This test pins the two things that the golden
 suite did not directly cover before the Phase-2b post-merge hostile review:

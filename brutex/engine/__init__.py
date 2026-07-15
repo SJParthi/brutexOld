@@ -17,7 +17,7 @@ Currently exposes:
   bits 0..59 fit u64 today; the u128 mask law + the two-limb fallback are
   documented in ``combo_mask.py``) (Stage-2 supermask kernel facade)
 - ``stage1a`` — the Stage-1A bitset-matrix builder: drives the existing
-  60-condition :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
+  66-condition (62 active) :func:`brutex.vocabulary.evaluator.evaluate_atoms` across a
   ``(instrument, interval)`` bar feed to produce the per-bar ``bar_bits``
   matrix the supermask kernel consumes (DEC-ENGINE-DRIVER-001).
 - ``results_store`` — the deterministic sweep→Parquet results sink keyed by

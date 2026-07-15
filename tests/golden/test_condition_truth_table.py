@@ -1,7 +1,9 @@
 """Golden consumer test for the condition truth table.
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
-"52-condition truth table / per-condition determinism (G9)").
+"condition truth table / per-condition determinism (G9)"; the table now
+spans the 66-declared / 62-active layout — rows exist only for IMPLEMENTED
+bits).
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
 projection of the frozen ``input → u128`` oracle

@@ -79,7 +79,7 @@ class ClosedTrade:
         trade's entry / exit instant, or ``None`` when no VIX bar exists at that
         timestamp. India VIX is **REFERENCE ONLY** (CLAUDE.md §1/§3): it is
         stamped on every trade for downstream filter analysis but is **NEVER**
-        part of the brute-force pattern combinations or the 60-condition
+        part of the brute-force pattern combinations or the shared condition
         vocabulary (DEC-VIX-TRADE-STAMP-001). It is a volatility index level,
         **not money**, so it keeps full Decimal precision and is never routed
         through paisa rounding (CLAUDE.md §4). ``None`` is the no-hallucination

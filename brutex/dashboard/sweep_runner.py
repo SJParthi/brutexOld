@@ -339,7 +339,7 @@ def build_sweep_kwargs(
 
     A pure 1:1 mapping (the request is already validated). The non-swept knobs are
     pinned to the safe dashboard defaults: ``conditions=None`` (the full
-    60-condition vocabulary — ``default_condition_bits()``),
+    implemented condition vocabulary — ``default_condition_bits()``),
     ``options_sim=False`` (signal-only research — no option lake required),
     ``allow_missing_slices=True`` (a one-click sweep runs on WHATEVER is in the
     lake, skipping empty ``(symbol, interval)`` slices honestly rather than hard

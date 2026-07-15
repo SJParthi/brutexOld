@@ -11,7 +11,7 @@ via the SAME :class:`~brutex.engine.results_store.ResultsStore` the sweep wrote 
 source of truth — CLAUDE.md §11 COMMON; no re-implemented Parquet schema), ranks the
 rows to a top-N leaderboard, and projects each row into a display dict.
 
-READ-ONLY (CLAUDE.md §3): this NEVER touches the brute-force engine, the 52-condition
+READ-ONLY (CLAUDE.md §3): this NEVER touches the brute-force engine, the shared condition
 vocabulary, or the pull/rate path — it only displays results the operator already
 produced. The brute-force ENGINE stays NIFTY/BANKNIFTY/SENSEX; this changes no
 storage, scope, vocabulary, or rate.

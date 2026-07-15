@@ -56,8 +56,8 @@ def test_every_label_is_a_nonempty_pro_and_simple_pair() -> None:
         assert simple.strip(), name
 
 
-def test_group_order_partitions_all_60_names_exactly() -> None:
-    """The four sentence groups partition all 60 names exactly once.
+def test_group_order_partitions_every_declared_name_exactly() -> None:
+    """The four sentence groups partition all 66 declared names exactly once.
 
     A name not in any group would be silently dropped from the sentence; this
     proves every condition contributes to the composed sentence.

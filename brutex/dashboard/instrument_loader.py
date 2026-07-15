@@ -69,7 +69,7 @@ option-pullable (DEC-NON-OPTION-INDEX-REFTAG-001). The options-bearing indices
 BANKNIFTY / SENSEX) is always tradable, never tagged reference_only.
 
 HARD SCOPE GUARD (CLAUDE.md §3): NTM constituents are lake / REFERENCE_ONLY only
-— NEVER in the 52-condition vocabulary or the brute-force engine, which stays
+— NEVER in the shared condition vocabulary or the brute-force engine, which stays
 exactly NIFTY / BANKNIFTY / SENSEX (locked by
 DEC-ENGINE-ISOLATION-INVARIANT-001). On a network miss with no cache the load
 degrades HONESTLY to the F&O-eligible base set with a ``reason`` note (never a

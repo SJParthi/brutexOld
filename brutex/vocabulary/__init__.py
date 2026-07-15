@@ -20,7 +20,7 @@ Same code path, same bit semantics, bit-identical output.
 
 ## Modules
 
-- `bits` — bit-position constants for each of the 60 conditions
+- `bits` — bit-position constants for each of the 66 declared conditions (62 active)
 - `conflicts` — conflict pairs (pruned at strategy generation)
 - `evaluator` — `evaluate_atoms(snapshot, params) -> u128` per bar
 - `snapshot` — `IndicatorSnapshot` input dataclass

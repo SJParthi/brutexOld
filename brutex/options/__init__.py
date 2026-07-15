@@ -4,7 +4,7 @@
 
     **Scope:** This package is **TRACK 2 reference data**. Track 1 (the
     locked spot-index brute-force backtest per CLAUDE.md §3) does NOT
-    use options data in its 52-condition vocabulary or its 5-stage
+    use options data in its shared condition vocabulary or its 5-stage
     funnel. The package lives inside ``brutex/`` because the cost
     calculator (`brutex/costs/calculator.py`) needs lot-size + expiry
     lookups when Track 2 lands. The DEC-P0-040 requirements review

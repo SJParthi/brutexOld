@@ -1,4 +1,4 @@
-"""Property invariants for the 52-condition vocabulary bit/decode/structure layer.
+"""Property invariants for the shared condition vocabulary bit/decode/structure layer.
 
 Complements ``tests/property/test_conflict_pairs_exact.py`` (the Stage-1B
 exactness proof over real bars) with the *structural* algebra of the bit table,
@@ -94,8 +94,15 @@ class TestDescribePartition:
     @given(mask=_mask_strategy)
     @settings(max_examples=500)
     def test_every_grouped_name_is_in_its_family_range(self, mask: int) -> None:
+        # describe_mask renders DISPLAY names (a tombstoned bit reads
+        # "(retired)" — TOMB-01), so the family table is derived through the
+        # SAME rendering authority.
+        from brutex.vocabulary.describe import condition_display_name
+
         family_of = {
-            name: fam for fam, rng in GROUP_RANGES for name in (BIT_TO_NAME[b] for b in rng)
+            name: fam
+            for fam, rng in GROUP_RANGES
+            for name in (condition_display_name(b) for b in rng)
         }
         for grp in describe_mask(mask):
             for name in grp.conditions:

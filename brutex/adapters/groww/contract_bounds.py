@@ -63,7 +63,7 @@ Scope (CLAUDE.md §3)
 --------------------
 Option/future contract bars are **LAKE / REFERENCE_ONLY** (DEC-P0-063) — this
 module bounds their reference-only ingest and NEVER touches the brute-force engine
-or the 52-condition vocabulary. It lives in the adapter/data layer; wiring the
+or the shared condition vocabulary. It lives in the adapter/data layer; wiring the
 derived windows into the production derivative-pull driver is owned by the in-flight
 derivatives PR (this module is the adapter-layer building block it consumes).
 """

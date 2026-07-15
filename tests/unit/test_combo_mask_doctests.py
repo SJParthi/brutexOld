@@ -1,8 +1,8 @@
 """Doctest teeth for ``brutex.engine.combo_mask`` (DEC-CORP-ACTION-GATE-001 fold).
 
 The 2026-07-03 audit found the module's ``count_combos`` doctests still
-answered with the 52-condition vocabulary (52 / 1326 / 22100) after
-DEC-VOCAB-U128-CODEGEN-001 grew it to 60 — and NOTHING ran them, so the drift
+answered with the historical 52-condition vocabulary (52 / 1326 / 22100)
+after DEC-VOCAB-U128-CODEGEN-001 grew the layout — and NOTHING ran them, so the drift
 was invisible. This runs doctest over the WHOLE module so any future example
 drift (a vocab-size change, a renamed helper, a stale sample value) fails CI
 instead of rotting silently.

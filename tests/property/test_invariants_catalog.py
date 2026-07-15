@@ -254,7 +254,7 @@ def test_p_20_replay_byte_equals_original() -> None:
 
 def test_p_25_no_vix_leak_in_vocabulary() -> None:
     """P-25: India-VIX (REFERENCE-ONLY, CLAUDE.md §2 Rule 3) never appears
-    in the 52-condition vocabulary, so it cannot leak into a pattern mask."""
+    in the shared condition vocabulary, so it cannot leak into a pattern mask."""
     pytest.skip("implemented in tests/property/test_phase2_invariants_promoted.py")
 
 

@@ -6,7 +6,7 @@ to the vocabulary decoder (``brutex.vocabulary.describe_mask``) so every leaderb
 row carries the EXACT conditions that fired, grouped by indicator family — and
 renders them as readable text a CLI or dashboard can print directly.
 
-Pure + O(1) per combo (a bounded decode of the 60-bit mask); no I/O.
+Pure + O(1) per combo (a bounded decode of the u128 strategy mask); no I/O.
 """
 
 from __future__ import annotations

@@ -201,7 +201,7 @@ def evaluate_combo(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     required_mask
-        The strategy mask (which of the 60 conditions must fire). ``0`` enters
+        The strategy mask (which vocabulary conditions must fire). ``0`` enters
         on every bar.
     direction
         :data:`~brutex.strategies.types.Side.BUY` (long) or ``Side.SELL`` (short).
@@ -751,7 +751,7 @@ def rank_sweep_over_bits(
     bars
         Chronologically ordered bars for one ``(instrument, interval)`` (non-empty).
     condition_bits
-        The condition bit positions (of the 60-condition vocabulary) to
+        The condition bit positions (of the declared condition vocabulary) to
         brute-force over, each in ``[0, 64)``. Duplicates are ignored.
     k
         How many of the chosen conditions each combo requires (``0 <= k <= n``,
