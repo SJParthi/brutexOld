@@ -27,6 +27,7 @@ from brutex.metrics.cascade import (
     _zscore_clamped,
     run_stage4_cascade,
 )
+from brutex.metrics.deflated_sharpe import deflated_sharpe_ratio
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
     LOCKBOX_DEFAULT_WINDOW_DAYS,
@@ -925,3 +926,86 @@ class TestCpcvRateCapture:
 
         v = CandidateVerdict(candidate_id="x", passed=False, rejected_at=None, detail="d")
         assert v.cpcv_pass_rate is None
+# ── DEC-RESULTS-TRUST-HONESTY-001 (audit BLOCKER 5): the corrected DSR is
+# RETAINED on every verdict whose filter-#2 evaluation succeeded — pass AND
+# reject alike — instead of being discarded on the pass path. ──────────────
+
+
+def _independent_dsr(c: CandidateInput, cfg: CascadeConfig, pool: list[CandidateInput]) -> float:
+    """The test-side oracle: recompute filter #2's exact pool-fallback DSR."""
+    pool_sharpes = [p.sharpe_ratio for p in pool]
+    trial_var = statistics.pvariance(pool_sharpes) if len(pool_sharpes) >= 2 else 0.0
+    return deflated_sharpe_ratio(
+        c.sharpe_ratio,
+        n_trials=len(pool),
+        trial_sharpe_variance=trial_var,
+        sample_length=max(c.total_trades, 2),
+        skew=c.skew,
+        kurtosis=c.kurtosis,
+    ).deflated_sharpe_ratio
+
+
+def test_dsr_corrected_retained_on_pass_and_threshold_reject() -> None:
+    """A PASS verdict carries the evaluated DSR (previously discarded) and a
+    filter-#2 threshold reject carries the same figure — bit-identical to an
+    independent recompute of the exact deflation inputs (full precision).
+    """
+    cfg = _pass_config()
+    pool = [_candidate("a", seed=1), _candidate("b", seed=2, sharpe_ratio=1.9)]
+    rep = run_stage4_cascade(pool, cfg)
+    by_id = {v.candidate_id: v for v in rep.verdicts}
+    assert by_id["a"].passed is True
+    assert by_id["a"].dsr_corrected == _independent_dsr(pool[0], cfg, pool)
+    # Threshold reject: an impossible dsr_min rejects at filter #2 while the
+    # evaluated figure still rides the verdict.
+    strict = _pass_config(dsr_min=1.01)
+    rep2 = run_stage4_cascade(pool, strict)
+    for cand, verdict in zip(pool, rep2.verdicts, strict=True):
+        assert verdict.rejected_at is FilterStage.DEFLATED_SHARPE
+        assert verdict.dsr_corrected == _independent_dsr(cand, strict, pool)
+
+
+def test_dsr_corrected_none_when_never_evaluated() -> None:
+    """A hard-gate reject never reaches filter #2 → honest ``None`` (never a
+    fabricated 0), and a filter-#2 evaluation ERROR (non-finite skew) also
+    reads ``None`` — the figure exists only when genuinely computed.
+    """
+    cfg = _pass_config()
+    rep = run_stage4_cascade([_candidate("x", seed=1, total_trades=10)], cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.HARD_GATES
+    assert v.dsr_corrected is None
+
+
+def test_dsr_corrected_survives_onto_later_stage_rejects() -> None:
+    """A candidate rejected at a LATER stage (CPCV here) keeps its filter-#2
+    figure — the retained value is per-candidate, not pass-only.
+    """
+    cfg = _pass_config(cpcv_min_pass_rate=1.01)
+    pool = [_candidate("x", seed=1)]
+    rep = run_stage4_cascade(pool, cfg)
+    (v,) = rep.verdicts
+    assert v.rejected_at is FilterStage.CPCV
+    assert v.dsr_corrected == _independent_dsr(pool[0], cfg, pool)
+
+
+def test_dsr_corrected_uses_leaderboard_stats_when_supplied() -> None:
+    """With frozen leaderboard trial stats the retained figure is the
+    corrected search-N deflation (dsr_n_source="leaderboard"), matching an
+    independent recompute against the supplied N/V.
+    """
+    cfg = _pass_config()
+    pool = [_candidate("a", seed=1)]
+    stats = DsrTrialStats(n_trials=50_000, sharpe_variance=0.25, n_finite=50_000)
+    rep = run_stage4_cascade(pool, cfg, trial_stats=stats)
+    assert rep.dsr_n_source == "leaderboard"
+    (v,) = rep.verdicts
+    expected = deflated_sharpe_ratio(
+        pool[0].sharpe_ratio,
+        n_trials=stats.n_trials,
+        trial_sharpe_variance=stats.sharpe_variance,
+        sample_length=max(pool[0].total_trades, 2),
+        skew=pool[0].skew,
+        kurtosis=pool[0].kurtosis,
+    ).deflated_sharpe_ratio
+    assert v.dsr_corrected == expected

@@ -133,3 +133,74 @@ def test_b2_gate_on_vs_off_whole_sweep_ratio(tmp_path: Path) -> None:
     off_t = _best_of(3, lambda: _sweep("off", None))
     on_t = _best_of(3, lambda: _sweep("on", GOLDEN_TEMPORAL))
     assert on_t / off_t <= ratio_ceiling(3.0), (off_t, on_t)
+
+
+def _display_row(seed: int) -> object:
+    """A minimal temporal-columned ResultRow for the B4 drill bench."""
+    from decimal import Decimal
+
+    from brutex.engine.period_stats import encode_judged_years, encode_period_stats
+    from brutex.engine.results_store import ResultRow
+
+    return ResultRow(
+        run_id=f"{seed:064x}",
+        instrument="NIFTY",
+        tf="5m",
+        direction="bull",
+        mode="A",
+        mask_bits=1,
+        net_pnl_paisa=300,
+        gross_profit_paisa=500,
+        gross_loss_paisa=200,
+        max_drawdown_paisa=300,
+        expectancy_paisa=100,
+        total_trades=3,
+        winning_trades=1,
+        losing_trades=2,
+        sharpe_ratio=1.0,
+        sortino_ratio=1.2,
+        calmar_ratio=0.9,
+        profit_factor=2.5,
+        win_rate=0.33,
+        max_drawdown_pct=0.05,
+        avg_entry_price=Decimal("100.00"),
+        avg_exit_price=Decimal("101.00"),
+        stats_by_year_json=encode_period_stats({"2021": (3, 300, 1, 300)}),
+        stats_by_quarter_json=encode_period_stats(
+            {"2021Q1": (2, 500, 1, 100), "2021Q3": (1, -200, 0, 200)}
+        ),
+        stats_by_month_json=encode_period_stats(
+            {"2021-01": (2, 500, 1, 100), "2021-07": (1, -200, 0, 200)}
+        ),
+        temporal_judged_years_json=encode_judged_years([2021]),
+    )
+
+
+def test_b4_stored_drill_is_flat_vs_store_row_count() -> None:
+    """B4 — one quarter/month drill click is FLAT vs store row count.
+
+    The endpoint's per-click work (after the per-revision scan/index cache) is
+    ONE dict lookup + ONE row's decode — independent of how many finalist rows
+    the store holds. Benched at 200 vs 2,000 indexed rows (10×); the
+    per-revision index BUILD is deliberately OUTSIDE the timed region (paid
+    once per revision — the disclosed envelope, never per click).
+    Measured 2026-07-09 (sandbox): small ≈ 15.6 µs, big ≈ 15.5 µs — ratio ≈ 0.99.
+    """
+    from brutex.dashboard.sweep_temporal_view import stored_horizon_payload
+
+    small_index = {row.run_id: row for row in (_display_row(s) for s in range(200))}  # type: ignore[attr-defined]
+    big_index = {row.run_id: row for row in (_display_row(s) for s in range(2_000))}  # type: ignore[attr-defined]
+    target = f"{150:064x}"
+
+    def _click(index: dict[str, object]) -> None:
+        for horizon in ("quarter", "month"):
+            payload = stored_horizon_payload(
+                index.get(target),  # type: ignore[arg-type]
+                run_id=target,
+                horizon=horizon,
+            )
+            assert payload["status"] == "ok"
+
+    small_t = _best_of(7, lambda: _click(small_index))
+    big_t = _best_of(7, lambda: _click(big_index))
+    assert big_t / small_t <= ratio_ceiling(3.0), (small_t, big_t)

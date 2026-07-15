@@ -58,6 +58,7 @@ def _row(
     tf: str = "5m",
     direction: str = "bull",
     sharpe: float = 1.0,
+    total_trades: int = 10,
 ) -> ResultRow:
     return ResultRow(
         run_id=f"{seed:064x}",
@@ -71,7 +72,7 @@ def _row(
         gross_loss_paisa=100_00,
         max_drawdown_paisa=50_00,
         expectancy_paisa=10_00,
-        total_trades=10,
+        total_trades=total_trades,
         winning_trades=6,
         losing_trades=4,
         sharpe_ratio=sharpe,
@@ -516,3 +517,65 @@ class TestLeaderboardCascadeJoin:
         ).write_parquet(sibling / "bull_k1_bbbbbbbbbbbbbbbb.aggs.parquet")
         assert client.get("/api/v1/sweep/leaderboard").json()["composite_join"]["scored_rows"] == 2
         assert calls["n"] == 2
+class TestServeFilterParams:
+    """DEC-RESULTS-TRUST-HONESTY-001 · B2a — the serving-side floor params."""
+
+    def test_min_trades_floor_reaches_the_reader(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1, total_trades=10), _row(2, total_trades=60)])
+        payload = client.get("/api/v1/sweep/leaderboard?min_trades=30").json()
+        assert [r["total_trades"] for r in payload["rows"]] == [60]
+        assert payload["total_rows"] == 1
+
+    def test_blank_filters_are_byte_identical_to_absent(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """Blank params = inactive = the EXACT legacy payload (the pinned arm)."""
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1), _row(2)])
+        legacy = client.get("/api/v1/sweep/leaderboard").json()
+        blank = client.get(
+            "/api/v1/sweep/leaderboard?min_trades=&min_pf=&min_dsr=&max_abs_dd_pct="
+        ).json()
+        assert blank == legacy
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "min_trades=abc",
+            "min_trades=-1",
+            "min_trades=30.5",
+            "min_pf=junk",
+            "min_pf=-0.1",
+            "min_dsr=nan",
+            "max_abs_dd_pct=inf",
+        ],
+    )
+    def test_junk_filter_values_are_a_clean_400(self, client: TestClient, query: str) -> None:
+        resp = client.get(f"/api/v1/sweep/leaderboard?{query}")
+        assert resp.status_code == 400
+        # The refusal names the offending parameter (the preset refusal law).
+        assert query.split("=", maxsplit=1)[0] in resp.json()["detail"]
+
+    def test_min_dsr_excludes_undemonstrable_rows(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        """The fixture rows persist NO deflated_sharpe — an active min_dsr
+        floor excludes them (fail-closed on the operator's explicit request);
+        the unfiltered view still serves every row."""
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        assert client.get("/api/v1/sweep/leaderboard").json()["total_rows"] == 1
+        assert client.get("/api/v1/sweep/leaderboard?min_dsr=0").json()["total_rows"] == 0
+
+    def test_hard_gates_recheck_marks_never_drops(
+        self, client: TestClient, store: InstrumentStore
+    ) -> None:
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1, total_trades=10), _row(2, total_trades=60)])
+        payload = client.get("/api/v1/sweep/leaderboard").json()
+        by_trades = {r["total_trades"]: r["hard_gates_recheck"] for r in payload["rows"]}
+        assert by_trades == {10: "marked", 60: "ok"}
+        assert payload["total_rows"] == 2

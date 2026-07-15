@@ -39,6 +39,8 @@ from tests.fakes.leaderboard_preset_fixtures import (
 )
 
 #: The exact pre-preset payload key set (the byte-identical absent-arm pin).
+#: DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (graft 9) consciously extended it with the
+#: two always-present additive envelope keys.
 _LEGACY_PAYLOAD_KEYS = {
     "available",
     "total_rows",
@@ -52,6 +54,8 @@ _LEGACY_PAYLOAD_KEYS = {
     "mixed_snapshot_eras",
     "run_id_conflicts",
     "rows",
+    "temporal_coverage",
+    "cascade_report",
 }
 
 

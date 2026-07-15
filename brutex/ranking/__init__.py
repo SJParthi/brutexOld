@@ -323,6 +323,56 @@ def gate_reasons(m: ResultMetrics) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+#: The :func:`persisted_hard_gates_recheck` wire verdicts — the serve-time
+#: belt's two-state vocabulary (DEC-RESULTS-TRUST-HONESTY-001): ``"ok"`` = no
+#: reconstructible door failed; ``"marked"`` = at least one did (the row is
+#: MARKED, never dropped — the ``snapshot_era`` pattern).
+HARD_GATES_RECHECK_OK: Final[str] = "ok"
+HARD_GATES_RECHECK_MARKED: Final[str] = "marked"
+
+
+def persisted_hard_gates_recheck(
+    *,
+    total_trades: int,
+    profit_factor: float | None,
+    max_drawdown_pct: float,
+    win_rate: float,
+) -> str:
+    """Serve-time hard-gate RE-CHECK over the fields a stored ``ResultRow`` persists.
+
+    DEC-RESULTS-TRUST-HONESTY-001 (the /results belt for legacy / non-gated
+    stores): re-judges the reconstructible hard doors from the persisted
+    scalars — the fail-closed non-finite guard (over the three persisted float
+    inputs), door 1 (``total_trades < MIN_TRADES``), door 2 (``profit_factor``
+    ``None``/``< 1.2``) and door 3 (``max_drawdown_pct > 30``) — reading the
+    SAME threshold constants as :func:`passes_gates` (CLAUDE.md §11 COMMON;
+    homed beside the predicate so a threshold change moves both at once).
+
+    Returns :data:`HARD_GATES_RECHECK_MARKED` when any judged door fails, else
+    :data:`HARD_GATES_RECHECK_OK`. The consumer MARKS, never drops (Golden
+    Rule #1 — a legacy row is surfaced with its verdict, not hidden).
+
+    HONEST envelope (Golden Rule #10): a PARTIAL recheck, one-way by
+    construction — doors 4 (win-rate × win/loss-ratio) and 5 (consecutive
+    losses) need ``win_loss_ratio`` / ``max_consecutive_losses``, which a
+    ``ResultRow`` does NOT persist, so they are NOT judged (fabricating
+    neutral fills would fake door verdicts). Therefore ``"marked"`` implies
+    the full :func:`passes_gates` would also reject (property-pinned), while
+    ``"ok"`` is necessary-not-sufficient — never presented as a full-gate
+    pass. ``win_rate`` participates only in the fail-closed non-finite guard
+    (its door needs the unpersisted ratio).
+    """
+    if any(_non_finite_gate_input(value) for value in (profit_factor, max_drawdown_pct, win_rate)):
+        return HARD_GATES_RECHECK_MARKED
+    if total_trades < MIN_TRADES:
+        return HARD_GATES_RECHECK_MARKED
+    if profit_factor is None or profit_factor < _MIN_PROFIT_FACTOR:
+        return HARD_GATES_RECHECK_MARKED
+    if max_drawdown_pct > _MAX_DRAWDOWN_PCT:
+        return HARD_GATES_RECHECK_MARKED
+    return HARD_GATES_RECHECK_OK
+
+
 def _f(value: float | None) -> float:
     """A ``None`` composite term contributes 0 (survivors have real metrics)."""
     return value if value is not None else 0.0
@@ -759,6 +809,8 @@ __all__ = [
     "GATE_PROFIT_FACTOR",
     "GATE_REASON_ORDER",
     "GATE_WIN_RATE_WLR",
+    "HARD_GATES_RECHECK_MARKED",
+    "HARD_GATES_RECHECK_OK",
     "MIN_TRADES",
     "N_COMPOSITE_TERMS",
     "OverfitGateConfig",
@@ -771,5 +823,6 @@ __all__ = [
     "gate_reasons",
     "overfit_gate_positions",
     "passes_gates",
+    "persisted_hard_gates_recheck",
     "rank_combos",
 ]

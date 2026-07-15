@@ -286,7 +286,9 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     DEC-LEDGER-DELTA-O-PAGE-001: the composite is the :func:`sweeps_revision`
     directory-mtime digest PLUS the audit chain's ``(mtime_ns:size)`` stat
     token (``<sweeps>/audit/sweep-all.jsonl`` — :data:`_SWEEP_AUDIT_RELPATH`,
-    test-pinned to ``sweep_results_view._AUDIT_RELPATH``).
+    test-pinned to ``sweep_results_view._AUDIT_RELPATH``) PLUS — since
+    DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 — the cascade report's
+    ``(mtime_ns:size)`` stat token (:data:`_CASCADE_REPORT_RELPATH`).
     :func:`sweeps_revision` alone digests DIRECTORY mtimes, and an append to
     the audit chain (a ``SWEEP_START`` — the era / mixed-era honesty source
     the leaderboard scan reads) moves NO directory mtime, so the file stat
@@ -295,7 +297,7 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     ``brutex sweep-all``) is a tempfile + ``os.replace`` into ``<tf>/``, and a
     store delete moves its parent dir.
 
-    Cost + envelope: one O(dirs) scandir digest plus ONE ``os.stat`` — paid per
+    Cost + envelope: one O(dirs) scandir digest plus TWO ``os.stat`` — paid per
     poll (honest, never claimed O(1)-total). An absent chain contributes the
     stable :data:`ABSENT_TOKEN` (its first-ever creation moves the composite
     exactly once). ``None`` = "unknown, no signal" (either probe failed with a
@@ -312,7 +314,21 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     )
     if chain is None:
         return None
-    return f"{dirs}|{chain}"
+    # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the cascade report's own file stat
+    # rides as a THIRD component — the /results cascade-verdict join reads
+    # ``<sweeps>/cascade/cascade-report.json`` per revision, and a report
+    # rewrite (``write_report``) moves only its PARENT dir's mtime, which
+    # ``sweeps_revision`` digests already — but the belt makes join
+    # correctness independent of writer rename discipline (the audit-chain
+    # stat precedent above). An absent report contributes the stable
+    # :data:`ABSENT_TOKEN`; cost is one extra ``os.stat`` per poll (stated).
+    report = _stat_token(
+        lake_root.joinpath(_SWEEPS_DIRNAME, *_CASCADE_REPORT_RELPATH),
+        event="lake_revision.cascade_report_stat_failed",
+    )
+    if report is None:
+        return None
+    return f"{dirs}|{chain}|{report}"
 
 
 def cascade_report_revision(lake_root: Path) -> str | None:

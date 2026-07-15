@@ -2542,6 +2542,16 @@ jobs:
             pytest --cov=brutex.engine.sweep_run_core --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_sweep_run_core.py
           else
             echo "(brutex.engine.sweep_run_core test file not present yet — gate inactive)"
+          # DEC-SWEEP-TEMPORAL-ROBUSTNESS-001: the pure /results temporal-drill
+          # serve logic — run_id validation (hostile values disk-free 400),
+          # stored quarter/month payloads + the derived half-year roll-up, the
+          # sweep_runs invalidation token, the sidecar index over real
+          # writer-produced stamps, and the day/week IST/ISO-week fold. 100%
+          # line+branch on sweep_temporal_view.py.
+          if compgen -G "tests/unit/test_sweep_temporal_view.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.sweep_temporal_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sweep_temporal_view.py
+          else
+            echo "(brutex.dashboard.sweep_temporal_view test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-RESULTS-DEPTH-001 (WP1-WP6): every NEW results-depth
           # engine module ships at 100% line+branch from its OWN dedicated

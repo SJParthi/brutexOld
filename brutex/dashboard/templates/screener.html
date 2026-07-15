@@ -138,6 +138,10 @@
       <input id="scMinWin" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMinPf">Min PF</label>
       <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+    <div class="ctl"><label for="scMinTrades">Min trades</label>
+      <input id="scMinTrades" type="number" step="1" placeholder="any"></div>
+    <div class="ctl"><label for="scMinDsr" title="floors the stored per-tuple DSR (tuple-N — an inflating under-count; DEC-RESULTS-TRUST-HONESTY-001)">Min DSR (tuple-N)</label>
+      <input id="scMinDsr" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
       <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
     <div class="ctl"><label for="scVixLo">VIX band ≥</label>
@@ -248,6 +252,10 @@
     if (minWin !== null) { filters.min_win_rate = minWin; }
     var minPf = num('scMinPf');
     if (minPf !== null) { filters.min_pf = minPf; }
+    var minTrades = num('scMinTrades');
+    if (minTrades !== null) { filters.min_trades = minTrades; }
+    var minDsr = num('scMinDsr');
+    if (minDsr !== null) { filters.min_dsr = minDsr; }
     var maxDd = num('scMaxDd');
     if (maxDd !== null) { filters.max_abs_dd_paisa = maxDd; }
     var lo = num('scVixLo');
@@ -409,7 +417,8 @@
       clearTimeout(renderDebounceTimer);
       renderDebounceTimer = setTimeout(render, 200);
     }
-    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+    ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMinTrades',
+     'scMinDsr', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
       byId(id).addEventListener('input', renderDebounced);
     });
     byId('scShowAll').addEventListener('click', function () {
