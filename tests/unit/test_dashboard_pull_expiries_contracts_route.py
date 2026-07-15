@@ -310,15 +310,16 @@ def test_universe_page_metadata_route_driven_by_pipeline(client: TestClient) -> 
 
     The route ``/api/v1/universe/pull-expiries-contracts`` itself still exists (this
     file's route tests cover it); it is simply no longer surfaced as its own button.
-    The ONE selection-aware ``pullPipelineBtn`` runs the gated chain that includes it.
+    Since the round-6 two-button split (DEC-PULL-SCOPED-ALL-ONECLICK-001) the
+    selection-aware ``pullFnoBtn`` runs the gated chain that includes it.
     """
     resp = client.get("/universe")
     assert resp.status_code == 200
     # the redundant per-stage metadata button is gone (no null .onclick at load)
     assert 'id="pullDerivBtn"' not in resp.text
     assert 'getElementById("pullDerivBtn")' not in resp.text
-    # the ONE pull button drives the gated pipeline (which includes the metadata stage)
-    assert 'id="pullPipelineBtn"' in resp.text
+    # the ▶ Pull F&O button drives the gated pipeline (which includes the metadata stage)
+    assert 'id="pullFnoBtn"' in resp.text
     assert "/api/v1/universe/pull-pipeline" in resp.text
 
 

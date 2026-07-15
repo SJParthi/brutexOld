@@ -81,7 +81,11 @@ class TestScopeReportMessages:
         # The launch pair is operator-typed → repr-quoted (round-8 finding 2).
         assert "'NSE'/'INDEX'" in message
         assert "CLAUDE.md §2 Rule 3" in message
-        assert "ADR-0012" in message
+        # DEC-ENGINE-SPOT-ONLY-001: the boilerplate names the spot-only law
+        # (the pre-flip "plus the NIFTY-futures series alias (ADR-0012)"
+        # admit clause is GONE — the alias is named only as RETIRED).
+        assert "DEC-ENGINE-SPOT-ONLY-001" in message
+        assert "spot-only" in message
         assert "--allow-out-of-scope" in message
 
     def test_override_warning_names_the_symbols_and_the_audit_stamp(self) -> None:

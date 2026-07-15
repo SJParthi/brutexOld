@@ -1819,6 +1819,44 @@ jobs:
           else
             echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
           fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): the pull-scope
+          # registry + spot-only no-op F&O reports + note surgery + the fail-soft
+          # crossverify tail fence, and the CLI --auto gate (settle constant +
+          # Muhurat deferral + composed mid-run belt). Both ship at 100%
+          # line+branch standalone from the start.
+          if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+          else
+            echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+          else
+            echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold: the self-arming
+          # post-market auto-pull scheduler (durable armed state + daemon
+          # ticker + the once-per-day fire law). 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+          else
+            echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
+          fi
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
+          # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
+          # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_settle_evidence.py" > /dev/null; then
+            pytest --cov=brutex.calendars.settle_evidence --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_settle_evidence.py
+          else
+            echo "(brutex.calendars.settle_evidence test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_sidecar_read.py" > /dev/null; then
+            pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
+          else
+            echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
@@ -2387,6 +2425,25 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
           fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
           # unkillable-run-core modules ship at 100% line+branch STANDALONE —
           # observability core (flight recorder / manifest / stamps / bundle /
@@ -2816,16 +2873,25 @@ jobs:
         run: |
           git fetch --no-tags origin "${BASE_REF}"
           python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
-      - name: Install deps (dev + data — the lake benches need polars/duckdb)
+      - name: Install deps (dev + data + ui — the lake AND route benches need them)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
         # gates (test_parquet_write_o1.py, test_db_candle_query_o1.py,
         # test_catalog_reconcile_o1.py, test_write_latency.py, …) NEVER ran in
         # CI, so a linear-scan regression on those hot paths could not fail
-        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute; the
+        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute.
+        # DEC-O1-GUARANTEE-HARDEN-001 review round 1 (the same finding class,
+        # one extra over): `[ui]` (fastapi) makes the SIX route-level bench
+        # gates execute too (test_db_tables_swr_o1 / test_preopen_export_memo_o1
+        # / test_revision_probe_ttl_o1 / test_lake_census_route_o1 /
+        # test_ledger_delta_o_page_o1 / test_movers_pcr_o1 — all previously
+        # collected-then-SKIPPED on this job via importorskip("fastapi")); the
         # fno_math/trading_core wheels the remaining skips need are built by
-        # the steps below, so no bench silently skips for a missing extra.
-        run: pip install -e ".[dev,data]"
+        # the steps below, so no bench silently skips for a missing extra
+        # (verified locally: the full tests/bench dir with ui deps = 371
+        # passed / 11 skipped, every remaining skip the documented
+        # BRUTEX_M4PRO_ABS class; the 6 route files ran 3× stable ~30 s).
+        run: pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable

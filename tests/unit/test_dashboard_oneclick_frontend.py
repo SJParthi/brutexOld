@@ -205,7 +205,9 @@ class TestOneclickWidgetLayer:
         js = _js(_ONECLICK)
         assert "JSON.stringify(rec.payload)" in js
         # The line lands in the DOM via BXUI.el(..., text) => textContent.
-        assert 'window.BXUI.el("div", "oc-event-line", bxEventLineText(rows[i]))' in js
+        # (`visible[i]` since DEC-O1-GUARANTEE-HARDEN-001 — the render walks
+        # the newest-500 capped window; the ONE-text-node law is unchanged.)
+        assert 'window.BXUI.el("div", "oc-event-line", bxEventLineText(visible[i]))' in js
 
     def test_funnel_precedence_law_manifest_only_when_idle(self) -> None:
         """C-M2: the live poller wins while a sweep runs."""

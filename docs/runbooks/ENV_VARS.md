@@ -152,7 +152,7 @@ Set by `.claude/settings.json` in every Claude Code session.
 
 ---
 
-## 8. Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001 / DEC-CROSSVERIFY-S3-WRITE-POSTURE-001)
+## 8. Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001 / DEC-CROSSVERIFY-S3-WRITE-POSTURE-001; scope amended SPOT-ONLY whole-spot-universe by DEC-CROSSVERIFY-SPOT-ONLY-001, MIGRATION.md #1788)
 
 All parsed FAIL-LOUD once at run start by
 `brutex.crossverify.config.resolve_crossverify_config` — a set-but-junk
@@ -171,9 +171,9 @@ the default).
 | `BRUTEX_CROSSVERIFY_LOCK_WAIT_S` | `2700.0` | finite float >= 0 — the bounded pull-lock wait budget (45 min) | `brutex.crossverify.config` |
 | `BRUTEX_CROSSVERIFY_LOCK_RETRY_S` | `60.0` | finite float >= 0.1 — the lock re-attempt cadence | `brutex.crossverify.config` |
 | `BRUTEX_CROSSVERIFY_DEADLINE_S` | `14400.0` | finite float >= 1 — the 4 h hard wall (breach = `suspect`, exit 2) | `brutex.crossverify.config` |
-| `BRUTEX_CROSSVERIFY_SETTLE_RETRY_ROUNDS` | `1` | int >= 0 — bounded settle-retry rounds for short/settling files | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_SETTLE_RETRY_ROUNDS` | `1` | int >= 0 — bounded settle-retry rounds for short/incomplete INDEX files (spot-only since #1788) | `brutex.crossverify.config` |
 | `BRUTEX_CROSSVERIFY_SETTLE_RETRY_DELAY_S` | `600.0` | finite float >= 0 — the per-round settle sleep | `brutex.crossverify.config` |
-| `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` | `5` | int >= 0 — prior-day pending-journal recovery-scan lookback | `brutex.crossverify.config` |
+| `BRUTEX_CROSSVERIFY_CATCHUP_DAYS` | `5` | int >= 0 — prior-day catchup lookback: the pending-journal recovery scan AND the withheld-day auto-re-gate scan (DEC-CROSSVERIFY-WITHHELD-REGATE-001) share this ONE window | `brutex.crossverify.config` |
 
 **Setup runbook:** see `docs/runbooks/crossverify-producer.md` (IAM grant,
 `pip install -e ".[crossverify]"`, the probe-decided `--at`, install +
@@ -207,5 +207,5 @@ typos).
 * DEC-PORTS-001 — port config layout
 * DEC-DHAN-GROWW-REMIGRATE-001 (ADR-0009) — live vendor contract
 * DEC-AWS-ONLY-CREDS-001 (MIGRATION #1065) — §5 AWS-SSM-only credential contract
-* DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION #1776) + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) — §8 `BRUTEX_CROSSVERIFY_*` surface
+* DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION #1776) + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 (#1777) + DEC-CROSSVERIFY-SPOT-ONLY-001 (#1788, spot-only scope) — §8 `BRUTEX_CROSSVERIFY_*` surface
 * DEC-VENDOR-PIVOT-001 — prior broker wipe (historical; superseded by the current vendor)

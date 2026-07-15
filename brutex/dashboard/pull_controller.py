@@ -1804,11 +1804,18 @@ def pull_all_spot(
         # round-1 R3-MAJOR-1 leak repro). A dry-run short-circuits to ``False``
         # WITHOUT touching the env (the ``detect_completeness_gaps`` gating
         # pattern — the synthetic adapter's first-day-only bars would false-red
-        # a today-covering window). NOTE: this bulk spot phase never armed
-        # ``detect_completeness_gaps`` (the #1031 demotions stay dead here —
-        # the named follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001); the TODAY
-        # gate rides its OWN parameter and IS wired here.
+        # a today-covering window). The bulk spot phase ALSO arms
+        # ``detect_completeness_gaps`` on a LIVE pull (``not dry_run`` — the
+        # cli.py ``cmd_fetch`` idiom), CLOSING the named follow-up
+        # DEC-BULK-SPOT-COMPLETENESS-FLAG-001: the #1031 interior-gap /
+        # trailing-truncation demotions now run on every production bulk path
+        # (nightly, ▶ Pull Spot + auto-pull, /pull-all, retry-failed, the
+        # crossverify pull legs); the spine's ``is_index`` gate keeps the ~750
+        # illiquid CASH names observe-only. A dry-run stays double-protected:
+        # the flag is False AND ``begin_pull_ledger(dry_run=True)`` returns
+        # ``None`` (record-inert).
         _today_gate = (not dry_run) and resolve_today_completeness_enabled()
+        _detect_gaps = not dry_run
         # The coverage reconcile band-aids (lake-reconcile / EMPTY-terminal /
         # FAILED-repull) are RETIRED (DEC-WINDOW-LEDGER-001, Stage d): the unified
         # ledger is the SOLE skip authority, so its own per-window record + the
@@ -2141,6 +2148,10 @@ def pull_all_spot(
                     symbol_windows=phase_windows,
                     write_pool=_write_consumer,
                     fetch_pipeline=_fetch_pipeline,
+                    # #1031 interior-gap / trailing-truncation demotions — armed
+                    # on a LIVE pull (DEC-BULK-SPOT-COMPLETENESS-FLAG-001) —
+                    # resolved once above.
+                    detect_completeness_gaps=_detect_gaps,
                     # Pre-settle TODAY minute-completeness gate
                     # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                     today_completeness_gate=_today_gate,

@@ -264,8 +264,9 @@
   .pull-div { width:1px; align-self:stretch; min-height:var(--ctl-h);
     background:var(--border-strong); margin:0 3px; }
   /* The from→to .daterange group is RE-ADDED + properly wired
-     (DEC-UNIVERSE-PULL-DATERANGE-001) — it scopes the SPOT history phase of the
-     ▶ Pull · full pipeline button (F&O keeps its per-contract default lookback).
+     (DEC-UNIVERSE-PULL-DATERANGE-001) — since the round-6 two-button split it
+     scopes the ▶ Pull F&O button's expiry selection (F&O keeps its
+     per-contract default lookback; ▶ Pull Spot ignores it by promise).
      The static .ctl-field "granularity · 1-minute" chip that shared this shape
      is REMOVED (DEC-UNIVERSE-UI-POLISH-002): since DEC-1MINUTE-ONLY-DERIVE-1DAY-001
      1-minute is the ONLY fetched granularity, so the chip was dead UI noise —
@@ -496,11 +497,16 @@
 
   <div class="band" id="tabs"></div>
 
-  <!-- ── Zone 0: the ONE selection-aware full-pipeline hero (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+  <!-- ── Zone 0: the TWO-BUTTON pull hero (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6
+       two-button split, superseding the one-button law of DEC-UNIVERSE-PULL-CONSOLIDATE-001
+       at the UI level ONLY — the /pull-pipeline route keeps the full-chain API default
+       for the nightly + old intents + external callers, byte-identically).
        The redundant per-stage buttons (Pull spot / Pull expiries + contracts / Pull historical) +
-       the bulk ①②③④ matrix + the separate "Pull selected" button are GONE: the pipeline ALWAYS
-       runs the fixed gated order spot → expiries+contracts → historical → pre-build, advancing only
-       when the prior stage fully succeeds, so one button does the whole thing. -->
+       the bulk ①②③④ matrix + the separate "Pull selected" button REMAIN gone, and the
+       combined full-pipeline button is now REMOVED too: the operator surface is exactly
+       ▶ Pull Spot (scope=spot-only, whole-universe, auto-arming) and ▶ Pull F&O
+       (scope=fno-only, selection/date-aware, manual only). -->
+
   <div class="universe-hero" id="universeHero">
     <div class="shine"></div>
     <div class="htitle"><span style="font-size:18px">⚡</span><b>Pull the Universe — one click, full history</b></div>
@@ -511,20 +517,55 @@
            contract resolution" — get_contracts returns "all listed strikes, not
            relative-to-spot" (brutex/adapters/groww/contracts.py). -->
       Re-click any time — already-pulled windows are skipped (no wasted Groww hit). The 19 intraday timeframes (and 1-day) are <b>derived from the 1-minute base</b> and written <b>only</b> by the pipeline's automatic FINAL pre-build stage once the fetch fully succeeds — covering <b>SPOT, FUTURES and OPTIONS</b> (F&amp;O keeps open-interest). Heads-up on storage: a fully pre-built lake costs a <b>measured multiple of its 1-minute footprint</b> — the pipeline measures the real multiplier after every pre-build and uses a conservative <b>6.5×</b> estimate before the first measurement (the earlier "2–3×" figure ignored the Greeks-enriched option 1-minute rewrite; DEC-LAKE-FOOTPRINT-MEASURED-001, operator-accepted; the lake is your external drive via <code>BRUTEX_LAKE_ROOT</code>). A pre-run disk guard skips the pre-build when free space is short (<code>BRUTEX_PREBUILD_DISK_GUARD=off</code> to override). There is no manual pre-build button — the pipeline runs it itself.</div>
-    <!-- The ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001): selection-aware — pulls the
-         TICKED instruments, or the WHOLE universe when none are ticked — via the SHARED
-         /pull-pipeline route (resolve_pull_targets: ?symbols= for a selection, bare = everything).
-         Always runs the fixed gated chain spot → expiries+contracts → historical (futures then
-         options) → pre-build, advancing only on each stage's FULL success. Single-flight via
-         startAndPoll; the label reflects the selection count. -->
-    <button class="pull-everything-btn" id="pullPipelineBtn"
-            title="ONE click — the full gated pipeline: pull spot (2020 → prev day, 1-minute), then ALL expiries + contracts metadata, then ALL historical F&amp;O candles (futures then options), then pre-build the derived timeframes — in that order. Each stage only starts once the previous one finishes clean (a dead token / quota / failed window stops the chain). Tick rows to scope it to your selection, or leave none ticked to pull the WHOLE universe. Re-click is safe — already-pulled windows are skipped.">
+    <!-- ▶ Pull Spot — the whole-universe spot-only button (DEC-PULL-SCOPED-ALL-
+         ONECLICK-001; relabeled at the round-6 two-button split): the SAME
+         /pull-pipeline launcher with the additive scope=spot-only token — all
+         launcher rails inherited byte-identically. Deliberately NOT wired to
+         the row ticks OR #pipeFrom/#pipeTo: full-range convergence
+         (2020-01-01 → previous day, incremental) IS the promise; scoped/dated
+         pulls belong to ▶ Pull F&O below. Static HTML + startAndPoll only —
+         no dynamic markup (textContent discipline). -->
+    <button class="pull-everything-btn" id="pullAllSpotBtn"
+            title="ONE click — pull the ENTIRE spot universe (all indices + all ~750 stocks), 1-minute, 2020-01-01 → previous day, auto-incremental (already-pulled windows are skipped). NO options, NO Greeks — the F&amp;O phases are skipped by design; the derived-timeframe pre-build + spot movers warm still run, then the TickVault cross-verify producer starts. The FIRST click also ARMS the daily post-market auto-pull (runs itself every trading day after the settle time while this dashboard is up — disarm via the auto chip below). Re-click is always safe.">
       <span class="pe-icon">▶</span>
       <span class="pe-text">
-        <b id="pullPipelineLabel">Pull · full pipeline</b>
-        <span class="pe-sub">spot → expiries + contracts → historical → pre-build · auto-gated, fail-closed · ticked rows scope it, else the whole universe</span>
+        <b id="pullAllSpotLabel">Pull Spot</b>
+        <span class="pe-sub">all indices + all ~750 stocks · 1-minute · 2020-01-01 → previous day · incremental (settled windows skipped) · NO options, NO Greeks · cross-verify producer runs after the pull · first click arms the daily auto-pull</span>
       </span>
     </button>
+    <!-- ▶ Pull F&O — the fno-only button (DEC-PULL-SCOPED-ALL-ONECLICK-001
+         round-6 two-button split): the SAME /pull-pipeline launcher with the
+         additive scope=fno-only token — spot is a designed no-op, metadata +
+         F&amp;O historical run for real, Greeks enrichment runs (options ARE
+         pulled), the F&amp;O prebuild + futures/options movers warm follow.
+         MANUAL only: never arms the auto-pull (no auto_arm param) and never
+         fires the cross-verify producer (spot-exclusive). Selection-aware:
+         ticked rows scope it (bare = the whole F&amp;O universe); the from/to
+         pickers select which expiries are pulled. -->
+    <button class="pull-everything-btn" id="pullFnoBtn"
+            title="ONE click — pull the F&amp;O side: ALL expiries + contracts metadata, then ALL historical F&amp;O candles (futures then options, 1-minute; per-contract default windows — futures expiry−60d, options expiry−30d), then Greeks enrichment + the F&amp;O derived-timeframe pre-build + the futures/options movers warm. Spot is skipped by design (use ▶ Pull Spot). Tick rows to scope it to your selection, or leave none ticked for the WHOLE F&amp;O universe; the from/to dates select which expiries are pulled. Manual only — never arms the daily auto-pull and never runs the cross-verify producer. Re-click is safe — already-pulled windows are skipped.">
+      <span class="pe-icon">▶</span>
+      <span class="pe-text">
+        <b id="pullFnoLabel">Pull F&amp;O</b>
+        <span class="pe-sub">expiries + contracts → historical futures + options → Greeks → F&amp;O pre-build · spot skipped by design · ticked rows scope it, else the whole F&amp;O universe · manual only</span>
+      </span>
+    </button>
+    <div class="hsub" id="pullAllSpotVerify" style="margin-top:4px; font-size:12px;">
+      Verify this pull:
+      <a href="/coverage/windows" style="color:var(--blue)">fetch windows (FAILED tab)</a> ·
+      <a href="/completeness" style="color:var(--blue)">completeness</a> ·
+      <a href="/coverage" style="color:var(--blue)">coverage</a>
+    </div>
+    <!-- The daily auto-pull chip (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5
+         fold): armed state + last outcome + honest next-eligible text from
+         the pull-progress payload's additive auto_pull object, plus the
+         disarm/re-arm toggle. textContent ONLY — never innerHTML. -->
+    <div class="hsub" id="autoPullRow" style="margin-top:4px; font-size:12px;">
+      <span id="autoPullChip">auto: …</span>
+      <button id="autoPullToggleBtn" type="button"
+              style="margin-left:8px; font-size:11px; display:none;"
+              title="Toggle the daily post-market auto-pull (the armed state persists across dashboard restarts)."></button>
+    </div>
   </div>
 
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
@@ -536,7 +577,7 @@
       To fill it:
       <b>1)</b> the instrument master loads automatically on this page (a public list — no keys needed; it is loading now if this is a fresh clone);
       <b>2)</b> live candle pulls read the Groww credentials + daily token from <b>AWS Parameter Store</b>
-      (<code>/tickvault/prod/groww/*</code>, minted by the dedicated Lambda), then hit <b>▶ Pull · full pipeline</b>
+      (<code>/tickvault/prod/groww/*</code>, minted by the dedicated Lambda), then hit <b>▶ Pull Spot</b> / <b>▶ Pull F&amp;O</b>
       above — with no AWS token available the pull fails fast (it never falls back to env vars or a local file).
     </div>
     <div style="font-size:12px; color:var(--muted); margin-top:10px;">
@@ -548,7 +589,7 @@
   </div>
 
   <div class="pullbar" role="toolbar" aria-label="Pull controls">
-    <div class="lead" id="pulllead">Tick rows to scope the pull to your selection — or leave none ticked to pull the whole universe — then hit ▶ Pull · full pipeline above. The from/to dates below scope the SPOT history phase AND select which F&amp;O expiries are pulled (each in-scope contract keeps its per-contract default window). Left at the defaults (or blank) the pull covers EVERYTHING — 2020-01-01 → previous trading day for spot, ALL expiries including live/unexpired contracts for F&amp;O.</div>
+    <div class="lead" id="pulllead">Tick rows to scope ▶ Pull F&amp;O to your selection — or leave none ticked for the whole F&amp;O universe — then hit ▶ Pull F&amp;O above. The from/to dates below select which F&amp;O expiries ▶ Pull F&amp;O pulls (each in-scope contract keeps its per-contract default window); ▶ Pull Spot always covers everything — 2020-01-01 → previous trading day, ignoring ticks and dates. Left at the defaults (or blank) ▶ Pull F&amp;O covers ALL expiries including live/unexpired contracts.</div>
     <div class="pull-row">
       <!-- The from/to date-range picker (DEC-UNIVERSE-PULL-DATERANGE-001) scopes
            the SPOT history phase AND selects which F&O expiries are pulled
@@ -639,19 +680,20 @@
   </div>
 
   <!-- Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001): the daily TickVault
-       cross-verification run — post-close priority pull (all spot + NIFTY/BANKNIFTY
-       futures, NO options), completeness gate, day-scoped prebuild, pinned CSV
+       cross-verification run — post-close priority pull (spot only — all indices
+       + all stocks; futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001),
+       completeness gate, day-scoped prebuild, pinned CSV
        export, idempotent S3 publish. Same runner as `brutex crossverify run`; the
        run takes the pull locks itself with a bounded wait, so a concurrent pull
        defers it honestly. GREEKS N/A: the Greeks stage is options-only and this
-       pull excludes options — nothing to enrich. Status is written via textContent
-       ONLY (CodeQL XSS guard). -->
+       spot-only pull excludes ALL F&O — nothing to enrich. Status is written via
+       textContent ONLY (CodeQL XSS guard). -->
   <div id="crossverifyPanel" role="status" aria-live="polite"
        style="margin:12px 0;padding:10px 14px;border-radius:10px;
               border:1px solid var(--border);background:var(--surface-2);font-size:13px;">
     <b>Cross-verify → TickVault (daily CSV → S3)</b>
     <button id="crossverifyBtn" class="vbtn" style="margin-left:10px;cursor:pointer;"
-            title="Pull today's spot + NIFTY/BANKNIFTY futures (options excluded), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
+            title="Pull today's spot universe (spot only — all indices + all stocks; futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001), gate completeness, derive the day's timeframes, render the pinned per-symbol CSVs and publish them to S3 for TickVault's cross-verification. Idempotent (journal-keyed); a concurrent pull defers it via a bounded lock wait; withheld files are honest absence, never wrong bytes.">
       ▶ Run cross-verify
     </button>
     <label style="margin-left:8px;color:var(--muted);">
@@ -1100,13 +1142,50 @@ function covStrip(i) {
     + "</div>";
 }
 
+/* Latest-claims-the-paint bounded JSON fetch for the six 15 s integrity
+   loaders below + the 5 s windows line (DEC-O1-GUARANTEE-HARDEN-001): each
+   loader's bare `fetch` carried NO abort bound (a headers-then-stalled-body
+   response leaked an in-flight fetch per tick — hung sockets accumulate on a
+   wedged endpoint) and NO ordering token (two overlapping slow responses
+   painted LAST-LANDED-wins, possibly the STALE one). Every call now rides
+   the SAME gbFetchJson hung-fetch abort bound armed through the BODY read
+   (§11 COMMON — no eighth hand-rolled controller copy) and claims its
+   loader's generation at fetch START: a response landing after a NEWER
+   invocation claimed the generation returns null instead of repainting over
+   the newer paint (the gbPollGen idiom, per-loader). MERGE-RECONCILE fold
+   (DEC-DASHBOARD-READPATH-WEDGE-001 #1763, landed on main in flight): the
+   client belt's per-loader NO-OVERLAP guard is folded in — a tick whose
+   prior fetch is still running is SKIPPED (never stacked), so a wedged
+   endpoint holds at most ONE in-flight connection per loader; main's
+   interim inline `guardedPollJson` AbortController copy is superseded by
+   this gbFetchJson-delegating helper carrying the same two guards (the
+   generation check stays as the belt for the throw→finally release path).
+   Cadence (the pinned setInterval registrations) + rendered output are
+   byte-identical — fetch mechanics only. */
+const loaderGen = {};
+const loaderInflight = Object.create(null);
+async function boundedLatestJson(key, url) {
+  if (loaderInflight[key]) return null;   // no-overlap: a prior tick's fetch is still running (#1763)
+  const gen = (loaderGen[key] || 0) + 1;
+  loaderGen[key] = gen;
+  loaderInflight[key] = true;
+  try {
+    const res = await gbFetchJson(url);
+    if (gen !== loaderGen[key]) return null;   // superseded — never repaint over a newer response
+    return res;
+  } finally {
+    loaderInflight[key] = false;
+  }
+}
+
 async function loadCompleteness() {
   if (document.hidden) return;   // hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001)
   /* Read-only: fetch the per-symbol completeness map + re-render the list ONLY when it
      actually changed (a pull landed) — keeps the strip live without churning 750 rows. */
   try {
-    const map = await guardedPollJson("/api/v1/universe/completeness");
-    if (map === undefined) return;
+    const r = await boundedLatestJson("completeness", "/api/v1/universe/completeness");
+    if (!r || !r.ok) return;
+    const map = r.body;
     const sig = JSON.stringify(map);
     if (sig === covSig) return;   // unchanged — no needless re-render
     COV = map; covSig = sig;
@@ -1122,8 +1201,9 @@ async function loadMappingIntegrity() {
      never pulled yet (no coverage row) is the neutral "not attempted" tally — NEVER red, so a
      clean selective pull reads green (DEC-MAPPING-INTEGRITY-ATTEMPTED-001). Never throws. */
   try {
-    const m = await guardedPollJson("/api/v1/universe/mapping-integrity");
-    if (m === undefined) return;
+    const r = await boundedLatestJson("mapping", "/api/v1/universe/mapping-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("mappanel");
     const verdict = document.getElementById("mapverdict");
     const detail = document.getElementById("mapdetail");
@@ -1154,8 +1234,9 @@ async function loadMasterIntegrity() {
      one IDX/EQ spot (by symbol AND token); RED counts orphan/ambiguous/disagreement/empty
      legs. Reads the snapshot the ingest hook persisted. Never throws — keeps last shown. */
   try {
-    const m = await guardedPollJson("/api/v1/universe/master-integrity");
-    if (m === undefined) return;
+    const r = await boundedLatestJson("master", "/api/v1/universe/master-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("masterpanel");
     const verdict = document.getElementById("masterverdict");
     const detail = document.getElementById("masterdetail");
@@ -1184,8 +1265,9 @@ async function loadEconomicsIntegrity() {
      mismatches. Cross-expiry lot revisions (legit NSE quarterly) are shown informational,
      never RED. Reads the persisted snapshot. Never throws — keeps last shown. */
   try {
-    const m = await guardedPollJson("/api/v1/universe/economics-integrity");
-    if (m === undefined) return;
+    const r = await boundedLatestJson("economics", "/api/v1/universe/economics-integrity");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("econpanel");
     const verdict = document.getElementById("econverdict");
     const detail = document.getElementById("econdetail");
@@ -1215,8 +1297,9 @@ async function loadParseSkips() {
      reasons. Built with textContent ONLY (the universe.html CodeQL XSS guard).
      Never throws — keeps the last shown verdict on a transient fetch error. */
   try {
-    const m = await guardedPollJson("/api/v1/universe/parse-skips");
-    if (m === undefined) return;
+    const r = await boundedLatestJson("parseskips", "/api/v1/universe/parse-skips");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("skippanel");
     const verdict = document.getElementById("skipverdict");
     const detail = document.getElementById("skipdetail");
@@ -1250,8 +1333,9 @@ async function loadLakeUniqueness() {
      textContent ONLY (the universe.html CodeQL XSS guard). Never throws — keeps the
      last shown verdict on a transient fetch error. */
   try {
-    const m = await guardedPollJson("/api/v1/universe/lake-uniqueness");
-    if (m === undefined) return;
+    const r = await boundedLatestJson("lakeunique", "/api/v1/universe/lake-uniqueness");
+    if (!r || !r.ok) return;
+    const m = r.body;
     const panel = document.getElementById("lakepanel");
     const verdict = document.getElementById("lakeverdict");
     const detail = document.getElementById("lakedetail");
@@ -1433,13 +1517,13 @@ async function selectInstrument(i) {
        REGISTRY_EXPIRY_COLUMNS = [exch, underlying, expiry_date, year, fetched_at]. */
     const r = await fetch('/api/v1/db/registry/expiries?underlying=' + encodeURIComponent(i.symbol));
     if (!r.ok) {
-      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load expiries — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load expiries — registry may be unreadable; try ▶ Pull F&O above") + '</div>';
       return;
     }
     const body = await r.json();
     const rows = (body.rows || []);
     if (!rows.length) {
-      const msg = body.note || 'No expiries pulled yet — run ▶ Pull · full pipeline above';
+      const msg = body.note || 'No expiries pulled yet — run ▶ Pull F&O above';
       ex.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">📭</span>' + esc(msg) + '</div>';
       return;
     }
@@ -1473,7 +1557,7 @@ async function renderContracts(symbol, expiryDate) {
     const r = await fetch('/api/v1/db/registry/contracts?underlying=' + encodeURIComponent(symbol)
       + '&expiry_date=' + encodeURIComponent(expiryDate));
     if (!r.ok) {
-      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load contracts — registry may be unreadable; try ▶ Pull · full pipeline above") + '</div>';
+      c.innerHTML = '<div class="empty"><span class="ei" aria-hidden="true">⚠</span>' + esc("couldn't load contracts — registry may be unreadable; try ▶ Pull F&O above") + '</div>';
       return;
     }
     const body = await r.json();
@@ -1529,15 +1613,18 @@ function optionCell(side, present, ix) {
   return cell;
 }
 
-/* ── The ONE selection-aware full-pipeline button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
+/* ── The pull chain — the TWO-BUTTON law (DEC-PULL-SCOPED-ALL-ONECLICK-001
+   round-6 two-button split, superseding the one-button law of
+   DEC-UNIVERSE-PULL-CONSOLIDATE-001 at the UI level only).
    The redundant per-stage handlers (runPull / pull spot / pull expiries+contracts /
-   pull historical) + the separate "Pull selected" + bulk-button handlers are GONE.
-   The single ▶ Pull · full pipeline button posts the SHARED /api/v1/universe/pull-pipeline
-   route: with ticked rows it sends ?symbols= so resolve_pull_targets scopes the pull to the
-   selection; with NO ticks it posts the bare route so resolve_pull_targets pulls the WHOLE
-   universe. The pipeline ALWAYS runs the fixed gated chain spot → expiries+contracts →
-   historical → pre-build, advancing only on each stage's full success. Single-flight via
-   startAndPoll. ── */
+   pull historical) + the separate "Pull selected" + bulk-button handlers REMAIN gone,
+   and the combined full-pipeline handler is now REMOVED too. ▶ Pull F&O posts
+   the SHARED /api/v1/universe/pull-pipeline route with scope=fno-only: with ticked rows
+   it sends ?symbols= so resolve_pull_targets scopes the pull to the selection; with NO
+   ticks it posts the whole F&O universe; the from/to pickers select which expiries are
+   pulled. ▶ Pull Spot (below) is the whole-universe scope=spot-only auto-arming button.
+   The route's full-chain default stays API-reachable (nightly / old intents / external
+   callers) — the UI just no longer offers it. Single-flight via startAndPoll. ── */
 function pipelineSelection() {
   // The ticked rows scope the pull; a lone single-highlight also scopes it (so a
   // one-row highlight pulls just that name). Empty ⇒ the whole universe.
@@ -1549,11 +1636,11 @@ function pipelineSelection() {
 // &from_date=/&to_date= ONLY when non-blank AND actually CHANGED from the
 // stamped data-default (DEC-EXPIRY-SCOPE-LIVE-EDGE-001): an untouched
 // pre-filled picker behaves exactly like a blank one, so the default one-click
-// pull threads NO dates → the server keeps the F&O expiry scope UNBOUNDED
-// (live/unexpired contracts included) and the spot phase resolves its own
-// canonical [2020-01-01, prev-day] default. A date the operator changed IS
-// sent and scopes the spot window + the F&O expiry selection. The backend
-// normalize_expiry_scope() is authoritative either way.
+// ▶ Pull F&O threads NO dates → the server keeps the F&O expiry scope
+// UNBOUNDED (live/unexpired contracts included). A date the operator changed
+// IS sent and scopes the F&O expiry selection (+ the metadata year grid; the
+// fno-only spot phase is a designed no-op, so no spot window is affected).
+// The backend normalize_expiry_scope() is authoritative either way.
 function pipelineDateQuery() {
   const fromEl = document.getElementById("pipeFrom");
   const toEl = document.getElementById("pipeTo");
@@ -1564,32 +1651,92 @@ function pipelineDateQuery() {
     q += "&to_date=" + encodeURIComponent(toEl.value);
   return q;
 }
-const PIPELINE_BTN = document.getElementById("pullPipelineBtn");
-if (PIPELINE_BTN) {
-  PIPELINE_BTN.onclick = () => {
+const PULL_FNO_BTN = document.getElementById("pullFnoBtn");
+if (PULL_FNO_BTN) {
+  PULL_FNO_BTN.onclick = () => {
     const items = pipelineSelection();
     const dq = pipelineDateQuery();
     if (items.length) {
       const ids = items.map(it => it.pull_symbol).join(",");
       startAndPoll(
-        "/api/v1/universe/pull-pipeline?symbols=" + encodeURIComponent(ids) + dq,
-        `${items.length} selected — spot → expiries + contracts → historical → pre-build`);
+        "/api/v1/universe/pull-pipeline?scope=fno-only&symbols=" + encodeURIComponent(ids) + dq,
+        `${items.length} selected — F&O: expiries + contracts → historical → pre-build`);
     } else {
-      // No selection ⇒ the whole universe (the bare route; resolve_pull_targets
-      // falls back to the whole admitted universe). A leading "&" is harmless on a
-      // query string with no "?"-params — guard it so the URL stays well-formed.
-      const url = dq
-        ? "/api/v1/universe/pull-pipeline?" + dq.slice(1)
-        : "/api/v1/universe/pull-pipeline";
+      // No selection ⇒ the whole F&O universe (resolve_pull_targets falls back
+      // to the whole admitted universe; reference-only names are a true no-op).
       startAndPoll(
-        url,
-        "EVERYTHING — spot → expiries + contracts → historical → pre-build");
+        "/api/v1/universe/pull-pipeline?scope=fno-only" + dq,
+        "F&O — expiries + contracts → historical → pre-build");
     }
   };
 }
+/* ▶ Pull Spot — the whole-universe spot-only button (DEC-PULL-SCOPED-ALL-
+   ONECLICK-001; relabeled at the round-6 two-button split): the SAME
+   /pull-pipeline launcher with the additive scope=spot-only token. Deliberately
+   ignores the row ticks AND the #pipeFrom/#pipeTo pickers — the whole-universe
+   full-range convergence IS this button's promise; scoped/dated pulls belong to
+   ▶ Pull F&O above. Static URL string only (no user input).
+   auto_arm=1 (round-5 fold): the first click ARMS the daily post-market
+   auto-pull scheduler — one click, fully automatic daily thereafter; a
+   market-hours-refused click still arms (the chip below says so). */
+const PULL_ALL_SPOT_BTN = document.getElementById("pullAllSpotBtn");
+if (PULL_ALL_SPOT_BTN) {
+  PULL_ALL_SPOT_BTN.onclick = () => {
+    startAndPoll(
+      "/api/v1/universe/pull-pipeline?scope=spot-only&auto_arm=1",
+      "pull everything (spot only)");
+    refreshAutoPullChip();  // the arming took effect even on a refused start
+  };
+}
+/* ── The daily auto-pull chip (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold).
+   Renders the additive auto_pull object from /pull-progress (also updated
+   live by pollProgress below) + the disarm/re-arm toggle. textContent ONLY —
+   never innerHTML (the CodeQL XSS guard); an absent/malformed payload reads
+   an honest "unavailable", never a fabricated armed state. ── */
+function renderAutoPullChip(ap) {
+  const chip = document.getElementById('autoPullChip');
+  const btn = document.getElementById('autoPullToggleBtn');
+  if (!chip || !btn) return;
+  if (!ap || typeof ap !== 'object') {
+    chip.textContent = 'auto: unavailable (no scheduler wired for this dashboard)';
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = '';
+  if (ap.armed) {
+    chip.textContent = 'auto: ON — ' + (ap.next_eligible || 'armed');
+    btn.textContent = 'disarm';
+  } else {
+    chip.textContent = 'auto: OFF — the ▶ Pull Spot click arms the daily post-market auto-pull';
+    btn.textContent = 'arm';
+  }
+  btn.onclick = async () => {
+    try {
+      const r = await fetch('/api/v1/universe/pull-all-spot-auto?armed=' + (ap.armed ? '0' : '1'),
+                            { method: 'POST' });
+      const body = await r.json();
+      if (r.ok && body && typeof body === 'object') renderAutoPullChip(body.auto_pull);
+    } catch (e) { /* the next pull-progress poll / page load re-renders the chip */ }
+  };
+}
+async function refreshAutoPullChip() {
+  /* One-shot seed (page load + after an arming click) — the LIVE updates ride
+     the existing pollProgress chain while a pull is watched. The request goes
+     through the ONE shared fetchPullProgress site (declared beside
+     pollProgress, hoisted) — never a second literal pull-progress fetch site
+     (the test_no_new_poll_loop_added one-fetch-site law). */
+  try {
+    const r = await fetchPullProgress();
+    if (!r.ok) return;              // keep the last rendered state — never a fake
+    const s = await r.json();
+    if (s && typeof s === 'object') renderAutoPullChip(s.auto_pull);
+  } catch (e) { /* chip keeps its last state; the poller self-recovers */ }
+}
+refreshAutoPullChip();
 
 /* ── Multi-select (DEC-UNIVERSE-MULTISELECT-001 / DEC-UNIVERSE-PULL-CONSOLIDATE-001):
-   tick several rows → the ONE ▶ Pull · full pipeline button scopes its pull to them.
+   tick several rows → the ▶ Pull F&O button scopes its pull to them (the round-6
+   two-button law; ▶ Pull Spot stays whole-universe by promise).
    The per-row checkbox toggles selMulti; the row BODY click still does single-select +
    expiries — stopPropagation on the checkbox keeps the two independent. ── */
 function toggleMulti(i, on) {
@@ -1616,10 +1763,10 @@ function updateSelectionLead() {
     const named = syms.slice(0, LEAD_MAX_NAMED).join(", ");
     const more = syms.length > LEAD_MAX_NAMED ? ` +${syms.length - LEAD_MAX_NAMED} more` : "";
     lead.textContent = `Selected: ${named}${more} (${n}) — one combined selection across the `
-      + `Index + Stocks lists. Hit ▶ Pull · full pipeline above (✗ clear unticks both lists).`;
+      + `Index + Stocks lists. Hit ▶ Pull F&O above (✗ clear unticks both lists).`;
   } else if (selInst) {
     lead.textContent = `Selected ${selInst} — tick more rows to scope the pull, `
-      + `or hit ▶ Pull · full pipeline above`;
+      + `or hit ▶ Pull F&O above`;
   } else {
     lead.textContent = DEFAULT_PULL_LEAD;
   }
@@ -1632,8 +1779,8 @@ function updateMultiBtn() {
   // DEC-PIPELINE-AUTOPREBUILD-001.) The button is ALWAYS enabled (no ticks ⇒
   // whole universe).
   const n = selMulti.size;
-  const lbl = document.getElementById("pullPipelineLabel");
-  if (lbl) lbl.textContent = n > 0 ? `Pull · ${n} selected — full pipeline` : "Pull · full pipeline";
+  const lbl = document.getElementById("pullFnoLabel");
+  if (lbl) lbl.textContent = n > 0 ? `Pull F&O · ${n} selected` : "Pull F&O";
   updateSelectionLead();
 }
 document.getElementById("selallbtn").onclick = () => {
@@ -1656,7 +1803,7 @@ document.getElementById("clrselbtn").onclick = () => {
    fetched on the operator's machine; NSE bot-blocks + this build env
    network-blocks nseindia.com), intersected with our F&O-eligible stocks.
    source:"nse"  → switch to the Stocks tab + tick the returned members in
-                   the existing selMulti multi-select (scoping ▶ Pull · full pipeline).
+                   the existing selMulti multi-select (scoping ▶ Pull F&O).
    source:"unknown-index" / "unavailable" → show the honest note (leave none
                    ticked to pull the whole universe). NEVER 500. */
 document.getElementById("tickconstbtn").onclick = async () => {
@@ -1699,7 +1846,7 @@ document.getElementById("tickconstbtn").onclick = async () => {
      tab/view: fetch the stock instruments in the BACKGROUND (so selMulti gets real
      inst objects) into a LOCAL list — never replacing the visible UNIV nor touching
      `filter` — then add the members to selMulti and re-render the CURRENT view, so
-     only the selection count + the ▶ Pull · full pipeline button label update. The
+     only the selection count + the ▶ Pull F&O button label update. The
      ticked stocks show their checkboxes if/when the operator later switches to the
      Stocks tab (renderInstruments reads selMulti.has(symbol)). */
   let stockUniv;
@@ -1732,20 +1879,24 @@ document.getElementById("tickconstbtn").onclick = async () => {
        the FULL count); OFF, prefer the backend note (it says "fresh from NSE" vs
        "from cache (fetched …)" correctly per source). */
     msg.textContent = fnoOnly
-      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ▶ Pull · full pipeline.`
+      ? `Ticked ${ticked} F&O constituent(s) of ${indexSymbol} (F&O only — ${skipped} non-F&O skipped; toggle off to tick all ${members.length}). Now hit ▶ Pull F&O.`
       : (note
-        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull · full pipeline.`);
+        || `Ticked ${ticked} constituent(s) of ${indexSymbol} — verify; membership rebalances. Now hit ▶ Pull F&O.`);
   }
   btn.disabled = false;
 };
 
-/* ── In-flight lock for the ONE pull button (DEC-UNIVERSE-PULL-CONSOLIDATE-001) ──
-   The bulk ①②③④ matrix + its multi-button disable loop are GONE: with a single
-   pipeline button, "disable the pull controls while a pull runs" is just disabling
-   that one button (PIPELINE_BTN was declared with the click handler above). Kept as
+/* ── In-flight lock for the pull buttons (DEC-UNIVERSE-PULL-CONSOLIDATE-001 +
+   DEC-PULL-SCOPED-ALL-ONECLICK-001, refuter-r1 NIT-5) ──
+   The bulk ①②③④ matrix + its multi-button disable loop are GONE: "disable the
+   pull controls while a pull runs" disables BOTH pull buttons — ▶ Pull F&O AND
+   ▶ Pull Spot (the round-6 two-button law; both were declared with their click
+   handlers above), so an in-page re-click really IS impossible on either (the
+   wedged-POST comments below reason from that invariant). Kept as
    setBulkDisabled so startAndPoll / finishLive call it unchanged. */
 function setBulkDisabled(on) {
-  if (PIPELINE_BTN) PIPELINE_BTN.disabled = on;
+  if (PULL_FNO_BTN) PULL_FNO_BTN.disabled = on;
+  if (PULL_ALL_SPOT_BTN) PULL_ALL_SPOT_BTN.disabled = on;
 }
 
 /* ── The LIVE feed: start a background pull, then poll /pull-progress ──
@@ -1775,35 +1926,12 @@ const FEED_STALE_RED_MS = 15000;
 const FEED_BACKOFF_BASE_MS = 3000;
 const FEED_BACKOFF_MAX_MS = 30000;
 const FEED_FETCH_TIMEOUT_MS = 10000;  // hung-fetch abort bound (headers AND body) — mirrors the widget's
-/* DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): the 15 s side-panel
-   pollers below (the six integrity/completeness loaders; the seventh, the quota
-   poller, was since DELETED with its endpoint — DEC-QUOTA-VERDICT-MOOT-001) had
-   NO abort bound and NO no-overlap guard, so under the 2026-07-08 read-path wedge each tick
-   opened a fresh fetch that hung on the wedged server and — with browsers having no
-   body-read timeout — the stacked hung connections exhausted the per-origin pool and
-   silenced even pure-async routes. This ONE guarded reader carries the SAME 10 s
-   AbortController bound + a per-URL in-flight guard pollProgress already uses: a poll
-   whose prior fetch is still running is SKIPPED (never stacked), and a hung fetch is
-   aborted within FEED_FETCH_TIMEOUT_MS (armed through the body read, cleared in the
-   finally) so it becomes a transient the caller swallows, never a leaked connection.
-   Returns the parsed JSON, or `undefined` on skip / non-ok (JSON.parse never yields
-   `undefined`, so it is an unambiguous "no update" sentinel); an abort/timeout REJECTS
-   so each poller's own try/catch keeps its last-shown value. */
-const _pollInflight = Object.create(null);
-async function guardedPollJson(url) {
-  if (_pollInflight[url]) return undefined;   // no-overlap: a prior tick's fetch is still running
-  _pollInflight[url] = true;
-  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-  const killer = ctrl ? setTimeout(() => ctrl.abort(), FEED_FETCH_TIMEOUT_MS) : null;
-  try {
-    const r = await fetch(url, ctrl ? { signal: ctrl.signal } : {});
-    if (!r.ok) return undefined;              // non-ok — treat as "no update" (each poller's prior `if(!r.ok) return`)
-    return await r.json();                    // killer stays ARMED through the body read
-  } finally {
-    if (killer) clearTimeout(killer);         // cleared only AFTER json settles — a stalled body aborts too
-    _pollInflight[url] = false;
-  }
-}
+/* DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): served at the six 15 s
+   side-panel loaders + the 5 s windows line by `boundedLatestJson` above —
+   the merge-reconcile folded the belt's no-overlap guard into that ONE
+   gbFetchJson-delegating helper (same 10 s abort armed through the body
+   read), superseding the interim inline `guardedPollJson` AbortController
+   copy that landed with #1763. */
 /* Monotonic client clock (immune to NTP/wall-clock jumps). Suspend caveat
    (Golden Rule #10, refuter-confirmed): on some browser/OS combinations
    performance.now() may NOT advance while the machine is suspended
@@ -1856,14 +1984,13 @@ async function refreshWindowsLine() {
     /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this line reads ONLY .counts —
        ?limit=0 keeps the identical counts payload while dropping the
        up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read.
-       DEC-DASHBOARD-READPATH-WEDGE-001 (client belt): the same abort + no-overlap
-       guard as the side-panel pollers — this 5 s poll hits the heavy
-       /coverage/windows route (a lake-limiter seam per
-       DEC-DASHBOARD-LAKE-IO-LIMITER-001), so an unaborted hung fetch here is the
-       identical connection-leak hazard. */
-    const payload = await guardedPollJson('/api/v1/coverage/windows?limit=0');
-    if (payload === undefined) return;
-    const counts = payload.counts || {};
+       Bounded + latest-wins via boundedLatestJson (DEC-O1-GUARANTEE-
+       HARDEN-001): interval-driven, so a stalled body never wedged a chain —
+       but it leaked an in-flight fetch per slow tick, and out-of-order
+       responses could repaint the line with STALE counts. */
+    const r = await boundedLatestJson('windowsline', '/api/v1/coverage/windows?limit=0');
+    if (!r || !r.ok) return;
+    const counts = (r.body || {}).counts || {};
     const grand = {noData: 0, resolved: 0, pending: 0, failed: 0, total: 0};
     const segParts = [];
     for (const seg of WINDOW_SEGMENTS) {
@@ -1908,8 +2035,9 @@ async function startAndPoll(path, label) {
   // (lastPollLabel still null) renderFeedAge names the pending start request +
   // the RELOAD-then-re-click remedy, never a false "retrying". Reload, NOT a
   // bare re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
-  // above disables the ONE pipeline button until finishLive — which never runs
-  // while the POST is wedged — so an in-page re-click is impossible; a fresh
+  // above disables BOTH pull buttons (full pipeline + spot-only) until
+  // finishLive — which never runs while the POST is wedged — so an in-page
+  // re-click is impossible; a fresh
   // page's enabled button re-attaches safely through the single-flight route.)
   startFeedAgeTicker();
   refreshWindowsLine();
@@ -2114,7 +2242,7 @@ function feedRetryDelayMs() {
    — during a hung/wedged start POST nothing retries, so the tail names the
    real state + the real remedy instead: RELOAD, then re-click. NOT a bare
    re-click (refuter-confirmed round-4 wording fix): setBulkDisabled(true)
-   disables the ONE pipeline button for the whole watch and finishLive — its
+   disables BOTH pull buttons for the whole watch and finishLive — their
    only re-enabler — never runs while the POST is wedged, so an in-page
    re-click is impossible; a fresh page's enabled button re-attaches safely
    through the single-flight route (see the startAndPoll comment). */
@@ -2224,6 +2352,18 @@ function subUnitNote(s, count) {
   if (count >= 2) bits.push('sub-unit ' + count.toLocaleString('en-IN') + ' this unit');  // <2 = not grinding — hide, no noise
   return bits.join(' · ');
 }
+/* The ONE pull-progress fetch site (test-pinned to exactly one literal — the
+   DEC-PULL-STALL-CHIP-001 no-second-poll-loop law): the live pollProgress
+   chain AND the auto-pull chip's one-shot seed (refreshAutoPullChip, the
+   DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold) both request through this
+   single helper, so the chip reuses pollProgress's endpoint + payload
+   contract instead of minting a second literal fetch site. `opts` passes
+   through VERBATIM so pollProgress's hung-fetch abort signal
+   (DEC-PULL-UI-STALENESS-001) still reaches the fetch; the seed's bare call
+   is a plain one-shot request, never a loop. */
+function fetchPullProgress(opts) {
+  return fetch('/api/v1/universe/pull-progress', opts || {});
+}
 async function pollProgress(label) {
   const gen = ++pollGen;            // every invocation claims the chain (re-entrancy guard)
   lastPollLabel = label;
@@ -2241,7 +2381,7 @@ async function pollProgress(label) {
   const opts = {};
   if (ctrl) opts.signal = ctrl.signal;
   try {
-    const r = await fetch('/api/v1/universe/pull-progress', opts);
+    const r = await fetchPullProgress(opts);
     if (gen !== pollGen) return;                              // superseded — drop stale response
     if (!r.ok) throw new Error('HTTP ' + r.status);           // non-ok is a POLL failure, NEVER a settled snapshot
     const s = await r.json();
@@ -2260,6 +2400,7 @@ async function pollProgress(label) {
       : (s.completed || 0).toLocaleString('en-IN') + ' / ' + (s.total || 0).toLocaleString('en-IN');
     renderLiveStats(s);
     renderPhases(s.phases, s.phase);   // DEC-UNIVERSE-PER-PHASE-PROGRESS-001: live per-phase rows
+    renderAutoPullChip(s.auto_pull);   // round-5 fold: the daily auto-pull chip rides the same poll
     if (s.state === 'running') {
       updateStallChip(s);  // stalled-suspect ⇒ amber chip; a recovery clears it (DEC-PULL-STALL-CHIP-001)
       // Per-expiry sub-unit note (DEC-PULL-HEADER-SUBUNIT-001) — '' when the label
@@ -2620,12 +2761,35 @@ async function pollCrossverify() {
     cvTimer = setTimeout(pollCrossverify, cvDelayMs());
   }
 }
+/* Render the DURABLE last-run record (the reload-proof failure surface —
+   DEC-CROSSVERIFY-WITHHELD-REGATE-001): a finished failure no longer
+   vanishes on a page reload / dashboard restart. textContent-only via
+   cvStatus; returns true iff a record was rendered. */
+function cvRenderLastRun(lr) {
+  if (!lr || typeof lr !== 'object' || typeof lr.verdict !== 'string') return false;
+  const ok = lr.exit_code === 0;
+  let line = (ok ? '✓ ' : '✕ ') + 'last run: ' + (lr.day || '?') + ' · ' + lr.verdict;
+  if (typeof lr.publish_failed === 'number' && lr.publish_failed > 0) {
+    line += ' · publish-failed ' + lr.publish_failed;
+  }
+  if (typeof lr.withheld === 'number' && lr.withheld > 0) line += ' · withheld ' + lr.withheld;
+  if (typeof lr.regated === 'number' && lr.regated > 0) line += ' · re-gated ' + lr.regated;
+  if (Array.isArray(lr.failed_keys) && lr.failed_keys.length > 0) {
+    line += ' · failing: ' + lr.failed_keys.join(', ');
+  }
+  if (lr.detail) line += ' · ' + lr.detail;
+  cvStatus(line);
+  return true;
+}
 async function cvAttachIfRunning() {
   try {
     const res = await gbFetchJson('/api/v1/crossverify/progress');
     if (!res.ok) return false;
     const s = res.body;
-    if (!s || s.state !== 'running') return false;
+    if (!s || s.state !== 'running') {
+      if (s) cvRenderLastRun(s.last_run);   // reload-proof: show the last outcome
+      return false;
+    }
     cvStatus('running · attaching to the live progress feed…');
     cvBeginWatch();
     return true;
