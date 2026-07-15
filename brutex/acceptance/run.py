@@ -1,6 +1,6 @@
 """Run orchestration: teeth gate → fenced checks → roll-up → report → exit code.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Any exception in a
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Any exception in a
 check runner → verdict ``ERROR`` with the exception in evidence, the run
 CONTINUES (the verifier failing never silently loses the other checks'
 evidence) and the overall exit is 2 (SUSPECT). ``TEETH_FAILED`` withholds all

@@ -213,7 +213,7 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # honest instead of coupling every credentials.py-touching PR to the discovery
         # stem-map heuristic (DEC-AWS-ONLY-CREDS-001).
         "brutex/config/credentials.py",
-        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1678): the NEW losing-streak
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1795): the NEW losing-streak
         # resilience module (fold + sidecar + annotation). Its 100% line+branch
         # is reached by a CURATED multi-file suite — test_resilience_streaks.py
         # (the pure fold/streak primitives) + test_resilience_sidecar.py (the
@@ -232,7 +232,7 @@ COVERAGE_DISCOVERY_EXCLUDE: frozenset[str] = frozenset(
         # discovery complement honest instead of blocking on an unreachable
         # single-file 100%.
         "brutex/engine/resilience_streaks.py",
-        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1678): results_depth_pass.py
+        # DEC-RESILIENCE-STREAKS-001 (MIGRATION.md #1795): results_depth_pass.py
         # gains an adoption-backfill + resilience-fence path whose new lines
         # (~492-528, 760-773) are exercised by the differently stemmed
         # test_resilience_sidecar.py + the integration test_resilience_end_to_end.py

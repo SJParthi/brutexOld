@@ -1,6 +1,6 @@
 """Self-test pins: smoke detection, battery table, the comparator-inversion tooth.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). The inversion tooth
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). The inversion tooth
 proves the self-test is not decorative: lobotomize the comparator and the
 battery itself must flip to TEETH_FAILED.
 """

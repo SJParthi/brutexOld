@@ -111,7 +111,7 @@ def _configure_sweep_logging() -> None:
     """Bound the sweep CLI's structlog volume — INFO default (disk-fill guard).
 
     ALSO the ``verify-acceptance`` stdout-purity guard (round 3 of
-    DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756): an unconfigured
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1797): an unconfigured
     process's structlog PrintLogger defaults to STDOUT, which buried the
     acceptance human table under scan events and broke the ``--json``
     machine contract (``json.loads(stdout)`` failed) — the seam below routes
@@ -1840,7 +1840,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # ── verify-acceptance (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, #1756) ──
+    # ── verify-acceptance (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, #1797) ──
     # The operator acceptance verifier: 7 composed checks + gating teeth
     # smoke + the frozen evidence report. All logic in brutex/acceptance/.
     verify_acc = sub.add_parser(
@@ -8643,7 +8643,7 @@ def cmd_verify_acceptance(  # pragma: no cover — orchestration shim over the 1
 ) -> int:
     """``brutex verify-acceptance`` — thin shim over :mod:`brutex.acceptance`.
 
-    DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). All verdict /
+    DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). All verdict /
     report / exit logic lives in the 100%-gated ``brutex/acceptance/``
     package; this shim only resolves flags, prints the human table and maps
     the returned exit code (0 clean / 1 usage / 2 SUSPECT / 3 findings /
@@ -10653,7 +10653,7 @@ def _dispatch(argv: list[str] | None) -> int:
         # cmd_sweep_all; the dashboard sweep job is already configured by
         # cmd_dashboard at startup and the guard defers to it).
         # verify-acceptance joined at round 3 of DEC-OPERATOR-ACCEPTANCE-
-        # VERIFY-001 (#1756): unconfigured structlog's default PrintLogger
+        # VERIFY-001 (#1797): unconfigured structlog's default PrintLogger
         # writes to STDOUT, so the acceptance checks' scan events buried the
         # human table and made `--json` unparseable (`json.loads(stdout)`
         # failed on the log prefix). The seam routes every log line to

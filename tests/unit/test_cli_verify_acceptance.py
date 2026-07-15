@@ -1,6 +1,6 @@
 """CLI shim pins: registration, dispatch, flag validation, exit mapping.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). The shim is a thin
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). The shim is a thin
 ``# pragma: no cover`` orchestration layer by house convention; these tests
 drive it through ``main()`` (the CLI-harness discipline) so the parser wiring
 + user-error arms are genuinely executed.

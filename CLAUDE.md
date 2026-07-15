@@ -278,7 +278,7 @@ bench regression is caught POST-merge on the self-hosted runner, never a
 merge blocker. CI-gate script + redteam tests + docs only; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1 Active-branch
 blurb + MIGRATION.md #1753.)
-Earlier: 2026-07-11 (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 —
+Earlier: 2026-07-11 (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1797 —
 `brutex verify-acceptance`: the ONE operator-runnable acceptance verifier — 7 composed
 checks (uniqueness census · derived-TF correctness incl. the NEW 1day compare · zero-vendor-call
 incremental-pull re-plan idempotence · disk-provable rate evidence · movers page-vs-DB truth via
@@ -303,7 +303,7 @@ TOCTOU law WIRED for real · per-day Muhurat 1day handling · the full moneyness
 grammar · expiry-capped covered-span replan · instruments.duckdb opened READ-ONLY only ·
 glob=False oracle reads · bounded 16 MiB evidence tails, chain-verify dropped from the
 evidence sub · `--months` made real for tf.daily/sanity + the census scoped to sampled
-coordinates — the per-round record lives in MIGRATION.md #1756, never this header).
+coordinates — the per-round record lives in MIGRATION.md #1797, never this header).
 HOSTILE-REVIEW ROUND 2 folded pre-merge (the coverage-gate test-stem BLOCKER renamed ·
 the registry.duckdb schema-drift ABSTAIN guard · the replan oracle's correct-or-abstain
 non-default-window-shape routing (explicit-dates F&O + overlapping-anchor false-FAILs dead,
@@ -311,15 +311,15 @@ the out-of-coverage double-fetch FAIL kept) · the pull TOCTOU retry genuinely r
 Muhurat-date 1day bars disclosed UNVERIFIED + counted once · the instrument-master read
 became an in-memory SNAPSHOT so the in-process #1482/#1646 drift ladder stays live ·
 seed-rotated F&O contract sampling + bounded/pruned coverage ledger — per-round record in
-MIGRATION.md #1756, never this header).
+MIGRATION.md #1797, never this header).
 HOSTILE-REVIEW ROUND 3 folded pre-merge (stdout-pure `--json`/table via the #1630 logging
 seam · the evidence-tree symlink refusal hoisted before the audit write · BOTH serving-path
 residuals disclosed (registry + `.manifest/`) · the engine set made code-true (INDIAVIX +
 NSE-NIFTY-*-FUT dirs full-history) · off-chain `--out` · loud SUSPECT on a failed report
-write · report.txt renders limits/routed/Muhurat — per-round record in MIGRATION.md #1756,
+write · report.txt renders limits/routed/Muhurat — per-round record in MIGRATION.md #1797,
 never this header).
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
-Active-branch blurb + MIGRATION.md #1756.)
+Active-branch blurb + MIGRATION.md #1797.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -349,7 +349,7 @@ NIFTY/BANKNIFTY/SENSEX; no scope/vocab/rate-cap change; `compute.py` 100%
 line+branch. Any per-round record lives ONLY in the §1 Active-branch blurb +
 MIGRATION.md #1685 — this header carries the pointer, never the story.)
 Earlier: 2026-07-12 (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md
-#1773 — the R38 rehearsal wall-time gate
+#1798 — the R38 rehearsal wall-time gate
 (`tests/integration/test_sweep_full_chain_rehearsal.py`, asserts
 `seconds_first < 300.0`) is made COMMIT-INVARIANT: the Golden-Rule-#4 run
 identity folds `code_commit_sha`, so the Stage-3 optimizer seeds — and with
@@ -366,11 +366,11 @@ audit/flight hash chains are direct file appends, byte-untouched). NOT a gate
 weakening: the 300 s assert is byte-unchanged; the assertion previously
 measured a commit-hash lottery + DEBUG-render overhead rather than its stated
 chain-feasibility purpose, and TEETH are proven — a wedged-chain-step
-injection made the real assertion FAIL on the pinned sha (recorded in #1773)
+injection made the real assertion FAIL on the pinned sha (recorded in #1798)
 + a permanent companion test pins the ≥1:1 measured-time response to injected
 per-mask delay. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
 scope/vocab/rate change; the per-fix record lives in the §1 Active-branch
-blurb + MIGRATION.md #1773.)
+blurb + MIGRATION.md #1798.)
 Earlier: 2026-07-11 (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 —
 the Stage-4 cascade overfitting verdicts + the per-candidate CPCV pass rate +
 the ranking composite JOIN the display surfaces: the top100 artifact gains the
@@ -1430,7 +1430,7 @@ REFERENCE_ONLY; no scope/vocab/rate/lake-schema change; `stage1a.py` +
 `bad_tick.py` + `replay.py` ALL 100% line+branch; ruff/ruff-format/`mypy
 --strict`/pyright clean. The P-06 look-ahead + suffix-independence suites pass
 UNMODIFIED.)
-Earlier: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1712 —
+Earlier: 2026-07-08 (DEC-SWEEP-ONECLICK-PREFLIGHT-ESTIMATOR-001, MIGRATION.md #1796 —
 Phase P1 of the one-click institutional sweep: the R4 hard data preflight (real
 NSE calendar coverage, DISK-verified 1-minute months, G1 derived-freshness reuse,
 lake-invariant/quarantine check, sweep-vs-pull exclusion probe, futures-execution
@@ -1465,7 +1465,7 @@ provably runnable — R16 preserved), disclosed via ONE
 build + a requested→applied `stage3_enable` Clamp row per downgraded group +
 the `stage3_enable` echo on the run payload; an OFF-GRID non-none leg under
 the effective stage3-ON posture is STILL refused with a clear 400 (the
-round-11 deep-crash class stays closed; full wording in MIGRATION.md #1712's
+round-11 deep-crash class stays closed; full wording in MIGRATION.md #1796's
 R54 addendum). VWAP exclude-vs-flag and the exact
 multi-exchange run semantics stay DEFAULT flag-and-run per the two pre-declared
 operator UNDECIDED items. P1 ownership zone ONLY — zero P2/P3/P4/P5/P6 files
@@ -3617,7 +3617,7 @@ hostile-review pass._
   blocker, unchanged here). CI-gate script + redteam tests + docs only;
   ZERO brutex/ source change; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   no scope/vocab/rate change.)
-  Earlier: `claude/verify-acceptance` (**DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756** —
+  Earlier: `claude/verify-acceptance` (**DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1797** —
   the operator acceptance verifier `brutex verify-acceptance`: NEW ADDITIVE `brutex/acceptance/` package
   (model/report/context/sampling/independent/selftest/run + checks/{unique,tf,pull,rate,movers,sanity,latency})
   + a thin `# pragma: no cover` cli shim + ci.yml per-module 100% gates + 4 modules in the weekly mutmut loop.
@@ -3724,7 +3724,7 @@ hostile-review pass._
   reading at test_window_ledger.py:990 did not reproduce at the fixed head, and that file is
   byte-untouched by this branch). ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
-  change; the per-item record lives in MIGRATION.md #1756.)
+  change; the per-item record lives in MIGRATION.md #1797.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -3783,7 +3783,7 @@ hostile-review pass._
   change; `compute.py` 100% line+branch (288 stmts / 54 branches, 0 missed); ruff/ruff-format clean, `mypy
   --strict` clean, pyright 0 new.)
   Earlier: `claude/r38-rehearsal-determinism` (**DEC-R38-REHEARSAL-DETERMINISM-001,
-  MIGRATION.md #1773** — the R38 rehearsal determinism fix, TESTS + DOCS only (zero
+  MIGRATION.md #1798** — the R38 rehearsal determinism fix, TESTS + DOCS only (zero
   `brutex/` source lines; three-file diff — the rehearsal test file + MIGRATION.md +
   this file): `test_sweep_full_chain_rehearsal.py`'s wall-time gate (`seconds_first
   < 300.0`) measured a commit-hash SEED LOTTERY — the run identity folds
@@ -7666,30 +7666,30 @@ hostile-review pass._
   tests + docs only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
   §1's Active branch line)
   Earlier: `claude/verify-acceptance`
-  (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1756 — the operator acceptance verifier
+  (DEC-OPERATOR-ACCEPTANCE-VERIFY-001, MIGRATION.md #1797 — the operator acceptance verifier
   `brutex verify-acceptance`: 7 composed checks over the real lake with PASS/FAIL/ABSTAIN(named)
   verdicts + evidence blocks, the gating teeth smoke + CI 20-poison battery, the frozen
   `brutex-acceptance-report-v1` report + hash-chained audit trail, verify-family exits 0/1/2/3/4;
   hostile-review round 1 folded pre-merge (TOCTOU law wired · per-day Muhurat · full moneyness
   grammar · expiry-capped covered-span replan · read-only instruments.duckdb · bounded evidence
-  tails · --months made real — per-round record in MIGRATION.md #1756);
+  tails · --months made real — per-round record in MIGRATION.md #1797);
   hostile-review round 2 folded pre-merge (coverage-gate test-stem rename · registry schema-drift
   ABSTAIN guard · correct-or-abstain non-default-window-shape replan · pull retry re-reads ·
   Muhurat-date 1day bars disclosed unverified · in-memory master snapshot keeps the drift ladder
   live · seed-rotated F&O sampling + bounded/pruned coverage ledger — per-round record in
-  MIGRATION.md #1756);
+  MIGRATION.md #1797);
   hostile-review round 3 folded pre-merge (stdout-pure --json/table via the #1630 logging seam ·
   evidence-tree symlink refusal hoisted before the audit write · both serving-path residuals
   disclosed (registry + .manifest/) · engine set made code-true (INDIAVIX + NSE-NIFTY-*-FUT dirs
   full-history) · off-chain --out · loud SUSPECT on a failed report write · report.txt renders
-  limits/routed/Muhurat — per-round record in MIGRATION.md #1756);
+  limits/routed/Muhurat — per-round record in MIGRATION.md #1797);
   hostile-review round 4 folded pre-merge (whole-run single-flight flock — concurrent runs no
   longer corrupt the audit hash chain · the pull.partition_presence half-open-span fix (healthy
   1-day windows read exit 3; battery poisons 6-8 made real teeth again) · symlink refusal
   extended to the audit child paths · per-leg unique battery teeth on a non-engine twin symbol ·
   the streak_carry block (subset/TEETH_FAILED runs never reset streaks) · the package-wide
   zero-vendor-call AST pin · --json on early-SUSPECT paths · the pyright baseline honesty
-  correction — per-round record in MIGRATION.md #1756);
+  correction — per-round record in MIGRATION.md #1797);
   additive `brutex/acceptance/` package only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   matches §1's Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
@@ -7710,7 +7710,7 @@ hostile-review pass._
   `combine_metrics_from_folds`), byte-identity golden-proven — zero Rust in
   this slice; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX)
   Earlier: `claude/r38-rehearsal-determinism`
-  (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md #1773 — the R38 rehearsal
+  (DEC-R38-REHEARSAL-DETERMINISM-001, MIGRATION.md #1798 — the R38 rehearsal
   wall-time gate made COMMIT-INVARIANT, tests + docs only (zero `brutex/`
   source lines): `_sweep_all` pins a MEASURED constant `code_commit_sha`
   (the run-identity input the Stage-3/cascade seeds derive from — pre-fix, a
@@ -7722,7 +7722,7 @@ hostile-review pass._
   PROVEN (a wedged-chain-step injection failed the real assertion at 315.8 s
   on the pinned sha; a permanent companion test pins the ≥1:1 measured-time
   response); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
-  branch line — see §1 + MIGRATION.md #1773 for the full blurb)
+  branch line — see §1 + MIGRATION.md #1798 for the full blurb)
   Earlier: `claude/results-cascade-verdict-join`
   (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, MIGRATION.md #1749 — the Stage-4
   cascade overfitting verdicts + per-candidate CPCV pass rate + the ranking

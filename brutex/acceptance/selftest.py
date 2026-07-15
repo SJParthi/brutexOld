@@ -1,6 +1,6 @@
 """Self-test law (§7): teeth smoke (3 poisons, gating) + the full poison battery.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). A verifier that cannot
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). A verifier that cannot
 demonstrate it detects planted poison ON THIS BOX withholds all real-lake
 verdicts (exit 2). The twin lake is built with the REAL production writers
 (``ParquetWriter``, the real resamplers, the real ledger/bridge writers —

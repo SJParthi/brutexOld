@@ -1,6 +1,6 @@
 """Check 6 — stored-data sanity over the sampled datasets (composed predicates).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Pure production
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Pure production
 predicates re-used verbatim: price sanity (:func:`count_price_violations`),
 the bounded bad-tick screen (:func:`is_bad_tick`, the #1616 disclosed escapes
 named), the DEC-SPOT-PRICE-2DP-001 tick grid, the real per-date NSE session

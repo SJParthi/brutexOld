@@ -1,6 +1,6 @@
 """Check 1 — uniqueness / dedup / foreign / overlap census (composed, never re-read).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Verbatim reuse of the
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Verbatim reuse of the
 ``scan_lake_invariants`` scanner the ``brutex lake audit-unique`` CLI + doctor +
 ``/universe`` chip share. PASS only when the scope is COMPLETE and clean — any
 finding OR any skipped/unreadable file FAILs (DEC-AUDIT-CENSUS-HONESTY-001:

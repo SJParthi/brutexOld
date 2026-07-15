@@ -1,6 +1,6 @@
 """Shared real-writer twin-lake fixtures for the acceptance-check suites.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Everything here rides
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Everything here rides
 the PRODUCTION writers via :mod:`brutex.acceptance.selftest` — never a
 hand-written parquet shape (the #1631 fixture-only blindspot).
 """

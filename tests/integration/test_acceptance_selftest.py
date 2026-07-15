@@ -1,6 +1,6 @@
 """CI-mandatory FULL poison battery — every detector demonstrated per merge.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756), design §7: the full
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797), design §7: the full
 battery runs where flake is cheap (CI), so every check's detector has a
 demonstrated-failure fixture on every merge — PLUS the comparator-inversion
 teeth proving the battery itself has teeth.

@@ -1,6 +1,6 @@
 """Check 3 — incremental-pull idempotence, ZERO vendor calls (structural re-plan).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Re-plans the ledger's
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Re-plans the ledger's
 own covered spans on a COPY with a pinned clock via the SAME planners the pull
 uses (:func:`~brutex.data.window_ledger_store.plan_windows` /
 :func:`~brutex.adapters.groww.option_ingest.plan_contract_windows` — both

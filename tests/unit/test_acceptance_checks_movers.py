@@ -1,6 +1,6 @@
 """Movers-check pins: real-wire vs fenced-leg equality + the tamper tooth.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). The tamper tooth is
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). The tamper tooth is
 the proof this check CATCHES rather than mirrors: a perturbed payload cell
 must FAIL with both legs' values.
 """

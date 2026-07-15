@@ -1,6 +1,6 @@
 """Check 7 — O(1)/latency spot-checks with MEASURED numbers (never a proof).
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). In-process TestClient
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). In-process TestClient
 + ``perf_counter`` best-of-N-MIN (the house DEC-CANARY-MINTIME-001 idiom); one
 recorded FIRST call + N warm rounds per probe. Verdicts gate the WARM
 best-of-N only; every number is emitted regardless. HONEST: on-box absolute

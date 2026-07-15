@@ -1,6 +1,6 @@
 """Check registry — id → runner, run in a fixed operator-facing order.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756). Every runner takes the
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797). Every runner takes the
 shared :class:`~brutex.acceptance.context.AcceptanceContext` and returns a
 :class:`~brutex.acceptance.model.CheckResult`. Fencing (a raising runner →
 verdict ``ERROR``, the run continues) lives in :mod:`brutex.acceptance.run`.

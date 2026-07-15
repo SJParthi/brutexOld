@@ -1,6 +1,6 @@
 """Pull-check pins: replan idempotence, anti-vacuous tooth, silent-loss detector.
 
-DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1756).
+DEC-OPERATOR-ACCEPTANCE-VERIFY-001 (MIGRATION.md #1797).
 """
 
 from __future__ import annotations
