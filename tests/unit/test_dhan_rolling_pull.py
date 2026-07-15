@@ -186,9 +186,11 @@ def test_report_to_dict_labels_rolling_atm(tmp_path: Path) -> None:
 def test_module_source_has_no_per_contract_label() -> None:
     # Structural honesty pin: every "per-contract"/"per-expiry"/"per-strike" mention in
     # the module is a NEGATED disclaimer (NEVER / NOT / no ...) — never a positive label.
-    import brutex.dashboard.dhan_rolling_pull as mod
-
-    _assert_per_contract_only_negated(Path(mod.__file__).read_text(encoding="utf-8"))
+    # The rolling-pull module's own source, via the already-imported symbol's
+    # defining file (avoids a redundant plain `import` of the module `from`-imported
+    # at the top — CodeQL py/import-and-import-from).
+    module_src = Path(run_dhan_rolling_option_pull.__code__.co_filename)
+    _assert_per_contract_only_negated(module_src.read_text(encoding="utf-8"))
 
 
 def _assert_per_contract_only_negated(text: str) -> None:

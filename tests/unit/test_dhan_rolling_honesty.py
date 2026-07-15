@@ -64,10 +64,10 @@ def test_parse_fno_symbol_never_decodes_a_rolling_label() -> None:
 def test_rolling_subdir_absent_from_fixed_contract_reader_heal_modules() -> None:
     # The rolling subtree name must not appear in any fixed-contract reader / heal
     # module — structural proof they can never touch the rolling lake.
-    import brutex.data.fno_symbol as _fno
     import brutex.data.lake_heal as _heal
     import brutex.data.lake_invariants as _inv
-    import brutex.data.option_parquet_writer as _opw
+    from brutex.data import fno_symbol as _fno
+    from brutex.data import option_parquet_writer as _opw
 
     for mod in (_fno, _opw, _inv, _heal):
         module_file = mod.__file__

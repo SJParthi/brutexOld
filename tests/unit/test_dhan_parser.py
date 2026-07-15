@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -44,12 +45,10 @@ def test_parse_epoch_utc_is_timezone_invariant(monkeypatch: pytest.MonkeyPatch) 
     # The classic footgun: a naive fromtimestamp reads the box's zone. Prove the
     # parse is INVARIANT under a hostile TZ.
     monkeypatch.setenv("TZ", "America/New_York")
-    try:
+    with contextlib.suppress(AttributeError):  # tzset absent on some platforms
         import time as _time
 
         _time.tzset()
-    except AttributeError:  # pragma: no cover — tzset absent on some platforms
-        pass
     ts = parse_epoch_utc(_EPOCH_0915_IST)
     assert ts == datetime(2022, 6, 1, 3, 45, tzinfo=UTC)
 
@@ -148,12 +147,10 @@ def _restore_tz() -> object:
         os.environ.pop("TZ", None)
     else:
         os.environ["TZ"] = original
-    try:
+    with contextlib.suppress(AttributeError):  # tzset absent on some platforms
         import time as _time
 
         _time.tzset()
-    except AttributeError:  # pragma: no cover
-        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

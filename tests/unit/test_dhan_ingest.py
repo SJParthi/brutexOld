@@ -682,7 +682,7 @@ class TestRollingFloorClamp:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The default arm: today=None resolves now_ist().date() ONCE inside the plan.
-        import brutex.adapters.dhan.ingest as ingest_mod
+        from brutex.adapters.dhan import ingest as ingest_mod
 
         frozen = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
         monkeypatch.setattr(ingest_mod, "now_ist", lambda: frozen)
@@ -706,7 +706,7 @@ class TestRollingFloorClamp:
         """
         from zoneinfo import ZoneInfo
 
-        import brutex.adapters.dhan.ingest as ingest_mod
+        from brutex.adapters.dhan import ingest as ingest_mod
 
         # 2026-07-14 23:00 UTC == 2026-07-15 04:30 IST.
         frozen_utc = datetime(2026, 7, 14, 23, 0, tzinfo=UTC)

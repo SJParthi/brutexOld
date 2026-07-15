@@ -512,12 +512,23 @@ def _scrip_master_matches(csv_text: str | None) -> tuple[dict[str, set[str]], st
     header = next(reader, None)
     secid_idx = -1
     if header:
+        # Prefer the documented security-id column (the pinned scrip-master schema
+        # in DHAN_SCRIP_MASTER_COLUMNS); fall back to the drift-tolerant
+        # SECURITY+ID substring so a renamed header still resolves.
+        documented = {c.upper() for c in DHAN_SCRIP_MASTER_COLUMNS}
         for idx, col in enumerate(header):
             upper = col.upper()
-            if "SECURITY" in upper and "ID" in upper:
+            if upper in documented and "SECURITY" in upper and "ID" in upper:
                 secid_idx = idx
                 secid_col = col
                 break
+        if secid_idx < 0:
+            for idx, col in enumerate(header):
+                upper = col.upper()
+                if "SECURITY" in upper and "ID" in upper:
+                    secid_idx = idx
+                    secid_col = col
+                    break
     if secid_idx < 0 or not header:
         return matches, secid_col
     for row in reader:

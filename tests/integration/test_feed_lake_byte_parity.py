@@ -194,11 +194,8 @@ def _reader_snapshot(root: Path) -> dict[str, Any]:
     snap["list_candle_datasets"] = list_candle_datasets(root)
     snap["list_fno_candle_datasets"] = list_fno_candle_datasets(root)
     snap["list_option_datasets"] = list_option_datasets(root)
-    conn = duckdb.connect()
-    try:
+    with duckdb.connect() as conn:
         snap["summarize_spot_datasets"] = summarize_spot_datasets(conn, root)
-    finally:
-        conn.close()
     scan = scan_lake_invariants(root)
     snap["scan_files_scanned"] = scan.files_scanned
     snap["scan_files_by_segment"] = dict(scan.files_by_segment)

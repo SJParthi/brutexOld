@@ -1037,7 +1037,7 @@ class TestComputeBarServedIvBranch:
         assert prov.status == STATUS_BAD_INPUT
 
     def test_served_kernel_none_stamps_no_solution(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.setattr(ge, "compute_greeks", lambda **_kw: None)
         bar = self._overlay(served_iv=0.145)

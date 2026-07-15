@@ -181,7 +181,7 @@ class TestComputeBarServedBranch:
     def test_served_prices_directly_no_root_solve(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Spy the kernel entry: on the served branch it must be called with a
         # non-None sigma (price-from-sigma), never sigma=None (the root-solve).
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         seen: list[float | None] = []
         real = ge.compute_greeks  # type: ignore[attr-defined]
@@ -202,7 +202,7 @@ class TestComputeBarServedBranch:
     def test_solved_path_calls_solver_with_sigma_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         seen: list[float | None] = []
         real = ge.compute_greeks  # type: ignore[attr-defined]
@@ -233,7 +233,7 @@ class TestComputeBarServedBranch:
 
     def test_served_kernel_none_stamps_no_solution(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # defensive branch: a stubbed kernel that returns None on the served path
-        import brutex.data.greeks_enrich as ge
+        from brutex.data import greeks_enrich as ge
 
         monkeypatch.setattr(ge, "compute_greeks", lambda **_kw: None)
         bar = _overlay(served_iv=0.145)
@@ -745,7 +745,7 @@ class TestDriverAndFence:
     def test_fence_reraises_lake_write_halt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.adapters.dhan.rolling_option_greeks as m
+        from brutex.adapters.dhan import rolling_option_greeks as m
 
         _write_partition(tmp_path)
 
@@ -759,7 +759,7 @@ class TestDriverAndFence:
     def test_fence_reraises_pool_broken(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.adapters.dhan.rolling_option_greeks as m
+        from brutex.adapters.dhan import rolling_option_greeks as m
 
         _write_partition(tmp_path)
 
@@ -773,7 +773,7 @@ class TestDriverAndFence:
     def test_fence_swallows_other_errors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.adapters.dhan.rolling_option_greeks as m
+        from brutex.adapters.dhan import rolling_option_greeks as m
 
         _write_partition(tmp_path)
 
