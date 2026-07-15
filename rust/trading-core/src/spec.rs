@@ -70,8 +70,9 @@ impl Direction {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StrategySpec {
-    /// Entry required-bits SUPERSET over the same 60-condition `u128` vocabulary
-    /// as [`crate::bits`]. The spec fires on a bar iff EVERY set bit here is also
+    /// Entry required-bits SUPERSET over the same `u128` condition vocabulary
+    /// as [`crate::bits`] (66 declared positions; only IMPLEMENTED bits may be
+    /// required). The spec fires on a bar iff EVERY set bit here is also
     /// set in the bar's `evaluate_atoms` mask. Serialized as a HEX STRING
     /// (`condition_mask` as a JSON number loses precision past bit 52).
     #[cfg_attr(feature = "serde", serde(with = "crate::spec::mask_hex"))]
@@ -259,7 +260,6 @@ mod tests {
             close_paisa: close,
             ema20_paisa: Some(995_000),
             ema200_paisa: Some(990_000),
-            vwap_paisa: None,
             pivots: PivotLevels {
                 p_paisa: 1_000_000,
                 r1_paisa: 1_005_000,
@@ -356,10 +356,16 @@ mod tests {
 
     #[test]
     fn new_rejects_a_reserved_bit() {
-        // Bit 60 is the first reserved/un-evaluated bit (TOTAL_CONDITIONS == 60).
-        let reserved = 1u128 << 60;
+        // Bit 66 is the first undeclared/reserved bit (TOTAL_CONDITIONS == 66).
+        let reserved = 1u128 << 66;
         let err = StrategySpec::new(reserved, Direction::Long, proximity(), 1, 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // Bit 64 (Supertrend) is DECLARED but layout-only — equally refused.
+        let declared_only = 1u128 << 64;
+        assert!(StrategySpec::new(declared_only, Direction::Long, proximity(), 1, 0).is_err());
+        // Bit 52 (VWAP) is TOMBSTONED — refused too (the wipe).
+        let tombstone = 1u128 << 52;
+        assert!(StrategySpec::new(tombstone, Direction::Long, proximity(), 1, 0).is_err());
     }
 
     #[test]
@@ -407,6 +413,24 @@ mod tests {
         assert_ne!(b, by_prox.canonical_bytes());
     }
 
+    /// Bit 63 (`narrow_cpr_day`) is the u64 SIGN bit — cheap insurance that a
+    /// mask/bar_bits word with it set survives the canonical-bytes encode
+    /// unchanged (everything here is u128/unsigned; a signed-i64 round-trip
+    /// anywhere in the encode would corrupt exactly this bit).
+    #[test]
+    fn bit_63_mask_round_trips_canonical_bytes_unchanged() {
+        let mask = (1u128 << 63) | 0b1010;
+        assert_eq!(mask & IMPLEMENTED_MASK, mask, "bit 63 must be implemented");
+        let spec = StrategySpec::new(mask, Direction::Long, proximity(), 2, 9).unwrap();
+        let bytes = spec.canonical_bytes();
+        // The mask occupies bytes 4..20 little-endian — recover it verbatim.
+        let mut le = [0u8; 16];
+        le.copy_from_slice(&bytes[4..20]);
+        assert_eq!(u128::from_le_bytes(le), mask);
+        // And the encode is stable across calls (no sign-dependent drift).
+        assert_eq!(spec.canonical_bytes(), bytes);
+    }
+
     // ── evaluate superset semantics (thin-wrapper proof) ───────────────────
     #[test]
     fn evaluate_fires_when_required_bits_are_a_subset() {
@@ -446,8 +470,10 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn serde_round_trips_via_hex_mask() {
+        // (Bit 53 in the original mask moved to bit 54 when 52-53 were
+        // TOMBSTONED — a spec may only require IMPLEMENTED bits.)
         let spec = StrategySpec::new(
-            0x0000_0000_0000_0000_0622_1014_8000_a01a,
+            0x0000_0000_0000_0000_0642_1014_8000_a01a,
             Direction::Short,
             proximity(),
             3,
@@ -457,11 +483,29 @@ mod tests {
         let json = serde_json::to_string(&spec).expect("serialize");
         // The mask is a HEX STRING, never a JSON number.
         assert!(
-            json.contains("\"0000000000000000062210148000a01a\""),
+            json.contains("\"0000000000000000064210148000a01a\""),
             "mask must serialise as zero-padded hex string, got: {json}"
         );
         let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, spec);
+        assert_eq!(back.canonical_bytes(), spec.canonical_bytes());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_bit_63_mask_hex_round_trips_unchanged() {
+        // The u64-sign-bit insurance, serde half: a spec whose mask carries
+        // bit 63 serialises through the `mask_hex` STRING adapter and parses
+        // back bit-identically (no signedness/precision loss).
+        let mask = (1u128 << 63) | (1u128 << 60) | 1;
+        let spec = StrategySpec::new(mask, Direction::Short, proximity(), 1, 4).unwrap();
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(
+            json.contains("\"00000000000000009000000000000001\""),
+            "hex string must carry bit 63 verbatim, got: {json}"
+        );
+        let back: StrategySpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.condition_mask, mask);
         assert_eq!(back.canonical_bytes(), spec.canonical_bytes());
     }
 

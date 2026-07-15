@@ -2,7 +2,7 @@
 //!
 //! `DEC-STAGE1A-RUST-BATCH-001`: BruteX's Stage-1A matrix builder
 //! (`brutex/engine/stage1a.py::Stage1AMatrixBuilder`) walks a bar feed in
-//! Python calling `evaluate_with_levels` + `VwapState.update` +
+//! Python calling `evaluate_with_levels` +
 //! `MarketStructureState.update` once PER BAR over the FFI. This module is the
 //! batch twin: the Python prepass (`Stage1AMatrixBuilder.collect_batch_inputs`)
 //! resolves every DECISION column with the builder's own roll/day/anchor
@@ -10,8 +10,10 @@
 //! daily-history bound and the anchor resolution are NEVER re-implemented here
 //! — and this core re-expresses only the integer state bookkeeping (running
 //! day extremes, the prior-bar flag deque, per-contract state recreation)
-//! around the SAME frozen cores: [`VwapState`], [`MarketStructureState`] and
+//! around the SAME frozen cores: [`MarketStructureState`] and
 //! [`evaluate_atoms`]. One `Vec<u128>` out, one mask per bar, input order.
+//! (The former VWAP columns — typical/volume/pre_open/session_key/session_day —
+//! were DELETED with the bits 52-53 tombstone: the VWAP/volume wipe.)
 //!
 //! ## Bit-identity contract
 //!
@@ -27,10 +29,10 @@
 //! Every STRUCTURAL violation (length/day-table/`day_index` desync, an
 //! out-of-domain `prior_n`/`fractal_k`) is an `Err(String)` — never a panic
 //! (G-2: a desynced day table must never silently serve shifted anchors). The
-//! VALUE envelope (price/level magnitudes, bps products, VWAP operands) is
+//! VALUE envelope (price/level magnitudes, bps products) is
 //! enforced by the feature-gated PyO3 wrapper in `python.rs`, which reuses the
-//! EXISTING boundary guards (`check_evaluate_inputs` / `bar_in_range` /
-//! `vwap_update_guard`) in place, verbatim — this core deliberately duplicates
+//! EXISTING boundary guards (`check_evaluate_inputs` / `bar_in_range`)
+//! in place, verbatim — this core deliberately duplicates
 //! none of their constants. Inside that envelope the arithmetic here is the
 //! evaluator's own (proven overflow-free under the guards — see
 //! `MAX_BAR_PAISA`'s derivation) plus `max`/`min` folds that cannot overflow.
@@ -41,13 +43,12 @@
 //! `FIB_DEPENDENT_MASK` / `APPLIES_TO_1DAY_MASK` constants and this core
 //! complements in-width (`mask & !dep`) — Python's `mask & ~DEP` on an
 //! arbitrary-precision int is identical for any mask `< 2^128` (unit-pinned
-//! below), and the masks the evaluator emits occupy bits 0..=59 only.
+//! below), and the masks the evaluator emits occupy bits 0..=63 only.
 
 use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
 use crate::indicators::fib::FibLevels;
 use crate::indicators::market_structure::MarketStructureState;
 use crate::indicators::pivots::PivotLevels;
-use crate::indicators::vwap::VwapState;
 
 /// Entries per day-table pivot row — mirrors the FROZEN `evaluate_with_levels`
 /// pivot ABI (`python.rs::PIVOT_LEVELS_LEN`; the feature-gated tests pin the
@@ -99,21 +100,9 @@ pub struct Stage1aBatchInputs<'a> {
     pub low_paisa: &'a [i64],
     /// Bar close (int64 paisa).
     pub close_paisa: &'a [i64],
-    /// HLC3 typical price, snapped Python-side via the canonical
-    /// `_price_to_paisa` seam (the raw-Decimal law — never re-derived here).
-    pub typical_paisa: &'a [i64],
-    /// Bar volume.
-    pub volume: &'a [i64],
     /// IST wall-clock seconds-of-day, prepass-resolved via the shared
     /// `trading_core.seconds_of_day` seam (DEC-TOD-SECONDS-RUST-SEAM-001).
     pub tod_seconds: &'a [u32],
-    /// True for a 09:00-09:15 pre-open auction bar (VWAP-excluded).
-    pub pre_open: &'a [bool],
-    /// Engine-injected VWAP session key (spot: the constant 0; futures: the
-    /// owning contract's expiry ordinal).
-    pub session_key: &'a [u64],
-    /// IST calendar-date ordinal of the bar.
-    pub session_day: &'a [i64],
     /// True = the ADR-0012 D11 TOTAL per-contract hard reset fires BEFORE this
     /// bar (emitted by the SAME prepass cursor that drives
     /// `_roll_to_new_contract`).
@@ -164,7 +153,7 @@ pub struct Stage1aBatchInputs<'a> {
 /// `Err(String)` on any violation (never a panic — G-2: a marshal-desynced
 /// day table must never silently serve shifted anchors):
 ///
-/// * all 14 per-bar columns share one length `N`;
+/// * all 9 per-bar columns share one length `N`;
 /// * `day_pivot_levels` / `day_fib_levels` / `day_has_fib` sizes agree with
 ///   `D = day_has_pivot.len()` (checked multiplication — total for any `D`);
 /// * `N == 0` requires empty day tables (and yields `Ok(0)`);
@@ -181,12 +170,7 @@ pub fn validate_structure(inp: &Stage1aBatchInputs<'_>) -> Result<usize, String>
         ("high_paisa", inp.high_paisa.len()),
         ("low_paisa", inp.low_paisa.len()),
         ("close_paisa", inp.close_paisa.len()),
-        ("typical_paisa", inp.typical_paisa.len()),
-        ("volume", inp.volume.len()),
         ("tod_seconds", inp.tod_seconds.len()),
-        ("pre_open", inp.pre_open.len()),
-        ("session_key", inp.session_key.len()),
-        ("session_day", inp.session_day.len()),
         ("contract_reset", inp.contract_reset.len()),
         ("day_index", inp.day_index.len()),
         ("ema20_paisa", inp.ema20_paisa.len()),
@@ -335,7 +319,7 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
 ///
 /// The loop body mirrors `Stage1AMatrixBuilder.push` step-for-step:
 ///
-/// 1. `contract_reset[i]` ⇒ recreate [`VwapState`] / [`MarketStructureState`],
+/// 1. `contract_reset[i]` ⇒ recreate [`MarketStructureState`],
 ///    clear the prior-flag deque, void the current day (D11 — the prepass
 ///    emits the flag from the SAME cursor that fires `_roll_to_new_contract`;
 ///    the EMA hard reset is a prepass concern — EMA arrives as a column).
@@ -346,14 +330,13 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
 /// 3. Absorb high/low into the running day extremes (with the defensive
 ///    `high >= low` `Err` arm mirroring `DayExtremesState.update`'s
 ///    `ValueError` — unreachable through a validated `CandleBar`).
-/// 4. Feed the SAME core [`VwapState`] the pyclass wraps.
-/// 5. Feed the SAME core [`MarketStructureState`].
-/// 6. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate.
-/// 7. The clears, in `push()`'s exact order: cold pivot anchor ⇒
+/// 4. Feed the SAME core [`MarketStructureState`].
+/// 5. [`evaluate_atoms`] — the ONE frozen evaluator, in-crate.
+/// 6. The clears, in `push()`'s exact order: cold pivot anchor ⇒
 ///    `mask &= !anchor_dependent_mask`; else cold fib ⇒
 ///    `mask &= !fib_dependent_mask`; then the optional D12
 ///    `mask &= applies_to_1day_mask`.
-/// 8. AFTER evaluation: push `close > open` into the prior deque, trimmed to
+/// 7. AFTER evaluation: push `close > open` into the prior deque, trimmed to
 ///    `prior_n` (a doji records bearish — the evaluator.py:119-123 law).
 pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u128>, String> {
     let n = validate_structure(inp)?;
@@ -365,7 +348,6 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
         pdh_pdl_proximity_bps: inp.pdh_pdl_bps,
         fib_proximity_bps: inp.fib_bps,
     };
-    let mut vwap = VwapState::new();
     let mut structure = MarketStructureState::new(inp.fractal_k);
     let mut prior = PriorBarHistory {
         prior_n: inp.prior_n,
@@ -385,7 +367,6 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
     for i in 0..n {
         if inp.contract_reset[i] {
             // ADR-0012 D11 TOTAL hard reset — post-roll state == fresh state.
-            vwap = VwapState::new();
             structure = MarketStructureState::new(inp.fractal_k);
             prior.flags.clear();
             current_day = None;
@@ -418,14 +399,6 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             day_high = day_high.max(high);
             day_low = day_low.min(low);
         }
-        let vwap_paisa = vwap.update(
-            inp.typical_paisa[i],
-            inp.volume[i],
-            inp.pre_open[i],
-            inp.session_key[i],
-            inp.session_day[i],
-            inp.tod_seconds[i],
-        );
         let market_structure = structure.update(high, low, close);
         let snapshot = IndicatorSnapshot {
             tod_seconds: inp.tod_seconds[i],
@@ -435,7 +408,6 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             close_paisa: close,
             ema20_paisa: inp.ema20_paisa[i],
             ema200_paisa: inp.ema200_paisa[i],
-            vwap_paisa,
             pivots,
             fib,
             day_high_paisa: day_high,
@@ -476,12 +448,7 @@ mod tests {
         high: Vec<i64>,
         low: Vec<i64>,
         close: Vec<i64>,
-        typical: Vec<i64>,
-        volume: Vec<i64>,
         tod: Vec<u32>,
-        pre_open: Vec<bool>,
-        session_key: Vec<u64>,
-        session_day: Vec<i64>,
         contract_reset: Vec<bool>,
         day_index: Vec<u32>,
         ema20: Vec<Option<i64>>,
@@ -500,12 +467,7 @@ mod tests {
             high: vec![10_100; n],
             low: vec![9_900; n],
             close: vec![10_050; n],
-            typical: vec![10_017; n],
-            volume: vec![100; n],
             tod: (0..n).map(|i| 9 * 3600 + 16 * 60 + i as u32).collect(),
-            pre_open: vec![false; n],
-            session_key: vec![0; n],
-            session_day: vec![738_000; n],
             contract_reset: vec![false; n],
             day_index: vec![0; n],
             ema20: vec![None; n],
@@ -523,12 +485,7 @@ mod tests {
             high_paisa: &c.high,
             low_paisa: &c.low,
             close_paisa: &c.close,
-            typical_paisa: &c.typical,
-            volume: &c.volume,
             tod_seconds: &c.tod,
-            pre_open: &c.pre_open,
-            session_key: &c.session_key,
-            session_day: &c.session_day,
             contract_reset: &c.contract_reset,
             day_index: &c.day_index,
             ema20_paisa: &c.ema20,
@@ -573,9 +530,9 @@ mod tests {
 
     #[test]
     fn every_per_bar_column_length_is_validated() {
-        // Truncate each of the 13 sibling columns in turn; each must be
-        // rejected with a length Err (the 14-slice length law).
-        for which in 0..13 {
+        // Truncate each of the 8 sibling columns in turn; each must be
+        // rejected with a length Err (the 9-slice length law).
+        for which in 0..8 {
             let mut c = cols(3);
             match which {
                 0 => {
@@ -588,30 +545,15 @@ mod tests {
                     c.close.pop();
                 }
                 3 => {
-                    c.typical.pop();
-                }
-                4 => {
-                    c.volume.pop();
-                }
-                5 => {
                     c.tod.pop();
                 }
-                6 => {
-                    c.pre_open.pop();
-                }
-                7 => {
-                    c.session_key.pop();
-                }
-                8 => {
-                    c.session_day.pop();
-                }
-                9 => {
+                4 => {
                     c.contract_reset.pop();
                 }
-                10 => {
+                5 => {
                     c.day_index.pop();
                 }
-                11 => {
+                6 => {
                     c.ema20.pop();
                 }
                 _ => {
@@ -736,7 +678,6 @@ mod tests {
     fn two_day_cols() -> Cols {
         let mut c = cols(4);
         c.day_index = vec![0, 0, 1, 1];
-        c.session_day = vec![738_000, 738_000, 738_001, 738_001];
         c.day_has_pivot = vec![false, true];
         c.day_has_fib = vec![false, true];
         // Day-1 row: pivots/fib anchored at ~100 rupees so proximity can fire.
@@ -798,6 +739,32 @@ mod tests {
     }
 
     #[test]
+    fn cpr_bits_ride_the_anchor_dependent_clear() {
+        // The CPR comparison bits (60-62) fire against a COLD day's zero
+        // placeholder row (close 10_050 > tc 0 — the close_above_pdh class),
+        // so they MUST be in the anchor-dependent clear; on the WARM day they
+        // evaluate off the real row. Day-1 row: pdh=10_100, pdl=9_900,
+        // p=10_000 ⇒ bc = round((10_100+9_900)/2) = 10_000, tc = 2·10_000 −
+        // 10_000 = 10_000 (a width-0 CPR: narrow fires too); close 10_050 >
+        // tc ⇒ bit 60.
+        let c = two_day_cols();
+        let mut v = view(&c);
+        const CPR_FAMILY: u128 = 0xF << 60;
+        v.anchor_dependent_mask = REAL_ANCHOR_DEP;
+        v.fib_dependent_mask = REAL_FIB_DEP;
+        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        // Day 0 (cold): every CPR bit cleared — never a fabricated verdict
+        // off the placeholder zeros.
+        assert_eq!(masks[0] & CPR_FAMILY, 0);
+        assert_eq!(masks[1] & CPR_FAMILY, 0);
+        // Day 1 (warm): above-TC + narrow fire off the real anchor row.
+        assert_ne!(masks[2] & (1u128 << crate::bits::BIT_ABOVE_CPR_TC), 0);
+        assert_ne!(masks[2] & (1u128 << crate::bits::BIT_NARROW_CPR_DAY), 0);
+        assert_eq!(masks[2] & (1u128 << crate::bits::BIT_INSIDE_CPR), 0);
+        assert_eq!(masks[2] & (1u128 << crate::bits::BIT_BELOW_CPR_BC), 0);
+    }
+
+    #[test]
     fn apply_1day_mask_ands_the_final_mask() {
         let c = cols(1);
         let mut v = view(&c);
@@ -845,11 +812,15 @@ mod tests {
 
     /// The three POSITIVE dependency masks exactly as the Python dispatch
     /// sends them (`stage1a.ANCHOR_DEPENDENT_MASK` / `FIB_DEPENDENT_MASK` /
-    /// `bits.APPLIES_TO_1DAY_MASK` — frozen vocabulary constants), so the
-    /// oracle-derived probe masks below replay under the REAL clears.
-    const REAL_ANCHOR_DEP: u128 = 0xf00003fffffc0;
+    /// `bits.APPLIES_TO_1DAY_MASK`). Updated for the 66-bit reshape: the
+    /// anchor mask GAINS the CPR bits 60-63 (they compare against the SAME
+    /// prev-day anchor and would otherwise fire against a cold-day zero row —
+    /// the stage1a.py `_pivot_dependent_bits` update ships with the Python
+    /// half of this change) and the applies-1day mask gains bits 60-65
+    /// (all six new conditions are 1day-applicable in the manifest).
+    const REAL_ANCHOR_DEP: u128 = 0xf00f_0000_3fff_ffc0;
     const REAL_FIB_DEP: u128 = 0x3ff80000;
-    const REAL_APPLIES_1DAY: u128 = 0xfcf0fffffffffff;
+    const REAL_APPLIES_1DAY: u128 = 0x3ffcf0fffffffffff;
 
     /// The pin-1 columns (directions B,B,B,R,R,R,B,B on 2024-01-02) — shared
     /// by the rolling-window pin and the RF-I F1 `apply_1day_mask` pin.
@@ -865,27 +836,28 @@ mod tests {
         c.close = vec![
             10_500, 11_000, 11_500, 11_000, 10_500, 10_000, 10_500, 11_000,
         ];
-        c.typical = vec![
-            10_333, 10_833, 11_333, 11_167, 10_667, 10_167, 10_333, 10_833,
-        ];
         c.tod = vec![
             33_300, 33_360, 33_420, 33_480, 33_540, 33_600, 33_660, 33_720,
         ];
-        c.session_day = vec![738_887; 8];
         c
     }
 
     /// The Python-oracle masks for [`pin1_cols`] under the REAL dependency
-    /// masks (`Stage1AMatrixBuilder(prior_n=3).build`, derived once).
+    /// masks (`Stage1AMatrixBuilder(prior_n=3).build`, derived once for the
+    /// 60-bit layout; mechanically re-derived for the 66-bit reshape as
+    /// `old & !(0b11 << 52)` — sound because the deleted VWAP state only ever
+    /// fed bits 52/53, and the new CPR bits 60-63 are cleared on this COLD
+    /// (day_has_pivot = false) stream by the updated REAL_ANCHOR_DEP. Phase B
+    /// re-derives from the regenerated Python oracle to confirm).
     const PIN1_MASKS: [u128; 8] = [
-        0x10040240000000,
-        0x10140240000000,
-        0x10140240000000,
-        0x10102280000000,
-        0x20100280000000,
-        0x20180280000000,
-        0x20104240000000,
-        0x10100240000000,
+        0x40240000000,
+        0x140240000000,
+        0x140240000000,
+        0x102280000000,
+        0x100280000000,
+        0x180280000000,
+        0x104240000000,
+        0x100240000000,
     ];
 
     /// Refuter RF-B F1(c): the mixed-direction ROLLING-WINDOW value pin.
@@ -945,11 +917,20 @@ mod tests {
             "the ∧-law self-check drifted from the oracle-derived literals"
         );
         assert_eq!(masks, expected);
-        // Anti-vacuous: the AND genuinely REMOVES bits on every bar (so an
-        // `|=` mutant, which can only ADD, must diverge on all 8).
-        for (m, e) in PIN1_MASKS.iter().zip(&masks) {
-            assert!(m != e, "the 1day clear removed nothing — vacuous pin");
-        }
+        // Anti-vacuous: the AND genuinely REMOVES bits on 7 of the 8 bars (an
+        // `|=` mutant, which can only ADD, must diverge on those). Bar 0's tod
+        // (09:15) precedes every ToD bucket, and its only formerly-cleared bit
+        // was the TOMBSTONED VWAP bit 52 — post-wipe it legitimately loses
+        // nothing to the 1day AND.
+        let removed = PIN1_MASKS
+            .iter()
+            .zip(&masks)
+            .filter(|(m, e)| m != e)
+            .count();
+        assert!(
+            removed >= 7,
+            "the 1day clear removed bits on only {removed}/8 bars — vacuous pin"
+        );
     }
 
     /// Refuter RF-B F1(c): the all-BULL prior-flag pin (`prior_n = 2`) —
@@ -962,24 +943,24 @@ mod tests {
         c.high = vec![10_300, 10_500, 10_700, 10_900, 11_100, 11_300];
         c.low = vec![9_900, 10_100, 10_300, 10_500, 10_700, 10_900];
         c.close = vec![10_200, 10_400, 10_600, 10_800, 11_000, 11_200];
-        c.typical = vec![10_133, 10_333, 10_533, 10_733, 10_933, 11_133];
         c.tod = vec![33_300, 33_360, 33_420, 33_480, 33_540, 33_600];
-        c.session_day = vec![738_887; 6];
         let mut v = view(&c);
         v.prior_n = 2;
         v.anchor_dependent_mask = REAL_ANCHOR_DEP;
         v.fib_dependent_mask = REAL_FIB_DEP;
         v.applies_to_1day_mask = REAL_APPLIES_1DAY;
         let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
+        // Oracle-derived for the 60-bit layout, mechanically re-derived for
+        // the 66-bit reshape as `old & !(0b11 << 52)` (see PIN1_MASKS).
         assert_eq!(
             masks,
             vec![
-                0x10040040000000,
-                0x10140040000000,
-                0x10142040000000,
-                0x10142040000000,
-                0x10142040000000,
-                0x10142040000000,
+                0x40040000000,
+                0x140040000000,
+                0x142040000000,
+                0x142040000000,
+                0x142040000000,
+                0x142040000000,
             ]
         );
         assert_ne!(masks[2] & (1u128 << crate::bits::BIT_PRIOR_N_BULLISH), 0);
@@ -1069,25 +1050,6 @@ mod tests {
         assert_eq!(masks[0] & (1u128 << crate::bits::BIT_GAP_DOWN_DAY), 0);
     }
 
-    /// Refuter RF-I round-3 F2(b): a `pre_open = true` bar must be EXCLUDED
-    /// from the session VWAP (vwap.rs skips it). Feed a 20_000-typical
-    /// pre-open bar then a 10_000-typical regular bar: the pristine VWAP is
-    /// 10_000, so the 10_050 close reads ABOVE (bit 52); the demonstrated
-    /// M12 mutant (`inp.pre_open[i]` → `false`) folds the auction bar in
-    /// (VWAP 15_000) and flips the verdict to BELOW (bit 53).
-    #[test]
-    fn pre_open_bar_is_excluded_from_the_session_vwap() {
-        let mut c = cols(2);
-        c.pre_open = vec![true, false];
-        c.typical = vec![20_000, 10_000];
-        c.tod = vec![9 * 3600, 9 * 3600 + 16 * 60];
-        let mut v = view(&c);
-        v.anchor_dependent_mask = 0; // cold-day clear disarmed — bits observable
-        let masks = stage1a_bar_bits_batch_impl(&v).unwrap();
-        assert_ne!(masks[1] & (1u128 << crate::bits::BIT_CLOSE_ABOVE_VWAP), 0);
-        assert_eq!(masks[1] & (1u128 << crate::bits::BIT_CLOSE_BELOW_VWAP), 0);
-    }
-
     /// Refuter RF-I round-3 F2(c): the reset arm's `current_day = None`
     /// day-cursor drop is DEFENSIVE-semantics teeth. A reset WITHOUT a
     /// day_index bump is structurally LEGAL (`validate_structure` allows a
@@ -1122,8 +1084,7 @@ mod tests {
         // (the D11 "post-roll state == fresh-builder state" law, natively).
         let mut c = two_day_cols();
         c.contract_reset = vec![false, false, true, false];
-        c.session_key = vec![7, 7, 8, 8];
-        // Vary the prices so states (VWAP / structure / prior) carry signal.
+        // Vary the prices so states (structure / prior) carry signal.
         c.open = vec![10_000, 10_040, 10_010, 10_020];
         c.close = vec![10_040, 10_010, 10_030, 10_010];
         c.high = vec![10_060, 10_060, 10_060, 10_060];
@@ -1136,12 +1097,7 @@ mod tests {
             high: c.high[2..].to_vec(),
             low: c.low[2..].to_vec(),
             close: c.close[2..].to_vec(),
-            typical: c.typical[2..].to_vec(),
-            volume: c.volume[2..].to_vec(),
             tod: c.tod[2..].to_vec(),
-            pre_open: c.pre_open[2..].to_vec(),
-            session_key: c.session_key[2..].to_vec(),
-            session_day: c.session_day[2..].to_vec(),
             contract_reset: vec![false, false],
             day_index: vec![0, 0],
             ema20: c.ema20[2..].to_vec(),
@@ -1185,12 +1141,7 @@ mod tests {
                 high: c.high[..k].to_vec(),
                 low: c.low[..k].to_vec(),
                 close: c.close[..k].to_vec(),
-                typical: c.typical[..k].to_vec(),
-                volume: c.volume[..k].to_vec(),
                 tod: c.tod[..k].to_vec(),
-                pre_open: c.pre_open[..k].to_vec(),
-                session_key: c.session_key[..k].to_vec(),
-                session_day: c.session_day[..k].to_vec(),
                 contract_reset: c.contract_reset[..k].to_vec(),
                 day_index: c.day_index[..k].to_vec(),
                 ema20: c.ema20[..k].to_vec(),

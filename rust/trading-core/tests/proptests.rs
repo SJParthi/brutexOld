@@ -10,8 +10,10 @@
 //! that fails when that operator is perturbed):
 //!
 //! 1. **Universal invariants** — hold for ALL bounded inputs: determinism,
-//!    reserved bits 52-63 always clear, mutually-exclusive bit pairs, at most
-//!    one time-of-day bucket, the pivot/fib level ladders are monotonic.
+//!    non-implemented bits (the tombstoned VWAP 52-53, the declared-only
+//!    Supertrend 64-65 and the reserved headroom >= 66) always clear,
+//!    mutually-exclusive bit pairs, at most one time-of-day bucket, the CPR
+//!    partition, the pivot/fib level ladders are monotonic.
 //! 2. **Independent oracle parity** — a deliberately separate re-implementation
 //!    of the 52 predicates (this file is in `tests/`, which `cargo-mutants`
 //!    never mutates, so a mutant in `src/` diverges from this oracle and dies).
@@ -44,8 +46,12 @@ const MID_MORNING_END: u32 = 11 * 3600 + 30 * 60;
 const MIDDAY_END: u32 = 13 * 3600;
 const AFTERNOON_END: u32 = 15 * 3600;
 
-/// All IMPLEMENTED condition bits set — the union the evaluator can ever produce
-/// (all 60 bits, incl. the VWAP/R5-S5/BOS/CHoCH groups, are implemented now).
+/// All IMPLEMENTED condition bits set — the union the evaluator can ever
+/// produce: bits 0..=51 and 54..=63 (incl. the R5-S5/BOS/CHoCH/CPR groups).
+/// Bits 52-53 are the TOMBSTONED VWAP positions and bits 64-65 the
+/// declared-only Supertrend layout — both outside IMPLEMENTED_MASK, so the
+/// `non_implemented_bits_are_always_clear` property pins them (and the >= 66
+/// headroom) permanently clear.
 const FULL_MASK: u128 = bits::IMPLEMENTED_MASK;
 
 // ───────────────────────────── strategies ──────────────────────────────────
@@ -208,10 +214,10 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                 Just(candle),
                 day_strat,
                 ood_strat,
-                // ema20, ema200 AND the session VWAP all share the `arb_ema`
-                // around-close strategy (above / below / None) so the Group-10
-                // VWAP-position bits are exercised both ways by the property suite.
-                (arb_ema(close), arb_ema(close), arb_ema(close)),
+                // ema20 + ema200 share the `arb_ema` around-close strategy
+                // (above / below / None) so the Group-1 comparisons see their
+                // equality boundary both ways.
+                (arb_ema(close), arb_ema(close)),
                 arb_tod(),
                 arb_proximity(),
                 arb_prior(),
@@ -239,7 +245,7 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
             )| {
                 let (open, high, low, close) = candle;
                 let (day_high, day_low) = day;
-                let (ema20, ema200, vwap) = emas;
+                let (ema20, ema200) = emas;
                 let snapshot = IndicatorSnapshot {
                     tod_seconds,
                     open_paisa: open,
@@ -248,7 +254,6 @@ fn arb_scenario() -> impl Strategy<Value = (IndicatorSnapshot, ProximityParams, 
                     close_paisa: close,
                     ema20_paisa: ema20,
                     ema200_paisa: ema200,
-                    vwap_paisa: vwap,
                     pivots,
                     fib,
                     day_high_paisa: day_high,
@@ -488,15 +493,7 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
         m |= 1u128 << bits::BIT_OUTSIDE_DAY;
     }
 
-    // Group 10: VWAP position (bits 52-53). `None` (warm-up / 1day) fires nothing.
-    if let Some(vwap) = s.vwap_paisa {
-        if c > vwap {
-            m |= 1u128 << bits::BIT_CLOSE_ABOVE_VWAP;
-        }
-        if c < vwap {
-            m |= 1u128 << bits::BIT_CLOSE_BELOW_VWAP;
-        }
-    }
+    // (Group 10, bits 52-53, is the TOMBSTONED VWAP pair — never set.)
 
     // Group 11: pivot R5/S5 proximity (bits 54-55) — same tolerance as Group 2.
     if oracle_is_near(c, pv.r5_paisa, bp) {
@@ -521,6 +518,25 @@ fn oracle(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -
     }
     if ms.choch_bearish {
         m |= 1u128 << bits::BIT_CHOCH_BEARISH;
+    }
+
+    // Group 13: Central Pivot Range (bits 60-63) — an independent re-derivation
+    // of the Ochoa/PivotBoss formulas (BC = round-half-even midpoint of the raw
+    // prev-day H/L; TC = 2·P − BC on the rounded pivot P; canonical tc >= bc).
+    let bc_raw = ((pv.pdh_paisa + pv.pdl_paisa) as f64 / 2.0).round_ties_even() as i64;
+    let tc_raw = 2 * pv.p_paisa - bc_raw;
+    let (tc, bc) = (tc_raw.max(bc_raw), tc_raw.min(bc_raw));
+    if c > tc {
+        m |= 1u128 << bits::BIT_ABOVE_CPR_TC;
+    }
+    if c < bc {
+        m |= 1u128 << bits::BIT_BELOW_CPR_BC;
+    }
+    if c >= bc && c <= tc {
+        m |= 1u128 << bits::BIT_INSIDE_CPR;
+    }
+    if pv.p_paisa > 0 && (i128::from(tc) - i128::from(bc)) * 10_000 <= i128::from(pv.p_paisa) * 30 {
+        m |= 1u128 << bits::BIT_NARROW_CPR_DAY;
     }
 
     m
@@ -553,8 +569,9 @@ proptest! {
         prop_assert_eq!(a, b);
     }
 
-    /// Every bit outside IMPLEMENTED_MASK (the LAYOUT-ONLY VWAP/R5-S5/BOS/CHoCH
-    /// bits + the reserved u128 headroom) must always be clear.
+    /// Every bit outside IMPLEMENTED_MASK must always be clear: the TOMBSTONED
+    /// VWAP bits 52-53, the declared-only Supertrend bits 64-65 AND the
+    /// reserved u128 headroom (>= 66).
     #[test]
     fn non_implemented_bits_are_always_clear((s, p, prior) in arb_scenario()) {
         let mask = evaluate_atoms(&s, &p, &prior);
@@ -562,8 +579,9 @@ proptest! {
     }
 
     /// The evaluator must equal the independent oracle on every scenario. This
-    /// is the workhorse mutation-killer: it pins the exact predicate of all 52
-    /// bits, and the boundary-aware generators reach each comparison's edge.
+    /// is the workhorse mutation-killer: it pins the exact predicate of every
+    /// implemented bit, and the boundary-aware generators reach each
+    /// comparison's edge.
     #[test]
     fn evaluator_matches_independent_oracle((s, p, prior) in arb_scenario()) {
         prop_assert_eq!(evaluate_atoms(&s, &p, &prior), oracle(&s, &p, &prior));
@@ -583,6 +601,20 @@ proptest! {
         prop_assert_eq!(pair(bits::BIT_CLOSE_IN_UPPER_THIRD, bits::BIT_CLOSE_IN_LOWER_THIRD), 0);
         prop_assert_eq!(pair(bits::BIT_GAP_UP_DAY, bits::BIT_GAP_DOWN_DAY), 0);
         prop_assert_eq!(pair(bits::BIT_INSIDE_DAY, bits::BIT_OUTSIDE_DAY), 0);
+        prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_BELOW_CPR_BC), 0);
+        prop_assert_eq!(pair(bits::BIT_ABOVE_CPR_TC, bits::BIT_INSIDE_CPR), 0);
+        prop_assert_eq!(pair(bits::BIT_BELOW_CPR_BC, bits::BIT_INSIDE_CPR), 0);
+    }
+
+    /// The three CPR position bits (60-62) form an EXACT PARTITION: with the
+    /// canonicalized band (tc >= bc), any close is strictly above TC, strictly
+    /// below BC, or inside the inclusive band — exactly one of the three fires
+    /// on EVERY scenario (never zero, never two).
+    #[test]
+    fn cpr_position_bits_form_an_exact_partition((s, p, prior) in arb_scenario()) {
+        let m = evaluate_atoms(&s, &p, &prior);
+        let cpr_pos = (m >> bits::BIT_ABOVE_CPR_TC) & 0b111;
+        prop_assert_eq!(cpr_pos.count_ones(), 1, "CPR position bits = {:#05b}", cpr_pos);
     }
 
     /// At most one Group-8 time-of-day bucket fires (the `else if` chain).
@@ -689,13 +721,14 @@ proptest! {
 
 // ──────────────────── deterministic per-bit reachability ─────────────────────
 
-/// Every one of the 52 bits is *individually* reachable: a hand-built scenario
+/// Every IMPLEMENTED bit is *individually* reachable: a hand-built scenario
 /// forces exactly that condition true and the bit fires. This is non-flaky
-/// (no RNG), proves reachability for all 52 (complementing the golden union
-/// test), and is a sharp mutation-killer — a deleted `mask |= 1 << BIT_X`
-/// statement, or a flipped comparison for that bit, makes its case fail.
+/// (no RNG), proves reachability for the whole implemented set (complementing
+/// the golden union test), and is a sharp mutation-killer — a deleted
+/// `mask |= 1 << BIT_X` statement, or a flipped comparison for that bit,
+/// makes its case fail.
 #[test]
-fn every_one_of_the_52_bits_is_individually_reachable() {
+fn every_implemented_bit_is_individually_reachable() {
     // Anchor chosen so ALL pivot + fib levels are strictly positive (so the
     // `close <= 0` short-circuit in `is_near` never masks a proximity case).
     let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
@@ -708,7 +741,6 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
-        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -1207,25 +1239,9 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         &no_prior,
     );
 
-    // Group 10: VWAP position (bits 52-53). close above / below a session VWAP.
-    check(
-        bits::BIT_CLOSE_ABOVE_VWAP,
-        IndicatorSnapshot {
-            close_paisa: 1_050_000,
-            vwap_paisa: Some(1_000_000),
-            ..base
-        },
-        &no_prior,
-    );
-    check(
-        bits::BIT_CLOSE_BELOW_VWAP,
-        IndicatorSnapshot {
-            close_paisa: 1_050_000,
-            vwap_paisa: Some(1_100_000),
-            ..base
-        },
-        &no_prior,
-    );
+    // (Group 10, bits 52-53, is the TOMBSTONED VWAP pair — reachability is
+    // deliberately IMPOSSIBLE; `non_implemented_bits_are_always_clear` +
+    // `tombstoned_vwap_bits_never_fire` own that direction.)
 
     // Group 11: pivot R5/S5 proximity (bits 54-55). close exactly ON R5 / S5.
     check(
@@ -1293,9 +1309,198 @@ fn every_one_of_the_52_bits_is_individually_reachable() {
         &no_prior,
     );
 
+    // Group 13: Central Pivot Range (bits 60-63). For the base anchor
+    // (1_100_000 / 1_000_000 / 1_060_000): P = round(3_160_000/3) = 1_053_333,
+    // BC = round(2_100_000/2) = 1_050_000, TC = 2·P − BC = 1_056_666.
+    check(
+        bits::BIT_ABOVE_CPR_TC,
+        IndicatorSnapshot {
+            close_paisa: 1_060_000, // > TC 1_056_666
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_BELOW_CPR_BC,
+        IndicatorSnapshot {
+            close_paisa: 1_000_000, // < BC 1_050_000
+            ..base
+        },
+        &no_prior,
+    );
+    check(
+        bits::BIT_INSIDE_CPR,
+        IndicatorSnapshot {
+            close_paisa: 1_050_000, // == BC — the INCLUSIVE lower edge
+            ..base
+        },
+        &no_prior,
+    );
+    // Narrow CPR: pdc exactly at the (pdh+pdl)/2 midpoint collapses the band
+    // to width 0 (P == BC == TC = 1_050_000) — trivially <= 30 bps of P.
+    check(
+        bits::BIT_NARROW_CPR_DAY,
+        IndicatorSnapshot {
+            pivots: compute_pivot_levels(1_100_000, 1_000_000, 1_050_000),
+            ..base
+        },
+        &no_prior,
+    );
+
     assert_eq!(
         seen, FULL_MASK,
-        "not all implemented bits (incl. VWAP/R5-S5/BOS/CHoCH) were exercised"
+        "not all implemented bits (incl. R5-S5/BOS/CHoCH/CPR) were exercised"
+    );
+}
+
+/// The tombstoned VWAP bits 52-53 can NEVER fire — even on the scenario that
+/// used to set them (close far above / below every level, warm EMAs). The
+/// deterministic companion of `non_implemented_bits_are_always_clear`.
+#[test]
+fn tombstoned_vwap_bits_never_fire() {
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let prox = ProximityParams {
+        pivot_proximity_bps: 10,
+        pdh_pdl_proximity_bps: 10,
+        fib_proximity_bps: 10,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    for close in [1i64, 1_050_000, 5_000_000] {
+        let s = IndicatorSnapshot {
+            tod_seconds: 10 * 3600,
+            open_paisa: close,
+            high_paisa: close,
+            low_paisa: close,
+            close_paisa: close,
+            ema20_paisa: Some(1_050_000),
+            ema200_paisa: Some(1_050_000),
+            pivots,
+            fib,
+            day_high_paisa: close,
+            day_low_paisa: close,
+            open_of_day_paisa: close,
+            market_structure: MarketStructureSignal::default(),
+        };
+        let m = evaluate_atoms(&s, &prox, &no_prior);
+        assert_eq!(
+            m & (0b11u128 << 52),
+            0,
+            "tombstoned VWAP bits fired for close={close}: {m:#x}"
+        );
+    }
+}
+
+/// Deterministic CPR boundary pins: at close == TC the strict above-bit stays
+/// CLEAR while the inclusive inside-bit is SET (and symmetrically at BC) — the
+/// `>`↔`>=` / `<`↔`<=` mutant killers for the Group-13 comparisons. Plus the
+/// exact narrow-CPR threshold edge in both directions.
+#[test]
+fn cpr_equality_boundaries_are_pinned() {
+    // Base anchor: BC = 1_050_000, TC = 1_056_666 (see the reachability test).
+    let pivots = compute_pivot_levels(1_100_000, 1_000_000, 1_060_000);
+    let fib = compute_fib_levels(1_100_000, 1_000_000);
+    let prox = ProximityParams {
+        pivot_proximity_bps: 0,
+        pdh_pdl_proximity_bps: 0,
+        fib_proximity_bps: 0,
+    };
+    let no_prior = PriorBarHistory {
+        prior_n: 3,
+        flags: vec![],
+    };
+    let eval = |close: i64| {
+        let s = IndicatorSnapshot {
+            tod_seconds: 0,
+            open_paisa: close,
+            high_paisa: close,
+            low_paisa: close,
+            close_paisa: close,
+            ema20_paisa: None,
+            ema200_paisa: None,
+            pivots,
+            fib,
+            day_high_paisa: close,
+            day_low_paisa: close,
+            open_of_day_paisa: close,
+            market_structure: MarketStructureSignal::default(),
+        };
+        evaluate_atoms(&s, &prox, &no_prior)
+    };
+    let bit = |m: u128, b: u32| (m >> b) & 1;
+
+    // close == TC: above CLEAR (strict), inside SET (inclusive upper edge).
+    let at_tc = eval(1_056_666);
+    assert_eq!(bit(at_tc, bits::BIT_ABOVE_CPR_TC), 0);
+    assert_eq!(bit(at_tc, bits::BIT_INSIDE_CPR), 1);
+    assert_eq!(bit(at_tc, bits::BIT_BELOW_CPR_BC), 0);
+    // one paisa above TC: above SET, inside CLEAR.
+    let over_tc = eval(1_056_667);
+    assert_eq!(bit(over_tc, bits::BIT_ABOVE_CPR_TC), 1);
+    assert_eq!(bit(over_tc, bits::BIT_INSIDE_CPR), 0);
+    // close == BC: below CLEAR (strict), inside SET (inclusive lower edge).
+    let at_bc = eval(1_050_000);
+    assert_eq!(bit(at_bc, bits::BIT_BELOW_CPR_BC), 0);
+    assert_eq!(bit(at_bc, bits::BIT_INSIDE_CPR), 1);
+    assert_eq!(bit(at_bc, bits::BIT_ABOVE_CPR_TC), 0);
+    // one paisa below BC: below SET, inside CLEAR.
+    let under_bc = eval(1_049_999);
+    assert_eq!(bit(under_bc, bits::BIT_BELOW_CPR_BC), 1);
+    assert_eq!(bit(under_bc, bits::BIT_INSIDE_CPR), 0);
+
+    // Narrow threshold edge: the law is (tc − bc)·10_000 <= p·30, i.e. at
+    // p = 1_000_000 the tie width is EXACTLY 3_000 paisa. Hand-built anchor:
+    //   pdh = 1_048_500, pdl = 948_500 ⇒ BC = round(1_997_000/2) = 998_500;
+    //   pdc = 1_003_000 ⇒ sum = 3_000_000 ⇒ P = 1_000_000;
+    //   TC = 2_000_000 − 998_500 = 1_001_500 ⇒ width = 3_000 — the EXACT tie,
+    //   so narrow FIRES (the `<=` law; a `<` mutant dies here).
+    let tie = compute_pivot_levels(1_048_500, 948_500, 1_003_000);
+    assert_eq!(tie.p_paisa, 1_000_000);
+    let cpr = trading_core::compute_cpr_levels(tie.p_paisa, 1_048_500, 948_500);
+    assert_eq!((cpr.bc_paisa, cpr.tc_paisa), (998_500, 1_001_500));
+    let s_tie = IndicatorSnapshot {
+        tod_seconds: 0,
+        open_paisa: 1_000_000,
+        high_paisa: 1_000_000,
+        low_paisa: 1_000_000,
+        close_paisa: 1_000_000,
+        ema20_paisa: None,
+        ema200_paisa: None,
+        pivots: tie,
+        fib,
+        day_high_paisa: 1_000_000,
+        day_low_paisa: 1_000_000,
+        open_of_day_paisa: 1_000_000,
+        market_structure: MarketStructureSignal::default(),
+    };
+    let m_tie = evaluate_atoms(&s_tie, &prox, &no_prior);
+    assert_eq!(
+        bit(m_tie, bits::BIT_NARROW_CPR_DAY),
+        1,
+        "an exact 30 bps width is narrow (<= law)"
+    );
+    // One paisa wider than the tie (p unchanged): NOT narrow. Widen the band
+    // by lowering bc_raw one paisa: pdh + pdl one LOWER halves oddly — use
+    // pdl − 2 so bc drops exactly 1 ⇒ width 3_002 > 3_000 ⇒ clear.
+    let wider = compute_pivot_levels(1_048_500, 948_498, 1_003_002);
+    assert_eq!(wider.p_paisa, 1_000_000);
+    let cpr_w = trading_core::compute_cpr_levels(wider.p_paisa, 1_048_500, 948_498);
+    assert_eq!(cpr_w.tc_paisa - cpr_w.bc_paisa, 3_002);
+    let m_wide = evaluate_atoms(
+        &IndicatorSnapshot {
+            pivots: wider,
+            ..s_tie
+        },
+        &prox,
+        &no_prior,
+    );
+    assert_eq!(
+        bit(m_wide, bits::BIT_NARROW_CPR_DAY),
+        0,
+        "a width past 30 bps of P must not be narrow"
     );
 }
 
@@ -1318,7 +1523,6 @@ fn equality_boundaries_keep_strict_bits_clear() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
-        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,
@@ -1575,7 +1779,6 @@ fn degenerate_bars_fire_no_shape_or_gap_bits() {
         close_paisa: 1_050_000,
         ema20_paisa: None,
         ema200_paisa: None,
-        vwap_paisa: None,
         pivots,
         fib,
         day_high_paisa: 1_050_000,

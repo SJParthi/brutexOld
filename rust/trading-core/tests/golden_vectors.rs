@@ -56,7 +56,6 @@ struct Case {
     close_paisa: i64,
     ema20_paisa: Option<i64>,
     ema200_paisa: Option<i64>,
-    vwap_paisa: Option<i64>,
     prev_pdh_paisa: i64,
     prev_pdl_paisa: i64,
     prev_pdc_paisa: i64,
@@ -119,7 +118,6 @@ fn eval_case(c: &Case) -> u128 {
         close_paisa: c.close_paisa,
         ema20_paisa: c.ema20_paisa,
         ema200_paisa: c.ema200_paisa,
-        vwap_paisa: c.vwap_paisa,
         pivots,
         fib,
         day_high_paisa: c.day_high_paisa,
@@ -175,11 +173,12 @@ fn rust_reproduces_every_golden_vector() {
 
 #[test]
 fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
-    // The both-ways gate is partitioned over the IMPLEMENTED bits — now all 60
-    // (VWAP/R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001). The
-    // separate `layout_only_bits_are_always_clear` test below proves the only
-    // remaining non-implemented bits — the reserved u128 headroom (60..127) — stay
-    // provably inert.
+    // The both-ways gate is partitioned over the IMPLEMENTED bits — 0..=51
+    // and 54..=63 (R5-S5 since PR-2, BOS/CHoCH since DEC-NIFTY-BOS-CHOCH-001,
+    // CPR 60-63 since the 66-bit reshape; the VWAP pair 52-53 is TOMBSTONED).
+    // The separate `layout_only_bits_are_always_clear` test below proves the
+    // non-implemented bits (52-53 tombstone, 64-65 declared-only Supertrend,
+    // >= 66 reserved headroom) stay provably inert.
     let fixture = load_fixture();
     let mut set_any: u128 = 0;
     let mut clear_any: u128 = 0;
@@ -200,9 +199,9 @@ fn rust_evaluator_exercises_all_implemented_bits_both_ways() {
 
 #[test]
 fn layout_only_bits_are_always_clear() {
-    // Every bit OUTSIDE IMPLEMENTED_MASK — now only the reserved u128 headroom
-    // (bits 60..127), since all 60 declared conditions are implemented — must be 0
-    // in EVERY evaluated case.
+    // Every bit OUTSIDE IMPLEMENTED_MASK — the tombstoned VWAP pair (52-53),
+    // the declared-only Supertrend pair (64-65) and the reserved u128 headroom
+    // (bits 66..127) — must be 0 in EVERY evaluated case.
     let fixture = load_fixture();
     let full: u128 = (1u128 << TOTAL_CONDITIONS) - 1;
     let layout_only = full & !IMPLEMENTED_MASK;

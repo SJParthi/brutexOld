@@ -12,11 +12,17 @@
 
 [package]
 name = "trading-core"
-# 0.3.1 → 0.3.2: DEC-STAGE1A-RUST-BATCH-001 — the ADDITIVE batch Stage-1A
+# 0.3.2 → 0.4.0: the 66-bit vocabulary reshape — VWAP bits 52-53 TOMBSTONED
+# (the VwapState math + the vwap_paisa/batch VWAP columns DELETED — an ABI
+# narrowing across all four evaluate pyfunctions), Central Pivot Range bits
+# 60-63 implemented, Supertrend bits 64-65 declared layout-only. The bump
+# moves `_indicator_version()` and re-keys every new run_id (the sanctioned
+# one-window re-key lever).
+# Earlier, 0.3.1 → 0.3.2: DEC-STAGE1A-RUST-BATCH-001 — the ADDITIVE batch Stage-1A
 # bar-bits kernel (`stage1a_batch` + the `stage1a_bar_bits_batch` pyfunction).
 # The bump moves `_indicator_version()` and re-keys every new run_id (the
 # sanctioned #1548 precedent — bump on ANY change, even with no math delta).
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)"
