@@ -10,8 +10,9 @@ stamp round-trip + every fail-closed parse arm, the V1-V5 serve-classification
 ladder reason-for-reason, the write path (stamp-LAST + the sibling-root
 revision-invariance pin), the fenced ``RollupMergeHook`` (seed-from-disk /
 full-fold / catch-up / idempotent re-merge / conflict latch + ``conflict_suspect``
-stamp / the KeyboardInterrupt carve-out), the ``LogGate`` LRU dedupe, the
-verify-insulation pins, and the mutation-workflow wiring pin.
+stamp / the KeyboardInterrupt carve-out), the verify-insulation pins, and
+the mutation-workflow wiring pin (the ``LogGate`` LRU-dedupe battery lives in
+its own leaf suite, ``tests/unit/test_observability_log_gate.py``).
 """
 
 # The teeth tests reach module-private helpers deliberately (house pattern).
@@ -1271,37 +1272,6 @@ class TestCliReconcile:
 
         with pytest.raises(KeyboardInterrupt):
             _run_results_rollup_reconcile(out_root=sweeps_root, rebuild=_interrupt)
-
-            # ────── LogGate ──────
-
-
-class TestLogGate:
-    def test_once_per_key(self) -> None:
-        gate = rr.LogGate()
-        assert gate.should_emit(("a", "b")) is True
-        assert gate.should_emit(("a", "b")) is False
-        assert gate.should_emit(("a", "c")) is True
-
-    def test_lru_eviction_re_emits(self) -> None:
-        gate = rr.LogGate(capacity=2)
-        assert gate.should_emit(("k1",)) is True
-        assert gate.should_emit(("k2",)) is True
-        assert gate.should_emit(("k1",)) is False  # refreshed (move_to_end)
-        assert gate.should_emit(("k3",)) is True  # evicts k2 (the LRU)
-        assert gate.should_emit(("k2",)) is True  # evicted → re-emits (evicts k1)
-        assert gate.should_emit(("k3",)) is False  # still resident
-        assert gate.should_emit(("k1",)) is True  # evicted by k2's re-entry
-
-    def test_clear_degraded_reports_once(self) -> None:
-        gate = rr.LogGate()
-        assert gate.clear_degraded() is False
-        gate.should_emit(("x",))
-        assert gate.clear_degraded() is True
-        assert gate.clear_degraded() is False
-
-    def test_capacity_validation(self) -> None:
-        with pytest.raises(ValueError, match="capacity"):
-            rr.LogGate(capacity=0)
 
             # ────── verify-insulation + workflow-wiring pins ──────
 

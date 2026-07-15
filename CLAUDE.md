@@ -2644,7 +2644,19 @@ hostile-review pass._
   stamp). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity / stored results bytes / ranking semantics /
   scope / vocab / rate untouched; `brutex/ranking/` byte-untouched (the hard fence); `results_rollup.py` 100%
   line+branch (497/128) + `sweep_results_view.py` 100% (196/56); ruff/ruff-format clean, `mypy --strict` clean,
-  pyright 0 new; the frozen sweep goldens + every existing /results + driver suite pass UNMODIFIED.)
+  pyright 0 new; the frozen sweep goldens + every existing /results + driver suite pass UNMODIFIED.
+  CI-RED FIX ROUND + MERGE-RECONCILE folded (2026-07-15, same branch — the per-item record lives in
+  MIGRATION.md #1732): the whole-engine ci.yml gate red (94.41% — the rollup suites were named outside
+  the `test_engine_*.py` glob) fixed at ROOT by the convention renames — `test_engine_results_rollup.py`,
+  the four per-driver Hook-A seam files (`test_engine_{sweep_orchestrator,sweep_supervisor,sweep_parallel,
+  stage3_wire}_rollup_hook.py` — each joining its driver's coverage_gate_discovery stem family),
+  `test_sweep_results_view_rollup_serve.py`, and the NEW dedicated `test_observability_log_gate.py`
+  (the discovery gate's NEW-module law; ci.yml/mutation.yml repointed; no threshold weakened, no pragma);
+  the merge onto main's #1794 tree rebuilds the /results route onto the landed stable-key +
+  revision_generation shape with the COMPOSITE-ACTIVATION ruling — a JOINED non-empty composite index
+  feeds preset ORDERING the persisted union cannot cover, so preset-ordered polls stay LEGACY while the
+  composite index is active (`composite_active`); rank_by orderings keep the rollup serve; the rollup
+  payload threads the same cascade+composite decoration as the legacy level-2 (wire parity).)
   Earlier: `claude/bulk-spot-completeness-flag`
   (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took
