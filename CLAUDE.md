@@ -338,9 +338,11 @@ the sequential BadTickScreen arm owns skips + WARNs; clean frames returned
 object-identical, clean lakes byte-identical, the SAME
 `BRUTEX_BAD_TICK_SCREEN` kill switch, a `prebuild:`-prefixed source on the
 SAME `feed.bad_tick_skipped` event), the movers raw-1m seam
-(`_read_cut_1m_frame`, POST-cut) gains the mirrored price-sanity gate so an
-inverted stored 1m row is an honest skip+count — never a silently laundered
-resampled bucket, never a CandleBar-ValueError 500 — and five db_view
+(`_read_cut_1m_frame`, POST-cut) gains the mirrored price-sanity gate
+[GAP-2 arm RECONCILED at the club-T fold: main's landed #1759 `screen_frame`
+now DROPS the insane row first — the gate stands as the inert fail-loud belt
+behind it; the intent holds — never a silently laundered
+resampled bucket, never a CandleBar-ValueError 500] — and five db_view
 stats-manifest claim sites relabel "true O(page) in partition depth" to the
 #1614 honest envelope (O(page-files) Parquet work + an O(D) per-request
 revalidation stat sweep; the window-ledger survivor sentence deliberately
@@ -3741,7 +3743,13 @@ hostile-review pass._
   (`ResampleInputError` already in the set) — never a silently laundered
   resampled bucket, never a CandleBar bare-ValueError 500 (both modes
   route-proven fails-before; a corrupt row strictly AFTER the as-of cutoff
-  never blanks an earlier-cut view, pinned); (BUG-4/5) five db_view
+  never blanks an earlier-cut view, pinned) [GAP-2 MECHANISM RECONCILED at
+  the 2026-07-15 club-T fold: main's DEC-DASHBOARD-READ-SCREEN-001 (#1759,
+  QUAD) landed `bar_screen.screen_frame` at the SAME seam in flight — the
+  insane row is now DROPPED row-level before this gate, the gate stands as
+  the inert fail-loud belt behind it, and the whole-symbol skip+count pins
+  were re-derived onto the landed drop semantics (the #1719 in-flight-twin
+  law); the never-laundered / never-500 intent holds, re-pinned]; (BUG-4/5) five db_view
   stats-manifest claim sites relabeled to the #1614 honest envelope
   (O(page-files) Parquet work + an O(D) per-request revalidation stat sweep,
   NOT literal O(page); the SHIPPED manifest no longer called "the named
@@ -7697,8 +7705,9 @@ hostile-review pass._
   read seam (NEW pure frame-form `bad_tick.screen_frame_bad_ticks`, gated
   after the price-sanity gate in `make_lake_read_1m._read`, clean lakes
   byte-identical — pinned), the movers raw-1m seam `_read_cut_1m_frame`
-  gains the mirrored price-sanity gate (inverted stored row → honest
-  skip+count, never a laundered bucket / CandleBar 500), and five db_view
+  gains the mirrored price-sanity gate [RECONCILED at the club-T fold onto
+  main's landed #1759 `screen_frame` — row-level drop first, the gate is the
+  inert belt behind it; never a laundered bucket / CandleBar 500 holds], and five db_view
   stats-manifest claim sites relabel to the #1614 honest envelope (the
   window-ledger survivor kept + doc-pinned); READ-side only; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
