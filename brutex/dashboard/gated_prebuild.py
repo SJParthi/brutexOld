@@ -18,16 +18,21 @@ pre-builds the selected underlyings' derived timeframes in ORDERED PHASES —
 The SPOT phase materialises each selected UNDERLYING's spot timeframes. The
 FUTURES phase, per underlying, DISCOVERS its FUT contracts in the F&O candle
 lake (:func:`discover_futures_contracts`, bounded — a handful of serial-month
-futures) and materialises each contract OI-aware. The OPTIONS phase does the
-SAME for the underlying's CE/PE contracts (:func:`discover_option_contracts`)
-when the options callables are injected — DEC-PIPELINE-AUTOPREBUILD-001
-supersedes the earlier "options stay on-demand" no-op; honest cost (Golden
-Rule #10, DEC-LAKE-FOOTPRINT-MEASURED-001): a fully-materialised lake costs a
-MEASURED multiple of its 1-minute footprint (observed multiplier persisted to
-``schema_meta``; conservative 6.5× fallback — the retired "~2-3×" guess ignored
-the Greeks-enriched 17-column 1-minute rewrite), operator-accepted. When the
-options callables are NOT injected the phase is an explicit, REPORTED no-op
-(never a silent skip).
+futures) and materialises each contract OI-aware. The OPTIONS phase is
+RETIRED in production (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling
+of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B, draft
+PR #1555: option data stays 1-minute-native; fills resolve on the next
+1-minute bar worst-case, so derived option TFs are pure cost — the
+DEC-LAKE-FOOTPRINT-MEASURED-001 measured multiple of the 1-minute footprint,
+dominated by the option chain): NO production caller injects the options
+callables any more, so the phase is the explicit, REPORTED by-design no-op
+(:data:`OPTIONS_PREBUILD_SKIPPED_NOTE` — never a silent skip, never a fake
+"0 contracts found"). The injected options arm (:func:`discover_option_contracts`
++ the CE/PE contract loop, DEC-PIPELINE-AUTOPREBUILD-001) is RETAINED
+STRUCTURAL — direct-unit-covered, unreachable from the pipeline (the
+DEC-CROSSVERIFY-SPOT-ONLY-001 retained-structural precedent); already-stored
+derived option TFs stay INERT on disk (never deleted — disk reclaim is an
+optional operator action).
 
 Pure orchestration — the spot materialise, the contract discovery, and the
 contract materialise are all INJECTED callables, so the whole control flow
@@ -220,6 +225,18 @@ PREBUILD_PHASE_ORDER: tuple[PrebuildKind, ...] = (
 #: parallel path in :mod:`brutex.dashboard.pipeline_prebuild` (§11 COMMON).
 SPOT_PREBUILD_SKIPPED_NOTE: Final[str] = (
     "spot materialisation not injected — skipped by design (F&O-only scope)"
+)
+
+#: The reported-no-op OPTIONS phase note (DEC-OPTIONS-PREBUILD-RETIRE-001 —
+#: the operator ruling of 2026-07-15 as relayed via the coordinator, ADR-0021
+#: RULING B, draft PR #1555): rendered whenever the options callables are NOT
+#: injected — the PRODUCTION shape since the retirement. Option data is
+#: 1-minute-native; the skip is BY DESIGN, never a fake "0 contracts found".
+#: ONE constant shared with the parallel path in
+#: :mod:`brutex.dashboard.pipeline_prebuild` (§11 COMMON).
+OPTIONS_PREBUILD_SKIPPED_NOTE: Final[str] = (
+    "options prebuild retired — option data is 1-minute-native, derived "
+    "timeframes skipped by design (DEC-OPTIONS-PREBUILD-RETIRE-001)"
 )
 
 
@@ -490,10 +507,9 @@ def _run_spot_noop_phase() -> PhasePrebuildReport:
 
     The fno-only spot-exclusion arm (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6
     two-button split), mirroring :func:`_run_options_noop_phase`'s honesty
-    posture: nothing is attempted BY DESIGN (unlike the options no-op, whose
-    underlyings were genuinely in scope but un-materialisable), zero work,
-    and the by-design note keeps the skip visible — never silent, never
-    mistakable for a real empty spot prebuild.
+    posture: nothing is attempted BY DESIGN, zero work, and the by-design
+    note keeps the skip visible — never silent, never mistakable for a real
+    empty spot prebuild.
     """
     return PhasePrebuildReport(
         phase=PrebuildKind.SPOT.value,
@@ -505,21 +521,26 @@ def _run_spot_noop_phase() -> PhasePrebuildReport:
     )
 
 
-def _run_options_noop_phase(underlyings: Sequence[Instrument]) -> PhasePrebuildReport:
+def _run_options_noop_phase() -> PhasePrebuildReport:
     """OPTIONS phase when the options callables are NOT injected: a reported no-op.
 
-    Honest (Golden Rule #10): with no ``options_contracts_for`` /
-    ``materialize_option`` injected the phase can materialise nothing — it
-    records the attempted underlyings, succeeds with zero work, and carries the
-    not-injected note so the skip is visible, never silent.
+    The PRODUCTION shape since DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator
+    ruling of 2026-07-15 as relayed via the coordinator — ADR-0021 RULING B,
+    draft PR #1555): option data is 1-minute-native, so NOTHING is attempted
+    BY DESIGN — zero discovery, zero work — and the by-design note
+    (:data:`OPTIONS_PREBUILD_SKIPPED_NOTE`) keeps the skip visible: never
+    silent, never a fake "0 option contracts found" (Golden Rule #10). The
+    exact structural mirror of :func:`_run_spot_noop_phase`, so the
+    sequential and parallel pipeline paths report an IDENTICAL options
+    phase shape.
     """
     return PhasePrebuildReport(
         phase=PrebuildKind.OPTIONS.value,
-        attempted=tuple(inst.symbol_name for inst in underlyings),
+        attempted=(),
         succeeded=(),
         failed=(),
         total_bars=0,
-        note="options materialisation not injected — skipped (no-op)",
+        note=OPTIONS_PREBUILD_SKIPPED_NOTE,
     )
 
 
@@ -549,15 +570,16 @@ def run_gated_prebuild(
     * **FUTURES** — for each underlying, *futures_contracts_for* DISCOVERS its
       FUT contracts in the F&O candle lake and *materialize_future* materialises
       each contract OI-aware. Keyed by contract symbol.
-    * **OPTIONS** — the SAME per-contract loop over the underlying's CE/PE
-      contracts (*options_contracts_for* + *materialize_option*,
-      DEC-PIPELINE-AUTOPREBUILD-001 — supersedes the on-demand-only no-op;
-      honest cost per DEC-LAKE-FOOTPRINT-MEASURED-001: a MEASURED multiple of
-      the 1-minute footprint once fully materialised — observed ``schema_meta``
-      multiplier, conservative 6.5× fallback; the retired "~2-3×" guess
-      ignored the Greeks-enriched 1-minute rewrite).
-      When EITHER options callable is ``None`` the phase is an explicit,
-      REPORTED no-op (back-compat — never a silent skip).
+    * **OPTIONS** — RETIRED in production (DEC-OPTIONS-PREBUILD-RETIRE-001,
+      the operator ruling of 2026-07-15 as relayed via the coordinator —
+      ADR-0021 RULING B, draft PR #1555: option data is 1-minute-native).
+      When EITHER options callable is ``None`` (the production shape — no
+      pipeline caller injects them any more) the phase is the explicit,
+      REPORTED by-design no-op (:data:`OPTIONS_PREBUILD_SKIPPED_NOTE` —
+      never a silent skip). The injected arm — the SAME per-contract loop
+      over the underlying's CE/PE contracts (*options_contracts_for* +
+      *materialize_option*, DEC-PIPELINE-AUTOPREBUILD-001) — is RETAINED
+      STRUCTURAL: direct-unit-covered, unreachable from the pipeline.
 
     Pure orchestration — all I/O is injected, so the whole control flow is
     offline-testable (CLAUDE.md §4 / §11). O(underlyings) for spot +
@@ -583,10 +605,12 @@ def run_gated_prebuild(
     options_contracts_for
         ``instrument -> Sequence[contract_symbol]`` — the underlying's CE/PE
         contract symbols discovered in the F&O candle lake, or ``None`` (the
-        options phase becomes a reported no-op).
+        options phase becomes the reported by-design no-op — the PRODUCTION
+        shape since DEC-OPTIONS-PREBUILD-RETIRE-001).
     materialize_option
         ``contract_symbol -> MaterializeResult`` — pre-builds ONE option
-        contract's OI-aware timeframes, or ``None`` (reported no-op).
+        contract's OI-aware timeframes, or ``None`` (reported by-design
+        no-op; the retained-structural injected arm).
     source
         The selection source label for the report (e.g. ``"pipeline"``).
 
@@ -613,7 +637,7 @@ def run_gated_prebuild(
     else:
 
         def _options_phase() -> PhasePrebuildReport:
-            return _run_options_noop_phase(underlyings)
+            return _run_options_noop_phase()
 
     if materialize_spot is not None:
         # Bind the narrowed callable so the closure below is statically non-None.
