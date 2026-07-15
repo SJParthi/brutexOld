@@ -211,11 +211,12 @@ def test_sweep_invalid_k_is_user_error(tmp_path: Path, capsys: pytest.CaptureFix
     assert "sweep error" in capsys.readouterr().err
 
 
-# ── ADR-0012 NIFTY-futures series alias through cmd_sweep ────────────────────
-# DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001: `brutex sweep NSE-NIFTY-FUT` resolves the
-# series ONCE (vendor lake dirs → ownership windows + roll schedule) and loads
-# the stitched slice through the ONE alias-aware loader with the command's
-# no-reconcile law preserved; a resolver refusal is an honest user error.
+# ── NIFTY-futures series alias through cmd_sweep ─────────────────────────────
+# DEC-ENGINE-SPOT-ONLY-001 (supersedes the DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001
+# default admit): `brutex sweep NSE-NIFTY-FUT` is REFUSED by default — the
+# engine is spot-only. The retained below-the-gate machinery (resolver +
+# alias-aware loader + roll-schedule threading) is exercised via the loud,
+# audit-stamped --allow-out-of-scope research escape, the ONLY admit path.
 
 _FUT_CONTRACTS: tuple[tuple[str, tuple[tuple[int, int, int], ...], float], ...] = (
     ("NSE-NIFTY-26Jun25-FUT", ((2025, 6, 24), (2025, 6, 25), (2025, 6, 26)), 100.0),
@@ -258,10 +259,15 @@ def _persist_futures(tmp_path: Path) -> tuple[Path, Path]:
     return lake_root, catalog_path
 
 
-def test_sweep_futures_alias_resolves_and_reports(
+def test_sweep_futures_alias_refused_by_default_spot_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The alias sweep stitches BOTH contracts and reports under the series label."""
+    """DEC-ENGINE-SPOT-ONLY-001: the default alias sweep is a loud user error.
+
+    Even over a REAL futures lake the production entry refuses BEFORE any
+    futures-series resolution — citing the DEC + the remediation, never a
+    silent skip, never a traceback.
+    """
     lake_root, catalog_path = _persist_futures(tmp_path)
     rc = cmd_sweep(
         lake_root=lake_root,
@@ -283,8 +289,49 @@ def test_sweep_futures_alias_resolves_and_reports(
         validate_oos=False,
         oos_only=False,
     )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "sweep REFUSED" in err
+    assert "DEC-ENGINE-SPOT-ONLY-001" in err
+    assert "spot-only" in err
+    assert "lake/REFERENCE_ONLY" in err
+
+
+def test_sweep_futures_alias_resolves_and_reports_under_override(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The RETAINED alias machinery stitches BOTH contracts under the override.
+
+    DEC-ENGINE-SPOT-ONLY-001 keeps the resolver + alias-aware loader as
+    below-the-gate internals — reachable ONLY via the loud, audit-stamped
+    --allow-out-of-scope research escape.
+    """
+    lake_root, catalog_path = _persist_futures(tmp_path)
+    rc = cmd_sweep(
+        lake_root=lake_root,
+        catalog_path=catalog_path,
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-NIFTY-FUT",
+        allow_out_of_scope=True,
+        interval=_INTERVAL,
+        start="2025-06-24",
+        end="2025-07-01",
+        direction="BUY",
+        k=2,
+        conditions="0,1,2",
+        stop_loss_paisa=None,
+        take_profit_paisa=None,
+        top=10,
+        min_hits=None,
+        sort_by="composite",
+        validate_oos=False,
+        oos_only=False,
+    )
     assert rc == 0
     out = capsys.readouterr().out
+    # The research escape is LOUD — the override warning precedes the report.
+    assert "--allow-out-of-scope OVERRIDE" in out
     assert "BruteX sweep — NSE-NIFTY-FUT 1minute BUY" in out
     # 3 Jun-contract days + 2 Jul-contract days × 40 bars — the stitched slice.
     assert "bars=200" in out
@@ -296,6 +343,8 @@ def test_sweep_futures_alias_resolver_refusal_is_user_error(
     """A lake with no NIFTY-futures dirs refuses loudly — never a crash."""
     # _sweep persists only the spot NIFTY lake: no bars/NSE/FNO tree exists,
     # so resolve_futures_series raises FuturesSeriesError → EXIT_USER_ERROR.
+    # (allow_out_of_scope: the DEC-ENGINE-SPOT-ONLY-001 gate refuses FIRST
+    # otherwise — this test pins the RESOLVER refusal below the gate.)
     rc = _sweep(
         tmp_path,
         exchange="NSE",
@@ -303,6 +352,7 @@ def test_sweep_futures_alias_resolver_refusal_is_user_error(
         symbol="NSE-NIFTY-FUT",
         start="2025-06-24",
         end="2025-07-01",
+        allow_out_of_scope=True,
     )
     assert rc == 1
     err = capsys.readouterr().err

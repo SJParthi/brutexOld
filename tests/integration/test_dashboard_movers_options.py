@@ -875,13 +875,18 @@ class TestRegistryContentTokenKeying:
     ) -> None:
         """`_registry_key_component`: the real token, the stable sentinels, the outage arm."""
         from brutex.dashboard import app as app_mod
+        from brutex.dashboard.db_view import registry_path_for
         from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
 
-        # Absent registry → the stable "absent" sentinel passes through.
-        assert app_mod._registry_key_component(tmp_path) == ABSENT_TOKEN
-        # Present registry → the exact stat token passes through.
+        # Absent registry → the stable double-absent composite passes through.
+        assert app_mod._registry_key_component(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # Present registry → the exact stat token passes through — resolved off
+        # the SAME path the ONE `registry_path_for` law yields (the drift pin:
+        # `_registry_key_component`'s path expression cannot diverge from it).
         (tmp_path / "registry.duckdb").write_bytes(b"duckdb-stand-in")
-        assert app_mod._registry_key_component(tmp_path) == registry_revision(tmp_path)
+        assert app_mod._registry_key_component(tmp_path) == registry_revision(
+            registry_path_for(tmp_path / "instruments.duckdb")
+        )
         # Probe outage (None — "no signal") → the distinct stable "unknown"
         # sentinel (the pre-fix generation-only envelope, never a raise).
         monkeypatch.setattr(app_mod, "registry_revision", lambda _root: None)
@@ -939,13 +944,13 @@ class TestRegistryContentTokenKeying:
         # starts wal-less — the steady post-pull state.
         with RegistryStore.open(target) as reg:
             reg.upsert_expiry("NSE", "NIFTY", date(2025, 7, 7), run_id="r1", fetched_at=now)
-        before = registry_revision(tmp_path)
+        before = registry_revision(target)
         main_before = _os.stat(target)
         cm = RegistryStore.open(target)
         reg2 = cm.__enter__()  # the held-open connection — no checkpoint yet
         try:
             reg2.upsert_expiry("NSE", "NIFTY", date(2025, 7, 14), run_id="r2", fetched_at=now)
-            held = registry_revision(tmp_path)
+            held = registry_revision(target)
             main_held = _os.stat(target)
         finally:
             cm.__exit__(None, None, None)
@@ -958,11 +963,11 @@ class TestRegistryContentTokenKeying:
             main_held.st_size,
         )
         # The close's checkpoint removes the wal → the token moves again
-        # (correctly — a write happened) back to a `+absent`-shaped composite.
-        after_close = registry_revision(tmp_path)
+        # (correctly — a write happened) back to a `|absent`-shaped composite.
+        after_close = registry_revision(target)
         assert after_close is not None
         assert after_close != held
-        assert after_close.endswith("+absent")
+        assert after_close.endswith("|absent")
 
 
 # ── compute_options_candidates discovery + resilience branches ────────────

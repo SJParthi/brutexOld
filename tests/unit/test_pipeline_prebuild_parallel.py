@@ -155,6 +155,55 @@ def test_parallel_covers_all_phases(
     assert kinds["NSE-NIFTY-30Jan25-20000-CE"] is PrebuildKind.OPTIONS
 
 
+def test_parallel_include_spot_false_runs_fno_phases_only(
+    patched: _FakeMaterialize, tmp_path: Path
+) -> None:
+    """[round-6 two-button split] the PARALLEL twin of the spot-exclusion arm:
+    ZERO spot work items are planned, the spot phase carries the COMMON
+    by-design note, and the F&O contract phases run for real."""
+    with capture_logs() as logs:
+        outcome = run_pipeline_prebuild_parallel(
+            instruments=[_spot("NSE-NIFTY")],
+            cascade=_cascade(),
+            lake_root=tmp_path,
+            workers=3,
+            daily_before=date(2025, 2, 1),
+            include_spot=False,
+        )
+    assert outcome.symbols_built == 3  # 1 future + 2 options — never the spot
+    assert outcome.ok is True
+    assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
+    started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
+    assert started[0]["spot_symbols"] == 0
+    spot_phase = [
+        e for e in logs if e["event"] == "pipeline.prebuild.phase_done" and e["phase"] == "spot"
+    ]
+    assert spot_phase[0]["attempted"] == 0
+    # The by-design note itself rides the internal spot PhasePrebuildReport
+    # (the SAME COMMON constant on both paths) — note-shape pinned at the
+    # gated_prebuild level, where the report is the public surface.
+    # [refuter round 1] The parallel path calls the SAME `_warn_if_all_no_source`
+    # over its assembled report — the empty no-op spot phase must not fire a
+    # spurious count=0 all-no-source WARN (the `and phase.attempted` guard's
+    # killing pin, sequential↔parallel parity).
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
+
+
+def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_path: Path) -> None:
+    """The guard forwards ``include_spot`` to the parallel path (workers>1)."""
+    outcome = run_pipeline_prebuild_guarded(
+        instruments=[_spot("NSE-NIFTY")],
+        cascade_or_error=_cascade,
+        materialize=lambda target: (_ for _ in ()).throw(AssertionError("unused")),
+        lake_root=tmp_path,
+        workers=2,
+        daily_before=date(2025, 2, 1),
+        include_spot=False,
+    )
+    assert outcome.symbols_built == 3
+    assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
+
+
 def test_dense_flag_set_for_index_spot_only(patched: _FakeMaterialize, tmp_path: Path) -> None:
     run_pipeline_prebuild_parallel(
         instruments=[_spot("NSE-NIFTY")],
@@ -320,6 +369,37 @@ def test_per_symbol_failure_quarantined(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert outcome.failed_count == 1
     assert outcome.failed[0].startswith("NSE-NIFTY-30Jan25-FUT")
     assert outcome.symbols_built == 3  # the other 3 still built
+
+
+def test_parallel_no_source_target_counted_ok_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T11 [fails-before] — the PARALLEL twin of the sequential no-source
+    classification (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a zero-stored-bars
+    SPOT target lands in the outcome's ``no_source`` (never ``failed``), ``ok``
+    stays True, and the F&O contracts still build — identical outcome shape to
+    the sequential path."""
+    from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+    fake = _FakeMaterialize(
+        fail={
+            "NSE-EMPTY": NoStored1mBarsError("no stored 1minute bars for NSE/INDEX/NSE-EMPTY — …")
+        }
+    )
+    _install(monkeypatch, fake)
+    outcome = run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-EMPTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=3,
+        daily_before=date(2025, 2, 1),
+    )
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.ok is True
+    assert outcome.failed == ()
+    assert outcome.failed_count == 0
+    assert outcome.symbols_built == 4  # NIFTY spot + 1 FUT + 2 options still built
 
 
 def test_tallies_unchanged_and_opens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

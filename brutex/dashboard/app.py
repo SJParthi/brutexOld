@@ -40,6 +40,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -59,12 +60,14 @@ from brutex.adapters.ingest_common import (
     label_synthetic,
     verdict_message,
 )
+from brutex.calendars.auto_pull_gate import compose_market_closed
 from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
+from brutex.dashboard.auto_pull_scheduler import AutoLaunchResult, AutoPullScheduler
 from brutex.dashboard.completeness import (
     ReconcileLogGate,
     build_completeness_scoreboard,
@@ -140,6 +143,7 @@ from brutex.dashboard.fno_underlying import (
     resolve_fno_index_aliases,
 )
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
+from brutex.dashboard.health_hub import HealthHub
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_census_holder import (
@@ -147,9 +151,11 @@ from brutex.dashboard.lake_census_holder import (
     LakeCensusHolder,
 )
 from brutex.dashboard.lake_revision import (
+    RevisionProbeMemo,
     cascade_report_revision,
     lake_revision,
     registry_revision,
+    resolve_revision_probe_ttl,
     sweep_results_revision,
 )
 from brutex.dashboard.launch_button import register_launch_routes, store_lake_root_resolver
@@ -232,6 +238,7 @@ from brutex.dashboard.pull_intent import (
     clear_banner_after_start,
     persist_intent_for_launch,
     probe_pull_singleflight,
+    restore_intent_after_refused_start,
     run_auto_resume,
     run_legacy_resume,
 )
@@ -240,6 +247,21 @@ from brutex.dashboard.pull_jobs import (
     JOB_KIND_SWEEP,
     BackgroundPullJob,
     ProgressHook,
+)
+from brutex.dashboard.pull_outcome import LastPullOutcome, classify_retained_pull_outcome
+from brutex.dashboard.pull_scope import (
+    SCOPE_FNO_ONLY,
+    SCOPE_FULL,
+    SCOPE_SPOT_ONLY,
+    CrossverifyTail,
+    CrossverifyTailOutcome,
+    build_fno_only_note,
+    build_spot_only_note,
+    fno_only_spot_report,
+    normalize_pull_scope,
+    run_crossverify_tail,
+    spot_only_historical_report,
+    spot_only_metadata_report,
 )
 from brutex.dashboard.rate_bridge_cache import (
     BRIDGE_SOURCE_UNWIRED,
@@ -311,6 +333,7 @@ from brutex.data.lake_invariants import (
     census_to_dict,
     scan_lake_invariants,
 )
+from brutex.data.lake_keys import StockDriftMap
 from brutex.data.mapping_integrity import (
     EligibleSpot,
     MappingIntegrityReport,
@@ -323,6 +346,7 @@ from brutex.data.master_integrity import META_KEY as MASTER_INTEGRITY_META_KEY
 from brutex.data.master_integrity import report_from_dict as master_report_from_dict
 from brutex.data.pcr import PcrCorruptionError
 from brutex.data.registry_store import ContractRow, RegistryError, RegistryStore
+from brutex.data.spot_drift import load_stock_drift_map
 from brutex.data.timeframe_materialize import MaterializeResult, materialize_lake_timeframes
 from brutex.doctor_autorun import LiveProofAutorun
 from brutex.engine.results_store import ResultsStoreError
@@ -1085,12 +1109,20 @@ def _registry_key_component(lake_root: Path) -> str:
     WORSE than the behaviour this fix replaces, and self-healing the moment
     the probe recovers (the recovered token differs from ``"unknown"``, so
     the next poll re-keys). Distinct by construction from every real token
-    (the composite ``"<mtime_ns>:<size>+<wal component>"`` — the main file
-    plus its DuckDB ``.wal`` sibling since the hostile-review m1 widening,
-    which catches a commit landing in the WAL before any checkpoint moves
-    the main file's stat) and from the absent-file ``"absent"`` sentinel.
+    (the composite ``"<main token>|<wal token>"`` — the main file plus its
+    DuckDB ``.wal`` sibling since the hostile-review m1 widening, which
+    catches a commit landing in the WAL before any checkpoint moves the main
+    file's stat; every real composite carries a ``|``) and from the
+    absent-registry ``"absent|absent"`` composite.
+
+    The probe is the ONE consolidated :func:`registry_revision` (the
+    DEC-O1-GUARANTEE-HARDEN-001 H1 token — the two in-flight twins collapsed
+    at the merge-reconcile, Golden Rule #11 COMMON); the
+    ``lake_root / "registry.duckdb"`` path expression is this file's existing
+    metadata-pull idiom (the sibling-of-the-master law
+    ``db_view.registry_path_for`` encodes — integration-pinned equal to it).
     """
-    token = registry_revision(lake_root)
+    token = registry_revision(lake_root / "registry.duckdb")
     return "unknown" if token is None else token
 
 
@@ -1103,8 +1135,10 @@ class _RegistryKeyedCache:
     built INSIDE :func:`~brutex.dashboard.registry_strikes.make_registry_chain_loader`
     (``registry_chain_key``), so the registry content token is folded here at
     the app.py key-build seam — keeping that loader's public signature
-    byte-stable — as ``"<key>|r=<token>"`` (``|`` cannot appear in a stat
-    token or the sentinels, so the join is unambiguous). Every other key
+    byte-stable — as ``"<key>|r=<token>"`` (the ``r=`` marker plus the token
+    grammar — components are ``<mtime_ns>:<size>`` / ``absent`` / the
+    ``unknown`` outage sentinel, none of which can contain ``r=`` — keep the
+    fold collision-free across tokens for any fixed key). Every other key
     component + the generation stamp pass through untouched.
     """
 
@@ -1309,7 +1343,13 @@ def build_app(
     session_rate: SessionRateController | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
+    pull_outcome_probe: Callable[[], LastPullOutcome] | None = None,
+    health_hub: HealthHub | None = None,
     loop_watchdog: LoopWatchdog | None = None,
+    crossverify_runner: Callable[[Any], Any] | None = None,
+    crossverify_tail: CrossverifyTail | None = None,
+    auto_pull_scheduler: AutoPullScheduler | None = None,
+    revision_probe_memo: RevisionProbeMemo | None = None,
 ) -> Any:
     """Construct the FastAPI ASGI app bound to *state*.
 
@@ -1474,6 +1514,21 @@ def build_app(
         assert the dry-run / job-end eviction through the REAL routes); ``None``
         (the default) builds a fresh production holder — byte-identical to the
         pre-seam construction (mirrors the ``summary_cache`` injection pattern).
+    pull_outcome_probe
+        Optional zero-arg probe returning the app's live
+        :class:`~brutex.dashboard.pull_outcome.LastPullOutcome`
+        (DEC-OPERATOR-HEALTH-TRUTH-001).  The production default classifies
+        THIS app's own retained last-pull state + id-correlated verdict holder
+        through the ONE :func:`~brutex.dashboard.pull_outcome.\
+classify_retained_pull_outcome`; tests inject a deterministic probe (or a
+        probe over their OWN real :class:`BackgroundPullJob`) to drive every
+        outcome state through the real routes (mirrors ``pull_active_probe``).
+    health_hub
+        Optional :class:`~brutex.dashboard.health_hub.HealthHub` backing the
+        ``GET /api/v1/health/hub`` fold (DEC-OPERATOR-HEALTH-TRUTH-001).
+        Injected so tests pin lane states with a deterministic clock/env;
+        ``None`` (the default) builds the production hub over this app's lake
+        root resolver + the resolved *pull_outcome_probe*.
     loop_watchdog
         Optional :class:`~brutex.observability.loop_watchdog.LoopWatchdog`
         (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): when given, the app
@@ -1486,6 +1541,30 @@ def build_app(
         existing ``build_app()`` caller is byte-identical. Production binds
         one in ``cli.cmd_dashboard`` behind the fail-loud
         ``BRUTEX_LOOP_WATCHDOG`` kill switch (default ON).
+    auto_pull_scheduler
+        Optional :class:`~brutex.dashboard.auto_pull_scheduler.AutoPullScheduler`
+        (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold — the self-arming
+        post-market daily auto-pull). When given, ``build_app`` binds the
+        scheduler's fire seam to THIS app's own spot-only
+        ``_launch_pipeline`` path (all launcher rails inherited), the
+        ``/pull-pipeline`` route honors ``auto_arm=1`` (the button's
+        first-click-arms-forever semantics), the arm/disarm toggle route +
+        the additive ``auto_pull`` payload keys activate, and the lifespan
+        resumes ticking at boot iff the durable state file says armed.
+        ``None`` (the default) wires NOTHING — zero threads, no new payload
+        keys, ``auto_arm`` refused 503 (the loop_watchdog zero-threads
+        posture); production builds one in ``cli.cmd_dashboard`` for the
+        resolved lake root.
+    revision_probe_memo
+        Optional :class:`~brutex.dashboard.lake_revision.RevisionProbeMemo`
+        (DEC-O1-GUARANTEE-HARDEN-001 H2) bounding the two per-poll O(dirs)
+        freshness probes — the oneclick runs-listing manifest-stat walk and
+        the ``/results`` ``sweep_results_revision`` scandir digest — to one
+        sweep per TTL window (default 1 s via
+        ``BRUTEX_REVISION_PROBE_TTL_S``; ``0`` disables = byte-identical
+        per-poll probes). ``None`` (the default) constructs a fresh memo with
+        the env-resolved TTL; tests inject one with an explicit ``ttl_s`` +
+        clock for deterministic pins.
 
     Returns
     -------
@@ -1557,21 +1636,46 @@ def build_app(
     # shutdown cancels the task + joins the monitor BOUNDED. Production binds
     # one in `cli.cmd_dashboard` behind the fail-loud BRUTEX_LOOP_WATCHDOG kill
     # switch (default ON).
-    if loop_watchdog is not None:
+    # The auto-pull scheduler rides the SAME lifespan seam (round-5 fold): its
+    # startup hook resumes ticking iff the durable state file says armed
+    # (a disarmed boot spawns ZERO threads and never auto-fires); shutdown
+    # ends the ticker bounded. `None` for both (every test construction's
+    # default) keeps the app lifespan-free — byte-identical, zero threads.
+    if loop_watchdog is not None or auto_pull_scheduler is not None:
         from contextlib import asynccontextmanager
 
-        watchdog = loop_watchdog  # narrow for the closure (mypy: not None)
+        watchdog = loop_watchdog  # narrow for the closure (mypy: possibly None)
+        scheduler_boot = auto_pull_scheduler
 
         @asynccontextmanager
-        async def _watchdog_lifespan(_app: Any) -> AsyncGenerator[None]:
-            """Start/stop the loop watchdog around the app's serving lifetime."""
-            await watchdog.start_from_running_loop()
+        async def _lifecycle_lifespan(_app: Any) -> AsyncGenerator[None]:
+            """Start/stop the watchdog + auto-pull ticker around serving."""
+            if watchdog is not None:
+                await watchdog.start_from_running_loop()
+            if scheduler_boot is not None:
+                # One small state-file read at startup; armed ⇒ resume ticking
+                # (the boot catch-up fires on an early TICK, never here).
+                # Belt (refuter round 6 N-1, the run_auto_resume "never crash
+                # boot" posture): the store's load() is itself never-raises,
+                # but a convenience scheduler must not be ABLE to kill boot —
+                # any unexpected raise logs and the dashboard serves.
+                try:
+                    scheduler_boot.start_if_armed()
+                except Exception as boot_exc:  # pylint: disable=broad-exception-caught  # never crash boot
+                    _LOG.warning(
+                        "auto_pull.boot_start_failed",
+                        error=str(boot_exc),
+                        error_type=type(boot_exc).__name__,
+                    )
             try:
                 yield
             finally:
-                watchdog.stop()
+                if scheduler_boot is not None:
+                    scheduler_boot.stop()
+                if watchdog is not None:
+                    watchdog.stop()
 
-        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_watchdog_lifespan)
+        app = FastAPI(title="BruteX Dashboard", version="0.1.0a0", lifespan=_lifecycle_lifespan)
     else:
         app = FastAPI(title="BruteX Dashboard", version="0.1.0a0")
 
@@ -1845,6 +1949,33 @@ def build_app(
     # COMMON generation-stamped LRU `MoversSnapshotCache` (CLAUDE.md §11 — it is a
     # generic keyed cache; no movers coupling, just the shared implementation).
     _candle_count_cache = MoversSnapshotCache()
+    # The /db F&O REGISTRY count cache (DEC-O1-GUARANTEE-HARDEN-001 H1): the
+    # registry pagers' FILTERED COUNT(*) totals + the nav-badge counts dict are
+    # paging-invariant, so they are memoised per registry CONTENT — keyed by the
+    # `registry_revision` stat token (registry.duckdb + its .wal sibling,
+    # digested to the generation via `revision_generation`), the #867
+    # `candle_count_key` idiom on a DEDICATED instance. A repeat/paging click
+    # within one registry revision is an O(1) hit; a metadata pull's write
+    # moves the file token → recount (never stale); a probe OUTAGE (token
+    # None) computes fresh UNCACHED (the lake_revision-family posture). The
+    # page DATA queries stay per-click LIMIT/OFFSET SELECTs — already O(page).
+    _registry_count_cache = MoversSnapshotCache()
+    # The revision-probe TTL memo (DEC-O1-GUARANTEE-HARDEN-001 H2): bounds the
+    # two per-poll O(dirs) probe sweeps (oneclick runs listing + the /results
+    # sweep_results_revision digest) to ONE sweep per TTL window (default 1 s,
+    # env BRUTEX_REVISION_PROBE_TTL_S — junk fails loud HERE at build_app for
+    # non-CLI embedders (review round 1 MINOR-1), and `cmd_dashboard` validates
+    # the SAME env FIRST with the clean `[brutex]` one-liner + EXIT_USER_ERROR,
+    # the loop-watchdog sibling idiom (review round 2); 0 disables).
+    # Staleness ≤ TTL, far under the 120 s adaptive-floor norm; a post-TTL
+    # poll always re-probes (no permanent-staleness state, pinned). The eager
+    # resolve keeps the memo's own lazy first-use path intact (an injected
+    # memo validates itself).
+    _revision_probe_memo = (
+        RevisionProbeMemo(ttl_s=resolve_revision_probe_ttl())
+        if revision_probe_memo is None
+        else revision_probe_memo
+    )
     # The /coverage/windows counts + page-row caches (DEC-COVERAGE-WINDOWS-O1-001 +
     # DEC-WINDOWS-MIDPULL-FLOOR-001): the `GROUP BY market, status` bucketed counts
     # AND the projected row page over the window ledger are invariant within one
@@ -2062,6 +2193,41 @@ def build_app(
             compute=lambda: build_underlying_kind_map(store.list_index_equity_instruments()),
         )
         return kinds, master_token
+
+    # The /db moneyness stock-drift map cache (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 —
+    # the /db twin of the Greeks ladder's DEC-GREEKS-SPOTJOIN-STOCK-001 stock arm,
+    # the exact memo law the #1482 named follow-up prescribed): the map is a pure
+    # function of the on-disk spot dirs (moved by a pull → the write generation) AND
+    # the instrument master (moved by a keyless `load-instruments` WITHOUT a
+    # generation bump — the documented master_revision trap), so the memo keys on
+    # the COMPOSITE token: `master_revision` folded into the KEY, the write
+    # generation as the cache's native generation. REUSES the COMMON
+    # `MoversSnapshotCache` (no new class).
+    _stock_drift_cache = MoversSnapshotCache()
+
+    def _stock_drift_map_cached(store: Any, lake: Path) -> StockDriftMap | None:
+        """The moneyness spot-join's stock drift map, composite-token memoised.
+
+        Thin memo over the COMMON fail-soft
+        :func:`~brutex.data.spot_drift.load_stock_drift_map` — the EXACT loader +
+        verification law the Greeks enrichment pass consumes (CLAUDE.md §11 COMMON,
+        never a second fold), so a drifted stock lake reads the SAME recovered spot
+        key on `/db` moneyness as the Greeks ladder stamps. Inherits the loader's
+        contract verbatim: no master → ``None`` (the ladder stays byte-identical —
+        the honest ``"?"``), a confirmed master-read error → ``None`` with the
+        loader's own WARN, an empty master → ``{}`` with zero lake I/O. ``None`` is
+        a cacheable value (the `_registry_strike_chain` precedent). Runs on the
+        threadpool worker — the ONE consumer is the lazy `stock_drift_loader`
+        closure inside the `/api/v1/db/candles` `query_candles` call, invoked only
+        on the exhausted-primary recovery path (a healthy exact-key page never
+        loads the map).
+        """
+        count, latest = master_revision(store)
+        return _stock_drift_cache.get_or_compute(
+            f"stockdrift|m={count}:{latest}",
+            generation=_summary_cache.generation,
+            compute=lambda: load_stock_drift_map(lake),
+        )
 
     # The /coverage + /universe nav-latency caches (DEC-DASHBOARD-NAV-LATENCY-001,
     # re-keyed by DEC-NAV-CACHES-FLOOR-REKEY-001): three pollers —
@@ -2425,6 +2591,14 @@ def build_app(
         # written in exactly ONE place — every pre-existing key stays byte-identical.
         payload = view.to_dict()
         stamp_bridge_freshness(payload, bridge_result)
+        # ONE more ADDITIVE key (DEC-OPERATOR-HEALTH-TRUTH-001): the honest
+        # LAST-PULL OUTCOME block. ``flow_state == "done"`` is true-but-weak
+        # evidence ("no pull running + a fresh tick") — the pre-fix operator
+        # page rendered it as a green "completed cleanly", the SAME green a
+        # disk-full / market-hours / quota HALT showed. The heartbeat now joins
+        # this block: a halted pull renders its named degraded state, never the
+        # clean-completion green. Every pre-existing key stays byte-identical.
+        payload["last_pull"] = _pull_outcome_probe_resolved().to_dict()
         return JSONResponse(payload)
 
     # The former ``GET /api/v1/quota`` route (DEC-DASHBOARD-QUOTA-PERSISTED-001)
@@ -3045,7 +3219,13 @@ def build_app(
     # gives their `_work` bodies), so a `brutex dashboard --lake-root X` launch with
     # a divergent/unset $BRUTEX_LAKE_ROOT still contends with a CLI pull/backfill
     # flocking X (DEC-GREEKS-BULK-REENRICH-001 fix round 2 — the lock root and the
-    # write root can no longer diverge).
+    # write root can no longer diverge). ONE start-time exception on _pull_job:
+    # the SWEEP route starts with ``cross_process_lock=False``
+    # (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001) because cmd_sweep_all owns its own
+    # discipline on the SAME flock file — the G10 preload SH read-guard + the
+    # G6 sweep single-flight; a job-level EX would self-conflict G10 (flock is
+    # per open file description) and lock the daily pull/crossverify out for
+    # the sweep's multi-day wall time.
     _pull_job = BackgroundPullJob(
         summary_cache=_summary_cache,
         on_run_end=_session_rate.clear_meter,
@@ -3071,6 +3251,128 @@ def build_app(
         summary_cache=_summary_cache,
         account_key_resolver=lambda: None,
         lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
+
+    # The cross-verify producer job (DEC-CROSSVERIFY-PRODUCER-001, MIGRATION.md
+    # #1776) — a THIRD BackgroundPullJob so its progress feed never collides
+    # with a pull's or the backfill's. Its route ALWAYS starts it with
+    # ``cross_process_lock=False``: the runner's own ``default_seams`` lock
+    # seam takes the account→lake→lease trio itself (bounded wait-retry,
+    # honest refusal), and a job-level second acquire of the SAME flock file
+    # would self-conflict (flock is per open file description). The IN-process
+    # single-flight (a second click) still applies. ``on_run_end`` clears the
+    # shared session CallMeter exactly like ``_pull_job`` — the crossverify
+    # pull leg is a REAL vendor pull through the SAME SessionRateController
+    # (DEC-RATE-METER-LIFECYCLE-001 posture, same disclosed blast radius).
+    _crossverify_job = BackgroundPullJob(
+        summary_cache=_summary_cache,
+        on_run_end=_session_rate.clear_meter,
+        lake_root_resolver=_job_lake_root_resolver(instrument_store),
+    )
+
+    def _start_crossverify_producer(config: Any) -> bool:
+        """Start the cross-verify producer job over *config* — the ONE start body.
+
+        DEC-PULL-SCOPED-ALL-ONECLICK-001 (§11 COMMON): shared by the
+        ``POST /api/v1/crossverify/run`` route AND the spot-only pipeline's
+        crossverify TAIL, so the runner selection (the injected
+        ``crossverify_runner`` test seam is observed by BOTH consumers), the
+        job's ``_work`` verdict surfacing, and the lock/market-hours start
+        kwargs can never drift onto two paths. Returns
+        :meth:`BackgroundPullJob.start`'s verdict (``False`` = already
+        running). Lock semantics (the phase-A handoff law): the job starts
+        with ``cross_process_lock=False`` because the runner's own
+        ``default_seams`` lock seam acquires the account→lake→lease trio
+        itself with a bounded wait-retry (run.py step F) — a job-level second
+        acquire would self-conflict; ``market_hours_exempt=True`` because the
+        RUNNER owns the market-hours law at its step E.
+        """
+
+        def _run_producer(cfg: Any) -> Any:  # pragma: no cover — runs on the job thread
+            """The production runner binding (tests inject crossverify_runner)."""
+            from brutex.crossverify.run import default_seams, run_crossverify
+
+            return run_crossverify(cfg, default_seams(cfg, session_rate=_session_rate))
+
+        runner = crossverify_runner if crossverify_runner is not None else _run_producer
+
+        def _work(on_progress: ProgressHook) -> object:
+            """Background body: run the producer; surface the honest verdict.
+
+            A non-zero exit verdict RAISES so the panel reads an honest ✕
+            (the runner itself never raises for data/vendor/publish problems
+            — it folds them into the verdict; the Telegram summary/refusal
+            already fired inside the runner, so no double alert here).
+            """
+            report = runner(config)
+            detail = f": {report.detail}" if report.detail else ""
+            headline = f"crossverify {report.day.isoformat()} — {report.verdict}{detail}"
+            if report.exit_code != 0:
+                raise RuntimeError(headline)
+            return {
+                "note": (
+                    f"{headline} · published {report.published} · "
+                    f"already {report.skipped_already} · withheld {report.withheld} · "
+                    f"nothing {report.nothing}"
+                ),
+                "verdict": report.verdict,
+                "exit_code": report.exit_code,
+            }
+
+        return _crossverify_job.start(
+            _work,
+            total=0,
+            detail=("cross-verify (DRY RUN)" if config.dry_run else "cross-verify → TickVault"),
+            # The runner's default_seams lock seam owns the account→lake→lease
+            # trio (bounded wait-retry) — a job-level acquire would self-conflict.
+            cross_process_lock=False,
+            # The runner owns the market-hours law at its step E (see docstring).
+            market_hours_exempt=True,
+        )
+
+    def _default_crossverify_tail() -> CrossverifyTailOutcome:
+        """The PRODUCTION crossverify tail (DEC-PULL-SCOPED-ALL-ONECLICK-001).
+
+        Fired by the spot-only ``/pull-pipeline`` arm as the launcher's LAST
+        step (report in hand, ledger durable). Resolves the SAME
+        ``BRUTEX_CROSSVERIFY_*`` config surface the route resolves and starts
+        the SAME ``_crossverify_job`` producer via
+        :func:`_start_crossverify_producer` — never a nested inline run on the
+        pipeline job thread (the runner's own bounded-wait lock trio absorbs
+        the pull-flock handoff; ruling 8a). A CONFIG construction failure
+        (junk ``BRUTEX_CROSSVERIFY_*`` env) is the ONLY production
+        ``not_configured`` path on THIS binding — fail-SOFT, the spot pull is
+        never blocked by a broken verify config (ruling 8). Seam construction
+        (``default_seams``) happens later on the crossverify JOB thread, after
+        this tail already returned ``started`` — a failure there surfaces as
+        an honest job ✕, never ``not_configured`` (the CLI tail differs: its
+        try-block wraps ``default_seams`` too — refuter round 4 H NIT-3).
+        """
+        from brutex.crossverify.config import resolve_crossverify_config
+
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=False)
+        try:
+            config = resolve_crossverify_config(lake_root=lake_root)
+        except ValueError as exc:
+            return CrossverifyTailOutcome(
+                status="not_configured", human=f"not configured (ValueError: {exc})"
+            )
+        if not config.enabled:
+            return CrossverifyTailOutcome(
+                status="disabled", human="disabled (BRUTEX_CROSSVERIFY=off)"
+            )
+        if _start_crossverify_producer(config):
+            return CrossverifyTailOutcome(
+                status="started",
+                human="producer started (poll /api/v1/crossverify/progress)",
+            )
+        return CrossverifyTailOutcome(status="already_running", human="already running")
+
+    # The spot-only pipeline's tail binding: the injectable test seam wins,
+    # PRODUCTION defaults to the REAL producer trigger above (never None —
+    # "not configured" renders only on a genuine construction failure).
+    _crossverify_tail: CrossverifyTail = (
+        crossverify_tail if crossverify_tail is not None else _default_crossverify_tail
     )
 
     # The /api/v1/pull/rate stall gate's pull-run signal (DEC-RATE-STALL-PULL-GATE-001):
@@ -3110,10 +3412,71 @@ def build_app(
     # background _work closure stamps the BulkSpotReport's `.verdict.to_dict()`
     # here when a pull / retry completes; GET /pull-verdict maps it through the
     # pure banner_for() helper so /universe can SHOW the coloured banner. A
-    # one-key holder (not a module-global — CLAUDE.md §4); the write is a single
-    # atomic reference assignment on the job thread, the read is on the request
-    # thread (CPython GIL → torn-state-free). `None` until the first pull lands.
-    _last_pull_verdict: dict[str, dict[str, Any] | None] = {"verdict": None}
+    # two-key holder (not a module-global — CLAUDE.md §4); each write assigns
+    # BOTH keys on the job thread, the read is on the request thread (CPython
+    # GIL → torn-state-free for the outcome probe's purposes: a mid-stamp read
+    # at worst sees the OLD id with the NEW verdict or vice versa, and either
+    # mismatch makes the probe honestly SKIP the verdict, never mis-colour).
+    # `verdict` is None until the first pull lands; `pull_id` is the STAMPING
+    # run's correlation id (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2:
+    # the outcome probe consults the verdict ONLY when it matches the retained
+    # snapshot's run — an un-timestamped stale verdict can never colour a
+    # different run's outcome; "" = stamped outside any run, e.g. the pre-pull
+    # credentials refusal, which correlates with the never-ran slot only).
+    _last_pull_verdict: dict[str, Any] = {"verdict": None, "pull_id": ""}
+
+    def _stamp_pull_verdict(verdict: dict[str, Any]) -> None:
+        """Stamp *verdict* + the CURRENT run's correlation id into the holder.
+
+        Called from the pull routes' _work closures, which run inside the
+        job's ``pull_id_scope`` — so ``current_pull_id()`` is the run the
+        verdict describes (``""`` at the pre-pull refusal gate, by design).
+        ONE writer helper so no stamp site can forget the id half
+        (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2).
+        """
+        from brutex.observability.correlation import current_pull_id
+
+        _last_pull_verdict["verdict"] = verdict
+        _last_pull_verdict["pull_id"] = current_pull_id()
+
+    def _default_pull_outcome_probe() -> LastPullOutcome:
+        """The honest LAST-PULL OUTCOME of THIS app's job slot (DEC-OPERATOR-HEALTH-TRUTH-001).
+
+        Joins the two truths the app already records — the job's RETAINED last
+        PULL-kind snapshot (``last_pull_state`` — live while a pull runs;
+        sweep-proof between runs, so a halted pull's red outcome survives a
+        later sweep — hostile-review M2/m5) and the last finished-pull verdict
+        holder above, consulted ONLY when its stamped run id matches the
+        retained snapshot's run — through the ONE pure classifier. O(1),
+        in-memory, read-only.
+        """
+        return classify_retained_pull_outcome(
+            _pull_job.last_pull_state(),
+            verdict=_last_pull_verdict["verdict"],
+            verdict_pull_id=_last_pull_verdict["pull_id"],
+        )
+
+    # Resolved probe (injection seam mirrors ``pull_active_probe``): the
+    # ``/api/v1/pull/rate`` additive ``last_pull`` block AND the health hub's
+    # pull lane both read THIS one callable — one truth source, two surfaces.
+    _pull_outcome_probe_resolved: Callable[[], LastPullOutcome] = (
+        pull_outcome_probe if pull_outcome_probe is not None else _default_pull_outcome_probe
+    )
+
+    # The unified health hub (DEC-OPERATOR-HEALTH-TRUTH-001): nightly chain +
+    # backup dead-man from durable local state, the pull lane from the probe
+    # above, doctor-daily + mutation honestly NOT WIRED (GitHub-Actions-only
+    # gates with no local artifact — never a fabricated green). Injected for
+    # deterministic tests; the production hub rides the same read-side lake
+    # root resolver the rate bridge uses.
+    _health_hub: HealthHub = (
+        health_hub
+        if health_hub is not None
+        else HealthHub(
+            lake_root_resolver=lambda: _rate_bridge_lake_root_or_none(instrument_store),
+            pull_outcome_probe=_pull_outcome_probe_resolved,
+        )
+    )
 
     def _gate_pull_dry_run(dry_run_requested: bool, *, route: str) -> bool:
         """Resolve a pull route's EFFECTIVE dry_run — explicit opt-in or LOUD refusal.
@@ -3147,7 +3510,7 @@ def build_app(
         if refusal is not None:
             # Stamp the RED refusal verdict so the /universe banner shows the
             # fix text too — needs_operator semantics, not just a 503 body.
-            _last_pull_verdict["verdict"] = refusal.to_dict()
+            _stamp_pull_verdict(refusal.to_dict())
             if liveproof is not None:
                 # Mirror the SAME relayed fix text onto the persistent
                 # live-proof banner (DEC-DOCTOR-LIVE-AUTORUN-001): the banner
@@ -3343,7 +3706,7 @@ def build_app(
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
@@ -3995,8 +4358,22 @@ def build_app(
         to_date: str | None,
         dry_run: bool,
         intent_restarts: int = 0,
+        scope: str | None = None,
+        auto_arm: bool = False,
     ) -> dict[str, Any]:
         """The ONE-CLICK pull(+movers) pipeline launcher — the ``/pull-pipeline`` body.
+
+        *auto_arm* (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold — the
+        self-arming button semantics: first click = run now if allowed + arm
+        forever) additionally ARMS the wired
+        :class:`~brutex.dashboard.auto_pull_scheduler.AutoPullScheduler`
+        BEFORE the launch attempt, so a market-hours/contention-REFUSED click
+        still arms (the response then says both: ``started: false`` + the
+        armed ``auto_pull`` block). Refused loudly when it cannot mean what
+        it says: 400 on a non-spot-only scope or a ``dry_run`` (a dry-run
+        must never arm the daily REAL pull), 503 when no scheduler is wired.
+        The boot-time resume never passes it (an intent re-fire must not
+        re-arm a deliberately-disarmed scheduler).
 
         Extracted from the route (DEC-PULL-INTENT-RESUME-001) so the SAME
         validated launch path serves BOTH the operator's POST and the boot-time
@@ -4010,10 +4387,15 @@ def build_app(
         Raises ``HTTPException`` exactly as the route did (400 validation /
         503 credential refusal); returns the route's JSON payload dict.
 
-        Backs BOTH the "▶ Pull EVERYTHING" hero button (no selection → the WHOLE
-        admitted universe — DEC-ONE-CLICK-PIPELINE-001) AND the "▶ Pull selected · N
-        — full pipeline" button (``?symbols=a,b,c`` → ONLY the ticked underlyings —
-        DEC-PULL-SELECTED-PIPELINE-001). Precedence ``symbols`` > ``symbol`` >
+        Backs the TWO /universe buttons (DEC-PULL-SCOPED-ALL-ONECLICK-001
+        round-6 two-button split): "▶ Pull Spot" (``scope=spot-only``,
+        whole-universe, ``auto_arm=1``) and "▶ Pull F&O" (``scope=fno-only``,
+        selection/date-aware, manual only) — while the bare ``scope=full``
+        default stays the API-reachable full chain, byte-identical, for the
+        nightly binding + old intents + external callers (the
+        DEC-ONE-CLICK-PIPELINE-001 / DEC-PULL-SELECTED-PIPELINE-001 semantics
+        live on at the ROUTE even though the UI no longer offers the combined
+        button). Precedence ``symbols`` > ``symbol`` >
         whole-universe is resolved by the SHARED
         :func:`~brutex.dashboard.pull_controller.resolve_pull_targets` (O(1) per id,
         fail-CLOSED on an empty/unknown selection → 400, so a typo never silently
@@ -4092,6 +4474,11 @@ def build_app(
             # ONCE, EAGERLY, at launch — a garbage BRUTEX_PIPELINE_STRICT_GATE
             # value is a clean 400 here, never a mid-pull 500 on the job thread.
             strict_gate = strict_gate_enabled()
+            # The pull SCOPE token (DEC-PULL-SCOPED-ALL-ONECLICK-001): absent /
+            # blank ⇒ the byte-identical full chain; "spot-only" swaps the two
+            # F&O phase closures for the no-op reports below; an unknown token
+            # is a clean 400 (a typo must never widen or narrow a vendor pull).
+            scope_token = normalize_pull_scope(scope)
             resolve_candle_range(
                 from_date=from_date,
                 to_date=to_date,
@@ -4139,6 +4526,46 @@ def build_app(
         registry_path = lake_root / "registry.duckdb"
         reference_only_ids = _require_store().reference_only_security_ids()
         tradable = [inst for inst in targets if inst.security_id not in reference_only_ids]
+        spot_only = scope_token == SCOPE_SPOT_ONLY
+        # The round-6 two-button split (DEC-PULL-SCOPED-ALL-ONECLICK-001):
+        # fno-only is the exact mirror — the SPOT phase becomes the honest
+        # no-op report, metadata + F&O historical run for REAL, the prebuild
+        # excludes the spot phase, only the futures/options movers warm, the
+        # crossverify tail never fires (Spot-exclusive by ruling) and the
+        # auto-pull scheduler never arms/fires it (auto_arm 400s below).
+        fno_only = scope_token == SCOPE_FNO_ONLY
+        # ── Self-arming daily auto-pull (round-5 fold) ────────────────────
+        # Validate + ARM before the launch attempt: a refused start (market
+        # hours / contention) must still leave the operator armed — the
+        # response confirms both. `armed_scheduler` narrows the Optional once
+        # (auto_arm=True with no scheduler already 503'd).
+        armed_scheduler: AutoPullScheduler | None = None
+        if auto_arm:
+            if scope_token != SCOPE_SPOT_ONLY:
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_arm requires scope=spot-only (the self-arming "
+                    "Pull-EVERYTHING-spot-only button semantics)",
+                )
+            if dry_run:
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_arm requires a real run — a dry-run must never arm "
+                    "the daily auto-pull",
+                )
+            if auto_pull_scheduler is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="auto-pull scheduler unavailable (not wired for this app) — "
+                    "run the pull without auto_arm",
+                )
+            armed_scheduler = auto_pull_scheduler
+        if armed_scheduler is not None:
+            armed_scheduler.arm()
+        # The run's LAUNCH day (IST) — a post-close run crossing midnight
+        # marks THIS day complete, never the next (the scheduler's
+        # once-per-day guard must not skip the following day's pull).
+        launch_day = now_ist().date()
         _LOG.info(
             "universe.pull_pipeline.requested",
             targets=len(targets),
@@ -4147,6 +4574,7 @@ def build_app(
             years=years,
             dry_run=dry_run,
             strict_gate=strict_gate,
+            scope=scope_token,
         )
 
         def _work(on_progress: ProgressHook) -> object:  # pragma: no cover — runs on the job thread
@@ -4179,7 +4607,23 @@ def build_app(
             # (_run_metadata → pull_expiries_contracts), and the sequencer's
             # between-phase belt (run_full_pipeline). So a junk BRUTEX_MARKET_HOURS_GUARD
             # set MID-pull can never crash a long run with a per-call ValueError.
-            _market_closed = resolve_market_closed()
+            # EVERY scoped arm (spot-only AND — round-6 — fno-only) additionally
+            # composes the Muhurat session belt
+            # (DEC-PULL-SCOPED-ALL-ONECLICK-001 — the trading-day-keyed guard is
+            # structurally blind to a holiday-listed Muhurat session; composed,
+            # the guard module untouched; the belt honors the SAME
+            # BRUTEX_MARKET_HOURS_GUARD kill switch — guard off ⇒ belt off,
+            # hostile-review r1 ruling; wiring frozen-clock-pinned by
+            # test_scope_spot_only_market_closed_is_composed_muhurat_belt —
+            # the R4 M6 mutant killer — plus its round-6 fno-only twin). The
+            # full-scope arm keeps the bare resolve byte-identically (the
+            # Muhurat blindness there is the named follow-up
+            # DEC-PIPELINE-MUHURAT-BELT-001).
+            _market_closed = (
+                compose_market_closed(resolve_market_closed())
+                if scope_token != SCOPE_FULL
+                else resolve_market_closed()
+            )
 
             def _phase_progress(label: str, bars: int, failed: bool) -> None:
                 on_progress(label, bars, failed, False)
@@ -4665,12 +5109,23 @@ def build_app(
                 try:
                     outcome = run_pipeline_prebuild_guarded(
                         instruments=targets,
+                        # SPOT-ONLY scope rides an EMPTY F&O cascade
+                        # (DEC-PULL-SCOPED-ALL-ONECLICK-001): a lake already
+                        # holding F&O candles is NOT re-derived by a spot-only
+                        # run — the FUTURES/OPTIONS prebuild phases report the
+                        # existing honest empty notes.
                         cascade_or_error=lambda: build_fno_cascade(
-                            list_fno_candle_datasets(lake_root)
+                            () if spot_only else list_fno_candle_datasets(lake_root)
                         ),
                         materialize=_materialize,
                         source="pipeline",
                         exclude_symbols=exclude_symbols,
+                        # FNO-ONLY scope (round-6 two-button split): the SPOT
+                        # prebuild phase is a REPORTED no-op — the exact
+                        # spot-exclusion mirror of the empty-cascade arm above
+                        # (a spot lake untouched by this pull is not re-derived;
+                        # the F&O cascade phases run for real).
+                        include_spot=not fno_only,
                         # Allocation probe at the tiny-file writer's start
                         # (DEC-LAKE-FS-PROBE-001) — best-effort, never blocks.
                         lake_root=lake_root,
@@ -4745,13 +5200,41 @@ def build_app(
                         session_rate=_session_rate, observer=make_rate_observer(state)
                     ),
                 ):
+                    # SPOT-ONLY scope (DEC-PULL-SCOPED-ALL-ONECLICK-001): swap
+                    # EXACTLY the two F&O phase closures for the no-op report
+                    # builders (they pass the UNCHANGED sequencer gates
+                    # vacuously) and honestly OMIT the futures/options movers
+                    # warmers (an absent segment, never a fabricated 0).
+                    # _run_spot is bound kwarg-for-kwarg IDENTICALLY on both
+                    # arms; the sequencer itself is byte-untouched.
+                    # The no-op builders echo the LAUNCH's dry_run flag
+                    # (refuter round 1, r2 NIT-6 — a dry-run payload's nested
+                    # sub-reports must never read ``dry_run: false``).
+                    # FNO-ONLY scope (round-6 two-button split): the exact
+                    # mirror — swap EXACTLY the spot phase closure for the
+                    # no-op report builder (it passes the UNCHANGED
+                    # spot_phase_ok gate vacuously) and honestly OMIT the
+                    # spot movers warmer; metadata + historical are bound
+                    # kwarg-for-kwarg IDENTICALLY to the full arm.
                     report = run_full_pipeline(
-                        run_spot=_run_spot,
-                        run_metadata=_run_metadata,
-                        run_historical=_run_historical,
-                        warm_spot_movers=_warm_spot_movers,
-                        warm_futures_movers=_warm_futures_movers,
-                        warm_options_movers=_warm_options_movers,
+                        run_spot=(
+                            (lambda: fno_only_spot_report(dry_run=dry_run))
+                            if fno_only
+                            else _run_spot
+                        ),
+                        run_metadata=(
+                            (lambda: spot_only_metadata_report(dry_run=dry_run))
+                            if spot_only
+                            else _run_metadata
+                        ),
+                        run_historical=(
+                            (lambda _prior: spot_only_historical_report(dry_run=dry_run))
+                            if spot_only
+                            else _run_historical
+                        ),
+                        warm_spot_movers=None if fno_only else _warm_spot_movers,
+                        warm_futures_movers=None if spot_only else _warm_futures_movers,
+                        warm_options_movers=None if spot_only else _warm_options_movers,
                         run_prebuild=_prebuild_timeframes,
                         strict_gate=strict_gate,
                         # DEC-GROWW-MARKET-HOURS-GUARD-001: if this pipeline pull
@@ -4782,8 +5265,11 @@ def build_app(
                     fno_cascade_cache=_fno_cascade_cache,
                     latest_date_cache=_latest_movers_date_cache,
                 )
-                if report.spot is not None:
-                    _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                # The fno-only arm's spot report is a DESIGNED no-op — its
+                # vacuous "clean" verdict must never clobber the last REAL
+                # pull's verdict surface (the B H1 honesty law's spot axis).
+                if report.spot is not None and not fno_only:
+                    _stamp_pull_verdict(report.spot.verdict.to_dict())
                 # Consecutive-failure health over the post-pull Greeks pass
                 # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
                 # sub-report. A stopped-early / no-candle pipeline (either
@@ -4795,7 +5281,50 @@ def build_app(
                     None if hist_report is None else hist_report.greeks_enrich_ok,
                     error=None if hist_report is None else hist_report.greeks_enrich_error,
                 )
-                return report.to_dict()
+                result = report.to_dict()
+                if spot_only:
+                    # The launcher's LAST step (DEC-PULL-SCOPED-ALL-ONECLICK-001
+                    # ruling 8a): fire the crossverify TAIL — the production
+                    # binding START-only triggers the landed _crossverify_job
+                    # producer, whose runner acquires its OWN lock trio on ITS
+                    # worker thread with the bounded wait-retry (never nested
+                    # inside our still-held pull single-flight) — then rewrite
+                    # the note through the ONE surgery law so the finish detail
+                    # (rail 11, 500-char cap) carries the honest spot-only +
+                    # Greeks-not-run + cross-verify text. Fail-soft by fence:
+                    # a broken tail never fails the successful pull.
+                    tail_outcome = run_crossverify_tail(
+                        _crossverify_tail,
+                        dry_run=dry_run,
+                        stopped_after=report.stopped_after,
+                    )
+                    result["note"] = build_spot_only_note(report.note, tail_outcome)
+                    if auto_pull_scheduler is not None and not dry_run:
+                        # The scheduler's completion hook (round-5 fold): EVERY
+                        # real spot-only run — manual click, boot resume, and
+                        # scheduler-fired alike — reports its LAUNCH-day
+                        # verdict, so a successful manual run counts as the
+                        # day's auto pull (no redundant re-fire) while a
+                        # failed one marks nothing. Guarded: the convenience
+                        # scheduler must never fail a finished pull.
+                        try:
+                            auto_pull_scheduler.note_run_complete(
+                                ok=bool(report.ok), run_date=launch_day, source="pipeline"
+                            )
+                        except Exception as note_exc:  # pylint: disable=broad-exception-caught  # never fail the pull
+                            _LOG.warning(
+                                "auto_pull.note_complete_failed",
+                                error=str(note_exc),
+                                error_type=type(note_exc).__name__,
+                            )
+                elif fno_only:
+                    # Round-6 two-button split: the fno-only note surgery ONLY
+                    # — deliberately NO crossverify tail (Spot-exclusive by
+                    # ruling; the producer verifies spot+futures files a SPOT
+                    # pull settles) and NO note_run_complete (an F&O pull must
+                    # never count as the day's spot auto-pull).
+                    result["note"] = build_fno_only_note(report.note)
+                return result
             finally:
                 # ALWAYS release — a spot/metadata stop, a raised phase, or a
                 # clean run all un-gate the movers (never blocked forever);
@@ -4823,42 +5352,92 @@ def build_app(
         # REAL pull's intent. The clear fires in the job's finally, on the
         # worker's success AND failure, BEFORE the single-flight release.
         on_finally: Callable[[], None] | None = None
-        if pull_intent_store is not None and not dry_run:
-            # Best-effort write (a failed write is logged, never blocks the
-            # pull); the clear hook is wired for EVERY real pull regardless —
-            # a completing real pull supersedes any lingering older intent.
-            # NOTE: the resume red-banner auto-clear does NOT live here — it
-            # fires AFTER start() below, gated on `started`
-            # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
-            # a refused start launches nothing and must not drop the banner).
-            persist_intent_for_launch(
-                pull_intent_store,
-                dry_run=dry_run,
-                symbols=symbols,
-                symbol=symbol,
-                from_date=from_date,
-                to_date=to_date,
-                restarts=intent_restarts,
+        prior_intent: PullIntent | None = None
+        # Intent-transaction mutex (refuter round 4 G-1 / R4-1,
+        # DEC-PULL-SCOPED-ALL-ONECLICK-001): the snapshot → persist → start()
+        # → restore span below is ONE transaction over the durable intent
+        # file — two concurrent launcher threads (two tabs / button+curl / a
+        # boot-resume racing a click; the route offloads via run_in_threadpool
+        # so requests are genuinely concurrent) interleaving those steps could
+        # defeat the round-3 restore (a stale prior=None snapshot
+        # orphan-clearing the RUNNING winner's freshly-persisted intent; a
+        # second refused click re-installing the first's clobber). The whole
+        # span therefore serializes under the store's process-local
+        # launch_mutex. Holding it across start() is SAFE: start() never
+        # WAITS on a lock (market-hours gate / in-process flag / LOCK_NB
+        # flock refusals all return False; on success the worker is spawned
+        # and start() returns) and the worker thread never acquires this
+        # mutex (its on_finally is the plain store.clear). HONEST hold
+        # envelope (refuter round 5, J-NIT-1): "non-blocking" is about
+        # lock-WAITS, not I/O latency — the held span synchronously does the
+        # intent-file load/persist/restore + two lock-file open() syscalls
+        # (not deadline-wrapped; unbounded on a wedged lake volume), the SSM
+        # credential read (boto3 default timeouts — minutes on a blackholed
+        # AWS route) and the lease enter/refresh (each run_with_deadline-
+        # bounded ≈5 s, ≤~10 s total). So a queued sibling click waits that
+        # span instead of the pre-mutex INSTANT in-process refusal — healthy
+        # ≈ sub-second, latency-only, same fault domain as its own I/O; the
+        # alternative (the G-1/R4-1 intent races) was strictly worse. A
+        # dry_run enters the mutex too (it persists/restores nothing, but
+        # its own start() still pays the same held-span I/O); store-less
+        # apps skip it — there is no intent state to serialize.
+        with pull_intent_store.launch_mutex if pull_intent_store is not None else nullcontext():
+            if pull_intent_store is not None and not dry_run:
+                # Best-effort write (a failed write is logged, never blocks the
+                # pull); the clear hook is wired for EVERY real pull regardless —
+                # a completing real pull supersedes any lingering older intent.
+                # NOTE: the resume red-banner auto-clear does NOT live here — it
+                # fires AFTER start() below, gated on `started`
+                # (DEC-RESUME-BANNER-AUTOCLEAR-001, round-3 hostile-review fold:
+                # a refused start launches nothing and must not drop the banner).
+                # Snapshot the CURRENT on-disk intent FIRST so a REFUSED start can
+                # put it back (refuter round 3 F-1, DEC-PULL-SCOPED-ALL-ONECLICK-001
+                # — the pre-start persist otherwise CLOBBERS a RUNNING pull's
+                # intent, and a crash in that window resumes the WRONG scope).
+                prior_intent = pull_intent_store.load()
+                persist_intent_for_launch(
+                    pull_intent_store,
+                    dry_run=dry_run,
+                    symbols=symbols,
+                    symbol=symbol,
+                    from_date=from_date,
+                    to_date=to_date,
+                    restarts=intent_restarts,
+                    # Non-default scope persists so a crash-resume re-fires the SAME
+                    # scope — a spot-only pull must never resume as a full-scope F&O
+                    # pull (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full, the
+                    # optional-field back-compat template).
+                    scope=scope_token if scope_token != SCOPE_FULL else None,
+                )
+                on_finally = pull_intent_store.clear
+            started = _pull_job.start(
+                _work,
+                total=len(targets),
+                detail=pipeline_detail,
+                ledger_synced=True,
+                on_finally=on_finally,
+                # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
+                market_hours_exempt=dry_run,
             )
-            on_finally = pull_intent_store.clear
-        started = _pull_job.start(
-            _work,
-            total=len(targets),
-            detail=pipeline_detail,
-            ledger_synced=True,
-            on_finally=on_finally,
-            # DEC-GROWW-MARKET-HOURS-GUARD-001: --dry-run is vendor-free → EXEMPT.
-            market_hours_exempt=dry_run,
-        )
-        if pull_intent_store is not None:
-            # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
-            # stale resume red banner ONLY when the real pull actually started
-            # — start() acquired the in-process + cross-process guards and
-            # spawned the worker. A refused start (contention / foreign-host
-            # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
-            # touches it (both gates live inside the helper).
-            clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
-        return {
+            if pull_intent_store is not None:
+                # Banner auto-clear (DEC-RESUME-BANNER-AUTOCLEAR-001): retire any
+                # stale resume red banner ONLY when the real pull actually started
+                # — start() acquired the in-process + cross-process guards and
+                # spawned the worker. A refused start (contention / foreign-host
+                # lease) keeps the CRITICAL crash-loop banner up; a dry_run never
+                # touches it (both gates live inside the helper).
+                clear_banner_after_start(pull_intent_store, dry_run=dry_run, started=started)
+                # Refused-start intent RESTORE (refuter round 3 F-1): the persist
+                # above ran BEFORE start() for pre-crash durability, so a REFUSED
+                # start (a pull already RUNNING here, flock contention, or the
+                # foreign-host lease) clobbered the running pull's on-disk intent
+                # — put the prior snapshot back (prior=None ⇒ clear the orphan;
+                # already-cleared-by-the-winner ⇒ leave absent). A started or
+                # dry-run launch restores nothing (gates live in the helper).
+                restore_intent_after_refused_start(
+                    pull_intent_store, prior=prior_intent, dry_run=dry_run, started=started
+                )
+        payload: dict[str, Any] = {
             "started": started,
             "targets": len(targets),
             "total": len(targets),  # the JS title reads body.total for the first render
@@ -4866,7 +5445,18 @@ def build_app(
             "target_source": target_source,  # "selection" / "single" / "universe"
             "years": years,
             "dry_run": dry_run,
+            # ADDITIVE (DEC-PULL-SCOPED-ALL-ONECLICK-001): the normalized scope
+            # token — every pre-existing key above is byte-identical (pinned).
+            "scope": scope_token,
         }
+        if spot_only and auto_pull_scheduler is not None:
+            # ADDITIVE, spot-only arm ONLY (round-5 fold — the default/full
+            # payload stays exactly the pinned shape above): the armed state +
+            # last auto outcome + honest next-eligible description, so a
+            # market-hours-refused arming click's response can say BOTH
+            # "started: false" AND "armed — first auto run <when>".
+            payload["auto_pull"] = auto_pull_scheduler.status()
+        return payload
 
     @app.post("/api/v1/universe/pull-pipeline")
     async def api_universe_pull_pipeline(
@@ -4875,8 +5465,14 @@ def build_app(
         from_date: str | None = Query(default=None),
         to_date: str | None = Query(default=None),
         dry_run: bool = Query(default=False),
+        scope: str | None = Query(default=None),
+        auto_arm: bool = Query(default=False),
     ) -> JSONResponse:
         """POST /api/v1/universe/pull-pipeline — the ONE-CLICK pull(+movers) pipeline.
+
+        ``auto_arm=1`` (spot-only scope only — the self-arming button sends
+        it) additionally arms the daily post-market auto-pull scheduler
+        BEFORE the launch attempt; see :func:`_launch_pipeline`.
 
         Thin delegator over :func:`_launch_pipeline` (which carries the full
         semantics docstring): the launch body is shared with the boot-time
@@ -4903,9 +5499,77 @@ def build_app(
                     from_date=from_date,
                     to_date=to_date,
                     dry_run=dry_run,
+                    scope=scope,
+                    auto_arm=auto_arm,
                 )
             )
         )
+
+    if auto_pull_scheduler is not None:
+        _scheduler: AutoPullScheduler = auto_pull_scheduler
+
+        def _auto_spot_launcher() -> AutoLaunchResult:
+            """The scheduler's fire seam — the SAME spot-only launcher the button uses.
+
+            Every rail is inherited by construction (`_launch_pipeline` IS
+            the button's body): market-hours guard, single-flight + flock,
+            durable intent + launch mutex, note surgery, crossverify tail.
+            Never raises for a refusal — a route-shaped rejection
+            (``HTTPException``: a credential 503, a validation 400) and a
+            refused start both map to ``started=False`` with the honest
+            reason, so the scheduler retries on later ticks (a healed
+            credential outage / a finished sweep is picked up the same day).
+            """
+            try:
+                payload = _launch_pipeline(
+                    symbols=None,
+                    symbol=None,
+                    from_date=None,
+                    to_date=None,
+                    dry_run=False,
+                    scope=SCOPE_SPOT_ONLY,
+                )
+            except HTTPException as exc:
+                return AutoLaunchResult(
+                    started=False,
+                    detail=f"launch rejected ({exc.status_code}): {exc.detail}",
+                )
+            if payload.get("started"):
+                return AutoLaunchResult(started=True, detail="spot-only pipeline job started")
+            return AutoLaunchResult(
+                started=False,
+                detail=(
+                    "launch refused — the pull single-flight/job slot is held "
+                    "(a pull or a multi-day dashboard sweep is running)"
+                ),
+            )
+
+        _scheduler.bind_launcher(_auto_spot_launcher)
+
+        @app.post("/api/v1/universe/pull-all-spot-auto")
+        async def api_universe_pull_all_spot_auto(armed: bool = Query()) -> JSONResponse:
+            """POST /api/v1/universe/pull-all-spot-auto — arm/disarm the daily auto-pull.
+
+            The "auto: ON — disarm" chip's toggle (DEC-PULL-SCOPED-ALL-
+            ONECLICK-001 round-5 fold): ``armed=1`` arms (and ensures the
+            ticker) WITHOUT launching anything — the ▶ button's ``auto_arm``
+            is the launch-and-arm path; ``armed=0`` disarms (the durable
+            state persists across restarts either way). Returns the fresh
+            ``auto_pull`` status block. Offloaded (state-file write on the
+            lake volume — the app.py offload doctrine). Registered only when
+            a scheduler is wired; a scheduler-less app has no route (404 —
+            the chip renders "unavailable" from the absent payload key).
+            """
+
+            def _toggle() -> dict[str, Any]:
+                """Arm/disarm on the worker thread; return the fresh status block."""
+                if armed:
+                    _scheduler.arm()
+                else:
+                    _scheduler.disarm()
+                return {"auto_pull": _scheduler.status()}
+
+            return JSONResponse(await _run_lake(_toggle))
 
     if pull_intent_store is not None:
         _intent_store: PullIntentStore = pull_intent_store
@@ -4932,6 +5596,10 @@ def build_app(
                     to_date=intent.to_date,
                     dry_run=False,
                     intent_restarts=intent.restarts,
+                    # A persisted spot-only intent resumes SPOT-ONLY — never a
+                    # silently-widened full-scope F&O pull
+                    # (DEC-PULL-SCOPED-ALL-ONECLICK-001; None = full).
+                    scope=intent.scope,
                 )
             except HTTPException as exc:
                 if exc.status_code < _SERVER_ERROR_FLOOR:
@@ -5032,6 +5700,7 @@ def build_app(
         # synchronous DuckDB reads that sat ON the event loop); the ValueError → 400
         # mapping stays OUTSIDE the offload (the #1622 api_universe_instruments idiom).
         def _resolve_targets() -> tuple[list[Instrument], str]:
+            """Resolve the retry selection on the threadpool worker (DuckDB reads)."""
             return resolve_pull_targets(
                 symbols=symbols,
                 symbol=symbol,
@@ -5101,7 +5770,7 @@ def build_app(
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)
@@ -5307,6 +5976,134 @@ def build_app(
         """
         return JSONResponse(_greeks_backfill_job.snapshot().to_dict())
 
+    @app.post("/api/v1/crossverify/run")
+    async def api_crossverify_run(
+        dry_run: bool = Query(default=False),
+        skip_pull: bool = Query(default=False),
+        no_publish: bool = Query(default=False),
+        day: str | None = Query(default=None),
+    ) -> JSONResponse:
+        """POST /api/v1/crossverify/run — start the daily TickVault cross-verify producer.
+
+        DEC-CROSSVERIFY-PRODUCER-001 (MIGRATION.md #1776): the SAME
+        :func:`brutex.crossverify.run.run_crossverify` runner the CLI
+        ``brutex crossverify run`` dispatches to, sharing THIS app's
+        ``SessionRateController`` (one account rate budget — §2 Rule 6),
+        launched on a dedicated background job (returns at once; poll
+        ``/api/v1/crossverify/progress``). Config junk
+        (``BRUTEX_CROSSVERIFY_*`` AND — for vendor-calling runs — the
+        market-hours guard env the runner's seams resolve) is validated
+        EAGERLY → 400, never a job-thread error (the greeks-backfill
+        posture; the CLI's eager ``default_seams`` validation, mirrored).
+
+        Lock semantics (the phase-A handoff law): the job starts with
+        ``cross_process_lock=False`` because the runner's own
+        ``default_seams`` lock seam acquires the account→lake→lease trio
+        itself with a bounded wait-retry + honest refusal — a job-level
+        second acquire of the same flock would self-conflict. Market-hours
+        semantics: ``market_hours_exempt=True`` at the JOB gate because the
+        RUNNER owns the market-hours law at its step E (the SAME
+        ``guard_active_default``; a vendor-calling in-window run returns the
+        honest ``deferred_market_hours`` verdict, exit 0, while ``dry_run`` /
+        ``skip_pull`` runs make no vendor calls and are legitimately allowed
+        in-window — the job-level all-or-nothing gate cannot express that
+        split). GREEKS N/A for this trigger: the Greeks stage is
+        options-only, and this pull is SPOT-ONLY — all indices + all
+        stocks; futures AND options excluded
+        (DEC-CROSSVERIFY-SPOT-ONLY-001) — so there is nothing to enrich:
+        pull → prebuild → movers-revision run with no Greeks stage.
+        """
+        parsed_day: date | None = None
+        if day is not None:
+            try:
+                parsed_day = date.fromisoformat(day)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"day must be YYYY-MM-DD, got {day!r}"
+                ) from exc
+        from brutex.crossverify.config import resolve_crossverify_config
+
+        lake_root = _resolve_pull_lake_root(instrument_store, dry_run=dry_run)
+        try:
+            config = resolve_crossverify_config(
+                lake_root=lake_root,
+                day=parsed_day,
+                dry_run=dry_run,
+                skip_pull=skip_pull,
+                no_publish=no_publish,
+            )
+            if not dry_run:
+                # Eager fail-loud VALIDATION only (junk market-hours env →
+                # 400 here, the CLI parity) — the runner's default_seams
+                # re-resolves the predicate at bind; a dry-run threads None
+                # (no vendor calls to gate), mirroring the seam's own gate.
+                from brutex.calendars.market_hours import resolve_market_closed
+
+                resolve_market_closed()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _LOG.info(
+            "crossverify.requested",
+            day=config.day.isoformat(),
+            dry_run=dry_run,
+            skip_pull=skip_pull,
+            no_publish=no_publish,
+            lake_root=str(lake_root),
+        )
+
+        # The ONE start body (DEC-PULL-SCOPED-ALL-ONECLICK-001 §11 COMMON):
+        # runner selection + job _work + the lock/market-hours start kwargs
+        # are shared with the spot-only pipeline's crossverify tail.
+        started = _start_crossverify_producer(config)
+        return JSONResponse(
+            {
+                "started": started,
+                "dry_run": dry_run,
+                "skip_pull": skip_pull,
+                "no_publish": no_publish,
+                "day": config.day.isoformat(),
+                "note": (
+                    "runs the same runner as `brutex crossverify run`; the run "
+                    "takes the pull locks itself (bounded wait — a concurrent "
+                    "pull defers it honestly); poll /api/v1/crossverify/progress"
+                ),
+            }
+        )
+
+    def _crossverify_last_run() -> dict[str, object] | None:
+        """The durable last-run record — the reload-proof failure surface.
+
+        DEC-CROSSVERIFY-WITHHELD-REGATE-001: reads the runner-written
+        ``<lake_root>/.crossverify/last_run.json`` view sidecar (best-effort;
+        absent / corrupt / no resolvable lake root → honest ``None`` — the
+        panel simply shows nothing, never a 500). Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.journal import load_last_run
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return None
+        return load_last_run(lake_root)
+
+    @app.get("/api/v1/crossverify/progress")
+    async def api_crossverify_progress() -> JSONResponse:
+        """GET /api/v1/crossverify/progress — the producer job snapshot.
+
+        The dedicated job's :meth:`~brutex.dashboard.pull_jobs.BackgroundPullJob.snapshot`
+        (state / current / detail / percent …) — O(1) per poll
+        (DEC-CROSSVERIFY-PRODUCER-001) — plus the ADDITIVE ``last_run`` field:
+        the durable end-of-run record the runner persists at
+        ``<lake_root>/.crossverify/last_run.json`` (verdict + counts + capped
+        failed keys + detail), so a finished failure survives a page reload
+        AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
+        O(1) small-sidecar stat+read per poll, off the event loop; ``null``
+        when absent/corrupt/unresolvable — never a fabricated record.
+        """
+        snapshot = _crossverify_job.snapshot().to_dict()
+        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        return JSONResponse(snapshot)
+
     @app.get("/api/v1/universe/pull-progress")
     async def api_universe_pull_progress() -> JSONResponse:
         """GET /api/v1/universe/pull-progress — the LIVE per-unit + per-phase pull snapshot.
@@ -5335,6 +6132,13 @@ def build_app(
         from brutex.data.window_ledger_store import ledger_path
 
         snap = _pull_job.snapshot().to_dict()
+        if auto_pull_scheduler is not None:
+            # ADDITIVE (round-5 fold): the daily auto-pull armed state + last
+            # outcome + honest next-eligible text for the /universe chip. O(1)
+            # memory after the scheduler's first lazy state load (single-writer
+            # in-memory mirror) — offloaded anyway for that one first read.
+            progress_scheduler = auto_pull_scheduler
+            snap["auto_pull"] = await _run_lake(progress_scheduler.status)
         current_phase = str(snap.get("phase", ""))
         store: Any = instrument_store
         lake_root = getattr(store, "path", None)
@@ -5408,6 +6212,29 @@ def build_app(
             if resume is not None:
                 payload["resume"] = resume
         return JSONResponse(payload)
+
+    @app.get("/api/v1/health/hub")
+    async def api_health_hub() -> JSONResponse:
+        """GET /api/v1/health/hub — the unified operator health fold.
+
+        DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747). ONE green/red fold
+        over the automation lanes with durable LOCAL state — pull outcome ·
+        nightly chain (`<lake>/sweeps/nightly/<id>/report.json`) · backup
+        dead-man (the PURE :func:`brutex.backup.deadman.evaluate_deadman`
+        verdict, read-only) — plus the honestly NOT-WIRED doctor-daily +
+        mutation lanes (GitHub-Actions-only gates, no local artifact; the
+        honesty law: unknown/unwired reads unknown/not-wired, NEVER a
+        fabricated green). Payload: ``{"fold": {verdict, headline},
+        "lanes": [{lane, verdict, headline, detail, checked_at, age_s}, …],
+        "generated_at", "ttl_s"}``.
+
+        Honest O-envelope: a poll within the hub's TTL serves the memoised
+        file lanes (O(1)); a refresh is one bounded ``scandir`` + three tiny
+        JSON reads — never a lake scan. Runs on a threadpool worker (the
+        app.py offload doctrine) so the event loop never touches the
+        filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
+        """
+        return JSONResponse(await run_in_threadpool(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
@@ -7325,8 +8152,14 @@ def build_app(
         **single-flight** background job (poll the live tick at
         ``/api/v1/sweep-progress``). Defaults mirror the CLI: NSE index symbols on
         the ``INDEX`` segment over ``2020-01-01 → today``. A second click while a
-        pull OR sweep is already running is a no-op (``{"started": false}``) — one
-        lake, one writer (CLAUDE.md §2 Rule 7 idempotence).
+        pull OR sweep is already running IN THIS PROCESS is a no-op
+        (``{"started": false}``) — one lake, one writer (CLAUDE.md §2 Rule 7
+        idempotence). Cross-process exclusion is owned by ``cmd_sweep_all``
+        itself (G10 preload read-guard + G6 sweep single-flight,
+        DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): a sweep started while another
+        process's pull holds the lake flock fails loudly at preload
+        (``LakeBusyError`` in the progress feed), and a pull/crossverify can run
+        CONCURRENTLY with the sweep's compute phase.
 
         The sweep reads the LOCAL lake (no vendor creds, no network); an empty /
         partly-pulled lake simply sweeps whatever slices exist and reports the
@@ -7391,12 +8224,26 @@ def build_app(
         # stays honest dark "idle" for the sweep's 2-4-day wall time — never a red
         # "stalled" off the (correctly) zero vendor rate. Single-flight, progress and
         # the duty-degrade probes are unchanged (they stay sweep-inclusive).
+        # cross_process_lock=False (DEC-SWEEP-LOCK-PULL-CONCURRENCY-001): the
+        # sweep engine OWNS its own cross-process exclusion — cmd_sweep_all
+        # takes the G10 lake read-guard (LOCK_SH on the SAME pull single-flight
+        # file, held across the bar PRELOAD ONLY) + the G6 sweep single-flight
+        # (DEC-SWEEP-UNKILLABLE-CORE-001). A job-level whole-run EX here BOTH
+        # self-conflicted with G10 (flock is per open file description — the
+        # dashboard sweep died at preload with LakeBusyError since G10 landed,
+        # commit 3f32b3e) AND would lock the daily pull/crossverify out for the
+        # sweep's multi-day wall time (the crossverify precedent — the callee
+        # owns its locks). A sweep started while a CROSS-process pull holds the
+        # lake flock now fails LOUDLY at preload (LakeBusyError in the progress
+        # feed, bounded to the preload) instead of a start()-refusal; the
+        # IN-process second click stays the started=false no-op (layer 1).
         started = _pull_job.start(
             _work,
             total=1,
             detail=f"sweep {request.symbols}",
             on_success=_summary_cache.mark_dirty,
             job_kind=JOB_KIND_SWEEP,
+            cross_process_lock=False,
         )
         payload = request.to_dict()
         payload["started"] = started
@@ -7525,7 +8372,14 @@ def build_app(
             ``<lake>/sweeps`` scan / rank ONLY on a miss
             (DEC-LEDGER-DELTA-O-PAGE-001).
             """
-            rev = sweep_results_revision(lake_root)
+            # DEC-O1-GUARANTEE-HARDEN-001 H2: the sweeps digest is an O(sweep
+            # dirs) scandir sweep per poll — memoise the token for the short
+            # TTL (one sweep per window; an outage `None` is never memoised,
+            # so the outage arm below re-derives per poll exactly as before).
+            rev = _revision_probe_memo.get(
+                f"sweep_results|{lake_root}",
+                lambda: sweep_results_revision(lake_root),
+            )
             # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the cascade report is
             # atomically OVERWRITTEN in place per sweep — the rewrite moves NO
             # directory mtime the sweeps digest sees, so its DEDICATED file
@@ -7753,7 +8607,15 @@ def build_app(
             if root is None:
                 return oneclick_view.build_runs_payload((), fixture_root_active=fixture_active)
             results_root: Path = root
-            probe = oneclick_artifacts.runs_revision_probe(results_root)
+            # DEC-O1-GUARANTEE-HARDEN-001 H2: the probe is an UNCAPPED O(run
+            # dirs) manifest-stat walk per poll (the F5 ruling) — memoise the
+            # RESULT for the short TTL so N polls within one window pay ONE
+            # walk (staleness ≤ TTL; absence/outage verdicts never memoised).
+            probe = _revision_probe_memo.get(
+                f"oc_runs|{results_root}",
+                lambda: oneclick_artifacts.runs_revision_probe(results_root),
+                cacheable=lambda p: p.token is not None,
+            )
 
             def _fresh() -> dict[str, Any]:
                 return oneclick_view.build_runs_payload(
@@ -8706,6 +9568,13 @@ def build_app(
                     # count cache + generation; absent registry ⇒ the lake-observed
                     # step with its honest "observed" low-confidence label.
                     registry_path=registry_path_for(store_path),
+                    # The evidence-grounded stock drift rung for the moneyness
+                    # spot-join (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001): lazy — the
+                    # composite-token memo runs ONLY when the exact-key spot probe
+                    # came back empty, so a drifted stock lake classifies moneyness
+                    # exactly as the Greeks ladder recovers its spot join while a
+                    # healthy page pays zero extra I/O.
+                    stock_drift_loader=lambda: _stock_drift_map_cached(store, lake),
                     # Manifest-first paging (DEC-LAKE-STATS-MANIFEST-001): the
                     # production route opts into the per-file stats manifest —
                     # served only after full per-request revalidation, ANY
@@ -8910,11 +9779,26 @@ def build_app(
         registry_path = registry_path_for(store_path)
 
         def _load() -> dict[str, Any]:
-            """Read the expiry grid + registry counts off the event loop."""
+            """Read the expiry grid + registry counts off the event loop.
+
+            DEC-O1-GUARANTEE-HARDEN-001 H1: the paging-invariant COUNTs ride
+            the dedicated registry count cache keyed by the registry-content
+            stat token; a probe outage (token ``None``) computes fresh
+            UNCACHED — never a stale total, never a fabricated one.
+            """
+            token = registry_revision(registry_path)
+            cache = None if token is None else _registry_count_cache
+            gen = 0 if token is None else revision_generation(token)
             payload = list_registry_expiries(
-                registry_path, exch=exch, underlying=underlying, limit=limit, offset=offset
+                registry_path,
+                exch=exch,
+                underlying=underlying,
+                limit=limit,
+                offset=offset,
+                count_cache=cache,
+                generation=gen,
             )
-            payload["counts"] = registry_counts(registry_path)
+            payload["counts"] = registry_counts(registry_path, count_cache=cache, generation=gen)
             return payload
 
         try:
@@ -8956,7 +9840,14 @@ def build_app(
         registry_path = registry_path_for(store_path)
 
         def _load() -> dict[str, Any]:
-            """Read the contract grid + registry counts off the event loop."""
+            """Read the contract grid + registry counts off the event loop.
+
+            DEC-O1-GUARANTEE-HARDEN-001 H1 — the expiries route's cache law,
+            applied to the contracts pager's FILTERED leg count.
+            """
+            token = registry_revision(registry_path)
+            cache = None if token is None else _registry_count_cache
+            gen = 0 if token is None else revision_generation(token)
             payload = list_registry_contracts(
                 registry_path,
                 exch=exch,
@@ -8964,8 +9855,10 @@ def build_app(
                 expiry_date=expiry_date,
                 limit=limit,
                 offset=offset,
+                count_cache=cache,
+                generation=gen,
             )
-            payload["counts"] = registry_counts(registry_path)
+            payload["counts"] = registry_counts(registry_path, count_cache=cache, generation=gen)
             return payload
 
         try:
