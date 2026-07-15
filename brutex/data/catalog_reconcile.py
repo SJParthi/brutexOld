@@ -70,6 +70,23 @@ __all__ = ["ReconcileResult", "reconcile_catalog_from_lake"]
 #: residual R2N-06.
 _LOG = structlog.get_logger("brutex.data.catalog_reconcile")
 
+#: Exception set for the per-file min/max Parquet read below: a
+#: :class:`polars.exceptions.PolarsError` decode fault OR a stored
+#: out-of-``datetime``-range timestamp conversion fault
+#: (:func:`datetime_out_of_range_errors` — the round-18
+#: DEC-LAKE-HEAL-OPTIONS-FOREIGN-001 fold, present-but-unreadable in effect).
+#: Hoisted to a module-level constant explicitly typed
+#: ``tuple[type[BaseException], ...]`` so the ``except`` site is a plain tuple of
+#: exception classes — mypy ``--strict`` rejects a ``*``-unpacked variadic tuple
+#: written inline in an ``except`` clause. Behaviour is identical to the inline
+#: ``(pl.exceptions.PolarsError, *datetime_out_of_range_errors())``:
+#: ``datetime_out_of_range_errors()`` returns a constant tuple, so building it
+#: once at import equals rebuilding it per file.
+_PARQUET_UNREADABLE_ERRORS: tuple[type[BaseException], ...] = (
+    pl.exceptions.PolarsError,
+    *datetime_out_of_range_errors(),
+)
+
 
 @dataclass(frozen=True)
 class ReconcileResult:
@@ -362,7 +379,7 @@ def reconcile_catalog_from_lake(
             first_ts = timestamps.min()
             last_ts = timestamps.max()
             raw_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except (pl.exceptions.PolarsError, *datetime_out_of_range_errors()) as exc:
+        except _PARQUET_UNREADABLE_ERRORS as exc:
             # DEC-SWEEP-RECONCILE-CORRUPT-REFUSE-001 (#1797): a CORRUPT /
             # version-incompatible partition file — or one whose Datetime column
             # holds an out-of-range value (the round-18 OverflowError class, folded
