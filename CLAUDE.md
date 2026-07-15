@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-14 (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md
+_Last updated: 2026-07-14 (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md
+#1794 (renumbered #1792 → #1793 → #1794 across the 2026-07-14
+merge-reconciles — main took #1792 for
+DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, then #1793 for
+DEC-SETTLE-EVIDENCE-ADOPTION-001), branch `claude/bulk-spot-completeness-flag` — the bulk whole-universe
+spot pull arms `detect_completeness_gaps`: `pull_all_spot`'s ONE spine call
+now threads `detect_completeness_gaps=not dry_run` (the cli.py `cmd_fetch`
+idiom), so the #1031 interior-gap / trailing-truncation demotions run on
+EVERY daily production path (nightly · ▶ Pull Spot + auto-pull · /pull-all ·
+retry-failed · the crossverify pull legs) instead of being dead on all of
+them — closing #1774's honest-envelope item (i). The spine's `is_index` gate
+keeps the ~750 illiquid CASH names observe-only on the gap/truncation class
+(the intrinsic ALL_FILTERED demotion stays deliberately un-index-gated);
+dry-runs stay
+double-protected (flag False + record-inert None ledger); demotions are
+bounded (settle SKIPPED at threshold 3, remediation `brutex
+reopen-skipped`). ONE call site + docs + tests — the detectors + spine are
+byte-untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1794.)
+Earlier: 2026-07-14 (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md
 #1793 — the measured-settle evidence adoption channel: the #1775 probe's
 `--summarize --emit-evidence` → committed `docs/groww/probe/settle_evidence.json`
 (schema 1, reviewed beside its transcripts) → the validated three-tier
@@ -2576,7 +2597,53 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/settle-evidence-adoption` (**DEC-SETTLE-EVIDENCE-ADOPTION-001,
+- **Active branch:** `claude/bulk-spot-completeness-flag`
+  (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
+  #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took
+  #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, then #1793 for
+  DEC-SETTLE-EVIDENCE-ADOPTION-001) — the bulk
+  whole-universe spot pull arms `detect_completeness_gaps`: `pull_all_spot`'s
+  ONE spine call (`_one_pass` → `run_groww_spot_ingest_with_retry`) now
+  threads `detect_completeness_gaps=not dry_run` — the cli.py `cmd_fetch`
+  idiom, hoisted as `_detect_gaps` beside the #1774 `_today_gate` — so the
+  #1031 interior-gap / trailing-truncation demotions run on EVERY daily
+  production path (the 01:30 nightly, ▶ Pull Spot + the auto-pull scheduler,
+  /pull-all, retry-failed, the crossverify pull legs — all funnel through
+  this one call), including the engine indices; pre-fix the kwarg was OMITTED
+  (defaults False at `run_ingest.py`) so the demotions were DEAD on every
+  bulk path and a holey/truncated SUCCESS index window settled forever.
+  CLOSES #1774's honest-envelope item (i) + the in-code NOTE. The spine's
+  three hard gates are byte-untouched and do the correctness work
+  (`detect_completeness_gaps AND is_index AND interval != 1day`; ALL_FILTERED
+  stays flag-gated-not-index-gated — intrinsic, so arming the bulk path
+  reaches CASH names on THAT class too): the ~750 illiquid CASH names stay
+  observe-only WARNed on the interior-gap/truncation class, never demoted on
+  it; demotion = re-pullable FAILED +
+  INTERIOR_GAP/SUSPECTED_PARTIAL, streak-bumping, settles SKIPPED at
+  EMPTY_TERMINAL_THRESHOLD=3 (bounded — never a livelock; honest
+  DEMOTED_SETTLE_REASONS label; remediation `brutex reopen-skipped`); stored
+  bars always kept. HONEST: covers ALL ~25 admitted indices via `is_index`
+  (every index prints on every session — the session-level presence the
+  detectors key on; intra-session density not claimed — so the #1031
+  rationale holds), NOT retroactive
+  (already-settled holey windows stay settled — the #1774 item-(a)
+  fetched-bars boundary; lake audit = DEC-LAKE-AUDIT-SETTLING-ROWS-001), the
+  detectors abstain out-of-calendar-coverage from 2027-01-01 until the 2027
+  NSE list lands (graceful lapse, no false demotes), the crossverify pull
+  legs arm too (always live, same bound). Dry-run double-protected: flag
+  False AND `begin_pull_ledger(dry_run=True)` → None (record-inert).
+  Fails-before-proven (NEW `TestCompletenessDemotionArming` spy pair + the
+  `TestBulkSpotCompletenessDemotionE2E` clock-free 2024 interior-hole e2e —
+  index FAILED+INTERIOR_GAP, same-pull non-index equity SUCCESS; 3/4 fail
+  with the one-kwarg fix stash-reverted); ONE test-churn reconcile
+  (`test_second_pull_reports_skipped_settled_windows` fixture bounded inside
+  the 5-session tolerance — it pins the settled-skip law, so it must settle);
+  every other `pull_all_spot(dry_run=False, …)` suite green unmodified.
+  Pull-INTEGRITY only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; `pull_controller.py`
+  100.00% line+branch on its ci.yml stanza; ruff/ruff-format clean; `mypy
+  --strict` clean; pyright 0 new.)
+  Earlier: `claude/settle-evidence-adoption` (**DEC-SETTLE-EVIDENCE-ADOPTION-001,
   MIGRATION.md #1793** — renumbered #1792 → #1793 at the 2026-07-14 second merge-reconcile
   (main took #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001; DEC-IDs are the stable
   handles per DEC-LEDGER-RENUMBER-001) — the measured-settle EVIDENCE-FILE adoption channel, closing the
@@ -2741,7 +2808,8 @@ hostile-review pass._
   `pipeline_prebuild.py` (206/60) + `pipeline_pull.py` (249/78) ALL 100.00%
   line+branch on their gates; touched `cli.py` lines covered; ruff/ruff-format
   clean, `mypy --strict` clean, pyright 0 new vs the origin/main baseline.)
-  Earlier: `claude/sweep-lock-pull-concurrency` (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
+  Earlier: `claude/sweep-lock-pull-concurrency`
+  (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
   CLI parity: `cmd_sweep_all` OWNS the sweep-vs-pull exclusion — the G10 lake read-guard
   (`LOCK_SH` on the pull single-flight file, held across the bar PRELOAD ONLY) + the G6 sweep
@@ -3358,7 +3426,9 @@ hostile-review pass._
   out-of-coverage (≥2027) abstains; non-trading today passes vacuously.
   (3) Armed at ALL FOUR production sites — incl. the bulk `pull_all_spot` phase
   `detect_completeness_gaps` never reached (that hole stays observed, named
-  follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001) — via its OWN spine param
+  follow-up DEC-BULK-SPOT-COMPLETENESS-FLAG-001 [CLOSED by that DEC,
+  MIGRATION.md #1794 — `pull_all_spot` now threads
+  `detect_completeness_gaps=not dry_run`]) — via its OWN spine param
   `today_completeness_gate`, each site resolving the fail-loud
   `BRUTEX_TODAY_COMPLETENESS_GATE` env ONCE per pull (dry-run/inspect ⇒ False
   without touching the env; junk fails loud at pull start); all four
@@ -7080,7 +7150,29 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/settle-evidence-adoption`
+- **Active feature branch:** `claude/bulk-spot-completeness-flag`
+  (DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794 — renumbered
+  #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles, main took
+  #1792 for DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 then #1793 for
+  DEC-SETTLE-EVIDENCE-ADOPTION-001 — the bulk
+  whole-universe spot pull arms `detect_completeness_gaps`:
+  `pull_all_spot`'s ONE spine call now threads
+  `detect_completeness_gaps=not dry_run` (the cli.py idiom, hoisted beside
+  the #1774 `_today_gate`), so the #1031 interior-gap /
+  trailing-truncation demotions run on every daily production path —
+  nightly, ▶ Pull Spot + auto-pull, /pull-all, retry-failed, the
+  crossverify pull legs — closing #1774's honest-envelope item (i); the
+  spine's `is_index` gate keeps the ~750 illiquid CASH names observe-only
+  on the gap/truncation class (the intrinsic ALL_FILTERED demotion stays
+  deliberately un-index-gated),
+  dry-runs stay double-protected (flag False + record-inert None ledger),
+  demotions settle SKIPPED at threshold 3 (bounded; `brutex
+  reopen-skipped`); NOT retroactive; detectors abstain out-of-coverage
+  from 2027 until the NSE list lands; ONE call site + docs + tests, the
+  detectors + spine byte-untouched; pull-INTEGRITY only — ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1794 for the full blurb)
+  Earlier: `claude/settle-evidence-adoption`
   (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793 — the measured-settle
   EVIDENCE-FILE adoption channel: the #1775 probe's `--summarize
   --emit-evidence PATH [--margin-minutes N]` folds ≥5 REGULAR probe days into
