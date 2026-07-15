@@ -580,9 +580,15 @@ async function loadMissing() {
   const sym = (drillSym.value || "").trim();
   if (sym) { url += "?symbol=" + encodeURIComponent(sym); }
   try {
-    const r = await doFetch(url);
-    if (!r.ok) { drillMsg("couldn't load gap list — error " + r.status); return; }
-    renderMissing(JSON.parse(await r.text()));
+    /* Route the on-demand drill through the ONE shared body-armed bound
+       (the same BXUI.fetchTextBounded shim the 4 s spot poll rides — #1519 /
+       DEC-O1-GUARANTEE-HARDEN-001): a headers-then-stalled-body response is
+       aborted within the bound and read as e.timeout, and the {ok,status,text}
+       shape is consumed directly. Supersedes the pre-#1519 headers-only fetch
+       shape this feature was authored against (that helper no longer exists). */
+    const res = await fetchTextBounded(url);
+    if (!res.ok) { drillMsg("couldn't load gap list — error " + res.status); return; }
+    renderMissing(JSON.parse(res.text));
   } catch (e) {
     drillMsg((e && e.timeout) ? "gap list timed out — retry" : "gap list offline — retry");
   } finally {
