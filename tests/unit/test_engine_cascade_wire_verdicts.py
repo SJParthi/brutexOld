@@ -15,13 +15,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-import brutex.engine.cascade_wire as cw
 import pytest
 from brutex.engine.cascade_wire import (
     AMBIGUOUS_MARKER,
+    CascadeWireReport,
     VerdictMarker,
     load_verdict_markers,
     report_group_count,
+    serialize_wire_report,
+    write_report,
 )
 from brutex.metrics.cascade import CandidateVerdict, CascadeReport, FilterStage
 from structlog.testing import capture_logs
@@ -51,8 +53,8 @@ def _verdict(
     )
 
 
-def _report(groups: tuple[tuple[str, str, CascadeReport], ...]) -> cw.CascadeWireReport:
-    return cw.CascadeWireReport(sweep_id="a" * 64, groups=groups)
+def _report(groups: tuple[tuple[str, str, CascadeReport], ...]) -> CascadeWireReport:
+    return CascadeWireReport(sweep_id="a" * 64, groups=groups)
 
 
 def _group(*verdicts: CandidateVerdict) -> CascadeReport:
@@ -84,7 +86,7 @@ class TestLoadVerdictMarkersRealWriter:
                 ("SENSEX", "5minute", _group(_verdict(3, passed=True))),
             )
         )
-        path = cw.write_report(tmp_path, report)
+        path = write_report(tmp_path, report)
         markers = load_verdict_markers(path)
         # dsr_n_source="pool" is the REAL writer's run-level default
         # (CascadeReport.dsr_n_source) threaded onto every marker of its group
@@ -116,7 +118,7 @@ class TestLoadVerdictMarkersRealWriter:
                 ("NIFTY", "5minute", _group(_verdict(7, passed=True))),
             )
         )
-        path = cw.write_report(tmp_path, report)
+        path = write_report(tmp_path, report)
         with capture_logs() as logs:
             markers = load_verdict_markers(path)
         assert markers[_rid(7)] == VerdictMarker(
@@ -138,7 +140,7 @@ class TestLoadVerdictMarkersRealWriter:
                 ),
             )
         )
-        path = cw.write_report(tmp_path, report)
+        path = write_report(tmp_path, report)
         with capture_logs() as logs:
             markers = load_verdict_markers(path)
         assert markers[_rid(9)] is AMBIGUOUS_MARKER
@@ -152,7 +154,7 @@ class TestLoadVerdictMarkersRealWriter:
         additive-at-version-1 law, never a parse failure.
         """
         payload: dict[str, Any] = json.loads(
-            cw.serialize_wire_report(
+            serialize_wire_report(
                 _report((("NIFTY", "1minute", _group(_verdict(4, passed=True))),))
             )
         )
@@ -187,7 +189,7 @@ class TestLoadVerdictMarkersRealWriter:
             dsr_n_source="leaderboard",
             dsr_n_trials=8_400_000,
         )
-        path = cw.write_report(tmp_path, _report((("NIFTY", "1minute", group),)))
+        path = write_report(tmp_path, _report((("NIFTY", "1minute", group),)))
         markers = load_verdict_markers(path)
         assert markers[_rid(11)] == VerdictMarker(
             passed=True,
@@ -207,7 +209,7 @@ class TestLoadVerdictMarkersRealWriter:
         fabricated 0 (the additive-at-version-1 law).
         """
         payload: dict[str, Any] = json.loads(
-            cw.serialize_wire_report(
+            serialize_wire_report(
                 _report((("NIFTY", "1minute", _group(_verdict(5, passed=True))),))
             )
         )
@@ -249,7 +251,7 @@ class TestLoadVerdictMarkersRealWriter:
                 ("NIFTY", "5minute", _stamped(2_000)),
             )
         )
-        path = cw.write_report(tmp_path, report)
+        path = write_report(tmp_path, report)
         with capture_logs() as logs:
             markers = load_verdict_markers(path)
         assert markers[_rid(13)] is AMBIGUOUS_MARKER
@@ -374,5 +376,5 @@ class TestReportGroupCount:
 
     def test_zero_groups_reads_zero_not_none(self, tmp_path: Path) -> None:
         """An EMPTY-groups report is a real report — 0, never conflated with absent."""
-        path = cw.write_report(tmp_path, _report(()))
+        path = write_report(tmp_path, _report(()))
         assert report_group_count(path) == 0

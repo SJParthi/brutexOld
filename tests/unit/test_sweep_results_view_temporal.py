@@ -19,7 +19,6 @@ import pytest
 
 pytest.importorskip("polars", reason="the reader loads per-tuple Parquet stores via ResultsStore")
 
-import brutex.engine.cascade_wire as cw
 from brutex.dashboard.sweep_results_view import (
     SweepScan,
     _temporal_row_keys,
@@ -28,7 +27,12 @@ from brutex.dashboard.sweep_results_view import (
     load_sweep_scan,
     store_error_payload,
 )
-from brutex.engine.cascade_wire import VerdictMarker
+from brutex.engine.cascade_wire import (
+    AMBIGUOUS_MARKER,
+    CascadeWireReport,
+    VerdictMarker,
+    write_report,
+)
 from brutex.engine.period_stats import encode_judged_years, encode_period_stats
 from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreError
 from brutex.metrics.cascade import CandidateVerdict, CascadeReport, FilterStage
@@ -151,8 +155,8 @@ def _write_report(lake_root: Path, verdicts: tuple[CandidateVerdict, ...]) -> Pa
         stage_survivors={},
         pool_pbo=None,
     )
-    report = cw.CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "5m", group),))
-    return cw.write_report(lake_root / "sweeps", report)
+    report = CascadeWireReport(sweep_id="a" * 64, groups=(("NIFTY", "5m", group),))
+    return write_report(lake_root / "sweeps", report)
 
 
 class TestTemporalRowKeys:
@@ -243,7 +247,7 @@ class TestCascadeRowKeys:
         assert keys["cascade_rejected_at"] == "walk_forward"
 
     def test_ambiguous_is_a_loud_question_never_a_coin_flip(self) -> None:
-        keys = _verdict_marker_row_keys(cw.AMBIGUOUS_MARKER)
+        keys = _verdict_marker_row_keys(AMBIGUOUS_MARKER)
         assert keys == {
             "cascade_verdict": "ambiguous",
             "cascade_rejected_at": None,
