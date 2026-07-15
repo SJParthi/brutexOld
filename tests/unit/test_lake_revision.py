@@ -568,3 +568,370 @@ class TestCascadeReportRevision:
 
         pinned = tmp_path.joinpath("sweeps", *probe_mod._CASCADE_REPORT_RELPATH)
         assert pinned == report_path(tmp_path / "sweeps")
+
+
+class TestRegistryRevision:
+    """`registry_revision` — the H1 registry-content stat token (DEC-O1-GUARANTEE-HARDEN-001)."""
+
+    def test_absent_registry_reads_the_stable_absent_composite(self, tmp_path: Path) -> None:
+        """No registry.duckdb + no .wal → the stable ``absent|absent`` token."""
+        from brutex.dashboard.lake_revision import registry_revision
+
+        token = registry_revision(tmp_path / "registry.duckdb")
+        assert token == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # Stable across repeat probes — never oscillates.
+        assert registry_revision(tmp_path / "registry.duckdb") == token
+
+    def test_main_file_write_moves_the_token(self, tmp_path: Path) -> None:
+        """Creating / rewriting the main file moves the token exactly once each."""
+        from brutex.dashboard.lake_revision import registry_revision
+
+        path = tmp_path / "registry.duckdb"
+        absent = registry_revision(path)
+        path.write_bytes(b"v1")
+        created = registry_revision(path)
+        assert created != absent
+        os.utime(path, ns=(1, 1))  # deterministic mtime move
+        assert registry_revision(path) != created
+
+    def test_wal_sibling_append_moves_the_token(self, tmp_path: Path) -> None:
+        """A WAL append moves the token even while the MAIN file's stat is still."""
+        from brutex.dashboard.lake_revision import registry_revision
+
+        path = tmp_path / "registry.duckdb"
+        path.write_bytes(b"v1")
+        os.utime(path, ns=(1, 1))
+        before = registry_revision(path)
+        wal = tmp_path / "registry.duckdb.wal"
+        wal.write_bytes(b"pending rows")
+        after = registry_revision(path)
+        assert after != before
+        assert registry_revision(path) == after
+
+    def test_main_stat_fault_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError on the MAIN stat → ``None`` ("no signal")."""
+        from brutex.dashboard import lake_revision as probe_mod
+
+        def _boom(path: object) -> object:
+            raise PermissionError(13, "denied", str(path))
+
+        monkeypatch.setattr(probe_mod.os, "stat", _boom)
+        with capture_logs() as logs:
+            assert probe_mod.registry_revision(tmp_path / "registry.duckdb") is None
+        assert [e for e in logs if e["event"] == "lake_revision.registry_stat_failed"]
+
+    def test_wal_stat_fault_returns_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-missing-file OSError on only the WAL stat → ``None`` too."""
+        from brutex.dashboard import lake_revision as probe_mod
+
+        path = tmp_path / "registry.duckdb"
+        path.write_bytes(b"v1")
+        real_stat = os.stat
+
+        def _wal_boom(target: object, *args: object, **kwargs: object) -> object:
+            if str(target).endswith(".wal"):
+                raise PermissionError(13, "denied", str(target))
+            return real_stat(str(target))
+
+        monkeypatch.setattr(probe_mod.os, "stat", _wal_boom)
+        with capture_logs() as logs:
+            assert probe_mod.registry_revision(path) is None
+        assert [e for e in logs if e["event"] == "lake_revision.registry_stat_failed"]
+
+
+class TestResolveRevisionProbeTtl:
+    """`resolve_revision_probe_ttl` — the fail-loud env law (H2)."""
+
+    def test_absent_and_blank_read_the_default(self) -> None:
+        from brutex.dashboard.lake_revision import (
+            DEFAULT_REVISION_PROBE_TTL_S,
+            resolve_revision_probe_ttl,
+        )
+
+        assert resolve_revision_probe_ttl(env={}) == DEFAULT_REVISION_PROBE_TTL_S
+        assert (
+            resolve_revision_probe_ttl(env={"BRUTEX_REVISION_PROBE_TTL_S": "  "})
+            == DEFAULT_REVISION_PROBE_TTL_S
+        )
+
+    def test_explicit_values_parse(self) -> None:
+        from brutex.dashboard.lake_revision import resolve_revision_probe_ttl
+
+        assert resolve_revision_probe_ttl(env={"BRUTEX_REVISION_PROBE_TTL_S": "2.5"}) == 2.5
+        assert resolve_revision_probe_ttl(env={"BRUTEX_REVISION_PROBE_TTL_S": "0"}) == 0.0
+
+    @pytest.mark.parametrize("junk", ["abc", "-1", "nan", "inf", "-inf"])
+    def test_junk_fails_loud(self, junk: str) -> None:
+        """Junk / negative / non-finite overrides raise — never a silent fallback."""
+        from brutex.dashboard.lake_revision import resolve_revision_probe_ttl
+
+        with pytest.raises(ValueError, match="BRUTEX_REVISION_PROBE_TTL_S"):
+            resolve_revision_probe_ttl(env={"BRUTEX_REVISION_PROBE_TTL_S": junk})
+
+    def test_ambient_environ_is_read_when_env_omitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from brutex.dashboard.lake_revision import resolve_revision_probe_ttl
+
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "3.25")
+        assert resolve_revision_probe_ttl() == 3.25
+
+
+class TestRevisionProbeMemo:
+    """`RevisionProbeMemo` — one probe per TTL window; no permanent staleness (H2)."""
+
+    def test_polls_within_ttl_pay_one_probe(self) -> None:
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        clock_now = [0.0]
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return f"token-{calls[0]}"
+
+        memo = RevisionProbeMemo(ttl_s=5.0, clock=lambda: clock_now[0])
+        results = [memo.get("k", _probe) for _ in range(5)]
+        assert calls[0] == 1
+        assert results == ["token-1"] * 5
+
+    def test_post_ttl_poll_always_sees_a_moved_token(self) -> None:
+        """The H2-guard: a poll AFTER the TTL re-probes — no permanent staleness."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        clock_now = [0.0]
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return f"token-{calls[0]}"
+
+        memo = RevisionProbeMemo(ttl_s=5.0, clock=lambda: clock_now[0])
+        assert memo.get("k", _probe) == "token-1"
+        clock_now[0] = 4.999
+        assert memo.get("k", _probe) == "token-1"  # inside the window — memoised
+        clock_now[0] = 5.0
+        # Exactly AT the TTL boundary (elapsed == ttl) the memo re-probes —
+        # strict `<` on the freshness check, so staleness is < ttl, never <= .
+        assert memo.get("k", _probe) == "token-2"
+        assert calls[0] == 2
+
+    def test_ttl_zero_is_a_pass_through(self) -> None:
+        """TTL 0 (the kill switch) = byte-identical legacy: every call probes."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return "t"
+
+        memo = RevisionProbeMemo(ttl_s=0.0)
+        for _ in range(3):
+            memo.get("k", _probe)
+        assert calls[0] == 3
+
+    def test_none_probe_result_is_never_memoised_and_evicts(self) -> None:
+        """A ``None`` (outage) verdict is re-derived per call AND evicts a prior entry."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        clock_now = [0.0]
+        outcomes: list[str | None] = ["good", None, None, "recovered"]
+        calls = [0]
+
+        def _probe() -> str | None:
+            value = outcomes[calls[0]]
+            calls[0] += 1
+            return value
+
+        memo = RevisionProbeMemo(ttl_s=1000.0, clock=lambda: clock_now[0])
+        assert memo.get("k", _probe) == "good"
+        memo.reset()  # drop the healthy entry so the outage arm is reached
+        assert memo.get("k", _probe) is None
+        # The None was NOT memoised — the next call probes again...
+        assert memo.get("k", _probe) is None
+        # ...and recovery lands immediately (never held behind a cached None).
+        assert memo.get("k", _probe) == "recovered"
+        assert calls[0] == 4
+
+    def test_none_evicts_a_prior_healthy_entry(self) -> None:
+        """An outage verdict evicts the prior token — recovery is fresh, not stale."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        clock_now = [0.0]
+        outcomes: list[str | None] = ["good", None, "recovered"]
+        calls = [0]
+
+        def _probe() -> str | None:
+            value = outcomes[calls[0]]
+            calls[0] += 1
+            return value
+
+        memo = RevisionProbeMemo(ttl_s=5.0, clock=lambda: clock_now[0])
+        assert memo.get("k", _probe) == "good"
+        clock_now[0] = 5.0  # past the TTL — re-probe hits the outage
+        assert memo.get("k", _probe) is None
+        # The prior "good" entry was evicted: the NEXT call re-probes even
+        # though the clock has not advanced (nothing cached to serve).
+        assert memo.get("k", _probe) == "recovered"
+
+    def test_custom_cacheable_predicate(self) -> None:
+        """A caller predicate (the runs-probe ArtifactProbe law) gates memoisation."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        calls = [0]
+
+        def _probe() -> tuple[str | None, bool]:
+            calls[0] += 1
+            return (None, False)  # an "absent" verdict — never memoised
+
+        memo = RevisionProbeMemo(ttl_s=1000.0, clock=lambda: 0.0)
+        for _ in range(3):
+            assert memo.get("k", _probe, cacheable=lambda p: p[0] is not None) == (None, False)
+        assert calls[0] == 3
+
+    def test_keys_are_independent(self) -> None:
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        memo = RevisionProbeMemo(ttl_s=1000.0, clock=lambda: 0.0)
+        assert memo.get("a", lambda: "ta") == "ta"
+        assert memo.get("b", lambda: "tb") == "tb"
+        assert memo.get("a", lambda: "never") == "ta"
+
+    def test_reset_drops_entries(self) -> None:
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return "t"
+
+        memo = RevisionProbeMemo(ttl_s=1000.0, clock=lambda: 0.0)
+        memo.get("k", _probe)
+        memo.reset()
+        memo.get("k", _probe)
+        assert calls[0] == 2
+
+    def test_env_junk_fails_loud_at_first_use(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No injected TTL → the env resolves at the FIRST get; junk raises there."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        memo = RevisionProbeMemo()
+        with pytest.raises(ValueError, match="BRUTEX_REVISION_PROBE_TTL_S"):
+            memo.get("k", lambda: "t")
+
+    def test_env_ttl_latches_at_first_use(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The env TTL resolves ONCE per instance — a mid-life env edit never re-parses."""
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "0")
+        memo = RevisionProbeMemo()
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return "t"
+
+        memo.get("k", _probe)
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        memo.get("k", _probe)  # latched 0 — pass-through, junk never re-parsed
+        assert calls[0] == 2
+
+    def test_resolve_ttl_double_checked_lock_loser_adopts_the_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review round 1 (R1 NIT-3 / R4 NIT-2) — the locked double-check arm.
+
+        Two racing first-callers must latch exactly ONE value: the lock
+        LOSER re-reads ``_resolved_ttl`` under the lock, finds the winner's
+        latch, and must NOT re-resolve the env. Deterministic race: the test
+        holds the memo lock, lets a worker thread block on it, latches the
+        value while holding, then releases — the worker takes the
+        already-latched inner arm (a re-resolve would read the junk env and
+        raise).
+        """
+        import threading
+
+        from brutex.dashboard.lake_revision import RevisionProbeMemo
+
+        memo = RevisionProbeMemo()
+        # Junk env: if the loser re-resolved instead of adopting the latch,
+        # it would raise ValueError — the adopt arm must never read the env.
+        monkeypatch.setenv("BRUTEX_REVISION_PROBE_TTL_S", "garbage")
+        results: list[float | Exception] = []
+
+        def _worker() -> None:
+            try:
+                results.append(memo._resolve_ttl())
+            except Exception as exc:  # the spy arm — a junk-env re-resolve raises ValueError
+                results.append(exc)
+
+        with memo._lock:  # the test IS the winning first-caller
+            t = threading.Thread(target=_worker)
+            t.start()
+            # Give the worker time to pass the outer None check and block on
+            # the lock; then latch the winner's value while still holding it.
+            import time as _time
+
+            _time.sleep(0.05)
+            memo._resolved_ttl = 5.0
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert results == [5.0]  # adopted the latch — never re-resolved junk
+
+    def test_production_default_composition_absent_env_memoises_at_1s(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The full production default end-to-end (review round 1 NIT-2).
+
+        Production wires ``RevisionProbeMemo()`` with NO env override — the
+        conftest hermeticity belt sets the env to ``"0"`` suite-wide, so no
+        other test ever exercises the composed default path: an ABSENT env
+        must resolve to the 1.0 s default AND actually memoise (clock-injected
+        — polls inside 1 s pay one probe, a poll at 1 s re-probes).
+        """
+        from brutex.dashboard.lake_revision import (
+            DEFAULT_REVISION_PROBE_TTL_S,
+            RevisionProbeMemo,
+        )
+
+        monkeypatch.delenv("BRUTEX_REVISION_PROBE_TTL_S", raising=False)
+        clock_now = [0.0]
+        calls = [0]
+
+        def _probe() -> str:
+            calls[0] += 1
+            return f"token-{calls[0]}"
+
+        memo = RevisionProbeMemo(clock=lambda: clock_now[0])  # the production shape
+        assert [memo.get("k", _probe) for _ in range(4)] == ["token-1"] * 4
+        assert calls[0] == 1  # the absent-env default genuinely memoises
+        assert DEFAULT_REVISION_PROBE_TTL_S == 1.0
+        clock_now[0] = 0.999
+        assert memo.get("k", _probe) == "token-1"  # still inside the 1 s window
+        clock_now[0] = 1.0
+        assert memo.get("k", _probe) == "token-2"  # the default TTL re-probes
+        assert calls[0] == 2
+
+
+class TestConftestHermeticityBelt:
+    """Review round 1 (R4 NIT-1) — the suite-wide TTL=0 belt is pinned.
+
+    tests/conftest.py ``setdefault``s ``BRUTEX_REVISION_PROBE_TTL_S=0`` so the
+    memo is a pass-through suite-wide (the #1692/#1774 wall-clock hermeticity
+    precedent) — dropping that line would reintroduce a real-clock 1 s TTL
+    into every /results + oneclick-runs invalidation test (timing flakes).
+    The memo's OWN tests stay armed via explicit ``ttl_s=``/``clock=``
+    injection, so the belt hides no wiring bug.
+    """
+
+    def test_conftest_sets_the_ttl_zero_belt(self) -> None:
+        conftest = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+        assert "from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV" in conftest
+        assert 'os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")' in conftest

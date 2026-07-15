@@ -1,16 +1,21 @@
 # pyright: reportPrivateUsage=none
-"""End-to-end cross-verify producer chain (DEC-CROSSVERIFY-PRODUCER-001 §9.3).
+"""End-to-end cross-verify producer chain (DEC-CROSSVERIFY-PRODUCER-001 §9.3,
+SPOT-ONLY per DEC-CROSSVERIFY-SPOT-ONLY-001 — MIGRATION.md #1788).
 
 A REAL lake written through the production ``ParquetBarSink`` (the golden
-harness's build law: 3 pinned indices + an ``M&M`` stock enumerated from a
-REAL ``instruments.duckdb`` + one NIFTY future enumerated from a REAL
-``registry.duckdb``) driven through the FULL :func:`run_crossverify` step
-machine over :func:`default_seams` — real locks (tmp-lake flocks + lease),
-real reader/gate-seam/export/staging/journal/prebuild legs — with exactly
-TWO injected seams: :class:`FakeS3Client` (no AWS in CI) and a recording
-alerter (the exactly-once summary pin). The pull leg is exercised in
-``--skip-pull`` mode (the vendor is out of CI's reach by design; the pull
-leg's call shapes are spy-pinned in ``tests/unit/test_crossverify_pull_leg.py``).
+harness's build law: 3 pinned trio indices + an OBSERVE-tier ``NIFTYIT``
+index (374/375 minutes, close edge complete — the #1788-fix-round
+index-policy arm) + an ``M&M`` stock enumerated from a
+REAL ``instruments.duckdb``, PLUS a NIFTY-future lake partition AND a REAL
+``registry.duckdb`` holding live FUT rows — the #1788 NEGATIVE-pin fixture:
+futures data present, futures files NEVER produced) driven through the FULL
+:func:`run_crossverify` step machine over :func:`default_seams` — real locks
+(tmp-lake flocks + lease), real reader/gate-seam/export/staging/journal/
+prebuild legs — with exactly TWO injected seams: :class:`FakeS3Client` (no
+AWS in CI) and a recording alerter (the exactly-once summary pin). The pull
+leg is exercised in ``--skip-pull`` mode (the vendor is out of CI's reach by
+design; the spot pull leg's call shapes are spy-pinned in
+``tests/unit/test_crossverify_pull_leg.py``).
 
 GATE HONESTY: the sibling completeness-gate module
 (``brutex.data.today_completeness``, MIGRATION.md #1774 — PR #1503) is NOW in
@@ -29,18 +34,19 @@ publish → next-run convergence, and the derive leg via the independent
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from brutex.crossverify.canonical import CanonicalIdentity, canonical_identity
 from brutex.crossverify.config import resolve_crossverify_config
 from brutex.crossverify.gate_seam import (
     CompletenessGateUnavailable,
     bind_production_classifier,
 )
-from brutex.crossverify.journal import load_journal, staging_dir
+from brutex.crossverify.journal import load_journal, load_last_run, staging_dir
 from brutex.crossverify.run import CrossverifyReport, default_seams, run_crossverify
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.registry_store import RegistryStore
@@ -61,13 +67,27 @@ if TYPE_CHECKING:
 
 _SESSION_MINUTES = 375
 
-#: The keys the clean-lake run publishes (the s3_key law, prefix default).
+#: The keys the clean-lake run publishes (the s3_key law, prefix default) —
+#: SPOT ONLY (#1788): despite the fixture lake's FNO partition + registry
+#: FUT rows, NO futures key is ever minted.
 _KEY_NIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTY.csv"
 _KEY_BANKNIFTY = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/BANKNIFTY.csv"
 _KEY_SENSEX = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/SENSEX.csv"
 _KEY_MM = f"crossverify/groww/{GOLDEN_DAY}/NSE_EQ/M&M.csv"
-_KEY_FUT = f"crossverify/groww/{GOLDEN_DAY}/NSE_FNO/NIFTY-2026-07-30-FUT.csv"
-_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM, _KEY_FUT}
+#: The OBSERVE-tier arm (#1788 fix round): a non-trio index with a SHORT but
+#: close-edge-complete day (374 minutes, last bar 15:29) PUBLISHES under the
+#: observe-only count law — never a withhold, never a blocked exit.
+_KEY_NIFTYIT = f"crossverify/groww/{GOLDEN_DAY}/IDX_I/NIFTYIT.csv"
+_ALL_KEYS = {_KEY_NIFTY, _KEY_BANKNIFTY, _KEY_SENSEX, _KEY_MM, _KEY_NIFTYIT}
+
+
+def _must_identity(exchange: str, segment: str, symbol: str) -> CanonicalIdentity:
+    identity = canonical_identity(exchange=exchange, segment=segment, lake_symbol=symbol)
+    assert identity is not None
+    return identity
+
+
+_NIFTYIT_IDENTITY = _must_identity("NSE", "INDEX", "NIFTYIT")
 
 
 class _RecordingAlerter:
@@ -84,6 +104,28 @@ class _RecordingAlerter:
     def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
         self.refusals.append((run_id, reason))
         return True
+
+
+def _idx(symbol: str, security_id: int) -> Instrument:
+    """A real IDX master row — the observe-tier index enumerates via the store."""
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=security_id,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.IDX,
+        segment=Segment.INDEX,
+        series=None,
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=0,
+        tick_size=Decimal(0),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
 
 
 def _eq(symbol: str, security_id: int) -> Instrument:
@@ -126,10 +168,21 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
             ),
         ),
         ("M&M", _bars(base_price="2900.00", minutes=range(3), oi_base=None)),
+        # The OBSERVE-tier index arm (#1788 fix round): 374 of 375 minutes
+        # (one interior hole) with the CLOSE EDGE present (minute 374 =
+        # 15:29 IST) — count_short under the real gate, PUBLISHED under the
+        # observe-only count law (a non-trio index never count-withholds).
+        (
+            "NIFTYIT",
+            _bars(base_price="43000.00", minutes=[m for m in full if m != 100], oi_base=None),
+        ),
+        # The #1788 NEGATIVE-pin fixture: a FULL futures contract day IS in
+        # the lake — the spot-only producer must still emit ZERO *_FNO keys.
         ("NIFTY-2026-07-30-FUT", _bars(base_price="24100.00", minutes=full, oi_base=50_000)),
     ]
+    identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
     for symbol, bars in plans:
-        identity = GOLDEN_IDENTITIES[symbol]
+        identity = identities[symbol]
         sink.append(
             exchange=identity.exchange,
             segment=identity.lake_segment,
@@ -141,14 +194,15 @@ def _build_lake(lake_root: Path, *, truncated_banknifty: bool) -> None:
     store = InstrumentStore.open(lake_root / "instruments.duckdb")
     try:
         store.upsert_many(
-            [_eq("M&M", 2031)],
+            [_eq("M&M", 2031), _idx("NIFTYIT", 5001)],
             snapshot_date=GOLDEN_DAY,
             run_id="cv-e2e",
             csv_source_sha256="0" * 64,
         )
     finally:
         store.close()
-    # The futures enumeration surface (--skip-pull falls back to the registry).
+    # A registry WITH live FUT rows — the #1788 negative pin: the spot-only
+    # producer never reads it, so these rows must yield ZERO exports.
     with RegistryStore.open(lake_root / "registry.duckdb") as registry:
         registry.upsert_contracts(
             "NSE",
@@ -205,14 +259,23 @@ class TestCleanChain:
         assert report.published == 5
         assert report.blocked == 0
         assert report.withheld == 0
+        # The #1788-fix-round three-way split: NIFTYIT (374/375, close edge
+        # complete) ships under the OBSERVE law; the other four are strict.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
         assert set(fake_s3.objects) == _ALL_KEYS
+
+        # #1788 NEGATIVE PIN: the lake HOLDS a full futures contract day and
+        # the registry HOLDS its live FUT row — yet ZERO *_FNO keys exist
+        # anywhere (S3, journal, staging); futures absence is BY DESIGN.
+        assert all("_FNO" not in key for key in fake_s3.objects)
+        assert all("-FUT" not in key for key in fake_s3.objects)
 
         # Byte-verified against the COMMITTED golden fixtures (same bar law).
         for key, fixture in (
             (_KEY_NIFTY, "NIFTY.csv"),
             (_KEY_SENSEX, "SENSEX.csv"),
             (_KEY_MM, "M&M.csv"),
-            (_KEY_FUT, "NIFTY-2026-07-30-FUT.csv"),
         ):
             assert fake_s3.objects[key] == (FIXTURES_DIR / fixture).read_bytes(), key
 
@@ -220,6 +283,7 @@ class TestCleanChain:
         journal = load_journal(clean_lake, GOLDEN_DAY)
         assert journal is not None
         assert set(journal.entries) == _ALL_KEYS
+        assert all("_FNO" not in key for key in journal.entries)  # the #1788 pin
         assert journal.pending_keys() == ()
         assert journal.withheld == {}
         assert not staging_dir(clean_lake, GOLDEN_DAY).exists()
@@ -318,7 +382,12 @@ class TestRealGateBinding:
         assert report.verdict == "published"
         assert report.exit_code == 0
         assert report.published == 5
-        assert set(fake_s3.objects) == _ALL_KEYS
+        # The REAL gate reads NIFTYIT count_short (374 < 375); the producer's
+        # observe tier publishes it (close edge complete) — the F1 e2e arm.
+        assert report.publish_strict == 4
+        assert report.publish_observe == 1
+        assert _KEY_NIFTYIT in fake_s3.objects
+        assert set(fake_s3.objects) == _ALL_KEYS  # spot only — no *_FNO key (#1788)
         assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
 
     def test_real_gate_truncated_index_day_withholds_exit_2(self, tmp_path: Path) -> None:
@@ -340,6 +409,133 @@ class TestRealGateBinding:
         # The REAL classifier's token for a truncated index day (never the
         # fake twin's fabrication): count_short (0/short < expected minutes).
         assert journal.withheld["BANKNIFTY"] == "count_short"
+
+
+class TestWithheldAutoRegate:
+    """DEC-CROSSVERIFY-WITHHELD-REGATE-001 e2e over the REAL gate: day D
+    withheld → the lake heals → the NEXT daily run auto-publishes D with
+    ZERO manual ``--day`` intervention (and never re-puts D's published
+    keys)."""
+
+    #: The next trading day after GOLDEN_DAY (Fri 2026-07-10 → Mon 2026-07-13,
+    #: a verified REGULAR NSE session).
+    NEXT_DAY = date(2026, 7, 13)
+
+    def _shifted_bars(self, bars: list[Any], days: int) -> list[Any]:
+        return [
+            dataclasses.replace(bar, timestamp=bar.timestamp + timedelta(days=days)) for bar in bars
+        ]
+
+    def _append(self, lake: Path, symbol: str, bars: list[Any]) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
+        identity = identities[symbol]
+        ParquetBarSink(writer=ParquetWriter(lake_root=lake)).append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+
+    def _run_on(
+        self, lake: Path, day: date, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifyReport:
+        config = resolve_crossverify_config(lake_root=lake, day=day, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        # STRICT real-gate binding (the TestRealGateBinding law).
+        return run_crossverify(
+            config, dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+        )
+
+    def test_healed_withheld_day_auto_publishes_on_the_next_daily_run(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        lake.mkdir()
+        _build_lake(lake, truncated_banknifty=True)
+        fake_s3 = FakeS3Client()
+
+        # Day D: BANKNIFTY truncated → withheld exit 2 (the real gate).
+        report_d = self._run_on(lake, GOLDEN_DAY, fake_s3, _RecordingAlerter())
+        assert (report_d.verdict, report_d.exit_code) == ("withheld_partial", 2)
+        assert _KEY_BANKNIFTY not in fake_s3.objects
+        journal_d = load_journal(lake, GOLDEN_DAY)
+        assert journal_d is not None and journal_d.withheld == {"BANKNIFTY": "count_short"}
+        # The durable last-run record captured the failure (reload-proof).
+        record = load_last_run(lake)
+        assert record is not None and record["verdict"] == "withheld_partial"
+
+        # HEAL: the vendor re-pull lands the full BANKNIFTY day (keep-first
+        # dedup absorbs the 3 already-stored bars).
+        self._append(
+            lake, "BANKNIFTY", _bars(base_price="52000.00", minutes=range(375), oi_base=None)
+        )
+        # The NEXT trading day's bars land too (the daily pull's normal work).
+        for symbol, price in (
+            ("NIFTY", "24100.00"),
+            ("BANKNIFTY", "52100.00"),
+            ("SENSEX", "80100.00"),
+        ):
+            self._append(
+                lake,
+                symbol,
+                self._shifted_bars(_bars(base_price=price, minutes=range(375), oi_base=None), 3),
+            )
+        self._append(
+            lake,
+            "M&M",
+            self._shifted_bars(_bars(base_price="2910.00", minutes=range(3), oi_base=None), 3),
+        )
+        self._append(
+            lake,
+            "NIFTYIT",
+            self._shifted_bars(
+                _bars(
+                    base_price="43100.00",
+                    minutes=[m for m in range(375) if m != 100],
+                    oi_base=None,
+                ),
+                3,
+            ),
+        )
+
+        # Day D+1 (the next daily run): NO --day, NO manual step — the
+        # withheld re-gate publishes D's BANKNIFTY alongside D+1's files.
+        puts_before = {key for _b, key, _c in fake_s3.puts}
+        alerter = _RecordingAlerter()
+        report_next = self._run_on(lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report_next.verdict, report_next.exit_code) == ("published", 0)
+        assert report_next.regated == 1
+        assert _KEY_BANKNIFTY in fake_s3.objects  # day D's file, auto-published
+        # D's healed bytes match a from-scratch D re-render (deterministic).
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+        # Never-re-put law: D's already-published keys saw NO second PUT.
+        d_reputs = [
+            key for _b, key, _c in fake_s3.puts if key in puts_before and key != _KEY_BANKNIFTY
+        ]
+        assert len(d_reputs) == len([k for k in puts_before if k != _KEY_BANKNIFTY])
+        # D's journal: withheld map cleared, the key published, staging gone.
+        journal_d2 = load_journal(lake, GOLDEN_DAY)
+        assert journal_d2 is not None
+        assert journal_d2.withheld == {}
+        assert journal_d2.entries[_KEY_BANKNIFTY].published is True
+        assert not staging_dir(lake, GOLDEN_DAY).exists()
+        # D+1's own files published (the run's normal output).
+        assert f"crossverify/groww/{self.NEXT_DAY}/IDX_I/NIFTY.csv" in fake_s3.objects
+        # ONE summary; the last-run record now reads the healthy outcome.
+        assert len(alerter.summaries) == 1
+        assert alerter.summaries[0][1].regated == 1
+        record2 = load_last_run(lake)
+        assert record2 is not None
+        assert record2["verdict"] == "published"
+        assert record2["regated"] == 1
+        assert record2["day"] == self.NEXT_DAY.isoformat()
 
 
 class TestPublishCrashConvergence:

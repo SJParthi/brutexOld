@@ -123,6 +123,75 @@ def journal_path(lake_root: Path, day: date) -> Path:
     return lake_root / CROSSVERIFY_DIRNAME / f"{day.isoformat()}.json"
 
 
+def last_run_path(lake_root: Path) -> Path:
+    """``<lake_root>/.crossverify/last_run.json`` — the durable last-run record.
+
+    DEC-CROSSVERIFY-LASTRUN-SURFACE (folded into
+    DEC-CROSSVERIFY-WITHHELD-REGATE-001): the runner persists a small
+    end-of-run summary here so the dashboard's progress route can surface
+    the LAST materially-run outcome (verdict + counts + capped failed keys
+    + detail) across dashboard restarts — a finished failure no longer
+    vanishes on a page reload. Written at run end (never by dry-runs, never
+    by the honest skip verdicts — a weekend skip must not clobber Friday's
+    failure record); the per-day journal stays the authoritative durable
+    done-record, this file is a VIEW convenience only (derive-on-read from
+    the journal cannot carry verdict/exit_code/detail — hence the written
+    record, the documented design choice).
+    """
+    return lake_root / CROSSVERIFY_DIRNAME / "last_run.json"
+
+
+def write_last_run(lake_root: Path, record: dict[str, object]) -> None:
+    """Atomically persist the last-run *record* (raises on I/O failure —
+    the caller guards best-effort; a failed view write never kills a run)."""
+    from brutex.data.atomic_io import atomic_write_simple
+
+    dest = last_run_path(lake_root)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(record, indent=2, sort_keys=True, allow_nan=False).encode("utf-8")
+    atomic_write_simple(dest, lambda tmp: tmp.write_bytes(body))
+
+
+def load_last_run(lake_root: Path) -> dict[str, object] | None:
+    """Load the last-run record; absent / corrupt / oversized → ``None`` (+ one
+    WARN on corrupt) — the :func:`load_journal` corruption-tolerance contract
+    (a view sidecar is never load-bearing; the journal is the truth)."""
+    path = last_run_path(lake_root)
+    try:
+        if path.stat().st_size > MAX_JOURNAL_BYTES:
+            _LOG.warning(
+                "crossverify.last_run_corrupt",
+                path=str(path),
+                error_type="OversizedRecord",
+                error=f"exceeds the {MAX_JOURNAL_BYTES}-byte sanity cap",
+            )
+            return None
+        payload = json.loads(path.read_bytes().decode("utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != JOURNAL_VERSION:
+            raise ValueError(f"unsupported last-run shape/version at {path}")
+    except FileNotFoundError:
+        return None
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        TypeError,
+        OverflowError,
+        RecursionError,
+    ) as exc:
+        # The load_journal degrade set: bit rot / a directory at the path /
+        # junk JSON / the two stdlib-json escapes (round-3 X2) all read as
+        # an honest absent record, never a crashed route.
+        _LOG.warning(
+            "crossverify.last_run_corrupt",
+            path=str(path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    return {str(key): value for key, value in payload.items()}
+
+
 def staging_dir(lake_root: Path, day: date) -> Path:
     """``<lake_root>/.crossverify/staging/<YYYY-MM-DD>/``."""
     return lake_root / CROSSVERIFY_DIRNAME / "staging" / day.isoformat()
@@ -270,6 +339,25 @@ def scan_pending_journals(lake_root: Path, *, today: date, lookback_days: int) -
     return pending
 
 
+def scan_withheld_journals(lake_root: Path, *, today: date, lookback_days: int) -> list[DayJournal]:
+    """PRIOR days' journals with WITHHELD symbols still on record, oldest first.
+
+    The auto-re-gate scan (DEC-CROSSVERIFY-WITHHELD-REGATE-001) — the
+    ``withheld`` twin of :func:`scan_pending_journals`: a journal whose
+    ``withheld`` map is non-empty names symbols the gate refused on that
+    day's run; a later run re-gates them from the (since-healed) lake. Same
+    window law (``today − lookback_days … today − 1`` — today's own withheld
+    map belongs to the current run's settle-retry belt), same O(lookback_days)
+    probes, same corrupt-journal WARN-and-skip degrade.
+    """
+    withheld: list[DayJournal] = []
+    for offset in range(lookback_days, 0, -1):
+        journal = load_journal(lake_root, today - timedelta(days=offset))
+        if journal is not None and journal.withheld:
+            withheld.append(journal)
+    return withheld
+
+
 __all__ = [
     "CROSSVERIFY_DIRNAME",
     "JOURNAL_VERSION",
@@ -277,9 +365,13 @@ __all__ = [
     "DayJournal",
     "JournalEntry",
     "journal_path",
+    "last_run_path",
     "load_journal",
+    "load_last_run",
     "scan_pending_journals",
+    "scan_withheld_journals",
     "staging_dir",
     "staging_path",
     "staging_path_for_key",
+    "write_last_run",
 ]

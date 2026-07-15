@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final, cast
 import structlog
 
 from brutex.dashboard.gated_prebuild import (
+    SPOT_PREBUILD_SKIPPED_NOTE,
     GatedPrebuildReport,
     PhasePrebuildReport,
     discover_futures_contracts,
@@ -134,7 +135,11 @@ class PrebuildOutcome:
     ok
         ``True`` iff the run completed with ZERO failures. ``False`` for any
         per-symbol failure AND for a guarded whole-run crash
-        (:func:`run_pipeline_prebuild_guarded`) — never a silent zero.
+        (:func:`run_pipeline_prebuild_guarded`) — never a silent zero. A
+        vendor-empty NO-SOURCE spot target is NOT a failure — counted in
+        ``no_source``, ``ok`` unaffected
+        (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — so the
+        ``pipeline_pull.py`` movers-warm gate opens over the healthy majority.
     crashed
         ``None`` for a run that COMPLETED (even with per-symbol failures);
         the escaping error's type name (e.g. ``"ValueError"``) when the
@@ -181,6 +186,21 @@ class PrebuildOutcome:
         derive skips as unchanged contributes 0 that run). ``0`` for a
         guarded whole-run crash (nothing was scanned). Folded into the
         pipeline completion headline + ``PipelinePullReport``.
+    no_source
+        The SPOT-target names classified NO-SOURCE — ZERO stored 1-minute
+        bars at derive time, nothing to derive (vendor-empty or never
+        pulled; DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — CAPPED at
+        :data:`MAX_REPORTED_FAILURES` by the producer (never a flooded
+        note); ``no_source_count`` is the TRUE total. NOT failures: ``ok``
+        is unaffected, and one with NO parquet in ANY timeframe is
+        structurally absent from movers-warm discovery (no parquet ⇒ no
+        dataset row); a surviving previously stored DERIVED timeframe
+        legitimately keeps it discoverable — genuine stored bars, never
+        fabricated (refuter round 2, MIGRATION.md #1792) — counted + NAMED
+        in the pipeline note instead of silently vanishing (Golden Rule #1).
+    no_source_count
+        The TRUE number of no-source spot targets (may exceed
+        ``len(no_source)``).
     """
 
     symbols_built: int
@@ -194,6 +214,8 @@ class PrebuildOutcome:
     disk_guard_blocked: bool = False
     disk_guard_detail: str | None = None
     opens_substituted: int = 0
+    no_source: tuple[str, ...] = ()
+    no_source_count: int = 0
 
 
 def _disk_guard_outcome(
@@ -247,6 +269,7 @@ def run_pipeline_prebuild(
     exclude_symbols: frozenset[str] = frozenset(),
     lake_root: Path | None = None,
     disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
+    include_spot: bool = True,
 ) -> PrebuildOutcome:
     """Compose + run the SPOT → FUTURES → OPTIONS prebuild over *instruments*.
 
@@ -317,6 +340,13 @@ def run_pipeline_prebuild(
         callable that RAISES is caught + logged
         (``pipeline.prebuild.disk_guard_error``) and treated as no-verdict —
         a guard bug never blocks the data stage.
+    include_spot
+        ``False`` makes the SPOT phase an explicit REPORTED no-op while the
+        FUTURES + OPTIONS contract phases run for real over the SAME
+        *instruments*-driven cascade discovery — the fno-only pipeline's
+        spot-exclusion arm (DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6, the
+        structural mirror of the spot-only empty-cascade arm). Default
+        ``True`` is byte-identical to the pre-round-6 prebuild.
 
     Returns
     -------
@@ -368,7 +398,10 @@ def run_pipeline_prebuild(
             contract_exchange[contract.symbol] = contract.exchange
     _LOG.info(
         "pipeline.prebuild.started",
-        spot_symbols=len(instruments),
+        # Honest scope on the fno-only spot-exclusion arm: the spot phase
+        # materialises NOTHING there (the instruments still drive the F&O
+        # contract discovery above).
+        spot_symbols=len(instruments) if include_spot else 0,
         futures_contracts=sum(len(v) for v in futures_by_underlying.values()),
         options_contracts=sum(len(v) for v in options_by_underlying.values()),
         # Honest payload extension (DEC-PREBUILD-CLEANSET-001): how many
@@ -426,7 +459,9 @@ def run_pipeline_prebuild(
 
     report = run_gated_prebuild(
         underlyings=instruments,
-        materialize_spot=_materialize_spot,
+        # ``None`` ⇒ the gated spine's REPORTED spot no-op phase (the fno-only
+        # spot-exclusion arm — round-6 two-button split).
+        materialize_spot=_materialize_spot if include_spot else None,
         futures_contracts_for=lambda inst: [
             c.symbol for c in futures_by_underlying[inst.symbol_name]
         ],
@@ -438,6 +473,7 @@ def run_pipeline_prebuild(
         source=source,
     )
     _log_phase_done(report)
+    _warn_if_all_no_source(report)
     outcome = _build_outcome(
         report,
         fs_note=fs_note,
@@ -470,8 +506,30 @@ def _log_prebuild_done(outcome: PrebuildOutcome, started: float) -> None:
         failed_count=outcome.failed_count,
         unchanged_skips=outcome.unchanged_skips,
         opens_substituted=outcome.opens_substituted,
+        # Additive always-present kwarg (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001
+        # — grep-able; logs are not a byte-pinned wire surface, the #1527
+        # ``excluded_symbols`` precedent).
+        no_source=outcome.no_source_count,
         duration_s=round(time.monotonic() - started, 3),
     )
+
+
+def _warn_if_all_no_source(report: GatedPrebuildReport) -> None:
+    """ONE loud WARN when EVERY attempted SPOT target read no-source (COMMON to both paths).
+
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — the ``all_excluded`` degrade
+    twin: the run still completes ``ok=True`` 0-built and the warm then fires
+    (a truly empty lake's ``latest_movers_date`` is ``None`` → warms nothing,
+    honest), but a WHOLE-universe no-source verdict is anomalous enough to
+    warrant one WARNING beside the per-symbol INFOs.
+    """
+    for phase in report.phases:
+        if (
+            phase.phase == PrebuildKind.SPOT.value
+            and phase.attempted
+            and len(phase.no_source) == len(phase.attempted)
+        ):
+            _LOG.warning("pipeline.prebuild.all_no_source", count=len(phase.no_source))
 
 
 def _unique_spot_instruments(instruments: Sequence[Instrument]) -> list[Instrument]:
@@ -509,6 +567,10 @@ def _build_outcome(
     incremental + daily-open tallies).
     """
     failed_names = tuple(s for phase in report.phases for s, _ in phase.failed)
+    # NO-SOURCE fold (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): only the SPOT
+    # phase ever carries no_source (the sequential catch + the parallel
+    # worker's kind gate), but the fold stays phase-generic — ONE law.
+    no_source_names = tuple(s for phase in report.phases for s in phase.no_source)
     return PrebuildOutcome(
         symbols_built=sum(len(phase.succeeded) for phase in report.phases),
         total_bars=report.total_bars,
@@ -518,6 +580,8 @@ def _build_outcome(
         fs_note=fs_note,
         unchanged_skips=unchanged_skips,
         opens_substituted=opens_substituted,
+        no_source=no_source_names[:MAX_REPORTED_FAILURES],
+        no_source_count=len(no_source_names),
     )
 
 
@@ -535,6 +599,7 @@ def run_pipeline_prebuild_parallel(
     source: str = "pipeline",
     exclude_symbols: frozenset[str] = frozenset(),
     disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
+    include_spot: bool = True,
 ) -> PrebuildOutcome:
     """PARALLEL twin of :func:`run_pipeline_prebuild` — fan the per-symbol derive across cores.
 
@@ -627,20 +692,26 @@ def run_pipeline_prebuild_parallel(
 
     # Ordered per-phase work items — EAGER, in-parent cascade discovery (pure
     # in-memory), exactly like the sequential path. SPOT dense = is_index; the
-    # #1031 density gate (contracts stay dense=False).
-    spot_items = [
-        (
-            inst.symbol_name,
-            _item(
-                inst.exch_id.value,
-                inst.segment.value,
+    # #1031 density gate (contracts stay dense=False). The fno-only
+    # spot-exclusion arm (include_spot=False — round-6 two-button split)
+    # plans ZERO spot items; the phase reports the by-design note below.
+    spot_items = (
+        [
+            (
                 inst.symbol_name,
-                PrebuildKind.SPOT,
-                dense=inst.is_index,
-            ),
-        )
-        for inst in instruments
-    ]
+                _item(
+                    inst.exch_id.value,
+                    inst.segment.value,
+                    inst.symbol_name,
+                    PrebuildKind.SPOT,
+                    dense=inst.is_index,
+                ),
+            )
+            for inst in instruments
+        ]
+        if include_spot
+        else []
+    )
     futures_items: list[tuple[str, PrebuildWorkItem]] = []
     options_items: list[tuple[str, PrebuildWorkItem]] = []
     for inst in instruments:
@@ -681,7 +752,10 @@ def run_pipeline_prebuild_parallel(
     )
 
     phase_groups: tuple[tuple[PrebuildKind, list[tuple[str, PrebuildWorkItem]], str], ...] = (
-        (PrebuildKind.SPOT, spot_items, ""),
+        # The spot phase's empty-note: "" on the default arm (an empty spot
+        # selection needs no note) vs the COMMON by-design skip note on the
+        # fno-only spot-exclusion arm (sequential-path parity, §11 COMMON).
+        (PrebuildKind.SPOT, spot_items, "" if include_spot else SPOT_PREBUILD_SKIPPED_NOTE),
         (
             PrebuildKind.FUTURES,
             futures_items,
@@ -738,14 +812,21 @@ def run_pipeline_prebuild_parallel(
         attempted = tuple(symbol for symbol, _ in group)
         succeeded: list[str] = []
         failed: list[tuple[str, str]] = []
+        no_source: list[str] = []
         total_bars = 0
         for symbol, item in group:
             res = result_by_coords[(item.exchange, item.segment, item.symbol)]
             if res.error is not None:
                 failed.append((symbol, res.error))
                 continue
-            # A non-error result ALWAYS carries a MaterializeResult (a pure
-            # type-narrowing cast — no runtime branch, keeps 100% branch cover).
+            if res.no_source is not None:
+                # DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: the worker's kind
+                # gate guarantees this arm only ever fires for the SPOT group.
+                no_source.append(symbol)
+                continue
+            # A non-error, non-no-source result ALWAYS carries a MaterializeResult
+            # (a pure type-narrowing cast — no runtime branch, keeps 100% branch
+            # cover).
             materialized = cast("MaterializeResult", res.result)
             succeeded.append(symbol)
             total_bars += materialized.total_bars
@@ -760,10 +841,12 @@ def run_pipeline_prebuild_parallel(
                 failed=tuple(failed),
                 total_bars=total_bars,
                 note=(empty_note if not attempted and not failed else ""),
+                no_source=tuple(no_source),
             )
         )
     report = GatedPrebuildReport(phases=tuple(phases), source=source)
     _log_phase_done(report)
+    _warn_if_all_no_source(report)
     outcome = _build_outcome(
         report,
         fs_note=fs_note,
@@ -789,6 +872,7 @@ def run_pipeline_prebuild_guarded(
     daily_cutoff_now: datetime | None = None,
     incremental: bool | None = None,
     disk_guard: Callable[[], DiskGuardDecision | None] | None = None,
+    include_spot: bool = True,
 ) -> PrebuildOutcome:
     """Crash-guarded :func:`run_pipeline_prebuild` for the route seam.
 
@@ -802,6 +886,10 @@ def run_pipeline_prebuild_guarded(
     DEC-PREBUILD-CLEANSET-001 (see :func:`run_pipeline_prebuild`). ``disk_guard``
     is forwarded to WHICHEVER path runs (sequential or parallel) — the pre-run
     disk preflight of DEC-LAKE-FOOTPRINT-MEASURED-001 gates both.
+    ``include_spot`` is likewise forwarded to both paths (the fno-only
+    spot-exclusion arm, DEC-PULL-SCOPED-ALL-ONECLICK-001 round-6 — a
+    reported spot no-op phase, F&O contract phases real; default ``True``
+    byte-identical).
     ``daily_cutoff_now`` (the run's pinned IST instant,
     DEC-DAILY-CUTOFF-GROUNDED-001) reaches the PARALLEL path explicitly; on
     the sequential path the caller bakes the SAME instant into the injected
@@ -840,6 +928,7 @@ def run_pipeline_prebuild_guarded(
                 source=source,
                 exclude_symbols=exclude_symbols,
                 disk_guard=disk_guard,
+                include_spot=include_spot,
             )
         return run_pipeline_prebuild(
             instruments=instruments,
@@ -850,6 +939,7 @@ def run_pipeline_prebuild_guarded(
             exclude_symbols=exclude_symbols,
             lake_root=lake_root,
             disk_guard=disk_guard,
+            include_spot=include_spot,
         )
     except Exception as exc:  # pylint: disable=broad-except - the route seam must never crash the job
         # Imported inside the handler (mirrors is_pull_halt's own lazy-import

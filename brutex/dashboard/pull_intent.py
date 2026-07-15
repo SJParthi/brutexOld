@@ -49,7 +49,14 @@ the pipeline's own — derived-TF partitions written + movers warmed — never a
 :data:`MAX_AUTO_RESTARTS` times by construction; the over-cap intent is KEPT on
 disk for forensics (only a later real pull's clean finish clears it). Every
 helper here is best-effort at the boot boundary: a corrupt / unreadable intent
-is logged + treated as absent (+ deleted best-effort), never a boot crash.
+is logged + treated as absent (+ deleted best-effort), never a boot crash —
+and never a HANG either: :func:`read_sidecar_bytes` (the shared #1614-round-6
+regular-file-only loader this store AND the auto-pull scheduler's state store
+read through) opens ``O_NONBLOCK`` + ``S_ISREG``-checks the descriptor, so a
+non-regular inode (FIFO / device symlink / socket / directory) planted at the
+sidecar folds into the same corrupt-file answer instead of blocking the read
+syscall forever (refuter round 7 P-1), and the 16 MiB cap is checked on the
+``fstat`` of the SAME open descriptor (no stat→read swap window — P-2).
 """
 
 from __future__ import annotations
@@ -58,6 +65,7 @@ import json
 import os
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -72,6 +80,14 @@ from brutex.adapters.groww.pull_singleflight import (
 )
 from brutex.data.atomic_io import atomic_write_simple
 
+# DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the round-7 P-1/P-2
+# regular-file-only loader MOVED VERBATIM to the COMMON leaf
+# brutex/data/sidecar_read.py (the calendars-layer settle-evidence loader must
+# not import the dashboard package; a copy is refused by CLAUDE.md §11 — the
+# #1715 leaf+shim precedent). These re-exports keep every existing consumer
+# byte-compatible; ``__all__`` still lists both names.
+from brutex.data.sidecar_read import SidecarReadResult, read_sidecar_bytes
+
 __all__ = [
     "MAX_AUTO_RESTARTS",
     "PULL_INTENT_FILENAME",
@@ -80,13 +96,16 @@ __all__ = [
     "PullIntentStore",
     "ResumeAction",
     "ResumeBanner",
+    "SidecarReadResult",
     "clear_banner_after_start",
     "emit_restart_cap_alert",
     "persist_intent_for_launch",
     "probe_pull_singleflight",
     "pull_intent_resume_active",
+    "read_sidecar_bytes",
     "resolve_pull_intent_resume",
     "restart_cap_message",
+    "restore_intent_after_refused_start",
     "run_auto_resume",
     "run_legacy_resume",
     "synthesize_legacy_intent",
@@ -121,6 +140,14 @@ _FALSY: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
 #: keys are ignored on load, a wrong SHAPE is corrupt).
 _INTENT_VERSION: Final[int] = 1
 
+#: Size cap on the intent file, checked on the ``fstat`` of the OPEN descriptor
+#: (refuter round 6 N-1 introduced the cap on a separate pre-read ``stat``;
+#: refuter round 7 P-1/P-2 moved it onto the fd — the crossverify #1776
+#: ``MAX_JOURNAL_BYTES`` precedent for the value): a real intent is ~250 bytes;
+#: a planted multi-GB file reads as corrupt instead of being read whole, and
+#: the fstat-on-fd cap leaves no stat→read swap window.
+MAX_INTENT_BYTES: Final[int] = 16 * 1024 * 1024
+
 
 def resolve_pull_intent_resume(env: Mapping[str, str] | None = None) -> bool:
     """Resolve the intent-resume escape hatch from the env — default ON.
@@ -145,9 +172,10 @@ class PullIntent:
     """The durable re-fire payload of one ``/pull-pipeline`` pull — frozen.
 
     Carries the request quadruple VERBATIM (the raw query strings; the route
-    re-derives everything else) plus the crash-loop accounting. A resume always
-    re-fires with ``dry_run=False`` — a dry-run never persists an intent in the
-    first place (:func:`persist_intent_for_launch`).
+    re-derives everything else) plus the OPTIONAL scope token
+    (DEC-PULL-SCOPED-ALL-ONECLICK-001) and the crash-loop accounting. A resume
+    always re-fires with ``dry_run=False`` — a dry-run never persists an intent
+    in the first place (:func:`persist_intent_for_launch`).
     """
 
     #: The ``?symbols=`` selection string (``None`` ⇒ whole universe / ``symbol``).
@@ -162,6 +190,21 @@ class PullIntent:
     restarts: int = 0
     #: UTC ISO timestamp of the ORIGINAL operator launch (forensics only).
     created_at: str = ""
+    #: The ``?scope=`` token (DEC-PULL-SCOPED-ALL-ONECLICK-001) — ``None`` ⇒ the
+    #: full chain (every pre-scope intent file, back-compat). Persisted so a
+    #: crashed spot-only pull resumes SPOT-ONLY, never a silently-widened
+    #: full-scope F&O pull (the optional-field back-compat template).
+    #:
+    #: NAMED RESIDUAL (refuter round 1, r2 MINOR/NIT-4 — the DOWNGRADE
+    #: direction): that law holds only on scope-AWARE code. PRE-scope code
+    #: (an operator ROLLBACK across a crashed spot-only pull) ignores this
+    #: key entirely, so the boot-time resume re-fires as a FULL-scope F&O
+    #: pull — the pre-feature behavior with every rail (market-hours guard,
+    #: single-flight, ledger idempotence) intact, but an operator-unauthorized
+    #: scope WIDENING nonetheless. Remediation: do not roll back across a
+    #: crashed spot-only pull, or clear the intent file first
+    #: (``docs/runbooks/pull-all-spot.md`` §5).
+    scope: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialise to the JSON payload shape (adds the schema version). Pure."""
@@ -173,6 +216,7 @@ class PullIntent:
             "to_date": self.to_date,
             "restarts": self.restarts,
             "created_at": self.created_at,
+            "scope": self.scope,
         }
 
     @classmethod
@@ -188,7 +232,10 @@ class PullIntent:
         if not isinstance(payload, Mapping):
             return None
         fields: dict[str, str | None] = {}
-        for key in ("symbols", "symbol", "from_date", "to_date"):
+        # ``scope`` is the OPTIONAL fifth request field (DEC-PULL-SCOPED-ALL-
+        # ONECLICK-001): absent on every pre-scope intent file ⇒ ``None`` ⇒ the
+        # full chain (back-compat); a non-string value is corrupt like the rest.
+        for key in ("symbols", "symbol", "from_date", "to_date", "scope"):
             raw = payload.get(key)
             if raw is not None and not isinstance(raw, str):
                 return None
@@ -206,6 +253,7 @@ class PullIntent:
             to_date=fields["to_date"],
             restarts=restarts,
             created_at=created_at,
+            scope=fields["scope"],
         )
 
 
@@ -280,6 +328,31 @@ class PullIntentStore:
         #: The resume red-banner holder — rides the store so ONE injected
         #: object carries both the durable intent and its UI surface.
         self.banner = ResumeBanner()
+        #: The launcher's PROCESS-LOCAL intent-transaction mutex (refuter
+        #: round 4 G-1 / R4-1, DEC-PULL-SCOPED-ALL-ONECLICK-001 — MIGRATION.md
+        #: #1779): the dashboard launcher holds it across its WHOLE
+        #: snapshot → persist → ``start()`` → restore span, so two concurrent
+        #: launcher threads can never interleave their snapshot/persist/restore
+        #: steps (a stale ``prior=None`` snapshot orphan-clearing a RUNNING
+        #: winner's freshly-persisted intent; a second refused click
+        #: re-installing the first's clobber). Rides the store so the mutex is
+        #: per-INTENT-FILE, exactly like the state it guards; cross-PROCESS
+        #: launchers are excluded by the account-wide pull ``flock`` instead.
+        #: Safe to hold across ``BackgroundPullJob.start`` — start() never
+        #: WAITS on a lock (LOCK_NB flock; refusals return ``False``; the
+        #: worker is spawned then start() returns) and NOTHING on the worker
+        #: thread (``on_finally`` = :meth:`clear`) ever acquires this mutex.
+        #: HONEST hold envelope (refuter round 5, J-NIT-1): the held span's
+        #: synchronous I/O bounds the hold — the intent-file + lock-file
+        #: syscalls are NOT deadline-wrapped (unbounded on a wedged lake
+        #: volume), the SSM credential read rides boto3 default timeouts,
+        #: and only the lease ops are deadline-bounded (≈2×5 s) — so a
+        #: queued sibling click waits that span (healthy ≈ sub-second)
+        #: instead of the pre-mutex instant in-process refusal;
+        #: latency-only, same fault domain as the click's own I/O. Typed as
+        #: a context manager so test seams may wrap it (the app only ever
+        #: ``with``-enters it).
+        self.launch_mutex: AbstractContextManager[object] = threading.Lock()
 
     @property
     def lake_root(self) -> Path:
@@ -320,26 +393,53 @@ class PullIntentStore:
         (non-JSON / wrong shape) logs ``pull_intent.corrupt``, is DELETED
         best-effort (it can never become readable again and must not re-trip
         every boot), and reads as absent — a boot can never crash here.
+
+        Hardened on the #1614 round-6 loader template via the shared
+        :func:`read_sidecar_bytes` (refuter round 7 P-1,
+        DEC-PULL-SCOPED-ALL-ONECLICK-001 — supersedes the round-6 N-1
+        crossverify-#1776-M1 read, whose plain ``read_bytes`` HUNG forever on
+        a non-regular inode: executed, a FIFO / ``/dev/zero`` symlink planted
+        at the intent path wedged the launcher's held-mutex ``prior_intent =
+        store.load()`` snapshot — a REAL pull-click request thread — with no
+        exception for any belt to catch): the open is ``O_NONBLOCK`` +
+        ``S_ISREG``-checked on the descriptor (a FIFO / device / socket /
+        directory folds into the corrupt-file answer, naming the shape), the
+        16 MiB cap (:data:`MAX_INTENT_BYTES`) is checked on the SAME
+        ``fstat`` (the stat→read TOCTOU window closed — round-7 P-2), and the
+        decode stays INSIDE the corruption-tolerant path so an invalid-UTF-8
+        byte (``UnicodeDecodeError``), a nesting-bomb payload
+        (``RecursionError``) and an out-of-range numeric (``OverflowError``)
+        all fold into the corrupt-file answer too.
         """
-        try:
-            raw = self._path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        result = read_sidecar_bytes(self._path, max_bytes=MAX_INTENT_BYTES)
+        if result.shape == "absent":
             return None
-        except OSError as exc:
+        if result.shape == "read_error":
             _LOG.warning(
                 "pull_intent.read_failed",
                 path=str(self._path),
-                error=str(exc),
-                error_type=type(exc).__name__,
+                error=result.detail,
+                error_type=result.error_type,
             )
             return None
         try:
-            payload: object = json.loads(raw)
-        except ValueError:
+            payload: object = None if result.raw is None else json.loads(result.raw.decode("utf-8"))
+        except (ValueError, RecursionError, OverflowError):
+            # ValueError covers junk JSON AND UnicodeDecodeError (its subclass).
             payload = None
         intent = PullIntent.from_payload(payload)
         if intent is None:
-            _LOG.warning("pull_intent.corrupt", path=str(self._path))
+            # The deletion below HEALS a planted non-regular inode too:
+            # ``clear()`` unlinks a FIFO / a symlink (the LINK, never its
+            # target) fine; a directory's unlink fails into the logged
+            # best-effort ``pull_intent.clear_failed``.
+            _LOG.warning(
+                "pull_intent.corrupt",
+                path=str(self._path),
+                oversized=result.shape == "oversized",
+                shape=result.shape if result.shape != "ok" else "undecodable",
+                detail=result.detail,
+            )
             self.clear()
             return None
         return intent
@@ -387,6 +487,7 @@ def persist_intent_for_launch(
     from_date: str | None,
     to_date: str | None,
     restarts: int = 0,
+    scope: str | None = None,
 ) -> bool:
     """Persist the launch intent iff this is a REAL pull; return whether written.
 
@@ -414,6 +515,9 @@ def persist_intent_for_launch(
         to_date=to_date,
         restarts=restarts,
         created_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        # A non-default scope rides the intent so a crash-resume re-fires the
+        # SAME scope (DEC-PULL-SCOPED-ALL-ONECLICK-001; ``None`` = full).
+        scope=scope,
     )
     return store.write(intent)
 
@@ -456,6 +560,96 @@ def clear_banner_after_start(
         )
         return True
     return False
+
+
+def restore_intent_after_refused_start(
+    store: PullIntentStore,
+    *,
+    prior: PullIntent | None,
+    dry_run: bool,
+    started: bool,
+) -> bool:
+    """Undo the pre-start intent persist when the start was REFUSED — never raises.
+
+    Refuter round 3 F-1 (DEC-PULL-SCOPED-ALL-ONECLICK-001, MIGRATION.md #1779):
+    :func:`persist_intent_for_launch` deliberately runs BEFORE
+    ``BackgroundPullJob.start`` (pre-crash durability — a SIGKILL between the
+    worker spawn and a later persist would leave a running-then-dead pull with
+    NO durable intent, and the ``on_finally`` clear must be wired INTO
+    ``start()``), so a REFUSED start (a pull already RUNNING in-process, lake
+    ``flock`` contention, or the foreign-host lease) has already CLOBBERED the
+    on-disk intent with the refused click's payload. Executed proof: a refused
+    FULL-scope click during a live spot-only pull left ``scope=null`` on disk,
+    and a crash in that window resumed the WRONG scope (the F&O metadata spine
+    entered). The clobber CLASS is inherited (pre-scope it clobbered
+    ``symbols``/``from_date``/``to_date``/``restarts`` the same way); this
+    restore closes every dimension at once.
+
+    *prior* is the caller's snapshot of the on-disk intent taken BEFORE its
+    persist. On a refused REAL start (``started=False``, not *dry_run*):
+
+    * current on-disk intent ABSENT → leave absent, restore NOTHING (the
+      RUNNING winner's ``on_finally`` clear raced between the persist and this
+      restore — its pull finished, so "no intent" IS the correct durable
+      record; writing *prior* back would resurrect an intent for a completed
+      pull);
+    * *prior* is ``None`` → :meth:`~PullIntentStore.clear` the orphan clobber
+      (the foreign-flock refusal shape: nothing in-process would EVER clear
+      it, so a later boot would "resume" a pull that never started);
+    * else → re-write *prior* VERBATIM (``restarts``/``created_at``/``scope``
+      included), so a crash in the window resumes the RUNNING pull's
+      scope/selection, never the refused click's.
+
+    A started launch or a *dry_run* restores nothing (``False`` —
+    :func:`persist_intent_for_launch`'s dry-run law means there is nothing to
+    undo). Returns ``True`` iff an on-disk restore/clear was performed.
+
+    SERIALIZATION (refuter round 4 G-1 / R4-1): the snapshot-and-restore
+    alone is per-request and non-transactional, so two CONCURRENT launcher
+    threads could defeat it (a loser whose stale ``prior=None`` snapshot
+    predated the winner's persist orphan-CLEARED the running winner's intent;
+    a second refused click re-installed the first's clobber). The launcher
+    therefore holds :attr:`PullIntentStore.launch_mutex` across its whole
+    snapshot → persist → start → restore span — this function assumes that
+    serialization and does not re-lock.
+
+    HONEST residuals (best-effort, the :func:`probe_pull_singleflight` TOCTOU
+    posture): (a) the running winner's ``on_finally`` clear fires on the
+    WORKER thread — deliberately never under the launch mutex — so it can
+    still land between this function's load and its restore write, which
+    resurrects the winner's OWN just-finished intent: worst case one
+    idempotent boot re-pull of an already-complete pull (zero re-fetched spot
+    windows — the ledger settles them — though the metadata phase and the
+    default-ON crossverify tail's producer still issue their per-run vendor
+    calls), never a wrong scope (a clear landing BEFORE the load takes the
+    leave-absent arm — the correct record); (b) on a FAILED restore write the
+    refused click's clobber REMAINS on disk (logged
+    ``restored="write_failed"`` — the same volume fault usually failed the
+    persist too); (c) launcher threads in a SECOND dashboard process on the
+    same lake do not share the mutex (off-design — one dashboard per lake;
+    the flock still excludes a second RUNNING pull).
+    """
+    if dry_run or started:
+        return False
+    if store.load() is None:
+        return False
+    if prior is None:
+        store.clear()
+        _LOG.info(
+            "pull_intent.refused_start_restored",
+            path=str(store.path),
+            restored="cleared_orphan",
+        )
+        return True
+    written = store.write(prior)
+    _LOG.info(
+        "pull_intent.refused_start_restored",
+        path=str(store.path),
+        restored="prior" if written else "write_failed",
+        prior_scope=prior.scope,
+        prior_restarts=prior.restarts,
+    )
+    return written
 
 
 def probe_pull_singleflight(lake_root: Path) -> bool:

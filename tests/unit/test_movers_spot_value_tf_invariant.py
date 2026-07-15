@@ -95,6 +95,32 @@ def _round_half_up_2dp(x: Fraction) -> Fraction:
     return Fraction(q, 100)
 
 
+def _screen_kept(bars: list[CandleBar]) -> list[CandleBar]:
+    """Bars KEPT by the engine-parity screen (DEC-DASHBOARD-READ-SCREEN-001).
+
+    The dashboard reader screens the cut raw-1m frame exactly as the engine does;
+    this mirrors that KEEP-set so the value oracle matches the served value on a
+    synthetic day whose independent random closes can jump ≥ 4× (a bad tick).
+    """
+    from brutex.data.bar_screen import BarVerdict, SessionBarScreen, session_date_from_ts
+
+    screen = SessionBarScreen(bad_tick_enabled=True)
+    kept = [
+        b
+        for b in bars
+        if screen.classify(
+            ist_date=session_date_from_ts(b.timestamp),
+            o=float(b.open),
+            h=float(b.high),
+            l=float(b.low),
+            c=float(b.close),
+        )
+        is BarVerdict.KEEP
+    ]
+    screen.finish()
+    return kept
+
+
 def _hand_raw_1m_paisa(bars: list[CandleBar]) -> int:
     """Σ round_money((h+l+c)/3) × volume over the raw 1-minute bars, in paisa."""
     total = Fraction(0)
@@ -372,11 +398,17 @@ class TestValueInvarianceProperty:
         _write_1m(lake, "NIFTY", bars)
         hh, mm = divmod(cutoff, 60)
         as_of = f"{hh:02d}:{mm:02d}"
+        # The oracle screens each TF's resolved-cutoff cut through the SAME
+        # engine-parity bad-tick screen the dashboard reader now applies
+        # (DEC-DASHBOARD-READ-SCREEN-001): this generator draws independent
+        # closes in [100, 5000], so a synthetic ≥4× minute jump is a bad tick
+        # the engine + the reader both DROP — the value stays TF-INVARIANT
+        # (the property under test) over the KEPT bars per shared effective as-of.
         by_cutoff: dict[int | None, int] = {}
         for interval in ("1minute", "5minute", "15minute"):
             resolved = resolve_asof_cutoff(interval, as_of)
             eff = resolved if resolved is not None else 24 * 60
-            expected = _hand_raw_1m_paisa([b for b in bars if _minute_of(b) <= eff])
+            expected = _hand_raw_1m_paisa(_screen_kept([b for b in bars if _minute_of(b) <= eff]))
             cands = compute_spot_candidates(
                 lake_root=lake, interval=interval, date=_DAY.isoformat(), time=as_of
             )

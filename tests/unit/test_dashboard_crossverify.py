@@ -51,12 +51,15 @@ def _report(**overrides: object) -> CrossverifyReport:
         verdict="published",
         published=3,
         skipped_already=1,
+        publish_strict=3,
+        publish_observe=0,
         withheld=0,
         blocked=0,
         nothing=2,
         excluded=0,
         publish_failed=0,
         recovered_prior=0,
+        regated=0,
         derived=4,
         derive_failed=0,
         movers_warm="revision-propagated (headless)",
@@ -274,6 +277,89 @@ def _tpl() -> str:
     return text
 
 
+class TestLastRunSurface:
+    """The additive `last_run` progress field — the reload-proof failure
+    surface (DEC-CROSSVERIFY-WITHHELD-REGATE-001)."""
+
+    def test_fresh_lake_serves_null_last_run(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        snap = client.get("/api/v1/crossverify/progress").json()
+        assert snap["last_run"] is None
+
+    def test_failed_run_record_survives_a_rebuilt_app_instance(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.crossverify.journal import write_last_run
+
+        record: dict[str, object] = {
+            "version": 1,
+            "day": "2026-07-10",
+            "verdict": "publish_failed",
+            "exit_code": 2,
+            "publish_failed": 3,
+            "failed_keys": ["crossverify/groww/2026-07-10/IDX_I/NIFTY.csv"],
+            "detail": "3 key(s) still failing after retries",
+        }
+        write_last_run(tmp_path, record)  # the runner-written durable record
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        snap = client.get("/api/v1/crossverify/progress").json()
+        assert snap["last_run"]["verdict"] == "publish_failed"
+        assert snap["last_run"]["publish_failed"] == 3
+        assert snap["last_run"]["failed_keys"] == ["crossverify/groww/2026-07-10/IDX_I/NIFTY.csv"]
+        # A REBUILT app instance (dashboard restart) still serves it — the
+        # record is lake-durable, never in-memory job state.
+        client2 = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        snap2 = client2.get("/api/v1/crossverify/progress").json()
+        assert snap2["last_run"] == snap["last_run"]
+
+    def test_real_failed_run_lands_in_the_progress_payload(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # End-to-end through the REAL runner-side write: a runner returning
+        # a failure verdict writes last_run.json via run_crossverify's
+        # _finish — here the injected runner mimics that write exactly the
+        # way the production runner does (the unit-level producer-write law
+        # is pinned in test_crossverify_run.py::TestLastRunRecord).
+        from brutex.crossverify.journal import write_last_run
+
+        def runner(config: CrossverifyConfig) -> CrossverifyReport:
+            report = _report(verdict="publish_failed", publish_failed=1, exit_code=2)
+            write_last_run(
+                config.lake_root,
+                {"version": 1, "verdict": report.verdict, "exit_code": report.exit_code},
+            )
+            return report
+
+        client = _client(store, monkeypatch, tmp_path, runner)
+        assert client.post("/api/v1/crossverify/run?dry_run=true").json()["started"] is True
+        snap = _wait_terminal(client)
+        assert snap["state"] == "error"  # the in-memory job verdict, as before
+        assert snap["last_run"]["verdict"] == "publish_failed"  # the durable twin
+
+    def test_corrupt_record_serves_null_never_500(
+        self, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from brutex.crossverify.journal import last_run_path
+
+        path = last_run_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{corrupt")
+        client = _client(store, monkeypatch, tmp_path, lambda config: _report())
+        response = client.get("/api/v1/crossverify/progress")
+        assert response.status_code == 200
+        assert response.json()["last_run"] is None
+
+    def test_no_store_app_serves_null_last_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+        client = TestClient(build_app(DashboardState(), instrument_store=None))
+        snap = client.get("/api/v1/crossverify/progress").json()
+        assert snap["last_run"] is None
+
+
 class TestUniversePanel:
     def test_panel_button_checkbox_and_status_span_exist(self) -> None:
         text = _tpl()
@@ -303,10 +389,35 @@ class TestUniversePanel:
         assert "gbFetchJson('/api/v1/crossverify/progress')" in tail
         assert "new AbortController" not in tail  # only gbFetchJson owns that
 
+    def test_last_run_render_is_wired_and_textcontent_only(self) -> None:
+        # The reload-proof failure surface: the attach path renders the
+        # durable last_run record when no run is live; textContent-only
+        # (cvStatus), never innerHTML (DEC-CROSSVERIFY-WITHHELD-REGATE-001).
+        html = _tpl()
+        assert "function cvRenderLastRun(lr)" in html
+        assert "cvRenderLastRun(s.last_run)" in html
+        assert "'last run: '" in html
+        assert "failed_keys" in html
+        assert "cvRenderLastRun(lr" not in html.replace("function cvRenderLastRun(lr)", "")
+        # The renderer writes ONLY through cvStatus (textContent).
+        renderer = html.split("function cvRenderLastRun(lr)")[1].split("async function")[0]
+        assert "innerHTML" not in renderer
+        assert "cvStatus(line)" in renderer
+
     def test_greeks_na_disclosure_present(self) -> None:
         """Tonight-scope addendum item 3: the options-only Greeks stage has
         nothing to enrich on this options-excluding pull — said in-template."""
         assert "GREEKS N/A" in _tpl()
+
+    def test_panel_wording_is_spot_only(self) -> None:
+        """DEC-CROSSVERIFY-SPOT-ONLY-001: the panel comment + the Run button
+        tooltip carry the amended spot-only contract — the stale
+        "spot + NIFTY/BANKNIFTY futures" wording class is guarded."""
+        text = _tpl()
+        start = text.index("Cross-verify producer (DEC-CROSSVERIFY-PRODUCER-001)")
+        block = text[start : text.index('id="cvstatus"', start)]
+        assert block.count("futures AND options excluded, DEC-CROSSVERIFY-SPOT-ONLY-001") == 2
+        assert "NIFTY/BANKNIFTY futures" not in block
 
 
 class _InlineScriptExtractor(HTMLParser):

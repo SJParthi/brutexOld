@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
 from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
+from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
 from brutex.data.today_completeness import (
     TODAY_COMPLETENESS_GATE_ENV,
     reset_today_gate_log_state,
@@ -78,6 +80,35 @@ os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
 # gate tests in test_groww_ingest.py / test_groww_option_ingest.py) — so this
 # default disables ONLY the ambient real-environ read, never the tested law.
 os.environ.setdefault(TODAY_COMPLETENESS_GATE_ENV, "0")
+
+# DEC-O1-GUARANTEE-HARDEN-001 (H2) test hermeticity (the same philosophy —
+# hermetic against the WALL CLOCK): the revision-probe TTL memo
+# (``lake_revision.RevisionProbeMemo``, default TTL 1 s) would make any test
+# that writes a sweep/run artifact and RE-POLLS a probe-keyed route within one
+# second serve the pre-write token — a timing-dependent flake class over every
+# /results + oneclick-runs invalidation test. The suite therefore runs under
+# the DOCUMENTED kill switch (``BRUTEX_REVISION_PROBE_TTL_S=0`` = the memo is
+# a pass-through, byte-identical per-poll probes; ``setdefault`` so an
+# explicit outer choice wins). The memo's OWN tests stay fully armed — they
+# inject ``ttl_s=`` + clocks explicitly (test_lake_revision.py, the route pins
+# in tests/bench/test_revision_probe_ttl_o1.py) — so this default disables
+# ONLY the ambient real-clock TTL, never the tested law.
+os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
+
+# DEC-SETTLE-EVIDENCE-ADOPTION-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the REPO CHECKOUT instead of the wall clock):
+# resolve_settle_time's evidence tier reads the repo-committed
+# docs/groww/probe/settle_evidence.json by default, so the DAY a measured
+# evidence file lands, every env=None / injected-mapping-without-the-key test
+# would silently change settle semantics (17:30 -> the measured value) — a
+# whole-suite flake class armed by a FUTURE commit. The suite therefore runs
+# with the channel off (`setdefault` so an explicit outer choice wins). The
+# channel's OWN tests stay fully armed — they inject env mappings + tmp paths
+# and monkeypatch settle_evidence.default_evidence_path explicitly; the ONE
+# committed-file CI test bypasses env entirely (validates default_evidence_path()
+# directly) — so this default disables ONLY the ambient repo read, never the
+# tested law.
+os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
 
 @pytest.fixture(autouse=True)

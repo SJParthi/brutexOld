@@ -56,6 +56,22 @@ on:
   pull_request:
     branches:
       - main
+  # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): merge-queue readiness. When a
+  # merge queue rules `main`, GitHub dispatches `merge_group` events for the
+  # queue's speculative merge commits (refs/heads/gh-readonly-queue/...).
+  # EVERY branch-protection required context is produced by THIS workflow
+  # (the 21 static job names in branch-protection-drift.yml's expected
+  # snapshot + the ci-ok dynamic name below), so without this trigger no
+  # required check could ever report on a queue ref and every queued PR
+  # would hang until the queue times it out — the classic merge-queue
+  # deadlock. Notes: (a) `merge_group` supports NO `paths:` filtering —
+  # irrelevant here, this workflow is unfiltered; (b) the PR-only sub-gates
+  # (job/step `if: github.event_name == 'pull_request'`) SKIP on
+  # merge_group exactly as they already do on push-to-main — ci-ok treats
+  # skipped==pass and none of them is a DIRECT required context (they
+  # enforced the PR itself on its pull_request run); (c) the concurrency
+  # group below keys on github.ref, which is unique per queue entry.
+  merge_group:
   workflow_dispatch:
 
 # Cancel in-progress runs for the same branch on new pushes — saves
@@ -1733,6 +1749,15 @@ jobs:
           else
             echo "(brutex.data.price_sanity test file not present yet — gate inactive)"
           fi
+          # DEC-DASHBOARD-READ-SCREEN-001: the ONE COMMON dashboard screened bar
+          # reader (SessionBarScreen + screen_frame/screen_rows) composing the
+          # public bad_tick + price_sanity predicates. Standalone-gateable at
+          # 100% line+branch with its own unit+property suite.
+          if compgen -G "tests/unit/test_bar_screen.py" > /dev/null; then
+            pytest --cov=brutex.data.bar_screen --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_bar_screen.py
+          else
+            echo "(brutex.data.bar_screen test file not present yet — gate inactive)"
+          fi
           # DEC-BENCH-ABS-BASELINE-001: the absolute bench-baseline schema/
           # comparator/capture/governance core — pure stdlib, standalone-gateable
           # at 100% line+branch with its OWN unit+property+golden suites.
@@ -1793,6 +1818,44 @@ jobs:
             pytest --cov=brutex.data.today_completeness --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_today_completeness.py
           else
             echo "(brutex.data.today_completeness test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 (MIGRATION.md #1779): the pull-scope
+          # registry + spot-only no-op F&O reports + note surgery + the fail-soft
+          # crossverify tail fence, and the CLI --auto gate (settle constant +
+          # Muhurat deferral + composed mid-run belt). Both ship at 100%
+          # line+branch standalone from the start.
+          if compgen -G "tests/unit/test_pull_scope.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_scope --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_scope.py
+          else
+            echo "(brutex.dashboard.pull_scope test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_auto_pull_gate.py" > /dev/null; then
+            pytest --cov=brutex.calendars.auto_pull_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_auto_pull_gate.py
+          else
+            echo "(brutex.calendars.auto_pull_gate test file not present yet — gate inactive)"
+          fi
+          # DEC-PULL-SCOPED-ALL-ONECLICK-001 round-5 fold: the self-arming
+          # post-market auto-pull scheduler (durable armed state + daemon
+          # ticker + the once-per-day fire law). 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_dashboard_auto_pull_scheduler.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.auto_pull_scheduler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_auto_pull_scheduler.py
+          else
+            echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
+          fi
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
+          # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
+          # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_settle_evidence.py" > /dev/null; then
+            pytest --cov=brutex.calendars.settle_evidence --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_settle_evidence.py
+          else
+            echo "(brutex.calendars.settle_evidence test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_sidecar_read.py" > /dev/null; then
+            pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
+          else
+            echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
           fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
@@ -2146,6 +2209,18 @@ jobs:
           # log) is covered by
           # tests/unit/test_dashboard_db_candles_torn_read_retry.py, which
           # MUST also join this gate.
+          # DEC-DASHBOARD-READ-SCREEN-001: the split-brain screen's /db seams
+          # (the _bad_tick_seed_bar empty-page + all-screened-window
+          # `return None` arms and the FNO CE/PE kind-derived
+          # bad_tick_enabled arms) are covered by
+          # tests/unit/test_dashboard_split_brain_screen.py, which MUST also
+          # join this gate.
+          # DEC-DB-TZ-MONEYNESS-FIXES-001: the session-TZ invariance belt
+          # (end-to-end pager + _IST_DATE_EXPR pin + source drift pin) AND
+          # the moneyness stock-drift rung (the stock_drift_loader lazy memo
+          # + rung attribution in _underlying_spot_close_by_ts) are covered
+          # by tests/unit/test_dashboard_db_tz_moneyness.py, which MUST also
+          # join this gate (23 test files total in this gate's list).
           # DEC-ALIEN-SCHEMA-READ-HEAL-001: the schema-aware per-file probe
           # (alien-schema skip + the union-conflict empty-degrade residue) is
           # covered by tests/unit/test_dashboard_db_alien_schema.py, which
@@ -2169,7 +2244,7 @@ jobs:
           # tests/unit/test_dashboard_db_span_bounded_reads.py — BOTH MUST
           # join this gate.
           if compgen -G "tests/unit/test_dashboard_db_query.py" > /dev/null; then
-            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py
+            pytest --cov=brutex.dashboard.db_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_dashboard_db_view.py tests/unit/test_dashboard_db_query.py tests/unit/test_db_view_registry.py tests/unit/test_db_view_manifest.py tests/unit/test_dashboard_db_fno.py tests/unit/test_dashboard_db_fno_moneyness.py tests/unit/test_dashboard_db_candle_count_cache.py tests/unit/test_dashboard_db_option_count_cache.py tests/unit/test_dashboard_db_ux_pack.py tests/unit/test_dashboard_window_payload_retry.py tests/unit/test_completeness_fno_skip.py tests/unit/test_dashboard_db_view_window_rows_cache.py tests/unit/test_dashboard_db_view_ledger_delta_fold.py tests/unit/test_dashboard_db_view_ledger_read_cache.py tests/unit/test_dashboard_db_stats_manifest.py tests/unit/test_dashboard_db_candles_torn_read_retry.py tests/unit/test_dashboard_db_alien_schema.py tests/unit/test_dashboard_db_ledger_stat_guard.py tests/unit/test_dashboard_db_baseline_manifest.py tests/unit/test_dashboard_db_view_window_ledger_page.py tests/unit/test_dashboard_db_span_bounded_reads.py tests/unit/test_dashboard_split_brain_screen.py tests/unit/test_dashboard_db_tz_moneyness.py
           else
             echo "(brutex.dashboard.db_view test files not present yet — gate inactive)"
           fi
@@ -2350,6 +2425,25 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
           fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
           # unkillable-run-core modules ship at 100% line+branch STANDALONE —
           # observability core (flight recorder / manifest / stamps / bundle /
@@ -2526,6 +2620,14 @@ jobs:
           BASE="origin/main"
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
+          fi
+          # DEC-MERGE-QUEUE-001: on a merge_group ref, diff against the merge
+          # group's OWN base SHA (the exact commit the queue applies the group
+          # onto — an ancestor of the checked-out queue ref, so present under
+          # fetch-depth 0), not origin/main — precise when main advances while
+          # the group builds. Absent on every other event → no-op.
+          if [ -n "${{ github.event.merge_group.base_sha }}" ]; then
+            BASE="${{ github.event.merge_group.base_sha }}"
           fi
           python scripts/ci/coverage_gate_discovery.py --base "$BASE"
       - name: Spec ↔ test crosswalk (Golden Rule #12 req 8)
@@ -2771,16 +2873,25 @@ jobs:
         run: |
           git fetch --no-tags origin "${BASE_REF}"
           python3 scripts/ci/bench_baseline_gate.py govern --base "origin/${BASE_REF}"
-      - name: Install deps (dev + data — the lake benches need polars/duckdb)
+      - name: Install deps (dev + data + ui — the lake AND route benches need them)
         # DEC-RESAMPLER-INPUT-GUARD-001 audit finding: `.[dev]` alone made every
         # polars/duckdb bench `importorskip` SILENTLY — the lake-write O(1)
         # gates (test_parquet_write_o1.py, test_db_candle_query_o1.py,
         # test_catalog_reconcile_o1.py, test_write_latency.py, …) NEVER ran in
         # CI, so a linear-scan regression on those hot paths could not fail
-        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute; the
+        # this job. `[data]` (polars/duckdb/pyarrow) makes them execute.
+        # DEC-O1-GUARANTEE-HARDEN-001 review round 1 (the same finding class,
+        # one extra over): `[ui]` (fastapi) makes the SIX route-level bench
+        # gates execute too (test_db_tables_swr_o1 / test_preopen_export_memo_o1
+        # / test_revision_probe_ttl_o1 / test_lake_census_route_o1 /
+        # test_ledger_delta_o_page_o1 / test_movers_pcr_o1 — all previously
+        # collected-then-SKIPPED on this job via importorskip("fastapi")); the
         # fno_math/trading_core wheels the remaining skips need are built by
-        # the steps below, so no bench silently skips for a missing extra.
-        run: pip install -e ".[dev,data]"
+        # the steps below, so no bench silently skips for a missing extra
+        # (verified locally: the full tests/bench dir with ui deps = 371
+        # passed / 11 skipped, every remaining skip the documented
+        # BRUTEX_M4PRO_ABS class; the 6 route files ran 3× stable ~30 s).
+        run: pip install -e ".[dev,data,ui]"
       - name: Install Rust toolchain (for fno_math wheel)
         # DEC-P0-053 (PR-N): brutex.orchestrator.bloom imports fno_math.
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -4359,7 +4470,19 @@ jobs:
     # expected snapshot (line 133), so no existing green requirement breaks.
     # This NARROWS which event can produce the required context (adds
     # enforcement); it removes no gate.
-    name: ${{ github.event_name == 'pull_request' && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
+    #
+    # DEC-MERGE-QUEUE-001 (MIGRATION.md #1784): `merge_group` is the SECOND
+    # legitimate producer of the required context. A merge queue evaluates
+    # required checks against ITS OWN speculative merge commit (the
+    # gh-readonly-queue ref), so the context MUST report there or every
+    # queued PR deadlocks. This does NOT reopen the shadowing hole the
+    # PR-only narrowing closed: a merge-group check run lands on the queue's
+    # merge SHA, never on a PR head SHA, so it can never satisfy or shadow a
+    # PR head's required context on the manual-merge path (check runs are
+    # keyed by commit). The PR-only sub-gates skip on merge_group (as on
+    # push) — they are not direct required contexts and already enforced
+    # the PR on its own pull_request run.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'CI OK (aggregate gate)' || 'CI OK (non-PR aggregate)' }}
     runs-on: ubuntu-24.04
     needs:
       - lint
