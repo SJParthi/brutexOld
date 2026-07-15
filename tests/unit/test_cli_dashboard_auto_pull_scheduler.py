@@ -130,3 +130,77 @@ def test_construction_fault_logs_and_still_binds(
     assert cli.cmd_dashboard(None, "127.0.0.1", 9187) == cli.EXIT_OK
     assert probes["auto_pull_scheduler"] is None
     assert probes["ran"] is True
+
+
+def test_junk_explicit_evidence_path_fails_loud_at_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[DEC-SETTLE-EVIDENCE-ADOPTION-001 — the §3.2 r6-M-2 twin] a junk
+    EXPLICIT BRUTEX_SETTLE_EVIDENCE_PATH is the SAME clean exit-1 one-liner
+    as junk settle/tick env, BEFORE uvicorn ever runs."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.delenv(AUTO_PULL_TICK_ENV, raising=False)
+    junk = tmp_path / "settle_evidence.json"
+    junk.write_bytes(b"{junk")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(junk))
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+    assert cli.cmd_dashboard(None, "127.0.0.1", 9190) == cli.EXIT_USER_ERROR
+    assert "ran" not in probes  # uvicorn.run never reached
+    assert SETTLE_EVIDENCE_PATH_ENV in capsys.readouterr().err
+
+
+def test_junk_evidence_path_masked_by_settle_env_still_fails_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """[the §3.2 latent-junk killer] with BRUTEX_PULL_ALL_SETTLE_IST SET, the
+    resolver's tier-1 short-circuit never reads the evidence — the eager
+    probe-only ``evidence_settle()`` boot line must STILL fail loud on a junk
+    explicit path (pre-fix it detonated later as per-poll 'unknown' text once
+    the operator unset the settle env)."""
+    from brutex.calendars.auto_pull_gate import PULL_ALL_SETTLE_ENV
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.delenv(AUTO_PULL_TICK_ENV, raising=False)
+    monkeypatch.setenv(PULL_ALL_SETTLE_ENV, "18:00")  # tier 1 masks the resolver
+    junk = tmp_path / "settle_evidence.json"
+    junk.write_bytes(b"\xffnot-json")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(junk))
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+    assert cli.cmd_dashboard(None, "127.0.0.1", 9191) == cli.EXIT_USER_ERROR
+    assert "ran" not in probes
+    assert SETTLE_EVIDENCE_PATH_ENV in capsys.readouterr().err
+
+
+def test_default_path_corrupt_evidence_boots_degraded_with_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt file at the DEFAULT evidence path never fails the boot: the
+    dashboard binds, the scheduler binds, ONE ``settle_evidence.invalid``
+    WARN fires and the settle law degrades to the conservative 17:30 (the
+    r6/r7 never-crash-the-boot posture; a bad COMMIT must die in CI — the
+    committed-file test — not brick fleet boots)."""
+    from brutex.calendars import settle_evidence
+    from structlog.testing import capture_logs
+
+    probes: dict[str, Any] = {}
+    _stub_dashboard_runtime(monkeypatch, tmp_path, probes)
+    monkeypatch.delenv(AUTO_PULL_TICK_ENV, raising=False)
+    # Route the DEFAULT tier at a corrupt tmp file: drop the conftest belt's
+    # "off" and monkeypatch the module-global default-path seam (§3.1).
+    monkeypatch.delenv(settle_evidence.SETTLE_EVIDENCE_PATH_ENV, raising=False)
+    corrupt = tmp_path / "settle_evidence.json"
+    corrupt.write_bytes(b"{junk")
+    monkeypatch.setattr(settle_evidence, "default_evidence_path", lambda: corrupt)
+    settle_evidence._reset_evidence_memo_for_tests()  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setenv("BRUTEX_LAKE_ROOT", str(tmp_path))
+    with capture_logs() as logs:
+        assert cli.cmd_dashboard(None, "127.0.0.1", 9192) == cli.EXIT_OK
+    assert probes["ran"] is True  # the boot succeeded, degraded
+    assert isinstance(probes["auto_pull_scheduler"], AutoPullScheduler)
+    warns = [e for e in logs if e["event"] == "settle_evidence.invalid"]
+    assert len(warns) == 1

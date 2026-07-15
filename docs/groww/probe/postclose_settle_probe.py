@@ -33,8 +33,17 @@ Usage
     # After >= 5 probe days, build the slot-by-check settle matrix:
     python docs/groww/probe/postclose_settle_probe.py --summarize docs/groww/probe/
 
+    # ... and emit the machine-readable settle-evidence artifact the auto-pull
+    # gate ADOPTS (DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793) —
+    # review the per-day matrix + margin, then commit it BESIDE its transcripts:
+    python docs/groww/probe/postclose_settle_probe.py \
+        --summarize docs/groww/probe/ \
+        --emit-evidence docs/groww/probe/settle_evidence.json --margin-minutes 15
+
 Exit code 0 = the probe ran to completion (per-symbol errors are recorded
-inline); 2 = the probe could not START (bad args / SDK / SSM / credentials).
+inline); 2 = the probe could not START (bad args / SDK / SSM / credentials)
+OR the evidence emit was REFUSED (no qualifying slot / < 5 regular days /
+margin out of bounds / self-validation failure).
 """
 
 from __future__ import annotations
@@ -47,7 +56,12 @@ import random
 import sys
 import urllib.request
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+
+#: Recorded in every run trailer + the emitted evidence (informational
+#: provenance — the settle_evidence validator checks non-empty, never exact).
+_PROBE_VERSION = "1.1"
 
 #: Deterministic CASH-pool seed — the SAME 10 names across all five slots AND
 #: all probe days, so the 5-day settle-time matrix is a controlled same-symbol
@@ -69,6 +83,53 @@ _INSTRUMENT_CSV_URL = "https://growwapi-assets.groww.in/instruments/instrument.c
 
 #: The per-slot checks the --summarize matrix folds (per record).
 _CHECKS = ("rows_all_len7", "count_ok", "last_bar_ok", "fut_fields_ok")
+
+#: The evidence-emit laws (mirroring brutex/calendars/settle_evidence.py's
+#: MIN_EVIDENCE_DAYS / MIN_MARGIN_MINUTES / MAX_MARGIN_MINUTES — literals
+#: because the emitter must work without brutex importable; the emitted file
+#: is self-validated against the real validator when brutex IS importable,
+#: and the repo CI committed-file test validates at commit either way).
+_MIN_EVIDENCE_DAYS = 5
+_MARGIN_BOUNDS = (10, 240)
+
+#: A regular NSE session's minutes — any 0 < expected < 375 day is a
+#: Muhurat/short session and is EXCLUDED from the evidence fold (a Budget
+#: special-weekend session is a full 375-minute regular session: INCLUDED).
+_REGULAR_SESSION_MINUTES = 375
+
+#: The full per-record key set the writer in :func:`main` emits on a
+#: SUCCESSFUL fetch (the 8 base keys + the 12 ``record.update`` keys); an
+#: errored fetch keeps only the 8 base keys with its ``error`` text filled.
+#: Keep in sync with the record build in main() — the round-trip suite pins
+#: BOTH the writer's literal key set (AST) AND its synthetic fixture's keys
+#: to THIS constant (tests/unit/test_settle_evidence.py — r1 coverage
+#: INFO-4), so the --emit-evidence golden can never silently drift from the
+#: real writer; the writer additionally SELF-CHECKS each successful record
+#: against this set at runtime (fail-loud RuntimeError on drift).
+_RECORD_KEYS = frozenset(
+    {
+        "probe_ts_ist",
+        "slot",
+        "symbol",
+        "kind",
+        "exchange",
+        "segment",
+        "expected_minutes",
+        "error",
+        "raw_rows",
+        "rows_len6",
+        "rows_len7",
+        "raw_null_volume",
+        "raw_null_oi",
+        "parsed_bars",
+        "count_ok",
+        "first_bar_ist",
+        "last_bar_ist",
+        "last_bar_is_1529",
+        "fut_volume_nonnull",
+        "fut_oi_nonnull",
+    }
+)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -94,7 +155,30 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         metavar="DIR",
         help="read every postclose-*.jsonl in DIR and print the slot-by-check settle matrix",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--emit-evidence",
+        default=None,
+        metavar="PATH",
+        help=(
+            "with --summarize: fold >=5 REGULAR probe days into the machine-readable "
+            "settle-evidence JSON at PATH (schema 1 — the auto-pull gate's adoption "
+            "artifact, DEC-SETTLE-EVIDENCE-ADOPTION-001); refuses (exit 2) without "
+            "a qualifying slot"
+        ),
+    )
+    parser.add_argument(
+        "--margin-minutes",
+        type=int,
+        default=15,
+        help=(
+            "margin added to the earliest all-pass slot for the adopted settle time "
+            "(default 15 >= the probe's ±15-min slot-snap window; bounds [10, 240])"
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.emit_evidence is not None and args.summarize is None:
+        parser.error("--emit-evidence requires --summarize")
+    return args
 
 
 def _nearest_slot(hhmm: str) -> str:
@@ -133,11 +217,35 @@ def _fno_eligible_cash_pool() -> list[str]:
     return sorted({groww for trading, groww in cash_rows if trading in eligible})
 
 
-def _summarize(directory: Path) -> int:
-    """Fold every ``postclose-*.jsonl`` transcript into the slot × check matrix."""
+def _check(row: dict[str, object], name: str) -> bool:
+    """One per-record check verdict (the --summarize matrix's fold unit)."""
+    if row.get("error"):
+        return False
+    if name == "rows_all_len7":
+        return row.get("rows_len7") == row.get("raw_rows")
+    if name == "count_ok":
+        return bool(row.get("count_ok"))
+    if name == "last_bar_ok":
+        return bool(row.get("last_bar_is_1529"))
+    # fut_fields_ok — vacuously true for non-FUT records.
+    if row.get("kind") != "FUT":
+        return True
+    return bool(row.get("fut_volume_nonnull")) and bool(row.get("fut_oi_nonnull"))
+
+
+def _summarize(directory: Path, *, emit_path: Path | None = None, margin_minutes: int = 15) -> int:
+    """Fold every ``postclose-*.jsonl`` transcript into the slot × check matrix.
+
+    Plain-path stdout is byte-identical to the pre-emit shape; *emit_path*
+    additionally folds the records into the settle-evidence artifact
+    (:func:`_emit_evidence`) AFTER the matrix — its refusals exit 2 (a plain
+    ``--summarize`` keeps its exit-0 contract).
+    """
     records: list[dict[str, object]] = []
+    transcripts: list[str] = []
     bad_lines = 0
     for path in sorted(directory.glob("postclose-*.jsonl")):
+        transcripts.append(path.name)
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -159,24 +267,13 @@ def _summarize(directory: Path) -> int:
         print(f"{bad_lines} unreadable line(s) skipped")
     if not records:
         print(f"no postclose-*.jsonl records under {directory}")
+        if emit_path is not None:
+            print("evidence NOT emitted: no probe records to fold")
+            return 2
         return 0
     by_slot: dict[str, list[dict[str, object]]] = {}
     for row in records:
         by_slot.setdefault(str(row.get("slot")), []).append(row)
-
-    def _check(row: dict[str, object], name: str) -> bool:
-        if row.get("error"):
-            return False
-        if name == "rows_all_len7":
-            return row.get("rows_len7") == row.get("raw_rows")
-        if name == "count_ok":
-            return bool(row.get("count_ok"))
-        if name == "last_bar_ok":
-            return bool(row.get("last_bar_is_1529"))
-        # fut_fields_ok — vacuously true for non-FUT records.
-        if row.get("kind") != "FUT":
-            return True
-        return bool(row.get("fut_volume_nonnull")) and bool(row.get("fut_oi_nonnull"))
 
     print("slot   " + "".join(f"{c:>16}" for c in _CHECKS) + "   records  days")
     ordered = sorted(by_slot, key=lambda s: (s not in _SLOTS, s))
@@ -201,19 +298,192 @@ def _summarize(directory: Path) -> int:
         )
     else:
         print("\nno slot has every check passing yet — keep probing (or inspect the errors)")
+    if emit_path is not None:
+        return _emit_evidence(
+            records, transcripts, emit_path=emit_path, margin_minutes=margin_minutes
+        )
+    return 0
+
+
+def _emit_evidence(
+    records: list[dict[str, object]],
+    transcripts: list[str],
+    *,
+    emit_path: Path,
+    margin_minutes: int,
+) -> int:
+    """Fold the transcript records into the settle-evidence artifact — or refuse.
+
+    DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793). The evidence law is
+    deliberately STRONGER than the pooled stdout verdict above: the earliest
+    all-pass slot must be OBSERVED on >= 5 distinct REGULAR trading days and
+    pass every check on EVERY such day (per-day presence required — the stdout
+    line pools records across days and may disagree). Off-grid slot labels
+    (a probe run > 15 min from every canonical slot keeps its verbatim HH:MM)
+    are IGNORED + counted — they can never contribute a pass or a fail.
+    Non-regular days are EXCLUDED + recorded: every-record ``expected_minutes
+    == 0`` = a non-trading day; any record ``0 < expected_minutes < 375`` = a
+    Muhurat/short session (a Budget special-weekend 375-minute session is
+    regular: included). Refusals print + exit 2, never a half-artifact.
+    """
+    ignored_records = 0
+    by_day: dict[str, list[dict[str, object]]] = {}
+    for row in records:
+        if str(row.get("slot")) not in _SLOTS:
+            ignored_records += 1
+            continue
+        by_day.setdefault(str(row.get("probe_ts_ist", ""))[:10], []).append(row)
+    if ignored_records:
+        print(f"{ignored_records} off-grid-slot record(s) ignored (not in {'/'.join(_SLOTS)})")
+    excluded_days: dict[str, str] = {}
+    per_day: dict[str, dict[str, dict[str, object]]] = {}
+    for day in sorted(by_day):
+        rows = by_day[day]
+        expected = [row.get("expected_minutes") for row in rows]
+        if all(value == 0 for value in expected):
+            excluded_days[day] = "non_regular_session (expected_minutes=0)"
+            print(f"excluded {day}: non-trading day (expected_minutes=0)")
+            continue
+        short = next(
+            (
+                value
+                for value in expected
+                if isinstance(value, int) and 0 < value < _REGULAR_SESSION_MINUTES
+            ),
+            None,
+        )
+        if short is not None:
+            excluded_days[day] = f"non_regular_session (expected_minutes={short})"
+            print(f"excluded {day}: Muhurat/short session (expected_minutes={short})")
+            continue
+        cells: dict[str, dict[str, object]] = {}
+        for slot in _SLOTS:
+            slot_rows = [row for row in rows if str(row.get("slot")) == slot]
+            if not slot_rows:
+                continue
+            failed = [
+                check for check in _CHECKS if any(not _check(row, check) for row in slot_rows)
+            ]
+            cells[slot] = {
+                "records": len(slot_rows),
+                "all_pass": not failed,
+                "failed_checks": failed,
+            }
+        per_day[day] = cells
+    earliest: str | None = None
+    for slot in _SLOTS:
+        days_with_slot = [day for day in per_day if slot in per_day[day]]
+        if len(days_with_slot) >= _MIN_EVIDENCE_DAYS and all(
+            per_day[day][slot]["all_pass"] for day in days_with_slot
+        ):
+            earliest = slot
+            break
+    if earliest is None:
+        print(
+            f"evidence NOT emitted: no canonical slot is observed on >= "
+            f"{_MIN_EVIDENCE_DAYS} distinct REGULAR trading days with every check "
+            f"passing on every such day (included days: {len(per_day)}) — keep probing"
+        )
+        return 2
+    # r1 correctness NIT-3: surface NON-MONOTONIC observations — the earliest
+    # slot all-pass on every observed day while a strictly LATER slot fails on
+    # some day deserves a human look before the commit review. INFORMATIONAL
+    # only: the adopted value + the evidence schema are UNCHANGED (a too-early
+    # adoption can never produce wrong data — the #1774 today-gate is the
+    # net), and the note lives in the EMIT path only (a plain --summarize
+    # keeps its byte-identical stdout).
+    later_slots = _SLOTS[_SLOTS.index(earliest) + 1 :]
+    non_monotonic = [
+        (day, slot)
+        for day in sorted(per_day)
+        for slot in later_slots
+        if slot in per_day[day] and not per_day[day][slot]["all_pass"]
+    ]
+    if non_monotonic:
+        first_day, first_slot = non_monotonic[0]
+        print(
+            f"note: non-monotonic observations — {len(non_monotonic)} later-slot "
+            f"failure(s) after the all-pass {earliest} (first: {first_day} at "
+            f"{first_slot}); adopted value unchanged — review per_day before committing"
+        )
+    earliest_minutes = int(earliest[:2]) * 60 + int(earliest[3:])
+    adopted_minutes = earliest_minutes + margin_minutes
+    if adopted_minutes >= 24 * 60:
+        print(f"evidence NOT emitted: {earliest} + {margin_minutes} min margin wraps past midnight")
+        return 2
+    adopted = f"{adopted_minutes // 60:02d}:{adopted_minutes % 60:02d}"
+    supporting_days = sum(1 for day in per_day if earliest in per_day[day])
+    payload: dict[str, object] = {
+        "schema": 1,
+        "kind": "groww-postclose-settle-evidence",
+        "earliest_all_pass_ist": earliest,
+        "adopted_settle_ist": adopted,
+        "margin_minutes": margin_minutes,
+        "distinct_trading_days": supporting_days,
+        "per_day": per_day,
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "probe_script_version": _PROBE_VERSION,
+        "checks": list(_CHECKS),
+        "slots_observed": [
+            slot for slot in _SLOTS if any(slot in cells for cells in per_day.values())
+        ],
+        "transcripts": transcripts,
+        "excluded_days": excluded_days,
+        "ignored_records": ignored_records,
+    }
+    emit_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        f"\nevidence written: {emit_path} — earliest all-pass {earliest} IST on "
+        f"{supporting_days} regular day(s) (per-day law: observed AND all-pass on "
+        f"every observed day — stronger than the pooled stdout verdict above, which "
+        f"may disagree) + {margin_minutes} min margin => adopted {adopted} IST"
+    )
+    print(
+        "review the per_day matrix + margin, then commit the evidence BESIDE its "
+        "transcripts (docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md §'Emit + adopt "
+        "the evidence')"
+    )
+    # Self-validate against the REAL repo validator when brutex is importable
+    # (the emitted artifact must pass the adoption channel's own truth table);
+    # a cred-less/venv-less box skips — the repo CI committed-file test
+    # validates at commit either way.
+    try:
+        from brutex.calendars.settle_evidence import validate_evidence_payload
+    except Exception:
+        print(
+            "self-validation skipped (brutex not importable — the repo CI test validates at commit)"
+        )
+        return 0
+    try:
+        validate_evidence_payload(payload, path=str(emit_path))
+    except ValueError as exc:
+        print(f"self-validation FAILED (file kept for inspection): {exc}")
+        return 2
+    print("self-validation OK (brutex.calendars.settle_evidence.validate_evidence_payload)")
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.summarize is not None:
-        return _summarize(Path(args.summarize))
+        emit_path = None if args.emit_evidence is None else Path(args.emit_evidence)
+        lo, hi = _MARGIN_BOUNDS
+        if emit_path is not None and not (lo <= args.margin_minutes <= hi):
+            print(
+                f"--margin-minutes {args.margin_minutes} is outside [{lo}, {hi}] "
+                f"(the settle_evidence validator's bounds) — evidence NOT emitted"
+            )
+            return 2
+        return _summarize(
+            Path(args.summarize), emit_path=emit_path, margin_minutes=args.margin_minutes
+        )
 
     # ---- lazy brutex imports (the --help path never needs the package) ----
     try:
-        from datetime import UTC, datetime, time, timedelta
+        from datetime import timedelta
         from zoneinfo import ZoneInfo
 
+        from brutex.adapters.groww.auth import GrowwCredentials
         from brutex.adapters.groww.aws_client import build_real_aws_client
         from brutex.adapters.groww.candles import fetch_candle_windows
         from brutex.adapters.groww.constants import (
@@ -233,10 +503,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from brutex.adapters.rate_common import RateController
         from brutex.calendars.market_hours import guard_active_default
         from brutex.calendars.nse import get_session, has_muhurat_session, now_ist
-        from brutex.adapters.groww.auth import GrowwCredentials
         from brutex.config.credentials_aws import load_groww_aws_credentials
         from brutex.data.session import IST
-    except Exception as exc:  # noqa: BLE001 — a start failure must name itself
+    except Exception as exc:
         print(f"CANNOT START: brutex import failed: {type(exc).__name__}: {exc}")
         return 2
 
@@ -271,9 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         aws = build_real_aws_client(resolve_token_broker_region())
         file_creds = load_groww_aws_credentials(client=aws)
-        creds = GrowwCredentials(
-            api_key=file_creds.api_key, totp_secret=file_creds.totp_secret
-        )
+        creds = GrowwCredentials(api_key=file_creds.api_key, totp_secret=file_creds.totp_secret)
         store = build_readonly_token_store_with(aws)
         cached, miss = store.load_with_reason(now_utc=datetime.now(UTC))
         if cached is None:
@@ -306,7 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             token_cache_store=_store,
             readonly_reread=_load,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"CANNOT START: read-only client build failed: {type(exc).__name__}: {exc}")
         return 2
 
@@ -335,7 +602,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             pool = _fno_eligible_cash_pool()
             cash = random.Random(str(args.seed)).sample(pool, min(_CASH_COUNT, len(pool)))
-        except Exception as exc:  # noqa: BLE001 — degrade to indices+FUT, recorded
+        except Exception as exc:
             print(f"instrument-master CSV unavailable ({exc}) — probing indices + FUT only")
             cash = []
     if cash:
@@ -347,7 +614,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("  (after day 1, pin the sample: re-run with --symbols <the list above>)")
     plan.extend((symbol, "CASH", "NSE", "CASH") for symbol in sorted(cash))
     try:
-        expiries = [e for e in resolve_expiries(client, exchange="NSE", underlying_symbol="NIFTY") if e >= today]
+        expiries = [
+            e
+            for e in resolve_expiries(client, exchange="NSE", underlying_symbol="NIFTY")
+            if e >= today
+        ]
         front = min(expiries)
         futs = [
             c
@@ -357,7 +628,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if c.contract_type == "FUT"
         ]
         plan.extend((c.symbol, "FUT", "NSE", "FNO") for c in futs[:1])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"front-month NIFTY FUT resolution failed ({exc}) — recorded, continuing")
 
     # ---- probe every symbol: raw shape via on_raw_payload + parsed criteria ----
@@ -433,7 +704,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         and last + timedelta(minutes=1) >= close_dt
                     ),
                     "fut_volume_nonnull": (
-                        kind == "FUT" and raw_stats["raw_rows"] > 0 and raw_stats["null_volume"] == 0
+                        kind == "FUT"
+                        and raw_stats["raw_rows"] > 0
+                        and raw_stats["null_volume"] == 0
                     ),
                     "fut_oi_nonnull": (
                         kind == "FUT"
@@ -443,8 +716,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                 }
             )
-        except Exception as exc:  # noqa: BLE001 — per-symbol errors recorded, probe continues
+        except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
+        if record["error"] is None and record.keys() != _RECORD_KEYS:
+            # Keep the drift pin honest at RUNTIME too: a successful fetch must
+            # emit EXACTLY the pinned key set (an errored fetch keeps only the
+            # 8 base keys by contract, so it is exempt). A drift here is a code
+            # bug, never a vendor error — fail loud, don't record-and-continue.
+            raise RuntimeError(
+                "probe record keys drifted from _RECORD_KEYS: "
+                f"{sorted(record.keys() ^ _RECORD_KEYS)}"
+            )
         records.append(record)
 
     settled = sum(
@@ -458,6 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     trailer = {
         "slot_summary": slot,
         "probe_ts_ist": now_ist().isoformat(),
+        "probe_script_version": _PROBE_VERSION,
         "symbols_probed": len(records),
         "errors": sum(1 for r in records if r.get("error")),
         "settled_records": settled,
@@ -480,12 +763,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(header)
     for r in records:
         print(
-            f"{str(r['symbol']):<28}{str(r['kind']):<7}"
-            f"{str(r.get('raw_rows', '-')):>5}{str(r.get('rows_len6', '-')):>6}"
-            f"{str(r.get('rows_len7', '-')):>6}{str(r.get('raw_null_volume', '-')):>7}"
-            f"{str(r.get('raw_null_oi', '-')):>7}{str(r.get('parsed_bars', '-')):>6}"
+            f"{r['symbol']!s:<28}{r['kind']!s:<7}"
+            f"{r.get('raw_rows', '-')!s:>5}{r.get('rows_len6', '-')!s:>6}"
+            f"{r.get('rows_len7', '-')!s:>6}{r.get('raw_null_volume', '-')!s:>7}"
+            f"{r.get('raw_null_oi', '-')!s:>7}{r.get('parsed_bars', '-')!s:>6}"
             f"{('OK' if r.get('count_ok') else 'short'):>7}"
-            f"{str(r.get('last_bar_ist') or '-'):>7}"
+            f"{r.get('last_bar_ist') or '-'!s:>7}"
             f"{('OK' if r.get('last_bar_is_1529') else 'no'):>6}  {r.get('error') or ''}"
         )
     print(f"\n{trailer['note']}  (transcript: {out_path})")
