@@ -22,6 +22,10 @@ battery proves a bit-63-set mask round-trips EXACTLY through every persistence
   trade-sim kernel (``fno_math.ResidentSweepSim``) — each verified against a
   pure-Python reference over bit-63-set bars, so a future accidental i64 FFI
   signature can never truncate/overflow the sign bit silently;
+* the L1 Bloom + L2 LMDB dedup membership — a bit-63 mask's combo digest
+  driven through the REAL :class:`~brutex.engine.sweep_cache.SweepCache`
+  (record → probe true; the sign-bit-cleared mask probes false; a re-open
+  reloads the persisted LMDB exact membership);
 * the trivial import law: ``IMPLEMENTED_MASK > 2**63`` breaks nothing at
   import anywhere (it now contains bit 63).
 """
@@ -294,3 +298,61 @@ def test_sweep_hot_kernel_resident_sweep_sim_sign_bit_mask() -> None:
     # Anti-vacuity: a high mask bit NO bar carries (bit 62) fires nothing —
     # the kernel genuinely evaluated the top word, it did not match-all.
     assert sim.count_trades([1 << 62], True, None, None) == [0]
+
+
+# ─────────────────────────────────────────────────────────────────
+# The Bloom + LMDB dedup membership (SweepCache → LmdbMembership)
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_sweep_cache_lmdb_membership_sign_bit_round_trip(tmp_path: Path) -> None:
+    """A bit-63 mask's combo digest round-trips the REAL Bloom + LMDB dedup.
+
+    Drives :class:`~brutex.engine.sweep_cache.SweepCache` (the production
+    dedup tier backed by :class:`~brutex.data.lmdb_membership.LmdbMembership`)
+    with the battery mask: record → probe true; a DIFFERENT mask (the sign
+    bit cleared — same low word) probes false, so the persisted key genuinely
+    encodes bit 63; and a fresh re-open reloads the durable LMDB exact
+    membership (the resume-dedup guarantee) with the same true/false split.
+    """
+    pytest.importorskip("lmdb")
+    from brutex.engine.sweep_cache import SweepCache
+
+    def seen(cache: SweepCache, mask: int) -> bool:
+        return cache.seen(
+            mask,
+            "NIFTY",
+            "5m",
+            "bull",
+            {"sl": 80},
+            data_snapshot_hash="s" * 64,
+            indicator_version="iv-battery",
+            code_commit_sha="c" * 40,
+        )
+
+    def record(cache: SweepCache, mask: int) -> bool:
+        return cache.record(
+            mask,
+            "NIFTY",
+            "5m",
+            "bull",
+            {"sl": 80},
+            data_snapshot_hash="s" * 64,
+            indicator_version="iv-battery",
+            code_commit_sha="c" * 40,
+        )
+
+    cleared = BIT63_MASK ^ (1 << 63)
+    with SweepCache.open(tmp_path / "cache", bloom_capacity=1_000) as cache:
+        assert seen(cache, BIT63_MASK) is False
+        assert record(cache, BIT63_MASK) is True
+        assert seen(cache, BIT63_MASK) is True
+        # Idempotent re-record: already a member, never double-admitted.
+        assert record(cache, BIT63_MASK) is False
+        # The sign-bit-cleared twin is a DIFFERENT combo — probes false.
+        assert seen(cache, cleared) is False
+    # Durability: a fresh open reloads the LMDB exact store (and rebuilds the
+    # in-RAM Bloom from it), preserving the exact true/false split.
+    with SweepCache.open(tmp_path / "cache", bloom_capacity=1_000) as reopened:
+        assert seen(reopened, BIT63_MASK) is True
+        assert seen(reopened, cleared) is False

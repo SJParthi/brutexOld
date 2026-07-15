@@ -198,6 +198,41 @@ class TestStrategySpecValidation:
     def test_full_implemented_mask_accepted(self) -> None:
         assert make_spec(condition_mask=IMPLEMENTED_MASK).condition_mask == IMPLEMENTED_MASK
 
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(52, id="bit52-retired-vwap-above"),
+            pytest.param(53, id="bit53-retired-vwap-below"),
+            pytest.param(64, id="bit64-declared-only-supertrend-above"),
+            pytest.param(65, id="bit65-declared-only-supertrend-below"),
+        ],
+    )
+    def test_retired_and_declared_only_bits_rejected(self, bit: int) -> None:
+        """The vocab-66 refusal pins (the Rust twin's Python mirror).
+
+        The RETIRED VWAP tombstones (52/53) and the declared-only SuperTrend
+        layout bits (64/65) are all outside ``IMPLEMENTED_MASK`` — a mask
+        requiring any of them must refuse at construction, alone AND mixed
+        with valid bits.
+        """
+        assert not (IMPLEMENTED_MASK >> bit) & 1  # genuinely unimplemented
+        with pytest.raises(StrategyError, match="unimplemented/reserved"):
+            make_spec(condition_mask=1 << bit)
+        with pytest.raises(StrategyError, match="unimplemented/reserved"):
+            make_spec(condition_mask=(1 << bit) | 0x1F)
+
+    @pytest.mark.parametrize(
+        "bit",
+        [
+            pytest.param(60, id="bit60-live-above-cpr-tc"),
+            pytest.param(63, id="bit63-live-narrow-cpr-day-sign-bit"),
+        ],
+    )
+    def test_live_cpr_bits_accepted(self, bit: int) -> None:
+        """The LIVE CPR bits construct — incl. bit 63, the u64 sign bit."""
+        mask = (1 << bit) | 0b101
+        assert make_spec(condition_mask=mask).condition_mask == mask
+
     def test_non_direction_rejected(self) -> None:
         with pytest.raises(StrategyError) as exc:
             make_spec(direction="long")

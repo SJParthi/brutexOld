@@ -21,10 +21,14 @@ regenerate-and-trust):
   recomputed INDEPENDENTLY here from the case's own prev-day anchors (exact
   integer/Decimal math — never the production helper).
 
-The companion fixture is a committed copy of the OLD masks (its ``note`` field
-records the provenance + the pre-reshape fixture's whole-file SHA-256), so this
-invariant stays verifiable forever — a later regeneration that silently moved
-an input or an old-vocabulary bit fails loudly here.
+The companion fixture is a committed copy of the OLD masks: its ``note`` field
+records the provenance prose, and its sibling ``source_fixture_sha256`` key
+records the pre-reshape fixture's WHOLE-FILE SHA-256
+(``19640054cb39…`` — verified against
+``git show d6ac9f850:tests/golden/fixtures/vocab_golden_vectors.json`` and
+pinned literally below), so this invariant stays verifiable forever — a later
+regeneration that silently moved an input or an old-vocabulary bit fails
+loudly here.
 """
 
 from __future__ import annotations
@@ -104,6 +108,20 @@ def test_companion_covers_the_full_corpus() -> None:
     assert _OLD["schema"] == "vocab-golden-migration-v2-masks"
     assert len(_OLD["cases"]) == len(_NEW["cases"]) == 400
     assert {c["id"] for c in _OLD["cases"]} == {c["id"] for c in _NEW["cases"]}
+
+
+def test_companion_records_the_pre_reshape_whole_file_sha() -> None:
+    """The companion's provenance anchor is the OLD fixture's whole-file SHA-256.
+
+    Pinned to the value independently re-derived from git history
+    (``git show d6ac9f850:tests/golden/fixtures/vocab_golden_vectors.json |
+    sha256sum``, verified 2026-07-15) — so the companion can never silently
+    claim descent from a different pre-reshape corpus.
+    """
+    assert (
+        _OLD["source_fixture_sha256"]
+        == "19640054cb39e50bb33088dd31c496d69706e8cbfe0690e9f11ef86862831a3a"
+    )
 
 
 def test_inputs_are_byte_identical_to_the_pre_reshape_fixture() -> None:

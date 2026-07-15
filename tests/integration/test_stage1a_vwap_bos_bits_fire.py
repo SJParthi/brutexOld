@@ -159,6 +159,52 @@ def test_market_structure_directions_fire_at_expected_bars() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# CPR bits 60-62 fire through the real streaming push() path (anchor-warm)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_cpr_position_bits_fire_on_anchor_warm_day_through_real_push() -> None:
+    """Day-2 (anchor-warm) bars carry EXACTLY ONE of bits 60/61/62 — and the
+    RETIRED VWAP tombstones (52/53) fire on NO bar of either day.
+
+    The integration-level anti-illusion twin of the unit cold-anchor test
+    (``tests/unit/test_engine_stage1a.py::test_cold_anchor_day_clears_every_cpr_bit``):
+    drives the ACTUAL :meth:`Stage1AMatrixBuilder.push` production path over a
+    small 2-day synthetic feed. Day 1 (cold anchor — no prior day) must clear
+    every CPR bit; day 2's prev-day anchors (pdh 110 / pdl 90 / pdc 100 →
+    P == BC == TC == 100.00) partition the closes: 105 above TC (bit 60),
+    95 below BC (bit 61), 100 inside (bit 62) — each region hit, and the
+    60/61/62 partition holds with exactly one bit per warm bar.
+    """
+    cpr_position_bits = (B.BIT_ABOVE_CPR_TC, B.BIT_BELOW_CPR_BC, B.BIT_INSIDE_CPR)
+    cpr_mask = sum(1 << b for b in cpr_position_bits)
+
+    day1 = [_bar(m, 110, 90, 100, day=2) for m in range(3)]
+    day2 = [
+        _bar(0, 110, 90, 105, day=3),  # close > TC → above_cpr_tc (60)
+        _bar(1, 110, 90, 95, day=3),  # close < BC → below_cpr_bc (61)
+        _bar(2, 110, 90, 100, day=3),  # BC <= close <= TC → inside_cpr (62)
+    ]
+    masks = _run(day1 + day2)
+    cold, warm = masks[: len(day1)], masks[len(day1) :]
+
+    # (cold) day 1 has no prev-day anchors → every CPR bit cleared.
+    assert all(m & cpr_mask == 0 for m in cold), "a CPR bit fired against cold anchors"
+    # (a) every anchor-warm bar carries EXACTLY ONE of bits 60/61/62.
+    for i, m in enumerate(warm):
+        fired = [b for b in cpr_position_bits if m & (1 << b)]
+        assert len(fired) == 1, f"warm bar {i}: CPR position bits fired = {fired}"
+    # …and each of the three regions genuinely fired somewhere (anti-vacuity).
+    assert [next(b for b in cpr_position_bits if m & (1 << b)) for m in warm] == [
+        B.BIT_ABOVE_CPR_TC,
+        B.BIT_BELOW_CPR_BC,
+        B.BIT_INSIDE_CPR,
+    ]
+    # (b) the RETIRED VWAP tombstones never fire — either day.
+    assert all((m & _VWAP_TOMBSTONE_MASK) == 0 for m in masks), "a tombstone bit fired"
+
+
+# ────────────────────────────────────────────────────────────────────────
 # NEGATIVE — proves the bits are real logic, not always-on
 # ────────────────────────────────────────────────────────────────────────
 
