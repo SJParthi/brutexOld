@@ -579,25 +579,19 @@ jobs:
           else
             echo "(brutex.costs test files not present yet — gate inactive)"
           fi
-          # DEC-RESULTS-TOPK-ROLLUP-001: the whole-package --cov=brutex.engine
-          # gate must also run the results_rollup suites —
-          # brutex/engine/results_rollup.py is stem-matched by
-          # tests/unit/test_results_rollup.py (its name is pinned by the
-          # mutation.yml mutmut-pair wiring, so it is NOT renamed to the
-          # test_engine_* glob), and the four Hook-A driver seam lines
-          # (stage3_wire / sweep_orchestrator / sweep_parallel /
-          # sweep_supervisor) are covered only by the REAL-driver wiring
-          # suite (the same static-list addition precedent as the
-          # costs/test_futures_costs.py gate above, PR #1248).
+          # DEC-RESULTS-TOPK-ROLLUP-001: the results_rollup suites are NAMED
+          # onto the test_engine_*.py glob (test_engine_results_rollup.py +
+          # the per-driver hook suites), so the whole-package
+          # --cov=brutex.engine gate collects them via the glob itself —
+          # no static file-list addition needed (the mutation.yml mutmut
+          # pair is repointed at the renamed file in the same change).
           if compgen -G "tests/unit/test_engine_*.py" > /dev/null; then
             pytest \
               --cov=brutex.engine \
               --cov-branch \
               --cov-report=term-missing \
               --cov-fail-under=100 \
-              tests/unit/test_engine_*.py \
-              tests/unit/test_results_rollup.py \
-              tests/unit/test_results_rollup_wiring.py
+              tests/unit/test_engine_*.py
           else
             echo "(brutex.engine test files not present yet — gate inactive)"
           fi
@@ -2711,11 +2705,11 @@ jobs:
           # /results top-K rollup — the union-superset trim, the V1-V5 serve
           # ladder, the fenced merge hook + the AuditCursor tail resume.
           # 100% line+branch on results_rollup.py from its dedicated suite.
-          if compgen -G "tests/unit/test_results_rollup.py" > /dev/null; then
-            pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_results_rollup.py
+          if compgen -G "tests/unit/test_engine_results_rollup.py" > /dev/null; then
+            pytest --cov=brutex.engine.results_rollup --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_rollup.py
             # The COMMON LogGate leaf (the PR #1436 CodeQL cycle fix) rides the
             # same suite — 100% line+branch on the leaf too.
-            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_results_rollup.py
+            pytest --cov=brutex.observability.log_gate --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_engine_results_rollup.py
           else
             echo "(brutex.engine.results_rollup test file not present yet — gate inactive)"
           fi
