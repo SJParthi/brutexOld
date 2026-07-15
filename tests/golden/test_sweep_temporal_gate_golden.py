@@ -27,13 +27,13 @@ import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
 from brutex.engine.results_store import ResultsStore
-from brutex.execution.fill_mode import FillMode
 from brutex.engine.sweep_run import (
     ComboDedup,
     SweepRunConfig,
     SweepRunSummary,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.orchestrator.audit import AuditWriter
 from brutex.ranking.temporal import TemporalRobustnessConfig
 from brutex.strategies.types import Side
