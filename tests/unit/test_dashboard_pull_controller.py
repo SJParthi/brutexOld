@@ -3778,8 +3778,6 @@ class TestIngestAuditWiring:
         assert not (tmp_path / "audit").exists()
 
 
-
-
 class TestCooperativeCancel:
     """DEC-JOB-COOPERATIVE-CANCEL-001: a cooperative cancel maps to the honest partial verdict."""
 

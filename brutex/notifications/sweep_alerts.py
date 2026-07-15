@@ -937,7 +937,6 @@ class SweepAlerter:
             dedupe_key=f"allfiltered-trip:{pull_id or trip_rule}",
         )
 
-
     def nightly_summary(
         self,
         *,

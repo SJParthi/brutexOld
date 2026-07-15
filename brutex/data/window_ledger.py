@@ -1071,10 +1071,7 @@ class WindowLedger:
                 # the streak nor the provenance advances; the row still records
                 # FAILED + the reason below). Both preserve arms carry the prior
                 # provenance verbatim — no new completeness evidence appended.
-                if degraded_reason in STREAK_EXEMPT_DEGRADED_REASONS:
-                    empty_streak = prior_streak
-                    streak_provenance = prior_prov
-                elif suppress_degraded_settle:
+                if degraded_reason in STREAK_EXEMPT_DEGRADED_REASONS or suppress_degraded_settle:
                     empty_streak = prior_streak
                     streak_provenance = prior_prov
                 else:

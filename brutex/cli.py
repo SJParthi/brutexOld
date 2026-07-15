@@ -7694,8 +7694,6 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     # pre-sweep user-config error, never a mid-launch traceback (both sweep
     # drivers re-resolve the same switch at their own entry; this eager pass
     # only front-loads the failure).
-    from brutex.engine.tuple_complete import resume_store_guard_enabled
-
     # ── RES-7 (DEC-AUDIT-SWEEP-ERRORSURFACE-001): resolve the sweep
     # rank-memory env knobs EAGERLY too — BRUTEX_SWEEP_MEM_BUDGET_BYTES and
     # BRUTEX_SWEEP_BOUNDED_RANK are otherwise resolved LAZILY per tuple deep
@@ -7708,6 +7706,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         resolve_bounded_rank_mode,
         resolve_mem_budget_bytes,
     )
+    from brutex.engine.tuple_complete import resume_store_guard_enabled
 
     try:
         resume_store_guard_enabled()
