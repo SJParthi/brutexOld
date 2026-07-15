@@ -1,4 +1,6 @@
-> STATUS: DESIGN-REVIEW VEHICLE (PR-B, worst-case fills track). Not normative until the PR-B implementation lands with its own decision entry (a reserved slot in the fills ledger band). File:line citations in this document reference the PR-A branch `claude/fill-worst-case-only` (not yet pushed at time of writing), NOT this branch's tree — they are design references, to be re-verified against the implementation PR.
+> STATUS: DESIGN-REVIEW VEHICLE (PR-B, worst-case fills track). Not normative until the PR-B implementation lands with its own decision entry (a reserved slot in the fills ledger band). File:line citations in this document reference the PR-A branch `claude/fill-worst-case-only` (not yet pushed at time of writing), NOT this branch's tree — they are design references, to be re-verified against the implementation PR. STANDING CAVEAT (v2): EVERY PR-A cite re-verifies when PR-A pushes — including the adverse-extreme session_gap/EOD pricing basis that §2.7-2.8 build on (MAIN prices those terminal closes at the bar CLOSE today per #1743; the adverse-extreme basis is PR-A's re-anchor, and B3 deliberately returns the terminal SAME-BAR case to the close basis).
+>
+> VERSION: **v2 — assurance register-review round 1 FOLDED** (verdict FIX-FIRST; blocking findings B1–B6 + the §8 Q1–Q6 confirmed positions + the minors/notes, each quoted by finding id in place). Coordinator FINAL rulings 2026-07-15 applied: B1 = the provenance LAW is REQUIRED, not waived (structural ADR-0021 invariant + hash-fold belt; the dual-vendor golden is an impl obligation); B2 = **the SLIDE is RATIFIED as the shipped law, UNIFIED with PR-A** (the register's WITHHOLD stays fully drafted as the named alternative — §5.4 — with its flip-asymmetry cost stated; a non-blocking operator morning note). v1 = the pre-review draft @ 0443045dd.
 
 # PR-B DESIGN — the 1-MINUTE EXECUTION GRID (design-for-review, NO code)
 
@@ -14,16 +16,17 @@
 - **Audience:** the assurance session — adversarial review against the
   extreme-scenario register BEFORE any implementation. Each register id gets
   its own § with the design answer + the pinning verify.
-- **Status of the register source files (DISCLOSED):**
-  `extreme-scenario-register-p0-fill.md`, `-2.md`, `-3.md` and `-p1-c.md` are
-  **EMPTY (0 bytes, mtime 2026-07-15 13:42)** at design time — apparently
-  wiped. The 13 P0 ids + 4 P1 ids are taken from the coordinator brief; the
-  scenario intents below are reconstructed from the ids + the PR-A assurance
-  ledger (`fill-worst-case-only-track.md:91-115`) + the surviving
-  `extreme-scenario-register-p1-b.md`. **Verbatim register verify lines are
-  quoted ONLY where the surviving p1-b file carries them; everywhere else the
-  original verify line is UNVERIFIED-UNAVAILABLE and the § says so.**
-  Assurance owns confirming each reconstruction matches its original intent.
+- **Status of the register source files (v2 UPDATE):** the fill register
+  files (`extreme-scenario-register-p0-fill.md`, `-2.md`, `-3.md`, and
+  `-p1-c.md`) were EMPTY at v1 design time (wiped); the v1 sections answered
+  RECONSTRUCTED scenarios and said so. They are **RESTORED and
+  AUTHORITATIVE** as of this v2 revision (2026-07-15): every section a
+  register entry drives now quotes the restored register VERBATIM, and the
+  assurance register-review's six blocking findings (B1–B6) — two of them
+  exactly the reconstruction-vs-original DRIFT class the v1 caveat predicted
+  (B1, B2) — are folded in place, each quoting its finding id. The v1
+  UNVERIFIED-UNAVAILABLE caveats are retired section-by-section where the
+  verbatim text now appears.
 
 ## §0 The operator law + settled interpretations (binding inputs)
 
@@ -48,6 +51,10 @@ next-bar, worst-case.
    replaces that interim with the real law — worst-case fills generally become
    LESS punitive on coarse TFs (a 1-minute adverse extreme ⊆ the 5-minute
    bar's), while staying never-optimistic vs reality.
+5. **Missing exact next-1m = the session-bounded SLIDE, RATIFIED as the
+   shipped law and UNIFIED with PR-A** (coordinator final ruling 2026-07-15,
+   the B2 fold — §5; the register's WITHHOLD stays fully drafted as the named
+   alternative §5.4 with its flip-asymmetry cost stated).
 
 ---
 
@@ -132,9 +139,29 @@ The fill bar for a signal on N is
 `ts_tf[N] + tf` opens AT the close instant and trades strictly after it, so it
 is "the next 1-minute bar strictly after the signal bar's close" (for a
 contiguous aligned feed this is the bar labelled `ts_tf[N] + tf`; on a hole it
-is the next STORED minute — §5). `arm_source` is that relation inverted, with
-the invariant that at most one decision bar closes per 1m boundary (tf ≥ 1),
-so `arm_source[j]` is a scalar. All arithmetic is on the UTC-aware
+is the next STORED same-session minute — the RATIFIED slide law, §5).
+`arm_source` is that relation inverted.
+
+**Collision truth + THE WINNER LAW — B4 [GAP — arm_source collision] folded
+(the v1 claim "at most one decision bar closes per 1m boundary, so
+`arm_source[j]` is a scalar" was FALSE):** a ≥tf-minute interior hole that
+crosses a decision-bar close boundary makes `exec_idx(N) == exec_idx(N+1)` —
+two (or more) decision bars can slide onto ONE 1m bar. `arm_source[j]`
+remains a scalar COLUMN by the deterministic WINNER LAW, stated ONCE here
+and implemented FROM THIS ONE STATEMENT by the Python walker, the Rust
+kernel AND the §3.11 diffcheck reference (never three re-derivations):
+
+> **earliest-armed wins** — `arm_source[j] = min{N : exec_idx(N) == j}`
+> (mirroring PR-A's pending-entry law: a pending entry is never re-armed or
+> overwritten by a later signal, `trade_sim.py:253-258`); every LOSING
+> decision index DROPS its signal with the counted event
+> `signals_dropped_collision` (per-tuple total + capped WARN, the
+> `_TAIL_HOLE_WARN_CAP` idiom).
+
+The **boundary-spanning-hole FIXTURE** (a ≥tf-minute hole crossing a
+decision close boundary → the earlier signal fills on the slid bar, the
+later signal drops + counts) is a REQUIRED pin, run through all three
+implementations (§3.11). All arithmetic is on the UTC-aware
 `bar.timestamp` values both streams already carry (`data/models.py:114-115`) —
 no IST conversion participates in the mapping (§3.2).
 
@@ -246,7 +273,8 @@ simulate_masks(masks, is_buy, sl_paisa, tp_paisa) -> Vec<Vec<TradeRecord>>
 `build_columns` (`trade_sim.rs:640-691`) validates
 `arm_source.len() == n_1m`, every non-negative `arm_source[j] < bar_bits.len()`,
 and `arm_source` strictly increasing over its non-negative entries (each
-decision bar maps to at most one fill bar). `Walker::push`
+decision bar maps to at most one fill bar — the column stores §1.2 WINNERS
+only; collision losers were already dropped + counted at map build). `Walker::push`
 (`trade_sim.rs:470-556`) keeps its (A)/(A2)/(B)/(C) ladder shape on 1m inputs;
 `simulate_one_core` (`trade_sim.rs:702-733`) computes
 `entry_signal = arm_source[i] >= 0 && W::is_superset(bar_bits[arm_source[i]], mask)`.
@@ -277,8 +305,10 @@ decision bar maps to at most one fill bar). `Walker::push`
 ### §1.5 Compute envelope + the flat-skip design lever
 
 The trade-sim leg becomes O(N_masks · N_1m) naively — a **tf_minutes×
-multiplier** on that leg (5× at 5m; ~375× at 1day). That is NOT acceptable to
-hand-wave (§2 Rule 5 / the 2-4 day SLA, CLAUDE.md §8). The designed
+multiplier** on that leg (5× at 5m; the nominal "~375× at 1day" is MOOT —
+tf=1day is structurally EMPTY under the law, §6b: every arm point drops at
+the same-session gate and flat-skip jumps the whole stream). That is NOT
+acceptable to hand-wave (§2 Rule 5 / the 2-4 day SLA, CLAUDE.md §8). The designed
 mitigation: **flat-skip** — while the walker is FLAT with no pending entry,
 NOTHING can happen until the next 1m bar j with `arm_source[j] >= 0`
 (excursions fold only in-position; forced/session flags are only consulted
@@ -291,8 +321,14 @@ the overwhelming majority under Stage-1B `min_hits` prefiltering
 (`sweep_run.py:523-525`) — pay far below N_1m; dense long-hold masks approach
 it honestly. The pure-Python walker and the diffcheck reference deliberately
 do NOT implement flat-skip (naive full walk = the independence oracle);
-a jump-vs-full-walk parity property pins behavior identity. Bench gates: §7.5.
-NO wall-clock SLA is claimed pre-measurement (Golden Rule #10).
+a jump-vs-full-walk parity property pins behavior identity.
+**Construction-cost ownership (assurance minor folded, NAMED):** the 1m
+kernel columns + the `ExecGridMap` are mask- AND tuple-independent for a
+`(symbol, tf)` coordinate — they are built ONCE per coordinate in a
+preload-scoped memo OWNED by `cmd_sweep_all` beside the `_bars_for` memo
+(`cli.py:7607-7608` precedent), never rebuilt per tuple. Bench gates
+(with acceptance teeth): §7.5. NO wall-clock SLA is claimed
+pre-measurement (Golden Rule #10).
 
 ---
 
@@ -315,75 +351,148 @@ All prices int64 paisa via the one `_price_to_paisa` seam
    fill is the adverse-max-vs-level ON THAT SAME 1m bar:
    BUY exit `min(level, low_1m)`, SELL exit `max(level, high_1m)`
    (the `trade_sim.py:733-747` / `trade_sim.rs:441-448` law re-anchored).
-   No detect-coarse/fill-later lag exists anywhere (§3b.1).
+   **THE GAP-OPEN LAW, explicit (B5 fold):** a 1m bar that GAPS past an
+   armed level fills at the ADVERSE-MAX vs the level WITHIN that bar — the
+   same `min(level, low_1m)` / `max(level, high_1m)` formula — NEVER the
+   untouched open, never the level itself when the bar's extreme is worse
+   (§5b). No detect-coarse/fill-later lag exists anywhere (§3b.1).
 3. **Tie law** — one 1m bar spanning BOTH levels fills the STOP first, always
    (`trade_sim.py:757-781`, `trade_sim.rs:354-357` — unchanged).
 4. **Same-bar deferral (NEW, settled):** the entry 1m bar folds its range
    into MFE/MAE but NEVER exits — SL/TP detection for a position begins on
    the 1m bar AFTER its entry bar. (Supersedes, on the 1m grid, the PR-A
    same-push manage-the-entry-bar behavior — `trade_sim.py:560` manages the
-   just-opened position on the entry bar. §3.12 carries the rationale + the
-   rejected alternative.)
+   just-opened position on the entry bar. §3.12 carries the rationale, the
+   rejected alternative, the B3 terminal carve-out, and the counted
+   `exits_deferred` observability.)
 5. **Forced session-close exit** — the first 1m bar whose minute reaches the
    SESSION's forced-exit instant (`forced_exit_seconds_for_session`,
    session-resolved per IST date — `trade_sim.py:455-486`) closes the
    position at that 1m bar's adverse extreme; boundary = session close − 10
    min (15:20 regular; early-close/Muhurat variants) — never a 15:20/375
    literal (§3b.2). Entry never fills at/after the boundary (gate in law 1).
+   A missing forced-boundary minute displaces the fill to the first STORED
+   at-or-after bar — a SLID fill, COUNTED per law 9's widened counter law.
 6. **Mode-B signal exit** — exit signal on decision bar N → fill on 1m bar
    `exec_idx(N)` at its adverse extreme (symmetry with entry; replaces the
    "next decision bar's open-anchored fill", `trade_sim.py:690-701`).
+   Implemented in full despite ZERO production callers (§8 Q5 SETTLED: no
+   dormant second fill law; a negative/AST pin asserts no production caller
+   passes exit signals — all five `simulate_trades` sites enumerated).
 7. **End of data** — a still-open position closes at the LAST STORED 1m
    bar's adverse extreme (`_last_bar_exit_paisa` re-anchored,
-   `trade_sim.py:794-804`).
+   `trade_sim.py:794-804`) — **UNLESS that last stored bar IS the trade's
+   entry bar** (the legalized `exit_idx == entry_idx` terminal degenerate):
+   then the fill is that bar's **CLOSE** (the #1743 `pos.last_bar.close`
+   basis), never the adverse extreme — the B3 fold, rationale in §3.12.
 8. **Session gap** — an open position never survives an IST session-date
    change ON THE 1M STREAM: first 1m bar of a new session closes it
    retroactively at the PRIOR session's last stored 1M bar's adverse extreme
    (the finish() idiom — `trade_sim.py:562-585`, `trade_sim.rs:516-529` —
-   re-keyed on 1m `session_idx`; §3.10). Pending exits subsumed; the boundary
-   bar never arms; earliest re-arm = its successor.
-9. **Missing minutes** — never a substitute/nearest-prior bar; the mapping's
-   `>=` law slides a fill to the next STORED same-session minute; absence
-   taxonomy + observability in §5.
+   re-keyed on 1m `session_idx`; §3.10) — with the SAME B3 terminal
+   carve-out as law 7: if the prior session's last stored 1m bar is the
+   trade's OWN entry bar, the fill is that bar's CLOSE, never its adverse
+   extreme (§3.12). Pending exits subsumed; the boundary bar never arms;
+   earliest re-arm = its successor.
+9. **Missing minutes — the RATIFIED SLIDE law (B2, coordinator final
+   ruling):** never a substitute/nearest-PRIOR bar, never a fabricated
+   minute; the mapping's `>=` law slides a fill to the next STORED
+   same-session minute — the nearest NEXT print, never a chosen-best one.
+   Guardrails AS LAW: session-bounded; cross-session attempts DROP;
+   worst-case pricing applies WITHIN the slid bar (the slide is never a
+   price windfall); and EVERY slid fill is COUNTED — entries, Mode-B exits,
+   AND missing-forced-boundary fills — via the widened `fill_slid_minutes`
+   family (a stated LAW obligation, not an observability nicety; §5).
+   Absence taxonomy + the WITHHOLD named alternative in §5.
 
 ---
 
 ## §3 P0 REGISTER SECTIONS (one per id — 13 folds)
 
-> Register-source caveat (§ header disclosure): the P0 fill register files are
-> EMPTY at design time; unless a verbatim line is quoted from a surviving
-> file, "Register verify" is reconstructed and marked UNVERIFIED-UNAVAILABLE.
+> Register-source status (v2): the P0 fill register files are RESTORED and
+> AUTHORITATIVE; each section below now quotes the register verbatim. The v1
+> reconstruction caveats are retired; where the v1 reconstruction DRIFTED
+> from the original (B1 §3.1, B2 §3.9) the section says so and folds the
+> finding under its id.
 
-### §3.1 [DV-FILL-BAR-VENDOR-AUTHORITY]
+### §3.1 [DV-FILL-BAR-VENDOR-AUTHORITY] — **B1 [DRIFT] folded (coordinator-ruled REQUIRED, not waived)**
 
-- **Reconstructed scenario:** the 1m execution bar becomes the PRICE AUTHORITY
-  for every fill — vendor (Groww) 1m data quality now prices P&L directly. A
-  corrupt/scaled/clamped vendor minute must never price a fill; which stream
-  is authoritative and which guards cover it must be pinned.
-- **Design answer:** the execution slice loads through the SAME one mouth as
-  every sweep slice — `load_sweep_slice` → `Catalog.get_bars` →
-  `arrow_table_to_bars` — so it inherits the engine read boundary verbatim:
-  positivity refusal BEFORE construction (`feed/replay.py:336-347`,
-  DEC-STORED-DATA-VALIDATION-001) and the bounded bad-tick screen
-  (`feed/replay.py:320-330`, DEC-SWEEP-DATA-EDGE-GUARDS-001 — skip-and-count,
-  never value-edit). The STORED lake 1m stream (2dp-snapped at the write
-  boundary, DEC-SPOT-PRICE-2DP-001) is the single authority; no second
-  source, no resample-on-the-fly, no vendor re-fetch at sweep time. A
-  screened/absent minute routes through the §5 absence law (slide within
-  session), never a corrupt price.
-- **Verify (register line UNVERIFIED-UNAVAILABLE; designed pin):** unit — a
-  planted ×10 fat-finger 1m bar inside the exec window is screened
-  (`feed.bad_tick_skipped` observed) and the entry due at that minute fills
-  on the next stored minute, never at the corrupt extreme; a planted
+- **Register (verbatim, restored file):** "Trigger: next-1m fill bar OHLC =
+  whichever vendor won keep-first; slice has no same-vendor-as-signal
+  invariant. Expected: fill bar shares provenance (vendor+lake gen) w/
+  signal, or per-vendor engine; deterministic true adverse extreme; hash
+  carries the slice vendor. Verify: golden same day both vendors both
+  orders → fill price bit-identical; property fill provenance == signal
+  vendor."
+- **v1 drift (disclosed, per finding B1):** the v1 reconstruction answered a
+  corrupt-vendor-MINUTE data-quality scenario. That material survives below
+  as the secondary layer, but the register's ACTUAL hazard is the
+  dual-vendor keep-first PROVENANCE RACE: with two vendors writing one
+  lake, the 1m fill bar's OHLC would be whichever vendor won keep-first at
+  pull time — fill prices become ingest-ORDER-decided, breaking Golden
+  Rule #7 determinism.
+- **Design answer — THE PROVENANCE LAW.**
+  1. **Invariant (LAW):** the 1m fill slice shares provenance — vendor +
+     lake generation — with the decision slice of the same coordinate,
+     enforced at slice load: both slices load in ONE preload span under ONE
+     G10 read-guard from ONE lake generation (§1.2 D1). **The fill bar's
+     provenance == the signal's vendor; a provenance MISMATCH WITHHOLDS the
+     fill (named, counted) — never a cross-vendor fill.** Provenance
+     resolution is deterministic regardless of ingest order (Golden
+     Rule #7): the same lake content yields the same fills no matter which
+     vendor's pull landed first.
+  2. **Mechanism (assurance option (a) — the STRUCTURAL argument is the
+     invariant; the hash-fold is the belt):** under frozen ADR-0021 the
+     ENGINE reads the PRIMARY tree only — Groww-exclusive; Dhan bytes live
+     under `feeds/dhan/**` and never enter an engine slice — so decision +
+     fill slices are same-vendor BY CONSTRUCTION in v1 and a runtime
+     mismatch is UNREACHABLE. The reproducibility belt is the §4.1
+     snapshot-hash fold (the exec slice's bytes are IN `data_snapshot_hash`,
+     so whichever bytes the lake serves, the run identity carries them and
+     any provenance change re-keys). PIN: an AST/negative pin that the
+     engine slice loader (`load_sweep_slice` → `Catalog`) has NO
+     `feeds/dhan/**`-tree path. **Option (b), named as the mechanism the
+     implementation MUST add if/when dual-vendor engine reads ever become
+     reachable:** a runtime provenance assertion at the fill selector —
+     mismatch ⇒ a typed withhold, never a cross-fill.
+  3. **Scope split (honest):** the INGEST-side vendor-authority surface
+     (which vendor's bytes a dual-vendor lake stores) belongs to the Dhan
+     sibling track. OUR invariant is ENGINE-side: same-slice provenance +
+     the snapshot-hash fold. This is explicitly NOT deferred to the
+     feed-divergence comparison vehicle — the fill law owns its own
+     provenance.
+  4. **Secondary (v1 material, still true):** the exec slice loads through
+     the SAME one mouth as every sweep slice (`load_sweep_slice` →
+     `Catalog.get_bars` → `arrow_table_to_bars`), inheriting positivity
+     refusal (`feed/replay.py:336-347`, DEC-STORED-DATA-VALIDATION-001) +
+     the bounded bad-tick screen (`feed/replay.py:320-330`,
+     DEC-SWEEP-DATA-EDGE-GUARDS-001); the stored lake 1m stream
+     (2dp-snapped, DEC-SPOT-PRICE-2DP-001) is the single price source — no
+     second source, no resample-on-the-fly, no vendor re-fetch at sweep
+     time; a screened/absent minute routes through §5, never a corrupt
+     price.
+- **Verify (register verbatim, adopted):** (a) the dual-vendor GOLDEN —
+  same day, both vendors, BOTH write orders → fill price bit-identical —
+  is an **IMPLEMENTATION OBLIGATION** on the PR-B impl PR, buildable once
+  dual-vendor lake fixtures exist (the Dhan-track fixture dependency is
+  named honestly: no dual-vendor fixture exists in this repo today); (b)
+  the property `fill provenance == signal vendor` (vacuously structural in
+  v1 — pinned via the no-Dhan-path AST pin above; becomes a live runtime
+  property with option (b)); (c) the v1 secondary pins retained — a
+  planted ×10 fat-finger 1m bar is screened (`feed.bad_tick_skipped`) and
+  the entry routes per §5, never the corrupt extreme; a planted
   non-positive 1m price fails the tuple LOUDLY at construction
-  (`SweepComboError` via `_build_trade_sim`, `sweep_run.py:1089-1096`),
-  never a silent fill.
+  (`SweepComboError` via `_build_trade_sim`, `sweep_run.py:1089-1096`).
 
-### §3.2 [DV-FILL-TZ-SHIFT-WRONG-BAR]
+### §3.2 [DV-FILL-TZ-SHIFT-WRONG-BAR] — **B6 [WEAK-PIN] folded**
 
-- **Reconstructed scenario:** timestamps are stored UTC, sessions are IST
-  (+05:30, no DST); a naive/mixed-tz comparison in the signal→next-1m mapping
-  selects a bar 5h30 off (or a wrong-session bar).
+- **Register (verbatim, restored file):** "Trigger: Dhan (tz UNVERIFIED) or
+  a Groww epoch branch mislabels tz +05:30; 'next 1m after signal ts' then
+  picks a different-time-of-day bar. Expected: tz VERIFIED per vendor before
+  the selector; ambiguous tz WITHHOLDS; selector asserts same-session +
+  bounded minute-distance. Verify: unit signal 10:00 IST + tz-shifted
+  candidate → selector rejects/withholds; a tz-unverified vendor can't reach
+  it."
 - **Design answer:** the mapping (§1.2) is pure UTC-aware arithmetic on
   `bar.timestamp` (`data/models.py:114-115` — "UTC timezone-aware datetime at
   the bar's open") for BOTH streams: `exec_idx(N) = first ts_1m >=
@@ -394,12 +503,33 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   a FIXED offset (CLAUDE.md §6 timestamp row), so UTC interval arithmetic ≡
   IST interval arithmetic; no naive datetime can enter (CandleBar's contract
   is aware-UTC; the mapping does zero string/naive parsing).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** property — the mapping is
-  invariant under re-rendering fixtures through `astimezone(IST)` round trips;
-  a deliberate label-grid shift of the 1m stream by +05:30 makes the
-  session-gate drop/refuse trades rather than fill a wrong bar; golden across
-  a session-open boundary (signal on the 09:15 5m bar → fill at the 09:20 1m
-  bar, IST, asserted via UTC values).
+- **B6 fold — the register's bounded-minute-distance assertion ON the fill
+  selector (the v1 section argued tz hygiene but pinned no selector-side
+  assertion):** the selector enforces, for every selected fill bar j of a
+  decision bar N, BOTH (a) same-session (`session_idx` equality — the
+  existing gate) AND (b) a bounded wall-clock minute distance:
+  `ts_1m[j] − (ts_tf[N] + tf_minutes)` must not exceed the expected slide
+  window — the bound IS the slide law's session boundary (the minutes
+  remaining in N's arming session; forced-boundary fills are
+  session-bounded by construction). A selected bar violating either arm
+  fires a NAMED refusal/withhold (`fill_selector_distance_refused`, counted
+  + capped WARN) — never a fill. A +05:30-shifted candidate grid violates
+  (a) or (b) structurally (a 330-minute displacement lands cross-session or
+  exceeds the remaining-session span). Defense-in-depth: the assertion
+  holds even if a tz-mislabelled stream somehow survived ingest.
+- **Scope note (register: "tz VERIFIED per vendor before the selector;
+  ambiguous tz WITHHOLDS"):** per-vendor tz VERIFICATION — and the
+  ingest-side withhold of a tz-UNVERIFIED vendor — is the Dhan sibling
+  track's INGEST gate, not this engine seam ("a tz-unverified vendor can't
+  reach it" is that gate's pin); the engine-side selector assertion above
+  is the last-line net, not the verification.
+- **Verify (register verbatim, adopted):** unit — signal 10:00 IST + a
+  tz-shifted candidate grid → the selector rejects/withholds
+  (`fill_selector_distance_refused` observed), never fills a wrong-time-of-
+  day bar; property — the mapping is invariant under `astimezone(IST)`
+  round-trip re-rendering; golden across a session-open boundary (signal on
+  the 09:15 5m bar → fill at the 09:20 1m bar, IST, asserted via UTC
+  values).
 
 ### §3.3 [FILL-DUALSTREAM-ABSENT]
 
@@ -418,11 +548,14 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   `--allow-missing-slices` deliberately does NOT waive the exec slice (a
   decision slice without its execution stream is not "partial coverage", it
   is an unrunnable coordinate).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** fails-before-style
-  integration — `sweep-all` at tf=5m over a lake holding 5minute partitions
-  but NO 1minute → EXIT_USER_ERROR naming `(symbol, 1minute)`; kwargs/killed-
-  token pins that no `exec_bars_1m=None` default exists on any public
-  simulate entry.
+- **Verify (register verbatim restored: "grep for a fill_bars(1m) param
+  (none); golden 5m signal @10:00–04 fills @10:05 1m bar, not the 5m bar" —
+  adopted + extended):** the register's golden (5m signal covering
+  10:00–10:04 fills on the 10:05 1m bar, never the 5m bar);
+  fails-before-style integration — `sweep-all` at tf=5m over a lake holding
+  5minute partitions but NO 1minute → EXIT_USER_ERROR naming
+  `(symbol, 1minute)`; kwargs/killed-token pins that no
+  `exec_bars_1m=None` default exists on any public simulate entry.
 
 ### §3.4 [FILL-SIGNAL-TS-OPEN-VS-CLOSE-LOOKAHEAD]
 
@@ -436,16 +569,25 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   is a pure function of decision bar N's own data, fully formed strictly
   before `exec_idx(N)`'s first trade; the walk consumes 1m bars forward-only
   (the module's no-look-ahead law, `trade_sim.py:75-82`, carries over).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** property — for every
-  emitted trade, `entry_fill_bar.timestamp >= signal_bar.timestamp +
-  tf_minutes` (strict for the label: entry bar's OPEN ≥ the close instant); a
-  label-anchored mutant (`+ tf_minutes` dropped) fails it and fails the
+- **Verify (register verbatim restored: "property LookAheadBarrier + 1m
+  suffix-indep: fill idx > coarse last-covered minute; mutate a ≤close 1m →
+  trade unchanged" — adopted):** property — for every emitted trade,
+  `entry_fill_bar.timestamp >= signal_bar.timestamp + tf_minutes` (strict
+  for the label: entry bar's OPEN ≥ the close instant = fill idx strictly
+  past the coarse bar's last covered minute); mutating any 1m bar at/before
+  the coarse close leaves the trade unchanged (the register's second arm);
+  a label-anchored mutant (`+ tf_minutes` dropped) fails both and fails the
   degenerate-case fixed-point suite (§6); plus the §3b.4 suffix-independence
   property on the 1m stream (mutating 1m bars after a trade's exit never
   changes it).
 
 ### §3.5 [FILL-SESSION-END-NO-NEXT-1M] (1m arm)
 
+- **Register (verbatim, restored file):** "Expected: entry DROPPED; forced
+  exits fill IN the current bar (worst-case), never the next session
+  (session_gap) nor its 09:15 1m. Verify: unit next-1m-absent signal → zero
+  trades; integration held position → forced_exit with in-session exit_ts,
+  never session_gap."
 - **PR-A disposition (verbatim, `fill-worst-case-only-track.md:100-104`):**
   "FOLDED-WITH-TEETH: last-bar-signal → ZERO trades pinned on BOTH sides
   (tests/golden/test_trade_sim_rust_golden.py::
@@ -476,6 +618,12 @@ All prices int64 paisa via the one `_price_to_paisa` seam
 
 ### §3.6 [FILL-WORSTCASE-SIDE-SIGN] (1m arm)
 
+- **Register (verbatim, restored file):** "Expected: Long entry=HIGH
+  exit=LOW; Short entry=LOW exit=HIGH — every leg adverse; reuse
+  minute_path.trade_excursions_1m per-side fold as the ONE COMMON sign
+  source. Verify: property+golden for [o,h,l,c]: BUY entry==h/exit==l, SELL
+  entry==l/exit==h; a high/low-swap mutant fails; worst pnl ≤ open-to-open
+  pnl."
 - **PR-A disposition (verbatim, `fill-worst-case-only-track.md:92-99`):**
   "FOLDED-WITH-TEETH: tests/property/test_trade_sim_worst_case_floor.py —
   test_entry_fill_is_the_adverse_extreme_side_correct (exact-equality BUY
@@ -491,6 +639,16 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   the 1m bar's adverse extreme (§2.5-2.8). The sign sites remain the exact
   four seams (`_open_position` / `_resolve_level_hit`-fill /
   `_open_anchored_exit_paisa` / `_last_bar_exit_paisa` and their Rust twins).
+- **Freeze-time obligation (assurance non-blocking note, folded):** the four
+  sign seams above reconcile onto ONE COMMON side-sign source at freeze
+  time — the `_open_anchored_exit_paisa` sign core extracted as the single
+  adverse-side helper the other three consume (§11 COMMON; today they are
+  four hand-synchronized sign expressions). This also resolves the
+  §3.6-vs-§2.6 seam ambiguity EXPLICITLY: under §2.6 the Mode-B fill stops
+  being open-ANCHORED (the decision-bar open drops out of the law entirely),
+  but the seam's SIDE-SIGN logic is the survivor — `_open_anchored_exit_paisa`
+  lives on as the common sign source, NOT as a retained open-anchored fill
+  law.
 - **Verify:** the PR-A floor-property suite re-derived over dual-stream
   fixtures — exact-equality side pins on the 1M extremes + the
   worst≤open-anchored dominance property per trade per exit class + the
@@ -509,15 +667,23 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   of every exec bar with ZERO derivation change — any single 1m bar
   difference re-keys every run identity in the grid (the `bxsnap2` streamed
   fold, `snapshot_hash.py:52-63`). The Stage-3 lockbox-train derivation
-  (ADR-0007 A1, `snapshot_hash.py:44-49`) must cut the exec slice with the
-  SAME lockbox exclusion law before folding — flagged as open question §8.Q3
-  (design intent: one shared slicer, never two cut laws).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** golden — flip ONE exec
-  1m bar's low by 1 paisa ⇒ `data_snapshot_hash` moves ⇒ `mask_run_id`
+  (ADR-0007 A1, `snapshot_hash.py:44-49`) cuts the exec slice with the SAME
+  lockbox exclusion law before folding — SETTLED per §8 Q3 (MANDATORY
+  sharpening adopted): ONE BOUNDARY — `lockbox_start` computed once per
+  instrument pair and applied to BOTH streams; where per-stream boundaries
+  would diverge, the EARLIER boundary wins + a tail-skew WARN. Pins: no
+  train trade prices an exec bar at/after the boundary (the WALK-side leak
+  is the sharper hazard, not the hash) AND the train fold includes the CUT
+  exec slices.
+- **Verify (register verbatim restored: "unit hash differs on a single 1m
+  field change while coarse constant; integration the tuple cache misses
+  after a 1m edit" — adopted):** golden — flip ONE exec 1m bar's low by 1
+  paisa ⇒ `data_snapshot_hash` moves ⇒ `mask_run_id`
   (`sweep_run.py:410-468`) + `grid_identity`
-  (`sweep_supervisor.py:382-401`) move; unchanged decision slice alone
-  cannot alias. Plus a spy pin that the preload registered the
-  `(symbol, "1minute")` key for every swept symbol.
+  (`sweep_supervisor.py:382-401`) move; integration — the tuple cache
+  MISSES after a 1m edit while the coarse slice is constant; unchanged
+  decision slice alone cannot alias. Plus a spy pin that the preload
+  registered the `(symbol, "1minute")` key for every swept symbol.
 
 ### §3.8 [FILL-EXIT-TS-NOT-COARSE-BAR-EQUITY-CRASH]
 
@@ -541,24 +707,48 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   of today's `sweep_driver.py:150-153` refusal). Equity stays sampled per
   DECISION bar — the per-mask equity fold remains O(N_tf), NOT O(N_1m)
   (§1.5's compute honesty; the drawdown/metrics tail is untouched in shape).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** fails-before — a
+- **Verify (register verbatim restored: "unit build_equity_curve with a 1m
+  exit_ts raises today (fails-before); post-fix equity attributes correctly
+  + exit_indices_consistent passes over 1m" — adopted):** fails-before — a
   1m-granular exit_ts trade fed to today's `build_equity_curve` raises
   `ValueError` (the pinned message `sweep_driver.py:152`); after — it folds
-  at the owning 5m bar; invariants Σ(equity deltas) == Σ(pnl) and
-  fastpath≡fallback bit-parity under the certificate; a `decision_of`
-  off-by-one mutant fails the parity.
+  at the owning 5m bar + `exit_indices_consistent` passes over the 1m
+  stream; invariants Σ(equity deltas) == Σ(pnl) and fastpath≡fallback
+  bit-parity under the certificate; a `decision_of` off-by-one mutant fails
+  the parity.
 
-### §3.9 [DV-FILL-1M-BAR-ABSENT]
+### §3.9 [DV-FILL-1M-BAR-ABSENT] — **B2 [DRIFT] folded; register override RATIFIED (slide is the law)**
 
-- **Reconstructed scenario:** the exact next 1-minute bar after a signal's
-  close does not exist in the stored stream. Four distinct causes with
-  different truths; the law must never fabricate or substitute.
-- **Design answer:** §5 in full (the four-cause taxonomy + the slide law +
-  observability). Summary: the mapping's `>=` law fills at the next STORED
-  same-session minute; cross-session → drop/`session_gap`; never a
-  nearest-PRIOR bar, never a synthesized minute.
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** §5's four fixtures (one
-  per cause) + the `fill_slid_minutes` observability pin.
+- **Register (verbatim, restored file):** "Trigger: 1m after the coarse
+  close is absent (untraded/hole/bad-tick-screened/truncated-withheld/
+  only-other-vendor) while a later 1m exists. Expected: WITHHELD/skipped w/
+  a named reason (or tuple demoted) — NEVER fall back to signal-TF open or
+  last close; any fabricated fill is counted+stamped. Verify: unit/property
+  4 absence causes → skip/withhold, no fabricated price; grep the fill seam
+  for a silent fallback."
+- **v1 drift (disclosed, per finding B2) + the FINAL ruling:** v1 designed a
+  session-bounded SLIDE — an override of the register's expected WITHHOLD —
+  without presenting it as one. The assurance review flagged the drift; the
+  coordinator then RULED (final, 2026-07-15): **the SLIDE is RATIFIED as
+  the shipped law, UNIFIED across PR-A and PR-B** (a divergent missing-bar
+  law between them is ruled a correctness defect), with the register's
+  guardrail intent carried as LAW (§2.9: session-bounded · every slid fill
+  counted · never a prior/substitute bar · cross-session DROPS ·
+  worst-case-within-the-slid-bar). The register's WITHHOLD stays fully
+  drafted as the NAMED ALTERNATIVE (§5.4) — a one-edit doc flip for the
+  operator's morning note, with its flip ASYMMETRY cost stated there.
+- **What the register's core prohibition still gets, unconditionally:**
+  NEVER a fallback to the signal-TF open, NEVER the last/nearest-PRIOR
+  close, NEVER a fabricated minute — the slide fills at the nearest NEXT
+  stored print only, worst-case-priced, counted.
+- **Design answer:** §5 in full (the four-cause taxonomy under the ratified
+  slide + the widened counter law + the §5.4 withhold alternative).
+- **Verify (register verbatim, adapted to the ruling):** §5's four
+  absence-cause fixtures (one per cause — each asserting the slid fill's
+  bar, price, and count; no fabricated price anywhere) + the grep/killed-
+  token pin that NO nearest-prior/last-close/signal-TF-open fallback exists
+  on any fill seam + the widened `fill_slid_minutes`-family observability
+  pins (entries, Mode-B exits, forced-boundary fills).
 
 ### §3.10 [FILL-SESSION-GAP-GUARD-1M-STREAM]
 
@@ -579,10 +769,14 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   same capped WARN discipline, now naming 1m-truth holes. The
   `exits_session_gap` aggregate counter (#1743's persistent signal) is
   unchanged in shape.
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** two-session dual-stream
-  fixture with a session-tail 1m hole → `session_gap` close priced at the
-  prior session's last 1M bar low/high (exact-equality both engines); the
-  #1743 truncation-equivalence property re-derived on the 1m stream
+- **Verify (register verbatim restored: "unit two-session parity re-derived
+  for 1m fills: open long into a gap closes at the prior session's last 1m;
+  no next-session fill; exit_ts stays prior" — adopted):** two-session
+  dual-stream fixture with a session-tail 1m hole → `session_gap` close
+  priced at the prior session's last 1M bar low/high (exact-equality both
+  engines; the B3 terminal carve-out arm — entry-bar-is-last-bar — priced
+  at that bar's CLOSE), exit_ts staying in the PRIOR session; the #1743
+  truncation-equivalence property re-derived on the 1m stream
   (prefix-truncation ≡ session_gap modulo reason label); Python↔Rust parity
   over the two-session hypothesis generator extended to dual streams.
 
@@ -598,21 +792,36 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   dual-stream walk, its own close-instant mapping (a flat forward two-pointer
   — deliberately NOT importing `exec_grid.py`, which joins the AST import-ban
   list), its own 1m session/forced re-derivation, the same-bar deferral, the
-  slide law, SL-first tie — the independent-recomputation bar
-  (`sweep_diffcheck.py:24-27`). The reference does NOT implement flat-skip
+  slide law, **the §1.2 collision WINNER LAW (B4 fold: earliest-armed wins,
+  loser drops + counts — the reference implements it FROM the §1.2 one
+  statement, exactly as walker and kernel do; one normative statement,
+  three independent implementations, parity-pinned)**, SL-first tie — the
+  independent-recomputation bar (`sweep_diffcheck.py:24-27`). The reference does NOT implement flat-skip
   (§1.5) — naive full walk is the point. K=200 sampling, blake3 seeding,
   never-adopt (`DiffCheckMismatch` ⇒ SUSPECT, production value always
   ships) all unchanged. The CI rehearsal keeps `CI_K_SAMPLES=8`
   (`sweep_diffcheck.py:116`).
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** the AST independence pin
-  extended (+`brutex.engine.exec_grid` in the banned-imports list); an
-  off-by-one mutant in the KERNEL's `arm_source` consumption ⇒
-  `DiffCheckMismatch` fires on the rehearsal fixture (fails-before teeth);
-  R45 clean on the re-locked goldens; the dual-stream hypothesis parity
-  suite (walker≡kernel≡reference on sampled masks).
+- **Verify (register verify restored: "golden Rust-vs-Python field-by-field
+  + diffcheck K=200: identical trades; an un-ported kernel trips
+  diffcheck→SUSPECT (teeth), never passes silently" — adopted):** the AST
+  independence pin extended (+`brutex.engine.exec_grid` in the
+  banned-imports list); an off-by-one mutant in the KERNEL's `arm_source`
+  consumption ⇒ `DiffCheckMismatch` fires on the rehearsal fixture
+  (fails-before teeth); R45 clean on the re-locked goldens; the dual-stream
+  hypothesis parity suite (walker≡kernel≡reference on sampled masks); the
+  §1.2 boundary-spanning-hole COLLISION fixture run through all three
+  implementations (each fills the earliest-armed winner on the slid bar,
+  drops the loser, and counts `signals_dropped_collision` — B4).
 
 ### §3.12 [FILL-SAME-BAR-TIME-ORDER-PHANTOM-LOSS]
 
+- **Register (verbatim, restored file):** "Expected: respect intra-bar
+  causality (entry before exit); defer the exit to the next 1m OR bound the
+  same-bar loss to a time-ORDERED path — no guaranteed full-range loss.
+  Verify: property same-bar loss ≤ worst monotone (O,H,L,C) ordered path;
+  golden a fast-reversal fixture must not report loss==(h−l) on every
+  trade." (The deferral chosen below is the register's FIRST offered arm;
+  the B3 dominance pin is the register's own property.)
 - **PR-A disposition (verbatim, `fill-worst-case-only-track.md:105-108`):**
   "WAIVED-ACCEPTED — verbatim rationale recorded in
   docs/adr/0023-worst-case-fills-only.md: 'H-then-L = conservative bound;
@@ -635,13 +844,38 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   (c) it makes the same-minute entry+exit class structurally impossible
   rather than bounded. The PR-A ADR-0023 waiver text remains true FOR the
   decision-TF interim it governed; PR-B's ADR records the supersession.
+- **B3 [GAP — same-1m deferral degenerate] folded — the terminal carve-out
+  that makes the claim TRUE:** the deferral has a legal degenerate the v1
+  draft contradicted itself on. A position whose entry 1m bar is the
+  stream's LAST stored bar (`end_of_data`) or a session's last stored bar
+  (`session_gap`) has NO successor to defer onto — `exit_idx == entry_idx`
+  is LEGALIZED for exactly those two terminal classes. Pricing that
+  terminal same-bar close at the ADVERSE EXTREME (v1 §2.7/2.8) would BE the
+  full-range phantom loss through the back door: entry at the 1m HIGH +
+  same-bar exit at the 1m LOW. So the terminal same-bar fill prices at the
+  bar's **CLOSE** — the #1743 `pos.last_bar.close` basis (main's own
+  session-gap price basis) — restated normatively in §2.7/2.8. With the
+  close basis, the §3.12 claim "the same-minute entry+exit class is
+  structurally impossible" is now true WITHOUT exception for path-ordered
+  losses: no fill anywhere depends on an assumed intra-bar path order (a
+  close is a real single print, not an ordered pair of extremes).
+  **Deferral observability (B3):** the counted `exits_deferred` event — a
+  trade whose ENTRY 1m bar's range already touched an SL/TP level, with
+  detection deferred by §2.4 — makes the deferral's cost MEASURABLE
+  (per-tuple total; aggregate wiring per the `exits_session_gap`
+  append-only counter idiom, #1743).
 - **Verify:** golden — an entry 1m bar whose own range pierces the SL level
   produces NO same-bar exit (both engines; fails-before against a same-bar
-  variant); property — for every trade,
+  variant) AND counts `exits_deferred == 1`; property — for every trade,
   `exit_bar_idx_1m > entry_bar_idx_1m` unless the exit class is
-  `session_gap`/`end_of_data` priced at the entry bar (last-stored-bar
-  degenerate, where idx equality is legal); the deferral-drop mutant
-  (re-enabling same-bar manage) fails both.
+  `session_gap`/`end_of_data` priced at the entry bar's CLOSE
+  (last-stored-bar degenerate, where idx equality is legal); **the B3
+  dominance pin** — for every legalized same-bar terminal trade,
+  |pnl| is bounded by the ordered-path worst for that bar (the close lies
+  within `[low, high]`, so the H-then-L/L-then-H bound holds structurally;
+  the pin keeps a price-basis regression from re-opening the phantom); the
+  deferral-drop mutant (re-enabling same-bar manage) fails the golden + the
+  property; a close-basis→extreme-basis mutant fails the dominance pin.
 
 ### §3.13 [FILL-KERNEL-BURNIN-GLOBAL-AUTOREVERT]
 
@@ -669,12 +903,16 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   twin, `rust_trade_sim.py:628-637`). Per-WINDOW, loud, never wrong numbers,
   and never a process-global latch. The R45 diffcheck (§3.11) is the
   independent net for a half-updated kernel that passes the signature probe.
-- **Verify (UNVERIFIED-UNAVAILABLE; designed pin):** a monkeypatched kernel
-  exposing the OLD (pre-dual-feed) constructor/signature ⇒ construction
-  demotes with `exec_grid_kernel_stale`, trades == oracle trades bit-for-bit;
-  a burn-in pin that `rust_metrics` still passes burn-in over 1m-law trades
-  (both arms fed the same trades); negative pin — no new global latch exists
-  in the trade-sim seam (grep/killed-token).
+- **Verify (register verbatim restored: "unit sweep w/ 1m exit instants →
+  no kernel_autoreverted latch, kernel stays engaged; a genuine kernel bug
+  still autoreverts (teeth)" — adopted):** a sweep whose exits land on 1m
+  instants absent from the coarse set produces NO `kernel_autoreverted`
+  latch (the metrics kernel stays engaged) while a genuine metrics-kernel
+  bug still autoreverts (teeth); a monkeypatched trade-sim kernel exposing
+  the OLD (pre-dual-feed) constructor/signature ⇒ construction demotes with
+  `exec_grid_kernel_stale`, trades == oracle trades bit-for-bit; negative
+  pin — no new global latch exists in the trade-sim seam
+  (grep/killed-token).
 
 ---
 
@@ -737,16 +975,26 @@ All prices int64 paisa via the one `_price_to_paisa` seam
   regen diff shows ONLY fill-price/ts/holding/identity fields moving; the
   PR-A `_GOLDEN_RUN_ID` (`715212420d…`, `pra_checkpoint.md:257-259`) must
   FAIL against the PR-B tree before re-lock.
+- **Census obligation (assurance non-blocking note, folded):** the golden
+  re-lock census must NAME the exit-reason / `exits_*` counter
+  REDISTRIBUTION the same-bar deferral causes — trades that exited on their
+  entry bar under PR-A move to next-bar SL/TP, `end_of_data`, or
+  `session_gap`, so the per-reason counts SHIFT even where the pnl columns
+  alone read like pure price moves — plus the NEW counters entering the
+  aggregate columns (`exits_deferred`, `signals_dropped_collision`, the
+  widened `fill_slid_minutes` family), each accounted in the census, never
+  a silent column drift.
 
 ### §3b.4 [FILL-LOOKAHEAD-PROPERTY-SUFFIX-INDEP-1M]
-(register file `-p1-c.md` EMPTY — verbatim line UNVERIFIED-UNAVAILABLE;
-reconstructed from the id + the standing suite)
+(verbatim register, `extreme-scenario-register-p1-c.md` — RESTORED at v2;
+the v1 reconstruction matched the original intent, caveat retired)
 
-- **Reconstructed expected:** the P-06 suffix-independence gates
-  (`tests/property/test_sweep_suffix_independence.py`, the #1181 permanent
-  layer) must cover the 1M execution stream too — trades over bars `0..N`
-  bit-identical whether EXEC bars after the last consumed instant are
-  absent, mutated, or extreme.
+- **Register expected (verbatim):** "extend suffix-independence — mutating a
+  1m after a trade's exit 1m can't change it, and a 1m at/before the coarse
+  close can't change the fill." The standing suite it extends:
+  `tests/property/test_sweep_suffix_independence.py` (the #1181 permanent
+  layer) — trades over bars `0..N` bit-identical whether EXEC bars after
+  the last consumed instant are absent, mutated, or extreme.
 - **Design answer:** the property suite gains the dual-stream arm: for a
   fixed decision stream + signals, mutating any 1m bar strictly after a
   trade's exit 1m bar (and after the last consumed arm point) leaves that
@@ -755,9 +1003,9 @@ reconstructed from the id + the standing suite)
   #1743 truncation-equivalence shape). The flat-skip kernel arm (§1.5) runs
   under the SAME property (jump tables are derived from arm points, which
   are decision-side data — no future exec bar can move an earlier jump).
-- **Verify:** the extended property file + the §3.4 mapping property; the
-  register's own line to be reconciled by assurance when the file is
-  restored.
+- **Verify (register verbatim):** "property two-stream suffix-independence
+  over the 1m stream; a deliberate look-ahead fill (a 1m inside the coarse
+  bar) FAILS the extended gate" — plus the §3.4 mapping property.
 
 ---
 
@@ -789,6 +1037,13 @@ reconstructed from the id + the standing suite)
    sweep"), and `sweep_verify`'s generation gate grows the same arm beside
    `_require_worst_case_entries`. PR-A-era artifacts thereby refuse LOUDLY,
    never replay silently (coordinator ruling 3's posture carried forward).
+   **Cascade-manifest posture (§8 Q2 SETTLED): the manifest carries the law
+   BY DERIVATION, never payload** — the `execution_grid` key in the spec
+   dict is the ONE schema addition (refuse-on-absence is the sole refusal
+   law); the exec coordinates derive as instruments × `"1minute"` in BOTH
+   `load_bars_for_manifest` AND `manifest_snapshot_hash`, so the G7
+   snapshot-hash check auto-refuses a healed lake, and bar bytes never
+   enter the manifest.
 3. **Every run_id re-keys ⇒ full re-sweep on deploy — documented.** Three
    independent re-key forces: the snapshot grows the exec slices, the params
    dict grows the key, and `code_commit_sha` moves. `run_id =
@@ -801,35 +1056,132 @@ reconstructed from the id + the standing suite)
    would be redundant), the flat-skip jump tables (§1.5 — behavior-identical
    accelerator, parity-pinned).
 
-## §5 MISSING-1m / ABSENCE TAXONOMY
+## §5 MISSING-1m / ABSENCE LAW — the RATIFIED SLIDE + the WITHHOLD alternative
+
+> **B2 [DRIFT — DV-FILL-1M-BAR-ABSENT] folded — coordinator FINAL ruling
+> 2026-07-15: the session-bounded SLIDE is RATIFIED as the shipped law,
+> UNIFIED across PR-A and PR-B** (a divergent missing-bar law between the
+> two is ruled a correctness defect). The register's expected WITHHOLD
+> stays fully drafted as the named alternative (§5.4) so either outcome of
+> the operator's non-blocking morning note is a one-edit flip — with the
+> flip ASYMMETRY stated honestly there.
+
+### §5.1 The register's expected behavior (verbatim, restored)
+
+"WITHHELD/skipped w/ a named reason (or tuple demoted) — NEVER fall back to
+signal-TF open or last close; any fabricated fill is counted+stamped."
+The core PROHIBITION is law under EITHER variant: never a fallback to the
+signal-TF open, never the last/nearest-PRIOR close, never a fabricated
+minute — pinned by the fill-seam grep (§3.9).
+
+### §5.2 THE SLIDE LAW (shipped; guardrails stated AS LAW)
 
 The walker sees only the STORED exec stream and cannot attribute causes at
-walk time; the LAW is therefore cause-independent — **never a substitute
-(nearest-prior) bar, never a fabricated minute** — while observability names
-what happened. The four causes and their behavior:
+walk time; the law is cause-independent. A fill whose exact next 1-minute
+bar is not stored fills at the **next STORED same-session minute — the
+nearest NEXT print, never a chosen-best one**, under these guardrails as
+LAW (§2.9): **session-bounded** (a fill never slides across a session
+boundary; cross-session attempts DROP — entry drop / `session_gap` per
+§2.7-2.8); **counted** — EVERY slid fill class counts (`fill_slid_minutes`
+for entries, widened per the assurance REQUIRED promotion to Mode-B exit
+fills and missing-forced-boundary fills — via one widened counter or named
+siblings `exit_fill_slid_minutes` / `forced_fill_slid_minutes`; per-tuple
+totals + capped WARN, the `_TAIL_HOLE_WARN_CAP` idiom
+`rust_trade_sim.py:163-170`); **never a prior/substitute bar**; and
+**worst-case pricing applies WITHIN the slid bar** — the slide is never a
+price windfall. The four causes and their behavior:
 
-| # | Cause | Lake truth | Behavior at the fill law | Named signal |
-|---|-------|-----------|--------------------------|--------------|
-| 1 | **Untraded minute** (vendor-legit empty; rare on the 3 engine indices — an index prints every session minute, the #1794 `is_index` presence law — but legal in general) | minute genuinely absent | the mapping's `>=` law fills at the next STORED same-session minute (the SLIDE); SL/TP simply not evaluated during absent minutes; MAE folds stored bars only | `fill_slid_minutes` counter (below) |
+| # | Cause | Lake truth | Behavior at the fill law (SLIDE) | Named signal |
+|---|-------|-----------|----------------------------------|--------------|
+| 1 | **Untraded minute** (vendor-legit empty; rare on the 3 engine indices — an index prints every session minute, the #1794 `is_index` presence law — but legal in general) | minute genuinely absent | the mapping's `>=` law fills at the next STORED same-session minute; SL/TP simply not evaluated during absent minutes; MAE folds stored bars only | the `fill_slid_minutes` counter family |
 | 2 | **Lake hole** (missed pull / interior gap / session tail — #1031's domain) | absent until healed | same slide; cross-session → entry DROP / position `session_gap` (§2.8); when the hole heals, the re-pull moves `data_snapshot_hash` → the re-sweep recomputes honestly (§4.1) | #1031 detectors own alerting; `trade_sim.session_tail_hole` WARN sweep on the 1m columns (§3.10) |
 | 3 | **Bad-tick-screened minute** (read-boundary skip-and-count, `feed/replay.py:320-330`) | stored but SCREENED at read | identical to absent — the screen precedes the walk; never price on the corrupt bar (§3.1) | `feed.bad_tick_skipped` (existing) |
 | 4 | **Withheld today-bars** (the #1774 today-completeness gate kept still-settling minutes out of the lake) | absent by design until settled | the session's stored tail simply ends earlier: entries whose fill instant lands past it DROP (same-session gate has nothing to fill on) or the position closes `end_of_data`/`session_gap` per §2.7-2.8 | the gate's own `TODAY_INCOMPLETE` ledger surface |
 
-**Why SLIDE and not strict-adjacent NO-FILL:** (a) it IS the operator law
-read plainly — "the NEXT 1-minute bar" after the close is the next minute
-that TRADED; a minute with no bar is a minute you could not have filled in
-either; (b) the current engine's own law is already "the next STORED bar,
-session-gated" (`trade_sim.py:253-258` — a pending entry fills at the very
-next bar unless it crossed a session), so the tf==1minute degenerate case
-(§6) is a fixed point ONLY under the slide; a strict-adjacent NO-FILL would
-silently drop trades on every one-minute hole and make the degenerate case
-diverge from PR-A; (c) worst-case pricing on the slid bar keeps the
-never-optimistic guarantee. **Bound:** the slide is session-bounded (the
-same-session gate) — a fill can never slide across a session boundary.
-**Observability:** the walker counts entries whose fill bar's timestamp
-exceeds `close_instant + 1 minute` (`fill_slid_minutes` total + capped
-per-tuple WARN, the `_TAIL_HOLE_WARN_CAP` idiom `rust_trade_sim.py:163-170`)
-— a visible honesty signal, never a law change.
+### §5.3 The ruling's rationale (recorded verbatim in intent)
+
+(a) Per-missing-minute withholding silently deletes trades on ordinary
+#1031 lake holes — a survivorship/selection distortion, which is exactly
+the optimism-illusion vector the operator's worst-case directive forbids;
+(b) a real broker fills at the next available print — the slide IS the
+executable reading of "the NEXT 1-minute bar"; (c) worst-case pricing on
+the slid bar keeps the never-optimistic guarantee; (d) **UNIFICATION:
+PR-A's existing walker behavior — a pending entry fills on the next PUSHED
+same-session bar (`trade_sim.py:253-258`) — IS the slide law at
+decision-TF granularity.** PR-A therefore needs NO code change; PR-B
+formalizes the SAME law on the 1m grid, and the tf==1minute degenerate
+case (§6) stays a fixed point of the fill laws.
+
+### §5.4 THE WITHHOLD — the named, fully-drafted ALTERNATIVE (flippable)
+
+**The variant (drafted so a flip is one edit):** an arming fill (entry, or
+Mode-B signal exit) whose EXACT next 1-minute bar (`ts_1m ==
+close_instant`) is not stored is WITHHELD — the entry is skipped (no
+trade), a Mode-B exit is skipped (the position continues under
+SL/TP/forced/terminal laws) — with a named counted reason
+(`entries_withheld_missing_1m` / `exits_withheld_missing_1m`). Out of the
+withhold's scope in ANY variant (positions must close): the forced-boundary
+fill prices at the first STORED 1m bar at/after the forced instant
+(displacement counted), and the §2.7/2.8 terminal laws price at stored
+prior bars.
+
+**Trade-off table (the operator's flip decision, fully informed):**
+
+| Variant | On hole-bearing lakes | Coherence | Fill realism |
+|---------|----------------------|-----------|--------------|
+| **SLIDE (ratified, shipped)** | trades preserved; the fill lands on the next stored minute, counted per class | PR-A-coherent (the unification, §5.3 — tf=1m fixed point; PR-A unchanged) | liberalizes fills onto later bars — a REAL stored price at a REAL later instant, worst-case-priced, never a windfall |
+| **WITHHOLD (alternative)** | fewer trades — entries at holes DROP (counted); the result set is survivorship-shaped exactly where data is worst | DIVERGES from PR-A's shipped walker unless PR-A is ALSO changed (see asymmetry below) | never a price the market did not immediately offer |
+
+**The flip is NOT symmetric (stated per the coordinator's honesty
+correction):** because PR-A's SHIPPED walker already slides (next pushed
+same-session bar), choosing WITHHOLD later would ALSO require changing
+PR-A's walker to keep the two laws consistent — else they diverge at every
+data hole. WITHHOLD is therefore the MORE INVASIVE option: an ENGINE change
++ golden re-locks on the PR-A surface, not a doc-only flip.
+
+**Documented cost of the withhold variant (the two-delta analysis —
+recorded here because it applies ONLY under this alternative):** under
+WITHHOLD, tf==1minute would carry TWO deltas from PR-A, not one: (a) the
+same-bar deferral (§2.4 — present under either variant), and (b) the
+withhold-at-holes delta — PR-A's walker fills a pending entry on the next
+PUSHED same-session bar (minute holes effectively slide today), so WITHHOLD
+drops entries that PR-A fills; the trade SET itself shrinks on hole-bearing
+spans. Under the ratified SLIDE, delta (b) does not exist and §6's
+one-delta statement holds.
+
+## §5b VOLUME-0 FILL BARS (ENGINE) + THE GAP-OPEN LAW — **B5 [GAP] folded**
+
+- **Volume-0 on the ENGINE is a NON-EVENT — stated explicitly so it can
+  never be conflated with the executor ruling.** The engine surface is the
+  3 spot indices (DEC-ENGINE-SPOT-ONLY-001) — spot-index bars are
+  STRUCTURALLY VOLUME-LESS (an index has no traded volume; the VWAP bits
+  52/53 permanently abstain for the same reason). A printed 1m bar is
+  therefore REAL + TRADABLE regardless of its volume field — the #1543
+  printed-bar precedent (DEC-FUTURES-EXEC-TRANSLATION-001's R15 "a printed
+  bar is REAL + TRADABLE") applied on the ENGINE side, where it was never
+  superseded. **Volume-0 NEVER rejects, withholds, or slides a fill on the
+  ENGINE** — no volume predicate exists anywhere on the engine fill path.
+- **Deliberately DISTINCT from the options/futures EXECUTOR ruling:** the
+  executors price TRADED CONTRACTS, where a volume-0 printed bar is a
+  stale-quote hazard; there DEC-FILL-WORST-CASE-ONLY-001 ruled volume-0 =
+  uniform ALWAYS-REJECT on BOTH executors (the futures R15 fill-by-default
+  clause consciously superseded ON THAT SURFACE, rejections counted). Two
+  laws, two surfaces: volume-less INDEX bars (engine, fills) vs
+  traded-contract bars (executors, translation). This section exists so
+  the two rulings can never be cross-applied in either direction.
+- **THE GAP-OPEN LAW (explicit, B5):** a next-1m bar that gaps PAST an
+  armed SL/TP level fills at the **ADVERSE-MAX vs the level WITHIN that
+  bar** — BUY exit `min(level, low_1m)`, SELL exit `max(level, high_1m)`
+  (§2.2's formula = PR-A's `_resolve_level_hit` fill law on the 1m grid) —
+  NEVER the untouched open, and never the level itself when the bar's
+  extreme is worse. A bar gapping entirely through the level fills at the
+  bar's own adverse extreme.
+- **Verify:** (a) fixture — a volume-0 1m fill bar FILLS (entry at its
+  adverse extreme; both engines); (b) killed-token/grep — no volume read
+  exists on the engine fill path (walker, kernel columns, reference sim);
+  (c) golden — a 1m bar gapping beyond the SL fills at the gapped adverse
+  extreme, not the level and not the open (both engines; a fill-at-open
+  mutant and a fill-at-level mutant both fail).
 
 ## §6 THE tf == 1minute DEGENERATE CASE
 
@@ -848,15 +1200,38 @@ Decision grid == execution grid (the preload key collapses to ONE slice,
   PR-B defers exit detection to the entry bar's successor. So tf=1minute is
   **the fixed point of every law EXCEPT the entry-bar exit-detection
   deferral** — a deliberate, ledgered law change (§3.12), not an accident of
-  the plumbing. Consequences at tf=1m: a trade whose PR-A life was
-  entry-and-stop-on-one-bar now exits on the next bar (or EOD/session_gap at
-  the entry bar's extreme if none follows); MFE/MAE unchanged in mechanism
-  (entry bar folds either way).
+  the plumbing. The one-delta statement HOLDS because the missing-bar law is
+  the ratified SLIDE, unified with PR-A's shipped next-pushed-bar behavior
+  (§5.3); under the §5.4 WITHHOLD alternative a SECOND delta would appear —
+  that analysis lives in §5.4 as the alternative's documented cost.
+  Consequences at tf=1m: a trade whose PR-A life was
+  entry-and-stop-on-one-bar now exits on the next bar — or, with no
+  successor, terminally AT the entry bar priced at its **CLOSE** (the B3
+  terminal basis, §2.7-2.8, never the adverse extreme); MFE/MAE unchanged
+  in mechanism (entry bar folds either way).
 - **Verify:** a dual-arm golden — the PR-A 1minute fixture family re-run
   under PR-B with same-bar-exit-free fixtures must be BIT-IDENTICAL
   (the fixed-point pin); a fixture engineered to exit on its entry bar under
-  PR-A must move by exactly the deferral (the delta pin, hand-derived); the
-  §3.4 mapping property at tf=1.
+  PR-A must move by exactly the deferral (the delta pin, hand-derived,
+  terminal arm priced at the close basis); the §3.4 mapping property at
+  tf=1.
+
+### §6b tf == 1day — STRUCTURALLY EMPTY under the law (stated plainly)
+
+A derived 1day decision bar is labelled midnight IST; its close instant is
+the NEXT midnight; the first stored 1m bar at/after that instant is the
+NEXT SESSION's 09:15 — a different IST session date than the arming bar's —
+so the same-session entry gate (§3.5) drops EVERY entry. **tf=1day
+produces ZERO trades under the 1m execution law.** This matches today's
+cross-session drop law (a 1day entry already fills on the next 1day bar =
+a different session under PR-A/main, so 1day sweeps yield zero trades
+today too — NOT a regression), but it must be said plainly because it
+(a) reshapes the §1.5 compute headline — the nominal "~375× at 1day"
+multiplier is MOOT (every arm point drops; flat-skip jumps the whole
+stream), and (b) sets the 1day golden expectation: the re-locked 1day
+fixtures pin ZERO trades, not re-priced trades. A TRADABLE 1day law (e.g.
+session-close-labelled daily bars) would be a separate operator decision,
+NOT this PR.
 
 ---
 
@@ -877,7 +1252,10 @@ read → different fills/costs). Byte-UNTOUCHED, pinned by empty-diff proofs:
 `vocab_golden_vectors.json` (indicator layer) and every stage1a `bar_bits`
 golden (signals are decision-TF, Stage-1A unchanged). Every re-locked value
 hand-derived in-file per the PR-A discipline; the PR-A-era run_id kept as a
-must-FAIL pin (§3b.3).
+must-FAIL pin (§3b.3). The 1day fixture family re-locks to ZERO-trade
+expectations (§6b — structurally empty, not re-priced). The re-lock CENSUS
+names the exit-reason/`exits_*` counter redistribution the deferral causes
+plus the new counters (§3b.3's census obligation).
 
 ### §7.2 Equity / exit-index / metrics tail
 
@@ -886,8 +1264,13 @@ must-FAIL pin (§3b.3).
 per-mask equity fold stays O(N_tf). `holding_bars` becomes a 1M-BAR count
 (`trade_sim.rs:571-587` semantics re-based) — a SEMANTIC change to
 `ClosedTrade.holding_bars` consumers (holding stats, time-in-market):
-decided as the honest reading (the walk grid IS the hold measure), disclosed;
-whether a `holding_decision_bars` companion is wanted is §8.Q4.
+decided as the honest reading (the walk grid IS the hold measure),
+disclosed. **§8 Q4 SETTLED: 1m-count ONLY — no `holding_decision_bars`
+companion field (derivable via `decision_of` where a display wants it);
+HARD OBLIGATION in the same change: `time_in_market_pct`'s denominator
+(`compute.py:818-821` `total_bars`) moves to the EXEC-stream bar count — a
+1m-count numerator over a decision-bar denominator would exceed 1 and the
+clamp would silently corrupt the ratio.**
 
 ### §7.3 Burn-in / diffcheck / capture surfaces
 
@@ -898,7 +1281,14 @@ unchanged, values move); `trade_capture`/results-depth re-lock; minute_path
 (`minute_path.py` docstring lines 1-50) stays annotation-only, and its
 `exit_bar_full_range` convention is re-derived against the 1m walker — the
 capture-pass 1m excursions should now match walker MFE/MAE at EVERY tf
-(an upgraded property; today pinned only at tf==1minute).
+(an upgraded property; today pinned only at tf==1minute). **The VIX
+reference stamper's lookups MOVE with the timestamps (assurance note
+folded):** `vix_at_entry`/`vix_at_exit` are looked up at the now
+1m-granular entry/exit instants — served by the NSE-INDIAVIX 1minute lake
+slice; a missing VIX minute stamps the honest `None` exactly as today
+(never fabricated, §2 Rule 3) — so the stamped VIX values on coarse-TF
+trades move at re-lock (a VALUE change riding the timestamp change, not a
+stamper-mechanism change).
 
 ### §7.4 Options/futures executors — 1m-granular timestamps FOR FREE
 
@@ -920,12 +1310,26 @@ an UNVERIFIED-estimate 250-420 MB as Python `CandleBar`s; measure at build).
 Compute: the trade-sim leg is O(N_masks · N_1m) naive — up to tf_minutes×
 today's leg — mitigated by the flat-skip design to
 O(#signals + Σ in-position minutes + #trades) per mask (§1.5), with a
-jump-vs-full-walk parity property and NEW bench gates: (a) per-mask cost
-flat vs N_1m for a sparse mask (ratio tier per `tests/bench/_o1_tiers.py`),
-(b) an A/B tuple-throughput bench vs the PR-A tree with the measured number
-recorded in the PR body — NO SLA claim before that measurement (Golden Rule
-#10). Construction: O(N_1m + N_tf) once per tuple (columns + map). Per-bar
-work stays O(1). NO O(1)-total claims anywhere.
+jump-vs-full-walk parity property and NEW bench gates **WITH TEETH
+(assurance minor folded — thresholds are REFUSAL gates, not claims)**:
+(a) per-mask cost flat vs N_1m for a sparse mask (ratio tier per
+`tests/bench/_o1_tiers.py`); (b) the A/B tuple-throughput bench vs the
+PR-A tree gains an ACCEPTANCE THRESHOLD — a sparse-mask rehearsal grid at
+tf=5m must land within **≤ 2.0× PR-A wall-clock per tuple**
+(justification: flat-skip bounds per-mask work by #signals + in-position
+minutes — both tf-invariant for a fixed strategy — and the
+once-per-coordinate column/map build amortizes across the grid's masks and
+tuples, so a >2× degradation means flat-skip is broken or a hidden
+O(N_1m)-per-mask term crept in; the measured number is STILL recorded in
+the PR body, and the ceiling refuses, it never substitutes for the
+measurement); (c) a dense-mask WORST-CASE bench — an always-in-position
+mask honestly walks ≈N_1m; the gate pins the cost LINEAR in N_1m (no
+superlinear surprise), the dense cost stated, never hidden. Construction:
+O(N_1m + N_tf) ONCE PER COORDINATE — the 1m columns + `ExecGridMap` live
+in the preload-scoped memo OWNED by `cmd_sweep_all` beside `_bars_for`
+(§1.5, the named caching owner), never rebuilt per tuple. Per-bar work
+stays O(1). NO O(1)-total claims anywhere; NO SLA claim before
+measurement (Golden Rule #10).
 
 ### §7.6 Not touched
 
@@ -936,7 +1340,7 @@ Bloom/LMDB dedup mechanics (keys re-derive through the same
 
 ---
 
-## §8 HONEST LIMITS + OPEN QUESTIONS FOR ASSURANCE
+## §8 HONEST LIMITS + ASSURANCE ANSWERS (Q1–Q6 SETTLED at review round 1)
 
 **Limits (stated, not hidden):**
 - **L1** The 1m bar is still a bar: worst-case-within-the-minute is the
@@ -944,63 +1348,80 @@ Bloom/LMDB dedup mechanics (keys re-derive through the same
   never-optimistic AT 1-MINUTE GRANULARITY, not tick-truth.
 - **L2** The same-bar deferral leaves ≤1 minute of undetected SL/TP exposure
   per trade (§3.12) — visible in MAE and the eventual exit, by design.
-- **L3** The slide law (§5) fills at the next stored minute, which on a
-  multi-minute hole is a stale-adjacent fill — a REAL stored price at a REAL
-  later instant, counted (`fill_slid_minutes`), session-bounded, honest.
+- **L3** The RATIFIED slide law (§5) fills at the next stored minute, which
+  on a multi-minute hole is a stale-adjacent fill — a REAL stored price at a
+  REAL later instant, counted per fill class (the widened
+  `fill_slid_minutes` family — a LAW obligation, §2.9), session-bounded,
+  worst-case-priced within the slid bar, honest.
 - **L4** Memory + throughput numbers marked UNVERIFIED are estimates;
   build-time measurement is a gate, and the flat-skip lever's win is
-  mask-sparsity-dependent (dense long-hold masks approach O(N_1m)).
-- **L5** The register wipe (header disclosure): 9 of 13 P0 sections answer a
-  RECONSTRUCTED scenario. Assurance must diff each against the original
-  intent when/if the files are restored.
+  mask-sparsity-dependent (dense long-hold masks approach O(N_1m) — the
+  §7.5 dense-mask bench states the cost).
+- **L5** (v2 update) The register files are RESTORED and authoritative;
+  every driving section quotes them verbatim, and the two reconstruction
+  DRIFTS the review found (B1, B2) are folded under their finding ids. The
+  v1 reconstruction caveat is retired.
 - **L6** NIFTY bar-count arithmetic uses an approximate holidays/yr (14-16);
   the exact count derives from `calendars/nse.py` at build time.
+- **L7** tf == 1day is STRUCTURALLY EMPTY under the law (§6b) — zero
+  trades, matching today's cross-session drop behavior; the 1day goldens
+  pin zero trades and the 375× compute headline is moot.
 
-**Open questions (assurance input wanted BEFORE freeze):**
-- **Q1** `run_persisted_sweep`'s finalist re-simulation + price anchors
-  (`ranked_combo_to_result_row`, `sweep_run.py:901-919`): with 1m-granular
-  `entry_ts`/`exit_ts`, the `avg_entry/exit_price` anchors should read the
-  1M bars (`bars_by_ts_first` over which stream?). Design intent: the exec
-  stream (the fill truth); confirm the ResultRow anchor semantics.
-- **Q2** Stage-3 / cascade re-simulation paths (`stage3_wire`,
-  `cascade_wire.load_bars_for_manifest`, `robustness`, `candidate`,
-  `validation`, the CLI options-sim replay): each re-sims through
-  `simulate_trades` and must thread the exec slice; the cascade MANIFEST
-  must carry/load the 1m slices for replay (a manifest-schema addition +
-  refusal law for manifests lacking them). Confirm the manifest posture.
-- **Q3** The Stage-3 lockbox: the exec slice must be cut by the SAME
-  lockbox-exclusion law as the decision slice before its snapshot fold
-  (§3.7) — one shared slicer. Confirm no second cut law is acceptable.
-- **Q4** `holding_bars` (§7.2): 1m-count only, or also carry a
-  `holding_decision_bars` companion for display continuity?
-- **Q5** Mode-B exit signals: designed as symmetric next-1m fills (§2.6).
-  The sweep path never feeds exit signals (`trade_sim.rs:697` — kernel
-  passes none); confirm the Mode-B law needs no operator ruling of its own.
-- **Q6** The ledger slot: #1826 assumed from the track band; coordinator to
-  confirm against the live reservation map at PR time (renumber-at-landing
-  law stands).
+**Assurance round-1 ANSWERS — Q1–Q6 SETTLED (each folded into its section):**
+- **Q1 SETTLED:** the finalist re-simulation's price anchors
+  (`ranked_combo_to_result_row`, `sweep_run.py:901-919`) read
+  `bars_by_ts_first` over the **EXEC (1m) stream** — the only total domain
+  including session_gap/slid fills; the open/close ANCHOR semantics are
+  KEPT on the 1m fill bars (fill-extreme anchors would be a separate
+  ResultRow-semantics DEC). Pins: fails-before KeyError on the decision
+  map; re-locked goldens show only anchor/ts/pnl movement.
+- **Q2 SETTLED:** the cascade manifest carries the law BY DERIVATION, not
+  payload (§4.2): ONE schema addition (`execution_grid` in the spec dict;
+  refuse-on-absence is the sole refusal law); exec coordinates derived as
+  instruments × `"1minute"` in BOTH `load_bars_for_manifest` AND
+  `manifest_snapshot_hash` (the G7 check auto-refuses a healed lake); bar
+  bytes never enter the manifest.
+- **Q3 SETTLED (MANDATORY sharpening adopted, §3.7):** the Stage-3 lockbox
+  uses ONE BOUNDARY — `lockbox_start` computed once per instrument pair,
+  applied to BOTH streams; divergent per-stream boundaries resolve to the
+  EARLIER + a tail-skew WARN. Pins: no train trade prices an exec bar
+  at/after the boundary (the WALK-side leak is the sharper hazard, not the
+  hash) AND the train fold includes the CUT exec slices.
+- **Q4 SETTLED (§7.2):** `holding_bars` = 1m-count ONLY — no
+  `holding_decision_bars` field (derivable via `decision_of`); HARD
+  OBLIGATION: `time_in_market_pct`'s denominator (`compute.py:818-821`
+  `total_bars`) moves to the exec-stream count in the SAME change.
+- **Q5 SETTLED (§2.6):** Mode-B needs no operator ruling — the symmetric
+  next-1m fill law IS implemented (no dormant second fill law), with a
+  negative/AST pin that no production caller passes exit signals
+  (production-unreachable today; all five `simulate_trades` sites
+  enumerated).
+- **Q6 SETTLED:** `DEC-FILL-EXEC-GRID-1M-001` @ reserved **#1826** is the
+  stable handle (renumber-at-landing absorbs collisions).
 
 ## §9 VERIFY MATRIX (the pinned-test inventory, by register id)
 
 | Id | Pin (summary) | Kind |
 |----|---------------|------|
-| DV-FILL-BAR-VENDOR-AUTHORITY | screened-bar slide + corrupt-price loud tuple fail | unit + integration |
-| DV-FILL-TZ-SHIFT-WRONG-BAR | tz-render invariance + shifted-grid refusal + session-open golden | property + golden |
-| FILL-DUALSTREAM-ABSENT | no-1m-lake launch REFUSED; no optional-exec-feed signature | integration + killed-token |
-| FILL-SIGNAL-TS-OPEN-VS-CLOSE-LOOKAHEAD | fill-ts ≥ close-instant property; label-anchor mutant fails | property + mutant |
+| DV-FILL-BAR-VENDOR-AUTHORITY | provenance LAW (mismatch withholds; no-Dhan-path AST pin per ADR-0021) + dual-vendor both-orders bit-identity golden (IMPL OBLIGATION, Dhan-fixture-dependent) + provenance==signal-vendor property; screened-bar routing + corrupt-price loud tuple fail retained | AST + golden + property + unit |
+| DV-FILL-TZ-SHIFT-WRONG-BAR | tz-render invariance + shifted-grid selector refusal (`fill_selector_distance_refused` — the B6 bounded-minute-distance assertion) + session-open golden | property + unit + golden |
+| FILL-DUALSTREAM-ABSENT | no-1m-lake launch REFUSED; 10:05-fill golden; no optional-exec-feed signature | integration + golden + killed-token |
+| FILL-SIGNAL-TS-OPEN-VS-CLOSE-LOOKAHEAD | fill-ts ≥ close-instant property; ≤close-1m-mutation invariance; label-anchor mutant fails | property + mutant |
 | FILL-SESSION-END-NO-NEXT-1M | last-bar zero-trades both engines; Muhurat boundary goldens; i+1-cross-session property | golden + property |
-| FILL-WORSTCASE-SIDE-SIGN | exact-equality 1m side pins + dominance property + H/L swap mutant | property + mutant |
-| FILL-REPRO-1M-NOT-IN-SNAPSHOT-HASH | 1-paisa 1m flip re-keys snapshot+run_id+grid_identity | golden |
-| FILL-EXIT-TS-NOT-COARSE-BAR-EQUITY-CRASH | fails-before ValueError → owning-bar fold; fastpath≡fallback | fails-before + property |
-| DV-FILL-1M-BAR-ABSENT | four-cause fixtures + fill_slid_minutes pin | unit |
-| FILL-SESSION-GAP-GUARD-1M-STREAM | 1m-tail-hole session_gap exact prices; truncation equivalence | golden + property |
-| FILL-RUST-KERNEL-DIFFCHECK-PARITY | AST ban + arm_source off-by-one ⇒ SUSPECT; dual-stream parity | AST + mutant + property |
-| FILL-SAME-BAR-TIME-ORDER-PHANTOM-LOSS | no-same-bar-exit golden; exit_idx>entry_idx property; deferral mutant | golden + property + mutant |
-| FILL-KERNEL-BURNIN-GLOBAL-AUTOREVERT | stale-wheel demotion `exec_grid_kernel_stale`; burn-in unaffected pin | unit + negative |
+| FILL-WORSTCASE-SIDE-SIGN | exact-equality 1m side pins + dominance property + H/L swap mutant (+ the freeze-time one-sign-source consolidation) | property + mutant |
+| FILL-REPRO-1M-NOT-IN-SNAPSHOT-HASH | 1-paisa 1m flip re-keys snapshot+run_id+grid_identity; tuple-cache miss after a 1m edit | golden + integration |
+| FILL-EXIT-TS-NOT-COARSE-BAR-EQUITY-CRASH | fails-before ValueError → owning-bar fold; exit_indices_consistent over 1m; fastpath≡fallback | fails-before + property |
+| DV-FILL-1M-BAR-ABSENT | four-cause fixtures under the RATIFIED slide (B2) + widened fill_slid_minutes-family pins + no-silent-fallback grep | unit + grep |
+| FILL-SESSION-GAP-GUARD-1M-STREAM | 1m-tail-hole session_gap exact prices (incl. the B3 terminal close-basis arm); truncation equivalence | golden + property |
+| FILL-RUST-KERNEL-DIFFCHECK-PARITY | AST ban + arm_source off-by-one ⇒ SUSPECT; dual-stream parity; the B4 boundary-spanning-hole collision fixture (winner law, ×3 implementations) | AST + mutant + property + fixture |
+| FILL-SAME-BAR-TIME-ORDER-PHANTOM-LOSS | no-same-bar-exit golden + exits_deferred count; exit_idx>entry_idx property (terminal close-basis carve-out); B3 dominance pin; deferral + close-basis mutants | golden + property + mutant |
+| FILL-KERNEL-BURNIN-GLOBAL-AUTOREVERT | 1m-exit-instants sweep → no autorevert latch (teeth kept); stale-wheel demotion `exec_grid_kernel_stale` | unit + negative |
 | FILL-SL-TP-DETECTION-VS-FILL-LAG | interior-minute pierce golden; detection-mode-swap mutant | golden + mutant |
-| FILL-FORCED-EXIT-1M-UNDERSPECIFIED | 15:20 1m LOW golden; half-day/Muhurat; no-literal grep | golden + grep |
-| FILL-LAW-REKEYS-EVERY-GOLDEN | ledgered re-lock; PR-A run_id must-FAIL; vocab-fixture empty diff | golden + diff-proof |
-| FILL-LOOKAHEAD-PROPERTY-SUFFIX-INDEP-1M | exec-stream suffix independence incl. flat-skip arm | property |
+| FILL-FORCED-EXIT-1M-UNDERSPECIFIED | 15:20 1m LOW golden; half-day/Muhurat; no-literal grep; missing-boundary slid-fill count | golden + grep + unit |
+| FILL-LAW-REKEYS-EVERY-GOLDEN | ledgered re-lock; PR-A run_id must-FAIL; vocab-fixture empty diff; the counter-redistribution census (§3b.3) | golden + diff-proof + census |
+| FILL-LOOKAHEAD-PROPERTY-SUFFIX-INDEP-1M | exec-stream suffix independence incl. flat-skip arm; look-ahead fill FAILS the extended gate | property |
 
-*(Plus the §6 degenerate fixed-point/delta pair, the §1.5 jump-parity
-property, and the §7.5 bench gates.)*
+*(Plus the §5b volume-0-fill + gap-open pins, the §6 degenerate
+fixed-point/delta pair, the §6b 1day zero-trade pin, the §1.5 jump-parity
+property, the §7.2 time_in_market denominator obligation, and the §7.5
+bench gates with their acceptance teeth.)*
