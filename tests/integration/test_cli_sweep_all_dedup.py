@@ -310,6 +310,75 @@ def test_cmd_sweep_all_clean_run_fires_no_halt_alert(
     assert len(completed) == 1
 
 
+def test_cmd_sweep_all_delivers_the_summary_to_on_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G5b end-to-end: a real run delivers exactly ONE SupervisedGridSummary.
+
+    Drives the REAL ``cmd_sweep_all`` True-branch of ``deliver_summary_safe``
+    (the fenced review-fold seam) — the dashboard job's capture path — over the
+    tiny persisted lake.
+    """
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    captured: list[Any] = []
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps", on_summary=captured.append)
+
+    assert rc == 0
+    assert len(captured) == 1
+    assert isinstance(captured[0], sweep_supervisor.SupervisedGridSummary)
+    assert captured[0].tuples_run >= 1
+
+
+def test_cmd_sweep_all_runs_the_sweep_chain_inside_keep_awake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G9: the whole sweep chain runs INSIDE the keep_awake window.
+
+    ``cmd_sweep_all`` imports ``keep_awake`` lazily inside the function, so the
+    SOURCE ``brutex.observability.power_keepawake.keep_awake`` is monkeypatched
+    with a recording context manager (mirrors ``test_nightly_run.py`` G9). The
+    sweep leg (``run_supervised_grid``) records a marker so the ordering proves
+    it ran between the keep_awake enter and exit — a sleeping Mac can no longer
+    pause a multi-day sweep mid-flight.
+    """
+    import contextlib
+    from collections.abc import Generator
+
+    from brutex.observability import power_keepawake
+
+    lake_root, catalog_path = _persist(tmp_path)
+    monkeypatch.setenv("BRUTEX_SWEEP_WORKERS", "1")
+    marks: list[str] = []
+
+    @contextlib.contextmanager
+    def _recording_keep_awake(reason: str) -> Generator[None, None, None]:
+        marks.append(f"enter:{reason}")
+        try:
+            yield
+        finally:
+            marks.append("exit")
+
+    monkeypatch.setattr(power_keepawake, "keep_awake", _recording_keep_awake)
+
+    real = sweep_supervisor.run_supervised_grid
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        marks.append("sweep")  # the SWEEP leg ran INSIDE the keep-awake window
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sweep_supervisor, "run_supervised_grid", _spy)
+
+    rc = _sweep_all(lake_root, catalog_path, tmp_path / "sweeps")
+
+    assert rc == 0
+    assert marks[0] == "enter:brutex sweep-all"
+    assert marks[-1] == "exit"
+    assert "sweep" in marks
+    assert marks.index("enter:brutex sweep-all") < marks.index("sweep") < marks.index("exit")
+
+
 def test_cmd_sweep_all_small_grid_auto_resolves_sequential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

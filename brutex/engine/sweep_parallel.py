@@ -199,6 +199,7 @@ from brutex.engine.sweep_supervisor import (
     SupervisedGridSummary,
     SweepGuards,
     grid_identity,
+    publish_progress_safe,
     tuple_cache_params,
     tuple_label,
 )
@@ -1212,7 +1213,11 @@ class ParallelGridDriver:
             every progress mutation (G3, DEC-SWEEP-UNKILLABLE-CORE-001) —
             ticked from the single-threaded writer-actor apply path, so the
             parallel run now streams live progress exactly like the sequential
-            driver. ``None`` (default) is byte-identical to before.
+            driver; FENCED via
+            :func:`~brutex.engine.sweep_supervisor.publish_progress_safe`
+            (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a failed progress
+            write never aborts the sweep. ``None`` (default) is byte-identical
+            to before.
         on_tuple
             Optional per-SUCCESSFUL-tuple hook fired with
             ``(tuple, SweepRunSummary)`` from the single-threaded writer-actor
@@ -1330,7 +1335,12 @@ class ParallelGridDriver:
         sweep_id = grid_identity(self._grid)
         total = count_sweep_tuples(self._grid)
 
-        self._guards.checkpoint.load()
+        # Resilient resume (G12): a corrupt checkpoint is quarantined + logged
+        # LOUD and the sweep starts fresh (next_index == 0) instead of aborting
+        # with a CRITICAL alert. A clean/absent checkpoint is byte-identical to
+        # the prior ``load()`` (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001). The quarantine
+        # sidecar load below still gates FIRST in ``_gate_or_dispatch``.
+        self._guards.checkpoint.load_or_quarantine()
         resume_from = self._guards.checkpoint.next_index
 
         self._guards.progress.start(enumerated=total, detail=self._subject)
@@ -1442,6 +1452,8 @@ class ParallelGridDriver:
                 f"{quarantine_note}"
             )
         )
+        if self._on_progress is not None:
+            publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
         self._guards.audit.append(
             action=SUPERVISOR_ACTION_COMPLETE, subject=self._subject, payload=payload
         )
@@ -2097,16 +2109,18 @@ class ParallelGridDriver:
             )
 
     def _advance(self, *, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once + stream the fresh snapshot to ``on_progress`` (G3).
+        """Tick progress once + stream the fresh snapshot to ``on_progress`` (G3, fenced).
 
         Runs ONLY on the single-threaded writer-actor apply path
         (:meth:`_apply_ready_prefix` → :meth:`_apply`), mirroring the
         sequential driver's ``_advance`` — the hook observes ordered state and
-        can never reorder a result byte.
+        can never reorder a result byte. The hook is FENCED
+        (publish_progress_safe, DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a
+        failed progress write never aborts the sweep.
         """
         self._guards.progress.advance(current=current, survived=survived, skipped=skipped)
         if self._on_progress is not None:
-            self._on_progress(self._guards.progress.snapshot())
+            publish_progress_safe(self._on_progress, self._guards.progress.snapshot(), log=_LOG)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -2240,6 +2254,9 @@ def run_parallel_grid(
     signature difference from ``run_supervised_grid``). ``stall_seconds`` /
     ``stall_min_mask_bars_per_sec`` default to ``None`` → resolved from the
     environment (the heavy-grid-aware stall bound, DEC-SWEEP-STALL-OOM-GUARDS-001).
+    ``on_progress`` is the optional fenced live-progress hook (default ``None`` is
+    byte-identical to the pre-hook behaviour; the SAME seam as
+    ``run_supervised_grid`` — DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
 
     Raises
     ------

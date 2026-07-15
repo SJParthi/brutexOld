@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from brutex.data.greeks_enrich import GreeksEnrichTarget
+    from brutex.engine.sweep_supervisor import SupervisedGridSummary
 
 from brutex import __version__
 from brutex.config.hardware_envelope import apply_polars_thread_bound
@@ -7116,6 +7117,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     allow_out_of_scope: bool = False,
     acknowledge_sla_overrun: bool = False,
     detach: bool = False,
+    on_summary: Callable[[SupervisedGridSummary], None] | None = None,
 ) -> int:
     """Run the full multi-parameter grid sweep and persist every ranked finalist.
 
@@ -7153,6 +7155,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     from brutex.engine.sweep_run import SweepRunSummary
     from brutex.engine.sweep_supervisor import (
         SweepGuards,
+        deliver_summary_safe,
         grid_identity,
         run_supervised_grid,
     )
@@ -8199,6 +8202,17 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                     "pass was SKIPPED (no trade sidecars / baselines / top-100 refresh this run)"
                 )
 
+            # Surface the RICH grid summary to the optional consumer (G5b): the
+            # dashboard job captures it to render an honest finish-detail note
+            # (failed / quarantined-prior tuple counts) instead of a bare "done".
+            # FENCED (review fold): this call sits INSIDE the sweep_abort_alert block,
+            # so a raising consumer would fire a false CRITICAL Telegram abort alert
+            # on an already-successful sweep whose results are persisted —
+            # deliver_summary_safe swallows + logs, mirroring publish_progress_safe.
+            # The CLI/daemon int-return contract is UNCHANGED — this is additive.
+            import structlog
+
+            deliver_summary_safe(on_summary, result, log=structlog.get_logger("brutex.sweep"))
             # "Resilient: skip + continue" verdict (Golden Rule #10): a clean grid exits
             # EXIT_OK; any tuple skipped after a SweepComboError — or any stage-3 cell
             # skipped on a VIX-trio conflict — makes the exit non-zero.
@@ -8343,6 +8357,11 @@ def cmd_sweep_daemon(  # pragma: no cover — live daemon loop (real clock + sle
                     f"[brutex] sweep-daemon --once: running one cycle now ({plan.resume.kind.value})"
                 )
 
+            # keep_awake is inherited TRANSITIVELY per cycle: cmd_sweep_all holds
+            # the host awake for its own chain (G9), so the daemon deliberately
+            # adds NO outer wrap — the host is free to sleep during the
+            # inter-cycle time.sleep above (a daemon-level wrap would pin it awake
+            # through every sleep).
             exit_code = cmd_sweep_all(**sweep_kwargs)
             audit.append(
                 action="DAEMON_CYCLE_DONE",

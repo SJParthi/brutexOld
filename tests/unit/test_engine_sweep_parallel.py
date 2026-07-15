@@ -2495,3 +2495,126 @@ class TestStoreCorruptPrefixIsComplete:
         serialised = f"{type(exc).__name__}: {exc}"
         assert serialised.startswith(mod._STORE_CORRUPT_ERROR_PREFIX)
         assert mod._STORE_CORRUPT_ERROR_PREFIX == "ResultsStoreSchemaError: "
+
+
+class TestParallelOnProgress:
+    """G3/G11: the parallel driver streams fenced live-progress snapshots.
+
+    ``run_parallel_grid``/`ParallelGridDriver`` gain an optional ``on_progress``
+    hook (default ``None`` byte-identical to the pre-hook behaviour), invoked
+    ONLY from the ordered apply path (``_advance``) + the finish, so the
+    published ``evaluated`` count is monotonic. The hook is fenced
+    (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11) so a raising publish never aborts
+    the sweep.
+    """
+
+    def test_recording_hook_receives_monotone_snapshots(self, tmp_path: Path) -> None:
+        grid = _grid()
+        snaps: list[Any] = []
+        out = tmp_path / "out"
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+                on_progress=snaps.append,
+            )
+        # A snapshot per applied tuple + one at finish — never empty.
+        assert snaps
+        evaluated = [s.evaluated for s in snaps]
+        assert evaluated == sorted(evaluated)  # monotone non-decreasing
+        assert evaluated[-1] > 0
+        # The final published snapshot agrees with the returned tally.
+        assert snaps[-1].evaluated == summary.tuples_run + summary.skipped_resume
+
+    def test_default_none_hook_does_not_crash(self, tmp_path: Path) -> None:
+        # The default-None branch of ``if self._on_progress is not None`` — a run
+        # with NO hook completes byte-identically (no publish attempted).
+        _out, _ingest, ckpt = _run_parallel(tmp_path, _grid(), workers=4)
+        assert ckpt > 0
+
+    def test_parallel_run_writes_sweep_progress_file(self, tmp_path: Path) -> None:
+        # Integration: wiring the REAL ``publish_progress`` bridge as the hook,
+        # a PARALLEL run writes the dashboard's ``sweep-progress.json`` (the
+        # cross-process file the sequential path already produced) with a
+        # terminal DONE snapshot — closing the G3 gap on the parallel path.
+        from brutex.engine.sweep_supervisor import publish_progress, read_progress
+
+        grid = _grid()
+        progress_path = tmp_path / "progress" / "sweep-progress.json"
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+        ):
+            mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+                on_progress=lambda snap: publish_progress(progress_path, snap),
+            )
+        assert progress_path.exists()
+        assert read_progress(progress_path)["state"] == "done"
+
+    def test_raising_hook_is_fenced_and_the_run_completes(self, tmp_path: Path) -> None:
+        # G11: a progress hook that ALWAYS raises (a disk-full / read-only-mount
+        # publish) never aborts the multi-day sweep — swallowed + WARN-logged,
+        # the grid still finishes and the checkpoint advances.
+        grid = _grid()
+        out = tmp_path / "out"
+
+        def _boom(_snap: Any) -> None:
+            raise OSError("read-only file system")
+
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            capture_logs() as logs,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=out,
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+                on_progress=_boom,
+            )
+            assert guards.checkpoint.next_index > 0
+        assert summary.tuples_run > 0
+        assert any(e["event"] == "sweep.progress.publish_failed" for e in logs)
+
+
+class TestParallelCorruptCheckpointResume:
+    """G12: the parallel driver quarantines a corrupt checkpoint + starts fresh."""
+
+    def test_corrupt_checkpoint_resume_starts_fresh_and_completes(self, tmp_path: Path) -> None:
+        grid = _grid()
+        # Plant a genuinely corrupt resume checkpoint at the store's path.
+        (tmp_path / "ckpt.json").write_text("{corrupt-parallel-resume", encoding="utf-8")
+        with (
+            AuditWriter.open(tmp_path / "ingest.jsonl") as ingest,
+            _guards(tmp_path, grid) as guards,
+            capture_logs() as logs,
+        ):
+            summary = mod.run_parallel_grid(
+                grid,
+                bars_for=_bars_for,
+                root=tmp_path / "out",
+                ingest_audit=ingest,
+                guards=guards,
+                workers=4,
+            )
+            assert guards.checkpoint.next_index > 0
+        assert summary.skipped_resume == 0  # fresh start — nothing resumed
+        assert summary.tuples_run > 0
+        assert any(e["event"] == "sweep.checkpoint_ignored" for e in logs)
+        assert list(tmp_path.glob("ckpt.json.corrupt-*"))  # forensic quarantine kept

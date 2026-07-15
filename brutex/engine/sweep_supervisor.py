@@ -750,7 +750,11 @@ def run_supervised_grid(
         if path_probe is None:
             _LOG.info("sweep_supervisor.resume_store_guard_inert", subject=subject)
 
-    guards.checkpoint.load()
+    # Resilient resume (G12): a corrupt checkpoint is quarantined + logged LOUD,
+    # and the sweep starts fresh (next_index == 0) instead of aborting the whole
+    # run with a CRITICAL alert. A clean/absent checkpoint is byte-identical to
+    # the prior ``load()`` (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001).
+    guards.checkpoint.load_or_quarantine()
     resume_from = guards.checkpoint.next_index
 
     guards.progress.start(enumerated=total, detail=subject)
@@ -863,10 +867,10 @@ def run_supervised_grid(
         wd_thread.start()
 
     def _advance(*, current: str, survived: bool, skipped: bool) -> None:
-        """Tick progress once + stream the fresh snapshot to *on_progress*."""
+        """Tick progress once + stream the fresh snapshot to *on_progress* (fenced)."""
         guards.progress.advance(current=current, survived=survived, skipped=skipped)
         if on_progress is not None:
-            on_progress(guards.progress.snapshot())
+            publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
 
     try:
         if resume_count > 0:
@@ -884,7 +888,7 @@ def run_supervised_grid(
             for _ in range(skipped_resume):
                 guards.progress.advance(survived=False, skipped=True)
             if on_progress is not None:
-                on_progress(guards.progress.snapshot())
+                publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
             resume_payload: dict[str, Any] = {
                 "resumed_count": skipped_resume,
                 "resume_from": resume_from,
@@ -1105,7 +1109,7 @@ def run_supervised_grid(
             )
         )
         if on_progress is not None:
-            on_progress(guards.progress.snapshot())
+            publish_progress_safe(on_progress, guards.progress.snapshot(), log=_LOG)
         guards.audit.append(action=_ACTION_COMPLETE, subject=subject, payload=payload)
         _LOG.info("sweep_supervisor.complete", **payload)
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -1139,6 +1143,78 @@ def run_supervised_grid(
         tuples_failed=tuples_failed,
         store_guard_forced=len(forced) + cache_forced,
     )
+
+
+def publish_progress_safe(
+    on_progress: Callable[[SweepProgressSnapshot], None],
+    snapshot: SweepProgressSnapshot,
+    *,
+    log: Any = _LOG,
+) -> None:
+    """Fire the progress hook, SWALLOWING any error (DEC-SWEEP-ACCEPTANCE-LIFECYCLE-001 / G11).
+
+    The live progress file is a best-effort dashboard bridge; a disk-full /
+    read-only-mount / permission failure while publishing it must NEVER kill a
+    running multi-day sweep. This fences ONLY the progress hook — the checkpoint
+    ``record`` and the hash-chained audit append stay FATAL (Golden Rule #8), so
+    a broken audit/checkpoint still aborts loudly. The caller guards ``None``
+    (this helper is only invoked with a real hook), so both branches here are
+    "the hook raised" (logged + swallowed) and "the hook returned".
+
+    Parameters
+    ----------
+    on_progress
+        The caller's progress hook (already known non-``None``).
+    snapshot
+        The fresh :class:`~brutex.engine.sweep_progress.SweepProgressSnapshot`.
+    log
+        The structlog logger for the swallowed-error WARNING.
+    """
+    try:
+        on_progress(snapshot)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — the progress bridge is best-effort
+        log.warning(
+            "sweep.progress.publish_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
+def deliver_summary_safe(
+    on_summary: Callable[[SupervisedGridSummary], None] | None,
+    summary: SupervisedGridSummary,
+    *,
+    log: Any = _LOG,
+) -> None:
+    """Fire the optional run-end summary hook, SWALLOWING any error (G5b fence).
+
+    The ``on_summary`` consumer (the dashboard job's finish-note capture) runs
+    AFTER a successful sweep whose results are already persisted; a raising
+    consumer must NEVER mask that success. Inside ``cmd_sweep_all`` this call sits
+    under the ``sweep_abort_alert`` block, so an unfenced raise would fire a false
+    CRITICAL Telegram abort alert on an already-successful sweep. This mirrors
+    :func:`publish_progress_safe`: only the best-effort hook is fenced, the
+    sweep's own result / exit path is untouched. A ``None`` hook is a no-op.
+
+    Parameters
+    ----------
+    on_summary
+        The caller's run-end summary hook, or ``None`` (no-op).
+    summary
+        The completed run's :class:`SupervisedGridSummary`.
+    log
+        The structlog logger for the swallowed-error WARNING.
+    """
+    if on_summary is None:
+        return
+    try:
+        on_summary(summary)
+    except Exception as exc:  # pylint: disable=broad-exception-caught — the summary hook is best-effort
+        log.warning(
+            "sweep.on_summary_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
 
 
 #: G11 warn-once latch — one WARN per progress path per process, so a dead disk
@@ -1284,9 +1360,11 @@ __all__ = [
     "SUPERVISOR_ACTION_TUPLE_RESUME",
     "SupervisedGridSummary",
     "SweepGuards",
+    "deliver_summary_safe",
     "grid_identity",
     "idle_progress",
     "publish_progress",
+    "publish_progress_safe",
     "read_progress",
     "reset_progress_write_warnings",
     "run_supervised_grid",
