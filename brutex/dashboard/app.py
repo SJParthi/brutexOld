@@ -6126,6 +6126,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         app.py offload doctrine) so the event loop never touches the
         filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
         """
+        # Deliberately on the DEFAULT AnyIO pool (not the lake limiter): the
+        # payload is a bounded scandir + three tiny local JSON reads (nightly
+        # report.json / backup deadman.json / in-process pull outcome), NEVER a
+        # lake scan (DEC-OPERATOR-HEALTH-TRUTH-001, #1747) — the api_logs
+        # non-lake precedent. Routing it through `_run_lake` would consume the
+        # 32-token lake budget for a poll that never touches the lake.
         return JSONResponse(await run_in_threadpool(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")

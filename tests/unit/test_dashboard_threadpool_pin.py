@@ -67,6 +67,11 @@ _SANCTIONED: Counter[tuple[str, str]] = Counter(
         ("app.py", "api_preopen_xlsx"): 1,  # CPU render — rows already via _run_lake
         ("app.py", "api_preopen_zip"): 1,  # CPU render — rows already via _run_lake
         ("app.py", "api_logs"): 1,  # LOCAL rotating log (~/.brutex/logs), not the lake
+        # DEC-OPERATOR-HEALTH-TRUTH-001 (#1747): bounded scandir + three tiny
+        # local JSON reads (nightly report.json / backup deadman.json /
+        # in-process pull outcome), NEVER a lake scan — the api_logs non-lake
+        # precedent. Sanctioned at the club-D merge-forward reconcile.
+        ("app.py", "api_health_hub"): 1,
     }
 )
 
