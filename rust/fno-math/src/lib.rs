@@ -80,6 +80,18 @@ pub mod metrics;
 /// wrappers; default-OFF behind `BRUTEX_RANKING_RUST` on the Python side.
 pub mod ranking;
 
+/// DEC-SWEEP-ENUM-RUST-001 (#1738): sweep-enumeration kernel — the RANGED
+/// `enumerate_prefilter` surface (design-of-record
+/// `docs/design/sweep_core/DESIGN_FINAL_RUST_SWEEP_CORE.md` §1.3): fused
+/// k-of-bits enumeration (`iter_masks_k_of_bits`) + conflict-pair prune
+/// (`has_conflict`) + Stage-1B min-hits count over a resident condition-major
+/// transposed-bitplane substrate, unranked via the LEX-RANK combinatorial
+/// number system, emitting kept masks in the exact `itertools.combinations`
+/// lexicographic order the sweep's durable bytes depend on. Default-OFF
+/// behind `BRUTEX_SWEEP_RUST_ENUM` (Python wrapper
+/// `brutex/engine/rust_enum.py`).
+pub mod enum_kernel;
+
 /// Crate version (semver). Must be bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -149,6 +161,14 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
+    // ── DEC-SWEEP-ENUM-RUST-001 (#1738) — sweep-enum kernel surface ──
+    // (fenced additive block: unmerged sibling slices share this surface;
+    // whoever lands second reconciles trivially. The interim free function
+    // `sweep_enum_conflict_free` was REPLACED pre-merge by the ranged
+    // resident classes — the design-of-record §1.3 surface.)
+    m.add_class::<enum_kernel::ResidentSweepEnum>()?;
+    m.add_class::<enum_kernel::ResidentSweepEnumU128>()?;
+    // ── end DEC-SWEEP-ENUM-RUST-001 block ──
     m.add_function(wrap_pyfunction!(python::popcount_bytes, m)?)?;
     // ── slice-4 ranking.rs registrations (feat(ranking): Rust ranking
     //    conversion) — a comment-fenced per-slice block per the slice-4 /

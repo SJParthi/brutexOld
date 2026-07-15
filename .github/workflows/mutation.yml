@@ -553,6 +553,7 @@ jobs:
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
+            "brutex/engine/rust_enum.py:tests/unit/test_engine_rust_enum.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/engine/rust_parity_core.py:tests/unit/test_engine_rust_parity_core.py:" \
             "brutex/ranking/rust_ranking.py:tests/unit/test_ranking_rust_ranking.py:" \
@@ -725,7 +726,7 @@ jobs:
   # Rust mutation — cargo-mutants over rust/fno-math/ (8-shard matrix)
   #
   # Engine-critical scope (metrics.rs + trade_sim.rs + python.rs + lib.rs
-  # + ranking.rs)
+  # + ranking.rs + enum_kernel.rs)
   # defined ONCE in rust/fno-math/.cargo/mutants.toml — a local
   # `cargo mutants` from that dir resolves the SAME scope as CI
   # (CLAUDE.md §2 Rule 11 COMMON). The compat/* exclusion is documented
@@ -799,6 +800,17 @@ jobs:
           #   guards into pure killable cores, 915 -> 920; the 2026-07-12
           #   merge-reconcile of main's #1743 trade-sim session-boundary guard
           #   grew trade_sim.rs 167 -> 168, 920 -> 921).
+          #   metrics.rs + trade_sim.rs + python.rs + lib.rs + enum_kernel.rs
+          #   = 803 mutants measured 2026-07-11 (`cargo mutants --list | wc -l`
+          #   on the DEC-SWEEP-ENUM-RUST-001 slice-1 CONFORMANCE-REWORK tree —
+          #   metrics 358 + trade_sim 167 + python 65 + lib 9 + enum_kernel 204;
+          #   the mutants.toml exclude_re drops ONLY the 578 provably-UNVIABLE
+          #   whole-fn `-> PyResult` constructor guesses on the two pyclass
+          #   shims — rationale + verification in that file's count block).
+          #   CLUB R1 weave (integration/club-r1-fnomath): the merged tree
+          #   carries BOTH slice scopes — ranking.rs AND enum_kernel.rs — so
+          #   the union scope is ~1,125 mutants BY ARITHMETIC over the two
+          #   member measurements above (921 + 204; NOT a fresh --list run).
           #   compat/* exclusion is DOCUMENTED there + in MIGRATION #1597.
           # - --in-place (replaces copy-mode): main's build.rs
           #   include!("../source_digest_core.rs") (#1258) fails the scratch-copy
@@ -812,6 +824,25 @@ jobs:
           #   4-9 s build + 25-31 s test) ~= 56-77 min + ~5.5 min baseline/setup
           #   ~= 61-82 min nominal, ~98 at +20% on the worst end -> >= 22 min
           #   margin per shard.
+          #   wall-clock parallelism = this 8-way shard matrix (6->8 vs main's
+          #   #1597 6-shard fno-math config — fno-math was never 7 shards on
+          #   main; the 7-shard matrix is the SEPARATE trading-core job's. At
+          #   6 shards the rework's 803-mutant re-measure reads
+          #   ceil(803/6)=134 mutants/shard x 29-40 s ~= 65-89 min nominal,
+          #   ~107 min at +20% on the worst end — a ~13 min margin against
+          #   the 120-min cap, past the margin condition that took #1597's
+          #   5->6 dial; 8 shards restores the proven ~100-mutant budget:
+          #   ceil(803/8)=101/shard ~= 49-67 min nominal, ~81 at +20%
+          #   -> >= 39 min margin).
+          #   CLUB R1 weave note (honest margin arithmetic, derived not
+          #   measured): the union ~1,125-mutant scope on this 8-shard
+          #   matrix reads ceil(1125/8)=141/shard x 29-40 s ~= 68-94 min
+          #   nominal + ~5.5 min setup, ~120 min at +20% on the worst end —
+          #   AT the 120-min cap with no margin. The #1597 pre-decided dial
+          #   (8->10) is the NAMED follow-up for the next mutation-workflow
+          #   change (the 8-shard shape is pinned by
+          #   tests/unit/test_engine_rust_enum.py and both members' own
+          #   budget blocks; not re-dialed inside the club weave).
           cargo mutants \
             --in-place \
             --shard ${{ matrix.shard }}/8 \

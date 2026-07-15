@@ -3,6 +3,8 @@
   "crate_version": "0.3.0",
   "symbols": [
     "ResidentBars",
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",

@@ -36,6 +36,8 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
         "ResidentBars",
+        "ResidentSweepEnum",
+        "ResidentSweepEnumU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",

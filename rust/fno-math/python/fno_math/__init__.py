@@ -62,6 +62,11 @@ from collections.abc import Sequence
 #: list; a test pins the two equal so they cannot drift.
 _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "ResidentBars",
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — the ranged sweep-enum kernel classes
+    # (fenced additive entries; unmerged sibling slices share this surface).
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -119,6 +124,10 @@ _assert_compiled_surface(_compiled)
 # wheel raises the actionable message, not a bare from-import failure.
 from ._fno_math import (  # noqa: E402
     ResidentBars,
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — fenced additive entries.
+    ResidentSweepEnum,
+    ResidentSweepEnumU128,
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     ResidentSweepSim,
     ResidentSweepSimU128,
     __version__,
@@ -159,6 +168,11 @@ __build_crate_version__: str = __version__
 
 __all__ = [
     "ResidentBars",
+    # DEC-SWEEP-ENUM-RUST-001 (#1738) — the ranged sweep-enum kernel classes
+    # (fenced additive entries; unmerged sibling slices share this surface).
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
+    # end DEC-SWEEP-ENUM-RUST-001 entries
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",

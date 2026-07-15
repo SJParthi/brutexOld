@@ -21,6 +21,8 @@ from collections.abc import Sequence
 
 __all__ = [
     "ResidentBars",
+    "ResidentSweepEnum",
+    "ResidentSweepEnumU128",
     "ResidentSweepSim",
     "ResidentSweepSimU128",
     "__version__",
@@ -239,6 +241,55 @@ def sweep_drawdown_stats(
     Python wrapper pre-guards. Raises `ValueError` outside the envelope.
     """
     ...
+
+class ResidentSweepEnum:
+    """Resident u64-width sweep-enumeration substrate (DEC-SWEEP-ENUM-RUST-001).
+
+    Holds the tuple's `bar_bits` window as condition-major transposed
+    bitplanes (built once in `__init__` — the `O(n_bars)` Python→Rust copy +
+    transpose is paid per tuple). `enumerate_prefilter` serves RANGES of the
+    fused k-of-bits enumeration + conflict prune + Stage-1B min-hits count in
+    the exact `iter_masks_k_of_bits` lexicographic order, returning the
+    design sextuple `(enumerated_in_range, conflict_pruned_in_range,
+    next_rank, exhausted, hits_counted_in_range, kept_masks)`. Raises
+    `ValueError` outside the validated envelope (a condition-bit or pair
+    index >= 64, k > n_unique, malformed pairs, start_rank > C(n, k), a
+    total count past the u64 rank domain) and `MemoryError` when a buffer
+    cannot be reserved (the global-stop class — re-raised bare by the
+    wrapper).
+    """
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
+
+class ResidentSweepEnumU128:
+    """Resident u128-width sweep-enumeration substrate — the wide twin of
+    `ResidentSweepEnum` for condition bits in `[64, 128)` (legal per
+    `MAX_VOCAB_BITS = 128`; production-unreachable today,
+    `IMPLEMENTED_MASK < 2**60`)."""
+
+    def __init__(self, bar_bits: list[int]) -> None: ...
+    def n_bars(self) -> int: ...
+    def enumerate_prefilter(
+        self,
+        condition_bits: list[int],
+        k: int,
+        conflict_pairs: list[tuple[int, int]],
+        min_hits: int,
+        start_rank: int,
+        max_enumerated: int,
+        max_work_cells: int,
+    ) -> tuple[int, int, int, bool, int, list[int]]: ...
 
 class ResidentBars:
     """Resident bar buffer — holds `bar_bits` Rust-side across batch calls.
