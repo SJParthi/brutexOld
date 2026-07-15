@@ -9116,6 +9116,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     stage3_fevals: int | None = None,
     stage3_restarts: int | None = None,
     allow_out_of_scope: bool = False,
+    overfit_gate: bool = True,
+    dsr_min: float = 0.95,
 ) -> int:
     """Verify a sweep results tree — the doctor's CLI (DEC-SWEEP-VERIFY-001).
 
@@ -9381,6 +9383,19 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         # silently.
         "unsafe_allow_out_of_scope_instruments": True,
     }
+    if overfit_gate:
+        # Club S2 fold (DEC-RESULTS-TRUST-HONESTY-001 × DEC-SWEEP-TUPLE-DIGEST-
+        # GATE-IDENTITY-001): sweep-all now runs the overfit/DSR gate BY
+        # DEFAULT and the ACTIVE gate config folds into every store ADDRESS,
+        # so the verify grid must carry the SAME gate to derive the SAME
+        # expected paths ("pass the SAME grid flags the sweep ran with" — the
+        # sweep-verify contract). A tree swept with --no-overfit-gate verifies
+        # with the same escape flag; the former "overfit-gated tree has no
+        # recorded-knob channel" residual is thereby closed for the DEFAULT
+        # posture (a NON-default --dsr-min still needs the matching flag).
+        from brutex.ranking import OverfitGateConfig
+
+        grid_kwargs["overfit"] = OverfitGateConfig(dsr_min=dsr_min)
     if max_tuples is not None:
         grid_kwargs["max_tuples"] = max_tuples
     if exploration.apriori:
@@ -9429,10 +9444,11 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # and fold them into the verify grid so `plan_expected_stores` + the
     # shadow re-sweep address the SAME files the launcher wrote. A gate-less
     # tree emits NO fragment (default-elision), so its verify grid — and every
-    # pre-fold verdict — is byte-identical to before. HONEST residual: an
-    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
-    # here yet, so its identity pairing still reads grid_mismatch — re-verify
-    # with a matching config (the #1336 remediation wording).
+    # pre-fold verdict — is byte-identical to before. The overfit gate rides
+    # the SHARED grid flags since the club S2 fold (default-ON on sweep-all
+    # AND here — a default tree pairs by default; --no-overfit-gate /
+    # --dsr-min must MATCH the launch flags or identity pairing honestly
+    # reads grid_mismatch — the #1336 remediation wording).
     if stage3 is not None and stage3.enabled:
         import dataclasses as _dc
 
@@ -11236,6 +11252,8 @@ def _dispatch(argv: list[str] | None) -> int:
             stage3_fevals=args.stage3_fevals,
             stage3_restarts=args.stage3_restarts,
             allow_out_of_scope=args.allow_out_of_scope,
+            overfit_gate=args.overfit_gate,
+            dsr_min=args.dsr_min,
         )
     # Quarantine heal (DEC-SWEEP-HEAL-001) — dry-run by default.
     if args.command == "sweep-heal":
