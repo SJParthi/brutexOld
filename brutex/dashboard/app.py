@@ -8637,20 +8637,56 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             # instance's pull-time adaptive floor (bounded, logged stale
             # serves) instead of paying the full scan per poll.
             gen = revision_generation(rev)
+            # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
+            # ONE composite-index read per `composite_index_revision` token —
+            # the slot's generation rides the ONE `revision_generation` digest
+            # bridge over the DEDICATED probe, NOT the sweeps generation. The
+            # pre-fix comment's sufficiency claim ("aggs writes move
+            # sweep_results_revision") was FALSE: the depth pass writes the
+            # aggs AFTER the sweep's last store flush / audit append into the
+            # sweep_runs/ sibling tree the sweeps token never stats, so `gen`
+            # alone froze an empty/partial index until the NEXT sweep
+            # (refuter-reproduced; now killed by the route regression). Any
+            # aggs write moves a results-depth dir mtime → new token →
+            # recompute; a sweeps-only move (store flush) leaves the cached
+            # index untouched. HOISTED above the rollup arm at the
+            # DEC-RESULTS-TOPK-ROLLUP-001 merge-reconcile: the rollup serve
+            # predicate below must consult the ACTIVE composite state.
+            composite_index: CompositeIndex = _sweep_leaderboard_cache.get_or_compute(
+                "composite_index",
+                generation=revision_generation(comp_rev or "outage"),
+                compute=lambda: load_composite_index(sweeps_root),
+            )
+            # A JOINED non-empty composite index feeds preset ORDERING (the
+            # composite preset's primary axis AND e.g. min_dd_first's
+            # composite tiebreak — see _preset_rank_record), which the
+            # persisted rollup union structurally cannot cover (the joined
+            # score is NOT a persisted ResultRow field; the union axes are
+            # probed over composite_score=None records). The exact
+            # "de-inerting forces a conscious decision" class the rollup
+            # design named — decided at the merge-reconcile: preset-ordered
+            # polls stay LEGACY while the composite index is active.
+            composite_active = composite_index.state == "joined" and bool(composite_index.by_run_id)
             # ── The rollup serve path (DEC-RESULTS-TOPK-ROLLUP-001) ──
             # Serve predicate: ONLY the UNFILTERED leaderboard (instrument /
             # tf / direction all ABSENT — an empty-string param is a
-            # DEGENERATE real filter and stays legacy). rank_by / preset /
-            # top are all rollup-servable (every axis is in the persisted
-            # union; top ≤ MAX_TOP_N=500 ≤ K=1000). The three-outcome ladder
+            # DEGENERATE real filter and stays legacy), and ONLY orderings
+            # the persisted union covers: every rank_by (persisted-field
+            # DESC + run_id-ASC ties) always; a PRESET ordering only while
+            # the composite index is inactive (see composite_active above).
+            # top ≤ MAX_TOP_N=500 ≤ K=1000. The three-outcome ladder
             # (fresh / stale-serve-with-note / legacy-fallback+rebuild) runs
-            # ONCE per revision generation (the level-1 slot below); repeat
-            # polls are level-2 payload hits. The slot rides the SAME stable-
-            # key + `revision_generation` doctrine as the legacy level-1 scan
-            # (DEC-NAV-CACHES-FLOOR-REKEY-001 — the branch-era rev-in-key
-            # fold is superseded by the generation bridge).
+            # ONCE per revision generation (the stable level-1 slot below,
+            # generation-keyed per DEC-NAV-CACHES-FLOOR-REKEY-001 — the
+            # branch-era rev-in-key fold is superseded by the generation
+            # bridge); repeat polls are level-2 payload hits.
             serve: RollupServe | None = None
-            if instrument is None and tf is None and direction is None:
+            if (
+                instrument is None
+                and tf is None
+                and direction is None
+                and (resolved_preset is None or not composite_active)
+            ):
                 serve = _sweep_leaderboard_cache.get_or_compute(
                     "sweep_rollup",
                     generation=gen,
@@ -8662,7 +8698,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 rollup_scan = serve.scan
                 behind = serve.behind_stores
                 conflict = serve.conflict_suspect
-                key = (
+                rollup_key = (
                     f"sweep_leaderboard|src=rollup"
                     f"|r={rank_by or ''}|p={resolved_preset or ''}|n={top}"
                     f"|b={behind}|c={int(conflict)}"
@@ -8674,8 +8710,9 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     # decoration as the legacy level-2 build (the #1749 join
                     # landed on main after the branch cut — a rollup serve
                     # must never silently drop the verdicts/scores the legacy
-                    # wire carries). The composite slot is the SHARED level-1b
-                    # cache slot (same key + generation ⇒ one compute).
+                    # wire carries). The composite index is the cached HOISTED
+                    # level-1b slot; a rollup-served row set never REORDERS on
+                    # the composite (see the predicate above).
                     payload = build_sweep_leaderboard(
                         lake_root,
                         rank_by=rank_by,
@@ -8683,11 +8720,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         scan=rollup_scan,
                         preset=resolved_preset,
                         cascade=load_cascade_join_file(sweeps_root, token=casc_rev),
-                        composite=_sweep_leaderboard_cache.get_or_compute(
-                            "composite_index",
-                            generation=revision_generation(comp_rev or "outage"),
-                            compute=lambda: load_composite_index(sweeps_root),
-                        ),
+                        composite=composite_index,
                     ).to_dict()
                     # Honest additive staleness notes (MAJOR-1) — EMIT-ON-
                     # nonzero/true so a FRESH serve's payload shape is
@@ -8699,7 +8732,12 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     return payload
 
                 return _sweep_leaderboard_cache.get_or_compute(
-                    key, generation=gen, compute=_rollup_payload
+                    rollup_key,
+                    generation=gen,
+                    compute=_rollup_payload,
+                    # The unfiltered coordinate's last-known pointer (the
+                    # probe-outage arm above serves lb_key).
+                    mru_prefix=lb_key,
                 )
             # Hook-C freshness witness (the refold composition fix over
             # DEC-NAV-CACHES-FLOOR-REKEY-001): the level-1 slot below can be
@@ -8738,24 +8776,6 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 from brutex.engine.results_rollup import rebuild_rollup_from_scan_best_effort
 
                 rebuild_rollup_from_scan_best_effort(lake_root / SWEEPS_DIRNAME, scan)
-            # Level 1b (DEC-RESULTS-CASCADE-VERDICT-JOIN-001, fix round 1):
-            # ONE composite-index read per `composite_index_revision` token —
-            # the slot's generation rides the ONE `revision_generation` digest
-            # bridge over the DEDICATED probe, NOT the sweeps generation. The
-            # pre-fix comment's sufficiency claim ("aggs writes move
-            # sweep_results_revision") was FALSE: the depth pass writes the
-            # aggs AFTER the sweep's last store flush / audit append into the
-            # sweep_runs/ sibling tree the sweeps token never stats, so `gen`
-            # alone froze an empty/partial index until the NEXT sweep
-            # (refuter-reproduced; now killed by the route regression). Any
-            # aggs write moves a results-depth dir mtime → new token →
-            # recompute; a sweeps-only move (store flush) leaves the cached
-            # index untouched.
-            composite_index: CompositeIndex = _sweep_leaderboard_cache.get_or_compute(
-                "composite_index",
-                generation=revision_generation(comp_rev or "outage"),
-                compute=lambda: load_composite_index(sweeps_root),
-            )
             # Level 2: the ranked payload per stable filter key (same token
             # generation; `mru_prefix` records the last-known pointer the
             # probe-outage arm above serves; the cascade join parses ONCE per
