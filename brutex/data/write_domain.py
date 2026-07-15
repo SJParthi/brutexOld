@@ -107,6 +107,10 @@ FEEDS_COMPONENT: Final[str] = "feeds"
 #: The primary domain's profile token (the Groww-exclusive primary tree).
 PRIMARY_DOMAIN_NAME: Final[str] = "primary"
 
+#: A feed subtree must be at least ``feeds/<vendor>`` — two path components
+#: (ADR-0021 Decision 1: a bare ``feeds`` claims the whole feed root).
+_MIN_FEED_SUBTREE_PARTS: Final[int] = 2
+
 
 class WriteDomainError(DataLakeError):
     """A staged write dest fell OUTSIDE the active profile's write domain.
@@ -228,7 +232,7 @@ def feeds_write_domain(
     *foreign_feed_subtrees* is the explicit belt the refusal message names).
     """
     parts = _clean_relative_parts(subtree)
-    if parts[0] != FEEDS_COMPONENT or len(parts) < 2:
+    if parts[0] != FEEDS_COMPONENT or len(parts) < _MIN_FEED_SUBTREE_PARTS:
         raise WriteDomainError(
             f"feed write-domain subtree {subtree!r} must sit under "
             f"'{FEEDS_COMPONENT}/<vendor>' (ADR-0021 Decision 1 — the feed-root "
