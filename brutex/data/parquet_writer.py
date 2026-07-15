@@ -1854,21 +1854,45 @@ class ParquetWriter:
                         schema[name] = pl.Float64
             df = pl.DataFrame(rows, schema=schema)
 
-            buffer: list[bytes] = []
+            def _python_render() -> bytes:
+                # polars write_parquet → file-like. Use an in-memory BytesIO
+                # so we can compute the hash before touching the filesystem.
+                bio = io.BytesIO()
+                df.write_parquet(
+                    bio,
+                    compression="zstd",
+                    compression_level=ZSTD_LEVEL,
+                    row_group_size=ROW_GROUP_SIZE,
+                    use_pyarrow=False,
+                    statistics=False,  # stats are non-deterministic; skip for reproducibility
+                )
+                return bio.getvalue()
 
-            # polars write_parquet → file-like. Use an in-memory BytesIO so
-            # we can compute the hash before touching the filesystem.
-            bio = io.BytesIO()
-            df.write_parquet(
-                bio,
-                compression="zstd",
-                compression_level=ZSTD_LEVEL,
-                row_group_size=ROW_GROUP_SIZE,
-                use_pyarrow=False,
-                statistics=False,  # stats are non-deterministic; skip for reproducibility
-            )
-            buffer.append(bio.getvalue())
-            return b"".join(buffer)
+            # ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
+            # Rust render seam — default OFF; when BRUTEX_LAKE_RUST_RENDER is
+            # truthy the frame crosses to the version-lockstepped brutex_lake
+            # crate as uncompressed Arrow IPC, guarded by the facade's three
+            # fail-closed layers (import guard / version guard / burn-in +
+            # autorevert). EVERY guarded/degraded path returns the verbatim
+            # _python_render() bytes, and the routing stays INSIDE
+            # lake_write_guard so a MemoryError anywhere maps to LakeWriteHalt
+            # exactly as before. Import is lazy: flag-OFF pays one dict probe
+            # and stays byte-identical.
+            from brutex.data import lake_rust_render
+
+            if lake_rust_render.lake_rust_render_enabled():
+                return lake_rust_render.render_parquet_bytes(
+                    ipc_bytes_factory=lambda: _ipc_bytes(df),
+                    python_render=_python_render,
+                    polars_version=pl.__version__,
+                    # The burn-in SHAPE gate's key (review-round fold): every
+                    # distinct frame schema (7-col spot / 17-col Greeks
+                    # overlay) is byte-compared at least once before crate
+                    # bytes ship for it — the count budget alone would let a
+                    # spot-only burn-in license a first-ever Greeks shape.
+                    schema_token=str(df.schema),
+                )
+            return _python_render()
 
     @staticmethod
     def _atomic_write(dest: Path, content: bytes) -> None:
@@ -1881,3 +1905,30 @@ class ParquetWriter:
         Prevents a half-written parquet file being left on disk on a kill/error.
         """
         atomic_write_via(dest, lambda tmp: tmp.write_bytes(content))
+
+
+def _ipc_bytes(df: pl.DataFrame) -> bytes:
+    """Serialise *df* to UNCOMPRESSED Arrow IPC bytes — the Rust-render handoff.
+
+    ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): when the
+    ``BRUTEX_LAKE_RUST_RENDER`` seam is engaged, the ALREADY-BUILT render
+    frame crosses the FFI as Arrow IPC (the spike-proven handoff — the crate
+    ``rechunk``s after the read so the memory layout matches the
+    single-chunk frame this module builds from per-column lists).
+    Uncompressed deliberately: the handoff must never introduce its own
+    compression variable into the byte-parity surface. MEMORY HONESTY: this
+    materialises a FULL uncompressed-IPC copy of the frame (≈ the frame's
+    in-RAM size, LARGER than the compressed parquet) that lives alongside
+    the source ``df``, the crate's re-decoded frame and the parquet
+    buffer(s) — the engaged render's transient peak is several× the frame
+    footprint (quantified in the runbook cost table,
+    docs/runbooks/lake-rust-render-lockstep.md §0). Reached ONLY from the
+    flag-ON path inside :meth:`ParquetWriter._render_bytes`'s
+    ``lake_write_guard`` block, so an allocation failure here maps to
+    ``LakeWriteHalt`` like every other render allocation.
+    """
+    import io
+
+    bio = io.BytesIO()
+    df.write_ipc(bio, compression="uncompressed")
+    return bio.getvalue()
