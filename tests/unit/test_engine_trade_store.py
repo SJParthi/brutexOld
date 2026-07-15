@@ -266,8 +266,6 @@ class TestWriteAndStamp:
         """DEC-DEPTH-STAMP-REFDATA-001 (#1801): a stamp written with no
         fingerprint reads ``None`` AND omits the JSON key entirely, so it is
         byte-identical to a pre-feature stamp (the additive back-compat law)."""
-        import json
-
         stamp = load_stamp(written)
         assert stamp is not None
         assert stamp.reference_fingerprint is None
@@ -275,8 +273,6 @@ class TestWriteAndStamp:
         assert "reference_fingerprint" not in payload
 
     def test_reference_fingerprint_round_trips(self, paths: SidecarPaths) -> None:
-        import json
-
         fp = "ab" * 32
         write_tuple_sidecars(
             paths,
@@ -300,8 +296,6 @@ class TestWriteAndStamp:
     def test_load_rejects_poisoned_reference_fingerprint(self, written: SidecarPaths) -> None:
         """A PRESENT-but-non-hex fingerprint is a damaged stamp → rebuild
         (``None``), never adopted."""
-        import json
-
         from structlog.testing import capture_logs
 
         payload = json.loads(written.stamp.read_text(encoding="utf-8"))

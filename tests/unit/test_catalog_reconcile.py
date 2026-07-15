@@ -352,7 +352,6 @@ class TestReconcile:
         import errno
         from types import SimpleNamespace
 
-        import brutex.data.catalog_reconcile as cr
         from structlog.testing import capture_logs
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
@@ -369,10 +368,11 @@ class TestReconcile:
         # Scope the shim to the module-level `pl` name (never the shared polars
         # module object) so only the reconcile's reads are intercepted.
         monkeypatch.setattr(
-            cr, "pl", SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions)
+            "brutex.data.catalog_reconcile.pl",
+            SimpleNamespace(read_parquet=_vanishing_read, exceptions=pl.exceptions),
         )
         with _open(tmp_path) as cat, capture_logs() as logs:
-            result = cr.reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
         assert result.partitions_reconciled == 1  # the good partition still lands
         assert result.skipped == 1
         assert result.unreadable == ()  # absent != corrupt — never a refusal signal
@@ -484,7 +484,6 @@ class TestReconcile:
         """
         from types import SimpleNamespace
 
-        import brutex.data.catalog_reconcile as cr
         from structlog.testing import capture_logs
 
         _write_partition(tmp_path, symbol="NIFTY", n=4)  # a GOOD partition
@@ -497,10 +496,11 @@ class TestReconcile:
             return real_read(path, *args, **kwargs)  # type: ignore[arg-type]
 
         monkeypatch.setattr(
-            cr, "pl", SimpleNamespace(read_parquet=_faulting_read, exceptions=pl.exceptions)
+            "brutex.data.catalog_reconcile.pl",
+            SimpleNamespace(read_parquet=_faulting_read, exceptions=pl.exceptions),
         )
         with _open(tmp_path) as cat, capture_logs() as logs:
-            result = cr.reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
+            result = reconcile_catalog_from_lake(lake_root=tmp_path, catalog=cat)
         assert result.partitions_reconciled == 1, label
         assert result.skipped == 1
         assert result.unreadable == (str(target),)  # present-but-unreadable — REFUSE

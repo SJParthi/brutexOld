@@ -64,7 +64,12 @@ from brutex.engine.sweep_orchestrator import (
     count_sweep_tuples,
 )
 from brutex.engine.sweep_progress import SweepProgress
-from brutex.engine.sweep_run import ComboDedup, SweepRunConfig, run_persisted_sweep
+from brutex.engine.sweep_run import (
+    ComboDedup,
+    SweepRunConfig,
+    plan_rank_memory,
+    run_persisted_sweep,
+)
 from brutex.engine.sweep_supervisor import SweepGuards, grid_identity
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.observability.logging import reset_configuration
@@ -384,8 +389,6 @@ class TestNoDoubleDivisionAfterScaleGuardsDedupe:
     def test_no_double_division_after_scale_guards_dedupe(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import brutex.engine.sweep_run as sweep_run_mod
-
         monkeypatch.delenv(MEM_BUDGET_ENV, raising=False)
         monkeypatch.delenv("BRUTEX_SWEEP_BOUNDED_RANK", raising=False)
         # The simulated pool-worker env: 48 GiB box, the pool initializer's
@@ -394,13 +397,13 @@ class TestNoDoubleDivisionAfterScaleGuardsDedupe:
         monkeypatch.setenv(BUDGET_WORKERS_ENV, "8")
 
         captured: list[int] = []
-        real_plan = sweep_run_mod.plan_rank_memory
+        real_plan = plan_rank_memory
 
         def _spy_plan(**kwargs: Any) -> Any:
             captured.append(kwargs["budget_bytes"])
             return real_plan(**kwargs)
 
-        monkeypatch.setattr(sweep_run_mod, "plan_rank_memory", _spy_plan)
+        monkeypatch.setattr("brutex.engine.sweep_run.plan_rank_memory", _spy_plan)
 
         cfg = SweepRunConfig(
             instrument="NIFTY",
