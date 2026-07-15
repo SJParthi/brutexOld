@@ -48,7 +48,7 @@ def _round_levy_paisa(amount_x_bps_x100: int) -> int:
     ``rate_decimal × 10_000_000``. So a 0.03503% rate is stored as
     3503, and ``rate_decimal = 3503 / 10_000_000 = 0.0003503``.
 
-    DEC-FILL-WORST-CASE-ONLY-001 (retaining the DEC-FILL-WORST-CASE-001
+    DEC-FILL-WORST-CASE-ONLY-001 (retaining the absorbed #1522 design's
     fix-round-2 adverse-levy-rounding law as the PERMANENT rule): every
     rate-scaled levy in the cost stack rounds ADVERSELY — ceiling toward
     +∞; a levy is a charge, so "adverse" = larger. The retired PRECISE

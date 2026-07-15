@@ -32,7 +32,7 @@ chain.
 Identity law (Golden Rule #4): ``canonical_trade_params`` emits
 ``{"fill_mode": "worst_case"}`` UNCONDITIONALLY — removing the key would
 alias worst-case run_ids with the frozen precise-era identities the retired
-emit-on-non-PRECISE elision protected (DEC-FILL-WORST-CASE-001, superseded).
+emit-on-non-PRECISE elision protected (the absorbed #1522 design).
 
 Knob-refusal law (the fail-loud posture, DEC-SWEEP-LOG-VOLUME-GUARD-001
 precedent): the historical ``$BRUTEX_FILL_MODE`` env knob is REMOVED, and a

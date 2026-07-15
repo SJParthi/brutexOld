@@ -377,7 +377,7 @@ class TestRecordedContext:
         assert ctx.data_snapshot_hash == "x"
 
 
-# ── Recorded fill mode (DEC-FILL-WORST-CASE-001) ──
+# ── Recorded fill mode (DEC-FILL-WORST-CASE-ONLY-001) ──
 
 
 class TestWorstCaseGenerationRefusal:

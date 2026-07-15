@@ -1255,7 +1255,7 @@ class TestStage3WireSeam:
                 tf_minutes=1,
                 start_equity_paisa=10_000_000,
                 reference_stamper=_STAMPER,
-                # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-001): the stamper wiring
+                # LEGACY-MODE PIN (DEC-FILL-WORST-CASE-ONLY-001): the stamper wiring
             )
             evaluate(80, 50)
         assert captured == [_STAMPER]

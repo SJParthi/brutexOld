@@ -22,7 +22,7 @@ pins are DELETED with the mode axis. Fixtures A/B keep FLAT (limit-locked)
 bars, so their FILLS are invariant (worst-case anchor == open on a flat
 bar; the +tick discipline preserves ``open ± tick``); their LEVY stacks are
 re-derived under the now-PERMANENT adverse (ceiling) levy rounding — the
-DEC-FILL-WORST-CASE-001 fix-round-2 law, unconditional once the mode axis
+DEC-FILL-WORST-CASE-ONLY-001 fix-round-2 law, unconditional once the mode axis
 died. Fixture W is the RANGE-bar worst-case golden (numbers UNCHANGED from
 its original 2026-07-13 lock — the promotion moved the pins, not the math).
 
@@ -270,7 +270,7 @@ class _RangeSource:
 
 def test_golden_worst_case_nifty_bull_atm_range_bars() -> None:
     """Fixture W — the RANGE-bar worst-case golden (locked 2026-07-13 with
-    DEC-FILL-WORST-CASE-001 + its fix-round-2 adverse-levy-rounding law;
+    DEC-FILL-WORST-CASE-ONLY-001 + its fix-round-2 adverse-levy-rounding law;
     numbers UNCHANGED by the DEC-FILL-WORST-CASE-ONLY-001 promotion — the
     bare call below ALWAYS ran this law).
 

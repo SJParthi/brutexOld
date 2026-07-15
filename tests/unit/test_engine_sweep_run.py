@@ -3485,7 +3485,7 @@ def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[Candl
 class TestWorstCaseFinalistProjection:
     """The finalist-projection anchor pin under the ONE worst-case law.
 
-    History (MIGRATION.md #1786 fix round 2): when fill modes still existed,
+    History (the absorbed PR #1522 design's fix round 2): when fill modes still existed,
     severing the projector's mode kwarg silently re-simulated finalists under
     the PRECISE library default while the RANKING ran worst-case — persisting
     precise-timing price anchors on a worst-case row. The mode axis is now

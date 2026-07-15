@@ -1504,7 +1504,7 @@ class TestWorstCaseComputeTradeCost:
 
     def test_net_floor_refuter_boundary_regression(self) -> None:
         # THE NAMED HISTORICAL REGRESSION (refuter-confirmed MAJOR-1 of the
-        # superseded DEC-FILL-WORST-CASE-001 fix round 2): entry FLAT at
+        # absorbed #1522 design's fix round 2): entry FLAT at
         # ₹460.05, exit low ONE paisa under the open, entry date 2024-10-03
         # (post-Oct-2024 STT regime, lot 25). The worst-case sell notional —
         # 25 paisa smaller — crossed a ₹0.5 STT nearest-rupee boundary

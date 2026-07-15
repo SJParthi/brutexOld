@@ -16,7 +16,7 @@ ONLY fill law, which changes this suite in TWO ways —
    with the retired open anchor and every fill/notional/gross figure is
    provably invariant (buy 10_005 / sell 11_995 etc.). Example W is the
    NON-flat worst-case-anchor golden.
-2. **Adverse levy rounding is PERMANENT.** The DEC-FILL-WORST-CASE-001
+2. **Adverse levy rounding is PERMANENT.** The DEC-FILL-WORST-CASE-ONLY-001
    fix-round-2 adverse-levy law (every rate-scaled levy rounds ADVERSELY —
    ceiling toward +∞; paisa for exch/SEBI/IPFT, whole-rupee for
    STT/stamp/GST) was worst-case-mode-conditional; with the mode axis deleted

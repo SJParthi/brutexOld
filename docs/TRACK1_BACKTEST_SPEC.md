@@ -751,9 +751,9 @@ ALL 30+ metrics displayed in the JSON report and PNG charts.
 4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
    bar accessor catches violations at runtime (debug build only).
 5. **WORST-CASE fills — the ONE fill law (SUPERSEDED 2026-07-12→15 by
-   operator directive: DEC-FILL-WORST-CASE-001 #1786 made worst-case
-   the default; DEC-FILL-WORST-CASE-ONLY-001 #1825 deleted the PRECISE
-   opt-out — worst-case is now the ONLY fill model):** fill-bar TIMING
+   operator directive: DEC-FILL-WORST-CASE-ONLY-001 #1825 — worst-case
+   is the ONLY fill model; absorbs the #1522 FillMode-mode design, the
+   PRECISE opt-out never shipped):** fill-bar TIMING
    is unchanged (signal at bar N → the fill bar is N+1; forced 15:20;
    same-bar SL-first tie), but the fill PRICE assumes the worst the
    decided bar printed — entry at the entry bar's ADVERSE EXTREME

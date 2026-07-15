@@ -196,7 +196,7 @@ class _RefPosition:
     ``last_exit_basis`` is the price a retroactive ``session_gap`` /
     ``end_of_data`` close prices against — the last managed bar's CLOSE
     under PRECISE, its direction-resolved ADVERSE extreme (LOW for a BUY,
-    HIGH for a SELL) under WORST_CASE (DEC-FILL-WORST-CASE-001) — resolved
+    HIGH for a SELL) under WORST_CASE (DEC-FILL-WORST-CASE-ONLY-001) — resolved
     per managed bar so the close site never re-reads a bar.
     """
 

@@ -3,7 +3,7 @@
 Re-locked for DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law —
 the retired PRECISE open-anchored goldens (and their ``FillMode`` pins) are
 DELETED with the mode axis; the worst-case constants below were hand-derived
-and locked when the law first landed (DEC-FILL-WORST-CASE-001) and are
+and locked when the law first landed (DEC-FILL-WORST-CASE-ONLY-001) and are
 UNCHANGED here — the one-law promotion moved the pins, never the numbers.
 
 The LONG fill arm is pinned byte-equal to the options calculator's
@@ -66,7 +66,7 @@ class TestFillGolden:
             ), (eh, el, xh, xl)
 
     #: WORST-CASE fill grid golden (hand-derived; locked with
-    #: DEC-FILL-WORST-CASE-001, promoted to the ONLY law here):
+    #: DEC-FILL-WORST-CASE-ONLY-001, promoted to the ONLY law here):
     #: LONG — buy = entry HIGH + 5 (never floors: high ≥ 5 ⇒ buy ≥ 10);
     #: sell = max(exit LOW − 5, 5); slip = |buy − high| + |low − sell|.
     _LONG_GRID: ClassVar[dict[tuple[int, int, int, int], tuple[int, int, int]]] = {
@@ -149,7 +149,7 @@ def _golden_window() -> FuturesBarWindow:
 class TestAcceptPathGolden:
     def test_full_trade_golden_field_for_field(self) -> None:
         # Hand-recomputed WORST-CASE accept path (NIFTY lot 75 on 2025-01-02,
-        # cost-free index) — the DEC-FILL-WORST-CASE-001 lock, now the ONE law:
+        # cost-free index) — the DEC-FILL-WORST-CASE-ONLY-001 lock, now the ONE law:
         #   entry bar 22,000.00 [21,990.00 – 22,010.00]
         #   exit bar 22,100.00 [22,095.00 – 22,110.00]
         #   buy = entry HIGH 2,201,000 + 5 = 2,201,005

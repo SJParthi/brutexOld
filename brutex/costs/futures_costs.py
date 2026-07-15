@@ -466,7 +466,7 @@ def futures_etc_unverified_windows() -> dict[str, tuple[tuple[date, date | None]
 
 # ─────────────────────────────────────────────────────────────────
 # Fill application — PRECISE (R15, open ± one tick) / WORST_CASE
-# (DEC-FILL-WORST-CASE-001, adverse bar extreme ± the SAME tick)
+# (DEC-FILL-WORST-CASE-ONLY-001, adverse bar extreme ± the SAME tick)
 # ─────────────────────────────────────────────────────────────────
 
 FuturesSide = Literal["long", "short"]

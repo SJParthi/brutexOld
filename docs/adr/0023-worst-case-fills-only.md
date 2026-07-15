@@ -8,8 +8,8 @@
 - **Status:** ACCEPTED (operator directive 2026-07-14; PR-A of the
   worst-case-fills-only track)
 - **Decision ID:** DEC-FILL-WORST-CASE-ONLY-001 (MIGRATION.md #1825;
-  supersedes-in-part DEC-FILL-WORST-CASE-001 #1786 — the PRECISE opt-out is
-  deleted; supersedes-in-part DEC-FUTURES-EXEC-TRANSLATION-001 #1543 — the
+  absorbs the #1522 FillMode-mode design — the PRECISE opt-out never
+  shipped; supersedes-in-part DEC-FUTURES-EXEC-TRANSLATION-001 #1543 — the
   R15 volume-0 fill-by-default clause)
 - **Date:** 2026-07-15
 - **Branch:** `claude/fill-worst-case-only` (worktree base = PR #1522's head
@@ -17,7 +17,10 @@
 
 ## Context
 
-DEC-FILL-WORST-CASE-001 (#1786) made worst-case fills the production
+This ADR records the FULL flip vs main — precise open-anchored fills →
+worst-case-only — in one hop (coordinator shape ruling 2026-07-15: this PR
+supersedes-and-closes PR #1522; its ledger row is absorbed here).
+PR #1522's FillMode-mode design made worst-case fills the production
 DEFAULT while keeping a byte-identical `PRECISE` legacy opt-out behind a
 `FillMode` enum, the `BRUTEX_FILL_MODE` env knob, a `--fill-mode` CLI flag
 and a `FillPolicy`/`LevelFill`/`SameBarTie` policy surface, plus the
@@ -30,7 +33,7 @@ with mode threading.
 
 ## Decision
 
-1. **One law, hardcoded.** The adverse-max law of #1786 is the only fill
+1. **One law, hardcoded.** The adverse-max law is the only fill
    law, hardcoded in the Python walker, the Rust kernels (u64 + u128 via
    MaskWord) and both translation executors: fill-bar TIMING is unchanged
    (signal at bar N → fill bar N+1; forced 15:20; same-bar tie ALWAYS
@@ -47,8 +50,8 @@ with mode threading.
    `{"fill_mode": "worst_case"}` — the fill_mode parameter is REMOVED from
    every config surface. Rationale: eliding the key would alias worst-case
    run_ids with the frozen precise-era goldens; the unconditional token
-   keeps the #1786 worst-case pins byte-valid (the re-locked sweep-run
-   `_GOLDEN_RUN_ID` equals #1786's `_WORST_CASE_GOLDEN_RUN_ID` exactly)
+   keeps the worst-case pins byte-valid across the absorption (the
+   re-locked sweep-run `_GOLDEN_RUN_ID` is stable)
    while the precise-era id is negative-pinned (`_PRECISE_ERA_RUN_ID`).
 3. **Legacy artifacts refuse loudly.** A cascade manifest without the
    `fill_mode` key or with a non-`worst_case` token, and a sweep-verify
@@ -64,7 +67,8 @@ with mode threading.
    TRADABLE" clause. Honest cost: a SURVIVORSHIP TILT — trades whose fill
    bars printed no volume vanish from the futures leg's results instead of
    being priced; each is counted as a `STALE_BAR` rejection, never silent.
-5. **Adverse levy rounding is permanent.** #1786's fix-round-2 law (every
+5. **Adverse levy rounding is permanent.** The absorbed design's
+   fix-round-2 law (every
    rate-scaled levy CEILs — paisa per leg for exchange/SEBI/IPFT,
    whole-rupee for STT/stamp/GST) loses its mode conditionality; the
    Track-2 charge stack can only be ≥ the statutorily half-up-rounded real
@@ -88,7 +92,8 @@ with mode threading.
 - Precise-era sweep trees are NOT migrated — they refuse; the remediation
   is a re-run (the run identity re-keys via the unconditional token
   anyway, so no precise-era result was reusable).
-- The engine-semantics change is the #1786 sanctioned exception continued:
+- The engine-semantics change is the ONE sanctioned exception to the
+  standing ENGINE-UNCHANGED posture (operator directive):
   scope/vocab/rate/lake-schema UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the
   vocabulary fixture `tests/golden/fixtures/vocab_golden_vectors.json` is
   byte-untouched (empty diff vs base, verified).

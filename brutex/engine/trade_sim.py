@@ -26,8 +26,8 @@ research, not execution).
 ## Fill conventions (HARDCODED — worst-case is the only fill law)
 
 DEC-FILL-WORST-CASE-ONLY-001: the configurable ``FillPolicy`` (and its
-``LevelFill`` / ``SameBarTie`` knobs, plus the two-member ``FillMode`` of the
-superseded DEC-FILL-WORST-CASE-001) is DELETED — every fill PRICE follows the
+``LevelFill`` / ``SameBarTie`` knobs, plus the absorbed #1522 design's
+two-member ``FillMode``) is DELETED — every fill PRICE follows the
 **adverse-max law**, unconditionally:
 
 * **Entry** — *locked* timing: signal on bar ``N`` → fill on bar ``N+1``

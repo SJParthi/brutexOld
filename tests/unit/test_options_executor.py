@@ -530,7 +530,7 @@ def test_signals_from_spot_trades_empty() -> None:
     assert sigs == []
 
 
-# ── DEC-FILL-WORST-CASE-001 — the worst-case fill mode ────────────────────────
+# ── DEC-FILL-WORST-CASE-ONLY-001 — the worst-case fill mode ────────────────────────
 
 
 @dataclass(frozen=True)

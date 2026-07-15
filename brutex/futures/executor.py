@@ -23,7 +23,7 @@ pinned reject order, hash-chained audit) without touching the options path (R12)
   honest counted ``NO_DATA`` reject — never a nearest-bar substitute.
 * **The worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001 — the ONLY
   law; the retired R15 OPEN-anchored PRECISE law and the two-member mode of
-  the superseded DEC-FILL-WORST-CASE-001 are DELETED):** entry/exit fill at
+  the absorbed #1522 mode design are DELETED):** entry/exit fill at
   the minute bar's ADVERSE EXTREME ± one adverse tick (long: entry HIGH +
   tick / exit LOW − tick; short mirrored — adverse both legs), so a fill
   can never flatter even on a flat bar. A gap-open beyond an SL/TP fills on

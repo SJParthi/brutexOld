@@ -2,7 +2,7 @@
 
 DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law (the
 configurable ``FillPolicy`` / ``LevelFill`` / ``SameBarTie`` machinery of the
-superseded DEC-FILL-WORST-CASE-001 is DELETED). The named regressions
+absorbed #1522 design is DELETED). The named regressions
 (gap-through-level clamp both directions; entry at the adverse extreme),
 every fill arm (entry / at-level / pending signal exit / forced /
 end_of_data / session_gap × BUY/SELL), the killed-token pins on the retired

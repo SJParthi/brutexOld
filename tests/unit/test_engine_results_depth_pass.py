@@ -843,7 +843,7 @@ class TestCascadeJoinThreading:
         )
 
 
-# ── WORST_CASE capture chain (DEC-FILL-WORST-CASE-001 fix round 3) ────────────
+# ── WORST_CASE capture chain (DEC-FILL-WORST-CASE-ONLY-001 fix round 3) ────────────
 
 
 def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
