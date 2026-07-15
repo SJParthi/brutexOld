@@ -46,10 +46,10 @@ def _row(**overrides: object) -> tuple:
 
 
 def _save(lake: Path, rows: list[tuple]) -> None:
+    import brutex.data.window_ledger_store as store_mod
     from brutex.data.window_ledger import WindowLedger
-    from brutex.data.window_ledger_store import save_window_ledger
 
-    save_window_ledger(WindowLedger.from_rows(rows), lake)
+    store_mod.save_window_ledger(WindowLedger.from_rows(rows), lake)
 
 
 def _sub(check, sub_id: str):
@@ -558,7 +558,7 @@ class TestPullRetryRereads:
     def test_ledger_vanishing_between_attempts_abstains(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from brutex.data.window_ledger_store import ledger_path
+        import brutex.data.window_ledger_store as store_mod
 
         lake = make_twin(tmp_path)
         _save(lake, [_row()])
@@ -569,7 +569,7 @@ class TestPullRetryRereads:
         def _deleting_body(ctx_, *, rss):  # type: ignore[no-untyped-def]
             if not calls:
                 calls.append(1)
-                ledger_path(lake).unlink()
+                store_mod.ledger_path(lake).unlink()
             return real_body(ctx_, rss=rss)
 
         monkeypatch.setattr(pull, "_run_body", _deleting_body)

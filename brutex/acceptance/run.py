@@ -258,7 +258,7 @@ def _run_one_check(
     def _worker() -> None:
         try:
             box["result"] = CHECK_REGISTRY[check_id](ctx)
-        except BaseException as exc:  # captured; re-raised on the caller thread
+        except Exception as exc:  # captured; re-raised on the caller thread
             box["exc"] = exc
 
     thread = threading.Thread(target=_worker, name=f"acceptance-check-{check_id}", daemon=True)

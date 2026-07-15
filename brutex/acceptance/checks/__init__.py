@@ -23,6 +23,15 @@ from brutex.acceptance.model import (
     make_subcheck,
 )
 
+#: Public surface — the check registry, its ordered id tuple (consumed by
+#: :mod:`brutex.cli` + :mod:`brutex.acceptance.run` for ``--checks`` selection),
+#: and the fingerprinted-run helper.
+__all__ = [
+    "ALL_CHECK_IDS",
+    "CHECK_REGISTRY",
+    "run_fingerprinted_check",
+]
+
 
 def run_fingerprinted_check(
     ctx: AcceptanceContext,

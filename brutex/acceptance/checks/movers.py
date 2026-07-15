@@ -411,15 +411,19 @@ def run(ctx: AcceptanceContext) -> CheckResult:
         coverage=coverage,
         repro=_repro(ctx),
         limits=[
-            "independent-leg reads are not fingerprint-guarded — a concurrent "
-            "writer surfaces as a loud mismatch FAIL, never a silent PASS",
+            (
+                "independent-leg reads are not fingerprint-guarded — a concurrent "
+                "writer surfaces as a loud mismatch FAIL, never a silent PASS"
+            ),
             # Round-3 disclosure (B-NEW-2): the second serving-path residual
             # beside the registry open — named, never suppressed (a seam edit
             # into the production discovery cache is out of this DEC's scope).
-            "the in-process serving path may refresh <lake>/.manifest/ "
-            "discovery caches exactly as the production dashboard does (a "
-            "benign self-healing rebuild, results-safe — the second disclosed "
-            "residual beside the registry.duckdb open)",
+            (
+                "the in-process serving path may refresh <lake>/.manifest/ "
+                "discovery caches exactly as the production dashboard does (a "
+                "benign self-healing rebuild, results-safe — the second disclosed "
+                "residual beside the registry.duckdb open)"
+            ),
         ],
     )
 
@@ -591,10 +595,12 @@ def _options_sub(ctx: AcceptanceContext, *, day_str: str) -> Any:
         },
         limits=[
             "iv/delta compared for presence/nullability only (stored overlay)",
-            "the movers check exercises the REAL serving path, which opens "
-            "registry.duckdb exactly as the production dashboard does "
-            "(schema-matched open = no net bytes; a drifted schema ABSTAINS "
-            "before the route runs)",
+            (
+                "the movers check exercises the REAL serving path, which opens "
+                "registry.duckdb exactly as the production dashboard does "
+                "(schema-matched open = no net bytes; a drifted schema ABSTAINS "
+                "before the route runs)"
+            ),
         ],
         repro=_repro(ctx),
     )

@@ -110,12 +110,12 @@ class TestMarketHours:
     def test_journal_events_counted_dry_run_excluded(self, tmp_path: Path) -> None:
         from datetime import UTC, datetime
 
-        from brutex.observability.pull_journal import record_pull_start
+        import brutex.observability.pull_journal as pj
 
         lake = make_twin(tmp_path)
         in_window = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)  # Friday 10:00 IST
-        record_pull_start(lake, pull_id="wet", dry_run=False, now_utc=in_window)
-        record_pull_start(lake, pull_id="dry", dry_run=True, now_utc=in_window)
+        pj.record_pull_start(lake, pull_id="wet", dry_run=False, now_utc=in_window)
+        pj.record_pull_start(lake, pull_id="dry", dry_run=True, now_utc=in_window)
         check = rate.run(make_ctx(lake))
         hours = _sub(check, "rate.market_hours")
         assert hours.verdict is Verdict.FAIL
@@ -390,11 +390,11 @@ class TestMarketHoursHeartbeats:
         # greeks-backfill jobs) and must never fold in as attempt stamps.
         from datetime import UTC, datetime
 
-        from brutex.observability.pull_journal import record_pull_heartbeat
+        import brutex.observability.pull_journal as pj
 
         lake = make_twin(tmp_path)
         in_window = datetime(2026, 7, 10, 4, 30, tzinfo=UTC)  # Friday 10:00 IST
-        record_pull_heartbeat(lake, pull_id="sweepjob", now_utc=in_window)
+        pj.record_pull_heartbeat(lake, pull_id="sweepjob", now_utc=in_window)
         check = rate.run(make_ctx(lake))
         hours = _sub(check, "rate.market_hours")
         assert hours.evidence["attempts_examined"] == 0

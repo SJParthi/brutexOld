@@ -112,16 +112,13 @@ def make_master_present_twin(
     ledger = WindowLedger.from_rows([tuple(getattr(r, f) for f in _LEDGER_FIELDS) for r in records])
     save_window_ledger(ledger, lake)
 
-    store = InstrumentStore.open(lake / "instruments.duckdb")
-    try:
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
         store.upsert_many(
             [_idx_instrument("NIFTY"), _idx_instrument("BANKNIFTY")],
             snapshot_date=DAY1,
             run_id="acceptance-twin",
             csv_source_sha256="0" * 64,
         )
-    finally:
-        store.close()
     return lake
 
 

@@ -430,21 +430,22 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
             repro=_repro(ctx),
         )
     try:
-        instruments = store.list_index_equity_instruments()
-        # Compose the SAME enrichment the production /completeness route applies
-        # (app.py `_completeness_inputs`): the FNO-pruned verdict-interval scan
-        # folded with the window-ledger rollup chip, so `row["completeness"]`
-        # carries the settled/pending/failed authority. The prior plain
-        # `summarize_spot_datasets` returned rows with NO `completeness` key, so
-        # `_spot_dimension_verdict(None)` read `none` for EVERY engine index on
-        # a HEALTHY master-present lake — a permanent spurious FAIL contradicting
-        # the operator's own /completeness page (round-6 BLOCKER). Verify what
-        # production SHOWS; never a weaker reimplementation (the whole-slice law).
-        spot_rows = build_spot_coverage_payload(
-            summarize_spot_verdict_datasets(store.connection, ctx.lake_root),
-            spot_window_rollup(ctx.lake_root),
-        )["rows"]
-        records = list(store.list_coverage())
+        with store:
+            instruments = store.list_index_equity_instruments()
+            # Compose the SAME enrichment the production /completeness route applies
+            # (app.py `_completeness_inputs`): the FNO-pruned verdict-interval scan
+            # folded with the window-ledger rollup chip, so `row["completeness"]`
+            # carries the settled/pending/failed authority. The prior plain
+            # `summarize_spot_datasets` returned rows with NO `completeness` key, so
+            # `_spot_dimension_verdict(None)` read `none` for EVERY engine index on
+            # a HEALTHY master-present lake — a permanent spurious FAIL contradicting
+            # the operator's own /completeness page (round-6 BLOCKER). Verify what
+            # production SHOWS; never a weaker reimplementation (the whole-slice law).
+            spot_rows = build_spot_coverage_payload(
+                summarize_spot_verdict_datasets(store.connection, ctx.lake_root),
+                spot_window_rollup(ctx.lake_root),
+            )["rows"]
+            records = list(store.list_coverage())
     except (duckdb.Error, CatalogError) as exc:
         # An older/foreign-schema store: observe-only means ABSTAIN, never DDL.
         return make_subcheck(
@@ -455,8 +456,6 @@ def _completeness_sub(ctx: AcceptanceContext) -> Any:
             abstain_reason=AbstainReason.NO_INSTRUMENT_STORE,
             repro=_repro(ctx),
         )
-    finally:
-        store.close()
     categories = categorize_instruments(
         instruments,
         is_index=lambda i: bool(getattr(i, "is_index", False)),
