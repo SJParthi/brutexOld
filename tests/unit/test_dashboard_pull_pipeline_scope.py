@@ -628,6 +628,68 @@ def test_scope_fno_only_tail_never_fires_on_a_real_run(
     assert spines.historical_calls == 1
 
 
+def test_owed_marker_written_only_by_a_real_spot_only_launch(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[DEC-CROSSVERIFY-OWED-SENTINEL-001] the durable owed marker is written
+    at pull-tail-commit ENTRY of a REAL spot-only run ONLY — a dry-run /
+    real fno-only / real full-scope run writes nothing — and it SURVIVES the
+    finished pull when the started producer never completes (the injected
+    tail spy starts no runner — exactly the crash-sentinel shape; the
+    runner's clear-on-completed-verdict is pinned in
+    ``test_crossverify_run.py::TestOwedMarkerClear``)."""
+    from brutex.calendars.nse import now_ist
+    from brutex.crossverify.owed import list_owed_days
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    _calls, tail = _tail_spy()
+    # The launcher marks against the STORE-derived write root (the
+    # instruments.duckdb parent — `_resolve_pull_lake_root`'s live law).
+    lake = tmp_path
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        # A dry-run spot-only launch owes nothing.
+        assert (
+            client.post(_ROUTE, params={"scope": "spot-only", "dry_run": "true"}).status_code == 200
+        )
+        _wait_for_job(client)
+        assert list_owed_days(lake) == []
+        # A REAL fno-only run owes nothing (the tail is Spot-EXCLUSIVE).
+        assert client.post(_ROUTE, params={"scope": "fno-only"}).status_code == 200
+        _wait_for_job(client)
+        assert list_owed_days(lake) == []
+        # A REAL full-scope run owes nothing (no crossverify tail by design).
+        assert client.post(_ROUTE).status_code == 200
+        _wait_for_job(client)
+        assert list_owed_days(lake) == []
+        # The REAL spot-only run writes the launch-day marker — and it
+        # PERSISTS past the finished pull (the crash window's sentinel).
+        assert client.post(_ROUTE, params={"scope": "spot-only"}).status_code == 200
+        _wait_for_job(client)
+    assert list_owed_days(lake) == [now_ist().date()]
+
+
+def test_owed_marker_skipped_under_the_crossverify_kill_switch(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[DEC-CROSSVERIFY-OWED-SENTINEL-001 kill-switch coherence] with
+    ``BRUTEX_CROSSVERIFY=off`` a REAL spot-only run marks NOTHING — owed
+    markers must never accumulate while the feature is deliberately off."""
+    from brutex.crossverify.owed import list_owed_days
+
+    _pin_creds_present(monkeypatch)
+    spines = _Spines()
+    spines.wire(monkeypatch)
+    monkeypatch.setenv("BRUTEX_CROSSVERIFY", "off")
+    _calls, tail = _tail_spy()
+    lake = tmp_path  # the store-derived write root
+    with _make_client(store, monkeypatch, tmp_path, crossverify_tail=tail) as client:
+        assert client.post(_ROUTE, params={"scope": "spot-only"}).status_code == 200
+        _wait_for_job(client)
+    assert list_owed_days(lake) == []
+
+
 def test_scope_fno_only_auto_arm_400_never_arms(
     store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -569,3 +569,136 @@ class TestPublishCrashConvergence:
         assert journal2 is not None
         assert journal2.pending_keys() == ()
         assert not staging_dir(clean_lake, GOLDEN_DAY).exists()
+
+
+class TestOwedDayCatchup:
+    """DEC-CROSSVERIFY-OWED-SENTINEL-001 e2e over the REAL seams: day D's
+    pull wrote its bars + the owed marker, then the box DIED before the
+    crossverify tail ever started (NO journal for D — invisible to the
+    pending/withheld scans); the NEXT daily run's step-D3 owed catchup
+    completes D with the manual ``--day`` machinery (full export → gate →
+    stage → publish through the recursive ``run_day`` binding of
+    ``default_seams``), clears D's marker, and converges idempotently
+    (the crash-after-publish-before-clear window re-runs to ZERO puts)."""
+
+    #: The next trading day after GOLDEN_DAY (Fri 2026-07-10 → Mon 2026-07-13).
+    NEXT_DAY = date(2026, 7, 13)
+
+    def _shifted_bars(self, bars: list[Any], days: int) -> list[Any]:
+        return [
+            dataclasses.replace(bar, timestamp=bar.timestamp + timedelta(days=days)) for bar in bars
+        ]
+
+    def _append(self, lake: Path, symbol: str, bars: list[Any]) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        identities = {**GOLDEN_IDENTITIES, "NIFTYIT": _NIFTYIT_IDENTITY}
+        identity = identities[symbol]
+        ParquetBarSink(writer=ParquetWriter(lake_root=lake)).append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+
+    def _append_next_day(self, lake: Path) -> None:
+        for symbol, price in (
+            ("NIFTY", "24100.00"),
+            ("BANKNIFTY", "52100.00"),
+            ("SENSEX", "80100.00"),
+        ):
+            self._append(
+                lake,
+                symbol,
+                self._shifted_bars(_bars(base_price=price, minutes=range(375), oi_base=None), 3),
+            )
+        self._append(
+            lake,
+            "M&M",
+            self._shifted_bars(_bars(base_price="2910.00", minutes=range(3), oi_base=None), 3),
+        )
+        self._append(
+            lake,
+            "NIFTYIT",
+            self._shifted_bars(
+                _bars(
+                    base_price="43100.00",
+                    minutes=[m for m in range(375) if m != 100],
+                    oi_base=None,
+                ),
+                3,
+            ),
+        )
+
+    def _run_on(
+        self, lake: Path, day: date, fake_s3: FakeS3Client, alerter: _RecordingAlerter
+    ) -> CrossverifyReport:
+        config = resolve_crossverify_config(lake_root=lake, day=day, skip_pull=True)
+        seams = default_seams(
+            config,
+            account_key_resolver=lambda: None,
+            s3_client_factory=lambda: fake_s3,
+            alerter=alerter,
+        )
+        return run_crossverify(
+            config, dataclasses.replace(seams, classifier_factory=bind_production_classifier)
+        )
+
+    def test_never_started_owed_day_completed_on_the_next_run(self, clean_lake: Path) -> None:
+        from brutex.crossverify.owed import list_owed_days, mark_owed
+
+        # Day D: the pull wrote its bars + the OWED marker, then the box
+        # died BEFORE the tail — NO journal, NO staging, NO S3 objects.
+        assert mark_owed(clean_lake, GOLDEN_DAY, source="dashboard-pipeline") is True
+        assert load_journal(clean_lake, GOLDEN_DAY) is None
+        self._append_next_day(clean_lake)
+
+        # The NEXT daily run: NO --day, NO manual step — step D3 completes D.
+        fake_s3 = FakeS3Client()
+        alerter = _RecordingAlerter()
+        report = self._run_on(clean_lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report.verdict, report.exit_code) == ("published", 0)
+
+        # Day D's files published with the PINNED bytes (the --day machinery
+        # verbatim — deterministic render, byte-verified vs the goldens).
+        assert set(fake_s3.objects) >= _ALL_KEYS
+        assert fake_s3.objects[_KEY_NIFTY] == (FIXTURES_DIR / "NIFTY.csv").read_bytes()
+        assert fake_s3.objects[_KEY_MM] == (FIXTURES_DIR / "M&M.csv").read_bytes()
+        # D's journal now exists (the rerun's durable done-record).
+        journal_d = load_journal(clean_lake, GOLDEN_DAY)
+        assert journal_d is not None
+        assert journal_d.pending_keys() == ()
+        # D+1's own files published too (the run's normal output).
+        assert f"crossverify/groww/{self.NEXT_DAY}/IDX_I/NIFTY.csv" in fake_s3.objects
+        # D's marker CLEARED by the rerun's completed verdict.
+        assert list_owed_days(clean_lake) == []
+        # TWO summaries — the rerun's (day D, loud catch-up) + today's.
+        assert [r.day for _rid, r in alerter.summaries] == [GOLDEN_DAY, self.NEXT_DAY]
+        assert all(r.verdict == "published" for _rid, r in alerter.summaries)
+
+    def test_tail_started_then_died_converges_without_double_puts(self, clean_lake: Path) -> None:
+        from brutex.crossverify.owed import list_owed_days, mark_owed
+
+        # Day D ran to a FULL publish, but the box died in the tiny window
+        # between the publish and the marker clear (simulated by re-marking):
+        # the journal exists AND the marker exists — both catchup paths must
+        # converge with ZERO double-puts (the mark_staged sha idempotency +
+        # publish-pending-only laws).
+        fake_s3 = FakeS3Client()
+        report_d = _run(clean_lake, fake_s3, _RecordingAlerter())
+        assert report_d.verdict == "published"
+        assert mark_owed(clean_lake, GOLDEN_DAY, source="dashboard-pipeline") is True
+        self._append_next_day(clean_lake)
+
+        puts_before = len(fake_s3.puts)
+        alerter = _RecordingAlerter()
+        report = self._run_on(clean_lake, self.NEXT_DAY, fake_s3, alerter)
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        # ZERO second puts for day D (idempotent convergence).
+        d_prefix = f"crossverify/groww/{GOLDEN_DAY}/"
+        new_puts = fake_s3.puts[puts_before:]
+        assert all(not key.startswith(d_prefix) for _b, key, _c in new_puts)
+        # The marker cleared; the rerun read every D key as already-published.
+        assert list_owed_days(clean_lake) == []
