@@ -94,8 +94,10 @@ from brutex.adapters.ingest_common import (
     CONFIRMED_EMPTY_MIN_FETCHES,
     GROWW_COVERAGE_MARKET,
     OLD_GAP_HORIZON_DAYS,
+    CancelCheck,
     clamp_window_end,
     drop_bars_after,
+    raise_if_cancelled,
     summarize_conflicts,
     tile_windows,
 )
@@ -361,9 +363,20 @@ def ingest_spot(
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    should_stop: CancelCheck | None = None,
     market_closed: Callable[[], bool] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, checked as the FIRST statement of every window fetch — BEFORE
+    any vendor call, so a flagged window makes ZERO vendor calls and its ledger
+    row stays PLANNED/unsettled (idempotently re-pulled next time). It raises
+    :class:`~brutex.adapters.ingest_common.PullCancelled`, a pull-wide graceful
+    stop. The never-interrupt zone (``_process_window_tail`` — sink append +
+    ledger record) deliberately carries NO check: a window that started its
+    fetch always completes its durable write chain. ``None`` (every legacy
+    caller) is byte-identical.
 
     The series' fetch WINDOWS are mapped through *run_parallel* so a SINGLE
     symbol's windows are in flight at once and the pull saturates UP TO the rate
@@ -550,6 +563,10 @@ def ingest_spot(
         captured by *run_parallel*, and re-raised on the caller thread below.
         """
         with pull_id_scope(pull_id):
+            # COOPERATIVE cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the ONE safe
+            # boundary — BEFORE the window's vendor fetch. A flagged window makes
+            # ZERO vendor calls; its ledger row stays unsettled → re-pulled.
+            raise_if_cancelled(should_stop)
             return _ingest_one_window(
                 adapter,
                 sink,

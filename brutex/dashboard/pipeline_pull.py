@@ -79,11 +79,6 @@ from typing import Any, Final
 
 import structlog
 
-from brutex.dashboard.composite_pull import CompositePullReport
-from brutex.dashboard.metadata_pull import MetadataPullReport
-from brutex.dashboard.movers_warm import MoversWarmResult
-from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
-
 # The verdict dataclass lives in the LEAF brutex.dashboard.pipeline_verdict
 # (DEC-PULL-SIX-STEP-ORDER-001): its consumers (composite_pull/historical_pull)
 # sit BELOW this sequencer in the module import graph, so housing it here made
@@ -93,6 +88,11 @@ from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 # The ``as`` self-alias is the explicit-re-export idiom mypy strict's
 # no-implicit-reexport demands; ruff PLC0414 flags exactly that idiom, hence
 # the per-line noqa (the repo's per-line-noqa-with-rationale house style).
+from brutex.adapters.ingest_common import CancelCheck
+from brutex.dashboard.composite_pull import CompositePullReport
+from brutex.dashboard.metadata_pull import MetadataPullReport
+from brutex.dashboard.movers_warm import MoversWarmResult
+from brutex.dashboard.pipeline_prebuild import PrebuildOutcome
 from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
@@ -144,6 +144,18 @@ PHASE_PREBUILD = "prebuild"
 SEGMENT_SPOT = "spot"
 SEGMENT_FUTURES = "futures"
 SEGMENT_OPTIONS = "options"
+
+#: The honest cancelled-pipeline headline (DEC-JOB-COOPERATIVE-CANCEL-001):
+#: an amber PARTIAL, never a red error, never a fabricated "complete".
+_CANCEL_NOTE: Final[str] = (
+    "pull cancelled by operator — completed windows are durable "
+    "(ledger checkpointed); the next pull resumes the remainder"
+)
+
+
+def _cancel_requested(should_stop: CancelCheck | None) -> bool:
+    """``True`` iff the cooperative-cancel probe is wired AND reads ``True`` — O(1)."""
+    return should_stop is not None and should_stop()
 
 
 def spot_phase_ok(report: BulkSpotReport) -> bool:
@@ -974,9 +986,19 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    should_stop: CancelCheck | None = None,
     market_closed: Callable[[], bool] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is the OPTIONAL cooperative-
+    cancel probe, consulted BETWEEN phases (the phase bodies additionally
+    thread it to their own window boundaries): a cancel observed after phase k
+    stops the chain with ``stopped_after = "<phase k> (cancelled)"`` and an
+    honest note — the completed phases' durable state stands, the skipped
+    phases run on the next pull. ``None`` (every legacy caller) is
+    byte-identical. Composes with the existing gate-failure stop (a cancelled
+    report is never ``ok``).
 
     Calls ``run_spot`` first; if :func:`spot_phase_ok` fails the chain STOPS (no
     vendor call for the later phases) and the report carries ``stopped_after =
@@ -1139,6 +1161,21 @@ def run_full_pipeline(
     # ContextVar — confined to this thread/context).
     with shared_pull_ledger_scope():
         spot = run_spot()
+        if _cancel_requested(should_stop) or spot.cancelled:
+            # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spot
+            # phase either observed the cancel at a window boundary (report
+            # ``cancelled=True``) or the request landed between phases. Stop the
+            # chain honestly — durable work stands, the next pull resumes.
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=f"{PHASE_SPOT} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
         if not spot_phase_ok(spot):
             quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
             return PipelinePullReport(
@@ -1185,6 +1222,17 @@ def run_full_pipeline(
                 stopped_after=PHASE_MARKET_HOURS,
                 note=_market_hours_stop_note(),
             )
+        if _cancel_requested(should_stop):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=f"{PHASE_METADATA} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
         if not metadata_phase_ok(metadata):
             quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
             return PipelinePullReport(
@@ -1225,6 +1273,21 @@ def run_full_pipeline(
                 note=_market_hours_stop_note(),
             )
         historical = run_historical(prior)
+        if _cancel_requested(should_stop):
+            # A cancel observed during/after the historical phase: skip the
+            # post-steps (prebuild + movers warm) — nothing is lost, the next
+            # clean pull derives (DEC-JOB-COOPERATIVE-CANCEL-001).
+            quarantined_names = derive_quarantined_name_set(spot, historical)
+            quarantined, quarantined_count = _cap_quarantined(quarantined_names)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=historical,
+                stopped_after=f"{PHASE_HISTORICAL} (cancelled)",
+                note=_CANCEL_NOTE,
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of

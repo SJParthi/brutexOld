@@ -768,6 +768,7 @@ PullVerdictKind = Literal[
     "auth_expired",
     "mass_empty_halt",
     "quota_exhausted",
+    "cancelled",
     "transient_residual",
     "quarantined_symbols",
     "known_gap_only",
@@ -784,6 +785,7 @@ _HEADLINE: Final[dict[str, str]] = {
         "(suspected vendor soft-throttle or mis-addressing)."
     ),
     "quota_exhausted": "📊 Daily Groww quota reached — auto-resume paused for today.",
+    "cancelled": "⏹️ Pull CANCELLED at operator request — an honest partial, stopped cleanly.",
     "transient_residual": "⏳ Some windows are still pending after retries.",
     "quarantined_symbols": "✅ Pull complete — some symbols were quarantined (not on Groww).",
     "known_gap_only": "ℹ️ No new bars — these symbols have no intraday on Groww.",
@@ -811,6 +813,11 @@ _ACTION: Final[dict[str, str]] = {
         "The 100,000/day Groww quota is spent — the auto-resume paused itself "
         "(it will NOT keep burning a dead quota). Re-pull after the IST-midnight "
         "reset; already-pulled windows are skipped, so only the gaps re-fetch."
+    ),
+    "cancelled": (
+        "Re-run the pull to resume the remainder — the pull stopped at a window "
+        "boundary on the operator's Stop, so every settled window is durably in the "
+        "ledger and only the un-pulled windows are re-fetched on the next pull."
     ),
     "transient_residual": (
         "Re-pull to finish — already-pulled windows are skipped and only the "
@@ -880,6 +887,9 @@ class PullVerdict:
         ``mass_empty_halt`` counts (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001): the pull
         halted on a suspected soft-throttle / mis-addressing episode — blindly
         re-pulling into the same episode is exactly what the breaker prevents.
+        ``cancelled`` counts (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): the
+        operator's Stop left an honest PARTIAL — only a human re-running the pull
+        can land the remainder, so the amber "re-run to resume" banner must show.
         A ``settled_skipped`` count ABOVE
         :data:`SETTLED_SKIPPED_OPERATOR_THRESHOLD` also counts, on EVERY kind
         (minor M-4): a pull that permanently wrote off that many windows must be
@@ -893,6 +903,7 @@ class PullVerdict:
             "auth_expired",
             "mass_empty_halt",
             "quota_exhausted",
+            "cancelled",
             "transient_residual",
         )
 
@@ -922,6 +933,7 @@ def classify_pull(
     auth_cause: str | None = None,
     quota_exhausted: bool = False,
     mass_empty_cause: str | None = None,
+    cancelled: bool = False,
     settled_skipped: int = 0,
 ) -> PullVerdict:
     """Classify a finished pull into ONE prioritised, actionable :class:`PullVerdict`.
@@ -944,17 +956,26 @@ def classify_pull(
        IST-midnight reset (DEC-AUTO-RESUME-QUOTA-001). Ranked just under a dead
        token because, like it, NO amount of immediate retrying can land a bar
        today — only the reset can.
-    4. **transient_residual** — retryable WINDOWS are still failing
+    4. **cancelled** — the operator's cooperative Stop halted the pull at a window
+       boundary (``cancelled``, DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3):
+       an honest PARTIAL — every settled window is durably in the ledger, unissued
+       windows stay PLANNED/FAILED, and the action reads "re-run the pull to
+       resume the remainder" — NEVER a fabricated green "✅ Pull complete." /
+       "No action needed." (the pre-fix classification, which stamped the GREEN
+       banner + the durable G5 journal ``verdict="clean"`` after a Stop). Ranked
+       above ``transient_residual``: the cancel is the CAUSE of the residual, so
+       it must headline (the residual windows ride ``pending_windows``).
+    5. **transient_residual** — retryable WINDOWS are still failing
        (``still_failed_windows`` > 0) but the token is alive: a re-pull / the
        auto-retry layer will finish them. The loud "re-pull to finish" verdict.
-    5. **quarantined_symbols** — NO retryable windows remain; the only "failures"
+    6. **quarantined_symbols** — NO retryable windows remain; the only "failures"
        are quarantined symbols (``failed_pairs`` > 0, e.g. a ticker not on Groww):
        a re-pull can NEVER recover them, so this is a COMPLETE pull with a note,
        NOT "re-pull to finish" (``needs_operator`` is False — grey, not amber).
-    6. **known_gap_only** — nothing completed and nothing failed, but the vendor
+    7. **known_gap_only** — nothing completed and nothing failed, but the vendor
        returned empty for some symbols (``no_data``): the vendor genuinely has no
        intraday for them (reference-only). Expected, not an error.
-    7. **clean** — everything that could complete did.
+    8. **clean** — everything that could complete did.
 
     *settled_skipped* (DEC-EMPTY-WINDOW-CIRCUIT-BREAKER-001 honest-verdict rule) is
     the count of windows THIS pull newly settled as terminal ``SKIPPED``
@@ -992,6 +1013,21 @@ def classify_pull(
     if quota_exhausted:
         return _make_verdict(
             "quota_exhausted",
+            still_failed_windows,
+            failed_pairs,
+            no_data,
+            completed,
+            None,
+            settled_skipped=settled_skipped,
+        )
+    if cancelled:
+        # The operator's cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): an
+        # honest amber PARTIAL naming the stop + the re-run remediation — never
+        # the fabricated green "✅ Pull complete." the pre-fix fall-through
+        # produced (continuation-v3 MAJOR). Ranked ABOVE transient_residual: the
+        # cancel is the cause of any residual, so it headlines.
+        return _make_verdict(
+            "cancelled",
             still_failed_windows,
             failed_pairs,
             no_data,
@@ -1853,6 +1889,42 @@ def partition_spot_steps(instruments: Sequence[Instrument]) -> tuple[SpotStepGro
     return tuple(groups)
 
 
+class PullCancelled(BruteXError):
+    """Operator cooperative cancel — a GRACEFUL pull-wide stop, NEVER an alert-bearing halt.
+
+    DEC-JOB-COOPERATIVE-CANCEL-001: raised at a SAFE boundary ONLY (before a
+    window's vendor fetch — never mid-write), it rides both ingest spines'
+    ``_GLOBAL_STOP_ERRORS`` so the existing graceful-halt propagation applies
+    for free: the per-symbol/contract quarantine is bypassed, the fetch
+    pipeline drains its in-flight write tails, and the durable window ledger
+    is persisted by the controllers' existing ``finally`` blocks — so a
+    cancelled pull's on-disk state is bit-identical to a graceful stop at that
+    window boundary, and the next pull idempotently re-pulls ONLY the windows
+    the cancel left unsettled (Golden Rule #7). Deliberately EXCLUDED from the
+    job layer's :func:`~brutex.dashboard.pull_jobs.is_pull_halt` — an operator
+    cancel must never fire the CRITICAL Telegram pull-halt alert nor read as
+    an ``error`` terminal.
+    """
+
+
+#: The zero-arg cooperative-cancel probe threaded down the pull spines
+#: (DEC-JOB-COOPERATIVE-CANCEL-001). ``True`` ⇒ stop at the next safe boundary.
+CancelCheck: TypeAlias = Callable[[], bool]  # noqa: UP040
+
+
+def raise_if_cancelled(should_stop: CancelCheck | None) -> None:
+    """Raise :class:`PullCancelled` iff *should_stop* is wired and reads ``True`` — O(1).
+
+    The ONE boundary-check helper (CLAUDE.md §11 COMMON) both spines call at
+    their window/contract boundaries: a ``None`` probe (every legacy caller)
+    is a no-op, so an un-wired path is byte-identical to before the feature.
+    """
+    if should_stop is not None and should_stop():
+        raise PullCancelled(
+            "pull cancelled at operator request (cooperative stop at the window boundary)"
+        )
+
+
 class StepOrderError(BruteXError):
     """A pull-step rank regression under ``StepOrderMonitor(raise_on_violation=True)``.
 
@@ -1987,8 +2059,10 @@ __all__ = [
     "OLD_GAP_HORIZON_DAYS",
     "SETTLED_SKIPPED_OPERATOR_THRESHOLD",
     "SYNTHETIC_DRY_RUN_LABEL",
+    "CancelCheck",
     "DateWindow",
     "LoopVerdict",
+    "PullCancelled",
     "PullStep",
     "PullVerdict",
     "PullVerdictKind",
@@ -2014,6 +2088,7 @@ __all__ = [
     "now_ist",
     "partition_spot_steps",
     "plan_windows",
+    "raise_if_cancelled",
     "retry_failed_windows",
     "run_until_clean",
     "summarize_conflicts",

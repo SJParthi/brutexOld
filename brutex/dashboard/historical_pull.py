@@ -108,6 +108,8 @@ from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.adapters.ingest_common import (
     AUTO_RESUME_MAX_ROUNDS,
     DEFAULT_EMPTY_RETRY_ATTEMPTS,
+    CancelCheck,
+    PullCancelled,
     PullStep,
     PullVerdict,
     StepOrderMonitor,
@@ -840,6 +842,7 @@ def _build_note(
     greeks_enrich_error: str | None = None,
     class_unresolved: int = 0,
     greeks_strict_withheld: bool = False,
+    greeks_cancel_withheld: bool = False,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -889,6 +892,15 @@ def _build_note(
     the strict barrier withheld the pass on an unclean prior/F&O step. NEVER
     a FAILED verdict (nothing ran, nothing is lost — the overlay is
     re-derivable). The ``False`` default renders byte-identically to before.
+
+    *greeks_cancel_withheld* (DEC-JOB-COOPERATIVE-CANCEL-001, combined-PR fix
+    round 2): ``True`` appends ", Greeks enrichment withheld (cancelled) —
+    re-attempted next pull" — an operator cancel withheld the post-pull tail
+    (L2 heal + Greeks) so the stop honours its latency contract. NEVER a
+    FAILED verdict (the overlay is re-derivable; the next pull re-attempts).
+    Mutually exclusive with the strict clause by construction (a cancelled
+    tail never reaches the strict gate). The ``False`` default renders
+    byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -920,6 +932,10 @@ def _build_note(
         # DEC-PULL-SIX-STEP-ORDER-001: the strict-withheld pass is NAMED (never
         # silence, never FAILED — the pass did not run; ok stays None).
         greeks_suffix = ", Greeks enrichment withheld (strict gate) — re-attempted next pull"
+    if greeks_cancel_withheld:
+        # DEC-JOB-COOPERATIVE-CANCEL-001 (fix round 2): the cancel-withheld tail
+        # is NAMED too (mutually exclusive with the strict clause by construction).
+        greeks_suffix = ", Greeks enrichment withheld (cancelled) — re-attempted next pull"
     if contracts_selected == 0 and contracts_out_of_scope:
         base = (
             f"all {contracts_out_of_scope} selected contract(s) across "
@@ -1144,9 +1160,20 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
+    should_stop: CancelCheck | None = None,
     ledger: WindowLedger | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
+
+    *should_stop* (DEC-JOB-COOPERATIVE-CANCEL-001) is threaded verbatim into every
+    :func:`run_groww_option_ingest` pass — checked per ``(contract, interval)``
+    pair (the F&O window boundary) — and its propagated
+    :class:`~brutex.adapters.ingest_common.PullCancelled` is CAUGHT at the bucket
+    loop (like the mass-empty halt, but with NO Telegram alert — the operator
+    asked): the remaining steps are announced ``pull.step.halted``
+    (``reason="cancelled"``), the ``finally`` drains the pipeline + persists the
+    ledger, so a cancelled phase's on-disk state ≡ a graceful stop at that
+    boundary. ``None`` (every legacy caller) is byte-identical.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
@@ -1400,6 +1427,7 @@ def _run_phase(
                 # Pre-settle TODAY minute-completeness gate
                 # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
                 today_completeness_gate=today_gate,
+                should_stop=should_stop,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1578,6 +1606,30 @@ def _run_phase(
             )
             if step_auth:
                 auth_latched = True
+    except PullCancelled as exc:
+        # Operator cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): the spine
+        # raised at a (contract, interval) window boundary. Everything already
+        # committed survives (bars via the sink; window records via the finally's
+        # drain + ledger persist below); every un-fetched window stays
+        # PLANNED/unsettled — idempotently re-pulled next time. Deliberately NO
+        # Telegram alert (the operator asked for this stop); the sequencer's
+        # between-phase probe carries the "cancelled" attribution to the report.
+        _LOG.warning(
+            "historical.pull.cancelled",
+            error=str(exc),
+            note=(
+                "operator cancel at the window boundary — committed work kept; "
+                "the next pull resumes the remaining windows"
+            ),
+        )
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="cancelled",
+            )
     except MassEmptySettleHalt as exc:
         # The mass-empty circuit breaker TRIPPED mid-phase (DEC-EMPTY-WINDOW-CIRCUIT-
         # BREAKER-001 minor M-5 — the F&O bulk route's polished halt, mirroring the
@@ -1843,6 +1895,21 @@ _GREEKS_STRICT_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
     ok=None, error=None, errored_targets=0
 )
 
+#: The operator-cancel WITHHELD outcome (DEC-JOB-COOPERATIVE-CANCEL-001, combined-PR
+#: fix round 2): a cooperative cancel observed AFTER the 1-minute phase settles
+#: withholds the post-pull tail — the O(pulled-scope) L2 heal AND the FULL Greeks
+#: enrichment pass — so the stop-latency contract ("finishing the current window,
+#: then stop") holds instead of silently running a potentially-hours-long tail.
+#: SAFE by construction: the L2 heal is best-effort (the next pull's L2 + the
+#: L1/L3 sweeps cover the slice) and the overlay is re-derivable (the next pull's
+#: stamp-gated enrich pass re-attempts it — exactly the ``_GREEKS_STRICT_WITHHELD``
+#: precedent). ``ok=None`` — the pass did NOT run; never a FAILED verdict. A
+#: DISTINCT instance so the caller's identity check can never collide with the
+#: module-level ``GREEKS_NOT_RUN`` / the strict-withheld sentinel.
+_GREEKS_CANCEL_WITHHELD: Final[_GreeksEnrichOutcome] = _GreeksEnrichOutcome(
+    ok=None, error=None, errored_targets=0
+)
+
 
 def _heal_lake_after_pull(
     *,
@@ -2020,6 +2087,7 @@ def pull_contract_candles(
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    should_stop: CancelCheck | None = None,
     ledger: WindowLedger | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
@@ -2187,6 +2255,17 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         is re-derivable, the next pull re-attempts). ``None`` (every
         non-pipeline caller — the /db selection route, tests) keeps today's
         best-effort behavior byte-identical.
+    should_stop
+        Optional cooperative-cancel probe (DEC-JOB-COOPERATIVE-CANCEL-001):
+        threaded into the F&O spine and checked BEFORE every
+        ``(contract, interval)`` window's vendor fetch, AND re-consulted after
+        the phase settles (combined-PR fix round 2) so a cancelled pull also
+        WITHHOLDS the post-pull tail — the O(pulled-scope) L2 heal + the FULL
+        Greeks-enrichment pass (`_GREEKS_CANCEL_WITHHELD`; the note reads
+        "withheld (cancelled) — re-attempted next pull"). Nothing is lost:
+        the next pull's L2 heal (+ L1/L3) covers the slice and the
+        stamp-gated enrich pass re-attempts the re-derivable overlay.
+        ``None`` (every legacy caller) is byte-identical.
     ledger
         Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
         to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
@@ -2374,6 +2453,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
                 form_preference=form_preference,
+                should_stop=should_stop,
                 # Shared pipeline ledger seam (DEC-LEDGER-LOAD-SPACE-V1-001):
                 # an injected instance skips _run_phase's own full-ledger load.
                 ledger=ledger,
@@ -2447,11 +2527,29 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
     contracts_completed = _mark_complete(registry, rebuilt, minute.complete)
 
     greeks_outcome = _GREEKS_NOT_RUN
-    if not dry_run:
+    # DEC-JOB-COOPERATIVE-CANCEL-001 (combined-PR fix round 2): re-consult the
+    # cancel token AFTER the phase settled (the token is per-run and stays set).
+    # A cancelled pull previously ran the O(pulled-scope) L2 heal + the FULL
+    # Greeks-enrichment tail below — contradicting the "finishing current
+    # window, then stop" latency contract at every claim site. On cancel BOTH
+    # are WITHHELD (never a data loss: the next pull's L2 heal — plus L1/L3 —
+    # covers the slice, and the stamp-gated enrich pass re-attempts the
+    # re-derivable overlay), the withholding is NAMED on the note.
+    cancelled_tail = should_stop is not None and should_stop()
+    if not dry_run and cancelled_tail:
+        _LOG.warning(
+            "historical.pull.cancel_tail_skipped",
+            note=(
+                "operator cancel — post-pull L2 heal + Greeks enrichment withheld; "
+                "the next pull heals the slice and re-attempts the overlay"
+            ),
+        )
+        greeks_outcome = _GREEKS_CANCEL_WITHHELD
+    elif not dry_run:
         # DEC-LAKE-HEAL-001 L2: heal the pulled contracts' slice FIRST so the
         # Greeks enrichment below (and the pipeline's later prebuild phase)
         # reads clean 1-minute (LakeWriteHalt re-raises). Integrity, NOT a
-        # post-step — it always runs, strict gate or not.
+        # post-step — it always runs on an un-cancelled pull, strict gate or not.
         _heal_lake_after_pull(rebuilt=rebuilt, windows=minute_windows, lake_root=lake_root)
         # The strict Greeks arm (DEC-PULL-SIX-STEP-ORDER-001): the literal
         # all-or-nothing barrier needs BOTH the threaded prior-step verdict
@@ -2509,6 +2607,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         greeks_enrich_error=greeks_outcome.error,
         class_unresolved=class_unresolved,
         greeks_strict_withheld=greeks_outcome is _GREEKS_STRICT_WITHHELD,
+        greeks_cancel_withheld=greeks_outcome is _GREEKS_CANCEL_WITHHELD,
     )
     return HistoricalPullReport(
         dry_run=dry_run,

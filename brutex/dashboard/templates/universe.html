@@ -566,6 +566,21 @@
               style="margin-left:8px; font-size:11px; display:none;"
               title="Toggle the daily post-market auto-pull (the armed state persists across dashboard restarts)."></button>
     </div>
+    <!-- Cooperative cancel (DEC-JOB-COOPERATIVE-CANCEL-001): shown while a pull
+         runs; POSTs /api/v1/pull/cancel. WITHIN a fetch phase the pull stops at
+         the WINDOW boundary — the in-flight window's fetch + durable write +
+         ledger record complete first, so the next pull resumes exactly the
+         unsettled remainder. HONEST scope (review fold — the pipeline probes
+         only BETWEEN phases): a stop during the METADATA phase is honored only
+         at the next PHASE boundary (that spine has no interior probe — minutes
+         at the paced vendor rate over ~750 underlyings), and a stop arriving
+         once the PREBUILD stage has launched is not observed by the prebuild
+         at all (it runs to completion). -->
+    <button class="pull-everything-btn" id="pullStopBtn" hidden
+            title="Cooperative stop — within a fetch phase the current window finishes its durable write + ledger checkpoint, then the pull settles as an honest partial. A stop during the metadata phase is honored only at the next phase boundary, and a stop after the pre-build stage launches is not observed by the pre-build (it runs to completion). The next pull resumes the remaining windows (nothing is lost).">
+      <span class="pe-icon">⏹</span>
+      <span class="pe-text"><b id="pullStopLabel">Stop pull</b></span>
+    </button>
   </div>
 
   <div id="emptyBanner" style="display:none; margin:8px 24px 4px; padding:16px 20px;
@@ -1897,7 +1912,52 @@ document.getElementById("tickconstbtn").onclick = async () => {
 function setBulkDisabled(on) {
   if (PULL_FNO_BTN) PULL_FNO_BTN.disabled = on;
   if (PULL_ALL_SPOT_BTN) PULL_ALL_SPOT_BTN.disabled = on;
+  // Cooperative Stop (DEC-JOB-COOPERATIVE-CANCEL-001): visible exactly while the
+  // Run button is disabled-because-running — startAndPoll disables, finishLive
+  // re-enables, the attach branch ("already running — watch it below") rides the
+  // same call, and the page-load pullAttachIfRunning() probe (review fold) rides
+  // it too, so a freshly-opened /universe during a running pull shows the Stop
+  // control without a Run re-click.
+  const stopBtn = document.getElementById('pullStopBtn');
+  if (stopBtn) {
+    stopBtn.hidden = !on;
+    if (!on) {
+      stopBtn.disabled = false;
+      const lbl = document.getElementById('pullStopLabel');
+      if (lbl) lbl.textContent = 'Stop pull';
+    }
+  }
 }
+
+/* Cooperative pull cancel (DEC-JOB-COOPERATIVE-CANCEL-001): POST the kind-gated
+   cancel route; the running pull stops at its next WINDOW boundary and settles
+   through the NORMAL poll path as an honest amber partial ("(cancelled)").
+   textContent only — never markup. */
+(function () {
+  const stopBtn = document.getElementById('pullStopBtn');
+  if (!stopBtn) return;
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    const lbl = document.getElementById('pullStopLabel');
+    if (lbl) lbl.textContent = 'Stopping — finishing current window + draining queued writes…';
+    try {
+      const r = await fetch('/api/v1/pull/cancel', { method: 'POST' });
+      const j = await r.json();
+      if (!j.cancelling) {
+        /* Distinct refusal labels (fix round 4): the wire's additive `reason`
+           separates "idle" from "running-but-uncancellable" — previously a
+           visibly-running metadata pull read "No running pull to cancel". */
+        if (lbl) lbl.textContent = (j.reason === 'uncancellable')
+          ? 'This pull surface has no stop seam — it runs to completion'
+          : 'No running pull to cancel';
+        stopBtn.disabled = false;
+      }
+    } catch (e) {
+      if (lbl) lbl.textContent = 'Cancel request failed — retry';
+      stopBtn.disabled = false;
+    }
+  };
+})();
 
 /* ── The LIVE feed: start a background pull, then poll /pull-progress ──
    The pull runs off the request thread (DEC-PULL-PROGRESS-LIVE-001); we POST to
@@ -2414,9 +2474,15 @@ async function pollProgress(label) {
       const subNote = subUnitNote(s, trackSubUnit(s));
       const suEl = document.getElementById('subunit');
       if (suEl) suEl.textContent = subNote ? '· ' + subNote : '';
-      document.getElementById('pulltitle').textContent = s.open_ended
+      // Cooperative cancel visibility (DEC-JOB-COOPERATIVE-CANCEL-001): while
+      // the run's cancel token is set the header says so honestly — the pull
+      // finishes its current window, drains the queued tail writes + ledger
+      // persist (the post-pull heal/Greeks tail is WITHHELD on cancel — the
+      // combined-PR fix round 2), then settles.
+      const cancelPrefix = s.cancelling ? 'CANCELLING — finishing current window + draining queued writes… · ' : '';
+      document.getElementById('pulltitle').textContent = cancelPrefix + (s.open_ended
         ? `Pulling ${label} · ${(s.completed || 0).toLocaleString('en-IN')} units · total unknown · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '')
-        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s);
+        : `Pulling ${label} · ${Math.round(s.percent || 0)}% · ${s.current || '…'}` + (subNote ? ' · ' + subNote : '') + etaSuffix(s));
       pollTimer = setTimeout(() => pollProgress(label), PROGRESS_MS);
       return;
     }
@@ -2832,6 +2898,39 @@ if (crossverifyBtn) {
   crossverifyBtn.addEventListener('click', startCrossverify);
   cvAttachIfRunning();   // a re-opened page re-attaches to a running producer
 }
+/* Page-load re-attach for the PULL watch (DEC-JOB-COOPERATIVE-CANCEL-001 review
+   fold — the gbAttachIfRunning precedent above): an operator re-opening
+   /universe during a multi-hour pull previously saw NO Stop control until they
+   re-clicked Run (setBulkDisabled(true) fired only from startAndPoll), so the
+   cancel feature was unreachable from a fresh page. ONE probe of /pull-progress
+   on load; a RUNNING pull-kind job (the additive job_kind gate — a running
+   dashboard SWEEP on the shared single-flight job never fabricates a pull
+   watch) re-attaches the FULL live watch: Run disabled + Stop visible + the
+   pollProgress chain, which settles through finishLive exactly like a clicked
+   run (the buttons come back when the pull ends). Best-effort — any probe
+   failure leaves the page as-is (a later Run click still works). The probe
+   rides the COMMON gbFetchJson helper (CLAUDE.md §11 — the ONE bounded
+   JSON-fetch core on this page) so it carries the FEED_FETCH_TIMEOUT_MS
+   hung-fetch abort bound through the BODY read AND adds no second raw
+   pull-progress fetch site — the one-fetch-site law of
+   test_no_new_poll_loop_added stands (the poll chain it attaches IS
+   pollProgress, never a new loop). */
+async function pullAttachIfRunning() {
+  try {
+    const res = await gbFetchJson('/api/v1/universe/pull-progress');
+    if (!res.ok) return;
+    const s = res.body;
+    if (!s || s.state !== 'running' || s.job_kind !== 'pull') return;
+    const panel = document.getElementById('pullpanel');
+    if (panel) panel.classList.add('on', 'running');
+    setBulkDisabled(true);
+    pullStarted = true;   // gate the all-segments line exactly like a clicked run
+    watchActive = true;   // open the visibility re-poll gate for the attached watch
+    document.getElementById('pulltitle').textContent = 'Attached to the running pull…';
+    pollProgress('running pull (re-attached)');
+  } catch (e) { /* best-effort — the page stays as-is; the next Run click works */ }
+}
+pullAttachIfRunning();
 
 /* Render the live stat row (units done/total · failed · no-data gaps · bars). A
    no-data gap is a benign Groww DH-905 boundary (e.g. NIFTY NEXT 50's pre-2021

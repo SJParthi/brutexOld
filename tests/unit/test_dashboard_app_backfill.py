@@ -137,12 +137,24 @@ class _FakeVerdict:
 
 
 class _FakeReport:
-    """Stub pull report — only ``.verdict`` is read on the job thread."""
+    """Stub pull report — ``.verdict`` + ``.to_dict()`` are read on the job thread.
+
+    Mirrors the ``BulkSpotReport`` surface the pull-all ``_work`` closure
+    consumes (DEC-JOB-COOPERATIVE-CANCEL-001 continuation-v3): the closure
+    stamps ``report.verdict.to_dict()`` then returns ``report.to_dict()`` — a
+    Mapping — so ``pull_jobs._finish_detail`` can surface an emit-on-cancel
+    ``"note"``. This UNCANCELLED stub payload carries NO ``note`` key, so the
+    job headline stays the back-compat ``"done"``.
+    """
 
     @property
     def verdict(self) -> _FakeVerdict:
         """The stub verdict."""
         return _FakeVerdict()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Minimal uncancelled payload Mapping (no ``note`` → headline "done")."""
+        return {"dry_run": True}
 
 
 def _fake_pull_all_spot(instruments: list[Instrument], **kwargs: Any) -> _FakeReport:

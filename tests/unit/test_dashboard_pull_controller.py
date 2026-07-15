@@ -3778,6 +3778,160 @@ class TestIngestAuditWiring:
         assert not (tmp_path / "audit").exists()
 
 
+class TestCooperativeCancel:
+    """DEC-JOB-COOPERATIVE-CANCEL-001: a cooperative cancel maps to the honest partial verdict."""
+
+    def test_cancel_at_window_boundary_sets_cancelled_and_keeps_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """A should_stop that fires stops the spot pull gracefully — cancelled=True, no crash.
+
+        The spine raises ``PullCancelled`` at the first window boundary (before any
+        vendor call); ``pull_all_spot`` CATCHES it like the quota / mass-empty global
+        stops, latches ``final_cancelled``, halts the remaining step groups, and the
+        report reads ``cancelled=True`` — an honest partial, NOT an ``error`` and with
+        NO Telegram alert (the operator asked for it).
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert report.auth_aborted is False
+        assert report.quota_exhausted is False
+        assert report.to_dict()["cancelled"] is True
+        events = {log["event"] for log in logs}
+        assert "universe.pull_all.cancelled" in events
+
+    def test_cancelled_verdict_is_never_a_fabricated_green_clean(self, tmp_path: Path) -> None:
+        """Continuation-v3 MAJOR (fails-before): a cancelled pull's verdict kind is `cancelled`.
+
+        Pre-fix ``BulkSpotReport.verdict`` never passed the ``cancelled`` latch
+        into :func:`classify_pull`, so an operator Stop fell through to the
+        GREEN ``clean`` kind — the "✅ Pull complete. / No action needed."
+        banner stamped into ``_last_pull_verdict`` on all three cancel-wired
+        surfaces AND the durable G5 pull journal (``record_pull_finish``
+        stamps ``verdict=verdict.kind``). The honest verdict is the amber
+        ``cancelled`` partial naming the operator stop + the re-run remedy.
+        """
+        report = pull_all_spot(
+            [_index("13")],
+            lake_root=tmp_path,
+            dry_run=True,
+            now=_BULK_NOW,
+            should_stop=lambda: True,
+        )
+        assert report.cancelled is True
+        verdict = report.verdict
+        # A dry-run verdict is mark_synthetic-relabeled; the KIND is preserved
+        # (the classifier stays the one authority) — pin the kind itself.
+        assert verdict.kind == "cancelled"
+        assert verdict.needs_operator is True
+        assert "CANCELLED at operator request" in verdict.headline
+        assert "✅ Pull complete." not in verdict.headline
+        assert "Re-run the pull to resume the remainder" in verdict.action
+        d = report.to_dict()
+        assert d["verdict"]["kind"] == "cancelled"
+        # The emit-on-cancel note: pull_jobs._finish_detail reads a Mapping's
+        # non-empty "note" as the job's completion headline, so a cancelled
+        # pull never finishes with the bare back-compat "done".
+        assert "CANCELLED at operator request" in d["note"]
+
+    def test_no_probe_is_not_cancelled(self, tmp_path: Path) -> None:
+        """The default (no should_stop) pull is never cancelled — byte-compatible."""
+        report = pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        assert report.cancelled is False
+        d = report.to_dict()
+        assert d["cancelled"] is False
+        # No emit-on-cancel note on an uncancelled payload (byte-identical wire;
+        # the job's completion headline stays the back-compat "done").
+        assert "note" not in d
+        assert d["verdict"]["kind"] != "cancelled"
+
+    def test_cancelled_group_settle_event_reads_clean_false(self, tmp_path: Path) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled group's settle is NOT clean.
+
+        ``PullCancelled`` is consumed inside ``_run_phase``, so the truncated
+        group still emits its ``pull.step.settled`` event with the unissued
+        windows left PLANNED (``group_failed == 0``) — pre-fix the event read
+        a false ``clean=True``. The ``final_cancelled`` latch now folds into
+        the ``clean=`` conjunction exactly like the adjacent market-hours /
+        auth / quota / mass-empty latches.
+        """
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=True,
+                now=_BULK_NOW,
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled, "the cancelled group must still emit its settle event"
+        assert all(log["clean"] is False for log in settled)
+
+    def test_uncancelled_group_settle_event_stays_clean(self, tmp_path: Path) -> None:
+        """The clean-run settle event stays ``clean=True`` — the latch fold is additive."""
+        with capture_logs() as logs:
+            pull_all_spot([_index("13")], lake_root=tmp_path, dry_run=True, now=_BULK_NOW)
+        settled = [log for log in logs if log["event"] == "pull.step.settled"]
+        assert settled
+        assert all(log["clean"] is True for log in settled)
+
+    def test_cancel_withholds_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Continuation-v2 fix (fails-before): a cancelled pull skips the L2 heal, loudly.
+
+        ``PullCancelled`` is consumed inside ``_run_phase`` so execution reaches
+        ``fetch_phases_ok = True``, and the finally's O(pulled-scope)
+        ``_heal_after_pull`` previously ran AFTER the operator's Stop —
+        contradicting the "finishing current window, then stop" latency
+        contract (the F&O twin was fixed in combined-PR round 2 via
+        ``cancelled_tail``; this is its spot mirror). The heal is now WITHHELD
+        with ONE ``pull.cancel_heal_skipped`` WARN naming the next-pull cover.
+        """
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+                should_stop=lambda: True,
+            )
+        assert report.cancelled is True
+        assert calls == []
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" in events
+
+    def test_uncancelled_pull_still_runs_post_drain_heal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-cancel pull keeps the L2 heal — the withholding is cancel-gated only."""
+        calls: list[str] = []
+        monkeypatch.setattr(pull_controller, "_heal_after_pull", lambda **_kw: calls.append("heal"))
+        with capture_logs() as logs:
+            report = pull_all_spot(
+                [_index("13")],
+                lake_root=tmp_path,
+                dry_run=False,
+                now=_BULK_NOW,
+                adapter_factory=_real_bulk_factory(SyntheticSpotAdapter()),
+            )
+        assert report.cancelled is False
+        assert calls == ["heal"]
+        events = {log["event"] for log in logs}
+        assert "pull.cancel_heal_skipped" not in events
+
+
 # ────────────────────────────────────────────────────────────────────────
 # DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline ledger seam
 # ────────────────────────────────────────────────────────────────────────
