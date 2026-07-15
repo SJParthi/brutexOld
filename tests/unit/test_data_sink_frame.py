@@ -161,6 +161,29 @@ class TestAppendFrame:
         assert result.bars_appended == 4
         assert result.bars_net_new == 4
 
+    def test_multi_month_descending_appearance_still_ascending(
+        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ascending-month order is the SORT's doing, never appearance order.
+
+        Direction pin (review-round-1 mutant census M-I): a frame whose
+        APRIL rows physically precede its MARCH rows (each month internally
+        sorted, so both sub-frames admit) groups in appearance order
+        [April, March] — dropping the ``sorted()`` would emit descending
+        ``write_results`` while every prior fixture (already ascending)
+        stayed green. Legacy ``append`` sorts its month dict identically,
+        so ascending IS the parity contract.
+        """
+        _steady_on(monkeypatch)
+        sink = ParquetBarSink(writer=writer)
+        april = _frame(2, start=datetime(2024, 4, 1, 4, 0, tzinfo=UTC))
+        march = _frame(2, start=datetime(2024, 3, 4, 4, 0, tzinfo=UTC))
+        swapped = pl.concat([april, march])  # April FIRST — appearance order
+        result = sink.append_frame(**_COORDS, frame=swapped)
+        assert result.partitions_written == 2
+        months = [wr.path.name for wr in result.write_results]
+        assert months == ["03.parquet", "04.parquet"]  # ascending — the sink law
+
     def test_ts_dtype_pre_check_degrades_whole_frame(
         self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

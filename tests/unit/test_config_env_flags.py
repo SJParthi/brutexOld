@@ -15,6 +15,8 @@ compiled ``fno_math`` wheel). This file pins:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from brutex.config.env_flags import FALSY_LITERALS, TRUTHY_LITERALS, env_flag_tristate
 
@@ -63,3 +65,31 @@ class TestEngineReExport:
         from brutex.engine import sweep_lookahead
 
         assert sweep_lookahead.env_flag_tristate is env_flag_tristate
+
+    def test_engine_alias_is_same_object_wheel_free(self) -> None:
+        """The identity pin that runs WITHOUT the compiled wheel.
+
+        Review-round-1 fold: the package-import pin above skips in every
+        wheel-free environment (the engine ``__init__`` needs ``fno_math``),
+        leaving the re-export identity unverified exactly where the
+        relocation matters. This twin executes the REAL
+        ``sweep_lookahead.py`` module body via a file-location load that
+        bypasses the engine package ``__init__`` — its
+        ``from brutex.config.env_flags import env_flag_tristate`` line runs
+        for real, so a drifted local copy (a ``def env_flag_tristate`` in
+        the module) fails the ``is`` check here in EVERY environment.
+        """
+        import importlib.util
+
+        # Resolve the file WITHOUT importing brutex.engine (which needs the
+        # wheel): walk from the wheel-free brutex package root instead.
+        import brutex
+
+        module_path = Path(brutex.__file__).parent / "engine" / "sweep_lookahead.py"
+        spec = importlib.util.spec_from_file_location(
+            "_sweep_lookahead_wheel_free_identity_probe", module_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.env_flag_tristate is env_flag_tristate

@@ -32,7 +32,11 @@ from brutex.data.frame_write_gate import (
     FrameWriteStats,
 )
 from brutex.data.models import CandleBar
-from brutex.data.parquet_writer import ParquetWriter, WriteResult
+from brutex.data.parquet_writer import (
+    FRAME_PRICE_MAGNITUDE_BOUND,
+    ParquetWriter,
+    WriteResult,
+)
 from brutex.data.spot_daily_resample import frame_to_candle_bars
 
 pytest.importorskip("polars")
@@ -254,9 +258,24 @@ class TestAdmissionGuards:
         bad = _frame(2).with_columns(pl.Series("volume", [-1, 5], dtype=pl.Int64))
         assert self._reason(bad) is DegradeReason.DOMAIN_VIOLATION
 
+    def test_g3_zero_volume_admits(self) -> None:
+        """Volume 0 ADMITS — the NORMAL production spot-INDEX shape.
+
+        Direction pin (review-round-1 mutant census M-B): a `<0`→`<=0`
+        narrowing is byte-safe (degrade → legacy same bytes) yet would
+        silently kill the fast lane on EVERY zero-volume index partition —
+        the engine trio's primary shape. The A/B corpus cannot see it.
+        """
+        zero = _frame(2).with_columns(pl.Series("volume", [0, 0], dtype=pl.Int64))
+        assert self._reason(zero) is None
+
     def test_g3_negative_oi(self) -> None:
         bad = _frame(2, oi=[-3, 5])
         assert self._reason(bad) is DegradeReason.DOMAIN_VIOLATION
+
+    def test_g3_zero_oi_admits(self) -> None:
+        """OI 0 ADMITS (the F&O null→0 convention stores zeros; census M-C)."""
+        assert self._reason(_frame(2, oi=[0, 5])) is None
 
     def test_g3_null_oi_is_fine(self) -> None:
         assert self._reason(_frame(2, oi=[None, 5])) is None
@@ -282,11 +301,38 @@ class TestAdmissionGuards:
         bad = _frame(2).with_columns(pl.Series("close", [0.01, 102.0], dtype=pl.Float64))
         assert self._reason(bad) is DegradeReason.DOMAIN_VIOLATION
 
+    def test_g3_flat_bar_admits(self) -> None:
+        """A flat (o=h=l=c) bar ADMITS — pins ALL FIVE ordering `>=`/`<=`
+        comparisons at their equality boundary in one frame (census M-D);
+        a strictified mutant would byte-safely degrade every doji bucket.
+        """
+        flat = _frame(1).with_columns(
+            *(
+                pl.Series(name, [250.0], dtype=pl.Float64)
+                for name in ("open", "high", "low", "close")
+            )
+        )
+        assert self._reason(flat) is None
+
     def test_g4_magnitude_bound(self) -> None:
         bad = _frame(1, base=1e12)
         assert self._reason(bad) is DegradeReason.MAGNITUDE_OVERFLOW
         fine = _frame(1, base=1e11)
         assert self._reason(fine) is None
+
+    def test_g4_exact_boundary_degrades(self) -> None:
+        """max |price| EXACTLY at the bound DEGRADES — the `>=` direction pin
+        (census M-A: a `>=`→`>` mutant is byte-safe but widens admission to
+        the unproven cast-parity edge; the inclusive bound is the contract).
+        """
+        at_bound = _frame(1).with_columns(
+            pl.Series("high", [FRAME_PRICE_MAGNITUDE_BOUND], dtype=pl.Float64)
+        )
+        assert self._reason(at_bound) is DegradeReason.MAGNITUDE_OVERFLOW
+        below = _frame(1).with_columns(
+            pl.Series("high", [FRAME_PRICE_MAGNITUDE_BOUND - 1.0], dtype=pl.Float64)
+        )
+        assert self._reason(below) is None
 
     def test_g5_snap_overflow_degrades(
         self, writer: ParquetWriter, monkeypatch: pytest.MonkeyPatch
@@ -360,6 +406,39 @@ class TestFreshLane:
             "file_rewritten",
         ):
             assert getattr(fast, field) == getattr(legacy, field), field
+
+    def test_steady_fresh_zero_volume_flat_bar_served_fast_bytes_equal_legacy(
+        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The production spot-INDEX shape (zero volume, one flat bucket) is
+        SERVED BY THE FAST LANE (admitted — never degraded) with bytes equal
+        to legacy. End-to-end teeth for the census M-B/M-D direction mutants:
+        a narrowed admission keeps bytes equal via degrade, so ONLY the
+        stats/spy assertions here (fast==1, zero legacy calls) can fail.
+        """
+        _steady_on(monkeypatch)
+
+        def index_shape() -> pl.DataFrame:
+            return _frame(3).with_columns(
+                pl.Series("volume", [0, 0, 0], dtype=pl.Int64),
+                # bar 1 is a flat o=h=l=c doji bucket
+                pl.Series("open", [100.0, 250.0, 102.0], dtype=pl.Float64),
+                pl.Series("high", [110.0, 250.0, 112.0], dtype=pl.Float64),
+                pl.Series("low", [95.0, 250.0, 97.0], dtype=pl.Float64),
+                pl.Series("close", [102.0, 250.0, 104.0], dtype=pl.Float64),
+            )
+
+        spy = _LegacySpy(monkeypatch)
+        stats = FrameWriteStats()
+        _wf(writer, index_shape(), stats=stats)
+        assert spy.calls == 0
+        assert stats.fast == 1
+        assert stats.degraded == 0
+
+        twin_root = lake.parent / "twin"
+        twin = ParquetWriter(lake_root=twin_root, partition_log_level="debug")
+        _legacy_write(twin, index_shape())
+        assert _dest(lake).read_bytes() == _dest(twin_root).read_bytes()
 
     def test_steady_fresh_spot_without_oi_column(
         self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
@@ -682,6 +761,28 @@ class TestMergeLane:
         assert result.file_rewritten is True  # the legacy dedup self-heal rewrote
         healed = pl.read_parquet(_dest(lake))
         assert healed.height == 3
+
+    def test_merge_stored_footer_height_mismatch_belt_degrades(
+        self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The `stored.height != physical` BELT is load-bearing on its own
+        (census M-G): a footer whose row count disagrees with the decoded
+        data pages (footer == unique while the data carries a dup) must
+        degrade `merge_stored_dups` — without the belt the probe would
+        proceed to G8 over the dup-carrying store and wrongly declare a
+        no-op, skipping the pending dedup self-heal.
+        """
+        self._seed(writer, _frame(3, with_oi=True))
+        stored = pl.read_parquet(_dest(lake))
+        # 4 physical rows, 3 unique timestamps — a dup pending self-heal.
+        pl.concat([stored, stored.slice(0, 1)]).sort("timestamp").write_parquet(_dest(lake))
+        # The lying footer: reports the UNIQUE count (3), not the physical 4
+        # — the footer-vs-data inconsistency class the belt guards.
+        monkeypatch.setattr(ParquetWriter, "_stored_physical_rows", staticmethod(lambda dest, b: 3))
+        _steady_on(monkeypatch)
+        stats = FrameWriteStats()
+        _wf(writer, _frame(3, with_oi=True), stats=stats)
+        assert stats.degrade_reasons == {"merge_stored_dups": 1}
 
     def test_merge_stored_snap_overflow_degrades(
         self, writer: ParquetWriter, lake: Path, monkeypatch: pytest.MonkeyPatch

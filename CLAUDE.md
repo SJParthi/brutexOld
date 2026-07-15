@@ -2699,7 +2699,24 @@ hostile-review pass._
   stanza), the two dead `sweep_lookahead` literal-set aliases DELETED (the
   classifier re-export + identity pin stand), the integration A/B suite on
   ONE writer-module import style; entry renumbered #1793 → #1795 at the
-  merge-reconcile.)
+  merge-reconcile. REVIEW ROUND 1 folded (2026-07-15 — the per-finding
+  record lives in MIGRATION.md #1795): the refuter-named byte-SAFE
+  degrade-DIRECTION mutant class (invisible to the A/B sha256 differential
+  by construction — a narrowed admission degrades to legacy's identical
+  bytes) closed by a 10-mutant hand-kill census (4 already killed; 6
+  survivors each now die to ONE new direction pin, fails-before verified —
+  incl. the zero-VOLUME admits pin: the production spot-INDEX shape a
+  `<0`→`<=0` mutant would have silently degraded on the whole engine trio —
+  the census is the ACCEPTED mutant-kill substitute per the #1749
+  precedent, mutation.yml wiring stays the named follow-up); the engine
+  re-export identity pin gains a wheel-free importlib file-load twin (runs
+  in EVERY environment); the ledger's burn-in event token corrected to the
+  emitted `prebuild.frame_write.autoreverted`; the G3 'positivity'
+  over-attribution corrected (upstream read-boundary guard, legacy parity);
+  the stale `_TRUTHY`/`_FALSY` docstring attributions in
+  rust_metrics/rust_stage1a reconciled to the promoted
+  `brutex.config.env_flags` home — docstring/comment-only, ENGINE
+  UNCHANGED.)
   Earlier: `claude/bulk-spot-completeness-flag`
   (**DEC-BULK-SPOT-COMPLETENESS-FLAG-001, MIGRATION.md #1794** — renumbered
   #1792 → #1793 → #1794 across the 2026-07-14 merge-reconciles (main took
