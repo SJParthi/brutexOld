@@ -88,18 +88,28 @@ def test_default_excludes_layout_only_bits(monkeypatch: pytest.MonkeyPatch) -> N
 # ── parser help strings track the count ─────────────────────────────────
 
 
-def test_parser_conditions_help_references_total_conditions() -> None:
-    """Both ``--conditions`` help strings carry the authoritative count."""
+def test_parser_conditions_help_references_the_implemented_count() -> None:
+    """Both ``--conditions`` help strings carry the honest ACTIVE count.
+
+    TOMB-03 companion: the default sweeps the IMPLEMENTED bits (62 on the
+    66-declared layout), so "all {TOTAL} implemented conditions" was a lie by
+    4 — every count is DERIVED (``IMPLEMENTED_MASK.bit_count()`` /
+    ``TOTAL_CONDITIONS``), never a hand-kept literal.
+    """
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
+
     parser = cli.build_parser()
     hits = 0
     for action in _walk_actions(parser):
         if "--conditions" in action.option_strings:
             hits += 1
             assert action.help is not None
-            assert str(TOTAL_CONDITIONS) in action.help
-            assert str(TOTAL_CONDITIONS - 1) in action.help
-            # The stale "0..51 / all 52" wording must be gone.
+            assert f"all {IMPLEMENTED_MASK.bit_count()} implemented conditions" in action.help
+            assert f"declares {TOTAL_CONDITIONS} bits" in action.help
+            # The stale "0..51 / all 52" wording must be gone — and the help
+            # must never claim the DECLARED count is all implemented.
             assert "0..51" not in action.help
+            assert f"all {TOTAL_CONDITIONS} implemented" not in action.help
     assert hits >= 1, "expected at least one --conditions argument"
 
 

@@ -162,24 +162,26 @@ def test_out_of_range_k_raises(bad: str) -> None:
         resolve_sweep_request(k=bad, today=_TODAY)
 
 
-def test_k_bound_is_the_full_66_vocabulary() -> None:
-    """``_MAX_K`` tracks ``TOTAL_CONDITIONS`` (66) — the pre-fix 52 rejected 53..60.
+def test_k_bound_is_the_implemented_condition_count() -> None:
+    """``_MAX_K`` tracks the IMPLEMENTED count (62) — never the declared layout.
 
-    Pinned against the vocabulary so a future vocab growth moves the dashboard
-    bound automatically (DEC-VOCAB-U128-CODEGEN-001; the drift class the
-    vocab doc sweep exists to kill). The DEFAULT sweep grid holds the 62
-    ACTIVE bits (the 60→66 reshape tombstoned 52/53 and declared 64/65
-    layout-only), so ``k`` up to 66 is structurally accepted while the
-    default condition set carries 62 members.
+    G-RETROT-08: the route sweeps ``default_condition_bits()`` (every
+    IMPLEMENTED bit — 62 on the 66-declared layout: the reshape tombstoned
+    VWAP 52/53 and declared SuperTrend 64/65 layout-only), so a ``k`` above 62
+    can never form a combo (``C(62, 63) = 0`` — an empty-grid illusion, not a
+    sweep). Pinned against ``IMPLEMENTED_MASK`` so vocab growth moves the
+    bound automatically (DEC-VOCAB-U128-CODEGEN-001).
     """
     from brutex.cli import default_condition_bits
     from brutex.dashboard.sweep_runner import _MAX_K
-    from brutex.vocabulary.bits import TOTAL_CONDITIONS
+    from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
-    assert _MAX_K == TOTAL_CONDITIONS == 66
-    assert len(default_condition_bits()) == 62
-    # The boundary: 53..66 must be ACCEPTED.
-    assert resolve_sweep_request(k="53,66", today=_TODAY).k == "53,66"
+    assert _MAX_K == IMPLEMENTED_MASK.bit_count() == 62
+    assert len(default_condition_bits()) == _MAX_K
+    # The boundary: 53..62 ACCEPTED; 63 (an empty C(62,63) grid) refused.
+    assert resolve_sweep_request(k="53,62", today=_TODAY).k == "53,62"
+    with pytest.raises(ValueError, match="k must be a whole number 1..62"):
+        resolve_sweep_request(k="63", today=_TODAY)
 
 
 def test_non_integer_sl_leg_raises() -> None:

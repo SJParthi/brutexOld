@@ -32,7 +32,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
-from brutex.vocabulary.bits import TOTAL_CONDITIONS
+from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 #: Default LAKE-partition index symbols (bare trading symbols, NOT the
 #: ``EXCH-SYMBOL`` groww keys) — mirrors the CLI ``--symbols`` default in
@@ -61,11 +61,14 @@ DEFAULT_START: Final[str] = "2020-01-01"
 
 #: Accepted direction tokens (upper-cased before the check).
 _DIRECTIONS: Final[frozenset[str]] = frozenset({"BUY", "SELL"})
-#: Max conditions-per-combo K — the engine bounds ``k`` by the unique condition
-#: count, which is the full 60-condition vocabulary by default (SweepGridConfig
-#: docstring; ``TOTAL_CONDITIONS`` is the one source of truth, so a future
-#: vocab growth moves this bound automatically — DEC-VOCAB-U128-CODEGEN-001).
-_MAX_K: Final[int] = TOTAL_CONDITIONS
+#: Max conditions-per-combo K — the route sweeps the DEFAULT condition set
+#: (``default_condition_bits()`` = every IMPLEMENTED bit), so ``k`` is bounded
+#: by the IMPLEMENTED count (62 on the 66-condition layout), not the declared
+#: layout width: a ``k`` above it can never form a combo (``C(62, 63) = 0`` —
+#: an empty-grid illusion, G-RETROT-08). ``IMPLEMENTED_MASK`` is the one
+#: source of truth, so vocab growth moves this bound automatically
+#: (DEC-VOCAB-U128-CODEGEN-001).
+_MAX_K: Final[int] = IMPLEMENTED_MASK.bit_count()
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +159,7 @@ def _normalise_directions(value: str | None) -> str:
 
 
 def _normalise_k(value: str | None) -> str:
-    """Validate every K parses to an int in ``[1, TOTAL_CONDITIONS]``; return the CSV."""
+    """Validate every K parses to an int in ``[1, _MAX_K]``; return the CSV."""
     tokens = _clean_csv(value, DEFAULT_K)
     out: list[str] = []
     for token in tokens:

@@ -228,23 +228,51 @@ def parse_condition_ids(raw: str) -> list[int]:
     The ONE parser behind all three sweep surfaces (``sweep`` / ``sweep-all`` /
     ``sweep-verify``), replacing three inline copies. Valid input parses
     byte-identically to the old inline expression. Each id is a 0-indexed bit
-    position validated against the VOCABULARY range
-    ``0..TOTAL_CONDITIONS - 1`` (0..59) — deliberately NOT the engine's
-    forward-compat ``[0, 128)`` u128 ceiling: bits 60..127 are
-    reserved/undefined dead bits the results store rejects
-    (``MASK_BITS_MAX``), so admitting them here would be a silent illusion.
+    position that must be IMPLEMENTED
+    (:data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` — the 62 active bits on
+    the 66-condition layout): a bit whose evaluator emits a constant 0 can
+    NEVER fire, so sweeping it is hours of silent dead compute — the results
+    store ADMITS every declared bit (``MASK_BITS_MAX`` spans the full layout),
+    so nothing downstream would catch it (TOMB-03/G-U64U12-02/G-RETROT-03; the
+    old rationale here — "the results store rejects dead bits" — had it
+    inverted). The refusal names the bit, its condition name, and its status:
+    RETIRED (a ``reserved = true`` tombstone — e.g. the VWAP bits 52/53 after
+    the spot-only volume wipe, DEC-ENGINE-SPOT-ONLY-001; a saved pre-reshape
+    script must drop them) vs declared-but-NOT-YET-implemented (a LAYOUT-ONLY
+    bit awaiting its math — e.g. the SuperTrend bits 64/65,
+    DEC-VOCAB-U128-CODEGEN-001 grow-only territory). Bits outside the declared
+    layout (``>= TOTAL_CONDITIONS``) stay the plain out-of-range refusal —
+    deliberately NOT the engine's forward-compat ``[0, 128)`` u128 ceiling.
 
     Raises
     ------
     CliUserError
-        On a non-integer token or an out-of-range bit index.
+        On a non-integer token, an out-of-range bit index, or an unimplemented
+        (retired / layout-only) bit.
     """
+    from brutex.vocabulary.bits import BIT_TO_NAME, RETIRED_MASK
+
     bits = _parse_int_csv(raw, flag="--conditions")
     for bit in bits:
         if not 0 <= bit <= TOTAL_CONDITIONS - 1:
             raise CliUserError(
                 f"--conditions bit {bit} out of range: valid bit indices are "
                 f"0..{TOTAL_CONDITIONS - 1}"
+            )
+        if not (IMPLEMENTED_MASK >> bit) & 1:
+            if (RETIRED_MASK >> bit) & 1:
+                raise CliUserError(
+                    f"--conditions bit {bit} ({BIT_TO_NAME[bit]}) is RETIRED — a tombstone "
+                    "whose math was deleted (the VWAP wipe: the engine is spot-only, "
+                    "DEC-ENGINE-SPOT-ONLY-001, and spot indices carry no volume). The "
+                    "evaluator emits 0 for it forever, so sweeping it is dead compute; "
+                    "drop it from the list (a pre-reshape saved script must be updated)"
+                )
+            raise CliUserError(
+                f"--conditions bit {bit} ({BIT_TO_NAME[bit]}) is declared but NOT YET "
+                "implemented (LAYOUT-ONLY — its math lands in a later PR; "
+                "DEC-VOCAB-U128-CODEGEN-001 grow-only layout). The evaluator emits 0 "
+                "for it today, so sweeping it is dead compute; drop it from the list"
             )
     return bits
 
@@ -371,8 +399,9 @@ def _add_sweep_grid_args(
         "--conditions",
         default=None,
         help=(
-            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
-            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+            f"Comma-separated IMPLEMENTED condition bit indices to sweep "
+            f"(default: all {IMPLEMENTED_MASK.bit_count()} implemented conditions; "
+            f"the layout declares {TOTAL_CONDITIONS} bits — retired/layout-only bits are refused)"
         ),
     )
     parser.add_argument(
@@ -1365,8 +1394,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--conditions",
         default=None,
         help=(
-            f"Comma-separated condition bit indices 0..{TOTAL_CONDITIONS - 1} to sweep "
-            f"(default: all {TOTAL_CONDITIONS} implemented conditions)"
+            f"Comma-separated IMPLEMENTED condition bit indices to sweep "
+            f"(default: all {IMPLEMENTED_MASK.bit_count()} implemented conditions; "
+            f"the layout declares {TOTAL_CONDITIONS} bits — retired/layout-only bits are refused)"
         ),
     )
     sweep.add_argument(
