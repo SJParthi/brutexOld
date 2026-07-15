@@ -143,7 +143,8 @@ relayed values (90-day intraday cap per request · 5 r/s + 100,000/day data
 limits with no per-minute cap · 24h ROLLING JWT · rolling-only options with
 NO per-expired-contract history · `DEC-DHAN-ROLLING-FLOOR-001`) with three
 MATERIAL deltas folded in below: (i) their recorded gap list G2/G3 still
-EXPECTS an options prebuild + a FUT node — COUNTERMANDED after item 9;
+EXPECTS an options prebuild + a FUT node — COUNTERMANDED after item 9
+(since RESOLVED at the feed-track review fold — see the restamp there);
 (ii) Dhan expired index FUTURES history is marked UNVERIFIED in their own
 facts file (item 2); (iii) Dhan INDIA VIX intraday availability + securityId
 are marked UNVERIFIED (item 10). Everything stays THEIR declaration — not
@@ -184,8 +185,12 @@ code at WS-D binding time; UNVERIFIED items are marked.
 5. **DEPTH LAWS:** the Dhan spot floor is the ROLLING law
    `dhan_history_floor(today) = today − 5y + 7d` (their
    `DEC-DHAN-ROLLING-FLOOR-001`, in their lineage — not on main yet); the
-   options floor unifies to `max(rolling 5y floor, measured options floor)`
-   (being implemented by them now). **TRUE 1-minute depth is UNVERIFIED**
+   options floor unifies to `max(rolling 5y floor, the options-floor
+   constant)` — where that constant is the REQUESTED / research-PARTIAL
+   value, explicitly UNVERIFIED in their own tree (their
+   `rolling_option_constants.py:165-178`; the earlier "measured options
+   floor" wording here was WRONG — feed-track review fold), being
+   implemented by them now. **TRUE 1-minute depth is UNVERIFIED**
    (vendor docs say 5y, the SDK docstring says 5 days — an operator probe is
    pending); the sequencer must NOT hard-assume 5y works (Decision 4 makes
    the floor resolver adapter-owned and honest-degrade). **Scope note
@@ -244,7 +249,13 @@ This countermand must be actively pushed to the Dhan track through the
 coordinator (correcting their G2/G3 TODO) BEFORE their sequencer work
 starts; §1.1's "the Dhan side pins its own options-prebuild ABSENCE in its
 own PR" is a coordination OBLIGATION, not an assumption — their recorded
-plan currently contradicts it.
+plan contradicted it when this paragraph was written. **RESTAMP
+(feed-track review fold, 2026-07-15): RESOLVED** — the "currently
+contradicts" clause is STALE: their READY follow-up PR ships the
+options-prebuild ABSENCE pins + the no-futures DECs (their attribution;
+their lineage, unlanded on main), so their plan no longer contradicts the
+rulings; the countermand stands as history with its coordination
+obligation DISCHARGED.
 
 ### 1.4 Verified BruteX orchestration facts (this track's own verification, 2026-07-15)
 
@@ -525,8 +536,10 @@ state; §1.4 backup row — a WS-D obligation).
 
 - Extra disk for the overlapping spot span (bounded: 4 symbols, Dhan ~5y of
   1-minute).
-- The Dhan subtree is INVISIBLE to existing dashboards until explicit read
-  surfaces land (a named follow-up, not this ADR).
+- The Dhan subtree is INVISIBLE to existing dashboards until a CONSUMED
+  read surface lands (their `dhan_rolling_db_view.py` exists on their
+  lineage as an UNCONSUMED /db first slice — feed-track review fold; a
+  named follow-up, not this ADR).
 - Per-domain heal/census wiring for `feeds/dhan/**` is the Dhan track's
   follow-up (the primary L3 heal/census deliberately does not descend into
   `feeds/`).
@@ -638,7 +651,9 @@ Groww-only (§4.1 supersession 5).
 
    (no METADATA node — rolling addressing needs no expiry/contract
     resolution; no FUTURES node — capability ABSENT on the vendor;
-    no movers warm — no dashboard read surface for the Dhan domain yet)
+    no movers warm — no CONSUMED dashboard read surface for the Dhan
+    domain yet: their `dhan_rolling_db_view.py` exists on their lineage
+    as an UNCONSUMED /db first slice — feed-track review fold)
 ```
 
 ### 3.3 Gate + boundary semantics
@@ -676,7 +691,7 @@ Groww-only (§4.1 supersession 5).
   lake-root-keyed today (`brutex/dashboard/pipeline_prebuild.py:801`).
 - **Movers warm:** PRIMARY (Groww) chain only, unchanged
   (DEC-PIPELINE-AUTOPREBUILD-001 lineage). The Dhan chain skips it — there
-  is no dashboard read surface over the Dhan domain yet (§2.4).
+  is no CONSUMED dashboard read surface over the Dhan domain yet (§2.4).
 
 ---
 
@@ -771,7 +786,7 @@ names its owner — the ORCHESTRATION layer never re-mints adapter facts):
 | Paging profile | interval-tier chunks (CLAUDE.md §6 chunk row) | 90d spot / 30d rolling tiles (§1.3 item 3) | adapter |
 | Rate factory | ONE `SessionRateController`, 8 r/s ceiling + 500/min governor (DEC-GROWW-RATE-CEILING-8-002, DEC-GROWW-RATE-PERMIN-001) | ONE `SessionRateController` + `DailyQuotaTracker`, 5 r/s + 100k/day, no per-minute cap (§1.3 item 3) | adapter (numbers), orchestration (one-instance-per-chain law) |
 | Auth / reauth binding | 06:00 IST daily token, read-only SSM re-read (DEC-AWS-ONLY-CREDS-001; CLAUDE.md §6 Auth row) | 24h rolling JWT, SSM re-read via their single-flight refresher (§1.3 item 7) | adapter |
-| Account-key resolver | Groww `api_key` fingerprint (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001) | Dhan client-id-keyed (their stack) | adapter |
+| Account-key resolver | Groww `api_key` fingerprint (DEC-ACCOUNT-KEY-SINGLEFLIGHT-001) | Dhan client-id-keyed — the TARGET binding, NOT shipped: WS-D PRECONDITION P1 (feed-track review fold; today their club jobs inherit the default GROWW-key resolver, `pull_jobs.py:154-177` — Decision 5 preamble) | adapter (P1 owned by the Dhan track) |
 | Lock domain | account + lake-root + lease trio at the primary root | the ONE feed-root flock at `feeds/dhan/` | adapter (mechanism), orchestration (disjointness invariant) |
 | Market-hours guard binding | ON, LOCKED (DEC-GROWW-MARKET-HOURS-GUARD-001) | `None` (§1.3 item 8; any Dhan policy = NEW decision, Q2) | operator |
 | Ledger / incrementality capability | durable window ledger, `market="groww"` family | ABSENT today (gap G4) — gates auto-arm per Decision 7 | adapter, ruled by orchestration |
@@ -799,18 +814,40 @@ even though it lives in the adapter track's stack. WS-C must inspect that
 layer first and either (a) declare `VendorPullProfile` the EVOLUTION/home of
 it (WS-C consumes/renames), or (b) record why they are genuinely distinct
 layers — decided in the WS-C PR with the coordinator brokering ownership,
-never two silent parallel abstractions.
+never two silent parallel abstractions. **Update (feed-track review fold,
+2026-07-15):** the Dhan track ACKNOWLEDGES `VendorPullProfile`/the
+capability registry as the ABSTRACTION and their
+`feeds/{registry,binding}` layer as the CONCRETE INSTANCE (§12.1) — the
+brokering resolves toward shape (a); WS-C still performs the inspection
+and records it.
 
 ---
 
 ## 6. Decision 5 — Concurrency + isolation matrix (the zero-cross-impact rows)
 
+**PRECONDITIONED (feed-track review fold, 2026-07-15 — Golden Rule #10; the
+earlier "no cross-vendor contention by construction" claim is CORRECTED to
+shipped truth):** the zero-cross-impact guarantee below holds only once
+WS-D PRECONDITION P1 (§15 item 4) lands — the Dhan client-id-keyed
+`account_key_resolver` on BOTH Dhan jobs, owned by the Dhan track (queued,
+their ~#1865-band ledger work landing behind the club). SHIPPED TRUTH
+today, per the Dhan track's review of their club #1551 lineage (their
+attribution — this track cannot see their branch): the club's two Dhan
+jobs pass NO `account_key_resolver`, so they inherit the DEFAULT resolver —
+verified on THIS tree: `BackgroundPullJob.__init__` defaults
+`account_key_resolver=None` → `_default_account_key_resolver`
+(`brutex/dashboard/pull_jobs.py:438` + :468-470 → :154-177), which returns
+`resolve_groww_aws_credentials().api_key` — the GROWW credential. A wet
+Dhan pull therefore takes the GROWW ACCOUNT flock, and a Dhan+Groww pull
+pair is MUTUALLY EXCLUSIVE today (contention, never corruption — the flock
+refuses the second start).
+
 | Dimension | Groww chain | Dhan chain | Isolation mechanism | Shared residual? |
 |---|---|---|---|---|
-| Job slot | its own `BackgroundPullJob` (per-vendor injected lock factories + guard — the ctor seams exist, `pull_jobs.py:435-443`) | its own `BackgroundPullJob` (same seams; precedent: the concurrent `_crossverify_job`, app.py:3132) | separate job objects + worker threads | the dashboard PROCESS if both run in-process (see residuals) |
+| Job slot | its own `BackgroundPullJob` (per-vendor injected lock factories + guard — the ctor seams exist, `pull_jobs.py:435-443`) | the staged CHAIN job of this design — noting the club ships TWO Dhan jobs TODAY (their #1551 lineage; feed-track review fold): whether the chain job ABSORBS or COEXISTS with them is a WS-D reconciliation item settled with the Dhan track at binding time (same ctor seams; precedent: the concurrent `_crossverify_job`, app.py:3132) | separate job objects + worker threads | the dashboard PROCESS if both run in-process (see residuals) |
 | Rate / quota | ONE `SessionRateController` (8 r/s + 500/min — DEC-GROWW-RATE-PERMIN-001) | ONE `SessionRateController` + `DailyQuotaTracker` (5 r/s + 100k/day — §1.3 item 3) | per-instance controllers (`pull_controller.py:992`; construction sites §1.4) — zero shared budget | none: a Groww 429 storm steps ONLY Groww's AIMD ladder; a Dhan quota exhaustion halts ONLY the Dhan chain |
-| Auth | Groww TOTP/daily-token SSM re-read (CLAUDE.md §6) | Dhan 24h JWT SSM re-read (§1.3 item 7) | separate credentials + separate reauth machinery; account single-flight keys per vendor account | none |
-| Locks | account + lake-root + lease trio at the primary root | ONE feed-root flock at `feeds/dhan/` | disjoint files by construction (Decision 1 rationale (c)); per-partition flocks are path-keyed (`partition_lock.py:339`) so they never collide across domains | HONEST ASYMMETRY (review fold): Dhan declares NO account-level single-flight and NO cross-host lease — flock is single-host, yet §9 discloses TickVault CO-TENANCY on the Dhan account (shared 100k/day budget). Two hosts sharing the Dhan account have no account exclusion/cross-host detection. Accepted for v1 under the single-box envelope (CLAUDE.md §8) + named as a Dhan-track follow-up (the DEC-ACCOUNT-KEY-SINGLEFLIGHT-001 / DEC-ACCOUNT-LEASE-CROSSHOST-001 parity gap) — never claimed equivalent to the Groww posture |
+| Auth | Groww TOTP/daily-token SSM re-read (CLAUDE.md §6) | Dhan 24h JWT SSM re-read (§1.3 item 7) | separate credentials + separate reauth machinery. The account single-flight keys per vendor account ONLY ONCE PRECONDITION P1 lands (feed-track review fold — the earlier unconditional wording was WRONG): today the Dhan jobs inherit the default GROWW-key resolver (the preamble above + the Locks row) | until P1: the GROWW-keyed account flock is SHARED — a wet Dhan pull and a Groww pull are mutually exclusive (contention, never corruption); after P1: none |
+| Locks | account + lake-root + lease trio at the primary root | feed-root flock at `feeds/dhan/` + (today, via the job DEFAULTS) the GROWW-keyed account flock + a feed-root cross-host lease | disjoint lock FILES by construction for the root/partition dimensions (Decision 1 rationale (c)); per-partition flocks are path-keyed (`partition_lock.py:339`) so they never collide across domains — but the ACCOUNT dimension is NOT disjoint today (the preamble) | SHIPPED TRUTH (feed-track review fold — REPLACES the earlier "honest asymmetry" note, which was wrong BOTH ways): per the Dhan track's review of their club #1551 lineage, the Dhan jobs DO enter an account single-flight — the WRONG one: inheriting the default GROWW-key resolver (verified on this tree, `pull_jobs.py:154-177` + :438/:468-470), so a wet Dhan pull takes the GROWW account flock and a Dhan+Groww pull pair is MUTUALLY EXCLUSIVE today — and they DO enter a cross-host lease (the default `lease_factory=pull_lease_guard`, `pull_jobs.py:439`, entered on the job's resolved root — the Dhan FEED root; per-domain, harmless-to-desirable). FIX = WS-D PRECONDITION P1 (§15 item 4), owned by the Dhan track. The narrower residual that DOES remain accepted for v1 under the single-box envelope (CLAUDE.md §8): the feed-root lease detects same-ROOT peers, not same-ACCOUNT peers — two hosts sharing the Dhan ACCOUNT (TickVault co-tenancy, §9) still have no account-level cross-host detection |
 | Pull-OBSERVABILITY singletons (review fold — the previously missing row) | the ONE `RateLimitPanel` (`brutex/dashboard/app.py:446`) fed by `make_rate_observer`/`RatePanelSampler` over the app's ONE `_session_rate` (:2268, :3779); `GET /api/v1/pull/rate` + the DEC-RATE-METER-LIFECYCLE-001 meter registration (`register_pull_meter`, `pull_controller.py:1140` — the "no in-process pull running ⇒ no meter registered" process invariant, with its documented eviction blast radius); the DEC-OPERATOR-HEALTH-TRUTH-001 health-hub pull lane + `last_pull` retained terminal keyed on the ONE `_pull_job` slot (app.py:3094; `pull_jobs.py:1561`); the process-global `MetricRegistry` pull-health gauges | **DARK in v1 — a NAMED gap** (the pull-plumbing twin of the §2.4 lake-read invisibility): the Dhan chain surfaces NONE of these Groww-slot readouts | **WS-D PIN:** the Dhan chain NEVER registers into the Groww panel / pull-rate meter / health-hub pull lane — registering would blend/evict the Groww readout, break the meter-lifecycle invariant, and mis-color the health-hub pull lane (three DECs of readout honesty). Per-vendor observability surfaces land in WS-E | the Dhan chain is observably dark on these surfaces until WS-E (disclosed; its own job snapshot + structlog stage events are the interim visibility) |
 | Prebuild derive lock | `derive_write_lock(primary root)` | `derive_write_lock(dhan feed root)` — VERIFIED-AS-BUILT by the Dhan track (2026-07-15: `feeds/dhan/.locks/derive.lock`, primary `.locks/` untouched; their pin `test_spot_prebuild_derive_lock_keys_on_dhan_feed_root`, §3.3) | lake-root-keyed lock (`pipeline_prebuild.py:801`) → per-domain keys → the two prebuilds may overlap | host CPU (below) |
 | Failure domain | per-vendor job thread/process; `MarketHoursHalt` / throttle / auth expiry / mass-empty halt the GROWW chain only | per-vendor job thread/process; quota exhaustion / JWT expiry halt the DHAN chain only | fail-closed within a vendor (§3.3); no shared exception path | the honest shared residuals below |
@@ -876,6 +913,13 @@ for OPTION contracts (DEC-PIPELINE-AUTOPREBUILD-001 —
    months). So after WS-A, an L2/L3 heal touching an option contract's
    1-minute would still CREATE/REWRITE a derived option `1day` — violating
    RULING B through a path the pipeline-scoped absence pin cannot catch.
+   (Feed-track review fold — the RULING C twin of this hazard: a
+   `daily_source=native` write domain EXCLUDES the recall's daily arm —
+   per the Dhan track's verified state ZERO heal/scan machinery is wired
+   over any feed root today, so the hazard is INERT there, but
+   `_run_recall`'s daily arm is segment-ungated and would derive-OVERWRITE
+   the native Dhan `1day` the moment their heal-wiring follow-up executes;
+   recorded as their obligation.)
    Two adjacent in-tree defects recorded for WS-A: (a) the
    `_prebuild_kind_from_coords` docstring's justification — "options
    intraday is never materialised — `materialize_lake_timeframes` raises
@@ -999,8 +1043,9 @@ for OPTION contracts (DEC-PIPELINE-AUTOPREBUILD-001 —
   - Leaving the bytes inert WITHOUT reader gating is REJECTED — it serves
     wrong %CHNG (A) and a recurring doctor FAIL.
 - The Dhan side pins its own options-prebuild ABSENCE in its own PR (their
-  file ownership; coordinated — and per the §1.3 COUNTERMAND their recorded
-  G2/G3 TODO must first be corrected through the coordinator).
+  file ownership; coordinated — the §1.3 COUNTERMAND is RESOLVED at the
+  feed-track review fold: their ready follow-up PR ships the absence pins
+  + the no-futures DECs).
 
 ---
 
@@ -1019,6 +1064,13 @@ OPTIONS phase is **REQUIRED before any nightly/auto-armed Dhan chain**.
 - Even a 1-year-deep re-pull ≈ 1008 × 13 tiles ≈ **13,000 requests/night**.
 - Dhan SPOT whole-range: 4 symbols × ceil(1825 / 90) = 4 × 21 ≈ **84
   requests** — interim-tolerable.
+
+**Tile caveat (feed-track review fold):** the 30-day rolling tile is
+itself the conservative-UNVERIFIED choice — if the rolling endpoint honors
+a true 90-day cap, whole-range re-issue drops to 1008 × 21 ≈ **21,000
+requests ≈ 21% of quota**. The ruling's conclusion is UNCHANGED either
+way: a nightly whole-range re-issue remains unsustainable beside spot +
+TickVault co-tenancy on the shared daily budget.
 
 Hence: whole-range re-issue is tolerable for SPOT interim, **categorically
 NOT for the nightly OPTIONS phase**.
@@ -1075,7 +1127,9 @@ misorder) — and **OBSERVABLY**:
 - The per-vendor `stopped_after` vocabulary extends with the staged names —
   INCLUDING `spot_daily` (RULING C: a native-daily failure reads
   `stopped_after=spot_daily`, observably BEFORE any 1-minute vendor call —
-  the §1.1 sequencer ruling's own-gate/own-token requirement).
+  the §1.1 sequencer ruling's own-gate/own-token requirement). The token is
+  SEQUENCER-minted from stage position at the gate — vendor reports carry
+  no stopped token (the §12 invariant-4 ruling, feed-track review fold).
 - Per-vendor pull-progress job surfaces (already job-scoped —
   `BackgroundPullJob` snapshots). Precision (review fold): job-scoped
   covers the SNAPSHOTS only — the single-slot rate panel /
@@ -1119,19 +1173,21 @@ the legacy chain is byte-identical):
 ```python
 def run_full_pipeline(
     *,
-    run_spot: Callable[[], BulkSpotReport],
-    run_metadata: Callable[[], MetadataPullReport] | None = None,
+    # EVERY stage callable is typed at the STRUCTURAL StageOutcome protocol
+    # (invariant 4 — feed-track review fold: the earlier concrete-Groww-type
+    # annotations contradicted the protocol mandate; the concrete report
+    # types are SATISFYING INSTANCES, never the contract):
+    run_spot: Callable[[], StageOutcome],    # Groww instance: BulkSpotReport
+    run_metadata: Callable[[], StageOutcome] | None = None,   # Groww instance: MetadataPullReport
     run_historical: ... ,                    # legacy combined F&O phase (default chain)
     run_prebuild: ... | None = None,         # legacy TERMINAL prebuild (default chain)
-    # NEW staged callables (None = stage ABSENT from this vendor's graph;
-    # each returns a StageOutcome-satisfying report — the structural
-    # protocol in invariant 4 below):
+    # NEW staged callables (None = stage ABSENT from this vendor's graph):
     run_spot_daily: Callable[[], StageOutcome] | None = None,   # RULING C: native-daily stage (daily_source=native binds it)
-    run_prebuild_spot: Callable[[], PrebuildOutcome] | None = None,
-    run_futures: Callable[[], CompositePullReport] | None = None,   # F&O spine, step_filter={INDICES_FUTURES,...}
-    run_prebuild_futures: Callable[[], PrebuildOutcome] | None = None,
-    run_options: Callable[[], CompositePullReport] | None = None,   # per-contract (Groww) or rolling (Dhan)
-    run_greeks: Callable[[], GreeksEnrichOutcome] | None = None,
+    run_prebuild_spot: Callable[[], StageOutcome] | None = None,   # instance on both vendors: PrebuildOutcome
+    run_futures: Callable[[], StageOutcome] | None = None,   # F&O spine, step_filter={INDICES_FUTURES,...}; Groww instance: CompositePullReport
+    run_prebuild_futures: Callable[[], StageOutcome] | None = None,   # Groww instance: PrebuildOutcome
+    run_options: Callable[[], StageOutcome] | None = None,   # per-contract (Groww instance: CompositePullReport) or rolling (Dhan)
+    run_greeks: Callable[[], StageOutcome] | None = None,    # instance on both vendors: the COMMON GreeksEnrichOutcome
     vendor: str = "groww",                   # the stage-event token
     ...
 ) -> PipelinePullReport: ...
@@ -1179,8 +1235,14 @@ otherwise have to guess):**
   in v1 (§10) — the strict-gate verdict threading for Greeks follows the
   §4.1 supersession-3 choice.
 - **One-line field sketches for the named types** (full shapes are WS-B/
-  WS-C deliverables): `PhaseKey` = a frozen `(vendor, stage, instrument?)`
-  token — the key `incremental_from` resolves coverage for;
+  WS-C deliverables): `PhaseKey` = an OPAQUE, VENDOR-MINTED coverage-key
+  token (feed-track review fold — the earlier fixed
+  `(vendor, stage, instrument?)` tuple sketch is superseded: a fixed tuple
+  cannot address the Dhan rolling space, 1008 keys of underlying ×
+  WEEK/MONTH × expiry_code × strike offset × side, §1.3 item 1): the
+  vendor's spine MINTS keys at its own granularity and the sequencer /
+  `incremental_from` plumbing threads them opaquely — never constructed or
+  interpreted by the orchestration layer;
   `VendorCapability` = a frozen set-like declaration
   `{spot: bool, futures: bool, options_shape: per_contract|rolling_atm|None,
   metadata: bool, daily_source: native|derived}`; `LockDomain` = the
@@ -1204,20 +1266,65 @@ enforces at review time):**
    Groww report types** (the Dhan track's interface improvement, adopted at
    the 2026-07-15 input fold): each stage callable returns an object
    satisfying a `StageOutcome`-shaped protocol naming the REQUIRED
-   fields/semantics — an `ok` verdict, failed/still-failed counts, halt
+   fields/semantics — an `ok` verdict, failed/still-failed counts, and halt
    propagation (a vendor-halt / `LakeWriteHalt` is RAISED, never swallowed
-   into the outcome — invariant 3), and a stopped-reason token. Groww's
+   into the outcome — invariant 3). **RULING (this design's own, recorded
+   at the feed-track review fold): the SEQUENCER owns `stopped_after`** —
+   the token is minted from stage POSITION at the gate, so the protocol
+   carries NO stopped-reason token and vendor reports never synthesize one
+   (the input fold's earlier "stopped-reason token" protocol field is
+   superseded by this ruling). Groww's
    existing report shapes (`BulkSpotReport` / `MetadataPullReport` /
    `CompositePullReport` / `PrebuildOutcome` / `GreeksEnrichOutcome`)
    already satisfy it, so the sequencer's gate predicates (`spot_phase_ok`
    family, `pipeline_pull.py:149-218`) generalize over the protocol
    unchanged for Groww; Dhan's stage reports are `DhanWindowOutcome`-based
-   (NOT `BulkSpotReport`) and satisfy the protocol directly or via THIN
-   adapters. Their Dhan Greeks CLI pass is exposed as a callable seam
+   (NOT `BulkSpotReport`) and — CORRECTED at the feed-track review fold
+   (the unconditional "directly or via thin adapters" claim was FALSE for
+   OPTIONS) — satisfy the protocol directly or via THIN adapters for
+   SPOT / PREBUILD / GREEKS, but NOT for OPTIONS today: per their review of
+   their club #1551 lineage (their evidence — this track cannot see their
+   branch), the rolling spine's `except DhanError` (their
+   `run_dhan_rolling_option_ingest.py:207`) lacks the
+   `is_terminal_pull_stop` carve-out their own `errors.py` docstring
+   promises (the SPOT spine HAS it) — a swallowed terminal halt (e.g. a
+   stale token) on a wet whole-range pull would burn up to ~3×61k doomed
+   requests against the SHARED 100k/day quota, and NO adapter can
+   un-swallow an exception (invariant 3 is unsatisfiable from outside the
+   spine). The carve-out is WS-D PRECONDITION P2 (§15 item 5) — REQUIRED
+   before the Dhan `run_options` binding; their code fix, queued. Their
+   Dhan Greeks CLI pass is exposed as a callable seam
    returning a gate-compatible outcome shape (their commitment, §1.3
    item 9).
 5. Stage-event tokens (`vendor=`, `stage=`) are emitted by the SEQUENCER,
    not re-minted per spine (§10).
+
+### 12.1 Appendix — Dhan binding sketch (per the Dhan track's review, 2026-07-15)
+
+The Dhan track's CHANGES-REQUESTED review of this ADR CONFIRMED the §12
+interface implementable against their club #1551 lineage. THEIR binding
+sketch, recorded with attribution (every symbol is theirs, on their tree —
+this track cannot see their branch; re-confirm at WS-D):
+
+- `run_spot` = a closure over their `run_dhan_spot_pull` — deliberately
+  NOT their `default_dhan_spot_pull`, which BUNDLES prebuild and would
+  collapse the staged gates — plus a thin `failed_windows` → `StageOutcome`
+  adapter.
+- `run_prebuild_spot` = their `run_dhan_prebuild(include_daily=False)` —
+  flipped + pinned by their native-daily PR (the RULING C pinned
+  invariant).
+- `run_options` = their `run_dhan_rolling_option_pull` + adapter —
+  **BLOCKED on PRECONDITION P2** (the rolling-spine terminal-stop
+  carve-out — invariant 4 above / §15 item 5).
+- `run_greeks` = trivial — their pass already returns the COMMON
+  `GreeksEnrichOutcome` (a `StageOutcome`-satisfying instance).
+- `run_futures` / `run_metadata` = `None` (absent capabilities — RULING A).
+
+WS-C acknowledgment (theirs, same review): the `VendorPullProfile` /
+capability registry of Decision 4 is the ABSTRACTION and their
+`brutex/feeds/{registry,binding}` layer is the CONCRETE INSTANCE — the §5
+ownership-brokering item resolves toward shape (a); WS-C still performs
+the inspection and records the consumption/rename.
 
 ---
 
@@ -1230,8 +1337,9 @@ enforces at review time):**
   named memory-file sources were absent at the authoring commit and landed
   ~7 minutes later — they are NOW cited as the primary declared evidence
   base (timeline + deltas recorded in §1.3, incl. the RULING-B/A
-  countermand of their G2/G3 TODO). Still THEIR declarations — re-confirm
-  at WS-D.
+  countermand of their G2/G3 TODO — RESOLVED at the feed-track review
+  fold: their ready PR ships the pins, §1.3 restamp). Still THEIR
+  declarations — re-confirm at WS-D.
 - Dhan TRUE 1-minute depth is UNVERIFIED (docs-vs-SDK contradiction; probe
   pending) — the rolling floor law may over-promise; the sequencer degrades
   honestly (adapter-owned floor resolver). Dhan INDIA VIX availability +
@@ -1249,11 +1357,20 @@ enforces at review time):**
   rewritten).
 - The shared residual failure domains (Decision 5) are real: disk volume,
   host CPU/RAM, in-process dashboard co-residency, Greeks pool, GIL.
+- **Zero-cross-impact is CONDITIONAL until the two WS-D PRECONDITIONS land
+  (feed-track review fold; §15 items 4-5):** TODAY, per the Dhan track's
+  review of their club lineage, a wet Dhan pull takes the GROWW account
+  flock via the inherited default resolver (P1 — a Dhan+Groww pull pair is
+  mutually exclusive, never corrupting) and the rolling-options spine can
+  swallow a terminal halt into up to ~3×61k doomed requests on the shared
+  100k/day quota (P2). Both fixes are the Dhan track's, queued.
 - The quota arithmetic (§8) uses the DECLARED tile/quota shape; a vendor
   change moves the numbers — the ruling's structure (incrementality gates
   auto-arm) survives, the percentages may not.
 - `feeds/dhan/**` is invisible to every primary dashboard/census surface
-  until explicit read surfaces land — an accepted, named gap.
+  until a CONSUMED read surface lands (their unconsumed
+  `dhan_rolling_db_view.py` /db first slice exists on their lineage —
+  feed-track review fold) — an accepted, named gap.
 - ONE strict-gate env for both vendors in v1 (§10) — a per-vendor override
   is deferred.
 
@@ -1284,6 +1401,21 @@ enforces at review time):**
 2. Coordinator reservations: the MIGRATION.md entry number for
    `DEC-DUAL-VENDOR-PIPELINE-001` + the ADR-0021 slot (this file).
 3. The Dhan track's contract values landing via club PR #1551 + follow-ups.
+4. **WS-D PRECONDITION P1 (feed-track review fold — the zero-cross-impact
+   precondition):** the Dhan client-id-keyed `account_key_resolver` on BOTH
+   Dhan jobs — owned by the Dhan track (queued, their ~#1865-band ledger
+   work landing behind the club). Until it lands, a wet Dhan pull takes the
+   GROWW account flock via the inherited default resolver (verified on
+   this tree — `brutex/dashboard/pull_jobs.py:154-177` + :438/:468-470)
+   and a Dhan+Groww pull pair is MUTUALLY EXCLUSIVE (Decision 5 preamble);
+   the BASE directive's zero-cross-impact requirement holds only once P1
+   lands.
+5. **WS-D PRECONDITION P2 (feed-track review fold):** the Dhan rolling
+   spine's `except DhanError` gains the `is_terminal_pull_stop` carve-out
+   (their evidence on their club tree:
+   `run_dhan_rolling_option_ingest.py:207`; the spot spine already has it;
+   their own `errors.py` docstring promises it) — REQUIRED before the Dhan
+   `run_options` binding (§12 invariant 4); their code fix, queued.
 
 ## 16. Open questions for operator sign-off (numbered, answerable)
 
@@ -1328,7 +1460,10 @@ enforces at review time):**
 - **WS-D:** the Dhan chain binding against the profile (with the Dhan
   track): feed-root derive-lock domain (VERIFIED-AS-BUILT by the Dhan
   track, §3.3 — WS-D consumes their pin, it does not re-verify),
-  `run_spot_daily` + `incremental_from` seams, greeks seam.
+  `run_spot_daily` + `incremental_from` seams, greeks seam; gated on
+  PRECONDITIONS P1 + P2 (§15 items 4-5) and settles the two-jobs-vs-chain
+  reconciliation (Decision 5 job-slot row) at binding time — the §12.1
+  binding sketch is the Dhan track's confirmed starting point.
 - **WS-E:** nightly/CLI dual-vendor lanes (two-process isolation) +
   stage-event observability surfaces.
 
@@ -1348,6 +1483,18 @@ enforces at review time):**
   team memory files `dhan-api-verified-facts.md` + `dhan-track-state.md`
   (absent at the authoring commit, landed ~7 min later — cited since the
   same-day review fold; timeline + deltas in §1.3).
+- The Dhan feed track's CHANGES-REQUESTED review of this ADR (2026-07-15,
+  against their club #1551 lineage) — folded same-day as the feed-track
+  review fold: the shipped-truth isolation rows + PRECONDITION P1 (the
+  Groww-keyed default account resolver, verified on this tree at
+  `brutex/dashboard/pull_jobs.py:154-177` + :438/:468-470/:439) ·
+  PRECONDITION P2 (the rolling-spine terminal-stop carve-out, their
+  evidence) · the §12 structural retyping + the opaque vendor-minted
+  `PhaseKey` + the sequencer-owned `stopped_after` ruling · the §8
+  tile caveat · the §1.3 G2/G3 restamp + options-floor-constant reword ·
+  the unconsumed `dhan_rolling_db_view.py` read-surface note · the two-jobs
+  job-slot clarification · the §12.1 binding-sketch appendix + their WS-C
+  abstraction/instance acknowledgment.
 - CLAUDE.md §2 Rules 3/4/6, §6 (Groww verified facts), §8 (hardware
   envelope).
 - DEC-PIPELINE-AUTOPREBUILD-001 (the terminal prebuild being
