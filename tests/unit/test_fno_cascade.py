@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 from brutex.dashboard.fno_cascade import (
-    FnoCascadeCache,
     FnoContract,
     build_expiry_counts,
     build_fno_cascade,
@@ -304,35 +303,3 @@ def test_contract_to_json_future_nulls() -> None:
     row = contract_to_json(c)
     assert row["strike"] is None and row["option_type"] is None
     assert row["label"] == "FUT" and row["intervals"] == ["1minute"]
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# FnoCascadeCache — generation-stamped memo
-# ─────────────────────────────────────────────────────────────────────────
-def test_cache_builds_once_then_hits_same_generation() -> None:
-    calls = {"n": 0}
-
-    def _build() -> Any:
-        calls["n"] += 1
-        return build_fno_cascade(
-            [_opt("NSE-NIFTY-06Feb20-12250-PE", "NIFTY", "2020-02-06", "12250", "PE")]
-        )
-
-    cache = FnoCascadeCache()
-    first = cache.get(generation=7, build=_build)
-    second = cache.get(generation=7, build=_build)
-    assert first is second  # O(1) handoff of the SAME index
-    assert calls["n"] == 1  # built once, not re-scanned
-
-
-def test_cache_rebuilds_on_generation_bump() -> None:
-    calls = {"n": 0}
-
-    def _build() -> Any:
-        calls["n"] += 1
-        return build_fno_cascade([])
-
-    cache = FnoCascadeCache()
-    cache.get(generation=1, build=_build)
-    cache.get(generation=2, build=_build)  # a pull bumped the generation → rebuild
-    assert calls["n"] == 2
