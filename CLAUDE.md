@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
+_Last updated: 2026-07-15 (CLUB S2 merge vehicle, branch
+`integration/club-s2-results` — the serial weave train of FOUR PRs as ONE
+merge event off main tip d6ac9f85: #1458 DEC-SWEEP-TEMPORAL-ROBUSTNESS-001
+(MIGRATION.md #1795 — the temporal-robustness year gate + per-period finalist
+stats) → #1459 DEC-RESULTS-TRUST-HONESTY-001 (#1796 — the /results trust +
+honesty pack, stacked on #1458; its cascade-verdict marker join now coexists
+with main's landed DEC-RESULTS-CASCADE-VERDICT-JOIN-001 join, NARROWED to
+emit-on-present so the no-report /results payload byte-identity law stands) →
+#1474 DEC-SWEEP-APRIORI-DEFAULT-001 (#1797 — Apriori-to-natural-extinction as
+the DEFAULT sweep exploration mode; the coordinator 1474-arms-first tie-break
+vs #1479 honored — the S2×R1 cross-club seam on sweep_run.py/
+sweep_supervisor.py re-laps on whichever club lands second) → #1522
+DEC-FILL-WORST-CASE-001 (#1798 — the global worst-case fill mode; pre-club
+goldens pin PRECISE explicitly). ONE club seam fix: sweep-verify folds the
+now-default-ON overfit gate into its grid so default trees identity-pair
+(#1796 × DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001). #1467 (gate provenance)
+EXCLUDED — red, its fixer owns it; #1396 (price-source axis) EXCLUDED —
+pre-futures-launch engine weave too wide for this vehicle, refolds standalone.
+The colliding ledger rows renumbered to the free tail block #1795–#1798
+(DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001). ENGINE surface
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
+This header carries pointers, never the story; each member's full record
+lives in its MIGRATION.md entry.)
+Earlier: 2026-07-11 (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 —
 the operator-page HEALTH TRUTH pack: (1) the heartbeat pull slot's unconditional
 green "last pull completed cleanly" on `flow_state === 'done'` is KILLED — the
 `/api/v1/pull/rate` payload gains the ADDITIVE `last_pull` OUTCOME block (NEW pure
@@ -2623,7 +2646,15 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
+- **Active branch:** `integration/club-s2-results` (CLUB S2 merge vehicle —
+  the serial weave of #1458 DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md
+  #1795) → #1459 DEC-RESULTS-TRUST-HONESTY-001 (#1796) → #1474
+  DEC-SWEEP-APRIORI-DEFAULT-001 (#1797) → #1522 DEC-FILL-WORST-CASE-001
+  (#1798), plus the sweep-verify default-overfit-gate identity-pairing seam
+  fix; #1467 + #1396 excluded (red / too-wide weave). Each member's full
+  record lives in its MIGRATION.md entry — this line carries pointers, never
+  the story. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+  Earlier: `claude/operator-health-truth` (**DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747** —
   the operator-page HEALTH TRUTH pack, READ-side dashboard/observability only. PART 1 (the over-claim fix): the v29
   heartbeat pull slot rendered `flow_state === 'done'` as a green "last pull completed cleanly", but FLOW_DONE means
   only "no pull running + a fresh rate tick" (`pull_rate_view.py`) — a HALTED pull (LakeWriteHalt disk_full/OOM ·
@@ -7228,7 +7259,11 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/operator-health-truth`
+- **Active feature branch:** `integration/club-s2-results`
+  (CLUB S2 merge vehicle — #1458 #1795 · #1459 #1796 · #1474 #1797 · #1522
+  #1798; matches §1's Active branch line — see §1 + the four MIGRATION.md
+  entries for the full blurbs)
+  Earlier: `claude/operator-health-truth`
   (DEC-OPERATOR-HEALTH-TRUTH-001, MIGRATION.md #1747 — the operator-page
   HEALTH TRUTH pack: the heartbeat pull slot's unconditional green "last pull
   completed cleanly" on `flow_state === 'done'` is KILLED — the pull-rate
