@@ -941,6 +941,7 @@ class TestConftestHermeticityBelt:
         assert "from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV" in conftest
         assert 'os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")' in conftest
 
+
 # ────────────────────────────────────────────────────────────────────────
 # Probe stat deadline (DEC-DASHBOARD-COLD-IO-DEADLINE-001, BUG-2c)
 # ────────────────────────────────────────────────────────────────────────
