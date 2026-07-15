@@ -103,6 +103,37 @@ def bad_tick_screen_enabled(raw: str | None = None) -> bool:
     return not (value is not None and value.strip().lower() in _FALSY)
 
 
+def emit_bad_tick_warn(
+    *,
+    source: str | None,
+    session_iso: str | None,
+    skipped: int,
+    max_ratio: float,
+    first_prev_close: float,
+    first_close: float,
+    log: structlog.stdlib.BoundLogger | None = None,
+) -> None:
+    """Emit the ONE per-session :data:`BAD_TICK_SKIP_EVENT` WARN record.
+
+    The SINGLE emission seam shared by :meth:`BadTickScreen._flush` (the
+    Python oracle) and the Rust-kernel replay in
+    :mod:`brutex.feed.replay` (``DEC-FEED-RUST-CORE-001``), so the event
+    name + field names/values can never fork between the two arms
+    (CLAUDE.md §11 COMMON). Unconditional — the callers own the
+    "skipped >= 1" guard; *log* is the injectable test seam (``None`` uses
+    the module logger, exactly like :class:`BadTickScreen`).
+    """
+    (log if log is not None else _LOG).warning(
+        BAD_TICK_SKIP_EVENT,
+        source=source,
+        session=session_iso,
+        skipped=skipped,
+        max_ratio=max_ratio,
+        first_prev_close=first_prev_close,
+        first_close=first_close,
+    )
+
+
 def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_MAX_RATIO) -> bool:
     """Return whether *close* is a bad tick versus the previous in-session *close*.
 
@@ -216,14 +247,14 @@ class BadTickScreen:
         """Emit exactly one WARN if the current session skipped ≥ 1 bad tick."""
         if self._skipped > 0 and self._first_offender is not None:
             prev_close, close = self._first_offender
-            self._log.warning(
-                BAD_TICK_SKIP_EVENT,
+            emit_bad_tick_warn(
                 source=self._source,
-                session=self._session.isoformat() if self._session is not None else None,
+                session_iso=self._session.isoformat() if self._session is not None else None,
                 skipped=self._skipped,
                 max_ratio=self._max_ratio,
                 first_prev_close=prev_close,
                 first_close=close,
+                log=self._log,
             )
 
 
@@ -233,5 +264,6 @@ __all__ = [
     "BAD_TICK_SKIP_EVENT",
     "BadTickScreen",
     "bad_tick_screen_enabled",
+    "emit_bad_tick_warn",
     "is_bad_tick",
 ]

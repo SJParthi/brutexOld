@@ -54,6 +54,7 @@ on:
       - "brutex/**"
       - "rust/fno-math/**"
       - "rust/trading-core/**"
+      - "rust/brutex-feed/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/mutation.yml"
@@ -229,6 +230,22 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The feed_rust mutmut pair's wheel-gated FFI/engagement tests need
+        # the kernel importable to kill their mutants (absent wheel = those
+        # tests skip and the corresponding mutants would falsely survive).
+        # Belt-and-suspenders crates.io flake guard (see fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: Run mutmut on critical modules
@@ -485,14 +502,37 @@ jobs:
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
+            "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
+            "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
+            # feed/replay.py pair (DEC-FEED-RUST-CORE-001, MIGRATION #1741
+            # REFUTER ROUND 6): the seam module previously had ZERO mutation
+            # coverage — R6a's `<= i -> < i` warn-drain mutant survived the
+            # whole corpus until the dedicated regression landed. Its test
+            # field is the module's 3-file discovery set (55 tests, min
+            # baseline ~2.5-3.7 s local — inside the [1200, 20000] ms regime);
+            # the 30 s wrap cap is MANDATORY, not optional: `_bars_from_scan`'s
+            # warn-drain and the oracle loop carry spin-capable loop mutants
+            # (the audit-mutant-173 wedge class). Measured 152 mutants
+            # (mutmut 2.5.1 list_mutations on this tree) ≈ ~6 min at the
+            # ~2.3 s/mutant CI pace — noting honestly that the budget
+            # arithmetic block above pre-dates the post-#1597 pair additions
+            # (lake_stats_manifest / feed_rust / sweep_apriori and now this
+            # pair) and understates the loop total accordingly.
             mod="${pair%%:*}"
             tmo="${pair##*:}"
             mid="${pair#*:}"
             tf="${mid%:*}"
+            # A pair's test field may hold MULTIPLE space-separated files (the
+            # feed/replay.py discovery set); the preflight must pass them as
+            # separate argv words, so split explicitly (quoting "$tf" would
+            # hand pytest ONE bogus space-joined path). The mutmut runner
+            # strings interpolate $tf into `sh -c '…'`, which word-splits at
+            # execution — correct for both single- and multi-file fields.
+            read -ra tf_files <<< "$tf"
             name="$(basename "$mod" .py)"
             if [ -n "$tmo" ]; then
               # Baseline-regime PREFLIGHT + measured-baseline wrap SIZING (fixer
@@ -522,10 +562,10 @@ jobs:
               # outside the regime instead of failing silently in either
               # direction.
               start_ms=$(date +%s%3N)
-              pytest "$tf" -x -q --no-header
+              pytest "${tf_files[@]}" -x -q --no-header
               base1_ms=$(( $(date +%s%3N) - start_ms ))
               start_ms=$(date +%s%3N)
-              pytest "$tf" -x -q --no-header
+              pytest "${tf_files[@]}" -x -q --no-header
               base2_ms=$(( $(date +%s%3N) - start_ms ))
               base_ms=$(( base1_ms < base2_ms ? base1_ms : base2_ms ))
               wrap_s=$(( base_ms * 5 / 1000 ))
@@ -856,6 +896,74 @@ jobs:
       # NO per-shard issue step — the fan-in mutation-verdict job owns alerts.
 
   # ─────────────────────────────────────────────────────────────────
+  # brutex-feed deep mutation gate (DEC-FEED-RUST-CORE-001) — the feed
+  # decision kernel's cargo-mutants pass. SINGLE job (no shard matrix):
+  # the scope is ONE small file (src/scan.rs — the positivity + bad-tick
+  # decision core; scope + exclusions documented in
+  # rust/brutex-feed/.cargo/mutants.toml), so the whole pass fits far
+  # inside the 120-min cap. Zero-survivor is the standard.
+  # ─────────────────────────────────────────────────────────────────
+  rust-mutation-brutex-feed:
+    name: "Rust mutation (cargo-mutants, brutex-feed)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    # Push runs deliberately skip the Rust matrices (DEC-MUTATION-RUNTIME-003)
+    # — see the rust-mutation job comment for the measured rationale.
+    if: github.event_name != 'push'
+    defaults:
+      run:
+        working-directory: rust/brutex-feed
+    steps:
+      # persist-credentials: false — see the fno-math twin (DEC-CI-FORK-PR-HARDEN-001).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-feed -> target
+          shared-key: "mutation-brutex-feed"
+          # cache-on-failure — see the fno-math twin.
+          cache-on-failure: true
+      - name: Install cargo-mutants
+        # Version PINNED — see the fno-math twin.
+        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Run cargo-mutants (scan.rs decision core, in-place)
+        run: |
+          # DEC-FEED-RUST-CORE-001:
+          # - SCOPE lives in rust/brutex-feed/.cargo/mutants.toml (ONE source
+          #   of truth): src/scan.rs only — python.rs (PyResult-alias
+          #   UNVIABLE wrapper class, gated end-to-end by the Python wheel
+          #   suites) + lib.rs (const/re-export only) documented OUT there.
+          # - --in-place: build.rs include!s ../source_digest_core.rs and the
+          #   integration tests read ../../tests/golden/fixtures/... — both
+          #   outside the crate dir, so copy-mode baselines break (the #1258
+          #   measured trading-core rationale).
+          # - default features suffice: scan.rs compiles without pyo3.
+          cargo mutants \
+            --in-place \
+            --test-tool cargo \
+            --no-shuffle \
+            --timeout 300 \
+            --output cargo-mutants.out \
+            -- \
+            --release
+      - name: Upload cargo-mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cargo-mutants-report-brutex-feed
+          path: rust/brutex-feed/cargo-mutants.out
+          retention-days: 14
+      # NO per-job issue step — the fan-in mutation-verdict job owns alerts.
+
+  # ─────────────────────────────────────────────────────────────────
   # Verdict (DEC-MUTATION-RUNTIME-003): ONE issue-filer per Rust gate
   # (per-shard create-only steps RACE the title dedup) + the zero-click
   # issue lifecycle: a fully-green SCHEDULED main run auto-closes every
@@ -886,7 +994,7 @@ jobs:
       contents: read
       issues: write # the fan-in filers + the scheduled-green auto-close below
     if: always()
-    needs: [python-mutation, rust-mutation, rust-mutation-trading-core]
+    needs: [python-mutation, rust-mutation, rust-mutation-trading-core, rust-mutation-brutex-feed]
     steps:
       - name: Open GitHub issue — fno-math gate red
         if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result) && github.event_name != 'workflow_dispatch'
@@ -930,12 +1038,34 @@ jobs:
               body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-MUTATION-RUNTIME-003); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
               labels: ['bug', 'mutation', 'rust', 'critical'],
             });
+      - name: Open GitHub issue — brutex-feed gate red
+        if: contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-feed.result) && github.event_name != 'workflow_dispatch'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const outcome = '${{ needs.rust-mutation-brutex-feed.result }}';
+            const sha7 = context.sha.substring(0, 7);
+            const title = `cargo-mutants: mutation gate red in brutex-feed on ${sha7}`;
+            const cause = outcome === 'cancelled'
+              ? 'The job hit the 120-minute timeout (conclusion cancelled). This is a RUNTIME/budget regression — NOT evidence of surviving mutants. Check whether the mutant count or per-mutant build cost grew.'
+              : 'The job failed: surviving (MISSED) mutants, per-mutant --timeout 300 timeouts, or a baseline/tooling break (cargo-mutants exit 4 = the BASELINE failed — a config/toolchain break, not survivors). The job log + report artifact distinguish them.';
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'bug,mutation,rust',
+            });
+            if (existing.data.find((i) => i.title === title)) return;
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo, title,
+              body: `${cause}\n\nCommit ${context.sha} — [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). Auto-filed by mutation.yml (DEC-FEED-RUST-CORE-001 on the DEC-MUTATION-RUNTIME-003 machinery); auto-closed by the mutation-verdict job on the first fully-green SCHEDULED run whose commit descends from this one.`,
+              labels: ['bug', 'mutation', 'rust', 'critical'],
+            });
       - name: Auto-close superseded mutation issues (green SCHEDULED main run only)
         if: >-
           github.event_name == 'schedule' && github.ref == 'refs/heads/main'
           && needs.python-mutation.result == 'success'
           && needs.rust-mutation.result == 'success'
           && needs.rust-mutation-trading-core.result == 'success'
+          && needs.rust-mutation-brutex-feed.result == 'success'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -982,8 +1112,10 @@ jobs:
           contains(fromJSON('["failure","cancelled"]'), needs.python-mutation.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation.result)
           || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-trading-core.result)
+          || contains(fromJSON('["failure","cancelled"]'), needs.rust-mutation-brutex-feed.result)
         run: |
           echo "python:       ${{ needs.python-mutation.result }}"
           echo "fno-math:     ${{ needs.rust-mutation.result }}"
           echo "trading-core: ${{ needs.rust-mutation-trading-core.result }}"
+          echo "brutex-feed:  ${{ needs.rust-mutation-brutex-feed.result }}"
           exit 1
