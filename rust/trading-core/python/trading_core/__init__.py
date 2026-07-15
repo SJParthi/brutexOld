@@ -153,11 +153,12 @@ def _assert_compiled_surface(
 _compiled = importlib.import_module("._trading_core", __name__)
 _assert_compiled_surface(_compiled)
 
-# Version-SENSITIVE staleness teeth (the 0.4.0 vocabulary reshape): the
-# missing-symbol handshake above is one-directional — a STALE 0.3.x wheel
-# carries every 0.4.0 symbol EXCEPT the new ones, but it ALSO still exposes
-# the deleted ``VwapState`` and would otherwise die later as a bare
-# ``TypeError`` on the narrowed evaluate ABIs. Refuse it loudly here.
+# Version-SENSITIVE staleness teeth (the 0.4.0 vocabulary reshape):
+# ``_assert_compiled_surface`` above already refuses a stale 0.3.x wheel on
+# its missing ``NARROW_CPR_WIDTH_BPS`` symbol, so this check is defensive
+# belt-and-braces — a second, DELETION-side handshake (the surface check is
+# presence-only) that names the reshape explicitly when a wheel still
+# exposes the deleted ``VwapState``.
 if hasattr(_compiled, "VwapState"):
     raise ImportError(
         "trading_core: the installed compiled wheel "

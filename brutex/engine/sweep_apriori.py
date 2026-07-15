@@ -175,7 +175,8 @@ the persisted store bytes.
 The sweep's up-front pre-flight refuses any ``k`` whose raw ``C(n_unique, k)``
 mask count exceeds ``max_combos``. That is correct for the brute-force path but
 with the DEFAULT cap would REFUSE a full-vocab ``k >= 4`` grid
-(``C(60, 4) = 487_635 > 100_000``) BEFORE the Apriori generator ever runs — even
+(``C(62, 4) = 557_845 > 100_000`` over the 62 active bits) BEFORE the Apriori
+generator ever runs — even
 though, with the flag ON, the deterministic ``MAX_MASK_BARS`` breaker is the real
 guardrail on emitted work, not raw ``C(n, k)``. :func:`effective_max_combos`
 therefore replaces **only the DEFAULT** ``max_combos`` guard value: with Apriori
@@ -297,8 +298,9 @@ def effective_max_combos(
     whose raw ``C(n_unique, k)`` mask count exceeds ``max_combos`` (the guards in
     ``SweepGridConfig.__post_init__`` + ``run_persisted_sweep``). That raw-count
     pre-flight is correct for the brute-force path, but with the DEFAULT cap it
-    would REFUSE a full-vocab ``k >= 4`` grid (``C(60, 4) = 487_635 > 100_000``)
-    BEFORE the Apriori generator ever runs — even though, with Apriori ON, the
+    would REFUSE a full-vocab ``k >= 4`` grid (``C(62, 4) = 557_845 > 100_000``
+    over the 62 active bits) BEFORE the Apriori generator ever runs — even
+    though, with Apriori ON, the
     deterministic ``MAX_MASK_BARS`` breaker (:func:`resolve_max_mask_bars`) is the
     real guardrail on emitted work, not raw ``C(n, k)``.
 

@@ -15,6 +15,13 @@ battery proves a bit-63-set mask round-trips EXACTLY through every persistence
 * :class:`~brutex.strategies.spec.StrategySpec` construction +
   ``canonical_bytes`` stability/sensitivity;
 * the ``%032x`` run-identity formatting width;
+* the sweep HOT-PATH kernels — the Stage-2 superset count
+  (:func:`~brutex.engine.combo_mask.count_supermasks` → the u64 Rust kernel
+  ``fno_math.count_supermasks_u64s`` + the resident
+  :class:`~brutex.engine.combo_mask.ResidentBarBuffer`) and the Stage-2
+  trade-sim kernel (``fno_math.ResidentSweepSim``) — each verified against a
+  pure-Python reference over bit-63-set bars, so a future accidental i64 FFI
+  signature can never truncate/overflow the sign bit silently;
 * the trivial import law: ``IMPLEMENTED_MASK > 2**63`` breaks nothing at
   import anywhere (it now contains bit 63).
 """
@@ -202,3 +209,88 @@ def test_mask_hex_formatting_width_is_32() -> None:
     assert len(rendered) == 32  # u128 width — no sign, no truncation
     assert rendered == "00000000000000009000000000000005"
     assert int(rendered, 16) == BIT63_MASK
+
+
+# ─────────────────────────────────────────────────────────────────
+# The sweep HOT-PATH kernels (Stage-2 count + trade-sim)
+# ─────────────────────────────────────────────────────────────────
+
+#: Bit-63-set bar_bits window for the kernel legs: the battery mask itself,
+#: two partial sign-bit supersets, a sign-bit-free superset of the low bits,
+#: and the empty bar. Every value fits u64 (bit 63 IS the top u64 bit), so
+#: the production router takes the Rust hot kernel — the surface under test.
+_KERNEL_BARS = [BIT63_MASK, (1 << 63) | 0b101, 1 << 63, 0b101, 0]
+_KERNEL_MASKS = [BIT63_MASK, 1 << 63, 0b101, 0]
+
+
+def _scalar_superset_counts(bar_bits: list[int], masks: list[int]) -> list[int]:
+    """Pure-Python (big-int) superset-count reference — no numpy, no Rust."""
+    return [sum(1 for b in bar_bits if (b & m) == m) for m in masks]
+
+
+def test_sweep_hot_kernel_count_supermasks_sign_bit() -> None:
+    """The Stage-2 count kernel serves a bit-63-set mask/bars EXACTLY.
+
+    All inputs fit u64 (bit 63 is the TOP u64 bit — no bit >= 64), so
+    ``count_supermasks`` routes to the Rust hot kernel
+    ``fno_math.count_supermasks_u64s``, NOT the two-limb numpy reference:
+    this is the sweep hot path itself. A future accidental i64 FFI signature
+    would overflow/misparse ``1 << 63`` here instead of shipping silently.
+    """
+    fno_math = pytest.importorskip("fno_math")
+    from brutex.engine.combo_mask import U64_MASK, count_supermasks
+
+    assert all(0 <= v <= U64_MASK for v in [*_KERNEL_BARS, *_KERNEL_MASKS])
+    expected = _scalar_superset_counts(_KERNEL_BARS, _KERNEL_MASKS)
+    # Hand-derived: only the battery bar ⊇ the battery mask; three bars carry
+    # bit 63; three bars ⊇ 0b101; every bar ⊇ 0.
+    assert expected == [1, 3, 3, 5]
+    # The production router (takes the u64 Rust kernel for these inputs).
+    assert count_supermasks(_KERNEL_BARS, _KERNEL_MASKS) == expected
+    # The raw kernel itself, no router in between.
+    assert list(fno_math.count_supermasks_u64s(_KERNEL_BARS, _KERNEL_MASKS)) == expected
+
+
+def test_sweep_hot_kernel_resident_bar_buffer_sign_bit() -> None:
+    """The resident Rust buffer (``fno_math.ResidentBars``) agrees on bit-63 bars."""
+    pytest.importorskip("fno_math")
+    from brutex.engine.combo_mask import ResidentBarBuffer
+
+    rb = ResidentBarBuffer(_KERNEL_BARS)
+    # All bars fit u64 → the RUST resident kernel backs the buffer (not the
+    # numpy fallback); this pins the sign-bit word crossed the FFI boundary.
+    assert rb._rust is not None
+    assert rb.count_supermasks(_KERNEL_MASKS) == _scalar_superset_counts(
+        _KERNEL_BARS, _KERNEL_MASKS
+    )
+    assert rb.count_supermask(BIT63_MASK) == 1
+
+
+def test_sweep_hot_kernel_resident_sweep_sim_sign_bit_mask() -> None:
+    """The u64 trade-sim kernel fires a bit-63-set mask on a bit-63-set bar.
+
+    The flat-window construction mirrors
+    ``tests/unit/test_fno_math_resident_sweep_sim_u128.py``: open/close
+    10_000, high +150 / low −150, one session, no forced bars. The battery
+    mask arms on bar 0 (the only superset), fills at open[1], and the
+    end-of-data close lands at close[2] → pnl 0, mfe/mae 150, holding 2.
+    """
+    fno_math = pytest.importorskip("fno_math")
+    bar_bits = [BIT63_MASK, 0, 0]
+    n = len(bar_bits)
+    sim = fno_math.ResidentSweepSim(
+        [10_000] * n,
+        [10_150] * n,
+        [9_850] * n,
+        [10_000] * n,
+        [False] * n,
+        [0] * n,
+        bar_bits,
+    )
+    # Pure-Python reference: exactly one bar is a superset of the mask.
+    assert _scalar_superset_counts(bar_bits, [BIT63_MASK]) == [1]
+    assert sim.count_trades([BIT63_MASK], True, None, None) == [1]
+    assert sim.simulate_masks([BIT63_MASK], True, None, None) == [[(0, 150, 150, 2, 1, 2)]]
+    # Anti-vacuity: a high mask bit NO bar carries (bit 62) fires nothing —
+    # the kernel genuinely evaluated the top word, it did not match-all.
+    assert sim.count_trades([1 << 62], True, None, None) == [0]
