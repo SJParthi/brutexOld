@@ -26,7 +26,7 @@ from brutex.adapters.groww.constants import (
     GROWW_OPTION_COVERAGE_MARKET,
 )
 from brutex.adapters.groww.sdk_protocol import GrowwSDK
-from brutex.adapters.ingest_common import StepOrderMonitor
+from brutex.adapters.ingest_common import PullStep, StepOrderMonitor
 from brutex.dashboard import historical_pull as hp
 from brutex.dashboard.composite_pull import _underlying_kind_map
 from brutex.dashboard.historical_pull import HistoricalPullReport, pull_contract_candles
@@ -931,6 +931,212 @@ class TestSpanIndexHoistPin:
         src = inspect.getsource(hp._run_phase)
         assert "span_index = index_lake_spans(spans)" in src
         assert "span_index=span_index" in src
+
+
+class TestStepFilter:
+    """The additive F&O-spine ``step_filter`` seam (DEC-STAGED-SEQUENCER-SEAMS-001).
+
+    ADR-0021 Decision 3: a FUTURES-only / OPTIONS-only STAGE invocation reuses
+    this ONE spine via a PullStep bucket selection — default ``None`` = every
+    step, BYTE-IDENTICAL (pinned); a filtered bucket is honestly ABSENT from
+    the pull + report (zero vendor calls, zero ledger rows, never marked
+    complete — NEVER fake-settled).
+    """
+
+    def _pull(
+        self,
+        tmp_path: Path,
+        *,
+        sdk: _FakeSDK,
+        sink: _RecordingSink,
+        step_filter: frozenset[PullStep] | None,
+    ) -> HistoricalPullReport:
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        return pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_path / "lake",
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            underlying_kinds=_KINDS,
+            step_monitor=StepOrderMonitor(raise_on_violation=True),
+            step_filter=step_filter,
+        )
+
+    def test_default_none_is_byte_identical_to_omitted(self, tmp_path: Path) -> None:
+        """``step_filter=None`` ≡ the parameter omitted — the pinned default parity."""
+        sdk_a, sink_a = _FakeSDK(), _RecordingSink()
+        report_a = self._pull(tmp_path / "a", sdk=sdk_a, sink=sink_a, step_filter=None)
+        registry = _seed_registry(tmp_path / "b", symbols=_FOUR_BUCKET_LEGS)
+        sdk_b, sink_b = _FakeSDK(), _RecordingSink()
+        report_b = pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_path / "b" / "lake",
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk_b, sink_b),
+            now=_NOW,
+            underlying_kinds=_KINDS,
+            step_monitor=StepOrderMonitor(raise_on_violation=True),
+        )
+        assert report_a.to_dict() == report_b.to_dict()
+        assert sdk_a.candle_symbols == sdk_b.candle_symbols
+        assert sink_a.appends == sink_b.appends
+        assert report_a.contracts_step_filtered == 0
+        # The default payload carries NO step-filter key (EMIT-ON-NONZERO).
+        assert "contracts_step_filtered" not in report_a.to_dict()
+
+    def test_futures_only_pulls_only_futures_buckets(self, tmp_path: Path) -> None:
+        """Steps {3,4}: only the FUT legs fetch; option legs honestly absent."""
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        with capture_logs() as logs:
+            report = self._pull(
+                tmp_path,
+                sdk=sdk,
+                sink=sink,
+                step_filter=frozenset({PullStep.INDICES_FUTURES, PullStep.STOCKS_FUTURES}),
+            )
+        assert sdk.candle_symbols == [_NIFTY_FUT, _ADANI_FUT]
+        assert report.contracts_step_filtered == 2
+        assert report.contracts_completed == 2
+        # NEVER fake-settled: the filtered option legs appear in NO completion
+        # surface — not completed, not started, no window planned.
+        assert set(report.phase1_complete) == {_NIFTY_FUT, _ADANI_FUT}
+        assert set(report.start_dates) == {_NIFTY_FUT, _ADANI_FUT}
+        assert report.to_dict()["contracts_step_filtered"] == 2
+        assert "2 contract(s) outside the step filter skipped" in report.note
+        filtered = _events(logs, "fno.step_filtered")
+        assert len(filtered) == 1
+        assert filtered[0]["contracts"] == 2
+        assert filtered[0]["steps"] == ["indices-futures", "stocks-futures"]
+        started = _events(logs, "pull.step.started")
+        assert [e["step"] for e in started] == ["indices-futures", "stocks-futures"]
+
+    def test_options_only_pulls_only_options_buckets(self, tmp_path: Path) -> None:
+        """Steps {5,6}: the options-only mirror."""
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        report = self._pull(
+            tmp_path,
+            sdk=sdk,
+            sink=sink,
+            step_filter=frozenset({PullStep.INDICES_OPTIONS, PullStep.STOCKS_OPTIONS}),
+        )
+        assert sdk.candle_symbols == [_NIFTY_CE, _ADANI_CE]
+        assert report.contracts_step_filtered == 2
+        assert set(report.phase1_complete) == {_NIFTY_CE, _ADANI_CE}
+        assert set(report.start_dates) == {_NIFTY_CE, _ADANI_CE}
+
+    def test_filtered_legs_never_marked_complete_in_registry(self, tmp_path: Path) -> None:
+        """The registry completion stamp covers ONLY the pulled buckets."""
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_path / "lake",
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            underlying_kinds=_KINDS,
+            step_filter=frozenset({PullStep.INDICES_FUTURES, PullStep.STOCKS_FUTURES}),
+        )
+        status = {row.contract_symbol: row.candle_status for row in registry.list_contracts()}
+        assert status[_NIFTY_FUT] == "complete"
+        assert status[_ADANI_FUT] == "complete"
+        # The filtered option legs stay untouched — re-joined by their own stage.
+        assert status[_NIFTY_CE] == "none"
+        assert status[_ADANI_CE] == "none"
+
+    def test_filtered_legs_leave_zero_ledger_rows(self, tmp_path: Path) -> None:
+        """Zero window-ledger rows for a filtered bucket — honestly absent."""
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        self._pull(
+            tmp_path,
+            sdk=sdk,
+            sink=sink,
+            step_filter=frozenset({PullStep.INDICES_OPTIONS, PullStep.STOCKS_OPTIONS}),
+        )
+        ledger = load_window_ledger(tmp_path / "lake")
+        markets = {record.market for record in ledger.records()}
+        assert GROWW_OPTION_COVERAGE_MARKET in markets
+        assert GROWW_FUTURE_COVERAGE_MARKET not in markets
+
+    def test_split_invocations_cover_the_whole_selection(self, tmp_path: Path) -> None:
+        """Futures-only THEN options-only ≡ the unfiltered selection's coverage."""
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        for selection in (
+            frozenset({PullStep.INDICES_FUTURES, PullStep.STOCKS_FUTURES}),
+            frozenset({PullStep.INDICES_OPTIONS, PullStep.STOCKS_OPTIONS}),
+        ):
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=tmp_path / "lake",
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+                underlying_kinds=_KINDS,
+                step_filter=selection,
+            )
+        assert sdk.candle_symbols == [_NIFTY_FUT, _ADANI_FUT, _NIFTY_CE, _ADANI_CE]
+        status = {row.contract_symbol: row.candle_status for row in registry.list_contracts()}
+        assert all(state == "complete" for state in status.values())
+
+    def test_empty_step_filter_is_a_typed_refusal(self, tmp_path: Path) -> None:
+        """An EMPTY selection is a caller bug — refused BEFORE any work."""
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        with pytest.raises(ValueError, match="step_filter must select at least one"):
+            pull_contract_candles(
+                registry.list_contracts(),
+                lake_root=tmp_path / "lake",
+                dry_run=False,
+                intervals=("1minute",),
+                registry=registry,
+                from_date=_FROM,
+                to_date=_TO,
+                client_factory=lambda _root: _factory(sdk, sink),
+                now=_NOW,
+                step_filter=frozenset(),
+            )
+        assert sdk.candle_symbols == []
+        assert sink.appends == []
+
+    def test_legacy_kinds_none_filter_still_selects_by_market(self, tmp_path: Path) -> None:
+        """``underlying_kinds=None`` + a filter: the 2-bucket degrade still splits by market."""
+        registry = _seed_registry(tmp_path, symbols=_FOUR_BUCKET_LEGS)
+        sdk, sink = _FakeSDK(), _RecordingSink()
+        report = pull_contract_candles(
+            registry.list_contracts(),
+            lake_root=tmp_path / "lake",
+            dry_run=False,
+            intervals=("1minute",),
+            registry=registry,
+            from_date=_FROM,
+            to_date=_TO,
+            client_factory=lambda _root: _factory(sdk, sink),
+            now=_NOW,
+            underlying_kinds=None,
+            # Kinds-None classifies everything stock-side — the futures-only
+            # selection must include the STOCKS_FUTURES bucket to catch them.
+            step_filter=frozenset({PullStep.INDICES_FUTURES, PullStep.STOCKS_FUTURES}),
+        )
+        assert set(sdk.candle_symbols) == {_NIFTY_FUT, _ADANI_FUT}
+        assert report.contracts_step_filtered == 2
 
 
 class TestReportOkProperty:
