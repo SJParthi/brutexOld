@@ -383,6 +383,63 @@ class TestLeaderboardRouteRollup:
         resp = client.get("/api/v1/sweep/leaderboard", params={"preset": "bogus"})
         assert resp.status_code == 400
 
+    def test_preset_with_active_composite_stays_legacy(
+        self, client: TestClient, store: InstrumentStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The merge-reconcile COMPOSITE-ACTIVATION ruling (MIGRATION.md #1732):
+        a JOINED non-empty composite index feeds preset ORDERING (the
+        ``composite`` preset's primary axis AND ``min_dd_first``'s composite
+        tiebreak) with a value that is NOT a persisted ``ResultRow`` field —
+        the persisted union structurally cannot cover it, so a PRESET-ordered
+        poll must stay LEGACY while the index is active; a plain ``rank_by``
+        poll (persisted fields only) keeps the rollup serve."""
+        import polars as pl
+
+        lake_root = store.path.parent
+        _write_store(lake_root, [_row(1), _row(2)])
+        assert rr.rebuild_rollup(lake_root / SWEEPS_DIRNAME) is True
+        # Activate the read-time composite index (the #1749 join): the newest
+        # run's aggs sidecar under the sweep_runs/ SIBLING tree.
+        depth = lake_root / "sweep_runs" / ("grid" + "0" * 60) / "results-depth" / "NIFTY" / "5m"
+        depth.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "run_id": [f"{1:064x}"],
+                "composite_score": pl.Series([1.75], dtype=pl.Float64),
+            }
+        ).write_parquet(depth / "bull_k1_aaaaaaaaaaaaaaaa.aggs.parquet")
+
+        calls: list[str] = []
+        real_classify = rr.classify_rollup
+
+        def _spy(root: Path, *, current_rev: str) -> object:
+            calls.append(current_rev)
+            return real_classify(root, current_rev=current_rev)
+
+        monkeypatch.setattr(rr, "classify_rollup", _spy)
+        for preset in ("composite", "min_dd_first"):
+            payload = client.get("/api/v1/sweep/leaderboard", params={"preset": preset}).json()
+            assert payload["composite_join"]["state"] == "joined"
+            assert payload["preset"] == preset
+            # ACTIVE composite + preset ⇒ the rollup arm never engaged: the
+            # served ordering is the legacy compute's (composite-aware — the
+            # control threads the SAME index the route's level-1b slot loads).
+            from brutex.dashboard.composite_join import load_composite_index
+
+            legacy = build_sweep_leaderboard(
+                lake_root,
+                preset=preset,
+                top_n=50,
+                composite=load_composite_index(lake_root / SWEEPS_DIRNAME),
+            ).to_dict()
+            assert payload == legacy
+        assert calls == []
+        # A plain rank_by poll keeps the rollup serve (persisted-field
+        # ordering — the union covers it; the composite only DECORATES).
+        rank_payload = client.get("/api/v1/sweep/leaderboard").json()
+        assert calls, "the unfiltered rank_by poll must still ride the rollup"
+        assert rank_payload["rows"][0]["composite_score"] == 1.75
+
     def test_additions_serve_fresh_legacy_and_reconverge(
         self, client: TestClient, store: InstrumentStore
     ) -> None:
