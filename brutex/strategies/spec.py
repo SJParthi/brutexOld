@@ -21,10 +21,19 @@ Design rules (hostile-review-hardened; see the PR-4b build spec):
   which a caller could double-carry a spec-carried axis (mask / direction /
   proximity / prior_n / symbol) or omit an eval-affecting one. Every
   eval-affecting axis NOT carried by ``canonical_bytes`` or a fixed
-  ``combo_hash`` field MUST ride params; today that set is exactly
-  ``{fib_anchor}`` (the anchor changes the Group-4 Fib levels a spec
-  evaluates against — two anchors are two computations and MUST get two
-  run-identities, mirroring ``canonical_trade_params``).
+  ``combo_hash`` field MUST ride params, in one of TWO emit classes
+  (mirroring ``canonical_trade_params``):
+
+  1. **Unconditionally emitted** — ``{fib_anchor}`` (the anchor changes the
+     Group-4 Fib levels a spec evaluates against — two anchors are two
+     computations and MUST get two run-identities).
+  2. **Optionally emitted when non-default** — ``{vwap_source, ema_source}``
+     (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1). The swept VWAP / EMA
+     price-source axis is eval-affecting (bits 52-53 / 0-5) but is OMITTED at
+     its default ``(HLC3, CLOSE)`` and emitted only when non-default, so
+     existing run_ids stay byte-identical (a hard back-compat invariant for
+     the sibling Rust-core owner's + product-audit's twin-baseline capture).
+     Absent ALWAYS means the default — a clean bijection, no ambiguity.
 * **Shared rules vs BruteX policy.** ``__post_init__`` mirrors the Rust
   binding's guard set (mask ⊆ ``IMPLEMENTED_MASK``, direction ∈ {Long,
   Short}, each proximity ∈ ``[0, MAX_PROXIMITY_BPS]``, ``prior_n`` a u64)
@@ -50,7 +59,11 @@ import trading_core
 from brutex.strategies.combo import combo_hash
 from brutex.strategies.errors import StrategyError
 from brutex.strategies.fib_definitions import Direction
-from brutex.strategies.types import FibAnchorKind
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    price_source_params_fragment,
+)
 from brutex.vocabulary.bits import IMPLEMENTED_MASK
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
@@ -378,18 +391,34 @@ def canonical_spec_params(
     tp_paisa: int | None,
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
 ) -> dict[str, Any]:
     """Return the ONE params layout inside every spec run-identity (COMMON).
 
-    Invariant: every eval-affecting axis NOT carried by ``canonical_bytes``
-    or a fixed ``combo_hash`` field MUST ride params. Today that set is
-    exactly ``{fib_anchor}`` — the anchor genuinely changes the Group-4 Fib
-    levels a spec evaluates against, so two anchors are two computations and
-    MUST get distinct run-identities (the same unconditional-emit rule as
-    :func:`brutex.engine.sweep_run.canonical_trade_params`). The spec-carried
-    axes (mask / direction / proximity / prior_n / symbol) are STRUCTURALLY
-    absent — this builder has no parameter through which to double-carry
-    them, so one logical run can never mint two identities (or two runs one).
+    Invariant: every eval-affecting axis NOT carried by ``canonical_bytes`` or a
+    fixed ``combo_hash`` field MUST ride params, in one of TWO emit classes
+    (mirroring :func:`brutex.engine.sweep_run.canonical_trade_params`):
+
+    * **Unconditionally emitted** — ``{fib_anchor}``. The anchor genuinely
+      changes the Group-4 Fib levels a spec evaluates against, so two anchors are
+      two computations and MUST get distinct run-identities. Emitted for EVERY
+      family (including prev-day).
+    * **Optionally emitted when non-default** — ``{vwap_source, ema_source}``
+      (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1). The swept VWAP / EMA
+      price-source axis is eval-affecting (bits 52-53 / 0-5) but the keys are
+      OMITTED when they equal the default ``(HLC3, CLOSE)`` and emitted only when
+      a non-default source is swept. WHY (run-id back-compat): unconditional emit
+      would re-key EVERY existing run's identity — a hard break for the sibling
+      Rust-core owner's + product-audit's twin-baseline capture, which depend on
+      existing run_ids staying byte-identical. Default-omit has no
+      canonicalisation ambiguity (absent ALWAYS means the default — a clean
+      bijection) and follows the repo's optional-param convention.
+
+    The spec-carried axes (mask / direction / proximity / prior_n / symbol) are
+    STRUCTURALLY absent — this builder has no parameter through which to
+    double-carry them, so one logical run can never mint two identities (or two
+    runs one).
 
     Parameters
     ----------
@@ -400,18 +429,26 @@ def canonical_spec_params(
     fib_anchor
         The swept Fib anchor — REQUIRED, emitted UNCONDITIONALLY (never
         omitted for the prev-day default).
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source axis. DEFAULT-OMITTED (Override 1):
+        emitted only when non-default, so a default cell's spec run-identity is
+        byte-identical to the pre-axis identity.
 
     Returns
     -------
     dict[str, Any]
         JSON-canonicalisable params (ints / strings / ``None`` only).
     """
-    return {
+    params: dict[str, Any] = {
         "sl_paisa": sl_paisa,
         "tp_paisa": tp_paisa,
         "start_equity_paisa": start_equity_paisa,
         "fib_anchor": fib_anchor.value,
     }
+    # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
+    params.update(price_source_params_fragment(vwap_source, ema_source))
+    return params
 
 
 def spec_run_id(
@@ -423,6 +460,8 @@ def spec_run_id(
     tp_paisa: int | None,
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
     data_snapshot_hash: str,
     indicator_version: str,
     code_commit_sha: str,
@@ -480,6 +519,8 @@ def spec_run_id(
             tp_paisa=tp_paisa,
             start_equity_paisa=start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
         ),
         data_snapshot_hash=data_snapshot_hash,
         indicator_version=indicator_version,
