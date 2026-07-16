@@ -22,7 +22,6 @@ import polars as pl
 import pytest
 from brutex.data import lake_rust_render as lrr
 from brutex.data import lake_rust_resample as lrs
-from brutex.data import tf_resampler
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from structlog.testing import capture_logs
 
@@ -556,64 +555,6 @@ class TestFrameComparator:
 
 
 # ---------------------------------------------------------------------------
-# seam wiring in tf_resampler (the OFF byte-identity + ordering laws)
-# ---------------------------------------------------------------------------
-
-
-class TestSeamWiring:
-    def test_flag_off_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The OFF (default) byte-identity spy-pin: with the flag unset the
-        # public fn must never call the seam — a bomb proves it.
-        monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
-
-        def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
-            raise AssertionError("seam must not be reached with the flag OFF")
-
-        monkeypatch.setattr(tf_resampler, "resample_frame_via_rust", _bomb)
-        out = tf_resampler.resample_1m_to_tf(_df_1m(), 5)
-        assert out.equals(tf_resampler._resample_1m_to_tf_python(_df_1m(), 5))
-
-    def test_flag_on_with_absent_wheel_serves_the_python_result(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # No new crash class: flag ON + no wheel → the oracle (verbatim
-        # Python body) serves through the seam's import-guard degrade.
-        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
-        _install_crate(monkeypatch, None)
-        out = tf_resampler.resample_1m_to_tf(_df_1m(), 5)
-        assert out.equals(tf_resampler._resample_1m_to_tf_python(_df_1m(), 5))
-        assert out.schema == tf_resampler._resample_1m_to_tf_python(_df_1m(), 5).schema
-
-    def test_validation_and_membership_raise_before_the_seam_when_on(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
-
-        def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
-            raise AssertionError("seam must not be reached for invalid input")
-
-        monkeypatch.setattr(tf_resampler, "resample_frame_via_rust", _bomb)
-        with pytest.raises(ValueError, match="Unsupported target TF"):
-            tf_resampler.resample_1m_to_tf(_df_1m(), 999)
-        with pytest.raises(TypeError):
-            tf_resampler.resample_1m_to_tf("not-a-frame", 5)
-
-    def test_flag_on_routes_through_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
-        seen: list[int] = []
-
-        def _spy(df: pl.DataFrame, tf: int, *, oracle: Any) -> pl.DataFrame:
-            seen.append(tf)
-            assert oracle is tf_resampler._resample_1m_to_tf_python
-            return oracle(df, tf)
-
-        monkeypatch.setattr(tf_resampler, "resample_frame_via_rust", _spy)
-        out = tf_resampler.resample_1m_to_tf(_df_1m(), 5)
-        assert seen == [5]
-        assert out.equals(tf_resampler._resample_1m_to_tf_python(_df_1m(), 5))
-
-
-# ---------------------------------------------------------------------------
 # cross-language drift pins
 # ---------------------------------------------------------------------------
 
@@ -645,3 +586,130 @@ class TestCrateSourceDriftPins:
         ).read_text()
         for name in lrs._CRATE_API:
             assert name in shim, f"{name} missing from the brutex_lake shim re-exports"
+
+
+# ---------------------------------------------------------------------------
+# mutation hardening (the zero-survivor weekly-gate law — each test kills a
+# mutant class the behavioral suite above left alive; mutmut-executed)
+# ---------------------------------------------------------------------------
+
+
+class TestMutationHardening:
+    def test_flag_env_name_literal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Kills the env-NAME string mutant: the literal (not the constant)
+        # must arm the flag, or every operator opt-in silently dies.
+        assert lrs.LAKE_RUST_RESAMPLE_ENV == "BRUTEX_LAKE_RUST_RESAMPLE"
+        monkeypatch.setenv("BRUTEX_LAKE_RUST_RESAMPLE", "1")
+        assert lrs.lake_rust_resample_enabled() is True
+
+    def test_burn_in_samples_is_sixteen(self) -> None:
+        # The #1531/#1532 16-sample law (kills the 16->17 mutant).
+        assert lrs.BURN_IN_SAMPLES == 16
+
+    def test_import_guard_remedy_and_detail_are_exact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        remedy = "pip install rust/brutex-lake (see docs/runbooks/lake-rust-render-lockstep.md)"
+        with capture_logs() as logs:
+            _run(monkeypatch, None)
+        disabled = [e for e in logs if e["event"] == "lake_rust_resample.rust_path_disabled"]
+        assert disabled[0]["remedy"] == remedy
+        lrs.reset_lake_rust_resample_for_tests()
+        module = _fake_crate()
+        module.resample_1m_ipc = "not-callable"  # type: ignore[attr-defined]
+        with capture_logs() as logs:
+            _run(monkeypatch, module)
+        disabled = [e for e in logs if e["event"] == "lake_rust_resample.rust_path_disabled"]
+        assert disabled[0]["remedy"] == remedy
+        assert disabled[0]["error_detail"] == (
+            "brutex_lake.resample_1m_ipc missing or not callable — foreign/stale install"
+        )
+
+    def test_version_mismatch_remedy_is_exact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with capture_logs() as logs:
+            _run(monkeypatch, _fake_crate(pinned="9.99.9"))
+        disabled = [e for e in logs if e["event"] == "lake_rust_resample.rust_path_disabled"]
+        assert disabled[0]["remedy"] == (
+            "align the wheel and the crate's pinned polars rev, then "
+            "re-run the parity corpus "
+            "(docs/runbooks/lake-rust-render-lockstep.md)"
+        )
+
+    def test_none_returning_pinned_version_fails_the_version_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The documented fail-closed law: a non-str (even None) pinned
+        # version flows into `!=` and latches polars_version_mismatch —
+        # kills the `_METADATA_ERROR = None` sentinel mutant, under which a
+        # None-returning foreign crate would degrade SILENTLY, unlatched.
+        out = _run(monkeypatch, _fake_crate(pinned=lambda: None))
+        assert out.equals(_ORACLE_DF)
+        assert lrs._DISABLED_REASON[0] == "polars_version_mismatch"
+
+    def test_polars_exceptions_home_resolves_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # pyo3_runtime unimportable + ONLY polars.exceptions carrying the
+        # class: the resolver must CONTINUE past the failed first home
+        # (kills the continue->break mutant AND the home-name string mutant).
+        monkeypatch.setitem(sys.modules, "pyo3_runtime", None)
+        fake_pl = types.ModuleType("polars.exceptions")
+        fake_pl.PanicException = _FakePanicException  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "polars.exceptions", fake_pl)
+        assert lrs._panic_belt_errors() == (Exception, _FakePanicException)
+
+    def test_crate_is_called_with_oi_aware_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The presence-decides law rides oi_aware=True ALWAYS (kills the
+        # True->False mutant, under which every F&O derive would silently
+        # drop OI + the Greeks overlay).
+        seen: list[tuple[int, bool]] = []
+
+        def _spy(ipc: bytes, tf: int, oi: bool) -> bytes:
+            seen.append((tf, oi))
+            return _ipc(_ORACLE_DF)
+
+        _install_crate(monkeypatch, _fake_crate(resample=_spy))
+        lrs.resample_frame_via_rust(_df_1m(), 5, oracle=_CountingOracle())
+        assert seen == [(5, True)]
+
+    def test_budget_arm_alone_triggers_burn_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # remaining=1 with the shape gate DISARMED: only the count-budget
+        # arm can enter the burn-in (kills the `> 0` -> `> 1` mutant).
+        lrs.reset_lake_rust_resample_for_tests(remaining=1)
+        lrs._BURN_IN_SHAPE_GATE[0] = False
+        oracle = _CountingOracle()
+        _install_crate(monkeypatch, _fake_crate())
+        lrs.resample_frame_via_rust(_df_1m(), 5, oracle=oracle)
+        assert oracle.calls == 1
+        assert lrs._BURN_IN_REMAINING[0] == 0
+
+    def test_spent_budget_never_decrements_below_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A shape-gate compare after the budget is spent must NOT touch the
+        # count (kills the `> 0` -> `>= 0` decrement-guard mutant).
+        lrs.reset_lake_rust_resample_for_tests(remaining=1)
+        _install_crate(monkeypatch, _fake_crate())
+        lrs.resample_frame_via_rust(_df_1m(), 5, oracle=_CountingOracle())
+        assert lrs._BURN_IN_REMAINING[0] == 0
+        lrs.resample_frame_via_rust(_df_1m(), 15, oracle=_CountingOracle())
+        assert lrs._BURN_IN_REMAINING[0] == 0
+
+    def test_source_literal_pins(self) -> None:
+        # Source-text pins for the remaining string/annotation/default
+        # mutants whose effect is internally-consistent state the behavioral
+        # suite cannot distinguish (logger name · engaged-memo key · shape
+        # gate armed default · latch cell annotation · the schema-token
+        # shape). mutmut mutates the file ON DISK, so a literal pin is a
+        # genuine kill (the killed-token/AST-pin house idiom).
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[2] / "brutex" / "data" / "lake_rust_resample.py"
+        ).read_text()
+        for literal in (
+            '_LOG = structlog.get_logger("brutex.data.lake_rust_resample")',
+            '_ENGAGED_KEY: Final[str] = "__engaged__"',
+            "_BURN_IN_SHAPE_GATE: Final[list[bool]] = [True]",
+            "_DISABLED_REASON: Final[list[str | None]] = [None]",
+            '    schema_token = f"{df_1m.schema}|tf={target_tf_minutes}"',
+        ):
+            assert literal in source, f"pinned literal drifted: {literal!r}"
