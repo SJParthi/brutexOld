@@ -3018,15 +3018,32 @@ class TestRenderShardRustSeamRouting:
     def test_flag_off_is_byte_identical_and_never_touches_the_crate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Bomb-crate spy: the default OFF arm must never import/touch brutex_lake."""
+        """Bomb-crate spy: the default OFF arm must never import/touch brutex_lake.
+
+        The spy raises the special-method-standard ``AttributeError`` (the
+        CodeQL ``__getattr__`` contract) — but a bare AttributeError alone
+        would DEFUSE the bomb: ``lake_rust_stats._resolve_crate`` probes the
+        crate via ``getattr(crate, name, None)`` (which swallows
+        AttributeError into the ``crate_unavailable`` latch) and
+        AttributeError is an explicit ``_DEGRADE_ERRORS`` member (degrades to
+        the oracle), so a broken OFF-arm invariant could still serve the
+        canonical bytes and pass the byte assert. The RECORDED-touch assert
+        below is therefore the un-swallowable teeth: ANY attribute access on
+        the poisoned module fails the test loudly, however the exception is
+        absorbed downstream.
+        """
         import sys
+
+        touched: list[str] = []
 
         class _Bomb:
             def __getattr__(self, name: str) -> object:
-                raise AssertionError(f"flag OFF touched brutex_lake.{name}")
+                touched.append(name)
+                raise AttributeError(f"flag OFF touched brutex_lake.{name}")
 
         monkeypatch.setitem(sys.modules, "brutex_lake", _Bomb())
         assert lsm.render_shard(self._stats()) == self._CANONICAL
+        assert touched == [], f"flag OFF touched brutex_lake: {touched}"
 
     def test_flag_on_burn_in_verifies_a_flipped_crate_against_the_oracle(
         self, monkeypatch: pytest.MonkeyPatch
