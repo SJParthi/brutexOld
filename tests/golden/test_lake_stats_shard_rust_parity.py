@@ -427,3 +427,21 @@ class TestPartitionStemGridMirror:
         assert partition.option_partition_stem(9999, 12) == "9999-12"
         assert partition.option_partition_stem(2024, 6) == "2024-06"
         assert partition.option_partition_stem(2026, 7) == "2026-07"
+
+    def test_python_validate_year_month_messages_match_the_pinned_literals(self) -> None:
+        """NIT-2 drift pin: the Python twin's refusal messages equal the
+        cargo-pinned literals (`validate_year_month_bounds_and_messages` in
+        rust/brutex-lake/src/stats_shard.rs) — the cross-language mirror
+        WITHOUT an FFI crossing, message-exact."""
+        partition._validate_year_month(2000, 1)  # in-bounds floor: no raise
+        partition._validate_year_month(2100, 12)  # in-bounds ceiling: no raise
+        cases = (
+            (1999, 1, "year must be a 4-digit Gregorian year in [2000, 2100], got 1999"),
+            (2101, 1, "year must be a 4-digit Gregorian year in [2000, 2100], got 2101"),
+            (2026, 0, "month must be in [1, 12], got 0"),
+            (2026, 13, "month must be in [1, 12], got 13"),
+        )
+        for year, month, expected in cases:
+            with pytest.raises(partition.PartitionError) as excinfo:
+                partition._validate_year_month(year, month)
+            assert str(excinfo.value) == expected
