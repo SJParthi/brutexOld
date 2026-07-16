@@ -18,7 +18,23 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (CLUB Q merge vehicle, branch
+_Last updated: 2026-07-16 (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001,
+MIGRATION.md #1832, branch `claude/crossverify-owed-sentinel` — the owed-day
+sentinel HARDENING follow-up to the landed #1810 (the base change rode the
+club-T train, PR #1558; this delta is the round-1 hostile-review fold —
+SHIP ×2, zero BLOCKER/MAJOR): `mark_owed_for_pull` gains publish-gate PARITY
+with the D3 catchup (a staged-only `BRUTEX_CROSSVERIFY_PUBLISH=off` launch
+no longer writes a marker no automatic pass would ever clear — mark and
+auto-clearer AGREE; mark-side pin test), the midnight-crossing launch is
+documented benign/convergent at both mark sites, `mark_owed`'s broad except
+narrows to OSError (a genuine code bug now propagates loudly), and the
+scan-window floor boundary is exactly pinned. Sidecar-gate + comments +
+tests only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change; zero new routes/env. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1832; main's landed #1810 entry is
+byte-untouched.)
+Earlier: 2026-07-15 (CLUB Q merge vehicle, branch
 `integration/club-q-dashboard` — the file-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1434 memory/cache + RAM-residency
 hardening pack (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) ·
@@ -2753,7 +2769,50 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
+- **Active branch:** `claude/crossverify-owed-sentinel`
+  (**DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1832** — the
+  owed-day sentinel HARDENING follow-up to the landed
+  DEC-CROSSVERIFY-OWED-SENTINEL-001 (#1810; the base change landed on main
+  via the club-T train, PR #1558, folding the closed draft PR #1537 — this
+  delta is the round-1 hostile-review fold authored after the train cut;
+  main's #1810 ledger entry is byte-UNTOUCHED, the round-1 record lives in
+  its OWN row #1832 per the coordinator's re-cut ruling). THE FOUR ITEMS
+  (2 reviewers, verdict SHIP ×2 — zero BLOCKER/MAJOR): (MINOR-1, the ONE
+  behavior change) `mark_owed_for_pull` gains publish-gate PARITY with the
+  step-D3 catchup that auto-completes markers — the mark previously gated
+  on `config.enabled` only while D3 sits behind run.py's
+  `config.publish and not config.dry_run` gate, so a staged-only
+  (`BRUTEX_CROSSVERIFY_PUBLISH=off`) launch wrote a marker that was
+  surfaced forever yet never auto-healed; the mark now gates on publish
+  too (mark and auto-clearer AGREE; ONE skip INFO names the reason),
+  pinned by the mark-side twin `test_publish_off_marks_nothing` beside
+  #1810's scan-side `test_owed_scan_gated_off_for_no_publish`. (MINOR-2,
+  documented NOT changed — benign/convergent) a launch that crosses
+  MIDNIGHT marks launch_day D while the tail runs config.day = D+1: D's
+  marker survives and the NEXT run's D3 completes it idempotently (zero
+  double-puts — the #1810 journal-idempotency law); the honest-limit
+  comment lives at BOTH launcher mark sites (app.py + cli.py). (NIT a)
+  `mark_owed`'s broad `except Exception` NARROWED to `except OSError` —
+  the sibling `clear_owed`'s discipline; a genuine code bug now propagates
+  loudly; both failure-arm tests exercise OSError subclasses, arm stays
+  covered. (NIT b) the exact floor-boundary pin
+  `test_window_floor_boundary_exact` — today − lookback IN the scan;
+  today − lookback − 1 OUT but KEPT + surfaced. HONEST: a publish-off
+  launch now writes NO marker — a later publish-on flip cannot
+  auto-complete that day (manual `--day` remediation; the deliberate cost
+  of parity); D2+D3 same-day double-processing stays idempotent; the
+  per-run beyond-window re-WARN is deliberate loudness; D3 has no
+  aggregate deadline (bounded by `catchup_days`); the scan's diagnostic
+  read is forensics-only. GATES (executed): `owed.py 109/26 100.00%`
+  (33 tests, ci.yml-exact) · whole `brutex.crossverify` 1544/416 100.00%
+  (617 battery tests) · launcher suites 93 passed · ruff/ruff-format
+  clean · `mypy --strict` 0 new · pyright 0 errors on touched files ·
+  ledger/citation/branch-consistency validators green. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; zero new routes/env. Files:
+  `brutex/crossverify/owed.py` + two comment-only launcher touches +
+  `tests/unit/test_crossverify_owed.py`.)
+  Earlier: `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
   the file-disjoint fold of THREE PRs as ONE merge event off main tip d6ac9f85,
   in fold order: **#1434** memory/cache + RAM-residency hardening pack
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · **#1433** the
@@ -3346,12 +3405,8 @@ hostile-review pass._
   owed); `mark_owed`/`clear_owed` are best-effort-LOUD (a write/unlink
   failure logs ONE WARN + returns False — never a failed pull, never
   silent); the launchers mark through the kill-switch-coherent
-  `mark_owed_for_pull` (marks NOTHING under `BRUTEX_CROSSVERIFY=off` /
-  `BRUTEX_CROSSVERIFY_PUBLISH=off` — the round-1 MINOR-1 mark/auto-clearer
-  PARITY fold: the D3 catchup sits behind run.py's publish gate, so
-  staged-only mode must not accumulate markers no automatic pass will ever
-  clear — / junk env). MARKER WRITE at pull-tail-commit ENTRY on BOTH
-  surfaces — the
+  `mark_owed_for_pull` (marks NOTHING under `BRUTEX_CROSSVERIFY=off` / junk
+  env). MARKER WRITE at pull-tail-commit ENTRY on BOTH surfaces — the
   dashboard spot-only `_work` (before `run_full_pipeline`; day =
   `launch_day`) and `cmd_pull_all_spot` (locks held, before the builder; the
   --auto gate's IST clock law); dry-runs / refused starts / full-scope /
@@ -3383,8 +3438,8 @@ hostile-review pass._
   DOUBLE-PUBLISH IMPOSSIBLE: a tail-started-then-died day (journal present)
   converges through the SAME rerun — `mark_staged` sha idempotency +
   publish-pending-only ⇒ zero second puts (e2e-pinned). PROOF (executed):
-  `test_crossverify_owed.py` (33 — every store law, FIFO-under-watchdog
-  no-hang, the round-1 exact floor-boundary + publish-off mark pins) + `TestOwedMarkerClear` (11) + `TestOwedCatchup` (11) +
+  `test_crossverify_owed.py` (31 — every store law, FIFO-under-watchdog
+  no-hang) + `TestOwedMarkerClear` (11) + `TestOwedCatchup` (11) +
   `TestDefaultSeamsRunDay` on run.py + the e2e `TestOwedDayCatchup` (the
   never-started day completed on the next run over the REAL seams with the
   published bytes byte-verified vs the committed goldens; the
@@ -3403,21 +3458,13 @@ hostile-review pass._
   UNTOUCHED (the marker rides the launcher seam below it). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; zero new routes (one additive field);
-  whole-package `brutex.crossverify` 100.00% line+branch (1544/416, 617
-  battery tests, re-measured at the round-1 fold) incl. the NEW ci.yml
-  `owed` gate (109/26) + the touched `run.py` (559/166); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
+  whole-package `brutex.crossverify` 100.00% line+branch (1541/414, 615
+  battery tests) incl. the NEW ci.yml `owed` gate (106/24) + the touched
+  `run.py` (559/166); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
   0 new; `node --check` green on universe.html; the pre-open fix round —
   the row-18 PR-body DEC-token rewording + the two CodeQL folds
   (string-target monkeypatch; the owed junk-name arm restructured with no
-  empty except, still LOUD) — and the HOSTILE-REVIEW ROUND 1 fold (SHIP ×2,
-  zero BLOCKER/MAJOR, landed post-club-T: the MINOR-1 publish-gate parity
-  above; the MINOR-2 midnight-crossing launch documented benign/convergent
-  at both mark sites — launch_day D's marker survives a past-midnight tail
-  and the NEXT run's D3 completes it idempotently; `mark_owed`'s except
-  narrowed Exception→OSError; the D2+D3 same-day double-processing /
-  per-run beyond-window re-WARN / no-aggregate-D3-deadline /
-  diagnostic-read NITs NAMED as honest limits) — are recorded in
-  MIGRATION.md #1810.)
+  empty except, still LOUD) — is recorded in MIGRATION.md #1810.)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
@@ -7809,7 +7856,17 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-q-dashboard`
+- **Active feature branch:** `claude/crossverify-owed-sentinel`
+  (DEC-CROSSVERIFY-OWED-SENTINEL-HARDEN-001, MIGRATION.md #1832 — the
+  owed-day sentinel HARDENING follow-up to the landed #1810: publish-gate
+  parity on `mark_owed_for_pull` (staged-only launches no longer write
+  markers the D3 catchup can never auto-clear; mark-side pin test), the
+  midnight-cross honest-limit comments at both launcher mark sites,
+  `mark_owed`'s except narrowed Exception→OSError, and the exact
+  scan-window floor-boundary pin; sidecar-gate + comments + tests only;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
+  line — see §1 + MIGRATION.md #1832 for the full blurb)
+  Earlier: `integration/club-q-dashboard`
   (CLUB Q merge vehicle — the file-disjoint fold of THREE PRs as ONE merge
   event off main tip d6ac9f85: #1434 memory/cache + RAM-residency hardening
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · #1433 the brutexd
