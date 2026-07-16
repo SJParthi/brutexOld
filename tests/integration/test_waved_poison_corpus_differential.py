@@ -46,7 +46,7 @@ from tests.fakes.poison_corpus import CORPUS, PoisonCase, supports_symlink
 #: Rust-backed twin plugs in here).
 ScannerImpl = Callable[..., LakeScanReport]
 
-#: The §1 in-scope ON-DISK poison classes the corpus MUST cover (the
+#: The §1 in-scope ON-DISK poison classes the corpus MUST match EXACTLY (the
 #: runtime-injection classes — mid-heal TOCTOU swap, PanicException at L3 —
 #: are deliberately out-of-corpus; see the readiness doc §5).
 _REGISTERED_IN_SCOPE_CLASSES: frozenset[str] = frozenset(
@@ -55,6 +55,7 @@ _REGISTERED_IN_SCOPE_CLASSES: frozenset[str] = frozenset(
         "bars_foreign_month_pure",
         "bars_foreign_month_overlap",
         "legacy_key_drift_sibling",
+        "legacy_key_drift_canonical_keys",
         "option_intra_file_dup",
         "option_foreign_month_pure",
         "option_foreign_month_overlap",
@@ -66,6 +67,7 @@ _REGISTERED_IN_SCOPE_CLASSES: frozenset[str] = frozenset(
         "dangling_symlink_option_file",
         "glob_metachar_series",
         "option_nested_dtype_list_side",
+        "option_nested_dtype_struct_side",
         "option_out_of_range_datetime",
         "bars_out_of_range_datetime",
         "bars_naive_timestamp_routing",
@@ -194,11 +196,24 @@ class TestPoisonCorpusDifferential:
 
 
 def test_corpus_covers_registered_classes() -> None:
-    """The corpus names are unique and ⊇ the §1 in-scope on-disk class list."""
+    """The corpus names are unique, count-PINNED, and EXACTLY the registered set.
+
+    The hard count pin + two-way set equality make silently DROPPING (or
+    silently adding) ANY case a mechanical failure — the hostile-review
+    MINOR-1 fix: a superset-only check let an unregistered case vanish.
+    """
     names = [case.name for case in CORPUS]
     assert len(names) == len(set(names))
+    assert len(CORPUS) == 27, (
+        "poison-corpus count pin moved — add/remove cases CONSCIOUSLY: "
+        "update _REGISTERED_IN_SCOPE_CLASSES AND this pin together"
+    )
     missing = _REGISTERED_IN_SCOPE_CLASSES - set(names)
     assert not missing, f"corpus is missing registered poison classes: {sorted(missing)}"
+    unregistered = set(names) - _REGISTERED_IN_SCOPE_CLASSES
+    assert not unregistered, (
+        f"corpus cases not in the registered class list: {sorted(unregistered)}"
+    )
 
 
 def test_expected_types_are_real_finding_classes() -> None:
