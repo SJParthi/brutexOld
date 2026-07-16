@@ -15,10 +15,11 @@ background revalidator per key. This suite pins:
 * the NEWEST-WINS store guard (the judge-found warm-reseed regression window);
 * spawn-failure (#1522 fold) + revalidate-failure (throttled WARN) honesty;
 * the ``stale_extended`` escalation (once per episode + the 300 s re-WARN);
-* the revalidator-stored entry's ``compute_duration`` is the REAL compute
-  span feeding the #920 adaptive floor (V2 honesty — the round-5 review's
-  zeroing-mutant pin: a fabricated 0 would under-throttle the background
-  walk cadence).
+* the #1434 byte-watermark accounting threads through the revalidator store;
+* the revalidator-stored entry's ``compute_duration`` is the REAL
+  compute+sizing span feeding the #920 adaptive floor (V2 honesty — the
+  round-5 review's zeroing-mutant pin: a fabricated 0 would under-throttle
+  the background walk cadence).
 
 Pure (no lake / FastAPI) — plain closures, injectable clock + swr_runner,
 zero real sleeps except the one bounded real-thread default-runner smoke.
@@ -470,23 +471,78 @@ class TestStaleExtendedEscalation:
         assert _events(logs, "movers_cache.stale_extended") == []
 
 
+class TestByteAccountingThreads:
+    """#1434 merge-compose: the revalidator store rides the SAME watermark."""
+
+    def test_revalidator_store_is_sized_and_watermarked(self) -> None:
+        """With ``max_bytes`` armed, the revalidator's store sizes the payload
+        and evicts LRU-first exactly like a get_or_compute store."""
+        clock = {"t": 0.0}
+        captured: list[Any] = []
+        sized: list[object] = []
+
+        def _size(value: object) -> int:
+            sized.append(value)
+            return 600
+
+        cache = _flagged(
+            clock=lambda: clock["t"], runner=captured.append, max_bytes=1000, size_of=_size
+        )
+        cache.get_or_compute("a", generation=1, compute=lambda: "va")  # 600 tracked
+        clock["t"] = 5.0
+        cache.get_or_compute("a", generation=2, compute=lambda: "va2")  # spawn
+        captured[0]()  # the revalidator stores va2 (600) — replaces a's 600
+        assert cache.total_bytes() == 600
+        assert "va2" in sized  # the revalidated payload WAS sized
+
+    def test_revalidator_store_watermark_evicts_lru(self) -> None:
+        """A revalidated store pushing the total over the watermark evicts the
+        LRU sibling — the byte_watermark_evicted log fires from the
+        revalidator path too."""
+        clock = {"t": 0.0}
+        captured: list[Any] = []
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=captured.append,
+            max_bytes=1000,
+            size_of=lambda value: 600,
+        )
+        cache.get_or_compute("a", generation=1, compute=lambda: "va")
+        clock["t"] = 5.0
+        cache.get_or_compute("a", generation=2, compute=lambda: "va2")  # spawn for a
+        cache.get_or_compute("b", generation=2, compute=lambda: "vb")  # a evicted (watermark)
+        with capture_logs() as logs:
+            captured[0]()  # a's revalidator stores 600 → total 1200 → evict LRU (b? a?)
+        assert _events(logs, "movers_cache.byte_watermark_evicted")
+        assert cache.total_bytes() <= 1000
+
+
 class TestRevalidatorFloorHonesty:
     """V2 (round-5 review): the revalidator-stored ``compute_duration`` is the
-    REAL compute span, so the #920 adaptive floor throttles the background
-    revalidate cadence honestly — a zeroed/unmeasured duration would
-    under-throttle (up to cap/base_floor× extra background walks)."""
+    REAL compute+sizing span, so the #920 adaptive floor throttles the
+    background revalidate cadence honestly — a zeroed/unmeasured duration
+    would under-throttle (up to cap/base_floor× extra background walks)."""
 
     def test_revalidator_compute_duration_feeds_adaptive_floor(self) -> None:
-        """The revalidator's stored ``compute_duration`` is its REAL compute
-        span, and the NEXT past-base read throttles to that MEASURED span:
+        """The revalidator's stored ``compute_duration`` covers compute PLUS
+        sizing (the same hostile-review-M1 law as the ``get_or_compute``
+        store), and the NEXT past-base read throttles to that MEASURED span:
         no respawn inside it (kills the ``_store_revalidated``
         ``compute_duration=0.0`` mutant — a zeroed floor respawns at the 2 s
         base), one respawn past it (kills the ``finished_at`` absolute-time
-        mutant — a 30 s floor would still throttle at age 21); the direct
+        mutant — a 40 s floor would still throttle at age 31); the direct
         value assert kills the ``started_at`` remainder-swap mutant."""
         clock = {"t": 0.0}
         captured: list[Any] = []
-        cache = _flagged(clock=lambda: clock["t"], runner=captured.append)
+
+        def _size(value: object) -> int:
+            if value == "v2":
+                clock["t"] += 10.0  # the deep sizing walk's span counts too (M1)
+            return 100
+
+        cache = _flagged(
+            clock=lambda: clock["t"], runner=captured.append, max_bytes=10_000, size_of=_size
+        )
         cache.get_or_compute("k", generation=1, compute=lambda: "v1")  # duration 0 @ t=0
 
         def _slow_v2() -> str:
@@ -497,18 +553,18 @@ class TestRevalidatorFloorHonesty:
         assert cache.get_or_compute("k", generation=2, compute=_slow_v2) == "v1"
         assert len(captured) == 1
         clock["t"] = 10.0  # the revalidator STARTS here (started_at=10)
-        captured[0]()  # compute -> t=30: duration = 20, computed_at = 30
+        captured[0]()  # compute -> t=30, sizing -> t=40: duration = 30, computed_at = 40
         entry = cache._entries["k"]
-        assert entry.compute_duration == pytest.approx(20.0)  # the real compute span
-        assert entry.computed_at == pytest.approx(30.0)
-        # Behavioral teeth: age 15 is past the 2 s base but INSIDE the honest
-        # 20 s effective floor -> the floor arm serves, NO second revalidator.
+        assert entry.compute_duration == pytest.approx(30.0)  # 20 s compute + 10 s sizing
+        assert entry.computed_at == pytest.approx(40.0)
+        # Behavioral teeth: age 5 is past the 2 s base but INSIDE the honest
+        # 30 s effective floor -> the floor arm serves, NO second revalidator.
         clock["t"] = 45.0
         assert cache.get_or_compute("k", generation=3, compute=lambda: "x") == "v2"
         assert len(captured) == 1  # a zeroed duration would have respawned here
         # Past the measured floor the SWR arm respawns — throttled TO the
         # measured span, never forever (the absolute-time mutant's kill).
-        clock["t"] = 51.0  # age 21 >= the 20 s effective floor
+        clock["t"] = 71.0  # age 31 >= the 30 s effective floor
         assert cache.get_or_compute("k", generation=3, compute=lambda: "x") == "v2"
         assert len(captured) == 2
 
@@ -564,7 +620,28 @@ class TestBoundedAuxState:
 
 
 class TestRevalidatorStoreEdges:
-    """The remaining revalidator-store arms: evicted-serve + outage-latch."""
+    """The remaining revalidator-store arms: single-entry-over + evicted-serve."""
+
+    def test_revalidator_single_entry_over_warns(self) -> None:
+        """A revalidated payload ALONE over the watermark keeps the single
+        resident entry + fires the one single_entry_over WARN — the same
+        episode law as a get_or_compute store."""
+        clock = {"t": 0.0}
+        captured: list[Any] = []
+        cache = _flagged(
+            clock=lambda: clock["t"],
+            runner=captured.append,
+            max_bytes=1000,
+            size_of=lambda value: 2000,  # every payload alone exceeds the watermark
+        )
+        cache.get_or_compute("a", generation=1, compute=lambda: "va")
+        clock["t"] = 5.0
+        cache.get_or_compute("a", generation=2, compute=lambda: "va2")
+        # Reset the episode flag so the revalidator's own arm fires the WARN.
+        cache._single_over_warned = False
+        with capture_logs() as logs:
+            captured[0]()
+        assert _events(logs, "movers_cache.byte_watermark_single_entry_over")
 
     def test_swr_serve_with_entry_evicted_midway(self) -> None:
         """The MRU-touch guard: the served key can be EVICTED between the arm

@@ -32,16 +32,24 @@ documented as ``None`` when the side omits it). The entry/exit bars are matched 
 the EXACT minute instant (``entry_ts`` / ``exit_ts`` localised to UTC) — a minute the
 option did not trade is an honest ``None``, never the nearest-prior bar.
 
-## O(1) discipline
+## O(1) discipline + bounded retention
 
 The symbol index + each contract's ``{instant → OptionBar}`` map are built once and
 cached, so a sweep that materialises many legs on the same contract pays the lake
 read ONCE; each :meth:`load_pair` is then an O(1) dict lookup of the two instants.
 The first touch of a contract is O(bars-in-contract) (a single small partition).
+The per-contract bar cache is an **LRU bounded at** ``bar_cache_capacity``
+**contracts** (default 256 — DEC-MEMORY-FOOTPRINT-HARDENING-001): the pre-fix
+unbounded dict retained EVERY touched contract's full 1-minute bar map for the
+source's lifetime, so a translation run across hundreds of contracts grew without
+bound. Eviction is safe by construction — this is a RECOMPUTABLE read cache over
+immutable stored bars, so a hit-after-evict re-reads the identical partition and
+rebuilds the identical map (results byte-identical; only the re-read cost returns).
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -102,15 +110,33 @@ class LakeOptionBarSource:
     :func:`~brutex.options.executor.execute_options_sim`. Stateless per call except
     for the two read-through caches (symbol index + per-contract bar map), so it is
     safe to reuse across a whole sweep.
+
+    Parameters
+    ----------
+    lake_root
+        The lake root (the parent of ``bars/``).
+    bar_cache_capacity
+        Maximum number of CONTRACTS whose bar maps stay resident (LRU —
+        DEC-MEMORY-FOOTPRINT-HARDENING-001; the pre-fix dict was unbounded).
+        Must be ``>= 1``; the default 256 comfortably holds a strike chain's
+        worth of contracts while bounding a many-contract translation run.
+        Eviction only ever costs a re-read (immutable stored bars → the
+        rebuilt map is identical), never a changed result.
     """
 
-    def __init__(self, lake_root: Path) -> None:
+    def __init__(self, lake_root: Path, *, bar_cache_capacity: int = 256) -> None:
+        if bar_cache_capacity < 1:
+            raise ValueError(f"bar_cache_capacity must be >= 1, got {bar_cache_capacity}")
         self._lake_root = lake_root
+        self._bar_cache_capacity = bar_cache_capacity
         # (exchange, underlying) → {(expiry, strike, option_type): groww_symbol}, built
-        # once per underlying by scanning + decoding its FNO partition dirs.
+        # once per underlying by scanning + decoding its FNO partition dirs (bounded by
+        # the 3-index engine scope — one small index per (exchange, underlying)).
         self._symbol_index: dict[tuple[str, str], dict[_ContractKey, str]] = {}
-        # groww_symbol → {utc_instant: OptionBar}, built once per contract on first touch.
-        self._bar_cache: dict[str, dict[datetime, OptionBar]] = {}
+        # groww_symbol → {utc_instant: OptionBar}, built once per contract on first
+        # touch — LRU-bounded at `bar_cache_capacity` contracts (single-threaded
+        # executor use, no lock — the module's documented concurrency envelope).
+        self._bar_cache: OrderedDict[str, dict[datetime, OptionBar]] = OrderedDict()
 
     def load_pair(
         self,
@@ -217,10 +243,15 @@ class LakeOptionBarSource:
 
         The leg ``side`` (CE/PE) + ``strike`` are stamped from the query; ``spot`` /
         ``iv`` are ``None`` (the F&O candle lake stores neither). A contract with no
-        Parquet yet → an empty map (every lookup misses → honest ``None``).
+        Parquet yet → an empty map (every lookup misses → honest ``None``). The map
+        is LRU-cached per contract, bounded at ``bar_cache_capacity`` contracts
+        (DEC-MEMORY-FOOTPRINT-HARDENING-001); an evicted contract simply re-reads
+        its immutable partition on the next touch — the identical map, never a
+        changed price.
         """
         cached = self._bar_cache.get(symbol)
         if cached is not None:
+            self._bar_cache.move_to_end(symbol)  # mark most-recently-used.
             return cached
         import polars as pl
 
@@ -248,7 +279,9 @@ class LakeOptionBarSource:
             for row in frame.iter_rows(named=True):
                 bar = _row_to_option_bar(row, side=option_type, strike=strike_dec)
                 bars[_utc_instant(bar.timestamp)] = bar
-        self._bar_cache[symbol] = bars
+        self._bar_cache[symbol] = bars  # a fresh insert lands most-recently-used.
+        while len(self._bar_cache) > self._bar_cache_capacity:
+            self._bar_cache.popitem(last=False)  # evict the LRU contract's map.
         return bars
 
 
