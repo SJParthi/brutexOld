@@ -18,18 +18,9 @@
      Retry (F-M4). Every value arrives from the artifact contracts — loud
      "awaiting real run artifact" states, never invented figures. -->
 <style>
-  :root {
-    --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
-    --border: #1E222D; --border-strong: #2B313F;
-    --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
-    --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
-    --red: #FF5C5C;
-    --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
-    --r-sm:8px; --r-md:10px; --r-pill:999px;
-    --ctl-h:38px; --gutter:clamp(16px,3vw,24px);
-    --elev-2:0 10px 30px rgba(0,0,0,.45);
-    --ease:cubic-bezier(.22,.61,.36,1);
-  }
+  /* Design tokens come from the ONE shared bx-theme.css/bx-design.css :root
+     (DEC-DASHBOARD-VISUAL-OVERHAUL-001 — the page-local duplicated :root
+     token block is DELETED; this sheet only consumes var(--…) tokens). */
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); height: 100%; }
   body {
@@ -51,44 +42,58 @@
   .topnav { margin-left:18px; display:flex; gap:14px; font-size:13px; align-items:center; }
   .topnav a { color:var(--blue); text-decoration:none; }
   .topnav a:hover { color:var(--text-bright); }
-  .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:12px;
+  .ticker { padding:8px 24px; border-bottom:1px solid var(--border); font-size:var(--fs-1);
     color:var(--muted); font-variant-numeric:tabular-nums; }
-  .mode-btn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
-    padding:6px 12px; font:inherit; font-size:12px; font-weight:700; color:var(--text);
-    background:var(--surface-2); }
   section { margin:16px 24px 0; padding:16px 18px; background:var(--surface);
-    border:1px solid var(--border); border-radius:12px; }
+    border:1px solid var(--border); border-radius:var(--r-lg); }
   section h3 { margin:0 0 10px; font-size:14px; font-weight:800; }
   .note { font-size:11.5px; color:var(--muted); margin-top:8px; overflow-wrap:anywhere; }
-  .warnnote { font-size:12px; color:var(--yellow); font-weight:700; margin-top:8px; }
+  .warnnote { font-size:var(--fs-1); color:var(--yellow); font-weight:700; margin-top:8px;
+    padding:6px 10px; border-left:3px solid var(--yellow); background:var(--warn-bg, rgba(255,183,77,.10));
+    border-radius:var(--r-xs); }
   .chart-host svg { width:100%; height:340px; display:block; background:rgba(0,0,0,0.25);
-    border-radius:8px; }
+    border-radius:var(--r-sm); }
   .equity-host svg { width:100%; height:220px; display:block; background:rgba(0,0,0,0.25);
-    border-radius:8px; }
+    border-radius:var(--r-sm); }
   .bx-candle-wick { stroke: var(--muted); stroke-width: 1; }
-  .bx-candle-up { fill: #26D9B0; stroke: #26D9B0; }
-  .bx-candle-down { fill: #FF5C5C; stroke: #FF5C5C; }
-  .bx-arrow-entry { fill: #26D9B0; }
-  .bx-arrow-exit { fill: #FFB74D; }
+  .bx-candle-up { fill: var(--green); stroke: var(--green); }
+  .bx-candle-down { fill: var(--red); stroke: var(--red); }
+  .bx-arrow-entry { fill: var(--green); }
+  .bx-arrow-exit { fill: var(--yellow); }
+  .bx-arrow { cursor: help; }
   .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
-  table { width:100%; border-collapse:collapse; font-size:12px; }
-  th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
-  th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
+  /* Axis chrome (Batch B+C): gridlines/labels/last-price marker — drawn from
+     the ALREADY-LOADED bars via the pure bx-chart.js tick builders.
+     vector-effect keeps 1px strokes crisp under post-load width scaling. */
+  .bx-gridline { stroke: var(--border); stroke-width: 1;
+    stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+  .bx-gridline-v { stroke: var(--border); opacity: .6; }
+  .bx-axis-label { fill: var(--muted); font-size: 10px;
+    font-family: var(--font-num, ui-monospace, monospace); }
+  .bx-lastprice-line { stroke: var(--blue); stroke-width: 1;
+    stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+  .bx-lastprice-label { fill: var(--blue); font-size: 10px; font-weight: 700;
+    font-family: var(--font-num, ui-monospace, monospace); }
+  .bx-zero-line { stroke: var(--muted); stroke-width: 1;
+    stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
+  .bx-candle-wick, .bx-candle-body { vector-effect: non-scaling-stroke; }
+  .bx-table th, .bx-table td { white-space:nowrap; }
   td.pos { color:var(--green-bright); }
   td.neg { color:var(--red); }
-  .tablewrap { overflow-x:auto; }
-  .oc-source-badge { padding:2px 8px; border:1px solid var(--border-strong); border-radius:6px;
-    font-size:10.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
   .story-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
   .story-cell { background:var(--surface-2); border:1px solid var(--border-strong);
-    border-radius:10px; padding:12px 14px; }
+    border-radius:var(--r-md); padding:12px 14px; }
   .story-cell .k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
-  .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
-  .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
-    border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
-  .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
-  .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
-    padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
+  .story-cell .v { font-size:var(--fs-4); font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums;
+    font-family:var(--font-num, ui-monospace, monospace); overflow-wrap:anywhere; }
+  .story-cell .v.pos { color:var(--green); }
+  .story-cell .v.neg { color:var(--red-text, var(--red)); }
+  /* Honesty channel (muted gold — disclosed truth, distinct from warn/bad):
+     the signal-only chip + the VIX band ride it; wording stays VERBATIM. */
+  .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--honest-bd);
+    border-radius:var(--r-sm); font-size:var(--fs-1); color:var(--honest);
+    background:var(--honest-bg); display:inline-block; }
+  .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:var(--fs-1); }
   #bxTip { position:absolute; z-index:1200; max-width:340px; background:var(--surface-3);
     border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:12px;
     color:var(--text); box-shadow:var(--elev-2); pointer-events:none; }
@@ -133,7 +138,7 @@
       <a href="/reports">Reports</a>
     </nav>
     <a href="/screener" style="color:var(--yellow); font-size:13px; text-decoration:none;">🏆 Winners</a>
-    <button id="bxModeToggle" class="mode-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
+    <button id="bxModeToggle" class="bx-btn" type="button" title="Beginner = plain English · Pro = technical (R33 toggle — one shared mechanism)">Pro ✓</button>
   </header>
 
   <!-- R36 "always visible" ticker strip (shared component — bx-oneclick.js) -->
@@ -155,6 +160,15 @@
     <div class="chart-host" id="stChartHost">
       <div class="note">no candles loaded yet — awaiting run + stored 1-minute data</div>
     </div>
+    <!-- Marker legend (Batch B+C): EVERY marker the chart draws is explained
+         here; hover depth comes from each node's own <title> (the bar's own
+         OHLC / the trade's own price+time — values already on this page). -->
+    <div class="note" id="stChartLegend">legend: triangle = trade marker — green = entry, amber = exit;
+      the triangle points WITH the trade direction (long entry points up, short entry points down) and its tip
+      sits at the matched candle; dashed blue line = last loaded bar's close; dotted lines = price/time grid
+      (labels from the loaded bars only). Hover a candle body for its own OHLC; hover an arrow for the trade's
+      entry/exit price + timestamp. A trade outside the loaded window DROPS its arrow with the loud note below —
+      never a snapped wrong-candle arrow.</div>
     <div class="warnnote" id="stArrowNote" hidden></div>
   </section>
 
@@ -173,19 +187,19 @@
   <!-- F-M5: the trade list is an INLINE section, visible AT LOAD — never a
        tab-gated reveal. -->
   <section aria-label="List of trades" id="stTradesSection">
-    <h3>📜 List of trades <span class="oc-source-badge" id="ocTradesSource">source: none</span></h3>
+    <h3>📜 List of trades <span class="bx-chip bx-chip--sm muted oc-source-badge" id="ocTradesSource">source: none</span></h3>
     <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
     <div id="stTradesError"></div>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Dir</th><th>Entry ts</th><th>Entry px</th><th>Exit ts</th><th>Exit px</th><th>Lots</th><th>Exit reason</th><th>P&amp;L</th><th>Costs</th><th>MAE</th><th>MFE</th><th>VIX in</th><th>VIX out</th><th>Chart</th></tr></thead>
+    <div class="bx-tablewrap">
+      <table class="bx-table bx-table--dense bx-table--zebra">
+        <thead><tr><th>Dir</th><th>Entry ts</th><th class="num">Entry px</th><th>Exit ts</th><th class="num">Exit px</th><th class="num">Lots</th><th>Exit reason</th><th class="num">P&amp;L</th><th class="num">Costs</th><th class="num">MAE</th><th class="num">MFE</th><th class="num">VIX in</th><th class="num">VIX out</th><th>Chart</th></tr></thead>
         <tbody id="stTradesBody"></tbody>
       </table>
     </div>
     <div class="pager">
-      <button id="stPrev" type="button">← prev page</button>
+      <button id="stPrev" class="bx-btn" type="button">← prev page</button>
       <span id="stPage">page 1</span>
-      <button id="stNext" type="button">next page →</button>
+      <button id="stNext" class="bx-btn" type="button">next page →</button>
     </div>
   </section>
 
@@ -319,15 +333,37 @@
     var host = byId('stChartHost');
     if (!host || !window.BXChart || !window.BXUI) { return; }
     window.BXUI.clear(host);
-    var geom = window.BXChart.candleGeom(state.candles, 1000, 340, 10);
+    // The viewBox tracks the host's REAL pixel width so axis text + candles
+    // render undistorted (the old fixed 1000×340 box under
+    // preserveAspectRatio:none stretched everything horizontally); PAD leaves
+    // room for the price/time labels the axis builders draw.
+    var W = Math.max(320, Math.floor(host.clientWidth || 1000));
+    var H = 340;
+    var PAD = 30;
+    var geom = window.BXChart.candleGeom(state.candles, W, H, PAD);
     if (geom.empty) {
       host.appendChild(window.BXUI.el('div', 'note',
         'no candles in the window — pull data on /universe or widen the range'));
       return;
     }
-    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 340', preserveAspectRatio: 'none' });
+    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 ' + String(W) + ' ' + String(H), preserveAspectRatio: 'none' });
+    // Axis chrome FIRST (under the candles): price gridlines + 2dp labels,
+    // IST time labels — all computed from the ALREADY-LOADED bars (no fetch).
+    var chrome = window.BXChart.priceAxisNodes(geom, W, H, PAD, 5)
+      .concat(window.BXChart.timeAxisNodes(state.candles, geom, H, PAD, 6));
+    for (var g = 0; g < chrome.length; g++) { svg.appendChild(chrome[g]); }
     var nodes = window.BXChart.candleNodes(geom);
     for (var i = 0; i < nodes.length; i++) { svg.appendChild(nodes[i]); }
+    // Static hover depth (paint-free — no mousemove handler): each candle
+    // BODY (draw order = wick then body per candle) carries its OWN bar's
+    // full-precision OHLC as an SVG <title> child.
+    for (var b = 0; b < state.candles.length; b++) {
+      var bodyNode = nodes[2 * b + 1];
+      if (bodyNode) {
+        bodyNode.appendChild(window.BXChart.svgTitleNode(
+          window.BXChart.candleTitleText(state.candles[b])));
+      }
+    }
     // Entry/exit arrows for the focused trade (or every loaded trade when
     // none is focused): the -1 sentinel DROPS the arrow + shows the loud
     // note — never a snapped wrong-candle arrow (F-B1).
@@ -342,9 +378,23 @@
       if (arrow.dropped) { droppedAny = true; continue; }
       var eC = geom.candles[arrow.entry_idx];
       var xC = geom.candles[arrow.exit_idx];
-      svg.appendChild(window.BXChart.arrowNode(eC.x, eC.yLow + 10, 'entry', String(trade.direction)));
-      svg.appendChild(window.BXChart.arrowNode(xC.x, xC.yHigh - 10, 'exit', String(trade.direction)));
+      // Each arrow is labeled with ITS trade's own stored price + timestamp
+      // (<title> hover + aria-label; the legend above explains the shapes).
+      var entryNode = window.BXChart.arrowNode(eC.x, eC.yLow + 10, 'entry', String(trade.direction));
+      var entryTitle = window.BXChart.tradeArrowTitle('entry', trade);
+      entryNode.appendChild(window.BXChart.svgTitleNode(entryTitle));
+      entryNode.setAttribute('aria-label', entryTitle);
+      svg.appendChild(entryNode);
+      var exitNode = window.BXChart.arrowNode(xC.x, xC.yHigh - 10, 'exit', String(trade.direction));
+      var exitTitle = window.BXChart.tradeArrowTitle('exit', trade);
+      exitNode.appendChild(window.BXChart.svgTitleNode(exitTitle));
+      exitNode.setAttribute('aria-label', exitTitle);
+      svg.appendChild(exitNode);
     }
+    // Last-price marker: dashed line + label at the LAST loaded bar's close
+    // (its own stored value — never a live quote).
+    var lastPx = window.BXChart.lastPriceNodes(state.candles, geom, W, H, PAD);
+    for (var lp = 0; lp < lastPx.length; lp++) { svg.appendChild(lastPx[lp]); }
     host.appendChild(svg);
     if (geom.flat) {
       host.appendChild(window.BXUI.el('div', 'note', 'flat price range in this window'));
@@ -421,10 +471,13 @@
     if (!tbody) { return; }
     while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
 
-    function td(text, cls) {
+    function td(text, cls, title) {
       var cell = document.createElement('td');
       if (cls) { cell.className = cls; }
       cell.textContent = text;
+      // Depth tooltip law: title carries the STORED full-precision value the
+      // formatted cell cannot show — never a computed fiction.
+      if (title) { cell.title = title; }
       return cell;
     }
 
@@ -434,19 +487,22 @@
       var pnl = typeof r.pnl_paisa === 'number' ? r.pnl_paisa : null;
       tr.appendChild(td(String(r.direction).toUpperCase(), null));
       tr.appendChild(td(String(r.entry_ts), null));
-      tr.appendChild(td(String(r.entry_px), null));
+      tr.appendChild(td(String(r.entry_px), 'num'));
       tr.appendChild(td(String(r.exit_ts), null));
-      tr.appendChild(td(String(r.exit_px), null));
-      tr.appendChild(td(r.lots === null || r.lots === undefined ? '—' : String(r.lots), null));
+      tr.appendChild(td(String(r.exit_px), 'num'));
+      tr.appendChild(td(r.lots === null || r.lots === undefined ? '—' : String(r.lots), 'num'));
       tr.appendChild(td(String(r.exit_reason), null));
-      tr.appendChild(td(pnl === null ? '—' : money(pnl), pnl !== null && pnl < 0 ? 'neg' : 'pos'));
-      tr.appendChild(td(r.costs_paisa === undefined ? '—' : money(r.costs_paisa), null));
+      tr.appendChild(td(pnl === null ? '—' : money(pnl),
+        pnl !== null && pnl < 0 ? 'num neg' : 'num pos',
+        pnl === null ? null : String(pnl) + ' paisa (stored)'));
+      tr.appendChild(td(r.costs_paisa === undefined ? '—' : money(r.costs_paisa), 'num',
+        typeof r.costs_paisa === 'number' ? String(r.costs_paisa) + ' paisa (stored)' : null));
       /* Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf"). */
       var gran = typeof r.mae_granularity === 'string' ? ' (' + r.mae_granularity + ')' : '';
-      tr.appendChild(td(String(r.mae) + gran, null));
-      tr.appendChild(td(String(r.mfe) + gran, null));
-      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? 'null' : String(r.vix_entry), null));
-      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? 'null' : String(r.vix_exit), null));
+      tr.appendChild(td(String(r.mae) + gran, 'num'));
+      tr.appendChild(td(String(r.mfe) + gran, 'num'));
+      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? 'null' : String(r.vix_entry), 'num'));
+      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? 'null' : String(r.vix_exit), 'num'));
       var chartTd = document.createElement('td');
       var link = document.createElement('a');
       link.textContent = '📈 chart';
@@ -469,6 +525,11 @@
     var host = byId('stEquityHost');
     if (!host || !window.BXChart || !window.BXUI) { return; }
     window.BXUI.clear(host);
+    // Host-width viewBox (undistorted labels) + ₹ gridlines/zero baseline
+    // via the pure equity-domain builders (labels via the house money()).
+    var eqW = Math.max(320, Math.floor(host.clientWidth || 1000));
+    var eqH = 220;
+    var eqPad = 24;
     /* Item 4C (the #48 overlap): the STORED minute-path series wins when the
        equity_ref sidecar served points; the per-trade close cumsum is the
        honest fallback, relabeled so the two can never be confused. */
@@ -476,8 +537,10 @@
       var mp = window.BXChart.minutePathSeries(state.equity);
       if (!mp.empty) {
         setEquityLabel('minute-path equity — the stored real series (R27)');
-        var mpSvg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 220', preserveAspectRatio: 'none' });
-        var mpPath = window.BXChart.equityPathNode(mp, 1000, 220, 8);
+        var mpSvg = window.BXChart.svgEl('svg', { viewBox: '0 0 ' + String(eqW) + ' ' + String(eqH), preserveAspectRatio: 'none' });
+        var mpChrome = window.BXChart.equityAxisNodes(mp, eqW, eqH, eqPad, money);
+        for (var mg = 0; mg < mpChrome.length; mg++) { mpSvg.appendChild(mpChrome[mg]); }
+        var mpPath = window.BXChart.equityPathNode(mp, eqW, eqH, eqPad);
         if (mpPath) { mpSvg.appendChild(mpPath); }
         host.appendChild(mpSvg);
         var mpBits = ['minute-path equity from the results-depth sidecar'];
@@ -502,8 +565,10 @@
       host.appendChild(window.BXUI.el('div', 'note', 'no trades yet — awaiting real run artifact'));
       return;
     }
-    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 220', preserveAspectRatio: 'none' });
-    var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
+    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 ' + String(eqW) + ' ' + String(eqH), preserveAspectRatio: 'none' });
+    var eqChrome = window.BXChart.equityAxisNodes(series, eqW, eqH, eqPad, money);
+    for (var eg = 0; eg < eqChrome.length; eg++) { svg.appendChild(eqChrome[eg]); }
+    var path = window.BXChart.equityPathNode(series, eqW, eqH, eqPad);
     if (path) { svg.appendChild(path); }
     host.appendChild(svg);
     var bits = [fallbackLabel];
@@ -622,8 +687,15 @@
         byId('stArm').textContent = String(row.arm);
         byId('stMask').textContent = String(row.mask_hex);
         byId('stFamily').textContent = String(row.family_id);
-        byId('stNet').textContent = m.net_pnl_paisa === undefined ? '—' : money(m.net_pnl_paisa);
-        byId('stMaxDd').textContent = m.max_dd_paisa === undefined ? '—' : money(m.max_dd_paisa);
+        var stNetEl = byId('stNet');
+        stNetEl.textContent = m.net_pnl_paisa === undefined ? '—' : money(m.net_pnl_paisa);
+        // Value-gated sign tint: colour carries the SIGN of the stored value
+        // only — an unknown "—" or an exact 0 is never tinted green/red.
+        stNetEl.classList.toggle('pos', typeof m.net_pnl_paisa === 'number' && m.net_pnl_paisa > 0);
+        stNetEl.classList.toggle('neg', typeof m.net_pnl_paisa === 'number' && m.net_pnl_paisa < 0);
+        var stDdEl = byId('stMaxDd');
+        stDdEl.textContent = m.max_dd_paisa === undefined ? '—' : money(m.max_dd_paisa);
+        stDdEl.classList.toggle('neg', typeof m.max_dd_paisa === 'number' && m.max_dd_paisa < 0);
         byId('stSharpe').textContent = m.sharpe === undefined ? '—' : String(m.sharpe);
         byId('stDsr').textContent = m.dsr === undefined ? '—' : String(m.dsr);
         byId('stCpcv').textContent = m.cpcv_pass_pct === undefined ? '—' : String(m.cpcv_pass_pct);
