@@ -45,7 +45,6 @@ from pathlib import Path
 
 import polars as pl
 import pyarrow.parquet as pq
-
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.window_ledger_store import (
