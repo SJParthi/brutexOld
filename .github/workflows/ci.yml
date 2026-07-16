@@ -1569,9 +1569,11 @@ jobs:
           #       midnight-IST re-stamp + forming-session `before` guard, EXCEPT
           #       it reads the carry-last open_interest (defensive `in columns`
           #       guard) instead of hardcoding None. 100% line+branch via
-          #       tests/unit/test_fno_daily_resample.py.
+          #       tests/unit/test_fno_daily_resample.py +
+          #       test_fno_daily_resample_rust_seam.py (the
+          #       DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 seam branch).
           if compgen -G "tests/unit/test_fno_daily_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py
+            pytest --cov=brutex.data.fno_daily_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_daily_resample.py tests/unit/test_fno_daily_resample_rust_seam.py
           else
             echo "(brutex.data.fno_daily_resample test file not present yet — gate inactive)"
           fi
@@ -1580,9 +1582,11 @@ jobs:
           #       + the on-the-fly /movers resample_session_to_tf (RENAMEs the
           #       lake `timestamp -> ts_utc`, drops the trailing FORMING bucket —
           #       no look-ahead, Property P-06). 100% line+branch via
-          #       tests/unit/test_fno_resample.py.
+          #       tests/unit/test_fno_resample.py +
+          #       test_fno_resample_rust_seam.py (the
+          #       DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 seam branches).
           if compgen -G "tests/unit/test_fno_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py
+            pytest --cov=brutex.data.fno_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_fno_resample.py tests/unit/test_fno_resample_rust_seam.py
           else
             echo "(brutex.data.fno_resample test file not present yet — gate inactive)"
           fi
@@ -1944,7 +1948,8 @@ jobs:
             echo "(brutex.data.spot_features test file not present yet — gate inactive)"
           fi
           if compgen -G "tests/unit/test_spot_resample.py" > /dev/null; then
-            pytest --cov=brutex.data.spot_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spot_resample.py
+            # + the DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 seam-wiring pins.
+            pytest --cov=brutex.data.spot_resample --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_spot_resample.py tests/unit/test_spot_resample_rust_seam.py
           else
             echo "(brutex.data.spot_resample test file not present yet — gate inactive)"
           fi
