@@ -439,7 +439,10 @@ def resample_frame_via_rust(
         return oracle(df_1m, target_tf_minutes)
     try:
         rust_df = pl.read_ipc(io.BytesIO(rust_bytes))
-    except _degrade_errors() as exc:
+    except (*_degrade_errors(), OSError) as exc:
+        # OSError joins the DECODE leg only (probed: polars' IPC reader
+        # surfaces a truncated/corrupt in-memory payload as an OSError from
+        # its seek) — a poisoned result payload degrades, never crashes.
         _warn_once("result_decode_error", error_detail=repr(exc))
         return oracle(df_1m, target_tf_minutes)
     if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
