@@ -1852,3 +1852,37 @@ class TestProvenanceEvent:
         assert [e["kind"] for e in reads] == [lsm.KIND_OPTIONS, lsm.KIND_OPTIONS]
         assert [e["series"] for e in reads] == [_OPT_SERIES, _OPT_SERIES]
         assert [e["log_level"] for e in reads] == ["info", "info"]
+
+
+class TestOPageClaimsRetired:
+    """DEC-READ-GUARD-PARITY-001 (BUG-4/5): the stats-manifest pager claims are
+    the MIGRATION.md #1614 honest envelope — O(page-files) Parquet work plus an
+    O(D) per-request revalidation stat sweep, never "true O(page) in partition
+    depth" and never "stays the named future work" for the SHIPPED manifest.
+
+    All counts run over WHITESPACE-NORMALIZED source (runs collapsed to one
+    space) so a docstring reflow can neither hide a retired phrase nor
+    false-fail an honest survivor (fix round 1 — the raw count passed only
+    because one survivor was line-split).
+    """
+
+    @staticmethod
+    def _src() -> str:
+        """db_view.py source, whitespace-normalized (one-space runs)."""
+        return " ".join(Path(db_view.__file__).read_text(encoding="utf-8").split())
+
+    def test_true_opage_in_partition_depth_absent(self) -> None:
+        assert "true O(page) in partition depth" not in self._src()
+
+    def test_stale_future_work_claim_absent(self) -> None:
+        assert "stays the named future" not in self._src()
+
+    def test_window_ledger_honest_survivors_kept(self) -> None:
+        """Exactly TWO ``true O(page)`` occurrences survive — BOTH honest
+        window-ledger "NOT claimed" sentences: (1) ``window_ledger_rows_cached``'s
+        "true O(page) needs a write-time manifest, NOT claimed (the #867/#1025
+        envelope)" and (2) ``query_window_ledger_page``'s #1719 twin "true
+        O(page) needs a write-time row manifest, NOT claimed" (no write-time
+        ledger ROW manifest exists — #1614 covers candle datasets only).
+        Counted over normalized whitespace, never pinned bare-absent."""
+        assert self._src().count("true O(page)") == 2

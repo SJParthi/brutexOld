@@ -31,6 +31,7 @@ from brutex.crossverify.journal import (
     staging_path,
     staging_path_for_key,
 )
+from brutex.crossverify.owed import list_owed_days, mark_owed, owed_marker_path
 from brutex.crossverify.prebuild_leg import DeriveOutcome
 from brutex.crossverify.pull_leg import PullLegReport
 from brutex.crossverify.run import (
@@ -204,6 +205,7 @@ def _harness(
     prior_sessions: dict[date, TradingSession | None] | None = None,
     prior_session_raises: frozenset[date] = frozenset(),
     on_prior_session: Callable[[date], None] | None = None,
+    run_day: Callable[[date], CrossverifyReport] | None = None,
     **config_kw: Any,
 ) -> _Harness:
     client = FakeS3Client()
@@ -282,6 +284,7 @@ def _harness(
         market_hours_blocked=lambda: market_hours_blocked,
         now_ist=clock if clock is not None else _Clock(),
         sleeper=sleeps.append,
+        run_day=run_day,
     )
     return _Harness(
         seams=seams,
@@ -2634,3 +2637,331 @@ class TestDefaultSeams:
         )
         seams.run_pull()
         assert seen == [rate]
+
+
+# ── DEC-CROSSVERIFY-OWED-SENTINEL-001 — the owed-day sentinel laws ────────
+
+
+def _owed_report(day: date, verdict: str, **overrides: Any) -> CrossverifyReport:
+    """A fake step-D3 rerun report (the recursive run's shape)."""
+    base: dict[str, Any] = {
+        "day": day,
+        "run_id": f"cv-{day:%Y%m%d}-owed",
+        "verdict": verdict,
+        "published": 3,
+        "skipped_already": 0,
+        "publish_strict": 3,
+        "publish_observe": 0,
+        "withheld": 0,
+        "blocked": 0,
+        "nothing": 0,
+        "excluded": 0,
+        "publish_failed": 0,
+        "recovered_prior": 0,
+        "regated": 0,
+        "derived": 0,
+        "derive_failed": 0,
+        "movers_warm": "",
+        "detail": "",
+        "exit_code": 0,
+    }
+    base.update(overrides)
+    return CrossverifyReport(**base)
+
+
+class TestOwedMarkerClear:
+    """The clear-on-completed-verdict law: the marker settles ONLY once the
+    day's run reaches a completed material terminal verdict (crash-convergent
+    — every deferral/refusal/failure keeps it for the next run's catchup)."""
+
+    def test_published_run_clears_todays_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path)
+        assert h.run().verdict == "published"
+        assert list_owed_days(tmp_path) == []
+
+    def test_nothing_to_do_clears_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        classifier = ScriptedClassifier(default=FakeVerdict(reason="no_today_bars"))
+
+        def reader_empty(*, exchange: str, segment: str, symbol: str, day: date) -> list[CandleBar]:
+            _ = (exchange, segment, symbol, day)
+            return []
+
+        h = _harness(
+            tmp_path,
+            targets=[_RELIANCE, _MM],
+            classifier=classifier,
+            reader=reader_empty,
+            settle_retry_rounds=0,
+        )
+        assert h.run().verdict == "nothing_to_do"
+        assert list_owed_days(tmp_path) == []
+
+    def test_non_trading_skip_clears_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, session=None)
+        assert h.run().verdict == "skipped_non_trading"
+        assert list_owed_days(tmp_path) == []
+
+    def test_muhurat_skip_clears_marker(self, tmp_path: Path) -> None:
+        # A holiday-listed Muhurat day must never wedge a marker forever.
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, session=_MUHURAT)
+        assert h.run().verdict == "skipped_muhurat"
+        assert list_owed_days(tmp_path) == []
+
+    def test_staged_only_publish_disabled_clears_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, publish=False)
+        assert h.run().verdict == "staged_only"
+        assert list_owed_days(tmp_path) == []
+
+    def test_dry_run_never_touches_the_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, dry_run=True)
+        assert h.run().verdict == "staged_only"
+        assert list_owed_days(tmp_path) == [_DAY]
+
+    def test_deferred_market_hours_keeps_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, market_hours_blocked=True)
+        assert h.run().verdict == "deferred_market_hours"
+        assert list_owed_days(tmp_path) == [_DAY]
+
+    def test_refused_keeps_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        h = _harness(tmp_path, gate_absent=True)
+        assert h.run().verdict == "refused"
+        assert list_owed_days(tmp_path) == [_DAY]
+
+    def test_withheld_partial_keeps_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        classifier = ScriptedClassifier(
+            by_class={"cash_spot": FakeVerdict(reason="volume_all_zero", incomplete=True)}
+        )
+        h = _harness(tmp_path, targets=[_NIFTY, _MM], classifier=classifier, settle_retry_rounds=0)
+        assert h.run().verdict == "withheld_partial"
+        assert list_owed_days(tmp_path) == [_DAY]
+
+    def test_publish_failed_keeps_marker(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, _DAY, source="test")
+        key = s3_key(prefix="crossverify/groww", day=_DAY, identity=_NIFTY)
+        h = _harness(tmp_path, s3_factory=lambda: FakeS3Client(fail_times={key: 99}))
+        assert h.run().verdict == "publish_failed"
+        assert list_owed_days(tmp_path) == [_DAY]
+
+    def test_clear_failure_warns_and_run_stays_green(self, tmp_path: Path) -> None:
+        # A non-empty DIRECTORY planted at the marker path: the clear fails
+        # LOUDLY (one WARN) and the run's verdict is untouched — the day
+        # honestly re-reads OWED and the next catchup converges it again.
+        marker = owed_marker_path(tmp_path, _DAY)
+        (marker / "junk").mkdir(parents=True)
+        h = _harness(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert [e for e in logs if e["event"] == "crossverify.owed_clear_failed"]
+        assert list_owed_days(tmp_path) == [_DAY]
+
+
+class TestOwedCatchup:
+    """Step D3 — the never-started owed-day catchup scan."""
+
+    _P1 = _DAY - timedelta(days=2)  # 2026-07-08
+    _P2 = _DAY - timedelta(days=1)  # 2026-07-09
+
+    def _spy(
+        self, script: dict[date, CrossverifyReport] | None = None
+    ) -> tuple[list[date], Callable[[date], CrossverifyReport]]:
+        calls: list[date] = []
+
+        def _run_day(day: date) -> CrossverifyReport:
+            calls.append(day)
+            if script is not None and day in script:
+                return script[day]
+            return _owed_report(day, "published")
+
+        return calls, _run_day
+
+    def test_no_owed_days_no_rerun(self, tmp_path: Path) -> None:
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day)
+        assert h.run().verdict == "published"
+        assert calls == []
+
+    def test_owed_prior_days_completed_oldest_first(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P2, source="test")
+        mark_owed(tmp_path, self._P1, source="test")
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert (report.verdict, report.exit_code) == ("published", 0)
+        assert calls == [self._P1, self._P2]
+        reruns = [e for e in logs if e["event"] == "crossverify.owed_day_rerun"]
+        assert [e["prior_day"] for e in reruns] == ["2026-07-08", "2026-07-09"]
+
+    def test_run_day_unbound_surfaces_and_never_drops(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        h = _harness(tmp_path)  # run_day=None — injected seams without the rerun
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert report.verdict == "published"
+        (warned,) = [e for e in logs if e["event"] == "crossverify.owed_rerun_unavailable"]
+        assert warned["days"] == ["2026-07-08"]
+        assert list_owed_days(tmp_path) == [self._P1]  # marker KEPT
+
+    def test_rerun_suspect_is_the_whole_run_halt_class(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        calls, run_day = self._spy(
+            {self._P1: _owed_report(self._P1, "suspect", exit_code=2, detail="prebuild halt")}
+        )
+        h = _harness(tmp_path, run_day=run_day)
+        report = h.run()
+        assert (report.verdict, report.exit_code) == ("suspect", 2)
+        assert "owed-day catchup suspect for 2026-07-08" in report.detail
+        assert calls == [self._P1]
+
+    def test_rerun_publish_failed_aborts_scan_and_final_verdict_is_loud(
+        self, tmp_path: Path
+    ) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        mark_owed(tmp_path, self._P2, source="test")
+        calls, run_day = self._spy(
+            {self._P1: _owed_report(self._P1, "publish_failed", publish_failed=2, exit_code=2)}
+        )
+        h = _harness(tmp_path, run_day=run_day)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        # The abort law: the later owed day is left for the next run…
+        assert calls == [self._P1]
+        assert [e for e in logs if e["event"] == "crossverify.owed_catchup_aborted"]
+        # …and the folded count keeps the FINAL verdict loud (exit 2).
+        assert (report.verdict, report.exit_code) == ("publish_failed", 2)
+        assert report.publish_failed == 2
+
+    def test_rerun_refused_aborts_scan_outer_run_unaffected(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        mark_owed(tmp_path, self._P2, source="test")
+        calls, run_day = self._spy(
+            {self._P1: _owed_report(self._P1, "refused", published=0, exit_code=1)}
+        )
+        h = _harness(tmp_path, run_day=run_day)
+        with structlog.testing.capture_logs() as logs:
+            report = h.run()
+        assert calls == [self._P1]
+        assert [e for e in logs if e["event"] == "crossverify.owed_day_contended"]
+        assert (report.verdict, report.exit_code) == ("published", 0)
+
+    def test_rerun_withheld_partial_continues_the_scan(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        mark_owed(tmp_path, self._P2, source="test")
+        calls, run_day = self._spy(
+            {self._P1: _owed_report(self._P1, "withheld_partial", withheld=1, exit_code=2)}
+        )
+        h = _harness(tmp_path, run_day=run_day)
+        report = h.run()
+        assert calls == [self._P1, self._P2]
+        assert (report.verdict, report.exit_code) == ("published", 0)
+
+    def test_zero_catchup_days_skips_the_owed_scan_structurally(self, tmp_path: Path) -> None:
+        # The recursive rerun's structural bound (catchup_days=0) — no scan,
+        # no rerun, and crucially NO misleading beyond-window WARN about the
+        # sibling markers the OUTER scan is about to complete.
+        mark_owed(tmp_path, self._P1, source="test")
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day, catchup_days=0)
+        with structlog.testing.capture_logs() as logs:
+            assert h.run().verdict == "published"
+        assert calls == []
+        assert [e for e in logs if e["event"] == "crossverify.owed_beyond_window"] == []
+        assert list_owed_days(tmp_path) == [self._P1]  # surfaced by the panel, not dropped
+
+    def test_owed_scan_gated_off_for_dry_run(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day, dry_run=True)
+        assert h.run().verdict == "staged_only"
+        assert calls == []
+
+    def test_owed_scan_gated_off_for_no_publish(self, tmp_path: Path) -> None:
+        mark_owed(tmp_path, self._P1, source="test")
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day, publish=False)
+        assert h.run().verdict == "staged_only"
+        assert calls == []
+
+    def test_beyond_window_marker_surfaced_never_rerun(self, tmp_path: Path) -> None:
+        stale = _DAY - timedelta(days=9)
+        mark_owed(tmp_path, stale, source="test")
+        calls, run_day = self._spy()
+        h = _harness(tmp_path, run_day=run_day, catchup_days=5)
+        with structlog.testing.capture_logs() as logs:
+            assert h.run().verdict == "published"
+        assert calls == []
+        (warned,) = [e for e in logs if e["event"] == "crossverify.owed_beyond_window"]
+        assert warned["days"] == [stale.isoformat()]
+        assert stale in list_owed_days(tmp_path)  # KEPT + surfaced
+
+    def test_owed_scan_skipped_after_nonretryable_recovery_abort(self, tmp_path: Path) -> None:
+        # The step-D abort law reaches D3 exactly like the D2/orphan scans:
+        # a nonretryable recovery abort skips the owed catchup this run.
+        prior = DayJournal(day=self._P1, run_id="cv-prior")
+        key = s3_key(prefix="crossverify/groww", day=self._P1, identity=_NIFTY)
+        staged = staging_path_for_key(tmp_path, self._P1, key)
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b"body\n")
+        prior.mark_staged(key, hashlib.sha256(b"body\n").hexdigest(), 5)
+        prior.save(tmp_path)
+        mark_owed(tmp_path, self._P2, source="test")
+        calls, run_day = self._spy()
+        h = _harness(
+            tmp_path,
+            run_day=run_day,
+            s3_factory=lambda: FakeS3Client(nonretryable=frozenset({key})),
+        )
+        report = h.run()
+        assert report.publish_failed >= 1
+        assert calls == []  # D3 never ran — the owed marker stays for the next run
+        assert list_owed_days(tmp_path) == [self._P2]
+
+
+class TestDefaultSeamsRunDay:
+    """The production step-D3 rerun binding: the manual ``--day`` machinery
+    verbatim — a day-scoped ``run_crossverify`` over fresh day-bound default
+    seams (``skip_pull=True`` + ``catchup_days=0``, the recursion bound)."""
+
+    def test_run_day_binds_day_scoped_config_and_fresh_seams(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorded: list[tuple[CrossverifyConfig, CrossverifySeams]] = []
+        sentinel = _owed_report(_DAY - timedelta(days=1), "published")
+
+        def _fake_run(config: CrossverifyConfig, seams: CrossverifySeams) -> CrossverifyReport:
+            recorded.append((config, seams))
+            return sentinel
+
+        # String-target setattr — the module is already imported via
+        # `from brutex.crossverify.run import …` at the top; a second
+        # `import brutex.crossverify.run` here would be the CodeQL
+        # dual-import-style smell (the #1791 registry-routes precedent).
+        monkeypatch.setattr("brutex.crossverify.run.run_crossverify", _fake_run)
+        outer = default_seams(
+            _seams_config(tmp_path, catchup_days=5),
+            env=_GUARD_OFF,
+            account_key_resolver=lambda: None,
+        )
+        assert outer.run_day is not None
+        prior_day = _DAY - timedelta(days=1)
+        assert outer.run_day(prior_day) is sentinel
+        ((day_config, day_seams),) = recorded
+        # The manual --day config shape: day-scoped, vendor-free, non-recursive.
+        assert day_config.day == prior_day
+        assert day_config.skip_pull is True
+        assert day_config.catchup_days == 0
+        assert day_config.dry_run is False
+        assert day_config.lake_root == tmp_path
+        # Fresh day-bound seams (never today's) — themselves rerun-capable.
+        assert day_seams is not outer
+        assert day_seams.run_day is not None
