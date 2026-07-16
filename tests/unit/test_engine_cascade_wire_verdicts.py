@@ -276,13 +276,17 @@ class TestLoadVerdictMarkersDegrades:
     def test_io_fault_warns_and_returns_empty(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The injection point is the #1793 loader's own ``os.open`` (the
+        hardened read no longer touches ``Path.read_bytes`` — #1851 R3)."""
+        from brutex.data import sidecar_read
+
         path = tmp_path / "cascade-report.json"
         path.write_text("{}", encoding="utf-8")
 
-        def _deny(_self: Path) -> bytes:
+        def _deny(*_args: object, **_kwargs: object) -> int:
             raise PermissionError("synthetic read outage")
 
-        monkeypatch.setattr(Path, "read_bytes", _deny)
+        monkeypatch.setattr(sidecar_read.os, "open", _deny)
         with capture_logs() as logs:
             assert load_verdict_markers(path) == {}
         warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_unreadable"]
@@ -355,6 +359,62 @@ class TestLoadVerdictMarkersDegrades:
             assert load_verdict_markers(path) == {}
         warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_unreadable"]
         assert len(warns) == 1
+
+
+class TestHardenedReportRead:
+    """The #1851 R3 hardened-read pins — the #1793 bounded regular-file-only
+    loader + the widened parse tuple on BOTH report readers: a nesting bomb /
+    non-regular inode / oversized out-of-band file reads the SAME wire
+    behavior as the corrupt shapes always did (markers ⇒ empty map + ONE
+    unreadable WARN; count ⇒ silent ``None``) — never a raw ``RecursionError``
+    (the executed fails-before: pre-change ``'['*60_000`` ESCAPED both), never
+    a FIFO hang, never a multi-GB whole-read."""
+
+    def test_nesting_bomb_markers_warn_once_and_return_empty(self, tmp_path: Path) -> None:
+        path = tmp_path / "bomb.json"
+        path.write_bytes(b"[" * 60_000)
+        with capture_logs() as logs:
+            assert load_verdict_markers(path) == {}
+        warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_unreadable"]
+        assert len(warns) == 1
+        assert warns[0]["error_type"] == "RecursionError"
+
+    def test_nesting_bomb_count_reads_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "bomb.json"
+        path.write_bytes(b"[" * 60_000)
+        assert report_group_count(path) is None
+
+    def test_fifo_reads_unreadable_never_hangs(self, tmp_path: Path) -> None:
+        """A FIFO planted at the report path: a bare ``read_bytes`` blocks for
+        a writer FOREVER — the bounded loader folds it into ``not_regular``
+        and both readers return their degrade immediately."""
+        import os
+
+        path = tmp_path / "fifo.json"
+        os.mkfifo(path)
+        with capture_logs() as logs:
+            assert load_verdict_markers(path) == {}
+        warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_unreadable"]
+        assert len(warns) == 1
+        assert warns[0]["error_type"] == "not_regular"
+        assert report_group_count(path) is None
+
+    def test_oversized_report_reads_unreadable(self, tmp_path: Path) -> None:
+        path = tmp_path / "huge.json"
+        with path.open("wb") as fh:
+            fh.truncate(cw.VERDICT_REPORT_MAX_BYTES + 1)  # sparse — no real 16 MiB write
+        with capture_logs() as logs:
+            assert load_verdict_markers(path) == {}
+        warns = [e for e in logs if e["event"] == "cascade_wire.verdict_markers_unreadable"]
+        assert len(warns) == 1
+        assert warns[0]["error_type"] == "oversized"
+        assert report_group_count(path) is None
+
+    def test_at_cap_report_still_loads(self, tmp_path: Path) -> None:
+        """Exactly-at-cap stays readable — the cap refuses only strictly-over."""
+        path = cw.write_report(tmp_path, _report(()))
+        assert path.stat().st_size <= cw.VERDICT_REPORT_MAX_BYTES
+        assert report_group_count(path) == 0
 
 
 class TestReportGroupCount:

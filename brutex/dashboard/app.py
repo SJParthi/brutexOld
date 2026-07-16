@@ -8714,7 +8714,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
             )
 
         try:
-            return JSONResponse(await run_in_threadpool(_resolve))
+            return JSONResponse(await _run_lake(_resolve))
         except ResultsStoreError as exc:
             # The C3 degrade posture, endpoint-shaped: store_error_payload logs
             # the full detail server-side; only its stable sanitized marker
@@ -9063,7 +9063,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 compute=_fresh,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/events")
     async def api_oneclick_events(
@@ -9214,7 +9214,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(

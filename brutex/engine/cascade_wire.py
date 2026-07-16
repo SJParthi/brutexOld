@@ -103,6 +103,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
+from brutex.data.sidecar_read import read_sidecar_bytes
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
     LOCKBOX_DEFAULT_MIN_TRADES,
@@ -2158,6 +2159,14 @@ def _parse_verdict_markers(payload: object) -> dict[str, VerdictMarker]:
     return markers
 
 
+#: Hard byte cap on one verdict-report read (mirrors the /results-side
+#: ``sweep_results_view.CASCADE_REPORT_MAX_BYTES`` — same file, same 16 MiB
+#: law; the value lives twice because the dashboard may import the engine,
+#: never the reverse): a real report is a few KiB–MiB; an out-of-band
+#: multi-GB file folds into the unreadable degrade WITHOUT being read whole.
+VERDICT_REPORT_MAX_BYTES: Final[int] = 16 * 1024 * 1024
+
+
 def report_group_count(path: Path) -> int | None:
     """Return the report's group count for the /results envelope, or ``None``.
 
@@ -2165,10 +2174,22 @@ def report_group_count(path: Path) -> int | None:
     SILENT: :func:`load_verdict_markers` (always called beside this by the one
     consumer, ``sweep_results_view.load_sweep_scan``) owns the degrade logging,
     so a corrupt report warns exactly ONCE per scan, never twice.
+
+    HARDENED read (#1851 reconcile round 3 — the #1793 COMMON
+    ``read_sidecar_bytes`` loader): a non-regular inode planted at the report
+    path (a FIFO would block a bare ``read_bytes`` FOREVER on the /results
+    poll path), an oversized out-of-band file, and a pathologically nested
+    valid-JSON payload (``'['*60_000`` — ``json.loads`` raises
+    ``RecursionError``, which previously ESCAPED this except tuple as a raw
+    crash) all fold into the SAME silent ``None`` the absent/corrupt shapes
+    always read.
     """
+    result = read_sidecar_bytes(path, max_bytes=VERDICT_REPORT_MAX_BYTES)
+    if result.raw is None:
+        return None
     try:
-        payload = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        payload = json.loads(result.raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     groups = payload.get("groups") if isinstance(payload, dict) else None
     return len(groups) if isinstance(groups, list) else None
@@ -2183,26 +2204,35 @@ def load_verdict_markers(path: Path) -> dict[str, VerdictMarker]:
     - ABSENT report (no cascade run yet — the normal state on a fresh lake) ⇒
       empty map, ONE ``debug`` event (deliberately below WARN: absence is
       first-class, the view's envelope carries ``present=false`` honestly).
-    - CORRUPT / unreadable report (bad JSON, wrong shape, I/O fault) ⇒ empty
+    - CORRUPT / unreadable report (bad JSON, wrong shape, I/O fault — incl. a
+      non-regular inode, an oversized out-of-band file and a nesting-bomb
+      payload, via the #1793 bounded loader + the widened parse tuple) ⇒ empty
       map + ONE ``cascade_wire.verdict_markers_unreadable`` WARN naming the
       path — all chips render ``—``, never a wrong verdict.
     """
-    try:
-        raw = path.read_bytes()
-    except (FileNotFoundError, NotADirectoryError):
+    # HARDENED read (#1851 reconcile round 3 — the #1793 COMMON loader): a
+    # bare `read_bytes` on a FIFO planted at the report path blocks FOREVER
+    # (wedging every /results poll); the bounded regular-file-only loader
+    # folds non-regular inodes + oversized files into the SAME unreadable
+    # WARN degrade, and the parse tuple gains `RecursionError` (a
+    # `'['*60_000` nesting bomb previously escaped as a raw crash).
+    # Absent-shape parity with the pre-loader read: `FileNotFoundError` AND
+    # `NotADirectoryError` both read the debug absent arm.
+    result = read_sidecar_bytes(path, max_bytes=VERDICT_REPORT_MAX_BYTES)
+    if result.shape == "absent" or result.error_type == "NotADirectoryError":
         _LOG.debug("cascade_wire.verdict_markers_absent", path=str(path))
         return {}
-    except OSError as exc:
+    if result.raw is None:
         _LOG.warning(
             "cascade_wire.verdict_markers_unreadable",
             path=str(path),
-            error_type=type(exc).__name__,
-            error=str(exc),
+            error_type=result.error_type or result.shape,
+            error=result.detail,
         )
         return {}
     try:
-        return _parse_verdict_markers(json.loads(raw))
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        return _parse_verdict_markers(json.loads(result.raw))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         _LOG.warning(
             "cascade_wire.verdict_markers_unreadable",
             path=str(path),
