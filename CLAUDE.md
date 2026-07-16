@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
-MIGRATION.md #1893, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
+MIGRATION.md #1897, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
 non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries:
 `arrow_table_to_bars` gains the explicit finiteness gate (an inf-HIGH bar
 previously served `Decimal('Infinity')` into the engine SILENTLY — the
@@ -43,7 +43,7 @@ only — ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; no
 lake/schema/scope/vocab/rate change. Named follow-up:
 DEC-DAILY-WINDOW-BADTICK-001 (bad-tick on the window reader). This header
 carries the pointer, never the story — the full record lives in the §1
-Active-branch blurb + MIGRATION.md #1893.)
+Active-branch blurb + MIGRATION.md #1897.)
 Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
@@ -2972,10 +2972,11 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
-  (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1893** —
-  renumbered #1832 → #1893 at the 2026-07-16 merge-reconcile per the
-  coordinator reservation map (#1832 held on the landing main tip; DEC-IDs
-  are the stable handles per DEC-LEDGER-RENUMBER-001) —
+  (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897** —
+  renumbered #1832 → #1897 at the 2026-07-16 merge-reconcile per the
+  steward ledger map (#1832 taken on main by
+  DEC-DASHBOARD-COLD-IO-DEADLINE-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) —
   non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries,
   closing two PRE-EXISTING latent defects the assurance session
   executed-repro'd on live main (base 6b9947d9) with planted/corrupt STORED
@@ -3024,7 +3025,7 @@ hostile-review pass._
   verbatim under comma-form subjects, identity-proven); the independent
   hostile review verdict is SHIP with its two honesty NITs folded
   (transitive-consumer disclosure + the pre-existing null-price TypeError
-  limit — both recorded in MIGRATION.md #1893).)
+  limit — both recorded in MIGRATION.md #1897).)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
@@ -8626,9 +8627,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
-  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1893 — renumbered
-  #1832 → #1893 at the 2026-07-16 merge-reconcile per the coordinator
-  reservation map — non-finite
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897 — renumbered
+  #1832 → #1897 at the 2026-07-16 merge-reconcile per the steward ledger
+  map — non-finite
   OHLC (inf/-inf/NaN) rejected at BOTH lake-read boundaries: the engine read
   boundary's explicit finiteness gate + the `(ValueError, ArithmeticError)`
   re-wrap (a NaN's raw `decimal.InvalidOperation` no longer escapes), the
@@ -8641,7 +8642,7 @@ hostile-review pass._
   proven at merge-base 6b9947d9, healthy-lake byte-identity + frozen engine
   goldens pinned UNMODIFIED; named follow-up DEC-DAILY-WINDOW-BADTICK-001;
   ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's
-  Active branch line — see §1 + MIGRATION.md #1893 for the full blurb)
+  Active branch line — see §1 + MIGRATION.md #1897 for the full blurb)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
