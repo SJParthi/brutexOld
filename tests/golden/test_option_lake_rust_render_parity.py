@@ -300,7 +300,8 @@ def _build_corpus() -> dict[str, _Case]:
         lake = _mkdtemp("pr2-o1-")
         writer = OptionParquetWriter(lake_root=lake)
         captured.clear()
-        assert writer.write(partition_key=_PK, coordinate=_COORD, bars=_bars_mix(40)) > 0
+        written = writer.write(partition_key=_PK, coordinate=_COORD, bars=_bars_mix(40))
+        assert written > 0
         assert len(captured) == 1
         _take("o1_fresh_small_ce_pe_40", "fresh render, 40 CE/PE bars, sparse nulls")
 
