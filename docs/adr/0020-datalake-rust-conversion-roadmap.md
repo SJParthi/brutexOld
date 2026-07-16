@@ -412,3 +412,33 @@ deviations carry over from PR-1). Locks + error mapping still did not move
 (PR-3/PR-4 territory); PR-3..PR-4 and the waves remain future work under
 the same apparatus. Payoff ≈ 0 banner holds — the options render is
 heal-/option-pull-driven O(month-file) glue; no speed claim.
+
+## 11. PR-4 shipped surface (2026-07-16 — appended when PR-4 landed; DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912)
+
+The §3 PR-4 gate set is IMPLEMENTED (full record: MIGRATION.md #1912):
+`rust/brutex-lake/src/locks.rs` ships `lock_try_exclusive` /
+`lock_release` / `atomic_commit_replace` behind the NEW default-OFF
+`brutex/data/lake_rust_locks.py` facade (`BRUTEX_LAKE_RUST_LOCKS`), with
+the §"PR-4 — locks / atomic-replace" laws held exactly: the
+`.locks/<sha256(dest)>.lock` path derivation stays Python-owned (the
+crate receives ONLY the fd — the unit-pinned byte-identical contract
+cannot drift through Rust), tmp→fsync→`os.replace` atomicity is the
+order-exact `commit_replace_impl` twin, the `LakeWriteHalt` /
+`PartitionLockTimeout` mapping stays entirely on the Python facade (the
+crate raises real `OSError(errno)` / `RuntimeError`-on-panic only), and
+in-process lock acquisition REMAINS on the Python facade
+(`BoundedLockRegistry` byte-untouched — the registry lock stays OUTER).
+Deviations from the roadmap sketch, recorded in the DEC: (a) the routing
+is attempt/commit-GRAINED, not whole-acquire — a Rust-side retry loop
+would drop the per-retry watchdog liveness beats
+(DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15); (b) temp-file creation stays
+`tempfile.mkstemp` on both arms (the `.brutex-write-` prefix +
+mkstemp-ENOSPC guard laws hold byte-identically); (c) no byte burn-in /
+no version guard on this facade — locks are polars-free and have no
+rendered bytes; the parity contract is BEHAVIORAL (the executed
+mixed-arm mutual-exclusion + two-subprocess belts + errno-parity
+suites stand in). One new direct dep: `libc = "0.2"` (flock only —
+already transitive in the committed `Cargo.lock`; rustix stays reserved
+for Wave C per §3). Flag OFF (the default) is byte- and
+call-graph-identical, bomb-spy-pinned; the default-ON flip needs its own
+DEC.

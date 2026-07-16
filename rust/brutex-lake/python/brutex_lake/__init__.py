@@ -7,14 +7,18 @@ this ``__init__.py`` re-exports its symbols (the fno-math DEC-P0-055 mixed
 layout) so callers write ``import brutex_lake;
 brutex_lake.render_parquet_from_ipc(...)``.
 
-The consumer is ``brutex/data/lake_rust_render.py`` — the default-OFF,
+The consumers are ``brutex/data/lake_rust_render.py`` — the default-OFF,
 version-guarded, burn-in-checked facade wired into the two lake writers'
 render seams (``ParquetWriter._render_bytes`` — the bars profile, PR-1 —
 and ``option_parquet_writer._atomic_write_parquet`` — the options-defaults
-profile, PR-2). Nothing else in ``brutex/`` imports this
-package, and the facade treats an absent/stale install as "stay on the
-Python render" (one loud WARN), so a missing wheel can never break a lake
-write.
+profile, PR-2) — and, since ADR-0020 PR-4
+(DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912),
+``brutex/data/lake_rust_locks.py`` — the default-OFF facade routing the
+partition-flock attempt/release + the atomic-write commit
+(chmod→fsync→rename) behind ``BRUTEX_LAKE_RUST_LOCKS``. Nothing else in
+``brutex/`` imports this package, and both facades treat an absent/stale
+install as "stay on the Python arm" (one loud WARN), so a missing wheel
+can never break a lake write.
 
 Lockstep law (the crate's whole reason to exist): the linked polars must be
 REV-pinned at the commit the installed Python wheel's release tag pointed at
@@ -29,7 +33,10 @@ from __future__ import annotations
 
 from brutex_lake._brutex_lake import (
     __version__,
+    atomic_commit_replace,
     linked_zstd_version,
+    lock_release,
+    lock_try_exclusive,
     merge_decision_from_ipc,
     pinned_polars_version,
     render_parquet_defaults_from_ipc,
@@ -38,7 +45,10 @@ from brutex_lake._brutex_lake import (
 
 __all__ = [
     "__version__",
+    "atomic_commit_replace",
     "linked_zstd_version",
+    "lock_release",
+    "lock_try_exclusive",
     "merge_decision_from_ipc",
     "pinned_polars_version",
     "render_parquet_defaults_from_ipc",

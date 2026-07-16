@@ -111,9 +111,11 @@ use polars_io::parquet::write::{ParquetCompression, ParquetWriteOptions};
 use polars_io::utils::file::{Writeable, WriteableTrait};
 use polars_parquet::write::{StatisticsOptions, ZstdLevel};
 use polars_plan::dsl::{FileWriteFormat, SinkDestination, SinkTarget, SpecialEq, UnifiedSinkArgs};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+mod locks;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -434,6 +436,94 @@ fn linked_zstd_version() -> String {
     libzstd_version_string()
 }
 
+/// Map an `io::Error` to a REAL Python `OSError(errno, …)` (ADR-0020 PR-4).
+///
+/// The two-tuple constructor form makes CPython's `OSError.__new__` both
+/// SET `.errno` and re-map to the errno-specific subclass
+/// (`FileNotFoundError`, `PermissionError`, …) — so the EXISTING Python
+/// `lake_write_guard` / except-arm taxonomy (`exc.errno in
+/// _DISK_FULL_ERRNOS` → `LakeWriteHalt("disk_full")`; every other errno
+/// raw) keeps working unchanged over the Rust arm. An errno-less
+/// `io::Error` (synthetic — none of the locks primitives mint one)
+/// degrades to a message-only `OSError`, never a new exception class.
+fn io_err_to_pyerr(err: std::io::Error) -> PyErr {
+    match err.raw_os_error() {
+        Some(code) => PyOSError::new_err((code, err.to_string())),
+        None => PyOSError::new_err(err.to_string()),
+    }
+}
+
+/// One non-blocking exclusive `flock` attempt on a caller-owned raw *fd*
+/// (DEC-LAKE-RUST-LOCKS-ATOMIC-001). `True` = acquired, `False` = a peer
+/// holds it (the Python arm's `BlockingIOError` shape); any other failure
+/// is a real `OSError` with the errno intact. The bounded retry loop /
+/// poll / progress-beat / `PartitionLockTimeout` law all stay on the
+/// Python facade (`partition_lock._acquire_bounded`). Runs WITHOUT the
+/// GIL; a panic maps to `RuntimeError` at this boundary, never a raw
+/// `PanicException`.
+#[pyfunction]
+fn lock_try_exclusive(py: Python<'_>, fd: i32) -> PyResult<bool> {
+    py.detach(|| {
+        std::panic::catch_unwind(|| locks::try_lock_exclusive_impl(fd)).map_err(|_| {
+            PyRuntimeError::new_err(
+                "brutex-lake lock_try_exclusive panicked (caught at the FFI boundary)",
+            )
+        })
+    })?
+    .map_err(io_err_to_pyerr)
+}
+
+/// Release the advisory lock held on *fd* and close it (`flock(LOCK_UN)`
+/// best-effort, then `close(2)` — the Python arm's `os.close` twin; the
+/// close alone releases an flock, kernel-guaranteed). Ownership of the fd
+/// transfers to this call: on return — success OR error — the fd must not
+/// be reused. A close failure is a real `OSError` with the errno intact.
+#[pyfunction]
+fn lock_release(py: Python<'_>, fd: i32) -> PyResult<()> {
+    py.detach(|| {
+        std::panic::catch_unwind(|| locks::unlock_close_impl(fd)).map_err(|_| {
+            PyRuntimeError::new_err(
+                "brutex-lake lock_release panicked (caught at the FFI boundary)",
+            )
+        })
+    })?
+    .map_err(io_err_to_pyerr)
+}
+
+/// The chmod→`fsync`→`rename` COMMIT of an already-written temp file — the
+/// atomic-replace tail of `atomic_io._atomic_write_core`, order-exact
+/// (chmod first, temp DATA `fsync`-ed to stable storage, then the atomic
+/// POSIX `rename(2)` = `os.replace` semantics). Temp creation, the payload
+/// write and the error-path temp cleanup all stay Python. On ANY error the
+/// temp is left in place (the Python core's `finally` owns cleanup) and a
+/// real `OSError` with the errno intact surfaces — `ENOSPC`/`EDQUOT` reach
+/// the EXISTING `lake_write_guard` unchanged. Runs WITHOUT the GIL (an
+/// `fsync` can block on a slow volume); a panic maps to `RuntimeError`.
+#[pyfunction]
+#[pyo3(signature = (tmp_path, dest, chmod=None))]
+fn atomic_commit_replace(
+    py: Python<'_>,
+    tmp_path: &str,
+    dest: &str,
+    chmod: Option<u32>,
+) -> PyResult<()> {
+    py.detach(|| {
+        std::panic::catch_unwind(|| {
+            locks::commit_replace_impl(
+                std::path::Path::new(tmp_path),
+                std::path::Path::new(dest),
+                chmod,
+            )
+        })
+        .map_err(|_| {
+            PyRuntimeError::new_err(
+                "brutex-lake atomic_commit_replace panicked (caught at the FFI boundary)",
+            )
+        })
+    })?
+    .map_err(io_err_to_pyerr)
+}
+
 // `#[pymodule]` registers the `_brutex_lake` Python submodule. Maturin
 // produces a cdylib whose extern "C" `PyInit__brutex_lake` symbol matches
 // this function name; under the mixed layout it installs at
@@ -450,6 +540,11 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ADR-0020 PR-3 (DEC-LAKE-RUST-MERGE-DEDUP-001): the merge/dedup
     // decision kernel — additive registration, own module file.
     m.add_function(wrap_pyfunction!(merge::merge_decision_from_ipc, m)?)?;
+    // ADR-0020 PR-4 (DEC-LAKE-RUST-LOCKS-ATOMIC-001) — ADDITIVE lock/atomic
+    // primitives; sibling waves register beside these, never in place of.
+    m.add_function(wrap_pyfunction!(lock_try_exclusive, m)?)?;
+    m.add_function(wrap_pyfunction!(lock_release, m)?)?;
+    m.add_function(wrap_pyfunction!(atomic_commit_replace, m)?)?;
     Ok(())
 }
 

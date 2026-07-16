@@ -33,3 +33,33 @@ def pinned_polars_version() -> str:
 
 def linked_zstd_version() -> str:
     """The libzstd version linked into this build (runtime-probed, e.g. ``"1.5.7"``)."""
+
+def lock_try_exclusive(fd: int) -> bool:
+    """One non-blocking exclusive ``flock`` attempt on a caller-owned raw fd.
+
+    ADR-0020 PR-4 (DEC-LAKE-RUST-LOCKS-ATOMIC-001). ``True`` = acquired,
+    ``False`` = a peer holds it (the ``BlockingIOError`` shape); any other
+    failure raises a real ``OSError`` with the errno intact. The bounded
+    retry loop / poll / progress-beat / ``PartitionLockTimeout`` law stay
+    on the Python facade. ``RuntimeError`` if the attempt panicked (caught
+    at the FFI boundary).
+    """
+
+def lock_release(fd: int) -> None:
+    """Release the advisory lock on *fd* and close it (``LOCK_UN`` + ``close``).
+
+    Ownership of the fd transfers to this call — on return (success or
+    error) the fd must not be reused. A close failure raises a real
+    ``OSError`` with the errno intact; ``RuntimeError`` on a panic.
+    """
+
+def atomic_commit_replace(tmp_path: str, dest: str, chmod: int | None = None) -> None:
+    """The chmod→``fsync``→``rename`` commit of an already-written temp file.
+
+    Order-exact twin of ``atomic_io._atomic_write_core``'s commit tail
+    (``os.replace`` semantics — atomically replaces an existing *dest*).
+    On ANY error the temp is left in place (the Python core's ``finally``
+    owns cleanup) and a real ``OSError`` with the errno intact raises —
+    ``ENOSPC``/``EDQUOT`` reach ``lake_write_guard`` unchanged.
+    ``RuntimeError`` on a panic.
+    """
