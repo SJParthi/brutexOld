@@ -980,10 +980,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "UNATTENDED (cron/launchd) mode: pull only on an NSE trading day, "
-            "only after the post-close settle time (default 17:30 IST — "
-            "conservative, UNMEASURED; BRUTEX_PULL_ALL_SETTLE_IST overrides), "
-            "never on a Muhurat day; every deferral prints one line and exits 0 "
-            "(cron-green)"
+            "only after the post-close settle time (operator override "
+            "BRUTEX_PULL_ALL_SETTLE_IST > committed probe evidence "
+            "docs/groww/probe/settle_evidence.json when valid > the "
+            "conservative 17:30 IST default — UNMEASURED until the #1775 "
+            "probe evidence lands), never on a Muhurat day; every deferral "
+            "prints one line and exits 0 (cron-green)"
         ),
     )
     pull_all_spot.add_argument(
@@ -3528,6 +3530,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
+    # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
+    # heavy setup (the house env-law; default absent/off = byte-identical
+    # single-process behaviour, no brutexd process spawned). The mechanism
+    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
+    # line+branch gate); this function only threads the decision.
+    from brutex.dashboard.rust_front import (
+        RustFrontError,
+        resolve_rust_front,
+        run_with_rust_front,
+    )
+
+    try:
+        _rust_front_on = resolve_rust_front()
+    except RustFrontError as exc:
+        raise CliUserError(str(exc)) from exc
+
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
@@ -3687,6 +3706,7 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # itself is best-effort (a fault logs and the dashboard still binds —
     # the button then runs without the auto-arm surface).
     from brutex.calendars.auto_pull_gate import resolve_settle_time
+    from brutex.calendars.settle_evidence import evidence_settle
     from brutex.dashboard.auto_pull_scheduler import (
         AutoPullScheduler,
         AutoPullStateStore,
@@ -3700,6 +3720,14 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         # as per-tick gate errors on an ARMED dashboard (the scheduler never
         # fired) — fail loud HERE like the tick env, the same clean one-liner.
         resolve_settle_time()
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with BRUTEX_PULL_ALL_SETTLE_IST set, resolve_settle_time's
+        # tier-1 short-circuit never reads the evidence, so a junk EXPLICIT
+        # BRUTEX_SETTLE_EVIDENCE_PATH would otherwise pass boot and detonate
+        # later as per-poll "unknown" text once the operator unsets the settle
+        # env. A default-path corrupt file WARNs + proceeds (never a boot
+        # failure — the r6/r7 posture).
+        evidence_settle()
     except ValueError as exc:
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
@@ -3809,6 +3837,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # root handlers (console + rotating JSON file) instead of uvicorn's own
     # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    if _rust_front_on:
+        # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
+        # operator port; uvicorn binds a private loopback port picked inside
+        # run_with_rust_front. A launch refusal (missing binary /
+        # non-loopback host) is a loud CliUserError exit 1, never a
+        # half-started topology.
+        try:
+            run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
+        except RustFrontError as exc:
+            raise CliUserError(str(exc)) from exc
+        return EXIT_OK
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
@@ -6308,7 +6347,12 @@ def cmd_pull_all_spot(
         auto_pull_allowed,
         resolve_settle_time,
     )
-    from brutex.dashboard.pipeline_pull import PHASE_MARKET_HOURS, strict_gate_enabled
+    from brutex.calendars.settle_evidence import evidence_settle
+    from brutex.dashboard.pipeline_pull import (
+        PHASE_MARKET_HOURS,
+        format_capped_names,
+        strict_gate_enabled,
+    )
     from brutex.dashboard.pull_scope import (
         SCOPE_SPOT_ONLY,
         SPOT_ONLY_SESSION_RESUME_HINT,
@@ -6330,6 +6374,12 @@ def cmd_pull_all_spot(
         env_map = {**os.environ, PULL_ALL_SETTLE_ENV: settle_ist}
     try:
         resolve_settle_time(env_map)
+        # Probe-only evidence-channel validation (DEC-SETTLE-EVIDENCE-ADOPTION-001
+        # §3.2): with --settle-ist / the settle env set, the tier-1
+        # short-circuit means resolve_settle_time never reads the evidence —
+        # a junk EXPLICIT BRUTEX_SETTLE_EVIDENCE_PATH must still fail loud
+        # HERE, pre-lock (a default-path corrupt file WARNs + proceeds).
+        evidence_settle(env_map)
         # Probe only — the binding re-resolves (the cmd_nightly precedent,
         # cli.py `strict_gate_enabled()` in its pre-chain fail-loud try):
         # junk BRUTEX_PIPELINE_STRICT_GATE previously escaped as a raw
@@ -6535,6 +6585,15 @@ def cmd_pull_all_spot(
             print(f"[brutex]   prebuild:  CRASHED ({report.prebuild_crashed})")
         else:
             print(f"[brutex]   prebuild:  {built} symbol(s), {bars} bars")
+        if report.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the
+            # structured-block twin of the headline's no-source clause — a
+            # clean run's stdout stays byte-identical.
+            print(
+                f"[brutex]   no-source: {report.prebuild_no_source_count} symbol(s) skipped "
+                "— no stored 1-minute data (vendor-empty or never pulled): "
+                f"{format_capped_names(report.prebuild_no_source, report.prebuild_no_source_count)}"
+            )
         print("[brutex]   movers:    not warmed (headless — dashboard caches re-key on next poll)")
         print("[brutex]   greeks:    not run — no options in this pull")
         print(f"[brutex]   cross-verify: {tail.human}")

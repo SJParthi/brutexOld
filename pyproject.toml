@@ -170,7 +170,17 @@ src = ["brutex", "tests"]
 # Red-team fixtures intentionally contain planted bugs. Excluded
 # from the global ruff scan; verified individually by tests/redteam/
 # subprocess invocations.
-extend-exclude = ["tests/redteam/fixtures/*.stripped.py", "tests/redteam/fixtures/planted_*.py"]
+# The #1775 post-close settle probe lives under docs/ and is OUTSIDE every
+# lint/type/coverage gate BY DESIGN (kept py_compile-clean; its module
+# docstring records the posture) — force-excluded here so the pre-commit ruff
+# hooks (which pass --force-exclude) match the CI scope (`ruff check brutex
+# tests`); DEC-SETTLE-EVIDENCE-ADOPTION-001 made the standing posture
+# mechanical when the emitter edits first put the file in a hook-scanned diff.
+extend-exclude = [
+    "tests/redteam/fixtures/*.stripped.py",
+    "tests/redteam/fixtures/planted_*.py",
+    "docs/groww/probe/postclose_settle_probe.py",
+]
 
 [tool.ruff.lint]
 select = [

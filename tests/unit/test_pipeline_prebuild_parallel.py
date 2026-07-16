@@ -130,7 +130,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeMaterialize) -> None:
     monkeypatch.setattr("brutex.data.timeframe_materialize.materialize_lake_timeframes", fake)
 
 
-# ── happy path: threaded fan-out over SPOT + FUTURES + OPTIONS ──────────────
+# ── happy path: threaded fan-out over SPOT + FUTURES (options retired) ──────
 
 
 @pytest.mark.parametrize("workers", [1, 3])
@@ -144,15 +144,18 @@ def test_parallel_covers_all_phases(
         workers=workers,
         daily_before=date(2025, 2, 1),
     )
-    # 1 spot + 1 future + 2 options, each 4 bars (3 intraday + 1 daily).
-    assert outcome.symbols_built == 4
-    assert outcome.total_bars == 16
+    # 1 spot + 1 future, each 4 bars (3 intraday + 1 daily) — the cascade's
+    # CE/PE contracts are NEVER planned (DEC-OPTIONS-PREBUILD-RETIRE-001).
+    assert outcome.symbols_built == 2
+    assert outcome.total_bars == 8
     assert outcome.failed_count == 0
     assert outcome.ok is True
     kinds = {str(c["symbol"]): c["kind"] for c in patched.calls}
     assert kinds["NSE-NIFTY"] is PrebuildKind.SPOT
     assert kinds["NSE-NIFTY-30Jan25-FUT"] is PrebuildKind.FUTURES
-    assert kinds["NSE-NIFTY-30Jan25-20000-CE"] is PrebuildKind.OPTIONS
+    # ABSENCE PIN: zero OPTIONS work items on the parallel path.
+    assert all(c["kind"] is not PrebuildKind.OPTIONS for c in patched.calls)
+    assert "NSE-NIFTY-30Jan25-20000-CE" not in kinds
 
 
 def test_parallel_include_spot_false_runs_fno_phases_only(
@@ -170,7 +173,7 @@ def test_parallel_include_spot_false_runs_fno_phases_only(
             daily_before=date(2025, 2, 1),
             include_spot=False,
         )
-    assert outcome.symbols_built == 3  # 1 future + 2 options — never the spot
+    assert outcome.symbols_built == 1  # 1 future — never the spot (options retired)
     assert outcome.ok is True
     assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
     started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
@@ -182,6 +185,11 @@ def test_parallel_include_spot_false_runs_fno_phases_only(
     # The by-design note itself rides the internal spot PhasePrebuildReport
     # (the SAME COMMON constant on both paths) — note-shape pinned at the
     # gated_prebuild level, where the report is the public surface.
+    # [refuter round 1] The parallel path calls the SAME `_warn_if_all_no_source`
+    # over its assembled report — the empty no-op spot phase must not fire a
+    # spurious count=0 all-no-source WARN (the `and phase.attempted` guard's
+    # killing pin, sequential↔parallel parity).
+    assert not [e for e in logs if e["event"] == "pipeline.prebuild.all_no_source"]
 
 
 def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_path: Path) -> None:
@@ -195,7 +203,7 @@ def test_guard_forwards_include_spot_to_parallel(patched: _FakeMaterialize, tmp_
         daily_before=date(2025, 2, 1),
         include_spot=False,
     )
-    assert outcome.symbols_built == 3
+    assert outcome.symbols_built == 1
     assert all(c["kind"] is not PrebuildKind.SPOT for c in patched.calls)
 
 
@@ -302,10 +310,10 @@ def test_m4_drift_pair_materialises_contract_once(
         workers=3,
         daily_before=date(2025, 2, 1),
     )
-    # 2 distinct spot partitions + 1 future + 2 options = 5 unique partitions.
+    # 2 distinct spot partitions + 1 future = 3 unique partitions (options retired).
     assert len(patched.by_symbol("NSE-NIFTY-30Jan25-FUT")) == 1
-    assert len(patched.by_symbol("NSE-NIFTY-30Jan25-20000-CE")) == 1
-    assert outcome.symbols_built == 5
+    assert patched.by_symbol("NSE-NIFTY-30Jan25-20000-CE") == []
+    assert outcome.symbols_built == 3
 
 
 def test_m3_sequential_path_dedups_identically(tmp_path: Path) -> None:
@@ -324,10 +332,10 @@ def test_m3_sequential_path_dedups_identically(tmp_path: Path) -> None:
         cascade=_cascade(),
         materialize=_seq,
     )
-    # Same counts as the parallel drift-pair test above: 2 spots + 3 contracts.
-    assert outcome.symbols_built == 5
+    # Same counts as the parallel drift-pair test above: 2 spots + 1 contract.
+    assert outcome.symbols_built == 3
     assert calls.count("NSE-NIFTY-30Jan25-FUT") == 1
-    assert calls.count("NSE-NIFTY-30Jan25-20000-CE") == 1
+    assert calls.count("NSE-NIFTY-30Jan25-20000-CE") == 0
 
 
 def test_m4_duplicate_spot_instrument_materialised_once(
@@ -344,7 +352,7 @@ def test_m4_duplicate_spot_instrument_materialised_once(
         daily_before=date(2025, 2, 1),
     )
     assert len(patched.by_symbol("NSE-NIFTY")) == 1
-    assert outcome.symbols_built == 4  # 1 spot + 1 future + 2 options
+    assert outcome.symbols_built == 2  # 1 spot + 1 future (options retired)
 
 
 # ── per-symbol quarantine + tallies ────────────────────────────────────────
@@ -363,12 +371,43 @@ def test_per_symbol_failure_quarantined(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert outcome.ok is False
     assert outcome.failed_count == 1
     assert outcome.failed[0].startswith("NSE-NIFTY-30Jan25-FUT")
-    assert outcome.symbols_built == 3  # the other 3 still built
+    assert outcome.symbols_built == 1  # the spot still built
+
+
+def test_parallel_no_source_target_counted_ok_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T11 [fails-before] — the PARALLEL twin of the sequential no-source
+    classification (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): a zero-stored-bars
+    SPOT target lands in the outcome's ``no_source`` (never ``failed``), ``ok``
+    stays True, and the F&O contracts still build — identical outcome shape to
+    the sequential path."""
+    from brutex.data.timeframe_materialize import NoStored1mBarsError
+
+    fake = _FakeMaterialize(
+        fail={
+            "NSE-EMPTY": NoStored1mBarsError("no stored 1minute bars for NSE/INDEX/NSE-EMPTY — …")
+        }
+    )
+    _install(monkeypatch, fake)
+    outcome = run_pipeline_prebuild_parallel(
+        instruments=[_spot("NSE-NIFTY"), _spot("NSE-EMPTY")],
+        cascade=_cascade(),
+        lake_root=tmp_path,
+        workers=3,
+        daily_before=date(2025, 2, 1),
+    )
+    assert outcome.no_source == ("NSE-EMPTY",)
+    assert outcome.no_source_count == 1
+    assert outcome.ok is True
+    assert outcome.failed == ()
+    assert outcome.failed_count == 0
+    assert outcome.symbols_built == 2  # NIFTY spot + 1 FUT still built (options retired)
 
 
 def test_tallies_unchanged_and_opens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _FakeMaterialize(
-        unchanged={"NSE-NIFTY-30Jan25-20000-CE"},
+        unchanged={"NSE-NIFTY-30Jan25-FUT"},
         opens={"NSE-NIFTY": 4},
     )
     _install(monkeypatch, fake)
@@ -464,7 +503,7 @@ def test_guard_routes_to_parallel_when_workers_gt_1(
         workers=3,
         daily_before=date(2025, 2, 1),
     )
-    assert outcome.symbols_built == 4  # parallel path ran
+    assert outcome.symbols_built == 2  # parallel path ran
     assert sentinel_called["seq"] is False  # the injected sequential fake was NOT used
 
 
@@ -597,7 +636,7 @@ class TestParallelDiskGuard:
         )
         assert outcome.ok is True
         assert outcome.disk_guard_blocked is False
-        assert outcome.symbols_built == 4
+        assert outcome.symbols_built == 2
 
     def test_guarded_forwards_disk_guard_to_parallel_path(
         self, patched: _FakeMaterialize, tmp_path: Path

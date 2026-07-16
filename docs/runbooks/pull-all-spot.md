@@ -132,7 +132,7 @@ ticks — its deferrals log `auto_pull.deferred` once per (day, reason):
 |-----------------------|--------------------------------------------------|-------------------------------------------------------------------|
 | `non_trading_day`     | weekend / listed NSE holiday (incl. Muhurat days) | `<date> is not an NSE trading day — nothing new to pull`           |
 | `muhurat_deferral`    | a (hypothetical) trading-day Muhurat listing      | `<date> has a Muhurat session — deferred to the next regular trading day (evening-session settle behavior unverified)` |
-| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (conservative — the vendor's true settle time is UNMEASURED; …)` — HH:MM is the ACTUAL resolved settle (default or override) |
+| `before_settle`       | trading day, before the settle time               | `waiting for post-close settle time HH:MM IST (…)` — HH:MM is the ACTUAL resolved settle and the parenthetical names the resolved TIER (DEC-SETTLE-EVIDENCE-ADOPTION-001): default → `(conservative — the vendor's true settle time is UNMEASURED; see docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md; override BRUTEX_PULL_ALL_SETTLE_IST)` (byte-identical to pre-#1793); env/flag → `(operator override BRUTEX_PULL_ALL_SETTLE_IST)`; committed evidence → `(measured — probe evidence: earliest all-pass HH:MM IST + N min margin over D trading days; override BRUTEX_PULL_ALL_SETTLE_IST)` |
 | `market_hours_blocked`| structural belt (unreachable while settle ≥ 15:35)| `inside the NSE market-hours pull window — deferred`               |
 
 Contention under `--auto` (another pull holds the lake single-flight) also
@@ -163,16 +163,49 @@ are never dropped on an exit-0 run; a crashed prebuild also gets its own
 `prebuild: CRASHED (ErrorType)` line. Junk `BRUTEX_PIPELINE_STRICT_GATE` is
 a clean exit-1 refusal before any lock (like the settle/market-hours knobs).
 
-## 3. The settle time is a GUESS — measure it, then tighten
+## 3. The settle time — measured when evidence exists, a guess until then
 
-`BRUTEX_PULL_ALL_SETTLE_IST` defaults to **17:30 IST** — a NAMED CONSERVATIVE
-guess: the vendor's post-close settle time is **UNMEASURED** (the #1775 probe
-was never run; 17:30 is the probe's last slot). Run
-`docs/groww/probe/postclose_settle_probe.py` per
-`docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md`, then set the env (or
-`--settle-ist HH:MM`) to the measured slot + margin. Strict `HH:MM`, fail-loud
-on junk, structurally refused below 15:35 (the market-hours guard's BLOCK_END —
-an earlier "settle" would just bounce off the untouched guard).
+The settle time resolves through the THREE-TIER law
+(DEC-SETTLE-EVIDENCE-ADOPTION-001, MIGRATION.md #1793):
+
+1. **Explicit `BRUTEX_PULL_ALL_SETTLE_IST`** (or `--settle-ist HH:MM`, which
+   rides the same strict resolver) — ALWAYS wins, evidence never read. Strict
+   `HH:MM`, fail-loud on junk, structurally refused below 15:35 (the
+   market-hours guard's BLOCK_END — an earlier "settle" would just bounce off
+   the untouched guard).
+2. **Validated committed probe evidence** —
+   `docs/groww/probe/settle_evidence.json` (schema 1; override the location
+   with `BRUTEX_SETTLE_EVIDENCE_PATH`; `off` disables the channel). A junk
+   EXPLICIT path fails loud at boot / pre-lock; a corrupt file at the DEFAULT
+   repo path degrades to tier 3 with one `settle_evidence.invalid` WARN (a
+   bad commit must die in CI's committed-file test, never brick fleet boots).
+3. **The conservative 17:30 IST default** — a NAMED CONSERVATIVE guess: until
+   the evidence file is committed the vendor's post-close settle time stays
+   **UNMEASURED** (17:30 is the #1775 probe's last slot).
+
+**The operator flow that replaces the guess** (all of it reviewed, none of it
+code): run the probe on ≥5 REGULAR trading days per
+`docs/groww/probe/POSTCLOSE_SETTLE_RUNBOOK.md`, then
+
+```bash
+python docs/groww/probe/postclose_settle_probe.py \
+  --summarize docs/groww/probe/ \
+  --emit-evidence docs/groww/probe/settle_evidence.json --margin-minutes 15
+```
+
+review the emitted per-day matrix + margin, commit the evidence + its
+transcripts in ONE PR (CI's committed-file test validates it), then `git pull`
++ restart (or wait one scheduler tick on a running dashboard) and verify the
+`settle_evidence.valid` INFO plus the "measured — probe evidence" deferral /
+`next_eligible` text. A >180-day-old evidence file still ADOPTS with a
+`settle_evidence.stale` WARN — re-probe and re-commit when it fires.
+
+Why the probe and not production self-learning (the censoring note):
+production "settled-by-T" observations are CENSORED at the very observation
+schedule being tuned — every gate-pass is seen at/after the current settle
+time, so passive evidence can never legitimately LOWER it (and the #1774
+gate-pass time is parse-blind to the raw 6-vs-7 row shape only the probe's
+`rows_all_len7` measures).
 
 Data safety either way: a too-early pull's still-settling TODAY bars are
 withheld by the today-completeness gate (#1774) and the end bound is the
@@ -260,25 +293,63 @@ The first-ever full run is LONG (~750 symbols × 6+ years of 1-minute; the
 session's settled windows persist, and each subsequent run shrinks. NO
 wall-clock SLA is claimed (Golden Rule #10).
 
-**Vendor-EMPTY symbol ⇒ movers warm withheld (NAMED residual, refuter-round-1
-r3 F-1 — inherited #1145/#1221 pipeline law, real-prebuild-e2e-pinned):** a
-symbol the vendor cleanly returns NO data for (settled SKIPPED, zero stored
-bars — NOT a quarantine) has nothing to derive, so the prebuild reports it a
-failure (`prebuild failures: <SYM>`), `PrebuildOutcome.ok` reads False, and
-the sequencer withholds the DASHBOARD spot-movers warm for the whole run
-(the warm clause is honestly absent from the note — never fabricated). The
-healthy symbols' timeframes ARE still built. Impact is display-cache warmth
-only: the movers caches re-key on the revision token at the next poll. The
-scoped exclusion fix is the named follow-up
-DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 (the spot report's per-symbol
-`no_data` provably conflates vendor-empty with an already-settled
-incremental re-run, so the exclusion needs a zero-stored-bars lake probe).
+**Vendor-EMPTY symbol ⇒ classified no-source, warm FIRES
+(DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, MIGRATION.md #1792 — closes the
+#1779 named residual):** a symbol the vendor cleanly returns NO data for
+(settled SKIPPED, zero stored bars — NOT a quarantine) has nothing to
+derive; the prebuild's read itself proves the empty partition (the
+zero-stored-bars LAKE-truth arm) and classifies it `no_source` instead of a
+failure — `PrebuildOutcome.ok` stays True and the DASHBOARD spot-movers warm
+FIRES over the healthy set (pre-#1792 the symbol read `prebuild failures:
+<SYM>` and withheld the warm run-wide). The symbol is COUNTED + NAMED in the
+headline and the CLI structured block (`N symbol(s) skipped — no stored
+1-minute data (vendor-empty or never pulled), excluded from timeframe
+build: <SYM> …`) — never silently dropped, and never warmed into a
+fabricated snapshot (warm discovery is parquet-file-gated per dataset: a
+symbol with NO parquet in ANY timeframe is structurally absent from every
+snapshot; a surviving previously stored DERIVED timeframe — e.g. a legacy
+vendor-fetched `1day` — legitimately keeps the symbol in the snapshot,
+serving genuine stored bars, which is why the clause claims only the
+timeframe-build exclusion — refuter round 2, MIGRATION.md #1792).
+Operator action for a delisted / never-traded name: NONE. A symbol you
+EXPECTED data for reading no-source means ZERO stored 1-minute bars at
+derive time — usually the vendor served nothing over the pulled range, or
+the spot was never pulled (the probe cannot distinguish; cause attribution
+is the named follow-up DEC-PREBUILD-EMPTY-CAUSE-ATTRIB-001) — verify on
+`/coverage/windows` (settled SKIPPED, `bars=0`). If `/coverage/windows`
+instead shows settled SUCCESS with `bars>0` for a no-source symbol, the
+stored 1-minute bars were removed AFTER the pull (e.g. a lake-heal
+quarantine MOVE of a poisoned partition — the heal moves files and never
+rewrites the window ledger) — inspect `<lake>/.quarantine/` and restore or
+re-pull (the third probe-blind shape; refuter round 2, MIGRATION.md
+#1792). The law is
+deliberately NON-TIERED (refuter round 1, MIGRATION.md #1792): a brute-force
+ENGINE index (NIFTY/BANKNIFTY/SENSEX) reading no-source gets the SAME INFO +
+named skip clause and the warm still fires — that shape means the engine's
+own 1-minute data is absent, which stays independently visible (the headline
+names it; `/coverage/windows` shows the settled-SKIPPED zero-bar windows;
+`/completeness` never reads `full` for a no-record spot row); a WARN-tier
+escalation for the engine trio (the #1788 strict-trio precedent) is the
+named follow-up DEC-PREBUILD-ENGINE-INDEX-NOSOURCE-TIER-001. The verdict is
+LAKE truth, deliberately never the spot report's per-symbol `no_data` (which
+provably conflates vendor-empty with an already-settled incremental re-run —
+the #1779 executed evidence; the trap twin is regression-pinned). The warm
+stays display-cache only: the movers caches re-key on the revision token at
+the next poll. A GENUINE prebuild failure (corrupt parquet, poisoned
+partition — and, since refuter round 4, an UNENUMERABLE partition: a
+chmod/ownership mishap on a symbol's `1minute` subtree raises the EACCES
+loudly instead of reading as "empty", so it can never masquerade as
+no-source) still reads `prebuild failures: …` and still withholds the warm —
+unchanged law.
 
-**Dry-run reports prebuild failures BY CONSTRUCTION (refuter-round-1 r3
-F-3):** a `--dry-run` / `dry_run=true` run writes no bars, so on a fresh
-lake the (real) prebuild fails every target and the note honestly reads
-`prebuild failures: …` — the inherited full-pipeline dry-run shape, not a
-defect of this button/command.
+**Dry-run reports no-source targets BY CONSTRUCTION (refuter-round-1 r3
+F-3, wording updated by #1792):** a `--dry-run` / `dry_run=true` run writes
+no bars, so on a fresh lake the (real) prebuild finds ZERO stored 1-minute
+bars for every spot target and the note honestly reads the no-source skip
+clause (`N symbol(s) skipped — no stored 1-minute data (vendor-empty or
+never pulled) …` — the never-pulled arm is literally the dry-run truth;
+pre-#1792 this shape read `prebuild failures: …`) — the inherited
+full-pipeline dry-run shape, not a defect of this button/command.
 
 ## 8. ▶ Pull F&O — the manual fno-only sibling (round-6 two-button split)
 

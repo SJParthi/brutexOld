@@ -624,6 +624,29 @@ def test_stdout_defensive_none_fields_render_question_marks(
     assert "prebuild:  ? symbol(s), ? bars" in capsys.readouterr().out
 
 
+def test_stdout_no_source_line_emit_on_nonzero(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T22 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the structured no-source
+    line renders ONLY when the count is non-zero (capped names + the honest
+    remainder from the TRUE count); the clean run's stdout stays
+    byte-identical — no line, no token (the sibling clean-run pins above pass
+    unmodified)."""
+    report = _report(
+        prebuild_no_source=("RELIANCE", "IDEA", "YESBANK", "SUZLON"),
+        prebuild_no_source_count=6,
+    )
+    assert _Harness(report=report).run(lake) == EXIT_OK
+    out = capsys.readouterr().out
+    assert (
+        "[brutex]   no-source: 6 symbol(s) skipped — no stored 1-minute data "
+        "(vendor-empty or never pulled): RELIANCE, IDEA, YESBANK (+3 more)" in out
+    )
+    # The clean run renders NO no-source token at all (emit-on-nonzero).
+    assert _Harness().run(lake) == EXIT_OK
+    assert "no-source" not in capsys.readouterr().out
+
+
 def test_stdout_ok_headline_carries_note_warning_clauses(
     lake: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -730,6 +753,93 @@ def test_dispatch_wires_all_flags(lake: Path, monkeypatch: pytest.MonkeyPatch) -
             "strict_exit": True,
         }
     ]
+
+
+# ── the settle-evidence adoption channel (DEC-SETTLE-EVIDENCE-ADOPTION-001) ─
+
+
+def test_auto_evidence_adopted_defers_measured(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A valid committed evidence file (adopts 16:00) drives the --auto gate:
+    a 15:50 run defers with ONE line carrying the MEASURED provenance, exit 0
+    (cron-green) — the e2e half of the evidence tier."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    from tests.unit.test_settle_evidence import write_evidence
+
+    evidence = write_evidence(tmp_path / "settle_evidence.json")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(evidence))
+    h = _Harness()
+    code = h.run(lake, auto=True, now=lambda: datetime(2024, 1, 2, 15, 50))
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert out.count("pull-all-spot deferred:") == 1
+    assert "waiting for post-close settle time 16:00 IST" in out
+    assert "measured" in out
+    assert "UNMEASURED" not in out  # a measured value never reads UNMEASURED
+    assert h.builder_kwargs == []  # nothing built on a deferral
+    # ... and 16:00 exactly RUNS (the inclusive boundary, evidence tier).
+    code2 = h.run(lake, auto=True, now=lambda: datetime(2024, 1, 2, 16, 0))
+    assert code2 == EXIT_OK
+    assert h.builder_kwargs != []
+    capsys.readouterr()
+
+
+def test_settle_ist_flag_beats_present_evidence(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[tier-1 supremacy e2e — the env_map trick] --settle-ist ALWAYS wins
+    over a present valid evidence file: evidence adopts 16:00 but the flag
+    says 18:00, so a 17:00 run still defers NAMING 18:00 with the operator
+    override provenance."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    from tests.unit.test_settle_evidence import write_evidence
+
+    evidence = write_evidence(tmp_path / "settle_evidence.json")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(evidence))
+    h = _Harness()
+    code = h.run(lake, auto=True, settle_ist="18:00", now=lambda: datetime(2024, 1, 2, 17, 0))
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    deferral_lines = [line for line in out.splitlines() if "pull-all-spot deferred:" in line]
+    assert len(deferral_lines) == 1
+    assert "waiting for post-close settle time 18:00 IST" in deferral_lines[0]
+    assert "16:00" not in deferral_lines[0]  # the evidence value never leaks past tier 1
+    assert "operator override BRUTEX_PULL_ALL_SETTLE_IST" in deferral_lines[0]
+    assert h.builder_kwargs == []
+
+
+def test_junk_explicit_evidence_path_exits_user_error_before_lock(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[§3.2 — the latent-junk killer, CLI arm] a junk EXPLICIT evidence path
+    fails loud PRE-lock even while --settle-ist masks the resolver's own
+    evidence read (the tier-1 short-circuit): the eager probe-only
+    ``evidence_settle(env_map)`` line catches it."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    junk = tmp_path / "settle_evidence.json"
+    junk.write_bytes(b"{junk")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(junk))
+    locks: list[str] = []
+
+    def lock_factory(*_a: Any, **_k: Any) -> Any:
+        locks.append("lock")  # pragma: no cover — must never run
+        return contextlib.nullcontext()
+
+    with pytest.raises(CliUserError, match=SETTLE_EVIDENCE_PATH_ENV):
+        cmd_pull_all_spot(lake_root=lake, settle_ist="18:00", lock_factory=lock_factory)
+    assert locks == []
 
 
 # ── the durable owed-day sentinel (DEC-CROSSVERIFY-OWED-SENTINEL-001) ─────

@@ -1844,6 +1844,20 @@ jobs:
           else
             echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
           fi
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
+          # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
+          # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_settle_evidence.py" > /dev/null; then
+            pytest --cov=brutex.calendars.settle_evidence --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_settle_evidence.py
+          else
+            echo "(brutex.calendars.settle_evidence test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_sidecar_read.py" > /dev/null; then
+            pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
+          else
+            echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
@@ -2411,6 +2425,25 @@ jobs:
             pytest --cov=brutex.dashboard.oneclick_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_view.py
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
           # unkillable-run-core modules ship at 100% line+branch STANDALONE —
@@ -3202,6 +3235,38 @@ jobs:
           done
           pip install dist/*.whl
           python ../../scripts/check_vocab_rust_parity.py
+
+  rust-brutexd:
+    name: Rust (brutexd build + clippy + test)
+    # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
+    # gates itself — fmt/check/clippy/test, mirroring the fno-math job
+    # pattern. The Python-side parity suite
+    # (tests/integration/test_sidecar_parity_static.py) additionally builds
+    # this crate inside the test job whenever cargo is present.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutexd
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutexd -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
 
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
@@ -4472,6 +4537,9 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
+      # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
+      # that introduces a crate must gate that crate (roadmap PR-1).
+      - rust-brutexd
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -4584,6 +4652,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -4621,6 +4690,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \
