@@ -1156,3 +1156,227 @@ def test_collect_batch_inputs_emits_the_x1_day_tables() -> None:
         proximity=ProximityParams(gap_mid_proximity_bps=25)
     ).collect_batch_inputs(bars)
     assert custom.gap_mid_bps == 25
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Group-13 §3.7 battery (the test stage, DEC-GAP-MIDPOINT-CONDITIONS-001)
+# ────────────────────────────────────────────────────────────────────────
+
+from brutex.engine.combo_mask import mask_to_entry_signals  # noqa: E402
+from brutex.engine.trade_sim import simulate_trades  # noqa: E402
+from brutex.strategies.types import Side  # noqa: E402
+
+
+def _tf_bar(
+    day: datetime,
+    bucket: int,
+    tf_minutes: int,
+    o: str,
+    h: str,
+    lo: str,
+    c: str,
+) -> CandleBar:
+    """One TF bar at ``09:15 IST + tf_minutes * bucket`` on ``day``."""
+    return _minute_bar(day, tf_minutes * bucket, o, h, lo, c)
+
+
+@pytest.mark.parametrize("tf_minutes", [3, 5, 15, 30])
+def test_gap_mid_arms_from_bar_2_on_each_tf(tf_minutes: int) -> None:
+    """The arm-from-bar-2 law holds PER TIMEFRAME (design §3.3): on each of
+    several TF-shaped bar streams the Group-13 bits are 0 on the session's
+    first TF bar and can arm from the second — the per-TF generalization the
+    operator steer mandates (Stage-1A evaluates whatever TF bars the sweep
+    loads; the arming ordinal is bucket-grid-agnostic).
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    bars = [
+        _tf_bar(day1, 0, tf_minutes, "100", "101", "99", "100"),
+        _tf_bar(day1, 1, tf_minutes, "100", "102", "98", "100"),
+        # Gap-UP: open 110.00 > pdc 100.00; X1_hi 102.00 + X2_hi 112.00 ⇒ ₹107.00.
+        _tf_bar(day2, 0, tf_minutes, "110", "112", "108", "111"),
+        _tf_bar(day2, 1, tf_minutes, "111", "113", "109", "112"),  # 112.00 above
+        _tf_bar(day2, 2, tf_minutes, "104", "105", "103", "104"),  # 104.00 below
+    ]
+    masks = build_bar_bits(bars)
+    assert masks[2] & GAP_MID_DEPENDENT_MASK == 0  # session's FIRST TF bar: dark
+    assert _gap_bits(masks[3]) == (True, False, False)  # second TF bar: armed
+    assert _gap_bits(masks[4]) == (False, True, False)
+
+
+def test_first_stream_day_has_no_x1_and_stays_dark() -> None:
+    """The dedicated first-stream-day pin (§3.7): with no prior session there
+    is NO X1, so bits 60-62 stay 0 on every bar of the stream's first day —
+    including bars 2+ (the arming ordinal alone would have armed them)."""
+    day = datetime(2024, 1, 2)
+    bars = [
+        _minute_bar(day, 0, "100", "101", "99", "100"),
+        _minute_bar(day, 1, "110", "112", "108", "111"),
+        _minute_bar(day, 2, "104", "105", "103", "104"),
+    ]
+    builder = Stage1AMatrixBuilder()
+    masks = [builder.push(bar) for bar in bars]
+    assert all(m & GAP_MID_DEPENDENT_MASK == 0 for m in masks)
+    assert builder._prev_session_edge is None  # no prior session ⇒ no X1
+    assert builder._gap_mid_paisa is None
+
+
+def test_near_gap_mid_exact_bps_boundary() -> None:
+    """The ``is_near`` law at its EXACT edge (§3.7): near fires iff
+    ``|close − level| <= close * bps div 10_000`` — inclusive at equality,
+    off one paisa past it (default 10 bps).
+
+    Hand arithmetic: level = (X1_hi 998000 + X2_hi 1000000) / 2 = 999000
+    paisa (₹9990.00). Probe A closes at ₹10000.00: tol = 1000000·10 div
+    10000 = 1000 paisa and |close − level| = 1000 — EXACTLY at the edge ⇒
+    near fires (co-firing with strictly-above, the PDH/PDL convention).
+    Probe B closes ONE paisa further (₹10000.01): tol = 1000001·10 div
+    10000 = 1000 paisa still, but |close − level| = 1001 ⇒ near is off.
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    masks = build_bar_bits(
+        [
+            _minute_bar(day1, 0, "9900", "9905", "9895", "9900"),
+            _minute_bar(day1, 1, "9900", "9980", "9890", "9900"),  # X1_hi ₹9980
+            # open 10000.00 > pdc 9900.00 ⇒ gap-UP; X2_hi ₹10000.00.
+            _minute_bar(day2, 0, "10000", "10000", "9950", "9960"),
+            _minute_bar(day2, 1, "9995", "10005", "9990", "10000"),  # probe A
+            _minute_bar(day2, 2, "10000", "10005", "9995", "10000.01"),  # probe B
+        ]
+    )
+    assert _gap_bits(masks[3]) == (True, False, True)  # diff == tol: near fires
+    assert _gap_bits(masks[4]) == (True, False, False)  # diff == tol + 1: near off
+
+
+def test_truncated_final_bucket_tf_uses_the_last_stored_bucket_as_x1() -> None:
+    """The truncated-final-bucket pin (§3.7): on TF=30minute the session's
+    last 09:15-anchored bucket is 15:15 (covering 15:15-15:29 — TRUNCATED,
+    375 % 30 != 0) and it — not the last FULL bucket (14:45) — is X1.
+
+    Discriminator: the 14:45 bucket carries a HIGHER high (108.00) than the
+    15:15 bucket (105.00); the served level (₹108.50) comes from the 15:15
+    extreme — a last-FULL-bucket anchor would mint ₹110.00 and flip the
+    probe's verdict.
+    """
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    day1_bars = [
+        _tf_bar(day1, k, 30, "100", "102", "98", "100")
+        for k in range(11)  # 09:15 .. 14:15
+    ] + [
+        _tf_bar(day1, 11, 30, "100", "108", "98", "100"),  # 14:45 — last FULL bucket
+        _tf_bar(day1, 12, 30, "100", "105", "98", "100"),  # 15:15 — last STORED bucket
+    ]
+    ist_last = day1_bars[-1].timestamp.astimezone(IST)
+    assert (ist_last.hour, ist_last.minute) == (15, 15)
+    bars = [
+        *day1_bars,
+        # Gap-UP: open 110.00 > pdc 100.00; X2_hi 112.00.
+        _tf_bar(day2, 0, 30, "110", "112", "108", "111"),
+        _tf_bar(day2, 1, 30, "108", "110", "107", "109"),  # probe close ₹109.00
+    ]
+    builder = Stage1AMatrixBuilder()
+    for bar in bars[:-1]:
+        builder.push(bar)
+    # level = (10500 + 11200) / 2 = 10850 — from the 15:15 (truncated) bucket.
+    assert builder._gap_mid_paisa == 10850
+    masks = build_bar_bits(bars)
+    # close 109.00 is ABOVE ₹108.50; under the wrong (14:45) anchor the level
+    # would be (10800 + 11200) / 2 = ₹110.00 and the same close would read
+    # BELOW — the probe discriminates the bucket identity.
+    assert _gap_bits(masks[-1]) == (True, False, False)
+
+
+def test_data_hole_prior_session_tail_missing_x1_is_last_stored_bar() -> None:
+    """The honest data-hole limit (§3.3): when the prior session's TAIL is
+    missing from the lake (a #1031-class hole), X1 = the last STORED TF bar
+    of that session — data-as-is, no fabrication, no NSE-clock
+    reconstruction."""
+    day1, day2 = datetime(2024, 1, 2), datetime(2024, 1, 3)
+    bars = [
+        # Day 1 ends at 09:21 IST — the rest of the session is a lake hole.
+        _minute_bar(day1, 0, "100", "101", "99", "100"),
+        _minute_bar(day1, 3, "100", "102", "98", "100"),
+        _minute_bar(day1, 6, "101", "103", "100", "101"),  # last STORED bar
+        # Gap-UP: open 105.00 > pdc 101.00; X2_hi 107.00.
+        _minute_bar(day2, 0, "105", "107", "104", "106"),
+        _minute_bar(day2, 1, "106", "108", "105", "106"),  # probe close ₹106.00
+    ]
+    builder = Stage1AMatrixBuilder()
+    for bar in bars[:-1]:
+        builder.push(bar)
+    # level = (10300 + 10700) / 2 = 10500 — the 09:21 stored bar is X1.
+    assert builder._gap_mid_paisa == 10500
+    masks = build_bar_bits(bars)
+    assert _gap_bits(masks[-1]) == (True, False, False)  # 106.00 above 105.00
+
+
+# ── The disclosed coarse-TF trade-inertness (design §3.4, posture (a)) ──
+
+
+def _coarse_tf_gap_corpus(tf_minutes: int) -> list[CandleBar]:
+    """A three-day gap corpus on the 09:15-anchored ``tf_minutes`` grid.
+
+    Day 2 gaps UP (open 110.00 > pdc 100.00; level = (X1_hi 10200 + X2_hi
+    11600) / 2 = ₹109.00) and every armed day-2 bar closes at ₹115.00 —
+    strictly above — so a ``close_above_gap_mid``-gated mask genuinely
+    SIGNALS; whether a signal can ever FILL is exactly the per-TF structure
+    under test. Day 3 exists so a last-bar signal's next bar is a LATER
+    session (the overnight-gap drop, R2-OC-2), never merely end-of-stream.
+    """
+    day1, day2, day3 = (datetime(2024, 1, 2 + i) for i in range(3))
+    buckets = 375 // tf_minutes + (1 if 375 % tf_minutes else 0)
+    bars: list[CandleBar] = []
+    for k in range(buckets):
+        bars.append(_tf_bar(day1, k, tf_minutes, "100", "102", "98", "100"))
+    bars.append(_tf_bar(day2, 0, tf_minutes, "110", "116", "108", "115"))
+    for k in range(1, buckets):
+        bars.append(_tf_bar(day2, k, tf_minutes, "115", "117", "113", "115"))
+    for k in range(buckets):
+        bars.append(_tf_bar(day3, k, tf_minutes, "120", "122", "118", "120"))
+    return bars
+
+
+@pytest.mark.parametrize("tf_minutes", [180, 240])
+def test_gap_mid_gated_masks_are_zero_trade_on_coarse_tfs(tf_minutes: int) -> None:
+    """The §3.4 disclosed inertness, pinned deterministically: every mask
+    whose ENTRY is gated by bits 60-62 is structurally ZERO-TRADE on TF=180
+    and TF=240.
+
+    TF=240 has session buckets {09:15, 13:15} — the only armed bar (13:15)
+    is the session's LAST bar, so its fill bar is the next session (dropped).
+    TF=180 has {09:15, 12:15, 15:15} — a 12:15-armed signal fills into the
+    15:15 bar whose [15:15, 18:15) window reaches 15:20 (forced-exit bar ⇒
+    refused), and a 15:15-armed signal drops overnight. The bits stay
+    EVALUABLE (honest mask semantics; the signals genuinely fire — the
+    non-vacuity assert) — the sweep simply scores the mask zero-trade.
+    """
+    bars = _coarse_tf_gap_corpus(tf_minutes)
+    signals = mask_to_entry_signals(build_bar_bits(bars), 1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+    assert any(signals)  # non-vacuous: the gap-gated mask DOES signal
+    trades = simulate_trades(
+        bars,
+        signals,
+        direction=Side.BUY,
+        tf_minutes=tf_minutes,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert trades == []  # …and can structurally never fill
+
+
+def test_gap_mid_gated_mask_can_trade_on_tf_120() -> None:
+    """The TF=120 contrast (partial inertness only): buckets {09:15, 11:15,
+    13:15, 15:15} — an 11:15-armed signal fills at the 13:15 bar (its
+    [13:15, 15:15) window never reaches 15:20 ⇒ not forced, same session),
+    so the zero-trade pins above are about the 180/240 session-bucket
+    structure, not a vacuously dead mask."""
+    bars = _coarse_tf_gap_corpus(120)
+    signals = mask_to_entry_signals(build_bar_bits(bars), 1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+    trades = simulate_trades(
+        bars,
+        signals,
+        direction=Side.BUY,
+        tf_minutes=120,
+        stop_loss_paisa=80,
+        take_profit_paisa=50,
+    )
+    assert len(trades) >= 1

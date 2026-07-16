@@ -256,6 +256,56 @@ def test_daily_history_leak_mutant_is_killed_by_the_multi_day_anchor_cases() -> 
         assert stitched_mutant != fresh
 
 
+def test_gap_mid_bits_ride_the_roll_equivalence() -> None:
+    """Group-13 coverage of the P1 oracle (DEC-GAP-MIDPOINT-CONDITIONS-001).
+
+    Deterministic gap-day segments: each segment spans two IST days whose
+    second day gaps UP hard, so the gap-midpoint bits genuinely FIRE inside
+    both the stitched build and the per-segment fresh builds (asserted — the
+    oracle's full-mask compare is non-vacuous over bits 60-62), and the
+    stitched build equals the fresh concat bit for bit — post-roll gap state
+    == fresh-builder gap state.
+
+    Honest blindness note (the ``_daily_history`` analysis class): a
+    SINGLE-member leak mutant on the three Group-13 members is structurally
+    INVISIBLE to this oracle — `_gap_mid_paisa` is unconditionally re-minted
+    at every day roll, `_session_edge` is overwritten at every push tail,
+    and a preserved `_prev_session_edge` is masked by the (independently
+    cleared) `_prev_day_ohlc` mint guard on the post-roll first day. The
+    designated kill for the member clears is therefore the MEMBER-level pin
+    ``test_contract_roll_clears_the_gap_mid_state_members`` in
+    ``tests/unit/test_engine_stage1a.py``; THIS case pins the composed
+    bit-level behavior across the roll.
+    """
+    from brutex.engine.stage1a import GAP_MID_DEPENDENT_MASK
+
+    def _gap_segment(first_day: date, base: int) -> list[CandleBar]:
+        day1 = [_seg_bar(first_day, m, base + m, base + 1 + m, evening=False) for m in range(4)]
+        day2_date = first_day + timedelta(days=1)
+        # Day 2 opens ~50% above day 1's close — a hard gap-UP; later closes
+        # sit above the minted midpoint, so bit 60 fires from bar 2 onward.
+        day2 = [
+            _seg_bar(
+                day2_date, m, base + base // 2 + 2 * m, base + base // 2 + 1 + 2 * m, evening=False
+            )
+            for m in range(4)
+        ]
+        return day1 + day2
+
+    seg_a = _gap_segment(_BASE_DAY, 100)
+    seg_b = _gap_segment(_BASE_DAY + timedelta(days=2), 500)
+    schedule = (
+        (_BASE_DAY + timedelta(days=1)).toordinal(),
+        (_BASE_DAY + timedelta(days=3)).toordinal(),
+    )
+    _assert_roll_equivalence([seg_a, seg_b], schedule)
+    fresh = build_bar_bits(seg_a) + build_bar_bits(seg_b)
+    fired = [i for i, m in enumerate(fresh) if m & GAP_MID_DEPENDENT_MASK]
+    # Non-vacuity: the gap bits fire inside BOTH segments' second days.
+    assert any(i < len(seg_a) for i in fired)
+    assert any(i >= len(seg_a) for i in fired)
+
+
 def test_partial_reset_would_break_the_oracle_teeth() -> None:
     """Non-vacuity teeth: WITHOUT the reset the equivalence genuinely fails.
 
