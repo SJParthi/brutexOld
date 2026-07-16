@@ -1,0 +1,40 @@
+# cargo-fuzz harness for the brutex-feed decision kernel.
+#
+# DEC-FEED-RUST-CORE-001 (joins the rust-fuzz-smoke.yml matrix). Fuzzes the
+# pure forward scan (`brutex_feed::scan_bars`) — the positivity + bad-tick
+# decision core the engine read boundary consumes behind BRUTEX_FEED_RUST.
+# cargo-fuzz needs NIGHTLY Rust + libFuzzer; this is a separate,
+# non-published package (NOT a workspace member), built with brutex-feed's
+# DEFAULT features so it links the dependency-free pure-Rust core (no
+# libpython — the trading-core harness shape).
+[package]
+name = "brutex-feed-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.93.1"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.brutex-feed]
+path = ".."
+# Pure-Rust core only — NO `python`/pyo3 feature, so the fuzz binary links
+# zero Python symbols.
+default-features = false
+
+# Overflow must panic (not wrap) so libFuzzer flags any out-of-domain
+# magnitude as a crash — matching the parent crate's release profile.
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_scan"
+path = "fuzz_targets/fuzz_scan.rs"
+test = false
+doc = false
+bench = false

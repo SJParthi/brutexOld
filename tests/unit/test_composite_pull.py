@@ -542,6 +542,30 @@ def test_underlying_kind_map_first_wins_on_key_collision() -> None:
     assert cp._underlying_kind_map(list(reversed(stock_first))) == {"BAJAJAUTO": True}
 
 
+def test_registry_read_keys_and_kind_map_survive_blank_symbol_row() -> None:
+    """DEC-FNO-UNDERLYING-EMPTY-GUARD-001 (guarantee-audit BUG-3): a blank-symbol row
+    never crashes the whole-map helpers.
+
+    Pre-fix, ``primary_fno_underlying("")`` raised ``IndexError`` inside BOTH
+    ``_registry_read_keys`` and ``_underlying_kind_map``, so ONE junk vendor row
+    poisoned the whole build. With the guard the blank row yields one inert ``""``
+    key (matched by no real registry/coverage row — the disclosed benign residue;
+    per-row skip here is deliberately out of the mandated scope) and every real
+    name is byte-identical.
+    """
+    instruments = [
+        _instrument("RELIANCE", 1),
+        _instrument("", 2),
+        _instrument("TCS", 3),
+    ]
+    keys = cp._registry_read_keys(instruments)
+    assert keys == ("RELIANCE", "", "TCS")
+    kinds = cp._underlying_kind_map(instruments)
+    assert set(kinds) == {"RELIANCE", "", "TCS"}
+    assert kinds["RELIANCE"] is True  # _instrument builds IDX rows — is_index=True.
+    assert kinds[""] is True  # present-but-inert (the disclosed residue).
+
+
 def test_aliased_underlying_chain_visible_to_candle_phase(tmp_path: Path) -> None:
     """FAILS-BEFORE regression: an aliased index's fresh chain must reach phase (b).
 
