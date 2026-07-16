@@ -1,7 +1,8 @@
 """Unit tests for the pipeline's ONE automatic prebuild phase (DEC-PIPELINE-AUTOPREBUILD-001).
 
 100% line+branch over ``brutex.dashboard.pipeline_prebuild``: the eager
-SPOT/FUTURES/OPTIONS discovery from the F&O candle-lake cascade, the
+SPOT/FUTURES discovery from the F&O candle-lake cascade (OPTIONS are retired
+— DEC-OPTIONS-PREBUILD-RETIRE-001, options are 1-minute-native), the
 target-shaped injected-materialiser seam (``include_daily`` is the ROUTE's
 binding — here the seam is a pure fake), the outcome rollup (built symbols /
 total bars / capped failure names / true failed_count / ok), the LOUD
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from brutex.dashboard.fno_cascade import FnoCascadeIndex, build_fno_cascade
+from brutex.dashboard.gated_prebuild import OPTIONS_PREBUILD_SKIPPED_NOTE
 from brutex.dashboard.pipeline_prebuild import (
     MAX_REPORTED_FAILURES,
     PrebuildOutcome,
@@ -98,26 +100,32 @@ class _FakeMaterializer:
         return MaterializeResult(written={"5m": self.bars, "1day": 1}, skipped=())
 
 
-# ── the happy path: full SPOT + FUTURES + OPTIONS composition ──────────────
+# ── the happy path: SPOT + FUTURES composition (options retired) ────────────
 
 
-def test_prebuild_covers_spot_futures_and_options_with_daily() -> None:
+def test_prebuild_covers_spot_and_futures_with_daily_never_options() -> None:
+    """DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as
+    relayed via the coordinator — ADR-0021 RULING B, draft PR #1555): the
+    prebuild covers SPOT + FUTURES; CE/PE contracts in the cascade are NEVER
+    discovered or materialised (options are 1-minute-native)."""
     mat = _FakeMaterializer()
     outcome = run_pipeline_prebuild(
         instruments=[_spot("NSE-NIFTY")],
         cascade=_cascade(),
         materialize=mat,
     )
-    # 1 spot underlying + 1 future + 2 options, each 4 bars (3 intraday + 1 daily).
+    # 1 spot underlying + 1 future, each 4 bars (3 intraday + 1 daily).
     assert outcome == PrebuildOutcome(
-        symbols_built=4, total_bars=16, failed=(), failed_count=0, ok=True
+        symbols_built=2, total_bars=8, failed=(), failed_count=0, ok=True
     )
     by_symbol = {t.symbol: t for t in mat.targets}
     assert by_symbol["NSE-NIFTY"].kind is PrebuildKind.SPOT
     assert by_symbol["NSE-NIFTY"].segment == "INDEX"
     assert by_symbol["NSE-NIFTY-30Jan25-FUT"].kind is PrebuildKind.FUTURES
-    assert by_symbol["NSE-NIFTY-30Jan25-20000-CE"].kind is PrebuildKind.OPTIONS
-    assert by_symbol["NSE-NIFTY-30Jan25-20000-PE"].kind is PrebuildKind.OPTIONS
+    # ABSENCE PIN: the cascade's CE/PE contracts produced ZERO targets — no
+    # OPTIONS kind, no option symbol, ever.
+    assert all(t.kind is not PrebuildKind.OPTIONS for t in mat.targets)
+    assert set(by_symbol) == {"NSE-NIFTY", "NSE-NIFTY-30Jan25-FUT"}
     # Contract targets carry the F&O lake segment + the cascade's exchange.
     fut = by_symbol["NSE-NIFTY-30Jan25-FUT"]
     assert (fut.segment, fut.exchange) == ("FNO", "NSE")
@@ -172,15 +180,12 @@ def test_prebuild_include_spot_false_runs_fno_phases_only() -> None:
             materialize=mat,
             include_spot=False,
         )
-    # 1 future + 2 options, each 4 bars — NO spot target ever materialised.
+    # 1 future, 4 bars — NO spot target ever materialised (and no option:
+    # DEC-OPTIONS-PREBUILD-RETIRE-001).
     assert outcome == PrebuildOutcome(
-        symbols_built=3, total_bars=12, failed=(), failed_count=0, ok=True
+        symbols_built=1, total_bars=4, failed=(), failed_count=0, ok=True
     )
-    assert [t.kind for t in mat.targets] == [
-        PrebuildKind.FUTURES,
-        PrebuildKind.OPTIONS,
-        PrebuildKind.OPTIONS,
-    ]
+    assert [t.kind for t in mat.targets] == [PrebuildKind.FUTURES]
     # The started log reports the honest zero spot scope; the by-design note
     # is the gated spine's REPORTED no-op (never a silent skip).
     started = [e for e in logs if e["event"] == "pipeline.prebuild.started"]
@@ -222,7 +227,7 @@ def test_guarded_prebuild_forwards_include_spot_sequential() -> None:
         materialize=mat,
         include_spot=False,
     )
-    assert outcome.symbols_built == 3
+    assert outcome.symbols_built == 1
     assert all(t.kind is not PrebuildKind.SPOT for t in mat.targets)
 
 
@@ -321,7 +326,7 @@ def test_prebuild_unmatched_exclusion_token_filters_nothing() -> None:
         materialize=mat,
         exclude_symbols=frozenset({"RELIANCE25JAN3000CE"}),
     )
-    assert outcome.symbols_built == 4  # spot + future + both options — untouched
+    assert outcome.symbols_built == 2  # spot + future — untouched (options retired)
 
 
 def test_guarded_prebuild_forwards_exclude_symbols() -> None:
@@ -342,16 +347,23 @@ def test_guarded_prebuild_forwards_exclude_symbols() -> None:
 
 
 def test_prebuild_per_symbol_failure_quarantined_and_named() -> None:
-    mat = _FakeMaterializer(fail={"NSE-NIFTY-30Jan25-20000-CE": ValueError("poisoned")})
+    # Two serial-month futures; one poisoned — the healthy sibling still builds.
+    cascade = build_fno_cascade(
+        [
+            _dataset("NSE-NIFTY-30Jan25-FUT", "FUT"),
+            {**_dataset("NSE-NIFTY-27Feb25-FUT", "FUT"), "expiry": "2025-02-27"},
+        ]
+    )
+    mat = _FakeMaterializer(fail={"NSE-NIFTY-30Jan25-FUT": ValueError("poisoned")})
     outcome = run_pipeline_prebuild(
-        instruments=[_spot("NSE-NIFTY")], cascade=_cascade(), materialize=mat
+        instruments=[_spot("NSE-NIFTY")], cascade=cascade, materialize=mat
     )
     assert outcome.ok is False
-    assert outcome.symbols_built == 3  # spot + future + the healthy PE still built
-    assert outcome.failed == ("NSE-NIFTY-30Jan25-20000-CE",)
+    assert outcome.symbols_built == 2  # spot + the healthy Feb future still built
+    assert outcome.failed == ("NSE-NIFTY-30Jan25-FUT",)
     assert outcome.failed_count == 1
-    # The healthy PE was STILL materialised (one bad symbol never aborts a stage).
-    assert any(t.symbol == "NSE-NIFTY-30Jan25-20000-PE" for t in mat.targets)
+    # The healthy sibling was STILL materialised (one bad symbol never aborts a stage).
+    assert any(t.symbol == "NSE-NIFTY-27Feb25-FUT" for t in mat.targets)
 
 
 def test_prebuild_failure_names_capped_at_ten_with_true_count() -> None:
@@ -474,14 +486,17 @@ def test_prebuild_emits_started_phase_done_and_done_logs() -> None:
     assert len(started) == 1
     assert started[0]["spot_symbols"] == 1
     assert started[0]["futures_contracts"] == 1
-    assert started[0]["options_contracts"] == 2
+    # DEC-OPTIONS-PREBUILD-RETIRE-001: never a numeric option count (options
+    # are not discovered) — the static by-design token instead.
+    assert "options_contracts" not in started[0]
+    assert started[0]["options_prebuild"] == OPTIONS_PREBUILD_SKIPPED_NOTE
     assert started[0]["excluded_symbols"] == 0  # DEC-PREBUILD-CLEANSET-001: 0 on a clean pull
     phase_done = [e for e in logs if e["event"] == "pipeline.prebuild.phase_done"]
     assert [e["phase"] for e in phase_done] == ["spot", "futures", "options"]
     assert all({"attempted", "succeeded", "failed", "total_bars"} <= set(e) for e in phase_done)
     done = [e for e in logs if e["event"] == "pipeline.prebuild.done"]
     assert len(done) == 1
-    assert done[0]["symbols_built"] == 4
+    assert done[0]["symbols_built"] == 2
     assert done[0]["failed_count"] == 0
     assert done[0]["duration_s"] >= 0
 
@@ -496,7 +511,7 @@ def test_guarded_prebuild_success_passes_outcome_through() -> None:
         materialize=_FakeMaterializer(),
     )
     assert outcome.ok is True
-    assert outcome.symbols_built == 4
+    assert outcome.symbols_built == 2
 
 
 def test_guarded_prebuild_catches_cascade_fault_loudly() -> None:
@@ -779,7 +794,7 @@ class TestDiskGuard:
         assert outcome.ok is True
         assert outcome.disk_guard_blocked is False
         assert outcome.disk_guard_detail is None
-        assert len(mat.targets) == 4
+        assert len(mat.targets) == 2
 
     def test_none_verdict_runs_normally(self) -> None:
         """SKIP/no-verdict: a disabled guard (env off / no store) never blocks."""
@@ -791,7 +806,7 @@ class TestDiskGuard:
             disk_guard=lambda: None,
         )
         assert outcome.ok is True
-        assert len(mat.targets) == 4
+        assert len(mat.targets) == 2
 
     def test_raising_guard_fails_open_and_logs(self) -> None:
         """OVERRIDE-by-failure: a guard bug is logged and the data stage proceeds."""
@@ -808,7 +823,7 @@ class TestDiskGuard:
                 disk_guard=_boom,
             )
         assert outcome.ok is True
-        assert len(mat.targets) == 4
+        assert len(mat.targets) == 2
         assert any(e["event"] == "pipeline.prebuild.disk_guard_error" for e in logs)
 
     def test_guarded_wrapper_threads_disk_guard(self) -> None:
@@ -838,15 +853,15 @@ class _UnchangedMaterializer:
 
 
 def test_prebuild_counts_unchanged_skips_honestly() -> None:
-    # 1 spot + 1 FUT + 2 options; the FUT + one option are unchanged-skipped.
+    # 1 spot + 1 FUT; the FUT is unchanged-skipped (options retired — never a target).
     outcome = run_pipeline_prebuild(
         instruments=[_spot("NSE-NIFTY")],
         cascade=_cascade(),
-        materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT", "NSE-NIFTY-30Jan25-20000-CE"}),
+        materialize=_UnchangedMaterializer({"NSE-NIFTY-30Jan25-FUT"}),
     )
-    assert outcome.unchanged_skips == 2
-    assert outcome.symbols_built == 4  # a skipped symbol is still current + counted built
-    assert outcome.total_bars == 8  # only the two FULL derives wrote bars
+    assert outcome.unchanged_skips == 1
+    assert outcome.symbols_built == 2  # a skipped symbol is still current + counted built
+    assert outcome.total_bars == 4  # only the ONE full derive wrote bars
     assert outcome.ok is True
 
 
@@ -958,8 +973,9 @@ def test_prebuild_target_dense_from_is_index() -> None:
     assert dense_by_symbol["NSE-NIFTY"] is True
     assert dense_by_symbol["NSE-RELIANCE"] is False
     assert dense_by_symbol["NSE-NIFTY-30Jan25-FUT"] is False
-    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-CE"] is False
-    assert dense_by_symbol["NSE-NIFTY-30Jan25-20000-PE"] is False
+    # Options retired (DEC-OPTIONS-PREBUILD-RETIRE-001) — no CE/PE target exists.
+    assert "NSE-NIFTY-30Jan25-20000-CE" not in dense_by_symbol
+    assert "NSE-NIFTY-30Jan25-20000-PE" not in dense_by_symbol
 
 
 def test_guarded_prebuild_crash_outcome_zero_opens_substituted() -> None:
