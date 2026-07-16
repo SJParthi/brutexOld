@@ -32,10 +32,9 @@ def resample_1m_ipc(ipc_bytes: bytes, target_tf_minutes: int, oi_aware: bool) ->
     raw).
     """
 
-def resample_all_ipc(
-    ipc_bytes: bytes, target_tf_minutes: list[int], oi_aware: bool
-) -> list[bytes]:
+def resample_all_ipc(ipc_bytes: bytes, target_tf_minutes: list[int], oi_aware: bool) -> list[bytes]:
     """Batch twin of ``resample_1m_ipc`` — one decode, one payload per TF."""
+
 def render_stats_shard_json(
     version: int,
     kind: str,
@@ -55,6 +54,8 @@ def render_stats_shard_json(
     ever cross this boundary). Raises ``TypeError``/``OverflowError``/
     ``UnicodeEncodeError`` on extraction failures and ``RuntimeError`` if
     the assembly panicked (caught at the FFI boundary).
+    """
+
 def classify_window_status(raw_bars: int, error_type: str | None, degraded: bool) -> str:
     """The window-ledger status law (ADR-0020 Wave C-3 / G8).
 
