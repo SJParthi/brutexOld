@@ -53,9 +53,15 @@ on:
       # models.py defines the CandleBar/FnoGreeksBar schema that dictates
       # the rendered frame's byte surface (review-round fold).
       - "brutex/data/models.py"
+      # Wave-B resample seam (DEC-LAKE-RUST-RESAMPLE-001, ledger #1913).
+      - "brutex/data/lake_rust_resample.py"
+      - "brutex/data/tf_resampler.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/unit/test_lake_rust_resample.py"
+      - "tests/unit/test_tf_resampler_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   pull_request:
     paths:
@@ -63,9 +69,14 @@ on:
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
       - "brutex/data/models.py"
+      - "brutex/data/lake_rust_resample.py"
+      - "brutex/data/tf_resampler.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/unit/test_lake_rust_resample.py"
+      - "tests/unit/test_tf_resampler_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -201,4 +212,7 @@ jobs:
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/unit/test_lake_rust_render.py \
-            tests/unit/test_parquet_writer_rust_render.py
+            tests/unit/test_parquet_writer_rust_render.py \
+            tests/unit/test_lake_rust_resample.py \
+            tests/unit/test_tf_resampler_rust_seam.py \
+            tests/integration/test_lake_rust_resample_parity.py

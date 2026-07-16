@@ -2945,7 +2945,41 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
+- **Active branch:** `claude/rust-lake-resample-wave` (**DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 —
+  allocator-final** — Wave-B slice 1 of ADR-0020 (slice G5): the 1-minute → derived-TF resample core
+  (`tf_resampler.resample_1m_to_tf`) re-hosted on the `rust/brutex-lake` crate behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_RESAMPLE` facade — the exact PR-1 (`lake_rust_render`, #1891) pattern one seam over. NEW
+  `rust/brutex-lake/src/resample.rs` (own module file, additive lib.rs registration — concurrent Wave siblings
+  extend the same crate without collision): `resample_1m_ipc_impl` + the batch face `resample_all_ipc_impl`
+  reproduce the 09:15-IST session-open-anchored bucket LAW op-for-op as pure integer arithmetic
+  (truncate=floor/`div_euclid` · total_minutes=TRUNC-toward-zero/Rust `/` · `//`=floor-div/`div_euclid` — three
+  DISTINCT rounding modes, so sub-minute + pre-09:15 stray timestamps bucket bit-identically; daily 375 = one
+  bucket per IST day at the 09:15 open), the aggregation set token-for-token (first/max/min/last/sum +
+  carry-LAST OI + the ten Greeks-overlay columns by PRESENCE — STATE never FLOW) under STABLE group_by; frames
+  cross as uncompressed Arrow IPC bytes (the PR-1 deviation). NEW facade leaf `brutex/data/lake_rust_resample.py`
+  mirrors `lake_rust_render` section-for-section (local tristate twin · import/API + polars-version lockstep
+  guards · 16-sample burn-in + schema×tf shape gate at DTYPE-EXACT frame strength — schema equality AND
+  `.equals`, the #1795b dtype-insensitivity closed — with ship-the-ORACLE autorevert · blanket degrade + panic
+  belt; OSError joins the DECODE leg only, probed; MemoryError re-raises raw); the seam sits inside
+  `resample_1m_to_tf` ONLY, AFTER validation + TF-membership (the verbatim body extracted to
+  `_resample_1m_to_tf_python`, Slice-0-style — ALSO the live parity oracle every degrade path serves); the
+  wrappers (`spot_resample`/`fno_resample`/`resample_all_21_tfs`) inherit the seam free and STAY Python.
+  PROOF (executed, real maturin wheel): the 9-case parity corpus (regular day · Muhurat evening · month edge ·
+  holey · volume-zero · OI/Greeks carry-last · 09:15-open collapse (naive dtype arm) · tf=1 identity · single
+  bar) ON-vs-OFF dtype-exact across ALL 21 TFs with the oracle BOMBED on the steady-state ON arm; the
+  whole-prebuild A/B (`materialize_lake_timeframes` over a real `ParquetBarSink` lake — derived partition bytes
+  sha256-EQUAL ON vs OFF); the existing independent-oracle/property/golden suites pass UNMODIFIED on BOTH arms
+  (65/65 each); cargo 21 tests + fmt + clippy `-D warnings` clean. Flag OFF (default) BYTE-IDENTICAL
+  (bomb-spy-pinned); run identity untouched (derived partitions only — stated, with the sweep's derived-TF read
+  dependency named). HONEST: the daily residues (`fno_daily_resample`/`spot_daily_resample`) are NOT this PR —
+  named follow-up DEC-LAKE-RUST-RESAMPLE-DAILY-001; the forming-bucket `resample_session_to_tf` fold + the batch
+  `resample_all_ipc` adoption are named follow-ups; `feed/resampler.py` stays EXEMPT (#1492 G3); the honesty
+  banner holds verbatim — "expected payoff ≈ 0 — uniformity, not speed", NO speedup claimed (the seam ADDS an
+  IPC round-trip per derived TF). `lake_rust_resample.py` 100% line+branch standalone; `tf_resampler.py` 100%
+  on both its gate shapes (the ci.yml 21c stanza extended with the NEW stem-matched
+  `test_tf_resampler_rust_seam.py`); ruff/ruff-format/`mypy --strict` clean, pyright 0 errors on touched files;
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
   — the fixed-close-comparison bias hazard, both left in the enum for a cheap round-2), mirroring the
@@ -8545,7 +8579,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/vwap-ema-price-source-axis`
+- **Active feature branch:** `claude/rust-lake-resample-wave`
+  (DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 — allocator-final — Wave-B
+  slice 1 of ADR-0020 (slice G5): the tf_resampler 1m→derived-TF core
+  re-hosted on `rust/brutex-lake` (`resample_1m_ipc_impl` + the batch face)
+  behind the NEW default-OFF `BRUTEX_LAKE_RUST_RESAMPLE` facade
+  (`brutex/data/lake_rust_resample.py` — the PR-1 lake_rust_render mirror:
+  tristate flag twin, import/API + polars-version lockstep guards, 16-sample
+  burn-in at DTYPE-EXACT frame strength with ship-the-oracle autorevert);
+  the seam inside `resample_1m_to_tf` ONLY, after validation + TF-membership,
+  with the verbatim body extracted to `_resample_1m_to_tf_python` as the live
+  parity oracle; wrappers + daily residues STAY Python (residues = named
+  follow-up DEC-LAKE-RUST-RESAMPLE-DAILY-001); the 9-case ON-vs-OFF parity
+  corpus + the whole-prebuild sha256 A/B EXECUTED green on the real wheel;
+  flag OFF byte-identical (bomb-spy-pinned); honesty banner verbatim —
+  expected payoff ≈ 0, uniformity not speed; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis; DEFAULT-OMITTED

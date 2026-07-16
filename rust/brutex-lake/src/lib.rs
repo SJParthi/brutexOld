@@ -99,6 +99,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+// Wave-B resample core (ADR-0020 slice G5, DEC-LAKE-RUST-RESAMPLE-001) —
+// own module file; registration lines only in this file (sibling Wave
+// slices extend the same crate additively).
+pub mod resample;
+
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -325,6 +330,8 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::resample_1m_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::resample_all_ipc, m)?)?;
     Ok(())
 }
 
