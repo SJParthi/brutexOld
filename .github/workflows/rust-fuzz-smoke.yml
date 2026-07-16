@@ -68,6 +68,8 @@ jobs:
             path: rust/trading-core
           - crate: fno-math
             path: rust/fno-math
+          - crate: brutex-feed
+            path: rust/brutex-feed
     defaults:
       run:
         working-directory: ${{ matrix.path }}

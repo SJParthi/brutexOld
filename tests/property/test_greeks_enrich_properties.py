@@ -203,3 +203,104 @@ class TestStoredNoArbProperties:
         pe = _enrich(_pe(strike), _kernel_premium(strike, sigma, is_call=False))
         assert ce.gamma is not None and pe.gamma is not None
         assert ce.gamma == pytest.approx(pe.gamma, rel=1e-6)
+
+
+class TestRustBatchOffOnEquivalence:
+    """`DEC-GREEKS-RUST-BATCH-001`: OFF ≡ ON over arbitrary row matrices.
+
+    Random per-row shapes (solvable / degenerate / non-finite closes, spot
+    present or absent, stamped or unstamped) through ``enrich_option_bars``
+    on BOTH arms of ``BRUTEX_GREEKS_RUST_BATCH`` — bars bit-identical under
+    the ``struct.pack`` float key, stats identical.
+    """
+
+    @staticmethod
+    def _bar_key(bar: FnoGreeksBar) -> tuple[object, ...]:
+        import struct
+
+        key: list[object] = [
+            bar.timestamp,
+            bar.volume,
+            bar.open_interest,
+            bar.greeks_provenance_id,
+        ]
+        for name in ("iv", "delta", "gamma", "theta", "vega", "rho", "t_years_used", "rate_used"):
+            value = getattr(bar, name)
+            key.append(None if value is None else struct.pack("<d", value))
+        for name in ("open", "high", "low", "close", "spot_at_bar"):
+            dec = getattr(bar, name)
+            key.append(None if dec is None else (str(dec), dec.as_tuple()))
+        return tuple(key)
+
+    @settings(max_examples=25, deadline=None)
+    @given(
+        shapes=st.lists(
+            st.tuples(
+                st.sampled_from(["atm", "deep_itm", "zero", "nan", "huge"]),
+                st.booleans(),  # spot present?
+                st.booleans(),  # carries a stale v1 stamp?
+            ),
+            min_size=0,
+            max_size=12,
+        )
+    )
+    def test_off_equals_on_bit_for_bit(self, shapes: list[tuple[str, bool, bool]]) -> None:
+        import os
+        from datetime import timedelta
+
+        from brutex.data.greeks_enrich import (
+            GREEKS_RUST_BATCH_ENV,
+            reset_rust_batch_for_tests,
+        )
+
+        closes = {
+            "atm": 180.0,
+            "deep_itm": 3500.0,
+            "zero": 0.0,
+            "nan": float("nan"),
+            "huge": 30_000.0,
+        }
+        parts = parse_fno_symbol("NSE-NIFTY-25Jan24-21500-CE")
+        assert parts is not None
+        rows: list[dict[str, object]] = []
+        spots: dict[datetime, Decimal] = {}
+        for i, (kind, has_spot, stale_stamp) in enumerate(shapes):
+            ts = _TS + timedelta(minutes=i)
+            close = closes[kind]
+            row: dict[str, object] = {
+                "timestamp": ts,
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": 1,
+                "open_interest": None,
+            }
+            for name in GREEKS_OVERLAY_FIELDS:
+                row[name] = None
+            if stale_stamp:
+                row["greeks_provenance_id"] = pack_greeks_provenance(
+                    formula_version=1, rate_source_id=1, style_flag=1, status=STATUS_OK
+                )
+            rows.append(row)
+            if has_spot:
+                spots[ts] = _SPOT
+
+        def _run() -> tuple[list[tuple[object, ...]], object]:
+            reset_rust_batch_for_tests()
+            bars, stats = enrich_option_bars(
+                rows, parts=parts, spot_by_ts=spots, rate_source=_RATE, style_flag=1
+            )
+            return [self._bar_key(b) for b in bars], stats
+
+        os.environ.pop(GREEKS_RUST_BATCH_ENV, None)
+        try:
+            keys_off, stats_off = _run()
+            os.environ[GREEKS_RUST_BATCH_ENV] = "1"
+            keys_on, stats_on = _run()
+        finally:
+            os.environ.pop(GREEKS_RUST_BATCH_ENV, None)
+            reset_rust_batch_for_tests()
+
+        assert keys_off == keys_on
+        assert stats_off == stats_on

@@ -39,3 +39,10 @@ _.__post_init__
 # test_audit_chain_properties.py (not yet by a CLI). Function exists at
 # brutex/orchestrator/audit.py:466.
 _.verify_chain
+
+# Protocol stub parameter (DEC-FEED-RUST-CORE-001): brutex/feed_rust.py's
+# _ScanKernel.__call__ mirrors the brutex_feed.scan_bars FFI signature; the
+# stub body never executes, so vulture reads the keyword-capable parameter
+# as an unused variable. The name is load-bearing documentation of the FFI
+# contract (and the real kernel is called with it positionally).
+_.screen_enabled
