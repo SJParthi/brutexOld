@@ -92,13 +92,62 @@ def resample_1m_to_fno_daily(df_1m: pl.DataFrame, *, before: date) -> list[Candl
     """
     # Local import keeps polars out of this module's import graph for callers that
     # only need the dataclass (CLAUDE.md §11 lazy dep, mirrors the spot module).
-    from brutex.data.models import CandleBar
-    from brutex.data.tf_resampler import OPEN_INTEREST_COLUMN, resample_1m_to_tf
+    from brutex.data.lake_rust_resample import daily_restamp_via_rust, lake_rust_resample_enabled
+    from brutex.data.tf_resampler import resample_1m_to_tf
 
     if df_1m.is_empty():
         return []
 
     daily = resample_1m_to_tf(df_1m, DAILY_TF_MINUTES)
+    if lake_rust_resample_enabled():
+        # DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 (the ADR-0020 row-14 port): the
+        # daily FILTER + midnight-IST RE-STAMP frame stage routes through the
+        # brutex_lake crate (``keep_oi=True`` — the F&O arm carries the
+        # resampler's carry-last OI through), with the SHARED spot frame
+        # pipeline as the live oracle. The verbatim per-row loop BELOW then
+        # materialises the bars from the restamped frame — its own
+        # ``astimezone(_IST)`` re-stamp and ``>= before`` filter are
+        # IDEMPOTENT over an already-restamped frame (midnight IST maps to
+        # the same IST date; every surviving row already passed the filter),
+        # so the ``Decimal(str(x))`` repr edges + the stdlib-UTC stamp stay
+        # Python-side and attribute-identical on BOTH arms (the row-14 law:
+        # output objects stay Python-side).
+        daily = daily_restamp_via_rust(
+            daily, before, keep_oi=True, oracle=_fno_daily_restamp_oracle
+        )
+    return _daily_frame_to_fno_bars(daily, before)
+
+
+def _fno_daily_restamp_oracle(daily: pl.DataFrame, before: date) -> pl.DataFrame:
+    """The F&O binding of the ONE shared daily restamp frame pipeline.
+
+    ``spot_daily_resample._daily_restamp_frame_python`` with ``keep_oi=True``
+    (CLAUDE.md §11 COMMON — one pipeline, two arms), shaped to the seam's
+    positional ``(frame, before)`` oracle signature.
+    """
+    # Friend import (DEC-P0-017 — deliberate cross-module reuse, never a copy).
+    from brutex.data.spot_daily_resample import (  # pyright: ignore[reportPrivateUsage]
+        _daily_restamp_frame_python,
+    )
+
+    return _daily_restamp_frame_python(daily, before, keep_oi=True)
+
+
+def _daily_frame_to_fno_bars(daily: pl.DataFrame, before: date) -> list[CandleBar]:
+    """The verbatim pre-seam per-row materialisation loop (Slice-0-style).
+
+    Extracted token-for-token from :func:`resample_1m_to_fno_daily` by
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 so the public fn can gate the Rust
+    frame stage while the OFF (default) path stays byte-identical. The loop
+    is RESTAMP- and FILTER-IDEMPOTENT: fed the raw resampled daily frame
+    (the OFF arm) it filters + re-stamps exactly as before; fed the
+    already-restamped frame (the ON arm) every row passes the filter and
+    re-stamps to the same midnight-IST instant — so both arms build
+    attribute-identical bars through this ONE retained loop.
+    """
+    from brutex.data.models import CandleBar
+    from brutex.data.tf_resampler import OPEN_INTEREST_COLUMN
+
     # Defensive: the OHLCV-aware resampler only appends the OI column when the
     # input carried one. A hand-built test frame (or the 1m no-op branch) can omit
     # it, so guard the read — a bare ``row["open_interest"]`` would KeyError.

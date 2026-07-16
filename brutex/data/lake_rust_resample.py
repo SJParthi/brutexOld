@@ -63,12 +63,13 @@ from __future__ import annotations
 import importlib
 import io
 import os
+from datetime import date
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from types import ModuleType
 
     import polars as pl
@@ -118,8 +119,15 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "pinned_polars_version",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "daily_restamp_ipc",
+    "session_cutoff_ipc",
     "linked_zstd_version",
 )
+
+#: Days-since-epoch base for the daily forming-session cutoff crossing —
+#: a ``datetime.date``'s physical value (stdlib — this leaf still never
+#: imports polars at module scope).
+_EPOCH_DATE: Final[date] = date(1970, 1, 1)
 
 #: Once-per-process-per-reason warn memo + the engaged-once latch. LOG-VOLUME
 #: state ONLY: resampled frames never depend on it.
@@ -358,6 +366,148 @@ def _frames_equal_dtype_exact(left: pl.DataFrame, right: pl.DataFrame) -> bool:
     return left.schema == right.schema and left.equals(right)
 
 
+def _guarded_crate() -> tuple[ModuleType, object] | None:
+    """Layers 1-2, shared by every routed entry point (§11 COMMON).
+
+    Latch check → import/API guard (:func:`_resolve_crate`) → metadata guard
+    → the version guard (ADR-0020 §7 hazard 1: fail-closed, ONE loud WARN
+    naming BOTH versions — resampled VALUES transitively determine
+    downstream parquet bytes, the ADR Wave-B ordering law). Returns
+    ``(crate, pinned_polars_version)`` iff the Rust path may engage;
+    ``None`` means the caller serves its Python oracle (any latch was
+    already logged by the failing layer).
+    """
+    if rust_resample_disabled():
+        return None
+    crate = _resolve_crate()
+    if crate is None:
+        return None
+    pinned = _crate_metadata(crate, "pinned_polars_version")
+    if pinned is _METADATA_ERROR:
+        return None
+    import polars as pl
+
+    if pinned != pl.__version__:
+        _disable(
+            "polars_version_mismatch",
+            installed_polars=pl.__version__,
+            crate_pinned_polars=pinned,
+            remedy="align the wheel and the crate's pinned polars rev, then "
+            "re-run the parity corpus "
+            "(docs/runbooks/lake-rust-render-lockstep.md)",
+        )
+        return None
+    return crate, pinned
+
+
+def _frame_to_ipc(frame: pl.DataFrame) -> bytes:
+    """Serialise a frame to uncompressed Arrow IPC bytes (the FFI crossing).
+
+    Called INSIDE the guarded crate-call closure so a serialise-leg
+    ``PolarsError`` rides the same degrade set as the crate call itself.
+    """
+    buffer = io.BytesIO()
+    frame.write_ipc(buffer, compression="uncompressed")
+    return buffer.getvalue()
+
+
+def _call_crate(call: Callable[[], object], *, error_reason: str) -> tuple[bool, object]:
+    """Run ONE crate FFI call under the degrade/escape/panic-belt discipline.
+
+    Returns ``(True, result)`` on a clean return; ``(False, None)`` after a
+    degrade-set raise (one ``lake_rust_resample.fallback`` WARN per process
+    per *error_reason*) or an escaped panic (``crate_panic`` latch). The
+    escape set (``KeyboardInterrupt``/``SystemExit``/``MemoryError``) —
+    the errors.py doctrine — re-raises RAW in the clause ABOVE the panic
+    belt, so the belt's ``Exception`` member can never swallow an OOM.
+    """
+    try:
+        return True, call()
+    except _degrade_errors() as exc:
+        _warn_once(error_reason, error_detail=repr(exc))
+        return False, None
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        # The panic belt over the crate's own catch_unwind (the render
+        # facade's doctrine verbatim — see _panic_belt_errors).
+        _disable("crate_panic", error_detail=repr(exc))
+        return False, None
+
+
+def _decode_ipc(payload: bytes, *, reason: str = "result_decode_error") -> pl.DataFrame | None:
+    """Decode a crate result payload; ``None`` means serve the oracle.
+
+    ``OSError`` joins the DECODE leg only (probed: polars' IPC reader
+    surfaces a truncated/corrupt in-memory payload as an OSError from its
+    seek) — a poisoned result payload degrades, never crashes.
+    """
+    import polars as pl
+
+    decode_errors: tuple[type[Exception], ...] = (*_degrade_errors(), OSError)
+    try:
+        return pl.read_ipc(io.BytesIO(payload))
+    except decode_errors as exc:
+        _warn_once(reason, error_detail=repr(exc))
+        return None
+
+
+def _note_engaged(crate: ModuleType, pinned: object) -> bool:
+    """Log the once-per-process ``lake_rust_resample.engaged`` INFO.
+
+    Returns ``False`` iff the ``linked_zstd_version`` metadata call raised —
+    a raising metadata pyfunction marks a foreign/stale install whose frames
+    are not trusted either (fail-closed; the latch was set by
+    :func:`_crate_metadata`) — the caller serves its oracle.
+    """
+    if _ENGAGED_KEY in _OBSERVABILITY_MEMO:
+        return True
+    linked_zstd = _crate_metadata(crate, "linked_zstd_version")
+    if linked_zstd is _METADATA_ERROR:
+        return False
+    _OBSERVABILITY_MEMO.add(_ENGAGED_KEY)
+    _LOG.info(
+        "lake_rust_resample.engaged",
+        crate_pinned_polars=pinned,
+        linked_zstd=linked_zstd,
+    )
+    return True
+
+
+def _serve_with_burn_in(
+    rust_df: pl.DataFrame,
+    schema_token: str,
+    compute_oracle: Callable[[], pl.DataFrame],
+) -> pl.DataFrame:
+    """Layer 3 — burn-in self-check (the #1531/#1532 pattern + the shape gate).
+
+    While the per-process budget lasts (PLUS on every previously-unseen
+    *schema_token* shape), both engines compute; ANY dtype-exact frame
+    difference ships the ORACLE frame and autoreverts the Rust path
+    (``lake_rust_resample.autoreverted`` at ERROR). Past burn-in the crate
+    frame serves directly with no oracle in the path.
+    """
+    shape_unseen = _BURN_IN_SHAPE_GATE[0] and schema_token not in _BURN_IN_SHAPES_SEEN
+    if _BURN_IN_REMAINING[0] > 0 or shape_unseen:
+        oracle_df = compute_oracle()
+        if not _frames_equal_dtype_exact(rust_df, oracle_df):
+            _disable(
+                "burn_in_frame_mismatch",
+                error=True,
+                rust_shape=str(rust_df.shape),
+                python_shape=str(oracle_df.shape),
+                schema_token=schema_token,
+            )
+            return oracle_df
+        _BURN_IN_SHAPES_SEEN.add(schema_token)
+        if _BURN_IN_REMAINING[0] > 0:
+            _BURN_IN_REMAINING[0] -= 1
+            if _BURN_IN_REMAINING[0] == 0:
+                _LOG.info("lake_rust_resample.burn_in_complete", samples=BURN_IN_SAMPLES)
+        return rust_df
+    return rust_df
+
+
 def resample_frame_via_rust(
     df_1m: pl.DataFrame,
     target_tf_minutes: int,
@@ -388,47 +538,15 @@ def resample_frame_via_rust(
         (``tf_resampler._resample_1m_to_tf_python``) — the live parity
         oracle every degrade path serves.
     """
-    if rust_resample_disabled():
+    guarded = _guarded_crate()
+    if guarded is None:
         return oracle(df_1m, target_tf_minutes)
-    crate = _resolve_crate()
-    if crate is None:
-        return oracle(df_1m, target_tf_minutes)
-    pinned = _crate_metadata(crate, "pinned_polars_version")
-    if pinned is _METADATA_ERROR:
-        return oracle(df_1m, target_tf_minutes)
-    import polars as pl
-
-    if pinned != pl.__version__:
-        # Layer 2 — the version guard (ADR-0020 §7 hazard 1): fail-closed,
-        # ONE loud WARN naming BOTH versions, never silently different
-        # frames (resampled VALUES transitively determine downstream
-        # parquet bytes — the ADR Wave-B ordering law).
-        _disable(
-            "polars_version_mismatch",
-            installed_polars=pl.__version__,
-            crate_pinned_polars=pinned,
-            remedy="align the wheel and the crate's pinned polars rev, then "
-            "re-run the parity corpus "
-            "(docs/runbooks/lake-rust-render-lockstep.md)",
-        )
-        return oracle(df_1m, target_tf_minutes)
-    try:
-        buffer = io.BytesIO()
-        df_1m.write_ipc(buffer, compression="uncompressed")
-        rust_bytes = crate.resample_1m_ipc(buffer.getvalue(), target_tf_minutes, True)
-    except _degrade_errors() as exc:
-        _warn_once("resample_error", error_detail=repr(exc))
-        return oracle(df_1m, target_tf_minutes)
-    except (KeyboardInterrupt, SystemExit, MemoryError):
-        # The escape set (the errors.py doctrine): operator interrupt /
-        # interpreter shutdown / OOM stay global — never a fallback. This
-        # clause sits ABOVE the panic belt so the belt's `Exception` member
-        # can never swallow a MemoryError.
-        raise
-    except _panic_belt_errors() as exc:
-        # The panic belt over the crate's own catch_unwind (the render
-        # facade's doctrine verbatim — see _panic_belt_errors).
-        _disable("crate_panic", error_detail=repr(exc))
+    crate, pinned = guarded
+    ok, rust_bytes = _call_crate(
+        lambda: crate.resample_1m_ipc(_frame_to_ipc(df_1m), target_tf_minutes, True),
+        error_reason="resample_error",
+    )
+    if not ok:
         return oracle(df_1m, target_tf_minutes)
     if not isinstance(rust_bytes, bytes):
         # Refuse-poison gate: a non-bytes return is a crate BUG — never
@@ -437,58 +555,178 @@ def resample_frame_via_rust(
         # stale/foreign install.
         _warn_once("resample_result_refused", result_type=type(rust_bytes).__name__)
         return oracle(df_1m, target_tf_minutes)
-    decode_errors: tuple[type[Exception], ...] = (*_degrade_errors(), OSError)
-    try:
-        rust_df = pl.read_ipc(io.BytesIO(rust_bytes))
-    except decode_errors as exc:
-        # OSError joins the DECODE leg only (probed: polars' IPC reader
-        # surfaces a truncated/corrupt in-memory payload as an OSError from
-        # its seek) — a poisoned result payload degrades, never crashes.
-        _warn_once("result_decode_error", error_detail=repr(exc))
+    rust_df = _decode_ipc(rust_bytes)
+    if rust_df is None:
         return oracle(df_1m, target_tf_minutes)
-    if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
-        linked_zstd = _crate_metadata(crate, "linked_zstd_version")
-        if linked_zstd is _METADATA_ERROR:
-            # A raising metadata pyfunction marks a foreign/stale install —
-            # its frames are not trusted either (fail-closed; latched above).
-            return oracle(df_1m, target_tf_minutes)
-        _OBSERVABILITY_MEMO.add(_ENGAGED_KEY)
-        _LOG.info(
-            "lake_rust_resample.engaged",
-            crate_pinned_polars=pinned,
-            linked_zstd=linked_zstd,
-        )
+    if not _note_engaged(crate, pinned):
+        return oracle(df_1m, target_tf_minutes)
     schema_token = f"{df_1m.schema}|tf={target_tf_minutes}"
-    shape_unseen = _BURN_IN_SHAPE_GATE[0] and schema_token not in _BURN_IN_SHAPES_SEEN
-    if _BURN_IN_REMAINING[0] > 0 or shape_unseen:
-        # Layer 3 — burn-in self-check (the #1531/#1532 pattern + the shape
-        # gate): both engines resample; ANY dtype-exact frame difference
-        # ships the ORACLE frame and autoreverts the Rust path.
-        oracle_df = oracle(df_1m, target_tf_minutes)
-        if not _frames_equal_dtype_exact(rust_df, oracle_df):
-            _disable(
-                "burn_in_frame_mismatch",
-                error=True,
-                rust_shape=str(rust_df.shape),
-                python_shape=str(oracle_df.shape),
-                schema_token=schema_token,
-            )
-            return oracle_df
-        _BURN_IN_SHAPES_SEEN.add(schema_token)
-        if _BURN_IN_REMAINING[0] > 0:
-            _BURN_IN_REMAINING[0] -= 1
-            if _BURN_IN_REMAINING[0] == 0:
-                _LOG.info("lake_rust_resample.burn_in_complete", samples=BURN_IN_SAMPLES)
-        return rust_df
-    return rust_df
+    return _serve_with_burn_in(rust_df, schema_token, lambda: oracle(df_1m, target_tf_minutes))
+
+
+def derive_frames_via_rust(
+    df_1m: pl.DataFrame,
+    tfs: Sequence[int],
+    *,
+    oracle: Callable[[Any, int], pl.DataFrame],
+) -> dict[int, pl.DataFrame]:
+    """The routed BATCH derive — the wrappers' ``{tf: frame}`` entry point.
+
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001: consumes the crate's shipped batch
+    face ``resample_all_ipc`` (ONE decode + ONE Python→Rust crossing for the
+    whole 19-TF derive — closing the wrapper half of the #1600-named
+    batch-face adoption), with the per-TF Python oracle as the parity
+    reference. NEVER a partial mix: a latched/guarded/degraded call, a
+    poisoned payload, an undecodable element, OR a burn-in mismatch on ANY
+    member serves the WHOLE derive from the oracle (the crate contract's
+    twin — any single TF's error fails the whole call). The input frame is
+    ALREADY validated (the caller runs ``tf_resampler._validate_input``
+    first — VALIDATION STAYS PYTHON) and every *tfs* member is an
+    ``ALL_TF_MINUTES`` member by construction.
+    """
+
+    def _oracle_all() -> dict[int, pl.DataFrame]:
+        return {tf: oracle(df_1m, tf) for tf in tfs}
+
+    guarded = _guarded_crate()
+    if guarded is None:
+        return _oracle_all()
+    crate, pinned = guarded
+    ok, payloads = _call_crate(
+        lambda: crate.resample_all_ipc(_frame_to_ipc(df_1m), list(tfs), True),
+        error_reason="derive_error",
+    )
+    if not ok:
+        return _oracle_all()
+    if (
+        not isinstance(payloads, list)
+        or len(payloads) != len(tfs)
+        or not all(isinstance(payload, bytes) for payload in payloads)
+    ):
+        # Refuse-poison gate, batch shape: the real crate returns exactly
+        # one PyBytes per requested TF — anything else marks a stale/foreign
+        # install and the whole derive serves from the oracle.
+        _warn_once("derive_result_refused", result_type=type(payloads).__name__)
+        return _oracle_all()
+    frames: dict[int, pl.DataFrame] = {}
+    for tf, payload in zip(tfs, payloads, strict=True):
+        frame = _decode_ipc(payload)
+        if frame is None:
+            return _oracle_all()
+        frames[tf] = frame
+    if not _note_engaged(crate, pinned):
+        return _oracle_all()
+
+    def _tf_oracle(tf: int) -> Callable[[], pl.DataFrame]:
+        # A typed closure factory (not a default-arg lambda) so each TF's
+        # burn-in reference late-binds ITS OWN tf.
+        return lambda: oracle(df_1m, tf)
+
+    out: dict[int, pl.DataFrame] = {}
+    for tf, frame in frames.items():
+        served = _serve_with_burn_in(frame, f"{df_1m.schema}|tf={tf}", _tf_oracle(tf))
+        if rust_resample_disabled():
+            # A burn-in mismatch autoreverted MID-derive: discard every
+            # crate frame and serve the whole derive from the oracle —
+            # never a partial rust/python mix inside one derive.
+            return _oracle_all()
+        out[tf] = served
+    return out
+
+
+def daily_restamp_via_rust(
+    daily: pl.DataFrame,
+    before: date,
+    *,
+    keep_oi: bool,
+    oracle: Callable[[Any, date], pl.DataFrame],
+) -> pl.DataFrame:
+    """The routed daily FILTER + midnight-IST RE-STAMP stage.
+
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001: the frame stage the two daily
+    resamplers (`spot_daily_resample.resample_1m_to_daily` with
+    ``keep_oi=False`` / `fno_daily_resample.resample_1m_to_fno_daily` with
+    ``keep_oi=True``) share, routed through the crate's
+    ``daily_restamp_ipc`` with the Python frame pipeline
+    (`spot_daily_resample._daily_restamp_frame_python`) as the live oracle.
+    *before* crosses as its days-since-epoch physical value; the CandleBar
+    materialisation stays Python-side on BOTH arms (the ADR row-14 law).
+    """
+    guarded = _guarded_crate()
+    if guarded is None:
+        return oracle(daily, before)
+    crate, pinned = guarded
+    before_days = (before - _EPOCH_DATE).days
+    ok, rust_bytes = _call_crate(
+        lambda: crate.daily_restamp_ipc(_frame_to_ipc(daily), before_days, keep_oi),
+        error_reason="daily_restamp_error",
+    )
+    if not ok:
+        return oracle(daily, before)
+    if not isinstance(rust_bytes, bytes):
+        _warn_once("daily_restamp_result_refused", result_type=type(rust_bytes).__name__)
+        return oracle(daily, before)
+    rust_df = _decode_ipc(rust_bytes)
+    if rust_df is None:
+        return oracle(daily, before)
+    if not _note_engaged(crate, pinned):
+        return oracle(daily, before)
+    schema_token = f"{daily.schema}|daily_restamp|keep_oi={keep_oi}"
+    return _serve_with_burn_in(rust_df, schema_token, lambda: oracle(daily, before))
+
+
+def session_cutoff_via_rust(
+    resampled: pl.DataFrame,
+    target_tf_minutes: int,
+    cutoff_min: int,
+    *,
+    oracle: Callable[[Any, int, int], pl.DataFrame],
+) -> pl.DataFrame:
+    """The routed forming-bucket CUTOFF filter of ``resample_session_to_tf``.
+
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001: filters an ALREADY-RESAMPLED
+    session frame through the crate's ``session_cutoff_ipc`` (keep a bucket
+    only when its label's IST minute-of-day + *target_tf_minutes* is
+    ``<= cutoff_min``), with the verbatim polars filter body
+    (`fno_resample._session_cutoff_python`) as the live oracle. The
+    resample STAGE itself is upstream (the caller ran the public
+    ``resample_1m_to_tf`` — validation + the inner seam — first).
+    """
+    guarded = _guarded_crate()
+    if guarded is None:
+        return oracle(resampled, target_tf_minutes, cutoff_min)
+    crate, pinned = guarded
+    ok, rust_bytes = _call_crate(
+        lambda: crate.session_cutoff_ipc(_frame_to_ipc(resampled), target_tf_minutes, cutoff_min),
+        error_reason="session_cutoff_error",
+    )
+    if not ok:
+        return oracle(resampled, target_tf_minutes, cutoff_min)
+    if not isinstance(rust_bytes, bytes):
+        _warn_once("session_cutoff_result_refused", result_type=type(rust_bytes).__name__)
+        return oracle(resampled, target_tf_minutes, cutoff_min)
+    rust_df = _decode_ipc(rust_bytes)
+    if rust_df is None:
+        return oracle(resampled, target_tf_minutes, cutoff_min)
+    if not _note_engaged(crate, pinned):
+        return oracle(resampled, target_tf_minutes, cutoff_min)
+    schema_token = f"{resampled.schema}|session_cutoff|tf={target_tf_minutes}"
+    return _serve_with_burn_in(
+        rust_df,
+        schema_token,
+        lambda: oracle(resampled, target_tf_minutes, cutoff_min),
+    )
 
 
 __all__ = [
     "BURN_IN_SAMPLES",
     "LAKE_RUST_RESAMPLE_ENV",
+    "daily_restamp_via_rust",
+    "derive_frames_via_rust",
     "env_flag_tristate",
     "lake_rust_resample_enabled",
     "resample_frame_via_rust",
     "reset_lake_rust_resample_for_tests",
     "rust_resample_disabled",
+    "session_cutoff_via_rust",
 ]

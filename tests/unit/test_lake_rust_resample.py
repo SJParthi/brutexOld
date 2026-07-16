@@ -93,6 +93,15 @@ def _fake_crate(
         resample = lambda ipc, tf, oi: _ipc(_ORACLE_DF)  # noqa: E731 - test stub
     module.resample_1m_ipc = resample  # type: ignore[attr-defined]
     module.resample_all_ipc = lambda ipc, tfs, oi: []  # type: ignore[attr-defined]
+    # The sibling faces (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001) — a real wheel
+    # ships the WHOLE _CRATE_API surface, so the fake must too (the import
+    # guard latches crate_unavailable on ANY missing member by design).
+    module.daily_restamp_ipc = lambda ipc, before_days, keep_oi: _ipc(  # type: ignore[attr-defined]
+        _ORACLE_DF
+    )
+    module.session_cutoff_ipc = lambda ipc, tf, cutoff: _ipc(  # type: ignore[attr-defined]
+        _ORACLE_DF
+    )
     return module
 
 

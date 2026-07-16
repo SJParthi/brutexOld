@@ -24,8 +24,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from brutex.data.lake_rust_resample import derive_frames_via_rust, lake_rust_resample_enabled
 from brutex.data.tf_resampler import resample_all_21_tfs
-from brutex.data.timeframes import DAILY_TF_MINUTES, TF_LABELS
+from brutex.data.timeframes import ALL_TF_MINUTES, DAILY_TF_MINUTES, TF_LABELS
 
 if TYPE_CHECKING:
     import polars as pl
@@ -33,9 +34,25 @@ if TYPE_CHECKING:
 #: The 1-minute base TF (the resample *source*, never a derived output).
 _BASE_TF_MINUTES: int = 1
 
+#: The 19 DERIVED intraday TFs (the 21 minus the ``1m`` base + the ``1d``
+#: daily) in ``ALL_TF_MINUTES`` order — EXACTLY the key set + ORDER the
+#: Python arm's dict comprehension over ``resample_all_21_tfs`` yields, so
+#: the two arms' output dicts iterate identically.
+DERIVED_INTRADAY_TF_MINUTES: tuple[int, ...] = tuple(
+    minutes for minutes in ALL_TF_MINUTES if minutes not in (_BASE_TF_MINUTES, DAILY_TF_MINUTES)
+)
+
 
 def derive_intraday_tfs(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
     """Resample a 1m spot DataFrame to the 19 derived intraday timeframes.
+
+    When — and ONLY when — ``BRUTEX_LAKE_RUST_RESAMPLE`` is set truthy
+    (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001, the ADR-0020 row-12 fold of this
+    wrapper into the crate's entry points), the 19-TF derive routes through
+    the ``brutex_lake`` batch face (ONE Arrow-IPC crossing) with the
+    verbatim per-TF Python resample body as the live parity oracle; flag OFF
+    (the default) is byte-identical to today (the seam is never touched —
+    bomb-spy-pinned). Validation stays Python on BOTH arms.
 
     Parameters
     ----------
@@ -51,6 +68,18 @@ def derive_intraday_tfs(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
         timeframes only — the ``1m`` base (source) and the ``1d`` daily
         (fetched from ``/charts/historical``, not resampled) are excluded.
     """
+    if lake_rust_resample_enabled():
+        return _derive_intraday_tfs_rust(df_1m)
+    return _derive_intraday_tfs_python(df_1m)
+
+
+def _derive_intraday_tfs_python(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """The verbatim pre-seam derive body (the Slice-0-style decomposition).
+
+    Extracted token-for-token from :func:`derive_intraday_tfs` by
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 so the public fn can gate the Rust
+    seam while the OFF (default) path stays byte-identical.
+    """
     all_tfs = resample_all_21_tfs(df_1m)
     return {
         TF_LABELS[minutes]: frame
@@ -59,6 +88,33 @@ def derive_intraday_tfs(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
     }
 
 
+def _derive_intraday_tfs_rust(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """The flag-ON arm: ONE batch crossing over the 19 derived intraday TFs.
+
+    VALIDATION STAYS PYTHON (the seam contract): the SAME
+    ``tf_resampler._validate_input`` gate the Python arm hits (via its first
+    ``resample_1m_to_tf`` call) runs FIRST, so a schema/ordering defect
+    raises the identical ``TypeError``/``ValueError``/``ResampleInputError``
+    on both arms — the crate never sees an unvalidated frame. Every degrade
+    path inside :func:`~brutex.data.lake_rust_resample.derive_frames_via_rust`
+    serves the verbatim per-TF Python oracle, so the returned mapping never
+    depends on the wheel being present or correct.
+    """
+    # Friend imports of the resampler's validation gate + pre-seam body (the
+    # DEC-P0-017 convention — deliberate cross-module reuse, never a copy).
+    from brutex.data.tf_resampler import (  # pyright: ignore[reportPrivateUsage]
+        _resample_1m_to_tf_python,
+        _validate_input,
+    )
+
+    _validate_input(df_1m)
+    frames = derive_frames_via_rust(
+        df_1m, DERIVED_INTRADAY_TF_MINUTES, oracle=_resample_1m_to_tf_python
+    )
+    return {TF_LABELS[minutes]: frames[minutes] for minutes in DERIVED_INTRADAY_TF_MINUTES}
+
+
 __all__ = [
+    "DERIVED_INTRADAY_TF_MINUTES",
     "derive_intraday_tfs",
 ]

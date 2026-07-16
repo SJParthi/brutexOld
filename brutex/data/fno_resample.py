@@ -26,11 +26,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# Reuse the spot module's ONE 1-minute base-TF constant (CLAUDE.md §11 COMMON — one
-# source of truth; do NOT redefine ``1`` here). The friend import is the established
-# convention (pyproject reportPrivateUsage="warning" + per-site ignore at deliberate
-# cross-module reuse sites — DEC-P0-017).
-from brutex.data.spot_resample import _BASE_TF_MINUTES  # pyright: ignore[reportPrivateUsage]
+from brutex.data.lake_rust_resample import (
+    derive_frames_via_rust,
+    lake_rust_resample_enabled,
+    session_cutoff_via_rust,
+)
+
+# Reuse the spot module's ONE 1-minute base-TF constant + derived-TF tuple
+# (CLAUDE.md §11 COMMON — one source of truth; do NOT redefine them here). The
+# friend import is the established convention (pyproject
+# reportPrivateUsage="warning" + per-site ignore at deliberate cross-module
+# reuse sites — DEC-P0-017).
+from brutex.data.spot_resample import (
+    _BASE_TF_MINUTES,  # pyright: ignore[reportPrivateUsage]
+    DERIVED_INTRADAY_TF_MINUTES,
+)
 from brutex.data.tf_resampler import resample_1m_to_tf, resample_all_21_tfs
 from brutex.data.timeframes import DAILY_TF_MINUTES, TF_LABELS
 
@@ -63,6 +73,25 @@ def derive_fno_intraday_tfs(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
         with the midnight-IST stamp by :mod:`brutex.data.fno_daily_resample`) are
         excluded. With an ``open_interest`` column present in ``df_1m`` every
         returned frame carries the bucket's carry-last OI.
+
+    When ``BRUTEX_LAKE_RUST_RESAMPLE`` is set truthy
+    (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001, the ADR-0020 row-13 fold of this
+    wrapper into the crate's entry points), the 19-TF derive routes through
+    the ``brutex_lake`` batch face exactly like the spot twin (OI + Greeks
+    overlay carried by PRESENCE — the crate's ``oi_aware`` law); flag OFF
+    (the default) is byte-identical to today.
+    """
+    if lake_rust_resample_enabled():
+        return _derive_fno_intraday_tfs_rust(df_1m)
+    return _derive_fno_intraday_tfs_python(df_1m)
+
+
+def _derive_fno_intraday_tfs_python(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """The verbatim pre-seam derive body (the Slice-0-style decomposition).
+
+    Extracted token-for-token from :func:`derive_fno_intraday_tfs` by
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 so the public fn can gate the Rust
+    seam while the OFF (default) path stays byte-identical.
     """
     all_tfs = resample_all_21_tfs(df_1m)
     return {
@@ -70,6 +99,27 @@ def derive_fno_intraday_tfs(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
         for minutes, frame in all_tfs.items()
         if minutes not in (_BASE_TF_MINUTES, DAILY_TF_MINUTES)
     }
+
+
+def _derive_fno_intraday_tfs_rust(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """The flag-ON arm: ONE batch crossing over the 19 derived intraday TFs.
+
+    The exact F&O twin of ``spot_resample._derive_intraday_tfs_rust`` —
+    VALIDATION STAYS PYTHON (the same gate the Python arm hits first), and
+    every degrade path serves the verbatim per-TF Python oracle. OI and the
+    Greeks-overlay columns ride the crate's carry-last PRESENCE law, so an
+    OI-less frame's output stays the OHLCV-6 verbatim on both arms.
+    """
+    from brutex.data.tf_resampler import (  # pyright: ignore[reportPrivateUsage]
+        _resample_1m_to_tf_python,
+        _validate_input,
+    )
+
+    _validate_input(df_1m)
+    frames = derive_frames_via_rust(
+        df_1m, DERIVED_INTRADAY_TF_MINUTES, oracle=_resample_1m_to_tf_python
+    )
+    return {TF_LABELS[minutes]: frames[minutes] for minutes in DERIVED_INTRADAY_TF_MINUTES}
 
 
 def resample_session_to_tf(
@@ -115,14 +165,38 @@ def resample_session_to_tf(
         present), ascending by ``ts_utc``, with the trailing forming bucket dropped when
         *cutoff_min* lands mid-bucket. Empty when the input is empty.
     """
-    import polars as pl
-
     if day_df.is_empty():
         return day_df
     renamed = day_df.rename({_LAKE_TS_COLUMN: _RESAMPLER_TS_COLUMN})
     resampled: pl.DataFrame = resample_1m_to_tf(renamed, target_tf_minutes)
     if cutoff_min is None or resampled.is_empty():
         return resampled
+    if lake_rust_resample_enabled():
+        # DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 (the ADR-0020 row-13
+        # forming-bucket-filter port): the cutoff filter routes through the
+        # crate with the verbatim polars filter body below as the live
+        # oracle. The resample stage ABOVE already rode the inner
+        # ``resample_1m_to_tf`` seam — this is the second (filter) stage.
+        return session_cutoff_via_rust(
+            resampled, target_tf_minutes, cutoff_min, oracle=_session_cutoff_python
+        )
+    return _session_cutoff_python(resampled, target_tf_minutes, cutoff_min)
+
+
+def _session_cutoff_python(
+    resampled: pl.DataFrame,
+    target_tf_minutes: int,
+    cutoff_min: int,
+) -> pl.DataFrame:
+    """The verbatim pre-seam forming-bucket filter (the Slice-0-style decomposition).
+
+    Extracted token-for-token from :func:`resample_session_to_tf` by
+    DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001 so the public fn can gate the Rust
+    seam while the OFF (default) path stays byte-identical — AND the live
+    parity oracle every seam degrade path serves.
+    """
+    import polars as pl
+
     # Drop the trailing FORMING bucket: a bucket labelled at IST minute ``s`` closes at
     # ``s + M``; keep it only when fully closed at/under the cutoff (``s + M <= cutoff``).
     # IST minute-of-day of the bucket label = (ts_utc + 05:30) hour*60 + minute, Int32-cast
