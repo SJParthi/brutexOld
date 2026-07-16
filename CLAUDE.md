@@ -135,7 +135,9 @@ one-line summary, never the story.)
 Earlier: 2026-07-15 (CLUB S2 members, branch `integration/club-s2-results-v2`
 — the FRESH rebuild off main tip d6ac9f85 WITHOUT #1522
 DEC-FILL-WORST-CASE-001 (the global worst-case fill mode, CONSCIOUSLY
-EXCLUDED): #1458 DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848 — the
+EXCLUDED — its retired content is carried forward by PR #1587 /
+DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023, the surviving
+fill-law carrier): #1458 DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848 — the
 temporal-robustness YEAR GATE + per-period finalist stats, engine truth) ·
 #1459 DEC-RESULTS-TRUST-HONESTY-001 (MIGRATION.md #1849 — the /results trust +
 honesty pack, PR-B of #1848, coexisting with main's landed
