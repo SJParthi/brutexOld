@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from brutex.cli import EXIT_OK, EXIT_VERIFY_INCONCLUSIVE, cmd_sweep_all, main
+from brutex.cli import EXIT_OK, EXIT_USER_ERROR, EXIT_VERIFY_INCONCLUSIVE, cmd_sweep_all, main
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
@@ -699,3 +699,45 @@ def test_ungated_tree_with_no_recorded_gate_config_verifies_rc0_unchanged(
     assert "verdict: CLEAN" in out
     assert "grid_mismatch" not in out
     assert "recount_mixed_mode_unverifiable" not in out
+
+
+def test_malformed_recorded_gate_config_on_a_valid_chain_exits_user_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """MINOR-2 (review fix round): the ``cmd_sweep_verify``
+    ``except SweepVerifyError → EXIT_USER_ERROR`` recovery branch, EXECUTED
+    end-to-end. A MALFORMED ``gate_config.overfit`` leg — here a NON-FINITE
+    ``weight`` member, which the supervisor chain's default ``json.dumps``
+    happily persists as a ``NaN`` token (MINOR-1's boundary) — is appended
+    through the REAL :class:`SweepAuditWriter` (``resume=True``, so the hash
+    chain stays VALID and the tolerant per-chain read cannot skip it); the
+    verify must refuse with the loud typed one-liner + rc 1, never a raw
+    traceback and never a later ``json.dumps(allow_nan=False)`` crash."""
+    from brutex.engine.sweep_audit import SweepAuditWriter
+
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    assert _sweep_all(lake_root, catalog_path, results_root, k="1,2", overfit_gate=False) == (
+        EXIT_OK
+    )
+    sup_path = results_root / "audit" / "sweep-all-supervisor.jsonl"
+    assert sup_path.exists()
+    with SweepAuditWriter.open(sup_path, resume=True) as sup:
+        sup.append(
+            action="SUPERVISOR_START",
+            subject="sweep-all",
+            payload={"gate_config": {"overfit": [0.9, float("nan"), 0.0, 0.0]}},
+        )
+    capsys.readouterr()
+
+    rc = main(
+        [
+            *_verify_argv(lake_root, catalog_path, results_root),
+            "--k",
+            "1,2",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == EXIT_USER_ERROR
+    assert "sweep-verify error: malformed gate_config.overfit leg" in captured.err

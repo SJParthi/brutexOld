@@ -72,6 +72,7 @@ from brutex.engine.tuple_complete import (
     write_completion_sentinel,
 )
 from brutex.orchestrator.audit import AuditWriter
+from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import has_conflict
 
@@ -184,6 +185,19 @@ def tree(clean_tree: Path, tmp_path: Path) -> Path:
 def _store_path(root: Path, grid: SweepGridConfig) -> Path:
     (tuple_,) = iter_sweep_tuples(grid)
     return tuple_store_path(root, tuple_, grid)
+
+
+def _alt_gate_store_path(root: Path, grid: SweepGridConfig) -> Path:
+    """THIS single tuple's store address under the ONE divergent overfit family.
+
+    The digest-precise (a)-floor probe's exact target
+    (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 review fix round): ``overfit=None``
+    when *grid* is gated, the default :class:`OverfitGateConfig` when ungated —
+    re-planned through the SAME ``tuple_store_path`` address law.
+    """
+    (tuple_,) = iter_sweep_tuples(grid)
+    alternate = None if grid.overfit is not None else OverfitGateConfig()
+    return tuple_store_path(root, tuple_, dataclasses.replace(grid, overfit=alternate))
 
 
 def _codes(report: TreeVerifyReport) -> set[str]:
@@ -1911,16 +1925,17 @@ class TestRecountCompare:
         self, tmp_path: Path
     ) -> None:
         """A GRID tuple absent at the planned (recovered gate-config) address
-        while the SAME ``{direction}_k{k}`` coordinate holds a store under a
-        DIFFERENT digest is a MIXED-gate-config tree — the honest
+        while THIS EXACT tuple's store exists at the DIVERGENT gate-config
+        address (digest-PRECISE — the review fix round's MAJOR) is a
+        MIXED-gate-config tree — the honest
         ``recount_mixed_mode_unverifiable`` WARN, never the pending-tuple
         ``recount_original_absent`` read (which would let a whole digest
         family pass as CLEAN-by-silence)."""
         original, scratch, grid = self._two_trees(tmp_path)
         store = _store_path(original, grid)
-        prefix = store.name.rsplit("_", 1)[0]
-        # The same tuple coordinate under a different gate-config digest.
-        (store.parent / f"{prefix}_{'0' * 16}.parquet").write_bytes(store.read_bytes())
+        # THIS tuple's store at the ONE divergent gate-config address (the
+        # recovered grid is UNGATED, so the divergent family is default-gated).
+        _alt_gate_store_path(original, grid).write_bytes(store.read_bytes())
         store.unlink()
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
@@ -1929,14 +1944,39 @@ class TestRecountCompare:
         assert "recount_original_absent" not in codes
         assert report.clean is True  # honesty (rc-4 via cmd_verify), never condemned
 
-    def test_original_absent_pairing_artifacts_never_read_as_gate_siblings(
+    def test_incomplete_single_config_sibling_stays_original_absent(self, tmp_path: Path) -> None:
+        """THE review-fix-round MAJOR regression (fails-before on the
+        prefix-glob probe): ``_tuple_digest`` folds the FULL tuple — a
+        single-config grid with ≥2 SL values legitimately writes TWO
+        same-``{direction}_k{k}_`` different-digest stores. Deleting ONE of
+        them is a benign INCOMPLETE tree, NOT mixed gate configs: the verdict
+        must stay the pending-tuple ``recount_original_absent``, never the
+        rc-4 ``recount_mixed_mode_unverifiable`` false positive."""
+        original, scratch, grid = self._two_trees(tmp_path, stop_losses=[80, 120])
+        plan = plan_expected_stores(original, grid)
+        assert len(plan) == 2  # two SL tuples — naturally same-prefix siblings
+        victim = sorted(plan)[0]
+        prefix = victim.name.rsplit("_", 1)[0]
+        # The surviving sibling genuinely shares the {direction}_k{k}_ prefix
+        # (the exact shape the pre-fix glob mis-read as mixed gate configs).
+        assert any(p != victim and p.name.startswith(f"{prefix}_") for p in plan)
+        victim.unlink()
+        trial_stats_sidecar_path(victim).unlink()
+        completion_sentinel_path(victim).unlink()
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+        assert report.clean is True
+
+    def test_original_absent_without_divergent_gate_store_stays_original_absent(
         self, tmp_path: Path
     ) -> None:
-        """The sibling probe globs ``{prefix}_*.parquet`` — STORE Parquets
-        only. The pairing artifacts left beside an unlinked store
-        (``….parquet.trials.json`` sidecar + ``….parquet.complete.json``
-        sentinel) do not end in ``.parquet`` and must never read as a second
-        gate-config family: the verdict stays ``recount_original_absent``."""
+        """An absent original with NO store at the divergent gate-config
+        address (the pairing ``….trials.json`` / ``….complete.json``
+        artifacts still beside it) keeps the pending-tuple
+        ``recount_original_absent`` read — the digest-precise probe checks
+        for exactly ONE file and it is absent."""
         original, scratch, grid = self._two_trees(tmp_path)
         store = _store_path(original, grid)
         store.unlink()
@@ -1945,6 +1985,7 @@ class TestRecountCompare:
             f"{store.name}.complete.json",
             f"{store.name}.trials.json",
         ]
+        assert not _alt_gate_store_path(original, grid).exists()
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         codes = _codes(report)
@@ -1954,41 +1995,46 @@ class TestRecountCompare:
     def test_all_three_absent_artifacts_consult_the_sibling_memo_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The sibling probe is memoised PER TUPLE: when all THREE artifacts
-        (store + trial-stats sidecar + completion sentinel) are absent from
-        the original tree beside a different-digest sibling, each artifact
-        reads ``recount_mixed_mode_unverifiable`` — but the ``{prefix}_*``
-        glob runs exactly ONCE (the second and third consultations return
-        the cached verdict, the ``mixed_sibling_memo`` short-circuit)."""
+        """The divergent-address probe is memoised PER TUPLE: when all THREE
+        artifacts (store + trial-stats sidecar + completion sentinel) are
+        absent from the original tree beside the divergent-gate store, each
+        artifact reads ``recount_mixed_mode_unverifiable`` — but the
+        alternate address is RE-PLANNED exactly ONCE (the second and third
+        consultations return the cached verdict, the ``mixed_sibling_memo``
+        short-circuit)."""
+        import brutex.engine.sweep_verify as sweep_verify_module
+
         original, scratch, grid = self._two_trees(tmp_path)
         store = _store_path(original, grid)
-        prefix = store.name.rsplit("_", 1)[0]
-        (store.parent / f"{prefix}_{'0' * 16}.parquet").write_bytes(store.read_bytes())
+        _alt_gate_store_path(original, grid).write_bytes(store.read_bytes())
         trial_stats_sidecar_path(store).unlink()
         completion_sentinel_path(store).unlink()
         store.unlink()
-        plan = plan_expected_stores(original, grid)
-        probe_patterns: list[str] = []
-        real_glob = Path.glob
+        plan = plan_expected_stores(original, grid)  # BEFORE the spy — plan calls it too
+        probe_calls: list[Path] = []
+        real_tuple_store_path = sweep_verify_module.tuple_store_path
 
-        def counting_glob(path: Path, pattern: str) -> object:
-            if pattern.endswith("_*.parquet"):
-                probe_patterns.append(pattern)
-            return real_glob(path, pattern)
+        def counting_tuple_store_path(
+            root: Path, tuple_: SweepTuple, grid_: SweepGridConfig
+        ) -> Path:
+            probe_calls.append(root)
+            return real_tuple_store_path(root, tuple_, grid_)
 
-        monkeypatch.setattr(Path, "glob", counting_glob)
+        monkeypatch.setattr(sweep_verify_module, "tuple_store_path", counting_tuple_store_path)
         report = compare_recount(original, scratch, plan, context_match=True)
         code_list = [f.code for f in report.findings]
         assert code_list.count("recount_mixed_mode_unverifiable") == 3
         assert "recount_original_absent" not in code_list
-        assert probe_patterns == [f"{prefix}_*.parquet"]  # ONE probe per tuple
+        assert probe_calls == [original]  # ONE re-plan per tuple
         assert report.clean is True
 
     def test_cell_original_absent_with_sibling_stays_original_absent(self, tmp_path: Path) -> None:
         """``is_grid_tuple`` gates the (a) floor OFF for Stage-3 CELL stores —
         a cell address rides the stage-3 knob fold, not the gate-config fold,
-        so a same-prefix sibling next to an absent cell original must keep the
-        pending-tuple ``recount_original_absent`` read."""
+        so even a store planted at the tuple's DIVERGENT gate-config address
+        (the exact target a grid-arm probe would find) must keep the
+        pending-tuple ``recount_original_absent`` read for an absent cell —
+        the ``is_grid_tuple and`` guard's mutant-killer."""
         original, scratch, grid = self._two_trees(tmp_path)
         record = _stage3_record()
         plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
@@ -2001,12 +2047,14 @@ class TestRecountCompare:
         cell_store = ResultsStore(path=dest)
         cell_store.append(template)
         cell_store.flush()
-        # Plant a same-prefix sibling in the ORIGINAL cell dir — for a GRID
-        # tuple this exact shape reads mixed-gate; the cell arm must not.
-        orig_dir = (original / cell_rel).parent
-        orig_dir.mkdir(parents=True, exist_ok=True)
-        prefix = (original / cell_rel).name.rsplit("_", 1)[0]
-        (orig_dir / f"{prefix}_{'0' * 16}.parquet").write_bytes(dest.read_bytes())
+        # Plant the store the (a)-floor probe would target for this tuple —
+        # a dropped ``is_grid_tuple`` guard would fire mixed-gate on the cell.
+        (cell_tuple, cell_grid, _) = plan[original / cell_rel]
+        alt = tuple_store_path(
+            original, cell_tuple, dataclasses.replace(cell_grid, overfit=OverfitGateConfig())
+        )
+        alt.parent.mkdir(parents=True, exist_ok=True)
+        alt.write_bytes(dest.read_bytes())
         report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
         codes = _codes(report)
         assert "recount_original_absent" in codes
@@ -3140,6 +3188,20 @@ class TestRecordedOverfitFromAudit:
         # OverfitGateConfig.__post_init__'s ValueError is wrapped, never raw.
         self._write_grid_start(tmp_path, {"gate_config": {"overfit": [2.0, 0.05, 0.0, 0.0]}})
         with pytest.raises(SweepVerifyError, match="invalid recorded overfit gate config"):
+            recorded_overfit_from_audit(tmp_path)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_leg_member_raises(self, tmp_path: Path, bad: float) -> None:
+        """MINOR-1 (review fix round): the supervisor chain's ``json.dumps``
+        rides the ``allow_nan=True`` default, so a ``NaN``/``Infinity`` leg
+        member is REACHABLE end-to-end through a hash-valid chain — and
+        ``OverfitGateConfig.__post_init__`` never finiteness-refuses the
+        ``weight`` slot, so an adopted non-finite member would crash
+        ``cmd_verify`` later at its ``json.dumps(allow_nan=False)`` summary
+        (an uncaught ``ValueError``). The leg predicate's ``math.isfinite``
+        must refuse it LOUDLY here instead."""
+        self._write_supervisor_start(tmp_path, {"gate_config": {"overfit": [0.9, bad, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
             recorded_overfit_from_audit(tmp_path)
 
 

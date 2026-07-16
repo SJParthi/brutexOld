@@ -32,8 +32,10 @@ regression (recount unusable on overfit trees), NOT a false-clean. Plus the
 `recount_mixed_mode_unverifiable` rc 4 (inconclusive), never
 CLEAN-by-silence; a corrupt supervisor chain on a cmd_sweep_all tree is
 honestly config-UNRECOVERABLE → the fold-base `grid_mismatch` rc 3, never a
-fabricated default. #1336 `_tuple_digest`/`_gate_config_fragment` + #1474's
-frozen `sweep_apriori.py` BYTE-UNTOUCHED; ENGINE UNCHANGED —
+fabricated default. The #1336 `_tuple_digest` law untouched — every minted
+digest VALUE-IDENTICAL (the review-fix NIT `float()` normalization on
+`_gate_config_fragment`'s overfit leg is value-neutral, pin-proven) — +
+#1474's frozen `sweep_apriori.py` byte-untouched; ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
 identity untouched. This header carries the pointer, never the story — the
 full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
@@ -2743,16 +2745,35 @@ hostile-review pass._
   UNRECOVERABLE and the verdict is the honest fold-base `grid_mismatch`
   rc 3 (pinned: rc 3 + exactly one chain-unreadable WARN + no hard
   EXIT_USER_ERROR — the interim non-tolerant read's rc-1 regression killed).
-  (a) HONESTY FLOOR: a GRID tuple absent at the recovered address beside a
-  same-`{direction}_k{k}` DIFFERENT-digest store reads the NEW
-  `recount_mixed_mode_unverifiable` WARN → rc 4 (mixed-gate tree —
-  inconclusive under one recovered config), never CLEAN-by-silence and
-  never condemned; pairing artifacts never read as siblings; the CELL arm
-  stays `recount_original_absent`; the sibling probe is memoised per tuple
-  (one glob, glob-spy-pinned). UNTOUCHED: #1336's
-  `_tuple_digest`/`_gate_config_fragment` internals + #1474's frozen
-  `sweep_apriori.py`. GATES: `sweep_verify.py` 100.00% line+branch
-  standalone (633/268) + the ci.yml whole-engine glob gate 100.00%; the
+  (a) HONESTY FLOOR (DIGEST-PRECISE since the review-fix round — the
+  designer MAJOR: the interim same-`{direction}_k{k}`-prefix glob read ANY
+  different-digest sibling as "mixed gate", but the #1336 digest folds the
+  FULL tuple incl. SL/TP/proximity/fib, so a benign INCOMPLETE single-config
+  multi-SL tree false-alarmed rc 4): a GRID tuple absent at the recovered
+  address reads `recount_mixed_mode_unverifiable` → rc 4 IFF the ORIGINAL
+  tree holds THIS EXACT tuple's store at the alternate-gate address —
+  re-planned via `dataclasses.replace(grid, overfit=…)` through the SAME
+  `tuple_store_path` law, never re-implemented digest math — (mixed-gate
+  tree, inconclusive under one recovered config), never CLEAN-by-silence
+  and never condemned; a same-prefix different-digest sibling (another
+  SL/TP) honestly reads `recount_original_absent`
+  (fails-before-pinned); the CELL arm stays `recount_original_absent`; the
+  probe is memoised per tuple (one `tuple_store_path` re-plan,
+  call-spy-pinned). REVIEW-FIX ROUND also folded: MINOR-1 —
+  `_overfit_from_recorded_leg` refuses NaN/±inf leg members (the supervisor
+  chain's json.dumps allows NaN; an adopted non-finite config would crash
+  cmd_verify's `allow_nan=False` dump — now the typed `SweepVerifyError`,
+  parametrized-pinned); MINOR-2 — the cmd_verify
+  `SweepVerifyError → EXIT_USER_ERROR` branch e2e-driven (a malformed
+  recorded gate_config.overfit on a VALID supervisor chain exits 1 with the
+  named stderr line); NIT — explicit `float()` normalization on the
+  `_gate_config_fragment` overfit leg (value-neutral for the all-float
+  `OverfitGateConfig` — the frozen default digest + gated e2e addresses
+  pass unmodified). UNTOUCHED: the #1336 `_tuple_digest` LAW (digests
+  value-identical; the NIT is the one sanctioned fragment edit) + #1474's
+  frozen `sweep_apriori.py`. GATES: `sweep_verify.py` 100.00% line+branch
+  standalone (635/268, the review-fix re-measure) + the ci.yml whole-engine
+  glob gate 100.00%; the
   cli.py delta rides the pre-existing pragma-no-cover `cmd_sweep_verify`
   shim, driven by the e2e suite; ruff/ruff-format clean; `mypy --strict`
   clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
@@ -7540,8 +7561,10 @@ hostile-review pass._
   overfit-gated tree — an ALARM-FATIGUE regression (recount unusable on
   overfit trees), NOT a false-clean; + the (a) honesty floor
   (`recount_mixed_mode_unverifiable` rc 4 on mixed-gate trees) and the
-  honest config-unrecoverable corrupt-supervisor rc 3; #1336 digest
-  internals + #1474's frozen `sweep_apriori.py` byte-untouched; ENGINE
+  honest config-unrecoverable corrupt-supervisor rc 3; the #1336 digest
+  law untouched (digests value-identical — the review-fix NIT `float()`
+  normalization is the one sanctioned fragment edit) + #1474's frozen
+  `sweep_apriori.py` byte-untouched; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
   §1 + MIGRATION.md #1851 for the full blurb)
   Earlier: `integration/club-g-docs`

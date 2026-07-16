@@ -51,6 +51,7 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -1617,9 +1618,13 @@ def _overfit_from_recorded_leg(leg: object, *, audit_path: Path) -> OverfitGateC
     Raises
     ------
     SweepVerifyError
-        On a malformed leg (wrong shape / non-numeric members) or a leg whose
-        values :class:`~brutex.ranking.OverfitGateConfig` itself refuses — a
-        malformed tree is not a verifiable tree (the
+        On a malformed leg (wrong shape / non-numeric / NON-FINITE members —
+        ``OverfitGateConfig.__post_init__`` never range-refuses a NaN/inf
+        ``weight``, and an adopted non-finite member would crash
+        ``cmd_verify`` later at its ``json.dumps(allow_nan=False)`` summary
+        instead of the loud typed refusal here; review fix round MINOR-1) or
+        a leg whose values :class:`~brutex.ranking.OverfitGateConfig` itself
+        refuses — a malformed tree is not a verifiable tree (the
         ``recorded_stage3_from_audit`` contract).
     """
     if leg is None:
@@ -1628,7 +1633,10 @@ def _overfit_from_recorded_leg(leg: object, *, audit_path: Path) -> OverfitGateC
         not isinstance(leg, Sequence)
         or isinstance(leg, (str, bytes))
         or len(leg) != _OVERFIT_LEG_LEN
-        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in leg)
+        or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in leg
+        )
     ):
         raise SweepVerifyError(
             f"malformed gate_config.overfit leg in the START record at {audit_path}: {leg!r}"
@@ -2108,7 +2116,14 @@ def compare_recount(
     checked = 0
     grid_corrupt_leaderboards: set[tuple[str, str]] = set()
 
-    def _diff_store(store_path: Path, *, is_grid_tuple: bool, leaderboard: tuple[str, str]) -> None:
+    def _diff_store(
+        store_path: Path,
+        *,
+        tuple_: SweepTuple,
+        entry_grid: SweepGridConfig,
+        is_grid_tuple: bool,
+        leaderboard: tuple[str, str],
+    ) -> None:
         nonlocal checked
         sentinel_path = completion_sentinel_path(store_path)
         sidecar_path = trial_stats_sidecar_path(store_path)
@@ -2124,26 +2139,35 @@ def compare_recount(
         mixed_sibling_memo: bool | None = None
 
         def _mixed_gate_sibling_exists() -> bool:
-            """``True`` iff the ORIGINAL tree holds a same-``(direction, k)`` store
-            under a DIFFERENT gate-config digest.
+            """``True`` iff the ORIGINAL tree holds THIS SweepTuple's store at
+            the DIVERGENT gate-config address (digest-PRECISE — the review
+            fix round's MAJOR).
 
-            The store filename law is ``{direction}_k{k}_{digest}.parquet``
-            (``tuple_store_path``; the digest is a BLAKE3 hex slice with no
-            ``_``), so ``name.rsplit("_", 1)[0]`` is the ``{direction}_k{k}``
-            prefix and any OTHER ``{prefix}_*.parquet`` FILE in the same
-            partition dir is the same tuple coordinate written under a
-            different `_tuple_digest` gate fold — a tree built under MIXED
-            gate configs. The glob matches only store Parquets: the sidecar
-            (``….parquet.trials.json``) and sentinel (``….parquet.complete.json``)
-            names do not end in ``.parquet``.
+            ``_tuple_digest`` folds the FULL tuple — combo AND the
+            SL/TP/proximity/fib-anchor knobs AND the gate config — into the
+            store address, so a SINGLE-config grid with ≥2 SL/TP/proximity
+            values legitimately writes many same-``{direction}_k{k}_``
+            stores; a same-prefix different-digest glob is therefore NOT
+            evidence of mixed gate configs (the pre-fix over-trigger). The
+            precise probe RE-PLANS this exact SweepTuple's address under the
+            ONE divergent overfit family — ``overfit=None`` when the
+            recovered grid is GATED (the ungated sibling family), the
+            default :class:`~brutex.ranking.OverfitGateConfig` when it is
+            UNGATED (the default-ON production family) — via
+            ``dataclasses.replace`` on the grid's overfit leg through the
+            SAME ``tuple_store_path`` the planner uses (never re-implemented
+            digest math; #1336 internals untouched), and checks for exactly
+            THAT file. A custom-parameter third family is honestly outside
+            this one-address probe: it reads ``recount_original_absent``
+            (never condemned), the pre-floor behaviour.
             """
             nonlocal mixed_sibling_memo
             if mixed_sibling_memo is None:
-                prefix = store_path.name.rsplit("_", 1)[0]
-                mixed_sibling_memo = any(
-                    candidate.name != store_path.name and candidate.is_file()
-                    for candidate in store_path.parent.glob(f"{prefix}_*.parquet")
+                alternate_overfit = None if entry_grid.overfit is not None else OverfitGateConfig()
+                alternate_path = tuple_store_path(
+                    original_root, tuple_, replace(entry_grid, overfit=alternate_overfit)
                 )
+                mixed_sibling_memo = alternate_path != store_path and alternate_path.is_file()
             return mixed_sibling_memo
 
         # Memoised store-pair VIX verdict (one load per tuple; all three
@@ -2253,16 +2277,21 @@ def compare_recount(
                 )
                 continue
             if not original_exists:
-                # The (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
-                # a GRID tuple absent at the recovered gate-config address
-                # while the SAME (direction, k) coordinate exists under a
-                # DIFFERENT digest is a tree built under MIXED gate configs —
-                # this recount's single recovered config cannot verify the
-                # other family, so the verdict is honestly INCONCLUSIVE
-                # (rc 4 via the cmd_verify trigger), never CLEAN-by-silence
-                # and never condemned. Cell (non-grid) artifacts keep the
-                # original-absent read verbatim — their addresses ride the
-                # stage-3 knob fold, not this probe.
+                # The (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+                # digest-PRECISE since the review fix round): a GRID tuple
+                # absent at the recovered gate-config address while THIS
+                # EXACT SweepTuple's store exists at the DIVERGENT
+                # gate-config address (the ungated/default-gated sibling
+                # family, re-planned via the SAME address law) is a tree
+                # built under MIXED gate configs — this recount's single
+                # recovered config cannot verify the other family, so the
+                # verdict is honestly INCONCLUSIVE (rc 4 via the cmd_verify
+                # trigger), never CLEAN-by-silence and never condemned. A
+                # benign incomplete single-config tree (many legitimate
+                # same-prefix SL/TP/proximity sibling digests) reads the
+                # plain original-absent below — never rc 4. Cell (non-grid)
+                # artifacts keep the original-absent read verbatim — their
+                # addresses ride the stage-3 knob fold, not this probe.
                 if is_grid_tuple and _mixed_gate_sibling_exists():
                     findings.append(
                         VerifyFinding(
@@ -2272,9 +2301,9 @@ def compare_recount(
                             detail=(
                                 "the recount produced this artifact at the "
                                 "recovered gate-config address but the tree "
-                                "lacks it AND holds a same-(direction, k) "
-                                "store under a DIFFERENT gate-config digest — "
-                                "a tree built under MIXED gate configs; "
+                                "lacks it AND holds this exact tuple's store "
+                                "at the DIVERGENT gate-config address — a "
+                                "tree built under MIXED gate configs; "
                                 "unverifiable under this recount's single "
                                 "recovered config (re-verify with the other "
                                 "config to cover its digest family), never "
@@ -2467,18 +2496,22 @@ def compare_recount(
     # GRID stores first — their verdicts feed the cell collateral rule (B5).
     ordered = sorted(plan)
     for store_path in ordered:
-        tuple_, _, is_grid = plan[store_path]
+        tuple_, grid_, is_grid = plan[store_path]
         if is_grid:
             _diff_store(
                 store_path,
+                tuple_=tuple_,
+                entry_grid=grid_,
                 is_grid_tuple=True,
                 leaderboard=(tuple_.instrument, tuple_.tf.label),
             )
     for store_path in ordered:
-        tuple_, _, is_grid = plan[store_path]
+        tuple_, grid_, is_grid = plan[store_path]
         if not is_grid:
             _diff_store(
                 store_path,
+                tuple_=tuple_,
+                entry_grid=grid_,
                 is_grid_tuple=False,
                 leaderboard=(tuple_.instrument, tuple_.tf.label),
             )
