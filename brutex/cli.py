@@ -9518,13 +9518,23 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # + test_sweep_all_futures_launch.py::
     # test_sweep_verify_recount_round_trips_a_futures_tree — all 4 FAIL
     # without this block). Resolve here EXACTLY as the launcher's default arm
-    # does (no verify-side flags — env parity, the apriori-env precedent);
-    # junk $BRUTEX_TEMPORAL fails loud pre-plan. HONEST residual: a tree
-    # launched under a NON-default `--temporal-mode` recounted under a
-    # different env still byte-diverges (temporal mode is not yet recorded on
-    # the START payload — the same unrecorded-knob class as --sl/--tp, which
-    # verify also takes as flags; recording+recovery is the named follow-up
-    # in MIGRATION.md #1851's reconcile-round-2 note).
+    # does — ENV-ONLY: sweep-verify takes NO --temporal-mode flag, so the
+    # only way to match a non-default launch is exporting the SAME
+    # $BRUTEX_TEMPORAL at verify time; junk $BRUTEX_TEMPORAL fails loud
+    # pre-plan. HONEST residual (SYMMETRIC, both directions): temporal mode
+    # is not yet recorded on the START payload, so ANY tree launched under a
+    # NON-default mode recounted under a mismatched env byte-diverges —
+    # including the off-launched case: a legitimately `--temporal-mode off`
+    # tree that previously verified clean now reads a LOUD rc-3 false-corrupt
+    # recount_divergence when recounted under the default OBSERVE env
+    # (narrow, loud, never a false-clean; remediation today =
+    # BRUTEX_TEMPORAL=off at verify). Recording+recovery à la the
+    # gate_config channel is the IMMEDIATE next item —
+    # DEC-SWEEP-TEMPORAL-RECOUNT-RECORD-001 (MIGRATION.md #1851
+    # reconcile-round-2 note; the defer is coordinator-accepted on the
+    # identity-exemption risk argument: temporal never enters
+    # `_tuple_digest`, so a wrong resolution mis-COLUMNS a shadow row —
+    # never mis-ADDRESSES the tree).
     try:
         temporal_config = resolve_temporal_config(None, None, None)
     except CliUserError as exc:

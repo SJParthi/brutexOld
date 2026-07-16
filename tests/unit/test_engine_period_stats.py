@@ -108,6 +108,21 @@ class TestDecodeStrictness:
         with pytest.raises(ValueError):
             decode_period_stats("not json", kind="year")
 
+    @pytest.mark.parametrize("kind", ["year", "quarter", "month"])
+    def test_nesting_bomb_folds_to_value_error(self, kind: str) -> None:
+        """The `_loads` RecursionError→ValueError fold (the G14 typed-damage
+        law; the sibling ResultsStore.load pin drives it end-to-end — this is
+        the DIRECT standalone-gate pin the #1851 reconcile-round-2 CI red
+        surfaced: `'['*60_000` recurses json.loads past the limit and must
+        surface as ValueError naming the column, never a raw RecursionError."""
+        with pytest.raises(ValueError, match=f"stats_by_{kind}.*nesting bomb"):
+            decode_period_stats("[" * 60_000, kind=kind)
+
+    def test_nesting_bomb_judged_years_folds_to_value_error(self) -> None:
+        """The judged-years twin of the fold — same `_loads` boundary."""
+        with pytest.raises(ValueError, match="temporal_judged_years.*nesting bomb"):
+            decode_judged_years("[" * 60_000)
+
     def test_non_object_rejected(self) -> None:
         with pytest.raises(ValueError, match="JSON object"):
             decode_period_stats("[1,2]", kind="year")
