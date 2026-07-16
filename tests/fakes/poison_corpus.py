@@ -40,7 +40,6 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import ParquetWriter
 from brutex.data.partition import build_partition_path
@@ -97,7 +96,9 @@ def _ts(minute: int, *, year: int = 2024, month: int = 6, day: int = 3) -> datet
 
 def _bar(ts: datetime, *, close: str = "100.00", volume: int = 10) -> CandleBar:
     c = Decimal(close)
-    return CandleBar(timestamp=ts, open=c, high=c, low=c, close=c, volume=volume, open_interest=None)
+    return CandleBar(
+        timestamp=ts, open=c, high=c, low=c, close=c, volume=volume, open_interest=None
+    )
 
 
 def _write_bars(
@@ -116,7 +117,9 @@ def _write_bars(
         key = (bar.timestamp.year, bar.timestamp.month)
         groups.setdefault(key, []).append(bar)
     for _, group in sorted(groups.items()):
-        writer.write(exchange=exchange, segment=segment, symbol=symbol, interval=interval, bars=group)
+        writer.write(
+            exchange=exchange, segment=segment, symbol=symbol, interval=interval, bars=group
+        )
 
 
 def _dest(
@@ -193,7 +196,9 @@ def _plant_raw_naive(dest: Path, timestamps: Sequence[datetime], *, price: float
     pq.write_table(table, dest)
 
 
-def _plant_raw_ohlc(dest: Path, rows: Sequence[tuple[datetime, float, float, float, float]]) -> None:
+def _plant_raw_ohlc(
+    dest: Path, rows: Sequence[tuple[datetime, float, float, float, float]]
+) -> None:
     """Write a RAW bar partition with explicit per-row OHLC (poison-capable)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     table = pa.table(
@@ -419,7 +424,9 @@ def build_option_unicode_digit_filename(lake: Path) -> None:
 def build_glob_metachar_series(lake: Path) -> None:
     # Poisoned REAL siblings + a CLEAN literal "X[12]" — reads must be literal.
     for sibling in ("ABS", "X1", "X2"):
-        _plant_option_raw(_opt_dest(lake, "2024-06", series=sibling), [("CE", _ts(1)), ("CE", _ts(1))])
+        _plant_option_raw(
+            _opt_dest(lake, "2024-06", series=sibling), [("CE", _ts(1)), ("CE", _ts(1))]
+        )
     _plant_option_raw(_opt_dest(lake, "2024-06", series="X[12]"), [("CE", _ts(5))])
 
 
@@ -427,7 +434,9 @@ def build_option_nested_dtype_list_side(lake: Path) -> None:
     _plant_option_nested_side(
         _opt_dest(lake, "2024-06", series="SERIES_BAD"), [_ts(1), _ts(2, month=7, day=1)]
     )
-    _plant_option_raw(_opt_dest(lake, "2024-06", series="SERIES_GOOD"), [("CE", _ts(1)), ("CE", _ts(1))])
+    _plant_option_raw(
+        _opt_dest(lake, "2024-06", series="SERIES_GOOD"), [("CE", _ts(1)), ("CE", _ts(1))]
+    )
 
 
 def build_option_nested_dtype_struct_side(lake: Path) -> None:
@@ -440,7 +449,9 @@ def build_option_nested_dtype_struct_side(lake: Path) -> None:
 
 def build_option_out_of_range_datetime(lake: Path) -> None:
     _plant_option_out_of_range(_opt_dest(lake, "2024-06", series="SERIES_BAD"))
-    _plant_option_raw(_opt_dest(lake, "2024-06", series="SERIES_GOOD"), [("CE", _ts(1)), ("CE", _ts(1))])
+    _plant_option_raw(
+        _opt_dest(lake, "2024-06", series="SERIES_GOOD"), [("CE", _ts(1)), ("CE", _ts(1))]
+    )
 
 
 def build_option_mass_poison_majority(lake: Path) -> None:
@@ -529,7 +540,9 @@ CORPUS: tuple[PoisonCase, ...] = (
         frozenset({"SchemaAlienFile"}),
         expects_skip=True,
     ),
-    PoisonCase("bars_price_sanity_rows", build_bars_price_sanity_rows, frozenset({"PriceSanityRows"})),
+    PoisonCase(
+        "bars_price_sanity_rows", build_bars_price_sanity_rows, frozenset({"PriceSanityRows"})
+    ),
     PoisonCase(
         "bars_out_of_range_datetime",
         build_bars_out_of_range_datetime,
@@ -537,7 +550,9 @@ CORPUS: tuple[PoisonCase, ...] = (
         expects_skip=True,
     ),
     # options tree
-    PoisonCase("option_intra_file_dup", build_option_intra_file_dup, frozenset({"OptionIntraFileDup"})),
+    PoisonCase(
+        "option_intra_file_dup", build_option_intra_file_dup, frozenset({"OptionIntraFileDup"})
+    ),
     PoisonCase(
         "option_foreign_month_pure",
         build_option_foreign_month_pure,
@@ -568,7 +583,9 @@ CORPUS: tuple[PoisonCase, ...] = (
         build_option_unicode_digit_filename,
         frozenset({"OptionIntraFileDup"}),
     ),
-    PoisonCase("glob_metachar_series", build_glob_metachar_series, frozenset({"OptionIntraFileDup"})),
+    PoisonCase(
+        "glob_metachar_series", build_glob_metachar_series, frozenset({"OptionIntraFileDup"})
+    ),
     PoisonCase(
         "option_nested_dtype_list_side",
         build_option_nested_dtype_list_side,
@@ -593,9 +610,7 @@ CORPUS: tuple[PoisonCase, ...] = (
         frozenset({"OptionForeignMonthRows"}),
     ),
     # filesystem / symlink shapes
-    PoisonCase(
-        "symlinked_series_dir", build_symlinked_series_dir, frozenset(), requires="symlink"
-    ),
+    PoisonCase("symlinked_series_dir", build_symlinked_series_dir, frozenset(), requires="symlink"),
     PoisonCase(
         "symlinked_options_root", build_symlinked_options_root, frozenset(), requires="symlink"
     ),

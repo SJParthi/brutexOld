@@ -39,6 +39,7 @@ from brutex.data.lake_invariants import (
     census_to_dict,
     scan_lake_invariants,
 )
+
 from tests.fakes.poison_corpus import CORPUS, PoisonCase, supports_symlink
 
 #: Any callable honoring the ``scan_lake_invariants`` signature (the future
@@ -91,7 +92,9 @@ def _normalize(value: object, root: str) -> object:
     if isinstance(value, str):
         return value.replace(root, "<LAKE>")
     if isinstance(value, Mapping):
-        return {str(k): _normalize(v, root) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+        return {
+            str(k): _normalize(v, root) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
     if isinstance(value, (list, tuple)):
         return tuple(_normalize(v, root) for v in value)
     return value
@@ -205,9 +208,7 @@ def test_expected_types_are_real_finding_classes() -> None:
             assert isinstance(getattr(li, type_name), type), (case.name, type_name)
 
 
-def test_skip_unless_supported_branches(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_skip_unless_supported_branches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An unknown requires-token fails LOUD; an unsupported capability skips."""
     bogus = dataclasses.replace(CORPUS[0], requires="fifo")
     with pytest.raises(ValueError, match="unknown PoisonCase.requires token"):
@@ -229,9 +230,7 @@ def test_supports_symlink_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     def _refuse(target: object, link: object) -> None:
         raise OSError("symlinks unsupported")
 
-    import tests.fakes.poison_corpus as corpus_module
-
-    monkeypatch.setattr(corpus_module.os, "symlink", _refuse)
+    monkeypatch.setattr("tests.fakes.poison_corpus.os.symlink", _refuse)
     assert supports_symlink(tmp_path) is False
 
 
