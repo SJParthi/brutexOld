@@ -2,7 +2,7 @@
 title: TrueData Market Data APIs — Local Documentation Reference
 researched_at: 2026-07-15
 vendor: TrueData Financial Information Pvt Ltd — truedata.in
-purpose: Complete offline reference of TrueData's public API documentation surface, for BruteX + TickVault vendor evaluation (DEC-GDF-TRUEDATA-DOCS-001, MIGRATION.md #1795)
+purpose: Complete offline reference of TrueData's public API documentation surface, for BruteX + TickVault vendor evaluation (DEC-GDF-TRUEDATA-DOCS-001, MIGRATION.md #1893)
 authority: RESEARCH-GRADE reference (relay/package-evidenced), NOT probe-verified. Unlike docs/groww/api-reference/ (the live vendor's authoritative pack), NOTHING in this directory may be encoded as fact in code without a credentialed live probe + a new DEC. Confidence stamps per claim are binding.
 ---
 
@@ -52,7 +52,7 @@ knowledge-base / marketing lines where the exact wording is load-bearing
 (ordinary quotation practice — sentence-scale, never page-scale
 reproduction; longer KB content is summarized). If a future ruling
 extends summarize-only to TrueData, recast classes (1) and (3) exactly as
-the GDF pack was conformed on 2026-07-15 (MIGRATION.md #1795 reconcile
+the GDF pack was conformed on 2026-07-15 (MIGRATION.md #1893 reconcile
 note).
 
 ## File index (mapped to the vendor's real doc surfaces)
