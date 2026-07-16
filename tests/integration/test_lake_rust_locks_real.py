@@ -74,8 +74,9 @@ class TestMixedArmMutualExclusion:
         with TODAY's `PartitionLockTimeout` message bytes."""
         lock = tmp_path / "lock.sidecar"
         holder_fd = _open_lock(lock)
-        waiter_fd = _open_lock(lock)  # a SECOND open file description
+        waiter_fd = -1
         try:
+            waiter_fd = _open_lock(lock)  # a SECOND open file description
             assert brutex_lake.lock_try_exclusive(holder_fd) is True
             clock_values = iter([0.0, 0.05, 0.11])
             with pytest.raises(PartitionLockTimeout) as exc_info:
@@ -86,37 +87,58 @@ class TestMixedArmMutualExclusion:
                     sleep=lambda _s: None,
                 )
             assert str(exc_info.value) == str(PartitionLockTimeout(0.1))
+            brutex_lake.lock_release(holder_fd)  # CONSUMES the fd (LOCK_UN + close)
+            holder_fd = -1
         finally:
-            brutex_lake.lock_release(holder_fd)
-            os.close(waiter_fd)
+            # Ownership-tracked cleanup: `lock_release` consumed holder_fd on
+            # the happy path; a bare close here would double-close (and with
+            # fd-number reuse could hit an unrelated fd).
+            if holder_fd >= 0:
+                os.close(holder_fd)
+            if waiter_fd >= 0:
+                os.close(waiter_fd)
 
     def test_python_holder_excludes_rust_waiter(self, tmp_path: Path) -> None:
         """(b) roles swapped: Python holds via fcntl → the Rust attempt reads False."""
         lock = tmp_path / "lock.sidecar"
         holder_fd = _open_lock(lock)
-        waiter_fd = _open_lock(lock)
+        waiter_fd = -1
         try:
+            waiter_fd = _open_lock(lock)
             fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             assert brutex_lake.lock_try_exclusive(waiter_fd) is False
         finally:
             os.close(holder_fd)
-            os.close(waiter_fd)
+            if waiter_fd >= 0:
+                os.close(waiter_fd)
 
     def test_release_hands_the_lock_to_the_other_arm(self, tmp_path: Path) -> None:
         """(c) Rust release → the Python waiter acquires; and the inverse."""
         lock = tmp_path / "lock.sidecar"
         rust_fd = _open_lock(lock)
-        py_fd = _open_lock(lock)
-        assert brutex_lake.lock_try_exclusive(rust_fd) is True
-        assert partition_lock._flock_attempt(py_fd) is False
-        brutex_lake.lock_release(rust_fd)  # closes rust_fd
-        assert partition_lock._flock_attempt(py_fd) is True
-        # Inverse: python holds, rust waiter blocked, python close releases.
-        rust_fd2 = _open_lock(lock)
-        assert brutex_lake.lock_try_exclusive(rust_fd2) is False
-        os.close(py_fd)
-        assert brutex_lake.lock_try_exclusive(rust_fd2) is True
-        brutex_lake.lock_release(rust_fd2)
+        py_fd = -1
+        rust_fd2 = -1
+        try:
+            py_fd = _open_lock(lock)
+            assert brutex_lake.lock_try_exclusive(rust_fd) is True
+            assert partition_lock._flock_attempt(py_fd) is False
+            brutex_lake.lock_release(rust_fd)  # CONSUMES rust_fd (LOCK_UN + close)
+            rust_fd = -1
+            assert partition_lock._flock_attempt(py_fd) is True
+            # Inverse: python holds, rust waiter blocked, python close releases.
+            rust_fd2 = _open_lock(lock)
+            assert brutex_lake.lock_try_exclusive(rust_fd2) is False
+            os.close(py_fd)
+            py_fd = -1
+            assert brutex_lake.lock_try_exclusive(rust_fd2) is True
+            brutex_lake.lock_release(rust_fd2)  # CONSUMES rust_fd2
+            rust_fd2 = -1
+        finally:
+            # Only close what was NOT consumed/closed above — a blind close
+            # would double-close a released fd (fd-number reuse hazard).
+            for leftover in (rust_fd, py_fd, rust_fd2):
+                if leftover >= 0:
+                    os.close(leftover)
 
     def test_two_process_belt_python_holder_rust_waiter(self, tmp_path: Path) -> None:
         """The cross-PROCESS belt: a subprocess Python holder excludes this
@@ -154,8 +176,13 @@ class TestMixedArmMutualExclusion:
                         break
                     time.sleep(0.01)
                 assert acquired, "rust waiter never acquired after the peer's release"
+                brutex_lake.lock_release(fd)  # CONSUMES the fd (LOCK_UN + close)
+                fd = -1
             finally:
-                brutex_lake.lock_release(fd)
+                # A failure path never reached `lock_release`; the plain close
+                # releases the flock kernel-side. Never both (double-close).
+                if fd >= 0:
+                    os.close(fd)
             proc.stdin.write("\n")
             proc.stdin.flush()
             assert proc.wait(timeout=_DEADLINE_S) == 0
