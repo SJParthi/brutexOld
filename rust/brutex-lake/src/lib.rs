@@ -87,6 +87,8 @@
 #![cfg_attr(not(test), deny(clippy::dbg_macro))]
 #![deny(unsafe_code)]
 
+pub mod merge;
+
 use std::sync::{Arc, Mutex};
 
 use polars::prelude::*;
@@ -325,6 +327,9 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
+    // ADR-0020 PR-3 (DEC-LAKE-RUST-MERGE-DEDUP-001): the merge/dedup
+    // decision kernel — additive registration, own module file.
+    m.add_function(wrap_pyfunction!(merge::merge_decision_from_ipc, m)?)?;
     Ok(())
 }
 

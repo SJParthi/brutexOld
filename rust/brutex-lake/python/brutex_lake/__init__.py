@@ -27,6 +27,7 @@ from __future__ import annotations
 from brutex_lake._brutex_lake import (
     __version__,
     linked_zstd_version,
+    merge_decision_from_ipc,
     pinned_polars_version,
     render_parquet_from_ipc,
 )
@@ -34,6 +35,7 @@ from brutex_lake._brutex_lake import (
 __all__ = [
     "__version__",
     "linked_zstd_version",
+    "merge_decision_from_ipc",
     "pinned_polars_version",
     "render_parquet_from_ipc",
 ]
