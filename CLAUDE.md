@@ -2945,7 +2945,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-lake-ledgerstore-spike` (**DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917** — allocator-final;
+- **Active branch:** `claude/rust-lake-ledgerstore-spike-r2` (**DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917** — allocator-final;
   the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE. VERDICT:
   byte-identity NOT FOUND — 14 polars-native (Rust encoder,
   `use_pyarrow=False`) writer arms × the 7-case corpus built through the
@@ -8578,7 +8578,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-lake-ledgerstore-spike`
+- **Active feature branch:** `claude/rust-lake-ledgerstore-spike-r2`
   (DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917 — allocator-final;
   the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE: VERDICT
   byte-identity NOT FOUND (F3 confirmed by measurement — 14 polars-native
