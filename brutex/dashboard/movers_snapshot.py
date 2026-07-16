@@ -63,6 +63,7 @@ from brutex.dashboard.movers_underlying_class import (
 )
 from brutex.data.bar_screen import screen_frame
 from brutex.data.derive_lock import derive_in_progress
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -867,7 +868,8 @@ def _read_cut_1m_frame(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns AND
+    its price-sanity gate — DEC-READ-GUARD-PARITY-001, §11).
 
     **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
     the ``cutoff_min`` filter is applied to the RAW 1-minute frame via the COMMON
@@ -882,6 +884,7 @@ def _read_cut_1m_frame(
     import polars as pl
 
     from brutex.data.lake_day_glob import read_day_intraday_frame
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
     month = read_day_intraday_frame(base, day, symbol=symbol)
@@ -905,6 +908,19 @@ def _read_cut_1m_frame(
     day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
+    # DEC-READ-GUARD-PARITY-001: mirror make_lake_read_1m's price-sanity gate
+    # on the SAME column shape (the docstring above already claims the column
+    # mirror — this closes the GATE mirror). An inverted / non-positive stored
+    # 1m row must be an honest skip+count (ResampleInputError is ALREADY in
+    # movers_read_skip_errors) — never a silently laundered resampled bucket,
+    # never a CandleBar ValueError 500 (movers_resilient deliberately keeps
+    # ValueError out of the skip set as the code-bug class). Validated on the
+    # POST-cut frame — exactly the rows served: a corrupt row strictly AFTER
+    # the as-of cutoff never blanks an earlier-cut view (correct-or-absent,
+    # the #1719 strictly-narrower-degrade law).
+    validate_frame_price_sanity(
+        day_df, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+    )
     return day_df
 
 
@@ -1295,6 +1311,16 @@ def resolve_prev_close(
     session date. Pure lake read — provenance judgement (and any warning) stays
     at the candidate-loop level.
 
+    A CE/PE OPTION contract SKIPS the ``1day`` read entirely and goes straight
+    to the 1-minute walk-back (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator
+    ruling of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B,
+    draft PR #1555): the derived option ``1day`` is retired, so a stored one
+    is FROZEN at retirement eve — reading it first would serve a stale
+    prev-close (a wrong %CHNG) for weeks. The recovered 1-minute close is the
+    TRUE prior session's last bar; SPOT + FUT keep the 1day-first read
+    byte-identically (the gate is the COMMON
+    :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
     HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): this baseline read is NOT
     routed through the bad-tick/insane screen, so a prior-session last bar that is
     itself a scaled spike would inflate ``prev_close`` and thus the %-move on the
@@ -1304,16 +1330,17 @@ def resolve_prev_close(
     """
     import polars as pl
 
-    df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
-    if df is not None:
-        prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
-            "timestamp"
-        )
-        if not prior.is_empty():
-            last = prior.tail(1)
-            close = Decimal(str(last.get_column("close")[0]))
-            found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
-            return PrevDayBaseline(value=close, found_date=found)
+    if not is_option_contract_coords(segment, symbol):
+        df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        if df is not None:
+            prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+                "timestamp"
+            )
+            if not prior.is_empty():
+                last = prior.tail(1)
+                close = Decimal(str(last.get_column("close")[0]))
+                found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
+                return PrevDayBaseline(value=close, found_date=found)
     recovered = _prior_session_last_from_minute(
         lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
