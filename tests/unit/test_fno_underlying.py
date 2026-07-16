@@ -103,6 +103,57 @@ def test_primary_is_head_of_forms() -> None:
     assert primary_fno_underlying("NIFTY", aliases={}) == "NIFTY"
 
 
+# ── DEC-FNO-UNDERLYING-EMPTY-GUARD-001: the blank-symbol degenerate ───────────
+
+
+def test_primary_fno_underlying_empty_symbol_returns_itself_never_raises() -> None:
+    """The guarantee-audit BUG-3 repro: ``primary_fno_underlying("")`` must be TOTAL.
+
+    Pre-fix, ``fno_underlying_forms("")`` returned ``()`` (the ``_add`` truthiness
+    gate drops every falsy form) and ``forms[0]`` raised ``IndexError`` — one blank
+    vendor row poisoned every whole-map consumer. The empty string now resolves to
+    itself verbatim — an inert key no coverage / registry / kind row ever matches,
+    never a fabricated form (Golden Rule #1).
+    """
+    assert primary_fno_underlying("", aliases={}) == ""
+    assert primary_fno_underlying("", aliases=_ALIASES) == ""
+
+
+def test_fno_underlying_forms_empty_symbol_yields_no_forms() -> None:
+    """``fno_underlying_forms("")`` DELIBERATELY stays ``()`` (the corrected docstring law).
+
+    No vendor form can be derived from nothing — a forms-iterating consumer (the
+    metadata fetch loop, the mapping-integrity fold) then issues ZERO SDK calls for
+    a blank symbol; ``("",)`` would issue a vendor query with an empty symbol.
+    """
+    assert fno_underlying_forms("", aliases={}) == ()
+    assert fno_underlying_forms("", aliases=_ALIASES) == ()
+
+
+def test_primary_fno_underlying_whitespace_only_unchanged() -> None:
+    """Whitespace-only symbols were NEVER crashing and stay byte-identical.
+
+    ``"  "`` is truthy, so ``_add("  ")`` appends it → forms ``("  ",)`` → primary
+    ``"  "`` (a junk-but-inert key). The BUG-3 fallback branch must NOT fire for it
+    — the guard is scoped to the literal empty string only.
+    """
+    assert fno_underlying_forms("  ", aliases={}) == ("  ",)
+    assert primary_fno_underlying("  ", aliases={}) == "  "
+
+
+def test_primary_fno_underlying_nonempty_byte_identity() -> None:
+    """Every NON-empty symbol is byte-identical to the pre-guard behaviour.
+
+    Structural: the ``forms[0] if forms else`` fallback fires only for the literal
+    ``""`` (``_add(spot_symbol)`` always appends a truthy string). The table kills a
+    ``forms[-1]`` / always-fallback mutant on the guarded return.
+    """
+    assert primary_fno_underlying("BAJAJ-AUTO", aliases=_ALIASES) == "BAJAJAUTO"
+    assert primary_fno_underlying("M&M", aliases={}) == "M&M"
+    assert primary_fno_underlying("NIFTY", aliases={}) == "NIFTY"
+    assert primary_fno_underlying("NIFTYJR", aliases=_ALIASES) == "NIFTYNXT50"
+
+
 # ── resolve_fno_underlying_forms (production alias map) ──────────────────────
 
 

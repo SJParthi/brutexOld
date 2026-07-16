@@ -18,6 +18,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+import structlog.testing
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_underlying_class import (
     CLASS_ALL,
@@ -131,6 +132,78 @@ class TestBuildUnderlyingKindMap:
 
     def test_empty(self) -> None:
         assert build_underlying_kind_map([]) == {}
+
+    # ── DEC-FNO-UNDERLYING-EMPTY-GUARD-001: blank-symbol row isolation ────
+
+    def test_build_underlying_kind_map_blank_symbol_row_skipped_counted(self) -> None:
+        """The guarantee-audit BUG-3 repro: ONE blank-symbol row never poisons the map.
+
+        Pre-fix, ``primary_fno_underlying("")`` raised ``IndexError`` and the ENTIRE
+        build died (every real name lost). The blank row is now skipped BEFORE the
+        resolver, counted, and surfaced as exactly ONE aggregate
+        ``movers.underlying_kind_blank_symbol_skipped`` WARNING per build.
+        """
+        rows = [
+            _inst("RELIANCE", kind=InstrumentType.EQ, segment=Segment.CASH),
+            _inst("", kind=InstrumentType.EQ, segment=Segment.CASH),
+            _inst("TCS", kind=InstrumentType.EQ, segment=Segment.CASH),
+        ]
+        with structlog.testing.capture_logs() as logs:
+            kinds = build_underlying_kind_map(rows)
+        assert kinds == {"RELIANCE": KIND_STOCK, "TCS": KIND_STOCK}
+        assert "" not in kinds
+        skip_events = [
+            e for e in logs if e["event"] == "movers.underlying_kind_blank_symbol_skipped"
+        ]
+        assert len(skip_events) == 1
+        assert skip_events[0]["skipped"] == 1
+        assert skip_events[0]["samples"] == [f"NSE:{rows[1].security_id}"]
+
+    def test_build_underlying_kind_map_whitespace_symbol_skipped(self) -> None:
+        """A whitespace-ONLY symbol row is skipped + counted too (the parser's own posture).
+
+        Pre-guard it inserted the junk-but-inert map key ``"  "`` (unmatched by any
+        real parsed token) — the disclosed behavior delta beyond the crash fix: now
+        skipped, so no whitespace junk key lands in the map.
+        """
+        rows = [
+            _inst("NIFTY", kind=InstrumentType.IDX, segment=Segment.CASH),
+            _inst("  ", kind=InstrumentType.EQ, segment=Segment.CASH),
+        ]
+        with structlog.testing.capture_logs() as logs:
+            kinds = build_underlying_kind_map(rows)
+        assert kinds == {"NIFTY": KIND_INDEX}
+        assert "  " not in kinds
+        skip_events = [
+            e for e in logs if e["event"] == "movers.underlying_kind_blank_symbol_skipped"
+        ]
+        assert len(skip_events) == 1
+        assert skip_events[0]["skipped"] == 1
+
+    def test_build_underlying_kind_map_blank_samples_capped_at_five(self) -> None:
+        """The ≤5 ``exch:security_id`` sample cap: 6 blank rows → skipped=6, 5 samples."""
+        rows = [
+            _inst(blank, kind=InstrumentType.EQ, segment=Segment.CASH)
+            for blank in ("", " ", "  ", "   ", "    ", "\t")
+        ]
+        with structlog.testing.capture_logs() as logs:
+            kinds = build_underlying_kind_map(rows)
+        assert kinds == {}
+        [event] = [e for e in logs if e["event"] == "movers.underlying_kind_blank_symbol_skipped"]
+        assert event["skipped"] == 6
+        assert len(event["samples"]) == 5  # capped — the sixth blank row is count-only.
+
+    def test_build_underlying_kind_map_clean_master_emits_no_skip_log(self) -> None:
+        """The zero-skip arm: a clean master emits NO skip event (kills the ``if skipped:``
+        inversion mutant)."""
+        with structlog.testing.capture_logs() as logs:
+            kinds = build_underlying_kind_map(
+                [_inst("NIFTY", kind=InstrumentType.IDX, segment=Segment.CASH)]
+            )
+        assert kinds == {"NIFTY": KIND_INDEX}
+        assert [
+            e for e in logs if e["event"] == "movers.underlying_kind_blank_symbol_skipped"
+        ] == []
 
 
 # ── fno_kind_from_underlying ──────────────────────────────────────────────
