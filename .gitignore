@@ -139,6 +139,10 @@ Cargo.lock
 # stay tracked; a NEW crate needs its own negation to be addable).
 !rust/brutex-feed/Cargo.lock
 !rust/brutex-feed/fuzz/Cargo.lock
+# brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
+# application BINARY crate: its lockfile is tracked for reproducible builds
+# (Golden Rule #4) + the security-audit Cargo.lock trigger.
+!rust/brutexd/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

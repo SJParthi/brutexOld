@@ -737,6 +737,247 @@ class TestOptionsApi:
         assert "vendor calendar" in body["note"]
 
 
+# ── registry content-token cache keying (DEC-MEMORY-FOOTPRINT-HARDENING-001) ─
+
+
+def _seed_sparse_july_lake(tmp_path: Path) -> None:
+    """A sparse July-2025 lake: only the 07-Jul CE/PE contracts carry candles."""
+    for opt in ("CE", "PE"):
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol=f"NSE-NIFTY-07Jul25-24000-{opt}",
+            interval="1minute",
+            bars=[
+                _min_bar(hour=9, minute=15, close="150", volume=100, oi=10, day=date(2025, 7, 7))
+            ],
+        )
+
+
+def _upsert_registry_expiries(tmp_path: Path, expiries: tuple[date, ...], *, run_id: str) -> None:
+    """A REAL RegistryStore write — the cross-process metadata-pull stand-in.
+
+    Deliberately NOT routed through any dashboard job funnel, so the write
+    bumps NEITHER the summary generation NOR the instrument-master revision —
+    exactly the nightly-headless / CLI / second-dashboard write class the
+    registry content token exists to catch.
+    """
+    import os as _os
+
+    from brutex.data.registry_store import RegistryStore
+
+    now = datetime(2025, 7, 1, tzinfo=UTC)
+    with RegistryStore.open(tmp_path / "registry.duckdb") as reg:
+        for exp in expiries:
+            reg.upsert_expiry("NSE", "NIFTY", exp, run_id=run_id, fetched_at=now)
+    # Deterministically distinct stat token (no filesystem mtime-granularity
+    # flake): the DuckDB commit moved the file already; pin a unique mtime too.
+    target = tmp_path / "registry.duckdb"
+    stamp = _os.stat(target).st_mtime_ns + 1_000_000
+    _os.utime(target, ns=(stamp, stamp))
+
+
+class TestRegistryContentTokenKeying:
+    """The options registry-derived caches re-key on a CROSS-PROCESS registry write.
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001: `_options_calendar_cache` +
+    `_options_strikes_cache` (and the options candidate key that bakes their
+    verdicts into its rows) were keyed on the write generation ONLY —
+    `lake_revision`'s composite never stats `registry.duckdb`, so a metadata
+    pull in ANOTHER process (nightly headless `run_full_pipeline`, a second
+    dashboard, a CLI registry writer) left an open dashboard serving the
+    PRE-pull expiry tiers / ATM strike steps until an unrelated ledger write
+    bumped the generation. The `registry_revision` token folded into those
+    keys (the #1660 `coverage_revision` precedent) closes it.
+    """
+
+    def test_cross_process_registry_write_rekeys_the_options_caches(
+        self, store: InstrumentStore, tmp_path: Path
+    ) -> None:
+        """The STALE-KEY regression (fails with the key folds reverted).
+
+        1. Registry v1 holds ONLY the 07-Jul expiry → a Far-Weekly poll reads
+           the honest "no Far Weekly contracts" note (one-expiry calendar has
+           no far weekly) and CACHES calendar + candidates.
+        2. A cross-process-style registry write lands the full July weeklies
+           (14/21/28-Jul) — NO generation bump, NO master move.
+        3. The SAME coordinate polled again MUST recompute off the POST-write
+           calendar: 21-Jul is now the calendar Far weekly with no pulled
+           candles → the "vendor calendar" honest-no-data note. Pre-fix the
+           generation-only keys served step 1's payload byte-identically.
+        """
+        _seed_sparse_july_lake(tmp_path)
+        _upsert_registry_expiries(tmp_path, (date(2025, 7, 7),), run_id="r1")
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        params = {
+            "asset": "options",
+            "interval": "1day",
+            "date": "2025-07-07",
+            "expiry": "Far",
+            "track": "Weekly",
+        }
+        pre = client.get("/api/v1/movers", params=params).json()
+        assert pre["instrument_count"] == 0
+        assert "vendor calendar" not in pre["note"]  # the one-expiry calendar has no far weekly
+
+        # The cross-process metadata pull: the registry moves, the generation does NOT.
+        _upsert_registry_expiries(
+            tmp_path, (date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)), run_id="r2"
+        )
+
+        post = client.get("/api/v1/movers", params=params).json()
+        # The registry token moved the calendar + candidate keys → a fresh
+        # compute off the POST-write calendar (21-Jul Far weekly, honest no-data).
+        assert post["instrument_count"] == 0
+        assert "vendor calendar" in post["note"]
+        assert post["note"] != pre["note"]
+
+    def test_no_registry_write_repeat_polls_hit_the_cache_byte_identical(
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The no-write parity pin: repeat polls are cache HITS, payloads byte-identical.
+
+        With nothing changed between two identical polls, the folded registry
+        token is byte-stable, so the calendar read AND the candidate scan each
+        run exactly ONCE (the O(1)-on-repeat contract is not regressed by the
+        key change) and the second payload equals the first.
+        """
+        from brutex.dashboard import app as app_mod
+
+        _seed_sparse_july_lake(tmp_path)
+        _upsert_registry_expiries(
+            tmp_path,
+            (date(2025, 7, 7), date(2025, 7, 14), date(2025, 7, 21), date(2025, 7, 28)),
+            run_id="r1",
+        )
+        calendar_calls = 0
+        candidate_calls = 0
+        real_calendar = app_mod.load_registry_expiries
+        real_candidates = app_mod.compute_options_candidates
+
+        def _counting_calendar(*args: object, **kwargs: object) -> object:
+            nonlocal calendar_calls
+            calendar_calls += 1
+            return real_calendar(*args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        def _counting_candidates(*args: object, **kwargs: object) -> object:
+            nonlocal candidate_calls
+            candidate_calls += 1
+            return real_candidates(*args, **kwargs)  # type: ignore[arg-type]  # passthrough shim
+
+        monkeypatch.setattr(app_mod, "load_registry_expiries", _counting_calendar)
+        monkeypatch.setattr(app_mod, "compute_options_candidates", _counting_candidates)
+        client = TestClient(build_app(DashboardState(), instrument_store=store))
+        # Near expiry with REAL rows so the strike-chain loader (the
+        # `_RegistryKeyedCache` adapter path) is exercised through the route.
+        params = {"asset": "options", "interval": "1day", "date": "2025-07-07", "expiry": "near"}
+        first = client.get("/api/v1/movers", params=params).json()
+        second = client.get("/api/v1/movers", params=params).json()
+        assert first["instrument_count"] == 2
+        assert second == first  # byte-identical payload on the repeat poll
+        assert calendar_calls == 1  # ONE calendar read across both polls
+        assert candidate_calls == 1  # ONE candidate scan across both polls
+
+    def test_registry_key_component_folds_token_or_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_registry_key_component`: the real token, the stable sentinels, the outage arm."""
+        from brutex.dashboard import app as app_mod
+        from brutex.dashboard.db_view import registry_path_for
+        from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
+
+        # Absent registry → the stable double-absent composite passes through.
+        assert app_mod._registry_key_component(tmp_path) == f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
+        # Present registry → the exact stat token passes through — resolved off
+        # the SAME path the ONE `registry_path_for` law yields (the drift pin:
+        # `_registry_key_component`'s path expression cannot diverge from it).
+        (tmp_path / "registry.duckdb").write_bytes(b"duckdb-stand-in")
+        assert app_mod._registry_key_component(tmp_path) == registry_revision(
+            registry_path_for(tmp_path / "instruments.duckdb")
+        )
+        # Probe outage (None — "no signal") → the distinct stable "unknown"
+        # sentinel (the pre-fix generation-only envelope, never a raise).
+        monkeypatch.setattr(app_mod, "registry_revision", lambda _root: None)
+        assert app_mod._registry_key_component(tmp_path) == "unknown"
+
+    def test_registry_keyed_cache_adapter_folds_the_token_into_every_key(self) -> None:
+        """`_RegistryKeyedCache` delegates with `|r=<token>` appended, stamp untouched."""
+        from brutex.dashboard import app as app_mod
+        from brutex.dashboard.movers_cache import MoversSnapshotCache
+
+        inner = MoversSnapshotCache()
+        adapter = app_mod._RegistryKeyedCache(inner, "111:222")
+        assert (
+            adapter.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "chain"
+            )
+            == "chain"
+        )
+        # The inner cache holds the token-folded key at the SAME generation…
+        assert (
+            inner.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07|r=111:222",
+                generation=7,
+                compute=lambda: "MISS",
+            )
+            == "chain"
+        )
+        # …and a DIFFERENT token keys apart (the cross-process re-key law).
+        other = app_mod._RegistryKeyedCache(inner, "333:444")
+        assert (
+            other.get_or_compute(
+                "options_strikes||NIFTY|2025-07-07", generation=7, compute=lambda: "fresh"
+            )
+            == "fresh"
+        )
+
+    def test_held_open_connection_commit_moves_the_token_via_the_wal(self, tmp_path: Path) -> None:
+        """The m1 wal-widening REAL-DuckDB arm: a wal-ONLY write moves the token.
+
+        A commit on a HELD-OPEN connection lands in DuckDB's write-ahead log;
+        the MAIN file's ``mtime``/``size`` move only on CHECKPOINT (connection
+        close / WAL threshold) — probe-verified 2026-07-11 on this DuckDB.
+        Pre-widening, ``registry_revision`` statted the main file ONLY, so
+        this exact write class was invisible until checkpoint (fails before:
+        the pre-widening token is byte-identical across the held-open commit).
+        """
+        import os as _os
+
+        from brutex.dashboard.lake_revision import registry_revision
+        from brutex.data.registry_store import RegistryStore
+
+        now = datetime(2025, 7, 1, tzinfo=UTC)
+        target = tmp_path / "registry.duckdb"
+        # Create + checkpoint (context-manager close), so the held-open phase
+        # starts wal-less — the steady post-pull state.
+        with RegistryStore.open(target) as reg:
+            reg.upsert_expiry("NSE", "NIFTY", date(2025, 7, 7), run_id="r1", fetched_at=now)
+        before = registry_revision(target)
+        main_before = _os.stat(target)
+        cm = RegistryStore.open(target)
+        reg2 = cm.__enter__()  # the held-open connection — no checkpoint yet
+        try:
+            reg2.upsert_expiry("NSE", "NIFTY", date(2025, 7, 14), run_id="r2", fetched_at=now)
+            held = registry_revision(target)
+            main_held = _os.stat(target)
+        finally:
+            cm.__exit__(None, None, None)
+        assert held is not None
+        assert held != before  # the committed write is VISIBLE while held open…
+        # …and it is visible via the WAL component alone: the main file's stat
+        # is byte-identical across the held-open commit (the m1 evidence).
+        assert (main_before.st_mtime_ns, main_before.st_size) == (
+            main_held.st_mtime_ns,
+            main_held.st_size,
+        )
+        # The close's checkpoint removes the wal → the token moves again
+        # (correctly — a write happened) back to a `|absent`-shaped composite.
+        after_close = registry_revision(target)
+        assert after_close is not None
+        assert after_close != held
+        assert after_close.endswith("|absent")
+
+
 # ── compute_options_candidates discovery + resilience branches ────────────
 # These exercise the per-file gate branches the broad dashboard suite covered
 # but the narrowly-mapped tests did not: the _discover_options segment/interval
@@ -1951,7 +2192,10 @@ class TestOptionsPcr:
                 expiry_tier=tier,
                 expiry_track=track,
             )
-            + f"|m={count}:{latest}",
+            # …PLUS the registry.duckdb content token (the DEC-MEMORY-FOOTPRINT-
+            # HARDENING-001 fold — warm/route key parity; this lake has no
+            # registry, so the component is the stable "absent" sentinel).
+            + f"|m={count}:{latest}|r={app_module._registry_key_component(tmp_path)}",
             generation=summary_cache.generation,
             compute=lambda: compute_options_candidates(
                 lake_root=tmp_path,
