@@ -1287,7 +1287,11 @@ class TestRunSwitchStopsTheOldRunChain:
         # standalone page's static awaiting copy) and BEFORE the fetch:
         no_run_at = update.index("if (!state.runId) { return; }")
         reset_at = update.index("resetPanelDom(); // NEW-R3-1: no previous-target residue")
-        fetch_at = update.index("loadManifestSymbol(loadRow);")
+        # B1 (S2 club-fold reconcile): the fetch entry now chains
+        # loadBaseline() ahead of loadRow() inside the manifest callback —
+        # the pin repoints to the same ONE fetch entry token; the ordering
+        # law (no-run early return < reset < fetch) is unchanged.
+        fetch_at = update.index("loadManifestSymbol(function () {")
         assert no_run_at < reset_at < fetch_at
 
     def test_reset_covers_story_trades_chart_and_equity(self) -> None:
