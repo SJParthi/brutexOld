@@ -26,7 +26,7 @@ Python-vs-Python identity self-test — the mechanical gate the future
 brutex/ source change. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The per-item
 record lives in the §1 Active-branch blurb + MIGRATION.md #1916 — this header
 carries the pointer, never the story.)
-_Last updated: 2026-07-16 (DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914 —
+Earlier: 2026-07-16 (DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914 —
 ADR-0020 Wave C row 4 + the row-5 rider: the stats-manifest shard RENDER
 re-hosted on `rust/brutex-lake` behind the default-OFF
 `BRUTEX_LAKE_RUST_STATS_MANIFEST` seam (ints + isoformat-strings-only FFI;
