@@ -131,6 +131,19 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
     "brutex/cli.py": (
         "wired: _LakeOptionBarSource._row_at keep-first + WARN via log_read_duplicates"
     ),
+    "brutex/adapters/dhan/rolling_option_writer.py": (
+        "write-side merge read of the Dhan ROLLING-ATM option feed lake — the "
+        "SEPARATE nested feed root feeds/dhan/rolling_options/ (the ADR-0021 "
+        "feed-root law), not the bars/options lake the dedup gate governs; "
+        "keep-first collapse on its own selector-keyed partitions "
+        "(DEC-DHAN-ROLLING-OPTIONS-001)"
+    ),
+    "brutex/adapters/dhan/rolling_option_greeks.py": (
+        "Greeks-overlay read-modify-write over the SAME Dhan rolling-ATM feed "
+        "lake (feeds/dhan/rolling_options/ — the ADR-0021 feed-root law), not "
+        "the bars/options lake the dedup gate governs; month-file reads feed "
+        "the writer's own merge discipline (DEC-DHAN-ROLLING-OPTIONS-001)"
+    ),
 }
 
 

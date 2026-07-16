@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("fastapi")
 pytest.importorskip("duckdb")
@@ -207,3 +208,87 @@ class TestDhanRollingPullRoute:
         assert "pull-rolling-options-dhan" in html
         assert "rolling-ATM" in html
         assert "NOT per-contract" in html
+
+
+class TestDhanRollingPullWetArms:
+    """The two WET-only route arms (DEC-DHAN-ROLLING-OPTIONS-001 merge-reconcile):
+    the credential 503 refusal (LOUD log, zero job start) and the non-synthetic
+    wet start that keeps the cross-process lock — the exact spot-route twins
+    (``TestDhanPullWetArms`` in test_dashboard_dhan_pull.py). The credential
+    resolver is monkeypatched (no AWS is ever touched); the injected fake seam
+    keeps the vendor offline.
+    """
+
+    def test_wet_pull_without_credentials_is_503_with_refusal_log(
+        self,
+        client: TestClient,
+        fake_pull: _FakeRollingPull,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A REAL rolling pull with unresolvable SSM creds is a LOUD HTTP 503
+        relaying the loader's own fix text + ONE
+        ``universe.pull_rolling_options_dhan.refused_no_credentials`` error log —
+        zero vendor calls, zero job start, never a silent synthetic downgrade.
+        """
+        fix_text = "Dhan SSM credentials missing — seed /tickvault/prod/dhan/* first"
+        monkeypatch.setattr(app_module, "dhan_credentials_error", lambda **_kw: fix_text)
+        with capture_logs() as logs:
+            # dry_run defaults False — the WET arm.
+            resp = client.post("/api/v1/universe/pull-rolling-options-dhan")
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert fix_text in detail  # the loader's fix text is relayed VERBATIM
+        refusals = [
+            e
+            for e in logs
+            if e["event"] == "universe.pull_rolling_options_dhan.refused_no_credentials"
+        ]
+        assert refusals, f"refusal log missing: {logs}"
+        # ZERO fetches, ZERO job start: the fake pull was never invoked.
+        assert fake_pull.request is None
+        assert fake_pull.client.calls == 0
+
+    def test_wet_start_detail_is_not_synthetic_and_keeps_cross_process_lock(
+        self,
+        store: InstrumentStore,
+        fake_pull: _FakeRollingPull,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A creds-resolving WET start labels the job with the PLAIN detail (no
+        synthetic marker — ``label_synthetic`` is the dry-run-only arm) and KEEPS
+        the cross-process single-flight lock (the dry-run skips it)."""
+        monkeypatch.setattr(app_module, "dhan_credentials_error", lambda **_kw: None)
+        starts: list[dict[str, Any]] = []
+        orig_start = app_module.BackgroundPullJob.start
+
+        def _spy(self: Any, work: Any, **kwargs: Any) -> bool:
+            starts.append(
+                {"detail": kwargs.get("detail"), "lock": kwargs.get("cross_process_lock")}
+            )
+            return bool(orig_start(self, work, **kwargs))
+
+        monkeypatch.setattr(app_module.BackgroundPullJob, "start", _spy)
+        with TestClient(
+            build_app(DashboardState(), instrument_store=store, dhan_rolling_option_pull=fake_pull)
+        ) as c:
+            resp = c.post(
+                "/api/v1/universe/pull-rolling-options-dhan",
+                params={"from_date": "2024-06-03", "to_date": "2024-06-04", "dry_run": "false"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["started"] is True
+            assert body["dry_run"] is False
+            assert body["dataset"] == "rolling-ATM"  # HONESTY LAW — never per-contract
+            assert fake_pull.done.wait(timeout=30.0)
+        rolling_starts = [s for s in starts if "rolling-ATM" in str(s["detail"])]
+        assert rolling_starts, f"no rolling-ATM job start captured: {starts}"
+        # The PLAIN detail — the synthetic label is the dry-run-only arm.
+        assert rolling_starts[0]["detail"] == "dhan rolling-ATM options pipeline"
+        # The WET run keeps the cross-process single-flight lock.
+        assert rolling_starts[0]["lock"] is True
+        # The wet request genuinely reached the seam and built the (fake) adapter.
+        assert fake_pull.request is not None
+        assert fake_pull.request.dry_run is False
+        assert fake_pull.adapter_built is True
