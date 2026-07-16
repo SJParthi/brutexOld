@@ -134,6 +134,10 @@ Cargo.lock
 # lockfile for reproducibility (Golden Rule #4) + the security-audit
 # Cargo.lock trigger (DEC-RUST-RAYON-SUPERMASK-001, first new-crate PR).
 !rust/fno-math/Cargo.lock
+# brutexd (the Rust HTTP front, Rust-uniformity Wave 1) is likewise an
+# application BINARY crate: its lockfile is tracked for reproducible builds
+# (Golden Rule #4) + the security-audit Cargo.lock trigger.
+!rust/brutexd/Cargo.lock
 
 # Worker/agent scratch dir — throwaway venvs, tool caches, mutation-testing
 # scratch, built wheels, and disposable test lakes created by Claude Code agents.

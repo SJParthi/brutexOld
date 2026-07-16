@@ -728,6 +728,12 @@
       <input type="checkbox" id="cvDry"> dry-run (render in memory — no locks, pulls, writes, or S3)
     </label>
     <span id="cvstatus" style="margin-left:10px;color:var(--muted);"></span>
+    <!-- Owed-day surface (DEC-CROSSVERIFY-OWED-SENTINEL-001): days whose pull
+         committed to a cross-verify that never reached a completed verdict
+         (box died/slept mid-chain). Fed by the EMIT-ON-PRESENT `owed_days`
+         progress field; rendered via textContent ONLY (CodeQL XSS guard);
+         empty text when nothing is owed. -->
+    <div id="cvowed" style="margin-top:6px;color:var(--muted);font-weight:600;"></div>
   </div>
 
   <!-- Mapping integrity — the real-time green/red spot↔options guarantee
@@ -2912,6 +2918,7 @@ async function pollCrossverify() {
     const s = res.body;
     if (!s || typeof s.state !== 'string') throw new Error('malformed progress payload');
     cvFailures = 0;
+    cvRenderOwed(s.owed_days);   // EMIT-ON-PRESENT: absent field clears the line
     if (s.state === 'running') {
       cvStatus('running · ' + (s.current || s.detail || '…'));
       cvTimer = setTimeout(pollCrossverify, CV_MS);
@@ -2927,6 +2934,17 @@ async function pollCrossverify() {
     cvStatus('… live progress feed unreachable (the run may still be going) — retrying');
     cvTimer = setTimeout(pollCrossverify, cvDelayMs());
   }
+}
+/* Render the durable OWED-day list (DEC-CROSSVERIFY-OWED-SENTINEL-001): days
+   whose pull committed to a cross-verify that never reached a completed
+   verdict — the crash sentinel the next run's owed catchup completes.
+   textContent ONLY (CodeQL XSS guard); clears when nothing is owed. */
+function cvRenderOwed(days) {
+  const el = document.getElementById('cvowed');
+  if (!el) return;
+  if (!Array.isArray(days) || days.length === 0) { el.textContent = ''; return; }
+  el.textContent = '⚠ cross-verify owed for ' + days.join(', ')
+    + ' — will complete on the next run';
 }
 /* Render the DURABLE last-run record (the reload-proof failure surface —
    DEC-CROSSVERIFY-WITHHELD-REGATE-001): a finished failure no longer
@@ -2953,6 +2971,7 @@ async function cvAttachIfRunning() {
     const res = await gbFetchJson('/api/v1/crossverify/progress');
     if (!res.ok) return false;
     const s = res.body;
+    if (s) cvRenderOwed(s.owed_days);   // reload-proof: an owed day reads loud on load
     if (!s || s.state !== 'running') {
       if (s) cvRenderLastRun(s.last_run);   // reload-proof: show the last outcome
       return false;
