@@ -317,12 +317,17 @@ class TestSweepResultsRevisionNoSignal:
     """
 
     def test_happy_composite_joins_dirs_and_chain(self, tmp_path: Path) -> None:
-        """The happy path: ``<dirs digest>|<chain stat>`` — and an audit append moves it.
+        """The happy path: ``<dirs digest>|<chain stat>|<report stat>`` — an append moves it.
 
         The standalone twin of the token behaviour proven in
         ``test_dashboard_results_revision_key.py`` (this module's stem-matched
         suite must reach the composite return on its own — the discovery-gate
         contract; the line was previously covered only by the sibling file).
+        Conscious pin update at the 2026-07-16 merge-reconcile: this test
+        arrived from main pinning the pre-#1848 TWO-component composite; on
+        this branch DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 (MIGRATION.md #1848)
+        appends the cascade report's stat as a THIRD component (``absent``
+        here — no report exists), exactly as the sibling file already pins.
         """
         _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
         chain = tmp_path / "sweeps" / "audit" / "sweep-all.jsonl"
@@ -332,7 +337,7 @@ class TestSweepResultsRevisionNoSignal:
         assert first is not None and "|" in first
         dirs = sweeps_revision(tmp_path)
         st = os.stat(chain)
-        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}"
+        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}|{ABSENT_TOKEN}"
         # An audit APPEND (no directory mtime moves) still moves the composite.
         with chain.open("ab") as handle:
             handle.write(b'{"action":"SWEEP_START"}\n')

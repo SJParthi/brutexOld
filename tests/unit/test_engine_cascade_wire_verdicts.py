@@ -15,8 +15,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-import brutex.engine.cascade_wire as cw
 import pytest
+from brutex.engine import cascade_wire as cw
 from brutex.engine.cascade_wire import (
     AMBIGUOUS_MARKER,
     VerdictMarker,

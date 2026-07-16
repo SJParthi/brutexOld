@@ -942,7 +942,7 @@ class TestBenchmarkJoin:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two combos on one depth run share ONE memoised baseline load."""
-        import brutex.dashboard.sweep_results_view as srv
+        from brutex.dashboard import sweep_results_view as srv
 
         row_a = _row(seed=1)
         row_b = _row(seed=2, sharpe=0.5)
@@ -974,7 +974,7 @@ class TestBenchmarkJoin:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A stamp with NO results-depth ancestor is skipped, never guessed."""
-        import brutex.dashboard.sweep_results_view as srv
+        from brutex.dashboard import sweep_results_view as srv
         from brutex.engine.trade_store import SidecarPaths
 
         row = _row(seed=1)
