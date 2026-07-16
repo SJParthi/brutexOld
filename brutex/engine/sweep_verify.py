@@ -80,6 +80,7 @@ from brutex.engine.tuple_complete import (
     read_completion_sentinel,
 )
 from brutex.models import BruteXError
+from brutex.ranking import OverfitGateConfig
 from brutex.strategies.types import Side
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -1600,6 +1601,149 @@ def recorded_apriori_from_audit(results_root: Path) -> bool | None:
     return winner_mode
 
 
+# The recorded overfit leg is EXACTLY the 4-member `_gate_config_fragment`
+# order [dsr_min, weight, default_skew, default_excess_kurtosis] (#1336).
+_OVERFIT_LEG_LEN = 4
+
+
+def _overfit_from_recorded_leg(leg: object, *, audit_path: Path) -> OverfitGateConfig | None:
+    """Reconstruct the recorded overfit gate config from ONE START-record leg.
+
+    ``leg`` is the winning START record's ``payload["gate_config"]["overfit"]``
+    value — the :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    order ``[dsr_min, weight, default_skew, default_excess_kurtosis]`` — or
+    ``None`` when the record carries no overfit leg (legacy / ungated).
+
+    Raises
+    ------
+    SweepVerifyError
+        On a malformed leg (wrong shape / non-numeric members) or a leg whose
+        values :class:`~brutex.ranking.OverfitGateConfig` itself refuses — a
+        malformed tree is not a verifiable tree (the
+        ``recorded_stage3_from_audit`` contract).
+    """
+    if leg is None:
+        return None
+    if (
+        not isinstance(leg, Sequence)
+        or isinstance(leg, (str, bytes))
+        or len(leg) != _OVERFIT_LEG_LEN
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in leg)
+    ):
+        raise SweepVerifyError(
+            f"malformed gate_config.overfit leg in the START record at {audit_path}: {leg!r}"
+        )
+    try:
+        return OverfitGateConfig(
+            dsr_min=float(leg[0]),
+            weight=float(leg[1]),
+            default_skew=float(leg[2]),
+            default_excess_kurtosis=float(leg[3]),
+        )
+    except ValueError as exc:
+        raise SweepVerifyError(
+            f"invalid recorded overfit gate config at {audit_path}: {exc}"
+        ) from exc
+
+
+def recorded_overfit_from_audit(results_root: Path) -> OverfitGateConfig | None:
+    """Read the OVERFIT gate config a sweep tree RECORDED at launch.
+
+    DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 — the recount-side recovery of the
+    overfit gate: the #1336 ``_tuple_digest`` folds the ACTIVE gate config into
+    every tuple store's ADDRESS, and the default-on overfit DSR gate flip means
+    a production tree's stores live at GATED addresses. ``sweep-verify
+    --recount`` re-plans addresses from ITS OWN grid (whose ``overfit`` default
+    is ``None``), so without this channel every healthy overfit-gated tree read
+    a ``grid_mismatch`` FALSE-POSITIVE — an alarm-fatigue regression, never a
+    false-clean. The tree describes itself: both audit chains are scanned
+    exactly like :func:`recorded_apriori_from_audit` (the SAME
+    :data:`_MODE_START_ACTIONS` family, last-START-per-chain, latest ``ts_utc``
+    across chains wins, the supervisor chain keeps an exact tie), and the
+    WINNING record's ``gate_config.overfit`` leg — persisted by the launch
+    sites in the :func:`~brutex.engine.sweep_identity._gate_config_fragment`
+    order — is reconstructed into an
+    :class:`~brutex.ranking.OverfitGateConfig`.
+
+    Returns
+    -------
+    OverfitGateConfig | None
+        The recorded gate config; ``None`` when the winning START record
+        carries no ``gate_config`` (an ungated / pre-channel tree — the
+        EMIT-ON-active law makes absence == legacy, so a legacy audit verifies
+        exactly as before this channel existed) or when no START record exists
+        in either READABLE chain.
+
+    Raises
+    ------
+    SweepVerifyError
+        If the winning record's leg is malformed / refused by
+        :class:`~brutex.ranking.OverfitGateConfig` (a malformed tree is not a
+        verifiable tree). An UNREADABLE chain deliberately does NOT raise —
+        unlike :func:`recorded_apriori_from_audit` (consulted CONDITIONALLY,
+        only when the mode can matter — the m2 law), THIS recovery is consulted
+        UNCONDITIONALLY by ``cmd_verify``, so a raise here would hard-fail
+        EVERY verify over one bit-rotted chain, violating the m2 survival law
+        ("an explicit-k no-recount verify never hard-fails on a corrupt
+        supervisor chain"). An unreadable chain is SKIPPED WHOLE (its partial
+        pre-corruption records are discarded — a broken hash chain is not
+        trusted piecemeal) with ONE loud
+        ``sweep_verify.overfit_recovery_chain_unreadable`` WARNING, and the
+        surviving READABLE chain — when it carries a START record — still
+        supplies the config. HONEST scope: only the LIBRARY grid entry
+        (:func:`~brutex.engine.sweep_orchestrator.run_sweep_grid`) records
+        GRID_SWEEP_START on the ingest chain; ``cmd_sweep_all``'s supervised
+        path records the config on SUPERVISOR_START ONLY (its ingest chain
+        carries per-tuple SWEEP_START lines, which are NOT the START family) —
+        so a gated ``cmd_sweep_all`` tree whose supervisor chain is unreadable
+        leaves the config UNRECOVERABLE: the recovery returns ``None`` and the
+        verify reads the honest ``grid_mismatch`` (correct-or-absent — never a
+        fabricated default config), while ``--recount`` still hard-fails at
+        its own verify-chain machinery (``recorded_audit_facts``).
+    """
+    from brutex.orchestrator.audit import AuditError, iter_entries
+
+    winner_leg: object = None
+    winner_found = False
+    winner_ts = float("-inf")
+    winner_path: Path | None = None
+    # Supervisor chain FIRST so an exact ts_utc tie keeps ITS record (the
+    # production launchers' chain) — the recorded_apriori_from_audit law.
+    for parts in (("audit", "sweep-all-supervisor.jsonl"), ("audit", "sweep-all.jsonl")):
+        audit_path = results_root.joinpath(*parts)
+        if not audit_path.exists():
+            continue
+        last_leg: object = None
+        last_found = False
+        last_ts = float("-inf")
+        try:
+            for entry in iter_entries(audit_path):
+                if entry.action not in _MODE_START_ACTIONS:
+                    continue
+                gate_config = entry.payload.get("gate_config")
+                last_leg = gate_config.get("overfit") if isinstance(gate_config, Mapping) else None
+                last_found = True
+                last_ts = entry.ts_utc
+        except AuditError as exc:
+            # Tolerant per-chain law (see the Raises section): skip the
+            # unreadable chain WHOLE — discard any pre-corruption partial
+            # state — and let the intact sibling chain supply the config.
+            _LOG.warning(
+                "sweep_verify.overfit_recovery_chain_unreadable",
+                audit_path=str(audit_path),
+                error=str(exc),
+            )
+            continue
+        if last_found and (not winner_found or last_ts > winner_ts):
+            winner_leg = last_leg
+            winner_found = True
+            winner_ts = last_ts
+            winner_path = audit_path
+    if not winner_found or winner_path is None:
+        return None
+    return _overfit_from_recorded_leg(winner_leg, audit_path=winner_path)
+
+
 def _stores_differ_only_in_vix(original: Path, scratch: Path) -> str | None:
     """Attribute a store-pair diff to the VIX trio — and name the SHAPE, or abstain.
 
@@ -1974,6 +2118,34 @@ def compare_recount(
             sentinel_path,
         )
         scratch_store = scratch_root / store_path.relative_to(original_root)
+        # Memoised mixed-gate-config sibling probe (the (a) honesty floor,
+        # DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001): computed at most once per
+        # tuple, consulted only on the original-absent arm below.
+        mixed_sibling_memo: bool | None = None
+
+        def _mixed_gate_sibling_exists() -> bool:
+            """``True`` iff the ORIGINAL tree holds a same-``(direction, k)`` store
+            under a DIFFERENT gate-config digest.
+
+            The store filename law is ``{direction}_k{k}_{digest}.parquet``
+            (``tuple_store_path``; the digest is a BLAKE3 hex slice with no
+            ``_``), so ``name.rsplit("_", 1)[0]`` is the ``{direction}_k{k}``
+            prefix and any OTHER ``{prefix}_*.parquet`` FILE in the same
+            partition dir is the same tuple coordinate written under a
+            different `_tuple_digest` gate fold — a tree built under MIXED
+            gate configs. The glob matches only store Parquets: the sidecar
+            (``….parquet.trials.json``) and sentinel (``….parquet.complete.json``)
+            names do not end in ``.parquet``.
+            """
+            nonlocal mixed_sibling_memo
+            if mixed_sibling_memo is None:
+                prefix = store_path.name.rsplit("_", 1)[0]
+                mixed_sibling_memo = any(
+                    candidate.name != store_path.name and candidate.is_file()
+                    for candidate in store_path.parent.glob(f"{prefix}_*.parquet")
+                )
+            return mixed_sibling_memo
+
         # Memoised store-pair VIX verdict (one load per tuple; all three
         # artifacts of a VIX-diverged tuple consult it). The memo holds the
         # shape string — moved or backfill — or the not-VIX-attributable
@@ -2081,6 +2253,36 @@ def compare_recount(
                 )
                 continue
             if not original_exists:
+                # The (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
+                # a GRID tuple absent at the recovered gate-config address
+                # while the SAME (direction, k) coordinate exists under a
+                # DIFFERENT digest is a tree built under MIXED gate configs —
+                # this recount's single recovered config cannot verify the
+                # other family, so the verdict is honestly INCONCLUSIVE
+                # (rc 4 via the cmd_verify trigger), never CLEAN-by-silence
+                # and never condemned. Cell (non-grid) artifacts keep the
+                # original-absent read verbatim — their addresses ride the
+                # stage-3 knob fold, not this probe.
+                if is_grid_tuple and _mixed_gate_sibling_exists():
+                    findings.append(
+                        VerifyFinding(
+                            path=rel,
+                            code="recount_mixed_mode_unverifiable",
+                            severity="warn",
+                            detail=(
+                                "the recount produced this artifact at the "
+                                "recovered gate-config address but the tree "
+                                "lacks it AND holds a same-(direction, k) "
+                                "store under a DIFFERENT gate-config digest — "
+                                "a tree built under MIXED gate configs; "
+                                "unverifiable under this recount's single "
+                                "recovered config (re-verify with the other "
+                                "config to cover its digest family), never "
+                                "classified as corruption"
+                            ),
+                        )
+                    )
+                    continue
                 findings.append(
                     VerifyFinding(
                         path=rel,
@@ -2314,6 +2516,7 @@ __all__ = [
     "plan_expected_stores",
     "recorded_apriori_from_audit",
     "recorded_context_from_audit",
+    "recorded_overfit_from_audit",
     "recorded_roll_schedules_from_audit",
     "recorded_stage3_from_audit",
     "stale_roll_schedule_refusal",

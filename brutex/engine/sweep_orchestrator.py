@@ -1391,6 +1391,17 @@ def run_sweep_grid(
         # wrong-mode recount downgrades to INCONCLUSIVE, never a false CORRUPT.
         # Absence == legacy, which also classifies every pre-flip tree correctly.
         start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    overfit_fragment = _gate_config_fragment(grid)
+    if overfit_fragment is not None and "overfit" in overfit_fragment:
+        # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
+        # consumed by sweep-verify's recorded-overfit reconcile
+        # (recorded_overfit_from_audit) so `sweep-verify --recount` re-derives
+        # the gate-folded store addresses (#1336 `_tuple_digest`) instead of
+        # reading a grid_mismatch FALSE-POSITIVE on every healthy overfit-gated
+        # tree. ONLY the overfit leg is persisted — stage3 already rides its
+        # own STAGE_3_PASS_START record. EMIT-ON-active: absence == legacy,
+        # keeping every ungated/legacy payload byte-identical.
+        start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
     audit.append(action=_ACTION_GRID_START, subject=subject, payload=start_payload)
 
     tuples_run = 0

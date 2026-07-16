@@ -18,7 +18,26 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (Club G docs merge vehicle, branch
+_Last updated: 2026-07-16 (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001,
+MIGRATION.md #1851, branch `integration/club-s2-results-v2` — the S2
+overfit-recount recovery channel: `brutex sweep-verify --recount` RECOVERS
+the overfit gate config the sweep RECORDED at launch (both grid launchers
+persist the #1336 overfit fragment on their START records; NEW
+`sweep_verify.recorded_overfit_from_audit` — dual-chain, TOLERANT per-chain
+read, absent gate_config = legacy byte-identical), so a healthy tree swept
+under the S2 club's default-on overfit DSR gate no longer reads a
+`grid_mismatch` FALSE POSITIVE on EVERY recount — an ALARM-FATIGUE
+regression (recount unusable on overfit trees), NOT a false-clean. Plus the
+(a) honesty floor: a MIXED-gate-config tree reads the honest
+`recount_mixed_mode_unverifiable` rc 4 (inconclusive), never
+CLEAN-by-silence; a corrupt supervisor chain on a cmd_sweep_all tree is
+honestly config-UNRECOVERABLE → the fold-base `grid_mismatch` rc 3, never a
+fabricated default. #1336 `_tuple_digest`/`_gate_config_fragment` + #1474's
+frozen `sweep_apriori.py` BYTE-UNTOUCHED; ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+identity untouched. This header carries the pointer, never the story — the
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1851.)
+Earlier: 2026-07-15 (Club G docs merge vehicle, branch
 `integration/club-g-docs` — the docs-only fold of TWO PRs as ONE merge
 event off main tip d6ac9f85: #1506 DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md
 #1780 — the summarize-only GDFL vendor-docs archive + the definitive
@@ -2693,7 +2712,53 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-g-docs` (**Club G docs merge
+- **Active branch:** `integration/club-s2-results-v2`
+  (**DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851** — the S2
+  overfit-recount recovery channel, folded onto the CLUB S2 members
+  (#1848–#1850) on this same branch. THE TRUE FAILURE MODE (stated
+  precisely): the S2 club carries the default-on overfit DSR gate flip
+  (fb06ca8a), whose #1336 law folds the ACTIVE overfit config into every
+  tuple store's `_tuple_digest` ADDRESS — while `cmd_verify --recount`
+  re-derived its expected-store plan config-BLIND, so plan∩found digests
+  were fully DISJOINT on every healthy overfit-gated tree and the recount
+  fired `grid_mismatch` (corrupt, rc 3) as a FALSE POSITIVE every time — an
+  ALARM-FATIGUE regression (recount unusable on overfit trees), NOT a
+  false-clean. THE FIX: (MINT) both launchers persist
+  `start_payload["gate_config"] = {"overfit": [dsr_min, weight,
+  default_skew, default_excess_kurtosis]}` — `sweep_supervisor` on
+  SUPERVISOR_START + `sweep_orchestrator`'s library `run_sweep_grid` on
+  GRID_SWEEP_START; an ungated grid writes NO key (absent ≠ default).
+  (VERIFY) NEW `sweep_verify.recorded_overfit_from_audit` mirrors
+  `recorded_apriori_from_audit` (dual-chain; last START per chain; latest
+  ts_utc across chains wins, supervisor keeps exact ties) with two
+  deliberate divergences — absent → None = legacy byte-identical, and a
+  TOLERANT per-chain read (an unreadable chain is skipped WHOLE with one
+  `sweep_verify.overfit_recovery_chain_unreadable` WARN — the mirror raises,
+  but this recovery is called UNCONDITIONALLY by cmd_verify); a malformed
+  recorded leg still raises `SweepVerifyError` (corrupt-or-absent, never a
+  fabricated config); cmd_verify reconciles via `dataclasses.replace(grid,
+  overfit=recorded)` iff recovered. HONEST SCOPE (the m2 executed-evidence
+  correction): cmd_sweep_all's ingest chain carries per-tuple SWEEP_START —
+  NOT the START family — so a corrupt SUPERVISOR chain leaves the config
+  UNRECOVERABLE and the verdict is the honest fold-base `grid_mismatch`
+  rc 3 (pinned: rc 3 + exactly one chain-unreadable WARN + no hard
+  EXIT_USER_ERROR — the interim non-tolerant read's rc-1 regression killed).
+  (a) HONESTY FLOOR: a GRID tuple absent at the recovered address beside a
+  same-`{direction}_k{k}` DIFFERENT-digest store reads the NEW
+  `recount_mixed_mode_unverifiable` WARN → rc 4 (mixed-gate tree —
+  inconclusive under one recovered config), never CLEAN-by-silence and
+  never condemned; pairing artifacts never read as siblings; the CELL arm
+  stays `recount_original_absent`; the sibling probe is memoised per tuple
+  (one glob, glob-spy-pinned). UNTOUCHED: #1336's
+  `_tuple_digest`/`_gate_config_fragment` internals + #1474's frozen
+  `sweep_apriori.py`. GATES: `sweep_verify.py` 100.00% line+branch
+  standalone (633/268) + the ci.yml whole-engine glob gate 100.00%; the
+  cli.py delta rides the pre-existing pragma-no-cover `cmd_sweep_verify`
+  shim, driven by the e2e suite; ruff/ruff-format clean; `mypy --strict`
+  clean; pyright 0 new. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run
+  identity untouched — the recording is audit-PAYLOAD only. The full record
+  lives in MIGRATION.md #1851.)
+  Earlier: `integration/club-g-docs` (**Club G docs merge
   vehicle** — the docs-only fold of TWO PRs as ONE merge event off main tip
   d6ac9f85: **#1506** DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780 — the
   SUMMARIZE-ONLY GDFL vendor-docs archive + the definitive granularity/depth
@@ -7466,7 +7531,20 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-g-docs`
+- **Active feature branch:** `integration/club-s2-results-v2`
+  (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001, MIGRATION.md #1851 — the S2
+  overfit-recount recovery channel: the recount recovers the RECORDED
+  overfit gate config (mint on both launchers' START records; the tolerant
+  dual-chain `recorded_overfit_from_audit`; absent = legacy byte-identical),
+  killing the `grid_mismatch` FALSE-POSITIVE alarm on every healthy
+  overfit-gated tree — an ALARM-FATIGUE regression (recount unusable on
+  overfit trees), NOT a false-clean; + the (a) honesty floor
+  (`recount_mixed_mode_unverifiable` rc 4 on mixed-gate trees) and the
+  honest config-unrecoverable corrupt-supervisor rc 3; #1336 digest
+  internals + #1474's frozen `sweep_apriori.py` byte-untouched; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see
+  §1 + MIGRATION.md #1851 for the full blurb)
+  Earlier: `integration/club-g-docs`
   (Club G docs merge vehicle — the docs-only fold of #1506
   DEC-GDFL-VENDOR-DOCS-001 (MIGRATION.md #1780) + #1508
   DEC-GDFL-INGEST-DESIGN-001 (MIGRATION.md #1781); DOCS-ONLY — zero

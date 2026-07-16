@@ -308,10 +308,27 @@ def test_explicit_ladder_under_truthy_env_tree_reverifies_verdict_grade(
 def test_explicit_k_no_recount_verify_survives_a_corrupt_supervisor_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """m2: the mode read runs ONLY when it can matter (recount requested OR the
-    default/extinction resolution) — an explicit-k, no-recount verify over a
-    tree with a CORRUPT supervisor chain returns rc 0 with the report, exactly
-    like main did before the gate existed."""
+    """m2 (the SURVIVAL law): an explicit-k, no-recount verify over a tree with
+    a CORRUPT supervisor chain never HARD-fails on the chain read — the
+    apriori mode read runs only when it can matter, and the overfit-gate
+    recovery (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001) is per-chain TOLERANT
+    (one loud ``sweep_verify.overfit_recovery_chain_unreadable`` WARNING,
+    never a raise / rc 1).
+
+    HONEST expectation shift (both directions, Golden Rule #10): this test
+    originally pinned rc 0 — true while the tree was UNGATED (pre
+    default-on-overfit). With the default-ON overfit DSR gate the sweep's
+    stores live at GATED addresses, and a ``cmd_sweep_all`` tree carries the
+    recorded gate config on the SUPERVISOR chain ONLY (its ingest chain holds
+    per-tuple SWEEP_START lines — not the START family), so corrupting that
+    one chain makes the config UNRECOVERABLE: the honest verdict is the named
+    ``grid_mismatch`` finding (rc 3 — correct-or-absent, never a fabricated
+    default config), exactly what this shape read at the fold base too
+    (pre-channel the test was ALREADY red rc 3; the channel's interim
+    non-tolerant read briefly made it rc 1 — the regression this pin kills)."""
+    from brutex.cli import EXIT_VERIFY_FINDINGS
+    from structlog.testing import capture_logs
+
     monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
     lake_root, catalog_path = _persist(tmp_path)
     results_root = tmp_path / "sweeps"
@@ -323,11 +340,19 @@ def test_explicit_k_no_recount_verify_survives_a_corrupt_supervisor_chain(
         fh.write("{not jsonl\n")
     capsys.readouterr()
 
-    rc = main([*_verify_argv(lake_root, catalog_path, results_root), "--k", "1,2"])
+    with capture_logs() as logs:
+        rc = main([*_verify_argv(lake_root, catalog_path, results_root), "--k", "1,2"])
     captured = capsys.readouterr()
-    assert rc == EXIT_OK  # the gate was skipped — no hard fail on the chain
+    # SURVIVAL: never a hard fail (rc 1) on the corrupt chain, never the
+    # "unreadable audit log" refusal — the verify runs to a real report.
+    assert rc == EXIT_VERIFY_FINDINGS
     assert "unreadable audit log" not in captured.err
     assert "sweep-verify report" in captured.out or "structural" in captured.out.lower()
+    # The tolerant recovery warned EXACTLY once for the one corrupt chain.
+    warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+    assert len(warned) == 1
+    # The config-unrecoverable residual is the HONEST named grid_mismatch.
+    assert "grid_mismatch" in captured.out
 
 
 # ──────────────── m7: the ladder-scaled Telegram watchdog timeout ────────────────
@@ -548,3 +573,129 @@ def test_extinct_tuple_diffcheck_completes_in_bounded_time(
         f"extinct k=6 tuple took {wall:.1f}s with the diffcheck ON — "
         "the raw C(60,6) walk is back (round-3 BLOCKER regression)"
     )
+
+
+# ── DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001: the overfit gate-config channel ──
+#
+# The S2 fold flipped the overfit DSR gate default-ON (fb06ca8a), which folds
+# an ``overfit`` fragment into every tuple's `_tuple_digest` store address —
+# but ``cmd_verify`` never set ``overfit`` on the verify grid, so a plain
+# ``sweep-verify --recount`` over a HEALTHY default-swept tree planned UNGATED
+# addresses against GATED files and read a ``grid_mismatch`` FALSE-POSITIVE on
+# every such tree (an ALARM-FATIGUE regression — recount unusable on overfit
+# trees; NOT a false-clean). The fix records the gate config at MINT
+# (SUPERVISOR_START / GRID_SWEEP_START ``gate_config``) and recovers it at
+# VERIFY (``recorded_overfit_from_audit`` → ``dataclasses.replace(grid,
+# overfit=…)``), plus the (a) honesty floor for MIXED-gate-config trees.
+
+
+def test_uniform_overfit_default_tree_recount_stays_rc0_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The healthy UNIFORM-gate-config pin: a default (overfit-gated) legacy
+    tree recounted with the recovered gate config reads CLEAN rc 0 — never the
+    pre-fix ``grid_mismatch`` false-positive, and never a false
+    ``recount_mixed_mode_unverifiable`` rc 4 (the (a) floor must not fire on a
+    single-family tree)."""
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    assert _sweep_all(lake_root, catalog_path, results_root, k="1,2") == EXIT_OK
+    capsys.readouterr()
+
+    rc = main(
+        [
+            *_verify_argv(lake_root, catalog_path, results_root, "--recount"),
+            "--k",
+            "1,2",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK
+    assert "verdict: CLEAN" in out
+    assert "grid_mismatch" not in out
+    assert "recount_mixed_mode_unverifiable" not in out
+    assert "[CORRUPT]" not in out
+
+
+def test_mixed_gate_config_tree_recount_reads_unverifiable_rc4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The (a) honesty floor: a tree built under MIXED gate configs — some
+    tuples minted with ``--no-overfit-gate`` (ungated digests), others under
+    the overfit default (gated digests) over ONE root — recounts to the
+    honest ``recount_mixed_mode_unverifiable`` INCONCLUSIVE rc 4: the single
+    recovered gate config (the LATEST START record's) cannot verify the other
+    digest family, so the verdict is never CLEAN-by-silence (rc 0 with the
+    ungated family invisibly skipped) and never verdict-grade corruption
+    (rc 3) or the pre-fix ``grid_mismatch``."""
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    # Cycle 1: k=1,2 UNGATED (`--no-overfit-gate`) → ungated tuple digests.
+    assert _sweep_all(lake_root, catalog_path, results_root, k="1,2", overfit_gate=False) == (
+        EXIT_OK
+    )
+    # Cycle 2: k=3,4 under the overfit DEFAULT → gated digests; its START
+    # record is the LATEST, so the recovery adopts the GATED config.
+    assert _sweep_all(lake_root, catalog_path, results_root, k="3,4") == EXIT_OK
+    capsys.readouterr()
+
+    rc = main(
+        [
+            *_verify_argv(lake_root, catalog_path, results_root, "--recount"),
+            "--k",
+            "1,2,3,4",
+        ]
+    )
+    out = capsys.readouterr().out
+    # PRESENCE, not an exact count: the floor emits per orphaned ARTIFACT
+    # (store + sidecar + sentinel per mixed tuple, as the recount ladder sees
+    # them) — the law under pin is the code + the exit grade, not the tally.
+    assert "recount_mixed_mode_unverifiable" in out
+    assert "MIXED gate configs" in out
+    assert "grid_mismatch" not in out  # the pre-fix false-positive class
+    assert " recount_divergence:" not in out  # never verdict-grade corruption
+    assert "[CORRUPT]" not in out
+    assert rc == EXIT_VERIFY_INCONCLUSIVE  # rc 4 — honestly unverifiable, not rc 0/3
+
+
+def test_ungated_tree_with_no_recorded_gate_config_verifies_rc0_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The no-record backward-compat arm: a ``--no-overfit-gate`` tree's audit
+    carries NO ``gate_config`` key anywhere (the EMIT-ON-active law), the
+    recovery returns ``None``, and the verify grid stays byte-identical to the
+    pre-channel shape — recount CLEAN rc 0.
+
+    HONEST envelope: a genuinely PRE-channel audit from an overfit-GATED
+    sweep (gated digests, no record) stays the disclosed ``grid_mismatch``
+    residual — the audit chain is hash-sealed, so that shape cannot be
+    simulated here without breaking the chain the recount verifies; the
+    no-record law is therefore pinned on the ungated arm, whose audit
+    genuinely lacks the key."""
+    monkeypatch.delenv(SWEEP_APRIORI_ENV, raising=False)
+    lake_root, catalog_path = _persist(tmp_path)
+    results_root = tmp_path / "sweeps"
+    assert _sweep_all(lake_root, catalog_path, results_root, k="1,2", overfit_gate=False) == (
+        EXIT_OK
+    )
+    # The EMIT-ON-active mint law: no overfit gate ⇒ no gate_config recorded.
+    for chain in ("sweep-all-supervisor.jsonl", "sweep-all.jsonl"):
+        chain_path = results_root / "audit" / chain
+        if chain_path.exists():
+            assert "gate_config" not in chain_path.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    rc = main(
+        [
+            *_verify_argv(lake_root, catalog_path, results_root, "--recount"),
+            "--k",
+            "1,2",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == EXIT_OK
+    assert "verdict: CLEAN" in out
+    assert "grid_mismatch" not in out
+    assert "recount_mixed_mode_unverifiable" not in out

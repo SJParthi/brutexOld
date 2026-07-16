@@ -50,6 +50,7 @@ from brutex.engine.sweep_verify import (
     recorded_apriori_from_audit,
     recorded_audit_facts,
     recorded_context_from_audit,
+    recorded_overfit_from_audit,
     recorded_roll_schedules_from_audit,
     recorded_stage3_from_audit,
     stale_roll_schedule_refusal,
@@ -1904,6 +1905,113 @@ class TestRecountCompare:
         assert "recount_original_absent" in _codes(report)
         assert report.clean is True
 
+    # ── the (a) honesty floor (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001) ──
+
+    def test_original_absent_with_mixed_gate_sibling_reads_unverifiable(
+        self, tmp_path: Path
+    ) -> None:
+        """A GRID tuple absent at the planned (recovered gate-config) address
+        while the SAME ``{direction}_k{k}`` coordinate holds a store under a
+        DIFFERENT digest is a MIXED-gate-config tree — the honest
+        ``recount_mixed_mode_unverifiable`` WARN, never the pending-tuple
+        ``recount_original_absent`` read (which would let a whole digest
+        family pass as CLEAN-by-silence)."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        prefix = store.name.rsplit("_", 1)[0]
+        # The same tuple coordinate under a different gate-config digest.
+        (store.parent / f"{prefix}_{'0' * 16}.parquet").write_bytes(store.read_bytes())
+        store.unlink()
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_mixed_mode_unverifiable" in codes
+        assert "recount_original_absent" not in codes
+        assert report.clean is True  # honesty (rc-4 via cmd_verify), never condemned
+
+    def test_original_absent_pairing_artifacts_never_read_as_gate_siblings(
+        self, tmp_path: Path
+    ) -> None:
+        """The sibling probe globs ``{prefix}_*.parquet`` — STORE Parquets
+        only. The pairing artifacts left beside an unlinked store
+        (``….parquet.trials.json`` sidecar + ``….parquet.complete.json``
+        sentinel) do not end in ``.parquet`` and must never read as a second
+        gate-config family: the verdict stays ``recount_original_absent``."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        store.unlink()
+        # The pairing artifacts are genuinely still in the partition dir.
+        assert sorted(p.name for p in store.parent.glob("*.json")) == [
+            f"{store.name}.complete.json",
+            f"{store.name}.trials.json",
+        ]
+        plan = plan_expected_stores(original, grid)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+
+    def test_all_three_absent_artifacts_consult_the_sibling_memo_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sibling probe is memoised PER TUPLE: when all THREE artifacts
+        (store + trial-stats sidecar + completion sentinel) are absent from
+        the original tree beside a different-digest sibling, each artifact
+        reads ``recount_mixed_mode_unverifiable`` — but the ``{prefix}_*``
+        glob runs exactly ONCE (the second and third consultations return
+        the cached verdict, the ``mixed_sibling_memo`` short-circuit)."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        store = _store_path(original, grid)
+        prefix = store.name.rsplit("_", 1)[0]
+        (store.parent / f"{prefix}_{'0' * 16}.parquet").write_bytes(store.read_bytes())
+        trial_stats_sidecar_path(store).unlink()
+        completion_sentinel_path(store).unlink()
+        store.unlink()
+        plan = plan_expected_stores(original, grid)
+        probe_patterns: list[str] = []
+        real_glob = Path.glob
+
+        def counting_glob(path: Path, pattern: str) -> object:
+            if pattern.endswith("_*.parquet"):
+                probe_patterns.append(pattern)
+            return real_glob(path, pattern)
+
+        monkeypatch.setattr(Path, "glob", counting_glob)
+        report = compare_recount(original, scratch, plan, context_match=True)
+        code_list = [f.code for f in report.findings]
+        assert code_list.count("recount_mixed_mode_unverifiable") == 3
+        assert "recount_original_absent" not in code_list
+        assert probe_patterns == [f"{prefix}_*.parquet"]  # ONE probe per tuple
+        assert report.clean is True
+
+    def test_cell_original_absent_with_sibling_stays_original_absent(self, tmp_path: Path) -> None:
+        """``is_grid_tuple`` gates the (a) floor OFF for Stage-3 CELL stores —
+        a cell address rides the stage-3 knob fold, not the gate-config fold,
+        so a same-prefix sibling next to an absent cell original must keep the
+        pending-tuple ``recount_original_absent`` read."""
+        original, scratch, grid = self._two_trees(tmp_path)
+        record = _stage3_record()
+        plan = plan_expected_stores(original, grid, stage3=record)  # type: ignore[arg-type]
+        (cell_rel,) = [
+            p.relative_to(original) for p, (_, _, is_grid) in plan.items() if not is_grid
+        ]
+        template = ResultsStore.load(_store_path(scratch, grid)).rows()[0]
+        dest = scratch / cell_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cell_store = ResultsStore(path=dest)
+        cell_store.append(template)
+        cell_store.flush()
+        # Plant a same-prefix sibling in the ORIGINAL cell dir — for a GRID
+        # tuple this exact shape reads mixed-gate; the cell arm must not.
+        orig_dir = (original / cell_rel).parent
+        orig_dir.mkdir(parents=True, exist_ok=True)
+        prefix = (original / cell_rel).name.rsplit("_", 1)[0]
+        (orig_dir / f"{prefix}_{'0' * 16}.parquet").write_bytes(dest.read_bytes())
+        report = compare_recount(original, scratch, plan, context_match=True, cell_evidence=True)
+        codes = _codes(report)
+        assert "recount_original_absent" in codes
+        assert "recount_mixed_mode_unverifiable" not in codes
+
     def test_absent_in_both_worlds_is_silent(self, tmp_path: Path) -> None:
         # A tuple with no artifacts ANYWHERE (e.g. no-bars in both sweeps)
         # contributes nothing — not even a count.
@@ -2857,6 +2965,182 @@ class TestRecordedAprioriFromAudit:
         assert recorded_apriori_from_audit(tmp_path) is False
         assert iter_calls.count(tmp_path / "audit" / "sweep-all.jsonl") == 1
         assert iter_calls.count(sup_path) == 1
+
+
+class TestRecordedOverfitFromAudit:
+    """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001: the tree's OWN recorded
+    OVERFIT gate config, read off the last START record per chain (latest
+    ``ts_utc`` across chains wins; the supervisor chain keeps an exact tie —
+    the ``recorded_apriori_from_audit`` law), with the PER-CHAIN TOLERANT
+    read: an unreadable chain is skipped WHOLE with one loud warning, never a
+    raise — the recovery is consulted UNCONDITIONALLY by ``cmd_verify``, so a
+    raise would hard-fail EVERY verify over one bit-rotted chain (the m2
+    survival law). The surviving READABLE chain supplies the config when it
+    carries a START record (GRID_SWEEP_START is minted by the LIBRARY
+    ``run_sweep_grid`` entry; a ``cmd_sweep_all`` tree carries the config on
+    SUPERVISOR_START only — its corrupt-supervisor shape is the honest
+    config-unrecoverable ``None``, pinned in the e2e m2 test)."""
+
+    _LEG: ClassVar[list[float]] = [0.9, 0.07, 0.1, 0.2]
+
+    @staticmethod
+    def _write_grid_start(
+        root: Path, payload: dict[str, object], *, ts_utc: float | None = None
+    ) -> None:
+        path = root / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with AuditWriter.open(path, resume=path.exists()) as audit:
+            audit.append(
+                action="GRID_SWEEP_START", subject="sweep-all", payload=payload, ts_utc=ts_utc
+            )
+
+    @staticmethod
+    def _write_supervisor_start(
+        root: Path, payload: dict[str, object], *, ts_utc: float | None = None
+    ) -> None:
+        from brutex.engine.sweep_audit import SweepAuditWriter
+
+        path = root / "audit" / "sweep-all-supervisor.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with SweepAuditWriter.open(path, resume=path.exists()) as sup:
+            sup.append(
+                action="SUPERVISOR_START", subject="sweep-all", payload=payload, ts_utc=ts_utc
+            )
+
+    def test_no_audit_files_returns_none(self, tmp_path: Path) -> None:
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_supervisor_gate_config_recovers_in_fragment_order(self, tmp_path: Path) -> None:
+        # The [dsr_min, weight, default_skew, default_excess_kurtosis]
+        # fragment order is pinned FIELD-FOR-FIELD (kills order-swap mutants).
+        self._write_supervisor_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+        assert cfg.weight == 0.07
+        assert cfg.default_skew == 0.1
+        assert cfg.default_excess_kurtosis == 0.2
+
+    def test_grid_gate_config_recovers(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+
+    def test_start_without_gate_config_returns_none(self, tmp_path: Path) -> None:
+        # The EMIT-ON-active law: absence == an ungated / pre-channel tree.
+        self._write_grid_start(tmp_path, {"sweep_id": "x"})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_non_mapping_gate_config_reads_none(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": "junk"})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_per_tuple_start_lines_are_not_the_start_family(self, tmp_path: Path) -> None:
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        path.parent.mkdir(parents=True)
+        with AuditWriter.open(path) as audit:
+            audit.append(action="SWEEP_START", subject="sweep-all", payload={"k": 2})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_newer_ungated_start_wins_over_an_older_gated_start(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=100.0)
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=200.0)
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_newer_gated_start_wins_over_an_older_ungated_start(self, tmp_path: Path) -> None:
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=100.0)
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=200.0)
+        cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+
+    def test_exact_ts_tie_keeps_the_supervisor_record(self, tmp_path: Path) -> None:
+        self._write_supervisor_start(tmp_path, {"w": 2}, ts_utc=150.0)
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}}, ts_utc=150.0)
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_last_start_in_a_chain_wins_after_a_gate_flip(self, tmp_path: Path) -> None:
+        # Launch 1 gated, launch 2 ungated on the SAME chain → the LAST wins.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        self._write_grid_start(tmp_path, {"w": 2})
+        assert recorded_overfit_from_audit(tmp_path) is None
+
+    def test_corrupt_supervisor_chain_is_skipped_and_the_grid_chain_supplies_the_config(
+        self, tmp_path: Path
+    ) -> None:
+        """THE tolerant-read pin (fails-before: the pre-tolerant read RAISED
+        ``SweepVerifyError: unreadable audit log`` here): a bit-rotted
+        supervisor chain is skipped with ONE loud warning and an intact grid
+        chain carrying a GRID_SWEEP_START gate_config (the LIBRARY
+        ``run_sweep_grid`` mint) still supplies the recovered config; no
+        raise, so a verify never hard-fails on the corrupt chain."""
+        from structlog.testing import capture_logs
+
+        sup_path = tmp_path / "audit" / "sweep-all-supervisor.jsonl"
+        sup_path.parent.mkdir(parents=True)
+        sup_path.write_text("{not jsonl\n", encoding="utf-8")
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        with capture_logs() as logs:
+            cfg = recorded_overfit_from_audit(tmp_path)
+        assert cfg is not None
+        assert cfg.dsr_min == 0.9
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert str(sup_path) == warned[0]["audit_path"]
+
+    def test_both_chains_unreadable_returns_none_with_a_warning_per_chain(
+        self, tmp_path: Path
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir(parents=True)
+        (audit_dir / "sweep-all-supervisor.jsonl").write_text("{not jsonl\n", encoding="utf-8")
+        (audit_dir / "sweep-all.jsonl").write_text("{not jsonl\n", encoding="utf-8")
+        with capture_logs() as logs:
+            assert recorded_overfit_from_audit(tmp_path) is None
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 2
+
+    def test_unreadable_chain_partial_records_are_discarded_whole(self, tmp_path: Path) -> None:
+        # A gated START followed by mid-chain corruption: the chain is skipped
+        # WHOLE — a broken hash chain is never trusted piecemeal, so the
+        # pre-corruption gated record must NOT be adopted.
+        from structlog.testing import capture_logs
+
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": self._LEG}})
+        path = tmp_path / "audit" / "sweep-all.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("{not jsonl\n")
+        with capture_logs() as logs:
+            assert recorded_overfit_from_audit(tmp_path) is None
+        warned = [e for e in logs if e["event"] == "sweep_verify.overfit_recovery_chain_unreadable"]
+        assert len(warned) == 1
+
+    def test_malformed_leg_shape_raises(self, tmp_path: Path) -> None:
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [0.9, 0.05]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_string_leg_raises(self, tmp_path: Path) -> None:
+        # A str IS a Sequence — the explicit str/bytes exclusion must refuse it.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": "junk"}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_bool_leg_member_raises(self, tmp_path: Path) -> None:
+        # bool is an int subclass — the explicit bool exclusion must refuse it.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [True, 0.05, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="malformed gate_config.overfit leg"):
+            recorded_overfit_from_audit(tmp_path)
+
+    def test_out_of_range_leg_values_raise(self, tmp_path: Path) -> None:
+        # OverfitGateConfig.__post_init__'s ValueError is wrapped, never raw.
+        self._write_grid_start(tmp_path, {"gate_config": {"overfit": [2.0, 0.05, 0.0, 0.0]}})
+        with pytest.raises(SweepVerifyError, match="invalid recorded overfit gate config"):
+            recorded_overfit_from_audit(tmp_path)
 
 
 # ── recount_mode_divergence (DEC-SWEEP-APRIORI-DEFAULT-001 review fix round 2) ──

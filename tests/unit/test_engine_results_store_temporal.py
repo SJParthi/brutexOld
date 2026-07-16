@@ -373,6 +373,17 @@ class TestAppendEnrichmentRule:
         with pytest.raises(ResultsStoreError, match="run-identity conflict"):
             store.append(_row(1, sharpe_ratio=9.9))
 
+    def test_merge_helper_refuses_a_non_temporal_difference_directly(self) -> None:
+        """The helper's OWN non-temporal equality precondition (its defensive
+        first loop): ``append``'s pre-filter raises before ever reaching it
+        with a non-sanctioned difference, so this arm is pinned DIRECTLY —
+        a differing required field ⇒ ``None`` (conflict), never a merge.
+        (Inherited fold-base coverage gap closed at the S2 reconcile.)"""
+        from brutex.engine.results_store import _merge_temporal_enrichment
+
+        merged = _merge_temporal_enrichment(_row(1), _row(1, sharpe_ratio=9.9))
+        assert merged is None
+
     def test_non_temporal_difference_with_enrichment_shape_is_a_conflict(self) -> None:
         """None-vs-populated temporal + a differing required field: conflict —
         the merge is refused before any temporal comparison matters."""

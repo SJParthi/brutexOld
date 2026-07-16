@@ -1406,6 +1406,35 @@ class TestSupervisorAprioriWiring:
         complete = next(e for e in entries if e.action == "SUPERVISOR_COMPLETE")
         assert complete.payload["tuples_failed_apriori_budget"] == 0
 
+    def test_overfit_gated_start_records_gate_config_overfit_leg(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001 (MIGRATION.md #1851): an
+        overfit-gated grid's SUPERVISOR_START payload records the #1336
+        overfit fragment ``[dsr_min, weight, default_skew,
+        default_excess_kurtosis]`` under ``gate_config`` — the MINT side of
+        the recount recovery channel `recorded_overfit_from_audit` reads."""
+        from brutex.ranking import OverfitGateConfig
+
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(overfit=OverfitGateConfig(dsr_min=0.9))
+        _summary, _memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert start.payload["gate_config"] == {"overfit": [0.9, 0.05, 0.0, 0.0]}
+
+    def test_ungated_start_carries_no_gate_config_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The EMIT-ON-active absence pin (#1851): an UNGATED grid writes NO
+        ``gate_config`` key — absent == legacy, never a recorded default."""
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        grid = _grid(k_values=[1])
+        _summary, _memos = self._run_with_fake(tmp_path, grid, monkeypatch, lambda *_a, **_k: None)
+        entries = list(read_entries(tmp_path / "sup.jsonl"))
+        start = next(e for e in entries if e.action == "SUPERVISOR_START")
+        assert "gate_config" not in start.payload
+
     def test_memo_resets_on_a_cell_change(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

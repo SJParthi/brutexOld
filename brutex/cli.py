@@ -9138,6 +9138,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         compare_recount,
         plan_expected_stores,
         recorded_audit_facts,
+        recorded_overfit_from_audit,
         verify_identity,
         verify_structural,
     )
@@ -9409,6 +9410,41 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         print(f"[brutex] sweep-verify config error: {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    import dataclasses as _dc
+
+    # Recorded OVERFIT-gate recovery (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001):
+    # `_tuple_digest` (#1336) folds the ACTIVE gate config into every tuple
+    # store ADDRESS, and the default-ON overfit DSR gate means every
+    # production tree's stores live at GATED addresses — while THIS verify
+    # grid's `overfit` default is None, so without the recovery
+    # `plan_expected_stores` + the recount mis-planned UNGATED addresses and
+    # every healthy overfit-gated tree read a grid_mismatch FALSE-POSITIVE
+    # (an alarm-fatigue regression — recount unusable on overfit trees; NOT a
+    # false-clean). The tree describes itself: the launch sites persist the
+    # overfit leg on their START records (SUPERVISOR_START/GRID_SWEEP_START);
+    # recover it here — unconditionally, BEFORE the Tier-1/2 address planning
+    # (the stage3 fold's placement law) — so every tier addresses the SAME
+    # files the launcher wrote. A recorded None (a legacy / pre-channel /
+    # ungated tree) leaves the grid byte-identical; a PRE-channel tree that
+    # WAS overfit-gated keeps the #1336 grid_mismatch remediation (re-verify
+    # with a matching config) — the narrowed honest residual. An UNREADABLE
+    # chain never raises here (the recovery is per-chain TOLERANT — one loud
+    # WARN per skipped chain, the surviving readable chain supplies the config
+    # when it carries a START record; the m2 survival law: an explicit-k
+    # no-recount verify never HARD-fails on a corrupt supervisor chain — a
+    # gated cmd_sweep_all tree whose supervisor chain is unreadable is
+    # config-UNRECOVERABLE and honestly reads grid_mismatch instead, never a
+    # fabricated default); the raise below is reserved for the MALFORMED-leg
+    # class (a junk gate_config.overfit on the winning START record — not a
+    # verifiable tree).
+    try:
+        _recorded_overfit = recorded_overfit_from_audit(out_root)
+    except SweepVerifyError as exc:
+        print(f"[brutex] sweep-verify error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if _recorded_overfit is not None:
+        grid = _dc.replace(grid, overfit=_recorded_overfit)
+
     # Stage-3 cell attribution via the cascade manifest (condition 2c) —
     # absent/unreadable manifest leaves cells honestly unattributed.
     import contextlib
@@ -9429,13 +9465,13 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     # and fold them into the verify grid so `plan_expected_stores` + the
     # shadow re-sweep address the SAME files the launcher wrote. A gate-less
     # tree emits NO fragment (default-elision), so its verify grid — and every
-    # pre-fold verdict — is byte-identical to before. HONEST residual: an
-    # overfit-gated tree (--dsr-min at launch) has no recorded-knob channel
-    # here yet, so its identity pairing still reads grid_mismatch — re-verify
-    # with a matching config (the #1336 remediation wording).
+    # pre-fold verdict — is byte-identical to before. The overfit leg's
+    # recorded-knob channel is the recorded_overfit_from_audit recovery ABOVE
+    # (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001); the residual is narrowed to
+    # PRE-channel overfit-gated trees (no gate_config on their START records),
+    # which keep the #1336 grid_mismatch remediation — re-verify with a
+    # matching config.
     if stage3 is not None and stage3.enabled:
-        import dataclasses as _dc
-
         from brutex.engine.sweep_verify import recorded_stage3_from_audit
 
         _addr_audit = recorded_stage3_from_audit(out_root / "audit" / "sweep-all.jsonl")
@@ -9854,7 +9890,11 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             reports.append(rec_report)
             if any(
                 f.code
-                in ("recount_divergence_inconclusive", "cell_recount_divergence_inconclusive")
+                in (
+                    "recount_divergence_inconclusive",
+                    "cell_recount_divergence_inconclusive",
+                    "recount_mixed_mode_unverifiable",
+                )
                 for f in rec_report.findings
             ) or (stage3 is not None and stage3.enabled and stage3_grid is None):
                 inconclusive_only = True

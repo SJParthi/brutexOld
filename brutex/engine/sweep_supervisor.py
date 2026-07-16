@@ -792,6 +792,18 @@ def run_supervised_grid(
         # by sweep-verify's recorded-mode gate; absence == legacy (which also
         # classifies every pre-flip tree correctly).
         start_payload["apriori"] = {"enabled": True, "max_mask_bars": resolve_max_mask_bars()}
+    overfit_fragment = _gate_config_fragment(grid)
+    if overfit_fragment is not None and "overfit" in overfit_fragment:
+        # The per-run OVERFIT-gate record (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001)
+        # — consumed by sweep-verify's recorded-overfit reconcile
+        # (recorded_overfit_from_audit) so `sweep-verify --recount` re-derives
+        # the gate-folded store addresses instead of reading a grid_mismatch
+        # FALSE-POSITIVE on every healthy overfit-gated tree. ONLY the overfit
+        # leg is persisted — the stage3 leg already rides its own
+        # STAGE_3_PASS_START record (recorded_stage3_from_audit), so persisting
+        # it here would double-record it. EMIT-ON-active: absence == legacy,
+        # keeping every ungated/legacy payload byte-identical.
+        start_payload["gate_config"] = {"overfit": overfit_fragment["overfit"]}
     guards.audit.append(action=_ACTION_START, subject=subject, payload=start_payload)
 
     tuples_run = 0
