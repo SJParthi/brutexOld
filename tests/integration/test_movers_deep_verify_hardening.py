@@ -708,7 +708,12 @@ class TestGainersLosersMultiRowOrder:
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
         # Six CE contracts on ONE underlying + expiry (all land in the near
-        # tier), prior 1-day close 100 each, snapshot closes giving ±3/±2/±1 %.
+        # tier), prior-session close 100 each, snapshot closes giving
+        # ±3/±2/±1 %. Post-#1831 (DEC-OPTIONS-PREBUILD-RETIRE-001) a CE/PE
+        # prev-close baseline SKIPS the frozen 1day read and walks back the
+        # prior session's 1-MINUTE bars, so each CE seeds a prior-session
+        # (2024-06-12) 1-minute bar carrying the prev close; the 1day prev
+        # bar is kept — inert for CE/PE now — as the retirement-eve shape.
         # Strike→pct assignment PERMUTED (round-2 F2) so the expected pct
         # order is NEITHER the lexicographic contract-symbol order NOR its
         # reverse on EITHER side: gainers expect [20200, 20000, 20100] and
@@ -734,7 +739,13 @@ class TestGainersLosersMultiRowOrder:
                 segment="FNO",
                 symbol=ce,
                 interval="1minute",
-                bars=[_min_bar(hour=9, minute=15, close=cur, volume=100, oi=1100)],
+                bars=[
+                    # The prior-session 1-minute bar the #1831 walk-back reads.
+                    _min_bar(
+                        hour=9, minute=15, close=prev, volume=100, oi=1000, day=date(2024, 6, 12)
+                    ),
+                    _min_bar(hour=9, minute=15, close=cur, volume=100, oi=1100),
+                ],
             )
         client = TestClient(build_app(DashboardState(), instrument_store=store))
         body = client.get(
