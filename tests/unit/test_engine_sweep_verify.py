@@ -2002,7 +2002,7 @@ class TestRecountCompare:
         alternate address is RE-PLANNED exactly ONCE (the second and third
         consultations return the cached verdict, the ``mixed_sibling_memo``
         short-circuit)."""
-        import brutex.engine.sweep_verify as sweep_verify_module
+        from brutex.engine import sweep_verify as sweep_verify_module
 
         original, scratch, grid = self._two_trees(tmp_path)
         store = _store_path(original, grid)

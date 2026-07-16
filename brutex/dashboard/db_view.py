@@ -63,6 +63,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
 from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
 # ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
@@ -2281,13 +2282,17 @@ def list_option_series(
 # ─── Lake STATS-manifest read integration (DEC-LAKE-STATS-MANIFEST-001) ──────
 #
 # The read half of the per-file stats manifest (the #867/#1025 named future
-# work): when a request opts in (``use_stats_manifest=True`` — the production
+# work, since SHIPPED by DEC-LAKE-STATS-MANIFEST-001 — MIGRATION.md #1614):
+# when a request opts in (``use_stats_manifest=True`` — the production
 # /db routes do; the pure-function default stays ``False`` so every direct
 # caller keeps the byte-identical legacy query pattern) AND the kill switch
 # (``BRUTEX_LAKE_STATS_MANIFEST``) is not ``off``, the candle pagers consult
 # the dataset's validated stats shard to (a) answer the page TOTAL from the
 # stamped per-file DISTINCT-key counts and (b) PRUNE the page query's file list
-# to only the files the requested page needs — true O(page) in partition depth.
+# to only the files the requested page needs — O(page-files) Parquet work
+# plus an O(D) per-request revalidation stat sweep (D = the ONE dataset's
+# month files), NOT literal O(page)/O(1) — the MIGRATION.md #1614 honest
+# envelope.
 # ANY validation/read failure falls back to the byte-identical legacy live
 # scan (one ``lake.stats_manifest.fallback`` log naming the clause) and the
 # read side reseeds the shard best-effort — the reader NEVER serves a number
@@ -2582,7 +2587,7 @@ def _stats_star_columns(
     under a key that folds in the validated file-state fingerprint
     (:func:`_stats_fingerprint`) — a memoised order can never be served for a
     file state other than the one it described (no staleness envelope at
-    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the O(page) win
+    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the pruned-read win
     is smaller — the production routes always inject the cache). Returns
     ``None`` on a describe failure (the caller degrades to legacy).
     """
@@ -2654,7 +2659,9 @@ def _stats_pruned_page(
 ) -> tuple[list[str], list[tuple[Any, ...]]] | None:
     """Execute the page over ONLY the files it needs — or ``None`` ⇒ run legacy.
 
-    The manifest page path (true O(page) in partition depth): plan the minimal
+    The manifest page path (O(page-files) Parquet work — the plan walk and
+    the request's revalidation are each O(D) in the dataset's month files,
+    so NOT literal O(page) in partition depth): plan the minimal
     file sublist + rebased local ``OFFSET`` via :meth:`_StatsReadContext.plan_page`,
     then execute the IDENTICAL SQL shape the legacy page uses (same
     SELECT/WHERE/QUALIFY/ORDER/LIMIT — only the ``read_parquet(?)`` binding
@@ -3134,9 +3141,14 @@ def query_candles(
     computation per write-generation and O(1) on a cached repeat (see
     *count_cache*). That scan is flat enough to pass the shared-CI < 8×
     depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``); genuine
-    row-group pruning would need stats-compatible raw-column predicates, and
-    a write-time page manifest (true O(page) reads) stays the named future
-    work (#867 / #1025). This mirrors the
+    row-group pruning would need stats-compatible raw-column predicates.
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the dataset's month files), NOT literal O(page). This
+    mirrors the
     :func:`brutex.data.lake_read.dedup_qualify_sql` /
     :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope;
     a prev/next paging click therefore RE-SCANS the partition — flat only in
@@ -3185,8 +3197,10 @@ def query_candles(
         Opt into the per-file lake STATS manifest (DEC-LAKE-STATS-MANIFEST-001):
         the page ``total`` + the default-range span are answered from the
         dataset's VALIDATED stats shard and the page query's file list is
-        PRUNED to only the files the page needs — true O(page) in partition
-        depth. Served ONLY after full per-request revalidation (parse + key
+        PRUNED to only the files the page needs — O(page-files) Parquet
+        work plus an O(D) per-request revalidation stat sweep (D = the
+        dataset's month files), NOT literal O(page). Served ONLY after
+        full per-request revalidation (parse + key
         echo + file-set + per-file stat token + month bounds); ANY failure —
         including a mid-request pruned-read error or a moved stat token —
         re-runs the WHOLE request on the byte-identical legacy path (one
@@ -5146,8 +5160,13 @@ def query_option_candles(
     materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
     top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
     **O(rows)** on the first computation per write-generation and O(1) on a
-    cached repeat (see *count_cache*). A write-time page manifest (true O(page)
-    reads) stays the named future work (#867 / #1025).
+    cached repeat (see *count_cache*).
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the series' month files), NOT literal O(page).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
@@ -5856,8 +5875,11 @@ def _isolated_counts_since(
         _close_cursor(cursor, conn)
 
 
-#: Resident-key bound for the shared ledger read cache: 3 key families
-#: (records / rows / spot-rollup) × multi-lake test headroom.
+#: Resident-key bound for the shared ledger read cache: 2 key families
+#: (records / spot-rollup — the ``ledger-rows`` family was RETIRED by
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the /db grid rows are now an
+#: O(page) on-demand projection over the ONE resident records family, never a
+#: second resident whole-ledger tuple) × multi-lake test headroom.
 _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
 
 #: Hard cap on the ledger read cache's adaptive floor — the #920 ``SummaryCache``
@@ -5865,6 +5887,77 @@ _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
 #: this floor is not pull-probe-scoped (the probe above is constant ``True``),
 #: so the tighter cap bounds the worst-case served staleness.
 _LEDGER_READ_FLOOR_CAP_S: Final[float] = 120.0
+
+#: Byte watermark for the ledger read cache (DEC-MEMORY-FOOTPRINT-HARDENING-001):
+#: the cache retains ONE parsed whole-ledger record TUPLE per lake (~1.0 KB/row
+#: measured — a production 841k-row ledger parses to ~0.8 GB resident; fix 3
+#: retired the second per-row ``ledger-rows`` family, halving the tracked
+#: two-family residency) plus the small spot-rollup dicts, so the 32-entry
+#: count bound alone is no byte
+#: bound at all. Budget = 1/16 of total RAM via the COMMON `memory_budget_bytes`
+#: (3 GiB on the CLAUDE.md §8 48 GiB box); floor 1 GiB when RAM is undetected —
+#: generous enough that today's steady state (one lake, two families) never
+#: evicts, while a pathological multi-lake session is bounded. No new env var.
+_LEDGER_READ_CACHE_FRACTION: Final[float] = 1.0 / 16.0
+_LEDGER_READ_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
+
+#: Per-record byte ESTIMATE for the ledger sizing hint (hostile-review M1 on
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001): RE-MEASURED at the 2026-07-11 #1719
+#: merge-reconcile — main's DEC-... #1386 INTERNED ledger decode (shared
+#: key-string objects across records) halved the per-record deep size, so the
+#: pre-interning ~600 B/record basis (rounded to 640) over-stated the deep
+#: walk ~2.1× and tripped the fix-3 residency ratio pin; the residency bench
+#: now measures the resident ``ledger-records`` family at ~301 B/record @ 50k
+#: rows under the SAME ``deep_size_bytes`` accounting the watermark evicts on
+#: (``tests/bench/test_ledger_cache_residency.py``); rounded conservatively UP
+#: to 320 so the hint over-states rather than under-states (the watermark then
+#: evicts EARLIER than the deep walk would — the safe direction for a byte
+#: bound). HONEST (Golden Rule #10): an estimate feeding an estimate — the
+#: watermark tracks approximations, never exact RSS; the hint-vs-deep-walk
+#: accuracy is pinned within 3× on a real records payload.
+_LEDGER_RECORD_EST_BYTES: Final[int] = 320
+
+#: Flat overhead added by the hint for a payload's outer shells (the 2-tuple /
+#: dict container + slack) — small beside even a few records.
+_LEDGER_HINT_BASE_BYTES: Final[int] = 512
+
+#: The records-family payload's arity: ``(generation, records)`` — named to
+#: avoid a PLR2004 magic number (the app.py convention).
+_LEDGER_RECORDS_PAYLOAD_ARITY: Final[int] = 2
+
+
+def _ledger_payload_size_hint(payload: object) -> int | None:
+    """O(1)-in-rows sizing hint for the ledger cache's payload families.
+
+    Hostile-review M1 (DEC-MEMORY-FOOTPRINT-HARDENING-001): the fix-2 byte
+    watermark ran :func:`~brutex.dashboard.movers_cache.deep_size_bytes` over
+    every COLD ledger parse's ``(generation, tuple[WindowLedgerRecord, ...])``
+    payload — measured **5.28 s** at the documented 841k-row production scale
+    (~25M ``getsizeof``/``getattr`` ops through the ``__slots__`` MRO branch)
+    plus a transient ~1.7M-entry ``seen`` id-set (~100+ MB), recurring at pull
+    cadence (the stamp moves per delta flush). This hint recognizes THE
+    records-family shape — a 2-tuple ``(int generation, tuple of
+    WindowLedgerRecord)``, checked on the FIRST element only (O(1); every
+    record in a payload is the same type by construction — one
+    ``load_window_ledger(...).records()`` materialization) — and returns
+    ``len(records) × _LEDGER_RECORD_EST_BYTES + _LEDGER_HINT_BASE_BYTES``.
+    Every OTHER shape returns ``None`` → the cache's deep-size fallback; the
+    only other resident family, the ``spot-rollup|`` dict, is SMALL by
+    construction (≤ spot symbols × fetch intervals cells, ~1.5k — its deep
+    walk is sub-millisecond), so it deliberately stays on the accurate walk.
+    """
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == _LEDGER_RECORDS_PAYLOAD_ARITY
+        and isinstance(payload[0], int)
+        and isinstance(payload[1], tuple)
+    ):
+        from brutex.data.window_ledger import WindowLedgerRecord
+
+        records = payload[1]
+        if not records or isinstance(records[0], WindowLedgerRecord):
+            return _LEDGER_HINT_BASE_BYTES + len(records) * _LEDGER_RECORD_EST_BYTES
+    return None
 
 
 def _make_ledger_read_cache(
@@ -5874,15 +5967,23 @@ def _make_ledger_read_cache(
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
-    Single-flight + the #920 adaptive floor, both REUSED from the verified
+    Single-flight + the #920 adaptive floor + the RAM-derived byte watermark
+    (DEC-MEMORY-FOOTPRINT-HARDENING-001), all REUSED from the verified
     :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` contract (no
-    third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* / *swr_runner*
-    are injectable so the floor + stale-while-revalidate tests are
-    deterministic (production keeps the monotonic default and the
-    daemon-thread runner).
+    third hand-rolled cache — CLAUDE.md §11 COMMON), plus the M1
+    ledger-aware ``size_of`` sizing hint so a cold 841k-row parse never pays
+    the measured 5.28 s deep-size walk (see :func:`_ledger_payload_size_hint`).
+    *clock* / *swr_runner* are injectable so the floor +
+    stale-while-revalidate tests are deterministic (production keeps the
+    monotonic default and the daemon-thread runner).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
+        max_bytes=memory_budget_bytes(
+            fraction=_LEDGER_READ_CACHE_FRACTION,
+            floor_bytes=_LEDGER_READ_CACHE_FLOOR_BYTES,
+        ),
+        size_of=_ledger_payload_size_hint,
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
@@ -5916,7 +6017,7 @@ def _make_ledger_read_cache(
 #: possibly spanning several ≥2 s delta flushes (a TIME bound, never a
 #: stamp-COUNT bound — the floor branch ages ``computed_at`` only), ALWAYS
 #: logged (``movers_cache.stale_served``) — the #920 ≤50%-duty law.
-#: The DERIVED families (rows / spot-rollup) are stamped with the generation
+#: The one DERIVED cached family (spot-rollup) is stamped with the generation
 #: the records were ACTUALLY served at (:func:`_ledger_records_stamped` embeds
 #: it in the cached value), so a projection built from a floor-stale records
 #: serve is itself generation-stale — never latched under the fresh generation
@@ -5924,6 +6025,15 @@ def _make_ledger_read_cache(
 #: under its OWN floor once the records floor passes, so a derived family's
 #: worst-case staleness COMPOSES the records floor with its own (each capped
 #: at 120 s) — every stale serve logged on the key that served it.
+#: RESIDENCY (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3): the ``ledger-records``
+#: family is THE single resident per-row representation. The former
+#: ``ledger-rows`` cached family (a second whole-ledger tuple-per-row payload,
+#: ~1.0 KB/row of tracked bytes beside the records' ~1.0 KB/row) is RETIRED —
+#: the /db grid projects its rows ON DEMAND from the cached records
+#: (:func:`window_ledger_rows_page`, O(page) per request), so exactly one
+#: per-row family is resident per lake and the grid's staleness is exactly the
+#: records serve (single-phase — the rows half of the composed-floor envelope
+#: is gone with the cache entry).
 _LEDGER_READ_CACHE: MoversSnapshotCache = _make_ledger_read_cache()
 
 
@@ -6220,8 +6330,8 @@ def _ledger_records_stamped(lake_root: Path) -> tuple[int, tuple[Any, ...]]:
     generation the records were actually COMPUTED at — the cached value EMBEDS
     its own epoch, so an adaptive-floor STALE serve (which returns the PRIOR
     entry verbatim) hands the caller the OLD generation, never the fresh one.
-    The derived key families (``ledger-rows`` / ``spot-rollup``) MUST stamp
-    their projections with THIS served generation: a projection built from
+    The derived cached key family (``spot-rollup``) MUST stamp
+    its projection with THIS served generation: a projection built from
     floor-stale records is then cached generation-STALE itself and recomputes
     once the records floor passes AND its OWN #920 floor permits (a derived
     entry ages under its own floor after the records refresh — the two floors
@@ -6260,7 +6370,7 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
 
 
 def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
-    """The /db window-ledger grid's row tuples, parsed ONCE per ledger stamp.
+    """The WHOLE window-ledger row projection, parsed ONCE per ledger stamp.
 
     DEC-SUSPICION-SWEEP-FIXES-001 (D3): the ``/api/v1/db/window-ledger`` route
     previously ran an UNCACHED ``load_window_ledger(...).to_rows()`` — a full
@@ -6268,37 +6378,35 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     pull holds ~841k rows, the measured shape behind :data:`WINDOW_ROWS_CAP`) on
     EVERY paging click. This helper routes the read through the SAME stamp-keyed
     ``_ledger_records_cached`` single parse the other ledger readers share, then
-    memoises the row projection (the canonical
+    builds the row projection (the canonical
     :func:`~brutex.data.window_ledger.ledger_record_row` per record — byte-equal
-    to ``WindowLedger.to_rows`` by construction, ONE source of the shape) as a
-    SEPARATE key family (``ledger-rows|<path>``) on THE shared
-    :data:`_LEDGER_READ_CACHE` (DEC-LEDGER-DELTA-O-PAGE-001) — a grid poll never
-    rebuilds the O(rows) tuple projection either. A paging click within one
-    ledger stamp is an O(1) cache handoff; the composite stamp token (base mtime
-    PLUS the pending delta name set, DEC-LEDGER-DELTA-FLUSH-001) re-keys it on a
-    full save OR a mid-pull delta append. A lake with no ledger Parquet AND no
-    pending deltas returns ``()`` — the same empty grid the uncached read
-    produced; a base-less DELTA-ONLY lake (a first pull's mid-flight checkpoint)
-    now renders its live rows like every other ledger reader (the fixed
-    base-less inconsistency — ``_ledger_records_cached`` always read it, this
-    projection returned ``()``). The projection is stamped with the SERVED
-    records generation (:func:`_ledger_records_stamped` — never the fresh stamp
-    a floor-stale records serve did not reach), so rows built from floor-stale
-    records stay generation-stale and recompute once the records floor passes
-    and this entry's own floor permits — never latched (the fix-round latch
-    defect, Golden Rule #1).
-    HONEST envelope (Golden Rule #10): the first read per stamp is still O(rows)
-    (parse + projection), and staleness after a stamp move is TWO-phase — the
-    records adaptive floor (``min(max(2 s, the parse's own duration), 120 s)``)
-    serves the prior rows first, and once it passes this ``ledger-rows`` entry
-    serves stale under its OWN #920 floor (``min(max(2 s, the projection's own
-    duration), 120 s)``), so the two floors COMPOSE: worst-case staleness =
-    records floor + rows floor, EACH capped at 120 s (possibly spanning several
-    ≥2 s delta flushes — a time bound, never a stamp-count bound). EVERY stale
-    serve is logged (``movers_cache.stale_served``) on the key that actually
-    served it — ``ledger-records`` in the first phase, ``ledger-rows`` in the
-    second; only the REPEAT read is O(1) — true O(page) needs a write-time
-    manifest, NOT claimed (the #867/#1025 envelope).
+    to ``WindowLedger.to_rows`` by construction, ONE source of the shape)
+    ON DEMAND. RESIDENCY (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3): the
+    projection is NO LONGER cached — the retired ``ledger-rows|<path>`` family
+    held a SECOND whole-ledger per-row payload beside the records family
+    (~1.0 KB/row of tracked bytes EACH, measured — ~0.8 GB apiece at the
+    production 841k-row ledger), so the shared cache now retains exactly ONE
+    per-row representation per lake and the transient projection's leaf objects
+    are SHARED with the resident records (tuple shells only, garbage after the
+    caller drops them). The ``/db`` grid route rides the O(page)
+    :func:`window_ledger_rows_page` instead; this whole-projection surface is
+    kept for parity/compat consumers with its exact historical output. A lake
+    with no ledger Parquet AND no pending deltas returns ``()`` — the same
+    empty grid the uncached read produced; a base-less DELTA-ONLY lake (a first
+    pull's mid-flight checkpoint) renders its live rows like every other ledger
+    reader.
+    HONEST envelope (Golden Rule #10): EVERY call now pays the O(rows) tuple
+    projection (the parse itself stays one-per-stamp behind the records cache)
+    — callers that only need a page must use :func:`window_ledger_rows_page`.
+    Staleness is exactly the records serve, SINGLE-phase since fix 3 (the
+    projection has no cache entry, so no second #920 floor exists): a stamp
+    move within the records adaptive floor (``min(max(2 s, the parse's own
+    duration), 120 s)``) serves rows built from the prior records — possibly
+    spanning several ≥2 s delta flushes (a time bound, never a stamp-count
+    bound), logged (``movers_cache.stale_served``) on the ``ledger-records``
+    key that served it — and the first read past the floor projects the
+    on-disk truth immediately (no rows-floor lag to compose); true O(page)
+    totals need a write-time manifest, NOT claimed (the #867/#1025 envelope).
     """
     from brutex.data.window_ledger import ledger_record_row
     from brutex.data.window_ledger_store import ledger_path
@@ -6316,16 +6424,11 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     if present is False and not _ledger_delta_files(path):
         return ()
     try:
-        # The records read runs FIRST (O(1) on a hit) so the projection is
-        # stamped with the generation the records were ACTUALLY served at —
-        # the compute closes over that exact snapshot, never re-reading under
-        # a fresher stamp.
-        generation, records = _ledger_records_stamped(lake_root)
-        return _LEDGER_READ_CACHE.get_or_compute(
-            f"ledger-rows|{path.as_posix()}",
-            generation=generation,
-            compute=lambda: tuple(ledger_record_row(r) for r in records),
-        )
+        # The records read is the ONE cached representation (fix 3 — the
+        # ledger-rows| projection family is RETIRED); the whole-projection
+        # here is rebuilt per call from that resident snapshot.
+        _generation, records = _ledger_records_stamped(lake_root)
+        return tuple(ledger_record_row(r) for r in records)
     except movers_read_skip_errors() as exc:
         # A wedged volume can still fail the READ itself (EIO inside
         # ``load_window_ledger``'s own stat — its never-raises contract does
@@ -6334,6 +6437,56 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
         # (the raising compute stores nothing), so the next poll retries.
         _LOG.warning("db.window_ledger_read_degraded", path=path.as_posix(), error=str(exc))
         return ()
+
+
+def window_ledger_rows_page(
+    lake_root: Path, *, offset: int, limit: int
+) -> tuple[int, tuple[tuple[Any, ...], ...]]:
+    """ONE ``(total, page)`` slice of the window-ledger grid rows — O(page).
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3 — the ``/api/v1/db/window-ledger``
+    route's read: slice the CACHED records FIRST, then project ONLY the page's
+    records through the canonical
+    :func:`~brutex.data.window_ledger.ledger_record_row` (projection is
+    per-record pure, so slice-then-project is byte-identical to the retired
+    cached whole-projection's ``rows[offset : offset + limit]``). A paging
+    click within one ledger stamp is an O(1) records-cache handoff + an
+    O(page ≤ *limit*) tuple projection — never a second resident whole-ledger
+    rows family (the residency this fix collapses) and never an O(rows)
+    re-projection per click. *offset* is clamped ``>= 0`` via the COMMON
+    :func:`clamp_offset` (the route validates ``ge=0`` anyway); an offset past
+    the end is a clean empty page with the real *total* (Python slice
+    semantics, exactly the route's historical behaviour). A lake with no
+    ledger Parquet AND no pending deltas returns ``(0, ())``.
+    HONEST envelope (Golden Rule #10): the FIRST read per stamp still pays one
+    O(rows) parse (the records cache's documented cost); staleness is exactly
+    the records serve (see :func:`window_ledger_rows_cached` — single-phase,
+    logged on the ``ledger-records`` key).
+    """
+    from brutex.data.window_ledger import ledger_record_row
+
+    # Path derived from the pinned module-local constants (the #1431 fast-path
+    # pattern — see :data:`_LEDGER_TABLE_DIRNAME`): even a FUNCTION-local
+    # ``window_ledger_store`` import participates in the
+    # ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+    # ``py/cyclic-import`` flags; the constants are test-pinned equal to
+    # ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME``.
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
+    # The SAME OSError-classed presence gate + named read degrade as
+    # :func:`window_ledger_rows_cached` (DEC-WINDOWS-STAT-GUARD-LATCH-001,
+    # merge-composed — the /db grid route rides THIS function, so the #1386
+    # hardening must cover it too).
+    _mtime, present = _ledger_base_stat(path)
+    if present is False and not _ledger_delta_files(path):
+        return (0, ())
+    try:
+        _generation, records = _ledger_records_stamped(lake_root)
+    except movers_read_skip_errors() as exc:
+        _LOG.warning("db.window_ledger_read_degraded", path=path.as_posix(), error=str(exc))
+        return (0, ())
+    safe_offset = clamp_offset(offset)
+    page = records[safe_offset : safe_offset + limit]
+    return (len(records), tuple(ledger_record_row(r) for r in page))
 
 
 def _window_market_bucket(market: str) -> str:
@@ -6897,11 +7050,15 @@ def query_window_ledger_page(
                     error_type=type(exc2).__name__,
                     **_ledger_stat_fields(path),
                 )
-    # LEGACY degrade — byte-identical to the pre-fix route: the stamp-cached
-    # full-tuple projection, sliced O(page). Serves the no-conn caller, the
-    # legacy-shape ledger, and the double-failure torn-read/bad-delta arm.
-    all_rows = window_ledger_rows_cached(lake_root)
-    return all_rows[offset : offset + limit], len(all_rows)
+    # LEGACY degrade — byte-identical rows to the pre-fix route (ONE row-shape
+    # source, ``ledger_record_row``): the stamp-cached records sliced FIRST,
+    # then ONLY the page projected (``window_ledger_rows_page`` —
+    # DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3 merge-compose: the degrade arm
+    # no longer pays the O(rows) whole-tuple projection per request). Serves
+    # the no-conn caller, the legacy-shape ledger, and the double-failure
+    # torn-read/bad-delta arm.
+    total, page = window_ledger_rows_page(lake_root, offset=offset, limit=limit)
+    return page, total
 
 
 #: The three window-phase buckets, in pull order (spot → futures → options), the
@@ -8216,5 +8373,6 @@ __all__ = [
     "summarize_spot_verdict_datasets",
     "table_summary",
     "window_ledger_rows_cached",
+    "window_ledger_rows_page",
     "window_status_label",
 ]

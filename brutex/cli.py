@@ -582,6 +582,22 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--price-source-cells",
+        default="hlc3:close",
+        dest="price_source_cells",
+        help=(
+            "Comma-separated VWAP/EMA price-source cells '<vwap>:<ema>' — "
+            "open/high/low/close/hlc3 (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Default "
+            "'hlc3:close' (byte-identical to the pre-axis sweep — the axis is "
+            "dormant at cardinality 1). The 5-cell OFAT lattice is "
+            "'hlc3:close,open:close,close:close,hlc3:open,hlc3:hlc3'. HONEST BUDGET "
+            "(Golden Rule #10): a combined 5-cell run does NOT fit the ≤2-day bar "
+            "(≈2.3-7.4 M4-days); run each non-default cell as a SEPARATE "
+            "cardinality-1 invocation (≈baseline ≤2 days each). VWAP-source cells "
+            "are only meaningful on NIFTY futures (spot indices carry no volume)"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -3810,6 +3826,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
+    # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
+    # heavy setup (the house env-law; default absent/off = byte-identical
+    # single-process behaviour, no brutexd process spawned). The mechanism
+    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
+    # line+branch gate); this function only threads the decision.
+    from brutex.dashboard.rust_front import (
+        RustFrontError,
+        resolve_rust_front,
+        run_with_rust_front,
+    )
+
+    try:
+        _rust_front_on = resolve_rust_front()
+    except RustFrontError as exc:
+        raise CliUserError(str(exc)) from exc
+
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
@@ -4100,6 +4133,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # root handlers (console + rotating JSON file) instead of uvicorn's own
     # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    if _rust_front_on:
+        # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
+        # operator port; uvicorn binds a private loopback port picked inside
+        # run_with_rust_front. A launch refusal (missing binary /
+        # non-loopback host) is a loud CliUserError exit 1, never a
+        # half-started topology.
+        try:
+            run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
+        except RustFrontError as exc:
+            raise CliUserError(str(exc)) from exc
+        return EXIT_OK
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
@@ -6716,6 +6760,22 @@ def cmd_pull_all_spot(
                     log.warning("pull_all_spot.refused_contention", error=str(exc))
                     # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
                     return EXIT_OK if auto else EXIT_USER_ERROR
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the pull is COMMITTED
+                # (locks held, real run) — write the durable owed marker
+                # BEFORE the chain runs, so a death anywhere downstream
+                # (mid-pull / mid-prebuild / pre-tail) leaves the sentinel
+                # the next run's step-D3 owed catchup completes. Best-effort
+                # + kill-switch coherent (marks nothing under
+                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
+                # failed pull); the tail's run_crossverify clears it at the
+                # day's completed material verdict. The day law mirrors the
+                # --auto gate's clock contract (IST wall clock; the injected
+                # `now` seam wins).
+                from brutex.calendars.nse import now_ist as _now_ist
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                launch_day = (now() if now is not None else _now_ist()).date()
+                mark_owed_for_pull(resolved, launch_day, source="cli-pull-all-spot")
             try:
                 hp = builder(
                     lake_root=resolved,
@@ -7452,6 +7512,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_combos: int | None,
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     # ON by default (DEC-RESULTS-TRUST-HONESTY-001 · B2b — the sanctioned
     # default flip; --no-overfit-gate / overfit_gate=False is the escape).
     # The LIBRARY default SweepRunConfig.overfit stays None — this is the
@@ -7620,12 +7681,29 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001, MIGRATION.md
     # #1752): the condition bits parse FIRST (the resolver needs n_unique +
     # the u128 width guard), then the ONE pure resolver maps the --k grammar +
     # the BRUTEX_SWEEP_APRIORI tri-state onto the ladder — EAGERLY, before any
     # lake I/O (the resolve_results_depth_enabled precedent), so a junk env
     # value on the default path is a clean pre-sweep user-config error.
+    # (The reconcile drops main's interim `k_list = _parse_int_csv(k, ...)`
+    # here — the resolver below OWNS the --k grammar; k_list = exploration.k_values.)
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     try:
         exploration = resolve_sweep_exploration(
@@ -7923,6 +8001,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": _indicator_version(),
@@ -9110,6 +9189,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -9279,11 +9359,28 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     # Exploration-mode resolution (DEC-SWEEP-APRIORI-DEFAULT-001): the SAME
     # resolver + env law as cmd_sweep_all — the shared parser flipped verify's
     # --k default to the extinction token too, so a bare `sweep-verify` on an
     # extinction tree rebuilds the SAME k-ladder. Condition bits parse FIRST
     # (the resolver needs n_unique + the u128 width guard).
+    # (The reconcile drops main's interim `k_list = _parse_int_csv(k, ...)`
+    # here — the resolver below OWNS the --k grammar; k_list = exploration.k_values.)
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     try:
         exploration = resolve_sweep_exploration(
@@ -9368,6 +9465,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": indicator,
@@ -10424,6 +10522,15 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
 
     if not bars:
         return []
+    # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
+    # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
+    # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
+    # the (vwap, ema) source as a column. So this options-translation replay is
+    # BASELINE-SOURCE ONLY: a survivor swept under a non-default fib_anchor or
+    # price-source cell replays here with the wrong Group-4 / VWAP-EMA bits. This is
+    # a PRE-EXISTING limitation (equally true for fib_anchor since #1011) — threading
+    # the source in would require ResultRow to carry it; documented in
+    # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
@@ -11109,6 +11216,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -11167,6 +11275,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -11257,6 +11366,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
