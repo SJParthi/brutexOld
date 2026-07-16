@@ -20,3 +20,19 @@ def pinned_polars_version() -> str:
 
 def linked_zstd_version() -> str:
     """The libzstd version linked into this build (runtime-probed, e.g. ``"1.5.7"``)."""
+
+def resample_1m_ipc(ipc_bytes: bytes, target_tf_minutes: int, oi_aware: bool) -> bytes:
+    """Resample a 1-minute frame (uncompressed Arrow IPC bytes) to ONE TF.
+
+    Returns the derived frame's uncompressed Arrow IPC bytes under the
+    09:15-IST session-open-anchored bucket law (Wave B, slice G5 —
+    DEC-LAKE-RUST-RESAMPLE-001). Raises ``ValueError`` on an
+    empty/undecodable payload or a polars error; ``RuntimeError`` if the
+    compute panicked (caught at the FFI boundary — a panic never crosses
+    raw).
+    """
+
+def resample_all_ipc(
+    ipc_bytes: bytes, target_tf_minutes: list[int], oi_aware: bool
+) -> list[bytes]:
+    """Batch twin of ``resample_1m_ipc`` — one decode, one payload per TF."""
