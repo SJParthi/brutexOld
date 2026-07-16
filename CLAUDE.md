@@ -18,8 +18,8 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN
-(placeholder — allocate via queue-master) — the Rust mirror of compute.py's
+_Last updated: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902
+(a coordinator-granted released S1 spare, verified free on live main) — the Rust mirror of compute.py's
 Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
 `brutex/metrics/compute_rust.py`) behind the NEW default-OFF
 `BRUTEX_METRICS_RUST_FOLD`; the fold-in-Rust / combine-in-Python split (the
@@ -2999,8 +2999,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
-  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
-  allocate via queue-master** — the Rust mirror of `compute.py`'s Slice-0
+  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main** — the
+  Rust mirror of `compute.py`'s Slice-0
   FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
   (`fold_trades_checked` pure `Result` core + the `metrics_fold_trades`
   pyfunction over five parallel per-trade columns; i128 integer sums →
@@ -8746,8 +8747,9 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
-  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
-  allocate via queue-master — the Rust mirror of `compute.py`'s Slice-0
+  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #1902 — a
+  coordinator-granted released S1 spare, verified free on live main — the
+  Rust mirror of `compute.py`'s Slice-0
   FOLD layer (`fno_math.metrics_fold_trades` + the seam
   `brutex/metrics/compute_rust.py`) behind the NEW default-OFF Pattern-A
   `BRUTEX_METRICS_RUST_FOLD`; fold-in-Rust / combine-in-Python (the combine

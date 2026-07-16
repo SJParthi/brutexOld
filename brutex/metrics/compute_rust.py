@@ -28,21 +28,23 @@ caller on the verbatim Python ``_fold_trades`` path — byte-identical by
 construction (the never-routes bomb-kernel spy pins it).
 
 LEAF DISCIPLINE (verified import direction — CodeQL py/cyclic-import
-clean, the #1533 lake_revision precedent): ``brutex.metrics.compute``
-imports this module LAZILY inside its ``_resolve_folds`` dispatch (NEVER at
-module scope — this module's TYPE_CHECKING annotations reference
-``compute``, so a module-level edge in either direction would close a
-module-level cycle), and ``brutex.engine`` (whose ``__init__`` pulls
-``sweep_driver`` → ``brutex.metrics.compute``) must stay importable — so
-this module must NOT import ``env_flag_tristate`` from
-``brutex.engine.sweep_lookahead`` (a metrics→engine edge would both close an
-import cycle and make a plain metrics import transitively hard-require the
-``fno_math`` wheel via ``brutex/engine/__init__``). It carries its own
-inline ``_TRUTHY`` / ``_FALSY`` vocabulary — the ``brutex.feed_rust`` leaf
-precedent — mirror-pinned against ``sweep_lookahead``'s sets by a test. The
-``brutex.metrics.compute`` internals it needs at runtime (``TradeFolds`` /
-``Moments`` / ``_fold_trades``) are imported LAZILY inside the function
-bodies (``compute`` is fully initialised by any call time).
+clean STRUCTURALLY, the #1533 lake_revision precedent): this module is a
+PURE LEAF — it imports NOTHING from the metrics compute module in ANY form
+(no module-level import, no TYPE_CHECKING import, no lazy in-function
+import; the plain-data :data:`FoldWire` boundary + the INJECTED
+``oracle_wire`` callable carry every cross-module need, so the only import
+edge is the consumer's own lazy ``from brutex.metrics import compute_rust``
+inside its ``_resolve_folds`` dispatch — one direction, no cycle for CodeQL
+to flag). ``brutex.engine`` (whose ``__init__`` pulls ``sweep_driver`` →
+the metrics compute module) must also stay importable — so this module must
+NOT import ``env_flag_tristate`` from ``brutex.engine.sweep_lookahead`` (a
+metrics→engine edge would both close an import cycle and make a plain
+metrics import transitively hard-require the ``fno_math`` wheel via
+``brutex/engine/__init__``). It carries its own inline ``_TRUTHY`` /
+``_FALSY`` vocabulary — the ``brutex.feed_rust`` leaf precedent —
+mirror-pinned against ``sweep_lookahead``'s sets by a test. The one type it
+needs for annotations (``ClosedTrade``) comes from the already-leaf
+``brutex.metrics.types``.
 
 ## Bit-exactness (Golden Rule #4) — why the RETURNS column is computed HERE
 
@@ -63,13 +65,15 @@ unbounded-int Python oracle (tested).
 ## Burn-in self-check + autorevert latch (the #1531/#1532 pattern)
 
 For the first :data:`SELF_CHECK_SAMPLES` kernel-served folds per process,
-:func:`fold_trades_via_kernel` ALSO runs the Python ``_fold_trades`` oracle
-and bit-compares the two :class:`~brutex.metrics.compute.TradeFolds`
-(:func:`fold_compare_key` — ints exact, floats by ``struct.pack`` bit
-pattern, signed zeros included; ``downside_sum_sq`` is compared through
-``float(...)`` because the Python arm legitimately holds the int ``0`` on an
-empty downside — ``0 / n`` and ``0.0 / n`` are the same ``+0.0``
-combine-side, pinned). A mismatch SHIPS THE ORACLE VALUE (correctness first
+:func:`fold_wire_via_kernel` ALSO evaluates the INJECTED ``oracle_wire``
+callable (the consumer passes its own Python-fold wire projection in — the
+dependency-inversion half of the plain-data boundary) and bit-compares the
+two :data:`FoldWire` tuples (:func:`wire_compare_key` — ints exact, floats
+by ``struct.pack`` bit pattern, signed zeros included; ``downside_sum_sq``
+rides a ``float(...)`` belt because the Python fold legitimately holds the
+int ``0`` on an empty downside, float-normalised by the consumer's wire
+projection — ``0 / n`` and ``0.0 / n`` are the same ``+0.0`` combine-side,
+pinned). A mismatch SHIPS THE ORACLE VALUE (correctness first
 — never a wrong fold consumed), latches the kernel OFF for the process
 (:func:`disable_kernel`, one ``metrics_rust_fold.kernel_autoreverted``
 ERROR), and every later call short-circuits to the oracle. The latch and
@@ -108,14 +112,13 @@ from __future__ import annotations
 
 import os
 import struct
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import structlog
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Sequence
 
-    from brutex.metrics.compute import TradeFolds
     from brutex.metrics.types import ClosedTrade
 
 _LOG = structlog.get_logger("brutex.metrics.compute_rust")
@@ -147,6 +150,21 @@ _COUNTS_ARITY: Final[int] = 7
 _SUMS_ARITY: Final[int] = 6
 _MOMENTS_ARITY: Final[int] = 5
 _FLOATS_ARITY: Final[int] = 3
+
+#: The PLAIN-DATA fold boundary (the structural CodeQL py/cyclic-import
+#: fix): the seam speaks ONLY these tuples — `(n_trades, winners, losers,
+#: max_holding_bars, largest_loss_paisa, max_consecutive_losses,
+#: max_consecutive_wins)` · the six exact integer sums `(net_pnl,
+#: gross_profit, gross_loss_abs, sum_mfe, sum_mae, sum_holding)` · the
+#: `(n, mean, m2, m3, m4)` moments · the `(downside_sum_sq, p95, p5)`
+#: floats — and the consumer (`_resolve_folds` in the metrics compute
+#: module) owns the `TradeFolds` construction, so this leaf imports
+#: NOTHING from that module in ANY form.
+FoldCounts = tuple[int, int, int, int, int, int, int]
+FoldSums = tuple[int, int, int, int, int, int]
+FoldMomentsWire = tuple[int, float, float, float, float]
+FoldFloats = tuple[float, float, float]
+FoldWire = tuple[FoldCounts, FoldSums, FoldMomentsWire, FoldFloats]
 
 #: Self-check samples still to run this process (single-cell mutable — the
 #: documented no-global-mutable-state exception, module docstring).
@@ -219,7 +237,7 @@ def disable_kernel(reason: str, **context: object) -> None:
     structural validation cannot see. The first call logs
     ``metrics_rust_fold.kernel_autoreverted`` (ERROR — a genuine
     kernel-wrongness signal, never throttled); repeat calls are no-ops.
-    Every subsequent :func:`fold_trades_via_kernel` call short-circuits to
+    Every subsequent :func:`fold_wire_via_kernel` call short-circuits to
     the Python oracle, so a wrong kernel can poison at most the ONE
     mismatching row — and even that row ships the ORACLE folds.
     """
@@ -258,42 +276,32 @@ def reset_observability_memo_for_tests() -> None:
     _OBSERVABILITY_MEMO.clear()
 
 
-def fold_compare_key(folds: TradeFolds) -> tuple[object, ...]:
-    """Map a :class:`TradeFolds` to its BIT-exact comparison key.
+def wire_compare_key(wire: FoldWire) -> tuple[object, ...]:
+    """Map a :data:`FoldWire` to its BIT-exact comparison key.
 
     Ints compare exactly under ``==``; every float is compared by its
     IEEE-754 bit pattern (``struct.pack('<d', …)``) so a signed-zero or
     last-ulp difference can never hide behind float equality — the #1531
     burn-in discipline. ``downside_sum_sq`` is normalised through
-    ``float(...)`` first: the Python arm legitimately holds the int ``0``
-    on an empty downside (``sum([])``) where the kernel returns ``+0.0``;
-    the two are combine-equivalent (``0 / n == 0.0 / n == +0.0``, pinned by
-    the golden suite's ``scratch_only`` corpus case) and ``float(0)`` is
-    ``+0.0``, so the key equates exactly that pair and nothing else.
+    ``float(...)`` as a total belt: the Python oracle's ``_fold_wire``
+    projection already float-normalises the ``sum([])`` int-``0`` an
+    empty downside legitimately produces (combine-equivalent —
+    ``0 / n == 0.0 / n == +0.0``, pinned by the golden suite's
+    ``scratch_only`` corpus case), and ``float(+0.0)`` is the identity,
+    so the key equates exactly that pair and nothing else.
     """
-    moments = folds.moments
+    counts, sums, moments, floats = wire
     return (
-        folds.n_trades,
-        folds.net_pnl_paisa,
-        folds.gross_profit_paisa,
-        folds.gross_loss_abs_paisa,
-        folds.winners,
-        folds.losers,
-        folds.sum_mfe_paisa,
-        folds.sum_mae_paisa,
-        folds.sum_holding_bars,
-        folds.max_holding_bars,
-        folds.largest_loss_paisa,
-        folds.max_consecutive_losses,
-        folds.max_consecutive_wins,
-        moments.n,
-        struct.pack("<d", moments.mean),
-        struct.pack("<d", moments.m2),
-        struct.pack("<d", moments.m3),
-        struct.pack("<d", moments.m4),
-        struct.pack("<d", float(folds.downside_sum_sq)),
-        struct.pack("<d", folds.p95),
-        struct.pack("<d", folds.p5),
+        *counts,
+        *sums,
+        moments[0],
+        struct.pack("<d", moments[1]),
+        struct.pack("<d", moments[2]),
+        struct.pack("<d", moments[3]),
+        struct.pack("<d", moments[4]),
+        struct.pack("<d", float(floats[0])),
+        struct.pack("<d", floats[1]),
+        struct.pack("<d", floats[2]),
     )
 
 
@@ -370,15 +378,21 @@ def _valid_fold_wire(result: object, n_trades: int) -> bool:
     return all(isinstance(v, float) for v in floats)
 
 
-def fold_trades_via_kernel(
-    trades: Sequence[ClosedTrade], start_equity_paisa: int
-) -> TradeFolds | None:
+def fold_wire_via_kernel(
+    trades: Sequence[ClosedTrade],
+    start_equity_paisa: int,
+    *,
+    oracle_wire: Callable[[], FoldWire],
+) -> FoldWire | None:
     """Run the Rust metrics FOLD; ``None`` ⇒ serve the row from Python.
 
-    The ONE FFI call site. Returns a :class:`TradeFolds` bit-identical to
-    ``_fold_trades(trades, start_equity_paisa)`` on success (module
-    docstring carries the exactness argument; the burn-in self-check
-    verifies the first :data:`SELF_CHECK_SAMPLES` per process). Returns
+    The ONE FFI call site. Returns a :data:`FoldWire` bit-identical to the
+    Python fold's wire projection on success (module docstring carries the
+    exactness argument; the burn-in self-check verifies the first
+    :data:`SELF_CHECK_SAMPLES` per process against the INJECTED
+    ``oracle_wire`` — the dependency-INVERSION half of the plain-data
+    boundary: the consumer passes its own oracle in, so this leaf never
+    imports the metrics compute module in any form, at any line). Returns
     ``None`` — after a warn-once (or, for a refused result, an ERROR) —
     when the kernel is unavailable, raises, or returns a structurally
     invalid wire tuple; the caller then serves the row through the
@@ -386,8 +400,10 @@ def fold_trades_via_kernel(
     ``MemoryError`` re-raises RAW (the house OOM law); every OTHER
     kernel-call exception degrades (the greeks-batch autorevert-fence
     taxonomy — module docstring). Callers guarantee ``trades`` is
-    non-empty and ``start_equity_paisa > 0`` (the ``_fold_trades``
-    contract — the zero-trade row is ``_empty_metrics``, the caller's arm).
+    non-empty, ``start_equity_paisa > 0``, and that ``oracle_wire``
+    computes the Python fold's wire for EXACTLY these arguments (the
+    burn-in's correctness anchor — a wrong oracle would autorevert a
+    correct kernel, never serve a wrong number).
     """
     if kernel_disabled():
         warn_fallback_once("kernel_disabled")
@@ -395,16 +411,7 @@ def fold_trades_via_kernel(
     kernel = _resolve_kernel()
     if kernel is None:
         return None
-    # Lazy import — NEITHER direction of the compute ↔ compute_rust pair
-    # carries a module-level runtime edge (CodeQL py/cyclic-import clean);
-    # `compute` is fully initialised by any call time.
-    from brutex.metrics.compute import (
-        Moments,
-        TradeFolds,
-        _fold_trades,  # pyright: ignore[reportPrivateUsage]
-    )
-
-    # The verbatim `_fold_trades` returns expression — CPython's correctly
+    # The verbatim Python-fold returns expression — CPython's correctly
     # rounded int/int division stays Python-side (module docstring).
     returns = [t.pnl_paisa / start_equity_paisa for t in trades]
     try:
@@ -436,36 +443,10 @@ def fold_trades_via_kernel(
             )
         return None
     # The structural gate above proves the shape; narrow for the type-checkers.
-    wire = cast(tuple[Any, ...], result)
-    counts, sums, moments_wire, floats = wire
-    folds = TradeFolds(
-        n_trades=counts[0],
-        net_pnl_paisa=sums[0],
-        gross_profit_paisa=sums[1],
-        gross_loss_abs_paisa=sums[2],
-        winners=counts[1],
-        losers=counts[2],
-        sum_mfe_paisa=sums[3],
-        sum_mae_paisa=sums[4],
-        sum_holding_bars=sums[5],
-        max_holding_bars=counts[3],
-        largest_loss_paisa=counts[4],
-        max_consecutive_losses=counts[5],
-        max_consecutive_wins=counts[6],
-        moments=Moments(
-            n=moments_wire[0],
-            mean=moments_wire[1],
-            m2=moments_wire[2],
-            m3=moments_wire[3],
-            m4=moments_wire[4],
-        ),
-        downside_sum_sq=floats[0],
-        p95=floats[1],
-        p5=floats[2],
-    )
+    wire = cast("FoldWire", result)
     if self_check_pending():
-        oracle = _fold_trades(trades, start_equity_paisa)
-        if fold_compare_key(folds) != fold_compare_key(oracle):
+        oracle = oracle_wire()
+        if wire_compare_key(wire) != wire_compare_key(oracle):
             # SHIP THE ORACLE VALUE (correctness first) + latch the kernel
             # off for the process — the #1531/#1532 autorevert law.
             disable_kernel("burn_in_mismatch", n_trades=len(trades))
@@ -474,21 +455,22 @@ def fold_trades_via_kernel(
     if _ENGAGED_KEY not in _OBSERVABILITY_MEMO:
         _OBSERVABILITY_MEMO.add(_ENGAGED_KEY)
         _LOG.info("metrics_rust_fold.engaged", n_trades=len(trades))
-    return folds
+    return wire
 
 
 __all__ = [
     "METRICS_RUST_FOLD_DEFAULT",
     "METRICS_RUST_FOLD_ENV",
     "SELF_CHECK_SAMPLES",
+    "FoldWire",
     "consume_self_check_sample",
     "disable_kernel",
-    "fold_compare_key",
-    "fold_trades_via_kernel",
+    "fold_wire_via_kernel",
     "kernel_disabled",
     "metrics_rust_fold_enabled",
     "reset_observability_memo_for_tests",
     "reset_self_check_for_tests",
     "self_check_pending",
     "warn_fallback_once",
+    "wire_compare_key",
 ]

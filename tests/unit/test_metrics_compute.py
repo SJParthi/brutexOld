@@ -37,6 +37,8 @@ from brutex.metrics.compute import (
     _drawdown_stats,
     _excess_kurtosis,
     _fold_trades,
+    _fold_wire,
+    _folds_from_wire,
     _percentile,
     _resolve_folds,
     _skewness,
@@ -1485,26 +1487,54 @@ class TestResolveFoldsDispatch:
 
         monkeypatch.delenv(compute_rust.METRICS_RUST_FOLD_ENV, raising=False)
 
-        def _seam_bomb(*_args: object) -> object:
+        def _seam_bomb(*_args: object, **_kwargs: object) -> object:
             raise AssertionError("the default path must never consult the kernel seam")
 
-        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", _seam_bomb)
+        monkeypatch.setattr(compute_rust, "fold_wire_via_kernel", _seam_bomb)
         trades = self._dispatch_trades()
         folds = _resolve_folds(trades, 1_000_000)
         assert folds == _fold_trades(trades, 1_000_000)
 
-    def test_flag_on_kernel_folds_are_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Flag ON + a serving kernel: the kernel folds object ships as-is."""
+    def test_flag_on_kernel_wire_is_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Flag ON + a serving kernel: the served wire's rebuild ships."""
         from brutex.metrics import compute_rust
 
         monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "1")
-        sentinel = _fold_trades([_trade(999, holding=1)], 500)
+        sentinel_folds = _fold_trades([_trade(999, holding=1)], 500)
+        sentinel_wire = _fold_wire(sentinel_folds)
 
-        def _fake_kernel(*_args: object) -> TradeFolds:
-            return sentinel
+        def _fake_seam(*_args: object, **_kwargs: object) -> object:
+            return sentinel_wire
 
-        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", _fake_kernel)
-        assert _resolve_folds(self._dispatch_trades(), 1_000_000) is sentinel
+        monkeypatch.setattr(compute_rust, "fold_wire_via_kernel", _fake_seam)
+        served = _resolve_folds(self._dispatch_trades(), 1_000_000)
+        assert served == _folds_from_wire(sentinel_wire)
+        assert served == sentinel_folds  # int-0 downside ≡ +0.0 (dataclass ==)
+
+    def test_flag_on_dispatch_injects_the_matching_oracle_wire(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The injected ``oracle_wire`` computes the Python fold's wire for
+        EXACTLY the dispatched arguments (the burn-in's correctness anchor —
+        a wrong injection would autorevert a correct kernel)."""
+        from brutex.metrics import compute_rust
+
+        monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "1")
+        seen: dict[str, object] = {}
+
+        def _capture_seam(trades: object, start: object, *, oracle_wire: object) -> None:
+            seen["trades"] = trades
+            seen["start"] = start
+            seen["oracle_wire"] = oracle_wire
+
+        monkeypatch.setattr(compute_rust, "fold_wire_via_kernel", _capture_seam)
+        trades = self._dispatch_trades()
+        _resolve_folds(trades, 1_000_000)
+        assert seen["trades"] is trades
+        assert seen["start"] == 1_000_000
+        oracle_wire = seen["oracle_wire"]
+        assert callable(oracle_wire)
+        assert oracle_wire() == _fold_wire(_fold_trades(trades, 1_000_000))
 
     def test_flag_on_kernel_unavailable_falls_to_oracle(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1513,7 +1543,59 @@ class TestResolveFoldsDispatch:
         from brutex.metrics import compute_rust
 
         monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "1")
-        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", lambda *_a: None)
+        monkeypatch.setattr(compute_rust, "fold_wire_via_kernel", lambda *_a, **_k: None)
         trades = self._dispatch_trades()
         folds = _resolve_folds(trades, 1_000_000)
         assert folds == _fold_trades(trades, 1_000_000)
+
+
+class TestFoldWireRoundTrip:
+    """`_fold_wire` ↔ `_folds_from_wire` — the plain-data boundary's pair laws.
+
+    The ALL-DISTINCT fixture kills every wire-slot index-swap mutant: any
+    two swapped slots change the rebuilt ``TradeFolds`` because no two
+    field values collide anywhere in the fixture.
+    """
+
+    _DISTINCT = TradeFolds(
+        n_trades=11,
+        net_pnl_paisa=1201,
+        gross_profit_paisa=2402,
+        gross_loss_abs_paisa=3603,
+        winners=4,
+        losers=5,
+        sum_mfe_paisa=4804,
+        sum_mae_paisa=5905,
+        sum_holding_bars=67,
+        max_holding_bars=23,
+        largest_loss_paisa=-7107,
+        max_consecutive_losses=2,
+        max_consecutive_wins=3,
+        moments=Moments(n=11, mean=0.125, m2=0.25, m3=-0.375, m4=0.4375),
+        downside_sum_sq=0.017,
+        p95=0.921,
+        p5=-0.843,
+    )
+
+    def test_round_trip_is_identity_on_all_distinct_fields(self) -> None:
+        folds = self._DISTINCT
+        # The fixture's mutant-killing precondition: no two int slots equal,
+        # no two float slots equal (an index swap can never hide).
+        counts, sums, moments_wire, floats = _fold_wire(folds)
+        # moments.n == n_trades is a LAW of the wire (`_valid_fold_wire`
+        # enforces it), so that one pair is deliberately equal — a swap
+        # between those two slots is value-equivalent by construction.
+        assert moments_wire[0] == counts[0]
+        int_slots = [*counts, *sums]
+        assert len(set(int_slots)) == len(int_slots)
+        float_slots = [*moments_wire[1:], *floats]
+        assert len(set(float_slots)) == len(float_slots)
+        assert _folds_from_wire(_fold_wire(folds)) == folds
+
+    def test_projection_float_normalises_int_zero_downside(self) -> None:
+        """The fold's legitimate `sum([])` int-``0`` crosses as ``+0.0``."""
+        folds = _fold_trades([_trade(7, holding=1), _trade(9, holding=2)], 100)
+        assert isinstance(folds.downside_sum_sq, int)
+        wire = _fold_wire(folds)
+        assert isinstance(wire[3][0], float)
+        assert wire[3][0] == 0.0
