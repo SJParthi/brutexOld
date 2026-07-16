@@ -76,9 +76,10 @@ Active-branch blurb + its MIGRATION.md entry.)
 Earlier: 2026-07-15 (CLUB R2 merge vehicle, branch
 `integration/club-r2-crates` — the crate-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1469 DEC-GREEKS-RUST-BATCH-001
-(MIGRATION.md #1795, renumbered from the provisional #1724) · #1435
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1832, renumbered from the provisional
-#1726) · #1454 DEC-FEED-RUST-CORE-001 (#1797, chain #1725 → #1741 → #1797).
+(MIGRATION.md #1892, chain #1724 → #1795 → #1892 — the last hop at the
+2026-07-16 club CDR2 fold, bare vs club-D's #1795a–#1795d block) · #1435
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1891, chain #1726 → #1796 → #1832 →
+#1891 — the last hop at the club CDR2 fold, club-D took #1832) · #1454 DEC-FEED-RUST-CORE-001 (#1797, chain #1725 → #1741 → #1797).
 Three INDEPENDENT crate trees (`rust/trading-core/src/greeks/batch.rs` ·
 `rust/brutex-lake/` · `rust/brutex-feed/`), every Python seam default-OFF /
 INERT (`BRUTEX_GREEKS_RUST_BATCH` · `BRUTEX_LAKE_RUST_RENDER` ·
@@ -632,8 +633,10 @@ lake/schema/scope/vocab/rate change; `trade_sim.py` + the whole engine 100%
 line+branch on the ci.yml whole-engine gate; the per-fix record lives in the
 §1 Active-branch blurb + MIGRATION.md #1743 — this header carries the
 one-line summary, never the story).
-Earlier: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1795
-(renumbered from the provisional #1724 at the club-R2 fold) — additive
+Earlier: 2026-07-11 (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892
+(renumbered from the provisional #1724 at the club-R2 fold, then
+#1795 → #1892 at the club CDR2 fold — bare vs club-D's #1795a–#1795d
+suffixed block per DEC-LEDGER-RENUMBER-001) — additive
 `trading_core.greeks_batch` columnar FFI face of the frozen Black-76 kernel
 (calls the SAME scalar `greeks` per element — zero math duplication; crate
 STAYS 0.3.1, no `_indicator_version` re-key) + the default-OFF
@@ -650,7 +653,7 @@ zero writes both arms, same target_errored fence + equal counts, siblings
 bit-identical, OFF's pre-raise stream a — possibly equal — prefix of ON's
 engaged-filtered stream with a pass-1-WARN-only extension — while WHICH
 poison's exception surfaces may differ between arms when
-several are present; disclosed in #1795); the
+several are present; disclosed in #1892); the
 EXISTING enrich golden
 reproduces byte-identically with the flag ON (fixture untouched,
 engaged-INFO anti-vacuous pin). HONEST: both arms O(rows) — ON/OFF wall
@@ -661,9 +664,9 @@ a default flip needs its own DEC/ADR. ENGINE UNCHANGED —
 NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change;
 GREEKS_FORMULA_VERSION stays 2; `greeks_enrich.py` + `spot_join.py` +
 `options/greeks.py` 100% line+branch on their ci.yml gates; the full record
-lives in the §1 Active-branch blurb + MIGRATION.md #1795 — this header
+lives in the §1 Active-branch blurb + MIGRATION.md #1892 — this header
 carries the one-line summary, never the story).
-Earlier: 2026-07-11 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1832 —
+Earlier: 2026-07-11 (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891 —
 slice 8 of the Rust-first conversion program (the data-lake I/O layer: 16 `brutex/data/`
 modules + `brutex/feed/resampler.py`): the panel's keep-Python verdict was
 OPERATOR-OVERRIDDEN to Rust-everywhere — a byte-identity-gated CONVERSION ROADMAP is
@@ -691,7 +694,7 @@ commit itself — PR-1 has since SHIPPED on the same branch (the `rust/brutex-la
 crate + the default-OFF `BRUTEX_LAKE_RUST_RENDER` render seam with import/version
 guards + burn-in autorevert; the byte-parity corpus green locally, and the 5-lens
 adversarial-review fix round folded pre-merge — the §1
-Active-branch blurb + the MIGRATION.md #1832 PR-1 segment carry the record).)
+Active-branch blurb + the MIGRATION.md #1891 PR-1 segment carry the record).)
 Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1712 / ADR-0019 — the UNKILLABLE sweep run
@@ -3048,7 +3051,7 @@ hostile-review pass._
   and v29.html keeps BOTH main's `bx-health-hub.js` include AND the extracted
   panel includes (each load-order law honored: health-hub after bx-poll.js,
   panels after bx-oneclick.js); gates re-run green post-merge. The
-  full record lives in MIGRATION.md #1832.)
+  full record lives in MIGRATION.md #1796.)
   Earlier: `claude/memory-footprint-hardening` (**DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721** —
   the memory/cache hardening pack, items 1-6 (all landed on this branch): (1) NEW
   `lake_revision.registry_revision` — the `registry.duckdb` content stat token folded into the options
@@ -3168,7 +3171,7 @@ hostile-review pass._
   Earlier: `integration/club-r2-crates` (**CLUB R2 merge vehicle** —
   the crate-disjoint fold of THREE PRs as ONE merge event off main tip
   d6ac9f85, in binding order **#1469** DEC-GREEKS-RUST-BATCH-001
-  (MIGRATION.md #1795) → **#1435** DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1832)
+  (MIGRATION.md #1892) → **#1435** DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1891)
   → **#1454** DEC-FEED-RUST-CORE-001 (#1797): three INDEPENDENT crate trees
   (`rust/trading-core/src/greeks/batch.rs` · `rust/brutex-lake/` ·
   `rust/brutex-feed/`) whose Python seams are ALL default-OFF / INERT
@@ -4943,10 +4946,12 @@ hostile-review pass._
   ci.yml gate + per-module gates green; cargo test --release 578 green,
   fmt/clippy clean; ruff/ruff-format clean; `mypy --strict` clean; pyright at
   the pre-change baseline; `node --check` clean on both touched JS files.)
-  Earlier: `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1795** —
-  entry number #1795 — renumbered from the provisional #1724 (= observed live-main max #1723 + 1
+  Earlier: `claude/greeks-rust-batch` (**DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892** —
+  entry number #1892 — renumbered from the provisional #1724 (= observed live-main max #1723 + 1
   at append) at the club-R2 integration fold, the free consecutive block #1795–#1797 vs the
-  live-main tail #1794 (the #1711 precedent, gaps are legal) —
+  live-main tail #1794 (the #1711 precedent, gaps are legal), then #1795 → #1892 at the
+  2026-07-16 club CDR2 fold (bare vs club-D's #1795a–#1795d suffixed block —
+  DEC-LEDGER-RENUMBER-001) —
   the additive `trading_core.greeks_batch` columnar FFI face + the default-OFF
   `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in the Greeks enrich loop. **Rust:** NEW
   `rust/trading-core/src/greeks/batch.rs` under DEFAULT features (per-PR `cargo test` exercises it) —
@@ -4968,7 +4973,7 @@ hostile-review pass._
   `forward = S·e^{rT}` — NO exp ever computed in Rust that Python didn't already compute) /
   `_solve_one` (the per-row oracle arm) / `_finish_bar`; the recomposed `_compute_bar` DELETED —
   grep proved ZERO consumers outside the loop (the spec assumed direct-call tests that do not
-  exist; code-wins deviation, disclosed in #1795); the loop gains the order-invariant `_account`
+  exist; code-wins deviation, disclosed in #1892); the loop gains the order-invariant `_account`
   fold + `_PendingSolve` placeholders + post-loop fill-in (`outcomes.get(slot) is None → _solve_one`
   IS the autorevert path — reachable, tested, zero pragmas); `_batch_solve_outcomes` chunks at
   `GREEKS_BATCH_MAX_ROWS=65_536`, burn-in bit-compares the first 16 elements per PROCESS
@@ -4980,7 +4985,7 @@ hostile-review pass._
   env (zero `_GreeksWorkerContext` change). **Sanctioned ON-arm log deltas — exactly three on a
   COMPLETING pass:** `rust_batch_engaged` (INFO once/process) · `rust_batch_autoreverted` (ERROR,
   fault only) · `rust_batch_flag_unrecognised` (WARNING once/process) — plus the ONE disclosed
-  crash-path delta (#1795, refuter-2B F1 + refuter-5B F1″: beyond the sanctioned engaged INFO,
+  crash-path delta (#1892, refuter-2B F1 + refuter-5B F1″: beyond the sanctioned engaged INFO,
   OFF's pre-raise stream is a — possibly equal — prefix of ON's, the extension pass-1 WARNs only;
   which poison's exception surfaces may differ under multiple corrupt rows);
   OFF arm ZERO delta (bomb-spy + zero-event
@@ -4991,7 +4996,7 @@ hostile-review pass._
   ON (fixture untouched, engaged-INFO anti-vacuous pin) + the 2-worker REAL-spawn sha256 parity
   golden + the hypothesis OFF≡ON property + the hostile status matrix (BELOW_INTRINSIC ±1-ULP band
   CE AND PE, T-floor µs boundary, reuse hit + per-term misses, NaN-OHLC skip, invalid-spot WARN,
-  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality on COMPLETING passes — the ONE disclosed crash-path delta is bounded by the four PROVEN invariants in #1795: zero writes both arms · same target_errored fence + equal errored counts · siblings bit-identical · beyond the sanctioned engaged INFO, OFF's pre-raise stream is a — possibly equal — prefix of ON's with a pass-1-WARN-only extension; which corrupt row's exception (type+message, hence the target_errored string) surfaces may DIFFER between arms when several are present — single-poison identical, multi-poison divergent, refuter-executed both). HONEST: both arms
+  repr-boundary spot 100.005, interleave ordering, log-SEQUENCE equality on COMPLETING passes — the ONE disclosed crash-path delta is bounded by the four PROVEN invariants in #1892: zero writes both arms · same target_errored fence + equal errored counts · siblings bit-identical · beyond the sanctioned engaged INFO, OFF's pre-raise stream is a — possibly equal — prefix of ON's with a pass-1-WARN-only extension; which corrupt row's exception (type+message, hence the target_errored string) surfaces may DIFFER between arms when several are present — single-poison identical, multi-poison divergent, refuter-executed both). HONEST: both arms
   O(rows) — NO O(1) claim; ON/OFF wall ≈1.0× measured on the sandbox (run-to-run noise straddles
   1.0 — independent reruns read 0.96–1.00×; NO speedup claimed, printed by the bench and gated only
   at the generous ≤1.5× no-regression ceiling; the retained Python
@@ -5009,14 +5014,14 @@ hostile-review pass._
   (14 mutants measured; NOT weekly-mutation-gated — the per-PR `cargo test` is its gate); the
   `_RustBatchState` races-output-safe lockless clause + the ON-arm GIL-hold envelope (one
   ≤65,536-row chunk per FFI call, no release — beats unaffected, per-target) + the measured
-  ON-arm peak working set (~1.74× OFF, ~109 vs ~63 MB @ 70k rows, O(N)) LEDGERED in #1795 + the
+  ON-arm peak working set (~1.74× OFF, ~109 vs ~63 MB @ 70k rows, O(N)) LEDGERED in #1892 + the
   impl report (the module docs carry the GIL envelope, not this figure); the autorevert `error` payload rides `repr(str(exc))` (house log-injection
   convention, pin updated); the burn-in-verifies-only-16 + ON-arm-MemoryError-surface honesty
-  clauses folded into #1795. ENGINE
+  clauses folded into #1892. ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
   change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the pre-change baseline.)
   Earlier: `claude/rust-datalake-io-slice8` (**DEC-RUST-DATALAKE-IO-ROADMAP-001,
-  MIGRATION.md #1832** — slice 8 of the Rust-first conversion program (the data-lake I/O
+  MIGRATION.md #1891** — slice 8 of the Rust-first conversion program (the data-lake I/O
   layer: 16 `brutex/data/` modules + `brutex/feed/resampler.py`, 17 total): the panel
   protocol (6 readers → 3 designers → judge) rendered keep-Python; the operator
   OVERRODE to Rust-everywhere, and a byte-identity-gated CONVERSION ROADMAP is adopted
@@ -5056,7 +5061,7 @@ hostile-review pass._
   output). `feed/resampler.py` stays EXEMPT (production-dead test oracle, #1492 G3;
   deletion-vs-retention a separate DEC). Umbrella DEC-RUST-FIRST-MANDATE-001 (ledger
   #1713) is in flight on the Slice-1 PR, NOT on main at this HEAD. **PR-1 SHIPPED on
-  this branch (same DEC — the #1832 PR-1 segment):** NEW standalone crate
+  this branch (same DEC — the #1891 PR-1 segment):** NEW standalone crate
   `rust/brutex-lake/` (pyo3 0.29 abi3-py312 maturin, the fno-math layout; in NO
   workspace, built ONLY by its own lane; polars REV-pinned `0df0c25d…` (= the
   commit the movable `py-1.42.1` tag pointed at — the L5 rev-pin fold) + restated
@@ -5084,7 +5089,7 @@ hostile-review pass._
   100% line+branch standalone; `parquet_writer.py` 100% on its full matched suite;
   cargo fmt/clippy/test green. ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11,
   same branch, pre-merge — 5 hostile lenses; the per-item record lives in the
-  MIGRATION.md #1832 PR-1 segment + ADR-0020 §9): foreign/broken-crate
+  MIGRATION.md #1891 PR-1 segment + ADR-0020 §9): foreign/broken-crate
   fail-closed hardening (API-surface import guard, `crate_metadata_error` +
   `crate_panic`/BaseException-belt latches, `AttributeError` in the degrade set),
   the crate's result construction moved inside the panic boundary + the render
@@ -8576,7 +8581,7 @@ hostile-review pass._
   CSS into bx-oneclick-panels.css); SUPERSEDES PR #1470 (recommend
   close-as-superseded); DISPLAY zone only, ZERO Python source changes; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
-  + MIGRATION.md #1832 for the full blurb)
+  + MIGRATION.md #1796 for the full blurb)
   Earlier: `claude/memory-footprint-hardening`
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721 — the memory/cache
   hardening pack, items 1-6: the `registry.duckdb` content token re-keys
@@ -8617,11 +8622,11 @@ hostile-review pass._
   the full blurbs)
   Earlier: `integration/club-r2-crates`
   (CLUB R2 merge vehicle — the crate-disjoint fold of #1469
-  DEC-GREEKS-RUST-BATCH-001 (MIGRATION.md #1795) → #1435
-  DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1832) → #1454 DEC-FEED-RUST-CORE-001
+  DEC-GREEKS-RUST-BATCH-001 (MIGRATION.md #1892) → #1435
+  DEC-RUST-DATALAKE-IO-ROADMAP-001 (#1891) → #1454 DEC-FEED-RUST-CORE-001
   (#1797); three independent crate trees, every Python seam default-OFF /
   INERT; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
-  branch line — see §1 + MIGRATION.md #1795–#1797 for the full blurbs)
+  branch line — see §1 + MIGRATION.md #1892 · #1891 · #1797 for the full blurbs)
   Earlier: `claude/gdfl-ingest-design`
   (DEC-GDFL-INGEST-DESIGN-001, MIGRATION.md #1781 — the GDFL 1-second L1
   snapshot ingest/store/derive/read DESIGN doc at
@@ -9079,8 +9084,9 @@ hostile-review pass._
   feeds byte-identical, NIFTY/BANKNIFTY/SENSEX (+ NSE-NIFTY-FUT); matches §1's
   Active branch line — see §1 + MIGRATION.md #1743 for the full blurb)
   Earlier: `claude/greeks-rust-batch`
-  (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1795 — renumbered from the
-  provisional #1724 at the club-R2 fold — the additive
+  (DEC-GREEKS-RUST-BATCH-001, MIGRATION.md #1892 — renumbered from the
+  provisional #1724 at the club-R2 fold, then #1795 → #1892 at the club
+  CDR2 fold — the additive
   `trading_core.greeks_batch` columnar face of the frozen Greeks kernel + the
   default-OFF `BRUTEX_GREEKS_RUST_BATCH` batch-solve seam in
   `enrich_option_bars` (shared-single-copy screens, 16-element burn-in +
@@ -9088,9 +9094,9 @@ hostile-review pass._
   existing enrich golden byte-identical with the flag ON; ON/OFF wall
   ≈1.0× measured (no speedup claimed; 1.5× no-regression ceiling only); crate stays 0.3.1; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
-  MIGRATION.md #1795 for the full blurb)
+  MIGRATION.md #1892 for the full blurb)
   Earlier: `claude/rust-datalake-io-slice8`
-  (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1832 — slice 8 of the
+  (DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891 — slice 8 of the
   Rust-first conversion program, the data-lake I/O layer: the panel's
   keep-Python verdict OPERATOR-OVERRIDDEN to Rust-everywhere; the
   byte-identity-gated conversion roadmap is adopted as ADR-0020, and
@@ -9107,7 +9113,7 @@ hostile-review pass._
   (wheel force-aligned to the crate pin, cargo `--locked`, rev-pinned
   polars deps) + the lockstep runbook (`window_ledger_store` stays the
   LAST-MILE named escalation point); the 5-lens ADVERSARIAL-REVIEW FIX
-  ROUND is folded pre-merge — per-item record in the MIGRATION.md #1832
+  ROUND is folded pre-merge — per-item record in the MIGRATION.md #1891
   PR-1 segment; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
   see §1 Active branch for the full blurb)
   Earlier: `integration/t1-sweep-core`

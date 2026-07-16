@@ -1,6 +1,6 @@
 # ADR-0020 — Rust conversion ROADMAP for the data-lake I/O layer (operator override: Rust everywhere, byte-identity gated)
 
-**Decision ID:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md entry #1832)
+**Decision ID:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md entry #1891 — renumbered #1832 → #1891 at the club CDR2 fold; DEC-IDs are the stable handles per DEC-LEDGER-RENUMBER-001)
 **Date:** 2026-07-11
 **Status:** **ACCEPTED** — operator-directed. DOCS-ONLY in this commit: the
 roadmap is adopted; zero code ships here; every conversion PR lands
@@ -313,7 +313,7 @@ byte-identical lake, 124/124 SHA match). The conversion's expected deltas:
 ## 9. PR-1 shipped surface (2026-07-11 — appended when PR-1 landed on this branch, same DEC)
 
 The §3 PR-1 gate set is IMPLEMENTED (full record: the PR-1 segment of
-MIGRATION.md #1832): the standalone `rust/brutex-lake/` crate (polars git
+MIGRATION.md #1891): the standalone `rust/brutex-lake/` crate (polars git
 deps REV-pinned at the commit the movable `py-1.42.1` tag pointed at —
 `PINNED_POLARS_GIT_REV`, no `tag =` line, cargo-tested by
 `manifest_rev_matches_pinned_rev`; restated object_store patch, zstd trio
@@ -339,7 +339,7 @@ did not move (the PR-1 boundary). PR-2..PR-4 and the waves remain future
 work under the same apparatus.
 
 **ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11, same branch, pre-merge —
-5 hostile lenses; full per-item record in the MIGRATION.md #1832 PR-1
+5 hostile lenses; full per-item record in the MIGRATION.md #1891 PR-1
 segment):** the facade is fail-closed against a FOREIGN/BROKEN crate (API
 surface verified at import; a raising metadata pyfunction latches
 `crate_metadata_error`; `AttributeError` joins the degrade set; a
