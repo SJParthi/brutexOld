@@ -98,7 +98,7 @@ from brutex.costs.constants import (
     unverified_windows,
     validate_regime_table,
 )
-from brutex.costs.types import Broker, GstSplit
+from brutex.costs.types import Broker, GstSplit, require_bar_extremes
 from brutex.universe import BRUTE_FORCE_INDEX_UNDERLYINGS
 
 __all__ = [
@@ -824,19 +824,22 @@ def compute_futures_trade_cost(trade: FuturesTradeInput) -> FuturesCostBreakdown
         defence-in-depth choke point for direct callers.
     """
     # The FuturesTradeInput validated all four extremes non-None at
-    # construction; the asserts narrow the Optional typing for the type
-    # checker (a None here is a broken dataclass invariant, not a reachable
-    # state).
-    assert trade.entry_bar_high_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.entry_bar_low_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.exit_bar_high_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.exit_bar_low_paisa is not None  # noqa: S101 — validated invariant
+    # construction; the COMMON `require_bar_extremes` seam narrows the
+    # Optional typing (a None here is a broken dataclass invariant, not a
+    # reachable state — it raises the explicit AssertionError, never a bare
+    # `assert` per bandit B101).
+    entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa = require_bar_extremes(
+        entry_bar_high_paisa=trade.entry_bar_high_paisa,
+        entry_bar_low_paisa=trade.entry_bar_low_paisa,
+        exit_bar_high_paisa=trade.exit_bar_high_paisa,
+        exit_bar_low_paisa=trade.exit_bar_low_paisa,
+    )
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_unit = apply_futures_fill(
         side=trade.side,
-        entry_high_paisa=trade.entry_bar_high_paisa,
-        entry_low_paisa=trade.entry_bar_low_paisa,
-        exit_high_paisa=trade.exit_bar_high_paisa,
-        exit_low_paisa=trade.exit_bar_low_paisa,
+        entry_high_paisa=entry_high_paisa,
+        entry_low_paisa=entry_low_paisa,
+        exit_high_paisa=exit_high_paisa,
+        exit_low_paisa=exit_low_paisa,
     )
     n_shares = trade.n_lots * trade.lot_size
     buy_notional_paisa = buy_fill_paisa * n_shares

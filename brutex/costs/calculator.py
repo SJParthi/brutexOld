@@ -30,6 +30,7 @@ from brutex.costs.types import (
     TradeCostBreakdown,
     TradeInput,
     UnsupportedTradeOutcomeError,
+    require_bar_extremes,
 )
 from brutex.options.lot_size_history import OptionsUnderlying, get_lot_size
 
@@ -251,19 +252,22 @@ def compute_trade_cost(trade: TradeInput) -> TradeCostBreakdown:
 
     # ── Step 1: apply slippage (1-tick flat adverse, around the worst-case
     #    bar-extreme anchor — DEC-FILL-WORST-CASE-ONLY-001). The TradeInput
-    #    validated all four extremes non-None at construction; the asserts
-    #    narrow the Optional typing for the type checker (a None here is a
-    #    broken dataclass invariant, not a reachable state).
-    assert trade.entry_bar_high_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.entry_bar_low_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.exit_bar_high_paisa is not None  # noqa: S101 — validated invariant
-    assert trade.exit_bar_low_paisa is not None  # noqa: S101 — validated invariant
+    #    validated all four extremes non-None at construction; the COMMON
+    #    `require_bar_extremes` seam narrows the Optional typing (a None here
+    #    is a broken dataclass invariant, not a reachable state — it raises
+    #    the explicit AssertionError, never a bare `assert` per bandit B101).
+    entry_high_paisa, entry_low_paisa, exit_high_paisa, exit_low_paisa = require_bar_extremes(
+        entry_bar_high_paisa=trade.entry_bar_high_paisa,
+        entry_bar_low_paisa=trade.entry_bar_low_paisa,
+        exit_bar_high_paisa=trade.exit_bar_high_paisa,
+        exit_bar_low_paisa=trade.exit_bar_low_paisa,
+    )
     buy_fill_paisa, sell_fill_paisa, realized_slip_per_share = _apply_slippage(
         trade.side,
-        entry_high_paisa=trade.entry_bar_high_paisa,
-        entry_low_paisa=trade.entry_bar_low_paisa,
-        exit_high_paisa=trade.exit_bar_high_paisa,
-        exit_low_paisa=trade.exit_bar_low_paisa,
+        entry_high_paisa=entry_high_paisa,
+        entry_low_paisa=entry_low_paisa,
+        exit_high_paisa=exit_high_paisa,
+        exit_low_paisa=exit_low_paisa,
     )
 
     # ── Step 2: lookup lot size ─────────────────────────────────────────

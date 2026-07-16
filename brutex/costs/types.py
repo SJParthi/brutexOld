@@ -39,7 +39,58 @@ __all__ = [
     "TradeSide",
     "UnsupportedTradeOutcomeError",
     "UnverifiedCostRegimeError",
+    "require_bar_extremes",
 ]
+
+
+def require_bar_extremes(
+    *,
+    entry_bar_high_paisa: int | None,
+    entry_bar_low_paisa: int | None,
+    exit_bar_high_paisa: int | None,
+    exit_bar_low_paisa: int | None,
+) -> tuple[int, int, int, int]:
+    """Narrow the four validated fill-bar extremes from ``int | None`` to ``int``.
+
+    The ONE COMMON narrowing seam (Golden Rule #11) shared by
+    :func:`brutex.costs.calculator.compute_trade_cost` and
+    :func:`brutex.costs.futures_costs.compute_futures_trade_cost`: both
+    ``TradeInput`` and ``FuturesTradeInput`` validate all four extremes
+    non-``None`` at construction (the DEC-FILL-WORST-CASE-ONLY-001 refusal in
+    ``__post_init__``), so a ``None`` here is a broken dataclass invariant —
+    not a reachable state through a validated constructor. The explicit
+    ``raise AssertionError`` (the house invariant idiom — never a bare
+    ``assert``, which vanishes under ``python -O`` and trips bandit B101)
+    keeps the guard fail-loud in every runtime mode.
+
+    Returns
+    -------
+    tuple[int, int, int, int]
+        ``(entry_high, entry_low, exit_high, exit_low)`` in paisa.
+
+    Raises
+    ------
+    AssertionError
+        If any extreme is ``None`` — a broken dataclass invariant (an
+        instance built past ``__post_init__``, e.g. via ``object.__new__``).
+    """
+    if (
+        entry_bar_high_paisa is None
+        or entry_bar_low_paisa is None
+        or exit_bar_high_paisa is None
+        or exit_bar_low_paisa is None
+    ):
+        raise AssertionError(
+            "fill-bar extremes are None past construction validation — a broken "
+            "TradeInput/FuturesTradeInput invariant (DEC-FILL-WORST-CASE-ONLY-001 "
+            "requires all four extremes at construction)"
+        )
+    return (
+        entry_bar_high_paisa,
+        entry_bar_low_paisa,
+        exit_bar_high_paisa,
+        exit_bar_low_paisa,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────

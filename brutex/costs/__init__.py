@@ -43,6 +43,7 @@ from brutex.costs.types import (
     TradeSide,
     UnsupportedTradeOutcomeError,
     UnverifiedCostRegimeError,
+    require_bar_extremes,
 )
 
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     "is_cost_bearing",
     "is_cost_free",
     "is_index_future",
+    "require_bar_extremes",
 ]

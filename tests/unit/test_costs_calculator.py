@@ -35,6 +35,7 @@ from brutex.costs import (
     UnverifiedCostRegimeError,
     compute_trade_cost,
     constants,
+    require_bar_extremes,
 )
 from brutex.costs.calculator import (
     _apply_slippage,
@@ -1472,6 +1473,53 @@ class TestTradeInputExtremesRequired:
             _make_trade(**{**_WORST_EXTREMES, f"{label}_high_paisa": 1})  # type: ignore[arg-type]
         with pytest.raises(ValueError, match=f"{label}_bar_low_paisa"):
             _make_trade(**{**_WORST_EXTREMES, f"{label}_low_paisa": 99_999_999})  # type: ignore[arg-type]
+
+
+_REQUIRE_EXTREMES_FULL: dict[str, int] = {
+    "entry_bar_high_paisa": 10_100,
+    "entry_bar_low_paisa": 9_900,
+    "exit_bar_high_paisa": 12_100,
+    "exit_bar_low_paisa": 11_900,
+}
+
+
+class TestRequireBarExtremes:
+    """The COMMON Optional-narrowing seam ``types.require_bar_extremes``.
+
+    Replaces the bare ``assert`` narrowing (bandit B101 — the enclosed check
+    would vanish under ``python -O``) with an explicit fail-loud
+    ``raise AssertionError``. Shared by ``compute_trade_cost`` AND
+    ``compute_futures_trade_cost`` (Golden Rule #11 COMMON).
+    """
+
+    def test_all_present_returns_narrowed_tuple(self) -> None:
+        assert require_bar_extremes(**_REQUIRE_EXTREMES_FULL) == (
+            10_100,
+            9_900,
+            12_100,
+            11_900,
+        )
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "entry_bar_high_paisa",
+            "entry_bar_low_paisa",
+            "exit_bar_high_paisa",
+            "exit_bar_low_paisa",
+        ],
+    )
+    def test_each_none_position_raises_assertion_error(self, missing: str) -> None:
+        # One case per `or` term — a dropped term is a killed mutant, not a
+        # silently-narrowed None (the broken-invariant path stays fail-loud).
+        kwargs: dict[str, int | None] = {**_REQUIRE_EXTREMES_FULL, missing: None}
+        with pytest.raises(AssertionError, match="broken"):
+            require_bar_extremes(
+                entry_bar_high_paisa=kwargs["entry_bar_high_paisa"],
+                entry_bar_low_paisa=kwargs["entry_bar_low_paisa"],
+                exit_bar_high_paisa=kwargs["exit_bar_high_paisa"],
+                exit_bar_low_paisa=kwargs["exit_bar_low_paisa"],
+            )
 
 
 class TestWorstCaseComputeTradeCost:
