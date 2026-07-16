@@ -2945,7 +2945,46 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-lake-resample-wave` (**DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 —
+- **Active branch:** `claude/rust-resample-siblings-r2` (**DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001, MIGRATION.md
+  #NNNN — PLACEHOLDER, allocate via the queue-master (cse_01UqSCc1288wNMGZS7zcTEtC) before un-draft** — Wave-B
+  slice 2 of ADR-0020: the FOUR resampler siblings (`spot_resample` · `fno_resample` · `spot_daily_resample` ·
+  `fno_daily_resample`) route their frame stages through the #1913 `rust/brutex-lake` resample seam behind the
+  SAME default-OFF `BRUTEX_LAKE_RUST_RESAMPLE` flag — the ADR rows 12-15 class-C gaps closed, the #1913-named
+  daily-residue follow-up delivered (the reserved DEC-LAKE-RUST-RESAMPLE-DAILY-001 id retired unused). LAYERS ON
+  #1913/PR #1600 (lands after it; the branch carries its commits until then). CRATE: NEW `daily_restamp_frame`
+  (the daily filter + midnight-IST re-stamp, law-for-law — keep `ist_date < before`, re-stamp ALWAYS
+  `Datetime(us, "UTC")` regardless of the input unit, select OHLCV + OI iff `keep_oi` AND present) + NEW
+  `session_cutoff_frame` (the forming-bucket cutoff law — `rem_euclid`/floor minute-of-day, keep
+  `s + tf <= cutoff`; the frame otherwise VERBATIM), both panic-bounded IPC pyfunctions on `resample.rs`, the
+  shared ts_utc validation extracted to ONE `validate_ts_column`. FACADE: the #1913 guard/burn-in machinery
+  extracted into shared helpers (behavior-identical — the #1913 suite passes with only the fake crate growing
+  the sibling faces) + THREE sibling entry points: `derive_frames_via_rust` (consumes the shipped batch face —
+  ONE crossing per 19-TF derive at the WRAPPER entry points; never a partial mix), `daily_restamp_via_rust`
+  (keep_oi split, `before` crosses as days-since-epoch) and `session_cutoff_via_rust`. SEAMS minimal: the
+  derive wrappers gate with `_validate_input` FIRST (VALIDATION STAYS PYTHON, error classes identical both
+  arms) over the NEW order-pinned `DERIVED_INTRADAY_TF_MINUTES`; `resample_session_to_tf` gates ONLY its
+  cutoff stage; `resample_1m_to_daily` gates its restamp stage (verbatim pipeline extracted to the ONE shared
+  `_daily_restamp_frame_python(…, keep_oi)`); `resample_1m_to_fno_daily` gates the same stage (keep_oi=True)
+  then runs the VERBATIM retained per-row loop on either frame — restamp/filter IDEMPOTENT (pinned), so the
+  `Decimal(str(x))` repr edges + the stdlib-UTC stamp stay Python-side and both arms build ATTRIBUTE-identical
+  CandleBar lists (the ADR row-14 law). PROOF (executed, real maturin --locked wheel): the four modules'
+  EXISTING golden/property suites — the parity ORACLE — pass UNMODIFIED on BOTH arms (159/159 flag-ON;
+  the full 21-file battery 333/333 OFF and 333/333 ON); NEW 34-test siblings parity corpus (derive dtype-exact
+  across the 19 TFs with the oracles BOMBED on the steady-state ON arm · session-cutoff across 6 cutoffs ×
+  4 TFs · daily CandleBar lists attribute-for-attribute incl. the null-OI carry-last edge); consumer suites
+  156 passed + 1 pre-existing skip; cargo 28 green + fmt + clippy `-D warnings` clean. Flag OFF (default)
+  BYTE-IDENTICAL on all four modules (per-module bomb-spy pins). GATES: `lake_rust_resample.py` 100.00%
+  (241/88) + `spot_resample.py` (20/2) + `fno_resample.py` (37/8) + `fno_daily_resample.py` (34/8) +
+  `spot_daily_resample.py` (213/58) ALL 100.00% line+branch on their (extended) gates; ruff/ruff-format clean;
+  `mypy --strict` clean + pyright 0 errors/0 warnings on the touched modules; the lake-rust-parity.yml lane +
+  the mutation pair extended. HONEST: the extended mutmut pair is WIRED, its zero-survivor run NOT executed
+  this session (the #1913 135/135 evidence covers the pre-extension surface only — stated per the #1614 law);
+  the daily ON arm pays two IPC crossings (payoff ≈ 0 stands, no speedup claimed); `resample_all_21_tfs`'s own
+  batch fold stays #1913's follow-up; the branch REPLACES the first `claude/rust-resample-siblings` push whose
+  third commit subject carried a `+` in scope (the #1580 replacement-branch precedent — tree byte-identical,
+  no rewrite of the pushed ref). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate
+  change; ONE existing env flag, no new routes.)
+  Earlier: `claude/rust-lake-resample-wave` (**DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 —
   allocator-final** — Wave-B slice 1 of ADR-0020 (slice G5): the 1-minute → derived-TF resample core
   (`tf_resampler.resample_1m_to_tf`) re-hosted on the `rust/brutex-lake` crate behind the NEW default-OFF
   `BRUTEX_LAKE_RUST_RESAMPLE` facade — the exact PR-1 (`lake_rust_render`, #1891) pattern one seam over. NEW
@@ -8579,7 +8618,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-lake-resample-wave`
+- **Active feature branch:** `claude/rust-resample-siblings-r2`
+  (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001, MIGRATION.md #NNNN — PLACEHOLDER,
+  allocate via the queue-master (cse_01UqSCc1288wNMGZS7zcTEtC) before
+  un-draft — Wave-B slice 2 of ADR-0020: the four resampler siblings
+  (spot_resample · fno_resample · spot_daily_resample · fno_daily_resample)
+  route their frame stages through the #1913 rust resample seam behind the
+  SAME default-OFF `BRUTEX_LAKE_RUST_RESAMPLE` flag; NEW crate faces
+  `daily_restamp_ipc` + `session_cutoff_ipc` + the facade siblings
+  `derive_frames_via_rust`/`daily_restamp_via_rust`/`session_cutoff_via_rust`
+  over the extracted #1913 guard/burn-in helpers; the verbatim Python bodies
+  are the retained live parity oracles (flag OFF = those bodies verbatim,
+  bomb-spy-pinned per module); the existing golden suites pass UNMODIFIED on
+  both arms (333/333 each) + the NEW 34-test siblings parity corpus with the
+  oracles bombed on the steady-state ON arm; layers on #1913/PR #1600 —
+  lands after it; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line)
+  Earlier: `claude/rust-lake-resample-wave`
   (DEC-LAKE-RUST-RESAMPLE-001, MIGRATION.md #1913 — allocator-final — Wave-B
   slice 1 of ADR-0020 (slice G5): the tf_resampler 1m→derived-TF core
   re-hosted on `rust/brutex-lake` (`resample_1m_ipc_impl` + the batch face)
