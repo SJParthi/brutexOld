@@ -50,22 +50,31 @@ on:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
+      # ADR-0020 PR-3 (DEC-LAKE-RUST-MERGE-DEDUP-001): the merge-decision seam.
+      - "brutex/data/lake_rust_merge.py"
       # models.py defines the CandleBar/FnoGreeksBar schema that dictates
       # the rendered frame's byte surface (review-round fold).
       - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/unit/test_lake_rust_merge.py"
+      - "tests/unit/test_parquet_writer_rust_merge.py"
+      - "tests/golden/test_lake_rust_merge_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   pull_request:
     paths:
       - "rust/brutex-lake/**"
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
+      - "brutex/data/lake_rust_merge.py"
       - "brutex/data/models.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/golden/test_lake_rust_render_parity.py"
+      - "tests/unit/test_lake_rust_merge.py"
+      - "tests/unit/test_parquet_writer_rust_merge.py"
+      - "tests/golden/test_lake_rust_merge_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -201,4 +210,7 @@ jobs:
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/unit/test_lake_rust_render.py \
-            tests/unit/test_parquet_writer_rust_render.py
+            tests/unit/test_parquet_writer_rust_render.py \
+            tests/golden/test_lake_rust_merge_parity.py \
+            tests/unit/test_lake_rust_merge.py \
+            tests/unit/test_parquet_writer_rust_merge.py
