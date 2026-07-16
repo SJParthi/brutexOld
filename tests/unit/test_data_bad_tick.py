@@ -272,6 +272,8 @@ def test_flush_delegates_to_emit_bad_tick_warn_byte_equivalently() -> None:
             first_close=10.0,
         )
     assert via_screen == direct
+
+
 # screen_frame_bad_ticks — the frame form (DEC-READ-GUARD-PARITY-001)
 # ────────────────────────────────────────────────────────────────────────
 
