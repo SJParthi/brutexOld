@@ -206,7 +206,9 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     # feed/replay.py pair's rationale comment (the R6a warn-drain mutant +
     # the 3-file discovery-set field) cites THAT decision's entry, not this
     # one.
-    ".github/workflows/mutation.yml": frozenset({590, 615, 1597, 1685, 1724, 1738, 1750, 1774, 1797}),
+    ".github/workflows/mutation.yml": frozenset(
+        {590, 615, 1597, 1685, 1724, 1738, 1750, 1774, 1797}
+    ),
     "brutex/data/lake_stats_manifest.py": frozenset({867}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),
