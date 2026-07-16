@@ -99,6 +99,8 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+pub mod window_ledger;
+
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -325,6 +327,13 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
+    // Wave C-3 (G8) — the window-ledger pure laws (window_ledger.rs; the
+    // facade `brutex/data/window_ledger_rust.py` engages them behind the
+    // default-OFF BRUTEX_LAKE_RUST_WINDOW_LEDGER via a SYMBOL handshake —
+    // these two names present + callable — never the polars version guard,
+    // which is irrelevant to a polars-free law).
+    m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
+    m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
     Ok(())
 }
 
