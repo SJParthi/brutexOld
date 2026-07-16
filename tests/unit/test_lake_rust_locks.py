@@ -781,3 +781,24 @@ class TestPartitionLockRoutingSeam:
         with pytest.raises(OSError) as exc_info:
             partition_lock._flock_attempt(fd)
         assert exc_info.value.errno == errno.EBADF
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    A routing leaf shipped WITHOUT its weekly mutation wiring would repeat
+    the DEC-LAKE-STATS-MANIFEST-001 round-8 refuter class (an unwired gate
+    presented as a deferred one — Golden Rule #10). The module:suite pair
+    sits in the workflow's 3-field ``module:testfile:timeout`` loop with the
+    EMPTY third field; this deterministic pin (the
+    ``TestMutationWorkflowWiring`` precedent) fails if the pair is ever
+    dropped. HONEST: it pins the WIRING only — the weekly run executes on
+    its own schedule/push triggers.
+    """
+
+    def test_pair_is_wired(self) -> None:
+        workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+        text = workflow.read_text(encoding="utf-8")
+        assert '"brutex/data/lake_rust_locks.py:tests/unit/test_lake_rust_locks.py:"' in text, (
+            "lake_rust_locks.py is not wired into mutation.yml's per-module mutmut loop"
+        )
