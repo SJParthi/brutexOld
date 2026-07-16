@@ -540,13 +540,13 @@ def _scan_via_kernel_or_none(
     # (positivity holds vacuously; an inf close would fold into the bad-tick
     # ratio as a silent DROP instead of the oracle's typed refusal) — so a
     # non-finite price column DEGRADES to the oracle loop, whose finiteness
-    # gate raises the loud corrupt-bar error. One vectorized O(rows) boolean
-    # pass per price column, kernel-path only (disclosed; the null gate above
-    # is metadata-only — this one genuinely scans).
-    import pyarrow.compute as pc
-
-    for name in ("open", "high", "low", "close"):
-        if not pc.all(pc.is_finite(table.column(name))).as_py():
+    # gate raises the loud corrupt-bar error. The probe runs over the SAME
+    # already-materialized float lists the oracle checks (short-circuiting
+    # ``all``; one O(rows) pass per price column, kernel-path only —
+    # disclosed: the null gate above is metadata-only, this one genuinely
+    # scans).
+    for name, column in (("open", opens), ("high", highs), ("low", lows), ("close", closes)):
+        if not all(map(math.isfinite, column)):
             warn_degrade_once("nonfinite_price_column", n_rows=n_rows, column=name)
             return None
     # Epoch-µs UTC ints for the kernel's IST session math — ONLY when the
