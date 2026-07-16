@@ -59,6 +59,8 @@ description = "Audited fixture/vendored-doc/ledger-prose paths — generic-api-k
 paths = [
   '''^tests/''',
   '''^docs/groww/''',
+  # Audited vendor-doc placeholders (no real secrets; creds live only in AWS SSM per DEC-AWS-ONLY-CREDS-001).
+  '''^docs/broker-api-capture/''',
   '''^docs/MIGRATION\.md$''',
   '''^brutex/dashboard/static/''',
 ]
@@ -69,6 +71,8 @@ id = "curl-auth-header"
 description = "Vendored Groww API reference curl examples use placeholder Bearer tokens"
 paths = [
   '''^docs/groww/''',
+  # Audited vendor-doc placeholders (no real secrets; creds live only in AWS SSM per DEC-AWS-ONLY-CREDS-001).
+  '''^docs/broker-api-capture/''',
 ]
 
 [[rules]]
