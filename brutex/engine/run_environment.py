@@ -41,6 +41,7 @@ def current_code_commit_sha() -> str:
     """
     import subprocess  # nosec B404 — git SHA read only; fixed constant argv below
 
+    fallback = f"brutex-{__version__}"
     try:
         out = subprocess.run(  # nosec B603 B607 — fixed constant argv, no shell, git on PATH
             ["git", "rev-parse", "HEAD"],  # noqa: S607 — fixed constant argv, no shell/user input
@@ -49,12 +50,15 @@ def current_code_commit_sha() -> str:
             check=True,
             timeout=5,
         )
-        sha = out.stdout.strip()
-        if sha:
-            return sha
     except (OSError, subprocess.SubprocessError):
-        pass
-    return f"brutex-{__version__}"
+        # Outside a git repo / git absent → the version-derived fallback;
+        # deliberate, documented in the module docstring (honest envelope).
+        return fallback
+    sha = out.stdout.strip()
+    if sha:
+        return sha
+    # An empty rev-parse answer is treated like the no-repo case: fall back.
+    return fallback
 
 
 def current_indicator_version() -> str:
