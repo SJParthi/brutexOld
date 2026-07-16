@@ -3346,8 +3346,12 @@ hostile-review pass._
   owed); `mark_owed`/`clear_owed` are best-effort-LOUD (a write/unlink
   failure logs ONE WARN + returns False — never a failed pull, never
   silent); the launchers mark through the kill-switch-coherent
-  `mark_owed_for_pull` (marks NOTHING under `BRUTEX_CROSSVERIFY=off` / junk
-  env). MARKER WRITE at pull-tail-commit ENTRY on BOTH surfaces — the
+  `mark_owed_for_pull` (marks NOTHING under `BRUTEX_CROSSVERIFY=off` /
+  `BRUTEX_CROSSVERIFY_PUBLISH=off` — the round-1 MINOR-1 mark/auto-clearer
+  PARITY fold: the D3 catchup sits behind run.py's publish gate, so
+  staged-only mode must not accumulate markers no automatic pass will ever
+  clear — / junk env). MARKER WRITE at pull-tail-commit ENTRY on BOTH
+  surfaces — the
   dashboard spot-only `_work` (before `run_full_pipeline`; day =
   `launch_day`) and `cmd_pull_all_spot` (locks held, before the builder; the
   --auto gate's IST clock law); dry-runs / refused starts / full-scope /
@@ -3379,8 +3383,8 @@ hostile-review pass._
   DOUBLE-PUBLISH IMPOSSIBLE: a tail-started-then-died day (journal present)
   converges through the SAME rerun — `mark_staged` sha idempotency +
   publish-pending-only ⇒ zero second puts (e2e-pinned). PROOF (executed):
-  `test_crossverify_owed.py` (31 — every store law, FIFO-under-watchdog
-  no-hang) + `TestOwedMarkerClear` (11) + `TestOwedCatchup` (11) +
+  `test_crossverify_owed.py` (33 — every store law, FIFO-under-watchdog
+  no-hang, the round-1 exact floor-boundary + publish-off mark pins) + `TestOwedMarkerClear` (11) + `TestOwedCatchup` (11) +
   `TestDefaultSeamsRunDay` on run.py + the e2e `TestOwedDayCatchup` (the
   never-started day completed on the next run over the REAL seams with the
   published bytes byte-verified vs the committed goldens; the
@@ -3399,13 +3403,21 @@ hostile-review pass._
   UNTOUCHED (the marker rides the launcher seam below it). ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; zero new routes (one additive field);
-  whole-package `brutex.crossverify` 100.00% line+branch (1541/414, 615
-  battery tests) incl. the NEW ci.yml `owed` gate (106/24) + the touched
-  `run.py` (559/166); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
+  whole-package `brutex.crossverify` 100.00% line+branch (1544/416, 617
+  battery tests, re-measured at the round-1 fold) incl. the NEW ci.yml
+  `owed` gate (109/26) + the touched `run.py` (559/166); ruff/ruff-format clean; `mypy --strict` 0 new; pyright
   0 new; `node --check` green on universe.html; the pre-open fix round —
   the row-18 PR-body DEC-token rewording + the two CodeQL folds
   (string-target monkeypatch; the owed junk-name arm restructured with no
-  empty except, still LOUD) — is recorded in MIGRATION.md #1810.)
+  empty except, still LOUD) — and the HOSTILE-REVIEW ROUND 1 fold (SHIP ×2,
+  zero BLOCKER/MAJOR, landed post-club-T: the MINOR-1 publish-gate parity
+  above; the MINOR-2 midnight-crossing launch documented benign/convergent
+  at both mark sites — launch_day D's marker survives a past-midnight tail
+  and the NEXT run's D3 completes it idempotently; `mark_owed`'s except
+  narrowed Exception→OSError; the D2+D3 same-day double-processing /
+  per-run beyond-window re-WARN / no-aggregate-D3-deadline /
+  diagnostic-read NITs NAMED as honest limits) — are recorded in
+  MIGRATION.md #1810.)
   Earlier: `claude/sweep-lock-pull-concurrency`
   (**DEC-SWEEP-LOCK-PULL-CONCURRENCY-001, MIGRATION.md #1785** — the dashboard sweep route +
   the nightly sweep leg stop holding the LAKE pull flock through the sweep, bringing BOTH to
