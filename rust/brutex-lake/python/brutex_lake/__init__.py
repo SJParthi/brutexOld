@@ -31,6 +31,7 @@ from brutex_lake._brutex_lake import (
     render_parquet_from_ipc,
     resample_1m_ipc,
     resample_all_ipc,
+    render_stats_shard_json,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "render_parquet_from_ipc",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "render_stats_shard_json",
 ]

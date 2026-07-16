@@ -103,6 +103,10 @@ use pyo3::types::PyBytes;
 // own module file; registration lines only in this file (sibling Wave
 // slices extend the same crate additively).
 pub mod resample;
+// ADR-0020 Wave C row 4 (+ the row-5 rider): the canonical stats-shard JSON
+// render + the crate-internal partition twins — DEC-LAKE-RUST-STATS-MANIFEST-001
+// (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
+pub mod stats_shard;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -332,6 +336,9 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
     m.add_function(wrap_pyfunction!(resample::resample_1m_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(resample::resample_all_ipc, m)?)?;
+    // Appended AFTER the PR-1 trio, never reordering them (§4.1 — the
+    // concurrent-sibling additive-registration merge law).
+    m.add_function(wrap_pyfunction!(stats_shard::render_stats_shard_json, m)?)?;
     Ok(())
 }
 
