@@ -4322,7 +4322,16 @@ jobs:
   bugfix-reversion-check:
     name: Bug-fix fix-reversion check (STANDARDS row 10 hardening)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Sanctioned infra HEADROOM raise (DEC-SWEEP-OVERFIT-RECOUNT-RECOVERY-001
+    # reconcile-round-2 note, MIGRATION.md #1851): the S2 club's 45-file
+    # shipped-test baseline MEASURED 622.69 s wall (1 failed, 2374 passed) —
+    # over the script's prior 600 s per-run default, so the gate exited 2 on
+    # a baseline exit-124 timeout and could never reach a verdict; two full
+    # pytest runs (baseline + reverted) ≈ 1250 s, over the prior 20-min job
+    # budget once setup (checkout + pip + two Rust wheels, ~8-10 min) is
+    # added. 50 min holds 2 × the 1200 s per-run budget + setup. The check
+    # still runs the FULL reversion — no skip, no shipped-test narrowing.
+    timeout-minutes: 50
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -4366,6 +4375,12 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Per-run pytest budget raised 600 s (script default) → 1200 s:
+          # the S2 club's shipped-test baseline measured 622.69 s wall —
+          # ~1.93× headroom for slower hosted runners; the two-run total
+          # (≈ 1250 s measured-shape) fits the 50-min job budget above.
+          # Sanctioned in MIGRATION.md #1851 (reconcile-round-2 note).
+          BUGFIX_REVERSION_TIMEOUT_S: "1200"
         run: python3 scripts/ci/validate_bugfix_reversion.py
 
   # ─────────────────────────────────────────────────────────────────

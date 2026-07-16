@@ -9502,6 +9502,36 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         )
     elif max_combos is not None:
         grid_kwargs["max_combos"] = max_combos
+    # Temporal-robustness parity for the Tier-3 shadow re-sweep
+    # (DEC-SWEEP-TEMPORAL-ROBUSTNESS-001 × DEC-SWEEP-OVERFIT-RECOUNT-
+    # RECOVERY-001, the reconcile-round-2 fix — MIGRATION.md #1851): the
+    # launcher resolves `--temporal-mode` > $BRUTEX_TEMPORAL > the shipped
+    # OBSERVE default and threads it as `grid.temporal`, which stamps the
+    # four optional per-period stats columns onto every persisted finalist
+    # row carrying trades. The temporal config is IDENTITY-EXEMPT (never in
+    # `_tuple_digest`), so a temporal-blind verify grid planned the SAME
+    # store addresses yet its shadow re-sweep rendered rows WITHOUT the
+    # columns — every default-launched tree whose finalists held trades read
+    # a recount_divergence FALSE-CORRUPT under a fully matched context (the
+    # residual the #1851 grid_mismatch recovery unmasked; executing pins:
+    # the 3 recount tests in tests/integration/test_cli_sweep_all_vix_stamp.py
+    # + test_sweep_all_futures_launch.py::
+    # test_sweep_verify_recount_round_trips_a_futures_tree — all 4 FAIL
+    # without this block). Resolve here EXACTLY as the launcher's default arm
+    # does (no verify-side flags — env parity, the apriori-env precedent);
+    # junk $BRUTEX_TEMPORAL fails loud pre-plan. HONEST residual: a tree
+    # launched under a NON-default `--temporal-mode` recounted under a
+    # different env still byte-diverges (temporal mode is not yet recorded on
+    # the START payload — the same unrecorded-knob class as --sl/--tp, which
+    # verify also takes as flags; recording+recovery is the named follow-up
+    # in MIGRATION.md #1851's reconcile-round-2 note).
+    try:
+        temporal_config = resolve_temporal_config(None, None, None)
+    except CliUserError as exc:
+        print(f"[brutex] {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+    if temporal_config is not None:
+        grid_kwargs["temporal"] = temporal_config
     try:
         grid = SweepGridConfig(**grid_kwargs)
     except ValueError as exc:
