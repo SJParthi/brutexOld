@@ -193,14 +193,13 @@ class WindowStatusLog:
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
-        """The 5-tuple identity of a window (market, symbol, interval, start, end)."""
-        return (
-            key.market,
-            key.security_id,
-            key.interval,
-            key.start.isoformat(),
-            key.end.isoformat(),
-        )
+        """The 5-tuple identity of a window (market, symbol, interval, start, end).
+
+        Delegates through the G8 routing facade with
+        :func:`window_key_python` as the live parity oracle
+        (DEC-LAKE-RUST-WINDOW-LEDGER-001; flag OFF = the oracle verbatim).
+        """
+        return routed_window_merge_key(key, python_law=window_key_python)
 
     def record(
         self,

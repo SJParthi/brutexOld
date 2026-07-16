@@ -53,8 +53,14 @@ on:
       # models.py defines the CandleBar/FnoGreeksBar schema that dictates
       # the rendered frame's byte surface (review-round fold).
       - "brutex/data/models.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_window_ledger_rust.py"
       - "tests/golden/test_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   pull_request:
@@ -63,8 +69,14 @@ on:
       - "brutex/data/parquet_writer.py"
       - "brutex/data/lake_rust_render.py"
       - "brutex/data/models.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_window_ledger_rust.py"
       - "tests/golden/test_lake_rust_render_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   workflow_dispatch: {}
@@ -201,4 +213,11 @@ jobs:
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/unit/test_lake_rust_render.py \
-            tests/unit/test_parquet_writer_rust_render.py
+            tests/unit/test_parquet_writer_rust_render.py \
+            tests/unit/test_window_ledger_rust.py
+          # G8 window-ledger differential + affected suites, flag-ON arm
+          # (the real wheel is installed + lockstep-aligned above).
+          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
+            tests/unit/test_window_ledger_rust.py \
+            tests/unit/test_window_status.py \
+            tests/unit/test_window_ledger.py
