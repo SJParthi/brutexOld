@@ -38,6 +38,7 @@ from brutex.metrics.compute import (
     _excess_kurtosis,
     _fold_trades,
     _percentile,
+    _resolve_folds,
     _skewness,
     combine_metrics_from_folds,
     compute_metrics_from_scalars,
@@ -1462,3 +1463,57 @@ class TestCombineFoldsGuard:
         )
         assert row.total_trades == 1
         assert row.net_pnl_paisa == 500
+
+
+class TestResolveFoldsDispatch:
+    """The DEC-METRICS-RUST-COMPUTE-FOLD-001 dispatch chokepoint's mutant kills.
+
+    The weekly mutation pair runs THIS file alone against ``compute.py``
+    (mutation.yml — the #1685 recorded single-unit-file decision), so the
+    ``_resolve_folds`` arms need their killing tests HERE; the fuller seam
+    battery (flag matrix, degrade taxonomy, burn-in/autorevert) lives in
+    ``tests/unit/test_metrics_compute_rust.py``.
+    """
+
+    @staticmethod
+    def _dispatch_trades() -> list[ClosedTrade]:
+        return [_trade(500, mfe=600, mae=100, holding=3), _trade(-300, mae=400, holding=2)]
+
+    def test_flag_off_never_consults_the_kernel_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default path: the seam is provably untouched (never-routes spy)."""
+        from brutex.metrics import compute_rust
+
+        monkeypatch.delenv(compute_rust.METRICS_RUST_FOLD_ENV, raising=False)
+
+        def _seam_bomb(*_args: object) -> object:
+            raise AssertionError("the default path must never consult the kernel seam")
+
+        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", _seam_bomb)
+        trades = self._dispatch_trades()
+        folds = _resolve_folds(trades, 1_000_000)
+        assert folds == _fold_trades(trades, 1_000_000)
+
+    def test_flag_on_kernel_folds_are_served(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Flag ON + a serving kernel: the kernel folds object ships as-is."""
+        from brutex.metrics import compute_rust
+
+        monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "1")
+        sentinel = _fold_trades([_trade(999, holding=1)], 500)
+
+        def _fake_kernel(*_args: object) -> TradeFolds:
+            return sentinel
+
+        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", _fake_kernel)
+        assert _resolve_folds(self._dispatch_trades(), 1_000_000) is sentinel
+
+    def test_flag_on_kernel_unavailable_falls_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag ON + a degraded kernel (``None``): the Python oracle serves."""
+        from brutex.metrics import compute_rust
+
+        monkeypatch.setenv(compute_rust.METRICS_RUST_FOLD_ENV, "1")
+        monkeypatch.setattr(compute_rust, "fold_trades_via_kernel", lambda *_a: None)
+        trades = self._dispatch_trades()
+        folds = _resolve_folds(trades, 1_000_000)
+        assert folds == _fold_trades(trades, 1_000_000)
