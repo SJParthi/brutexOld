@@ -249,7 +249,7 @@ def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str
 def _hang_watchdog(seconds: int = 10) -> Generator[None]:
     """Fail LOUDLY if the scan blocks — the fails-before shape is a FIFO hang.
 
-    The house SIGALRM idiom (the #1614 round-6 / #1832 precedent): a planted
+    The house SIGALRM idiom (the #1614 round-6 / #1896 precedent): a planted
     FIFO previously wedged the scan FOREVER in C-level ``fifo_open`` (not even
     SIGALRM-interruptible once blocked in the open(2)), so the watchdog's job
     is to convert a regression back to that shape into a loud test failure
@@ -1005,7 +1005,7 @@ class TestOptionsTree:
 class TestPlantedFifoScanSurvival:
     """SCAN-LEVEL planted-FIFO regressions — the tests that would have caught
     the residual hang (DEC-LAKE-READ-INODE-GUARD-001 fix round, MIGRATION.md
-    #1832).
+    #1896).
 
     The Phase-1 guard covered the PRIMARY read (``_read_key_columns`` rides
     ``read_parquet_regular``), but the except-arm DIAGNOSTIC

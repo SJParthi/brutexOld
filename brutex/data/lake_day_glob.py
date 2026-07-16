@@ -42,10 +42,20 @@ prior day`` — :mod:`brutex.data.spot_daily_resample`), so an IST day's 1-day b
 can sit in the PRIOR UTC month's file (e.g. IST ``2026-07-01`` ⇒ ``2026-06``).
 This helper is therefore used ONLY by the **intraday** session readers — the
 1-minute base AND the prebuilt derived intraday-TF partitions
-(``2minute`` … ``4hour``, whose bucket labels share the bar's own IST date by
-the fixed-arithmetic session anchor, DEC-RESAMPLE-ANCHOR-002 — so the same
-one-month-file argument holds; DEC-PIPELINE-AUTOPREBUILD-001 chunk 2's
-stored-first movers read rides it). The ``1day`` prior-close / daily-snapshot
+(``2minute`` … ``4hour``, whose bucket labels share the bar's own IST date for
+a session-filtered symbol by the fixed-arithmetic session anchor,
+DEC-RESAMPLE-ANCHOR-002 — but NOT always the bar's UTC **month**: a label
+before 05:30 IST maps to the prior UTC day, so on the 1st of an IST month a
+derived-TF bucket — e.g. a stray 09:00 pre-open bar's 05:15-IST 4hour label —
+is FILED under the prior UTC month's file (DEC-MOVERS-STORED-FRESHNESS-001
+REFUTER ROUND 2 defect B2; the earlier "the same one-month-file argument
+holds" wording here was falsified by that executed shape). The stored-TF
+consumer (:func:`brutex.dashboard.movers_stored_read.read_stored_day_frame` —
+DEC-PIPELINE-AUTOPREBUILD-001 chunk 2's stored-first movers read) therefore
+ALSO probes the prior month's file exactly on that month-edge; the 1-minute
+base itself is unaffected — a session-filtered symbol's bar TIMES
+(~09:00–19:15 IST) never precede 05:30 IST, so the one-month-file argument
+stays exact for 1-minute). The ``1day`` prior-close / daily-snapshot
 readers keep their whole-partition read (a daily series is tiny — at most
 ``years × ~250`` rows — so it is not a hot path). Mis-applying this to ``1day``
 would silently drop month-boundary days, so the contract is documented here and

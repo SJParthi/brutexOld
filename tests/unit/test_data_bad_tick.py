@@ -19,6 +19,7 @@ from brutex.data.bad_tick import (
     BAD_TICK_SKIP_EVENT,
     BadTickScreen,
     bad_tick_screen_enabled,
+    emit_bad_tick_warn,
     is_bad_tick,
     screen_frame_bad_ticks,
 )
@@ -193,6 +194,86 @@ def test_injected_logger_is_used() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# emit_bad_tick_warn — the ONE shared WARN seam (DEC-FEED-RUST-CORE-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_emit_bad_tick_warn_exact_kwargs_injected_logger() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeLog:
+        def warning(self, event: str, **kw: object) -> None:
+            events.append((event, kw))
+
+    emit_bad_tick_warn(
+        source="NSE/INDEX/NSE-NIFTY/1minute",
+        session_iso="2024-01-02",
+        skipped=2,
+        max_ratio=BAD_TICK_MAX_RATIO,
+        first_prev_close=27945.0,
+        first_close=2794.5,
+        log=_FakeLog(),  # type: ignore[arg-type]
+    )
+    assert events == [
+        (
+            BAD_TICK_SKIP_EVENT,
+            {
+                "source": "NSE/INDEX/NSE-NIFTY/1minute",
+                "session": "2024-01-02",
+                "skipped": 2,
+                "max_ratio": BAD_TICK_MAX_RATIO,
+                "first_prev_close": 27945.0,
+                "first_close": 2794.5,
+            },
+        )
+    ]
+
+
+def test_emit_bad_tick_warn_default_logger_record_shape() -> None:
+    with capture_logs() as logs:
+        emit_bad_tick_warn(
+            source=None,
+            session_iso=None,
+            skipped=1,
+            max_ratio=2.0,
+            first_prev_close=100.0,
+            first_close=10.0,
+        )
+    assert logs == [
+        {
+            "event": BAD_TICK_SKIP_EVENT,
+            "log_level": "warning",
+            "source": None,
+            "session": None,
+            "skipped": 1,
+            "max_ratio": 2.0,
+            "first_prev_close": 100.0,
+            "first_close": 10.0,
+        }
+    ]
+
+
+def test_flush_delegates_to_emit_bad_tick_warn_byte_equivalently() -> None:
+    # The screen's _flush record and a DIRECT emit with the same coordinates
+    # are the SAME dict — the delegation-equivalence law both arms of the
+    # DEC-FEED-RUST-CORE-001 seam rely on.
+    with capture_logs() as via_screen:
+        screen = BadTickScreen(source="src")
+        screen.keep(ist_date=date(2024, 1, 2), close=100.0)
+        screen.keep(ist_date=date(2024, 1, 2), close=10.0)
+        screen.finish()
+    with capture_logs() as direct:
+        emit_bad_tick_warn(
+            source="src",
+            session_iso="2024-01-02",
+            skipped=1,
+            max_ratio=BAD_TICK_MAX_RATIO,
+            first_prev_close=100.0,
+            first_close=10.0,
+        )
+    assert via_screen == direct
+
+
 # screen_frame_bad_ticks — the frame form (DEC-READ-GUARD-PARITY-001)
 # ────────────────────────────────────────────────────────────────────────
 

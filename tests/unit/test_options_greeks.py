@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import math
+import struct
 import sys
 from datetime import date
 
@@ -24,9 +25,12 @@ from brutex.options.greeks import (
     IV_CLAMP_MIN,
     T_FLOOR_YEARS,
     VEGA_ADMISSION_FLOOR,
+    GreeksBatchOutcome,
     GreeksInputError,
     GreeksResult,
+    GreeksSolveRequest,
     compute_greeks,
+    compute_greeks_batch,
 )
 from brutex.options.risk_free import RISK_FREE_SOURCE_VERSION, FixedRateSource, RiskFreeRate
 from hypothesis import given
@@ -365,3 +369,182 @@ class TestProperties:
             assert priced.admissible is False
         else:
             assert solved.price == pytest.approx(priced.price, rel=1e-9)
+
+
+def _result_bits(result: GreeksResult) -> tuple[bytes, bool, str, int]:
+    """Bit-exact compare key for a solved result (signed zeros included)."""
+    return (
+        struct.pack(
+            "<7d",
+            result.iv,
+            result.delta,
+            result.gamma,
+            result.theta,
+            result.vega,
+            result.rho,
+            result.price,
+        ),
+        result.admissible,
+        result.rate_source,
+        result.rate_version,
+    )
+
+
+class TestBatchFace:
+    """`compute_greeks_batch` ≡ per-element `compute_greeks` (DEC-GREEKS-RUST-BATCH-001)."""
+
+    def test_outcome_refuses_both_set(self) -> None:
+        solved = compute_greeks(sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True)
+        assert solved is not None
+        with pytest.raises(ValueError, match="BOTH a result and an invalid_input"):
+            GreeksBatchOutcome(result=solved, invalid_input="invalid_input: nope")
+
+    def test_outcome_allows_each_legal_shape(self) -> None:
+        solved = compute_greeks(sigma=0.18, forward=F, strike=K, t_years=T, rate=RATE, is_call=True)
+        assert solved is not None
+        assert GreeksBatchOutcome(result=solved, invalid_input=None).result is solved
+        both_none = GreeksBatchOutcome(result=None, invalid_input=None)
+        assert both_none.result is None and both_none.invalid_input is None
+        reject = GreeksBatchOutcome(result=None, invalid_input="invalid_input: x")
+        assert reject.invalid_input == "invalid_input: x"
+
+    @staticmethod
+    def _matrix() -> list[GreeksSolveRequest]:
+        """ok CE + ok PE + sigma-direct + no_solution + invalid_input rows."""
+        return [
+            GreeksSolveRequest(
+                price=180.0, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
+            ),
+            GreeksSolveRequest(
+                price=165.0, forward=F, strike=K, t_years=T, rate=RATE, is_call=False
+            ),
+            GreeksSolveRequest(
+                price=None,
+                forward=F,
+                strike=23_000.0,
+                t_years=T,
+                rate=RATE,
+                is_call=True,
+                sigma=0.18,
+            ),
+            # no_solution: t below the 600 s floor.
+            GreeksSolveRequest(
+                price=50.0,
+                forward=F,
+                strike=K,
+                t_years=1.0 / (365.0 * 86_400.0),
+                rate=RATE,
+                is_call=True,
+            ),
+            # no_solution: premium above the no-arb upper bound.
+            GreeksSolveRequest(
+                price=F * 2.0, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
+            ),
+            # invalid_input: non-positive forward.
+            GreeksSolveRequest(
+                price=100.0, forward=-1.0, strike=K, t_years=T, rate=RATE, is_call=True
+            ),
+            # invalid_input: neither price nor sigma.
+            GreeksSolveRequest(price=None, forward=F, strike=K, t_years=T, rate=RATE, is_call=True),
+        ]
+
+    def test_per_element_parity_with_scalar_entry(self) -> None:
+        """Each batch element bit-equals the scalar call on the same args."""
+        requests = self._matrix()
+        outcomes = compute_greeks_batch(requests)
+        assert len(outcomes) == len(requests)
+        for req, outcome in zip(requests, outcomes, strict=True):
+            scalar_error: str | None = None
+            scalar: GreeksResult | None = None
+            try:
+                scalar = compute_greeks(
+                    price=req.price,
+                    sigma=req.sigma,
+                    forward=req.forward,
+                    strike=req.strike,
+                    t_years=req.t_years,
+                    rate=req.rate,
+                    is_call=req.is_call,
+                )
+            except GreeksInputError as exc:
+                scalar_error = str(exc)
+            if scalar_error is not None:
+                assert outcome.result is None
+                assert outcome.invalid_input == scalar_error
+                continue
+            if scalar is None:
+                assert outcome.result is None
+                assert outcome.invalid_input is None
+            else:
+                assert outcome.invalid_input is None
+                assert outcome.result is not None
+                assert _result_bits(outcome.result) == _result_bits(scalar)
+
+    def test_matrix_genuinely_covers_all_three_families(self) -> None:
+        outcomes = compute_greeks_batch(self._matrix())
+        assert sum(1 for o in outcomes if o.result is not None) == 3
+        assert sum(1 for o in outcomes if o.result is None and o.invalid_input is None) == 2
+        rejects = [o for o in outcomes if o.invalid_input is not None]
+        assert len(rejects) == 2
+        assert all(
+            o.invalid_input is not None and o.invalid_input.startswith("invalid_input")
+            for o in rejects
+        )
+
+    def test_bare_float_rate_is_a_whole_call_loud_reject(self) -> None:
+        good = GreeksSolveRequest(
+            price=180.0, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
+        )
+        bad = GreeksSolveRequest(
+            price=180.0,
+            forward=F,
+            strike=K,
+            t_years=T,
+            rate=0.065,  # type: ignore[arg-type]  # the exact dynamic-caller bug the seam guards
+            is_call=True,
+        )
+        with pytest.raises(GreeksInputError, match="stamped RiskFreeRate"):
+            compute_greeks_batch([good, bad])
+
+    def test_empty_request_list_is_empty_outcomes(self) -> None:
+        assert compute_greeks_batch([]) == []
+
+    def test_short_kernel_return_fails_the_strict_zip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A length-lying kernel is refused by ``strict=True``, never truncated."""
+
+        def _short(*_args: object) -> list[object]:
+            return []
+
+        # ``brutex.options.greeks`` binds ``import trading_core`` and resolves
+        # ``trading_core.greeks_batch`` at call time, so patching the shared
+        # wheel module object (already imported at the top of this file) hits
+        # exactly the seam the wrapper reads.
+        monkeypatch.setattr(trading_core, "greeks_batch", _short)
+        with pytest.raises(ValueError, match="zip"):
+            compute_greeks_batch(self._matrix()[:1])
+
+    def test_rate_provenance_stamped_per_request(self) -> None:
+        """Each solved element carries ITS OWN request's rate provenance."""
+        other = RiskFreeRate(rate=0.05, source="csv", version=RISK_FREE_SOURCE_VERSION)
+        requests = [
+            GreeksSolveRequest(
+                price=180.0, forward=F, strike=K, t_years=T, rate=RATE, is_call=True
+            ),
+            GreeksSolveRequest(
+                price=None,
+                forward=F,
+                strike=K,
+                t_years=T,
+                rate=other,
+                is_call=True,
+                sigma=0.2,
+            ),
+        ]
+        outcomes = compute_greeks_batch(requests)
+        assert outcomes[0].result is not None
+        assert outcomes[0].result.rate_source == RATE.source
+        assert outcomes[1].result is not None
+        assert outcomes[1].result.rate_source == "csv"
+        assert outcomes[1].result.rate_version == RISK_FREE_SOURCE_VERSION

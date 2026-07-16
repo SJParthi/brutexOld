@@ -74,6 +74,11 @@
 
 use jaeckel::{implied_black_volatility, norm_cdf, norm_pdf};
 
+// DEC-GREEKS-RUST-BATCH-001: the columnar batch face of [`greeks`] — calls
+// the SAME frozen kernel per element (zero math duplication); compiled under
+// DEFAULT features so the per-PR `cargo test` exercises it.
+pub mod batch;
+
 /// Machine-readable prefix for caller-contract violations (wrapper re-raises).
 pub const ERR_INVALID: &str = "invalid_input";
 /// Machine-readable prefix for honest no-solution outcomes (wrapper maps to NA).
