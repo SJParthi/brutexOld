@@ -2435,6 +2435,20 @@ jobs:
           else
             echo "(brutex.metrics.cascade test file not present yet — gate inactive)"
           fi
+          # DEC-METRICS-RUST-COMPUTE-FOLD-001: the flag-gated Rust metrics-FOLD
+          # seam brutex.metrics.compute_rust (default-OFF BRUTEX_METRICS_RUST_FOLD;
+          # flag matrix + every degrade arm + burn-in/autorevert + the dual-arm
+          # bit-parity property). Same numpy-safe form as the sibling metrics
+          # gates (brutex.metrics eagerly imports numpy); the fno_math wheel is
+          # installed in this job, so the kernel-served arms genuinely execute.
+          if compgen -G "tests/unit/test_metrics_compute_rust.py" > /dev/null; then
+            pytest tests/unit/test_metrics_compute_rust.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/compute_rust.py" | grep -q "brutex/metrics/compute_rust.py" \
+              || { echo "ERROR: brutex/metrics/compute_rust.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/compute_rust.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.compute_rust test file not present yet — gate inactive)"
+          fi
           # DEC-UNIVERSE-NSE-CONSTITUENTS-001 (#445): best-effort NSE index →
           # constituent-stock helper powering the /universe "⊕ tick its
           # constituents" action. 100% line+branch on nse_constituents.py — the
