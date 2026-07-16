@@ -82,5 +82,5 @@ corrections were folded into this pack from it:
    (no verbatim vendor prose / response-sample dumps; identifiers + key
    shapes are facts). This pack's vendor-README sample blocks were recast
    into field-inventory tables the same day — see the licensing-posture
-   section in [README.md](./README.md) + MIGRATION.md #1795's reconcile
+   section in [README.md](./README.md) + MIGRATION.md #1893's reconcile
    note.
