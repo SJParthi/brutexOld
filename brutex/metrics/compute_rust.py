@@ -105,7 +105,7 @@ from __future__ import annotations
 
 import os
 import struct
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 
@@ -394,7 +394,11 @@ def fold_trades_via_kernel(
         return None
     # Lazy import — `compute` imports THIS module at module scope, so the
     # reverse edge must be function-local (fully initialised by call time).
-    from brutex.metrics.compute import Moments, TradeFolds, _fold_trades
+    from brutex.metrics.compute import (
+        Moments,
+        TradeFolds,
+        _fold_trades,  # pyright: ignore[reportPrivateUsage]
+    )
 
     # The verbatim `_fold_trades` returns expression — CPython's correctly
     # rounded int/int division stays Python-side (module docstring).
@@ -427,7 +431,8 @@ def fold_trades_via_kernel(
                 n_trades=len(trades),
             )
         return None
-    wire: tuple[Any, ...] = result
+    # The structural gate above proves the shape; narrow for the type-checkers.
+    wire = cast("tuple[Any, ...]", result)
     counts, sums, moments_wire, floats = wire
     folds = TradeFolds(
         n_trades=counts[0],

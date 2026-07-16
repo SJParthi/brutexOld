@@ -70,7 +70,7 @@ from tests.property.test_compute_fold_combine_differential import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 # The kernel-path tests need the compiled wheel; the CI job that runs this
 # gate installs it (the facade-golden importorskip precedent — a wheel-less
@@ -139,7 +139,7 @@ def _plant_kernel(monkeypatch: pytest.MonkeyPatch, kernel: Any) -> None:
     monkeypatch.setitem(sys.modules, "fno_math", fake)
 
 
-def _events(logs: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+def _events(logs: Sequence[Mapping[str, Any]], event: str) -> list[Mapping[str, Any]]:
     return [entry for entry in logs if entry["event"] == event]
 
 
@@ -161,9 +161,7 @@ class TestFlagMatrix:
         assert compute_rust.metrics_rust_fold_enabled() is False
         assert compute_rust.METRICS_RUST_FOLD_DEFAULT is False
 
-    def test_whitespace_empty_falls_to_default_off(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_whitespace_empty_falls_to_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "   ")
         assert compute_rust.metrics_rust_fold_enabled() is False
 
@@ -231,9 +229,7 @@ class TestFoldViaKernelDegrades:
     @pytest.mark.parametrize(
         "exc", [ValueError("boundary"), TypeError("conversion"), RuntimeError("poisoned")]
     )
-    def test_kernel_raise_degrades(
-        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
-    ) -> None:
+    def test_kernel_raise_degrades(self, monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
         def _bomb(*_args: object) -> object:
             raise exc
 
@@ -265,9 +261,7 @@ class TestFoldViaKernelDegrades:
         folds = _fold_trades(trades, 1_000)
         assert folds.net_pnl_paisa == 2**70 - 1
 
-    def test_invalid_wire_refused_loudly_once(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_invalid_wire_refused_loudly_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _plant_kernel(monkeypatch, lambda *_a: ("junk",))
         with capture_logs() as logs:
             assert compute_rust.fold_trades_via_kernel(_PIN_TRADES, _PIN_START) is None
@@ -329,9 +323,7 @@ class TestValidFoldWire:
         assert not compute_rust._valid_fold_wire(_poison_counts(wire, winners=n + 1), n)
         assert not compute_rust._valid_fold_wire(_poison_counts(wire, losers=-1), n)
         # winners + losers > n with each individually in range.
-        assert not compute_rust._valid_fold_wire(
-            _poison_counts(wire, winners=n, losers=n), n
-        )
+        assert not compute_rust._valid_fold_wire(_poison_counts(wire, winners=n, losers=n), n)
         assert not compute_rust._valid_fold_wire(_poison_counts(wire, max_l=n + 1), n)
         assert not compute_rust._valid_fold_wire(_poison_counts(wire, max_w=-1), n)
         assert not compute_rust._valid_fold_wire(_poison_counts(wire, max_holding=0), n)
@@ -410,9 +402,7 @@ class TestBurnIn:
             assert compute_rust.fold_trades_via_kernel(_PIN_TRADES, _PIN_START) is not None
         assert len(_events(logs, "metrics_rust_fold.engaged")) == 1
 
-    def test_mismatch_ships_oracle_and_autoreverts(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_mismatch_ships_oracle_and_autoreverts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         wire = _valid_wire()
         floats = list(wire[3])
         floats[1] = math.nextafter(floats[1], math.inf)  # 1-ulp p95 poison
@@ -442,9 +432,7 @@ class TestBurnIn:
         assert len(errors) == 1
         assert errors[0]["reason"] == "first"
 
-    def test_steady_state_serves_without_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_steady_state_serves_without_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         compute_rust.reset_self_check_for_tests(remaining=0)
         assert not compute_rust.self_check_pending()
 
@@ -511,9 +499,7 @@ class TestDispatchChokepoint:
 class TestFlagOnCorpusParity:
     """The NON-VACUOUS flag-ON proof over the whole #1685 golden corpus."""
 
-    def test_corpus_bit_equal_with_kernel_engaged(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_corpus_bit_equal_with_kernel_engaged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_FLAG, "1")
         # Widen the burn-in so EVERY corpus case is kernel-vs-oracle
         # cross-checked inside the seam, not just the first 16.
@@ -539,9 +525,7 @@ class TestFlagOnCorpusParity:
         assert calls[0] == nonempty
         assert not compute_rust.kernel_disabled()
 
-    def test_neumaier_downside_case_served_by_kernel(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_neumaier_downside_case_served_by_kernel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The burn-in-caught 1-ulp class: ten -0.1 returns whose squares'
         compensated sum differs from the plain fold — the kernel must serve
         CPython 3.12's `sum()` answer bit-for-bit."""
@@ -550,9 +534,7 @@ class TestFlagOnCorpusParity:
         folds = _resolve_folds(trades, 10_000)
         oracle = _fold_trades(trades, 10_000)
         assert not compute_rust.kernel_disabled()
-        assert struct.pack("<d", folds.downside_sum_sq) == struct.pack(
-            "<d", oracle.downside_sum_sq
-        )
+        assert struct.pack("<d", folds.downside_sum_sq) == struct.pack("<d", oracle.downside_sum_sq)
         assert struct.pack("<d", folds.downside_sum_sq) == struct.pack(
             "<d", float.fromhex("0x1.999999999999bp-4")
         )
@@ -637,8 +619,7 @@ class TestFoldsBitEquality:
             ),
             (
                 "huge_magnitudes",
-                [_trade(-(10**13), 0, 10**13, 375)] * 4
-                + [_trade(10**13, 10**13, 0, 375)],
+                [_trade(-(10**13), 0, 10**13, 375)] * 4 + [_trade(10**13, 10**13, 0, 375)],
                 10**6,
             ),
             ("neumaier_band", [_trade(-1000) for _ in range(10)], 10_000),
@@ -651,9 +632,7 @@ class TestFoldsBitEquality:
         folds = compute_rust.fold_trades_via_kernel(trades, start)
         assert folds is not None, name
         oracle = _fold_trades(trades, start)
-        assert compute_rust.fold_compare_key(folds) == compute_rust.fold_compare_key(oracle), (
-            name
-        )
+        assert compute_rust.fold_compare_key(folds) == compute_rust.fold_compare_key(oracle), name
         # The kernel-built TradeFolds is a genuine TradeFolds with a genuine
         # Moments (not a duck-typed stand-in).
         assert isinstance(folds, TradeFolds)
