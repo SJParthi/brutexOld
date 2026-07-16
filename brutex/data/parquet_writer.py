@@ -1910,25 +1910,16 @@ class ParquetWriter:
 def _ipc_bytes(df: pl.DataFrame) -> bytes:
     """Serialise *df* to UNCOMPRESSED Arrow IPC bytes — the Rust-render handoff.
 
-    ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): when the
-    ``BRUTEX_LAKE_RUST_RENDER`` seam is engaged, the ALREADY-BUILT render
-    frame crosses the FFI as Arrow IPC (the spike-proven handoff — the crate
-    ``rechunk``s after the read so the memory layout matches the
-    single-chunk frame this module builds from per-column lists).
-    Uncompressed deliberately: the handoff must never introduce its own
-    compression variable into the byte-parity surface. MEMORY HONESTY: this
-    materialises a FULL uncompressed-IPC copy of the frame (≈ the frame's
-    in-RAM size, LARGER than the compressed parquet) that lives alongside
-    the source ``df``, the crate's re-decoded frame and the parquet
-    buffer(s) — the engaged render's transient peak is several× the frame
-    footprint (quantified in the runbook cost table,
-    docs/runbooks/lake-rust-render-lockstep.md §0). Reached ONLY from the
-    flag-ON path inside :meth:`ParquetWriter._render_bytes`'s
-    ``lake_write_guard`` block, so an allocation failure here maps to
-    ``LakeWriteHalt`` like every other render allocation.
+    DEC-RUST-DATALAKE-IO-ROADMAP-001: a THIN delegating alias of the COMMON
+    :func:`brutex.data.lake_rust_render.ipc_handoff_bytes` (the body was
+    HOISTED there in PR-2 when ``option_parquet_writer`` became the second
+    caller — §11 COMMON; this alias preserves the PR-1 module's documented
+    shape and its test surface). All the byte-surface + memory-honesty
+    documentation lives on the common helper. Reached ONLY from the flag-ON
+    path inside :meth:`ParquetWriter._render_bytes`'s ``lake_write_guard``
+    block, so an allocation failure maps to ``LakeWriteHalt`` like every
+    other render allocation.
     """
-    import io
+    from brutex.data import lake_rust_render
 
-    bio = io.BytesIO()
-    df.write_ipc(bio, compression="uncompressed")
-    return bio.getvalue()
+    return lake_rust_render.ipc_handoff_bytes(df)

@@ -2067,7 +2067,11 @@ jobs:
             # DEC-LAKE-STATS-MANIFEST-001: the _record_option_stats hook is
             # covered by tests/unit/test_option_parquet_writer_stats_manifest.py, which
             # MUST run alongside the base suite for the 100% gate to hold.
-            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py tests/unit/test_option_parquet_writer_stats_manifest.py
+            # DEC-RUST-DATALAKE-IO-ROADMAP-001 PR-2: the _atomic_write_parquet
+            # render seam's flag-ON arm + _defaults_python_render are covered by
+            # tests/unit/test_option_parquet_writer_rust_render.py (crate-FREE —
+            # fake brutex_lake modules), which MUST likewise join the gate.
+            pytest --cov=brutex.data.option_parquet_writer --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_option_parquet_writer.py tests/unit/test_option_parquet_writer_stats_manifest.py tests/unit/test_option_parquet_writer_rust_render.py
           else
             echo "(brutex.data.option_parquet_writer test file not present yet — gate inactive)"
           fi

@@ -42,15 +42,25 @@ def _fake_crate(
     *,
     pinned: str = "1.42.1",
     render: Any = None,
+    render_defaults: Any = None,
     zstd: str = "1.5.7",
 ) -> types.ModuleType:
-    """Build a fake ``brutex_lake`` module with injectable behaviour."""
+    """Build a fake ``brutex_lake`` module with injectable behaviour.
+
+    Carries ALL FOUR ``_CRATE_API`` callables (PR-2 — the import guard is
+    all-or-nothing): *render* drives the bars profile, *render_defaults*
+    the options-defaults profile; each defaults to the other's stub when
+    only one is injected so single-profile tests stay terse.
+    """
     module = types.ModuleType("brutex_lake")
     module.pinned_polars_version = lambda: pinned  # type: ignore[attr-defined]
     module.linked_zstd_version = lambda: zstd  # type: ignore[attr-defined]
     if render is None:
         render = lambda ipc: b"rust-bytes"  # noqa: E731 - test stub
+    if render_defaults is None:
+        render_defaults = render
     module.render_parquet_from_ipc = render  # type: ignore[attr-defined]
+    module.render_parquet_defaults_from_ipc = render_defaults  # type: ignore[attr-defined]
     return module
 
 
@@ -866,6 +876,269 @@ class TestShapeGate:
 
 
 # ---------------------------------------------------------------------------
+# render profiles (PR-2) — registry, per-profile budgets, prefixed tokens
+# ---------------------------------------------------------------------------
+
+
+class TestRenderProfiles:
+    def test_unknown_profile_fails_closed_to_oracle_without_latch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown profile value must NEVER KeyError into a write path —
+        loud oracle degrade, no latch (the install is not implicated)."""
+        crate_calls: list[bytes] = []
+
+        def _render(ipc: bytes) -> bytes:
+            crate_calls.append(ipc)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=_render, render_defaults=_render))
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+                profile="not-a-profile",
+            )
+            again = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+                profile="not-a-profile",
+            )
+        assert out == PY_BYTES
+        assert again == PY_BYTES
+        assert crate_calls == []  # never reached the crate (nor the IPC factory)
+        assert not lrr.rust_render_disabled()  # degrade, never a latch
+        warns = [e for e in logs if e["event"] == "lake_rust_render.fallback"]
+        assert len(warns) == 1  # warn-once
+        assert warns[0]["reason"] == "profile_unknown"
+        assert warns[0]["profile"] == "not-a-profile"
+
+    def test_default_profile_routes_to_the_bars_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars_calls: list[bytes] = []
+        defaults_calls: list[bytes] = []
+
+        def _bars(ipc: bytes) -> bytes:
+            bars_calls.append(ipc)
+            return PY_BYTES
+
+        def _defaults(ipc: bytes) -> bytes:
+            defaults_calls.append(ipc)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=_bars, render_defaults=_defaults))
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+        )
+        assert len(bars_calls) == 1  # the PR-1 back-compat default
+        assert defaults_calls == []
+
+    def test_options_profile_routes_to_the_defaults_callable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bars_calls: list[bytes] = []
+        defaults_calls: list[bytes] = []
+
+        def _bars(ipc: bytes) -> bytes:
+            bars_calls.append(ipc)
+            return PY_BYTES
+
+        def _defaults(ipc: bytes) -> bytes:
+            defaults_calls.append(ipc)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=_bars, render_defaults=_defaults))
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+            profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+        )
+        assert len(defaults_calls) == 1
+        assert bars_calls == []
+
+    def test_stale_pr1_crate_missing_the_defaults_callable_latches_both_profiles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The all-or-nothing crate-API law (atomic-pin doctrine): a
+        PR-1-vintage install missing ``render_parquet_defaults_from_ipc``
+        latches ``crate_unavailable`` for the BARS surface too."""
+        crate = _fake_crate()
+        delattr(crate, "render_parquet_defaults_from_ipc")
+        _install_crate(monkeypatch, crate)
+        with capture_logs() as logs:
+            out = lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_python_render,
+                polars_version="1.42.1",
+                profile=lrr.PROFILE_BARS,  # the profile whose callable EXISTS
+            )
+        assert out == PY_BYTES
+        assert lrr.rust_render_disabled()
+        disabled = [e for e in logs if e["event"] == "lake_rust_render.rust_path_disabled"]
+        assert disabled and disabled[0]["reason"] == "crate_unavailable"
+        assert "render_parquet_defaults_from_ipc" in disabled[0]["error_detail"]
+
+    def test_per_profile_burn_in_budgets_are_independent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bars-warmed process has ZERO byte witnesses on the defaults
+        surface — the options profile must run its OWN budget of compares."""
+        oracle_calls: list[int] = []
+
+        def _oracle() -> bytes:
+            oracle_calls.append(1)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=2)
+        for _ in range(3):  # bars budget (2) spent; third render steady-state
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_oracle,
+                polars_version="1.42.1",
+            )
+        assert len(oracle_calls) == 2
+        for _ in range(3):  # the options profile seeds + spends its OWN cell
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_oracle,
+                polars_version="1.42.1",
+                profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+            )
+        assert len(oracle_calls) == 4  # 2 bars + 2 options compares
+        assert not lrr.rust_render_disabled()
+
+    def test_engaged_and_burn_in_complete_fire_once_per_profile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        with capture_logs() as logs:
+            for profile in (lrr.PROFILE_BARS, lrr.PROFILE_OPTIONS_DEFAULTS):
+                for _ in range(2):
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_ipc_factory,
+                        python_render=_python_render,
+                        polars_version="1.42.1",
+                        profile=profile,
+                    )
+        engaged = [e for e in logs if e["event"] == "lake_rust_render.engaged"]
+        assert [e["profile"] for e in engaged] == [
+            lrr.PROFILE_BARS,
+            lrr.PROFILE_OPTIONS_DEFAULTS,
+        ]
+        complete = [e for e in logs if e["event"] == "lake_rust_render.burn_in_complete"]
+        assert [e["profile"] for e in complete] == [
+            lrr.PROFILE_BARS,
+            lrr.PROFILE_OPTIONS_DEFAULTS,
+        ]
+        # The memo keys: bars keeps the PR-1 literal (the frozen bars corpus
+        # guard reads it); the options profile records the suffixed key.
+        assert lrr._ENGAGED_KEY in lrr._OBSERVABILITY_MEMO
+        assert lrr._engaged_memo_key(lrr.PROFILE_OPTIONS_DEFAULTS) in lrr._OBSERVABILITY_MEMO
+        assert (
+            lrr._engaged_memo_key(lrr.PROFILE_OPTIONS_DEFAULTS)
+            == f"{lrr._ENGAGED_KEY}|{lrr.PROFILE_OPTIONS_DEFAULTS}"
+        )
+
+    def test_profile_prefix_never_cross_licenses_a_shape(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R10: a bars witness for schema token T must never license the
+        SAME token under the options profile — the facade prefixes the
+        profile into the seen-set key by construction."""
+        oracle_calls: list[int] = []
+
+        def _oracle() -> bytes:
+            oracle_calls.append(1)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="18col-options",
+        )
+        assert len(oracle_calls) == 1  # bars budget spent on the token
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="spend-the-options-budget",
+            profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+        )
+        assert len(oracle_calls) == 2  # the options profile's own budget
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="18col-options",  # SEEN under bars — not under options
+            profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+        )
+        assert len(oracle_calls) == 3  # compared despite the spent budgets
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_oracle,
+            polars_version="1.42.1",
+            schema_token="18col-options",
+            profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+        )
+        assert len(oracle_calls) == 3  # now seen under options — steady state
+        assert not lrr.rust_render_disabled()
+
+    def test_seen_set_cap_saturation_compares_always_but_records_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The honest-bound cap (PR-2): past ``_BURN_IN_SHAPES_CAP`` a novel
+        shape is byte-compared on EVERY render (the fail-safe direction —
+        more oracle compares, never fewer) and never recorded."""
+        oracle_calls: list[int] = []
+
+        def _oracle() -> bytes:
+            oracle_calls.append(1)
+            return PY_BYTES
+
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=0)
+        lrr._BURN_IN_SHAPE_GATE[0] = True  # armed, budget spent (whitebox)
+        for i in range(lrr._BURN_IN_SHAPES_CAP):
+            lrr._BURN_IN_SHAPES_SEEN.add(f"filler-shape-{i}")
+        for _ in range(2):
+            lrr.render_parquet_bytes(
+                ipc_bytes_factory=_ipc_factory,
+                python_render=_oracle,
+                polars_version="1.42.1",
+                schema_token="novel-shape-past-cap",
+            )
+        assert len(oracle_calls) == 2  # compared BOTH times — never recorded
+        assert len(lrr._BURN_IN_SHAPES_SEEN) == lrr._BURN_IN_SHAPES_CAP
+        assert "bars|novel-shape-past-cap" not in lrr._BURN_IN_SHAPES_SEEN
+        assert not lrr.rust_render_disabled()
+
+    def test_shape_keys_are_profile_prefixed_in_the_seen_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_crate(monkeypatch, _fake_crate(render=lambda ipc: PY_BYTES))
+        lrr.reset_lake_rust_render_for_tests(remaining=1)
+        lrr.render_parquet_bytes(
+            ipc_bytes_factory=_ipc_factory,
+            python_render=_python_render,
+            polars_version="1.42.1",
+            schema_token="tok",
+            profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+        )
+        assert {f"{lrr.PROFILE_OPTIONS_DEFAULTS}|tok"} == lrr._BURN_IN_SHAPES_SEEN
+
+
+# ---------------------------------------------------------------------------
 # thread-fuzz: the unlocked latch/counter/memo invariant (review-round fold)
 # ---------------------------------------------------------------------------
 
@@ -938,6 +1211,175 @@ class TestThreadFuzz:
         total = n_threads * per_thread
         assert lrr.BURN_IN_SAMPLES <= len(oracle_calls) <= total  # lost decrements only ADD
 
+    def test_two_profiles_concurrently_never_ship_a_wrong_byte(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR-2 concurrency surface (a): threads split across BOTH profiles
+        share the ONE disable latch while interleaving the per-profile
+        ``_BURN_IN_REMAINING`` decrements — every returned byte equals its
+        frame's oracle, no autorevert, and EACH profile spends at least its
+        own full burn-in budget of compares (the documented RMW race can
+        only LOSE decrements — extra compares, never fewer)."""
+        import threading
+
+        def _render(ipc: bytes) -> bytes:
+            return b"rendered:" + ipc
+
+        _install_crate(monkeypatch, _fake_crate(render=_render))
+        oracle_calls: dict[str, list[int]] = {
+            lrr.PROFILE_BARS: [],
+            lrr.PROFILE_OPTIONS_DEFAULTS: [],
+        }
+        results: dict[int, list[bytes]] = {}
+        errors: list[BaseException] = []
+        n_threads, per_thread = 8, 10
+
+        def _const(payload: bytes) -> Callable[[], bytes]:
+            return lambda: payload
+
+        def _oracle_for(payload: bytes, profile: str) -> Callable[[], bytes]:
+            def _oracle() -> bytes:
+                oracle_calls[profile].append(1)
+                return b"rendered:" + payload
+
+            return _oracle
+
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        monkeypatch.setattr(threading, "excepthook", _capture)
+
+        def _worker(idx: int) -> None:
+            profile = lrr.PROFILE_BARS if idx % 2 == 0 else lrr.PROFILE_OPTIONS_DEFAULTS
+            out: list[bytes] = []
+            for j in range(per_thread):
+                payload = f"frame-{idx}-{j}".encode()
+                out.append(
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_const(payload),
+                        python_render=_oracle_for(payload, profile),
+                        polars_version="1.42.1",
+                        schema_token="fuzz-shape",
+                        profile=profile,
+                    )
+                )
+            results[idx] = out
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert not lrr.rust_render_disabled()  # neither profile tripped the SHARED latch
+        for idx in range(n_threads):
+            expected = [f"rendered:frame-{idx}-{j}".encode() for j in range(per_thread)]
+            assert results[idx] == expected  # every stored byte == that frame's oracle
+        per_profile_total = (n_threads // 2) * per_thread
+        for profile, calls in oracle_calls.items():
+            # Each profile's OWN budget of compares ran despite the shared
+            # latch/interleaved decrements; lost decrements only ADD.
+            assert lrr.BURN_IN_SAMPLES <= len(calls) <= per_profile_total, profile
+
+    def test_concurrent_novel_shapes_past_the_cap_never_ship_a_wrong_byte(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR-2 concurrency surface (b): concurrent NOVEL shapes driven far
+        past ``_BURN_IN_SHAPES_CAP`` — the check-then-add race may overshoot
+        the seen-set by at most the racing-thread count (memory-only,
+        bounded), every returned byte equals its oracle, every render
+        COMPARES (novel shape ⇒ the fail-safe direction: more oracle
+        compares, never fewer), and no autorevert."""
+        import threading
+
+        def _render(ipc: bytes) -> bytes:
+            return b"rendered:" + ipc
+
+        _install_crate(monkeypatch, _fake_crate(render=_render))
+        oracle_calls: list[int] = []
+        results: dict[int, list[bytes]] = {}
+        errors: list[BaseException] = []
+        n_threads, per_thread = 12, 30  # 360 novel shapes >> the 64-entry cap
+
+        def _const(payload: bytes) -> Callable[[], bytes]:
+            return lambda: payload
+
+        def _oracle_for(payload: bytes) -> Callable[[], bytes]:
+            def _oracle() -> bytes:
+                oracle_calls.append(1)
+                return b"rendered:" + payload
+
+            return _oracle
+
+        def _capture(args: threading.ExceptHookArgs) -> None:
+            exc = args.exc_value if args.exc_value is not None else args.exc_type()
+            errors.append(exc)
+
+        monkeypatch.setattr(threading, "excepthook", _capture)
+
+        def _worker(idx: int) -> None:
+            out: list[bytes] = []
+            for j in range(per_thread):
+                payload = f"frame-{idx}-{j}".encode()
+                out.append(
+                    lrr.render_parquet_bytes(
+                        ipc_bytes_factory=_const(payload),
+                        python_render=_oracle_for(payload),
+                        polars_version="1.42.1",
+                        schema_token=f"novel-shape-{idx}-{j}",
+                        profile=lrr.PROFILE_OPTIONS_DEFAULTS,
+                    )
+                )
+            results[idx] = out
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert not lrr.rust_render_disabled()  # 360 clean compares — no autorevert
+        for idx in range(n_threads):
+            expected = [f"rendered:frame-{idx}-{j}".encode() for j in range(per_thread)]
+            assert results[idx] == expected  # every stored byte == that frame's oracle
+        # Every render carried a NOVEL shape, so every render compared —
+        # past the cap too (compare-ALWAYS, the fail-safe direction).
+        assert len(oracle_calls) == n_threads * per_thread
+        # The unlocked check-then-add can overshoot the cap by at most one
+        # entry per racing thread (memory-only, bounded — module docstring).
+        assert len(lrr._BURN_IN_SHAPES_SEEN) <= lrr._BURN_IN_SHAPES_CAP + n_threads
+
+
+# ---------------------------------------------------------------------------
+# the COMMON IPC handoff (hoisted here in PR-2 — §11 COMMON)
+# ---------------------------------------------------------------------------
+
+
+class TestIpcHandoffBytes:
+    def test_round_trips_the_frame_uncompressed(self) -> None:
+        pl = pytest.importorskip("polars")
+        import io
+        from datetime import UTC, datetime
+
+        df = pl.DataFrame(
+            {"timestamp": [datetime(2024, 1, 1, 3, 45, tzinfo=UTC)], "close": [100.5]},
+            schema={
+                "timestamp": pl.Datetime(time_unit="us", time_zone="UTC"),
+                "close": pl.Float64,
+            },
+        )
+        back = pl.read_ipc(io.BytesIO(lrr.ipc_handoff_bytes(df)))
+        assert back.equals(df)
+
+    def test_parquet_writer_alias_delegates(self) -> None:
+        """`parquet_writer._ipc_bytes` is the thin PR-1-shape alias — one body."""
+        pl = pytest.importorskip("polars")
+        from brutex.data.parquet_writer import _ipc_bytes
+
+        df = pl.DataFrame({"close": [1.5, 2.5]}, schema={"close": pl.Float64})
+        assert _ipc_bytes(df) == lrr.ipc_handoff_bytes(df)
+
 
 # ---------------------------------------------------------------------------
 # latch / reset seams
@@ -972,9 +1414,13 @@ class TestLatchAndReset:
         lrr._disable("crate_unavailable")
         lrr._warn_once("render_error")
         lrr._BURN_IN_SHAPES_SEEN.add("stale-shape")
+        lrr._BURN_IN_REMAINING["bars"] = 3
         lrr.reset_lake_rust_render_for_tests()
         assert not lrr.rust_render_disabled()
-        assert lrr._BURN_IN_REMAINING[0] == lrr.BURN_IN_SAMPLES
+        # Per-profile budgets are lazily seeded: reset clears the cells and
+        # restores the seed value every profile initialises from.
+        assert lrr._BURN_IN_REMAINING == {}
+        assert lrr._BURN_IN_DEFAULT[0] == lrr.BURN_IN_SAMPLES
         assert set() == lrr._OBSERVABILITY_MEMO
         assert set() == lrr._BURN_IN_SHAPES_SEEN
         assert lrr._BURN_IN_SHAPE_GATE[0] is True  # armed on a fresh view
@@ -982,3 +1428,4 @@ class TestLatchAndReset:
     def test_reset_steady_state_disarms_the_shape_gate(self) -> None:
         lrr.reset_lake_rust_render_for_tests(remaining=0)
         assert lrr._BURN_IN_SHAPE_GATE[0] is False  # steady state — crate bytes, no oracle
+        assert lrr._BURN_IN_DEFAULT[0] == 0  # every profile lazily seeds spent
