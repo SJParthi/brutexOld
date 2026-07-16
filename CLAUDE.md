@@ -18,7 +18,22 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (CLUB Q merge vehicle, branch
+_Last updated: 2026-07-15 (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 —
+the condition vocabulary reshapes 60 → 66 declared / 62 ACTIVE, implementing the
+`DEC-VOCAB-VWAP-VOLUME-WIPE-001` wipe ruling (decision PR in flight): the dead
+session-VWAP bits 52/53 are TOMBSTONED (positions held forever, math deleted
+from the shared trading-core crate, "(retired)" on every mask surface via the
+ONE describe authority, provably never-firing) and four live CPR conditions
+land on bits 60-63 (NARROW_CPR_WIDTH_BPS=30 — supersedes the earlier 50 lock;
+no vendor standard, practitioner-verified 2026-07-15) with SuperTrend slots
+64/65 reserved LAYOUT-ONLY; crate/wheel 0.3.2 → 0.4.0 (ONE indicator_version
+re-key window; default grid C(60,k)→C(62,k), k=5: 5,461,512→6,471,002); cascade
+replay gates on the recorded vocabulary identity (fail-closed, no escape — the
+replay overwrites); every fixture regenerated under the frozen-input migration
+invariant (400/400 + an independent Decimal oracle). ENGINE surface UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; this header carries the pointer, never the story — the
+full record lives in the §1 Active-branch blurb + MIGRATION.md #1804.)
+Earlier: 2026-07-15 (CLUB Q merge vehicle, branch
 `integration/club-q-dashboard` — the file-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1434 memory/cache + RAM-residency
 hardening pack (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) ·
@@ -2753,7 +2768,103 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
+- **Active branch:** `claude/vocab-66-reshape`
+  (**DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804** — the 60→66 vocabulary
+  reshape implementing `DEC-VOCAB-VWAP-VOLUME-WIPE-001` (decision PR in
+  flight): TOTAL_CONDITIONS 60→66, 62 ACTIVE — the dead session-VWAP bits 52/53
+  TOMBSTONED (positions held forever, `reserved=true`/`implemented=false`
+  tombstone rows in conditions.toml, math DELETED from the shared trading-core
+  crate — `indicators/vwap.rs` + `IndicatorSnapshot.vwap_paisa` + the evaluator
+  Group-10 branch + `PyVwapState`/`vwap_update_guard` gone; FFI NARROWED
+  `evaluate_from_raw` 23→22 / `evaluate_with_levels` 22→21 / `evaluate_spec`
+  24→23 / `stage1a_bar_bits_batch` 27→22 — the five dropped batch columns fed
+  ONLY the vwap update, consumer-by-consumer verified; the roll-reset
+  session-key machinery survives its deleted consumer, D11 untouched) and four
+  live Central-Pivot-Range conditions on bits 60-63 (`above_cpr_tc` /
+  `below_cpr_bc` / `inside_cpr` / `narrow_cpr_day` — ONE math site
+  `pivots.rs::compute_cpr_levels` computed per-bar off the snapshot's EXISTING
+  pivot levels, ZERO new FFI args, O(1)/bar; P = the already-rounded floor
+  pivot, reused never re-derived; BC = round_half_even((PDH+PDL)/2), TC =
+  2P − BC, canonicalized tc=max/bc=min; bits 60/61 STRICT · 62 INCLUSIVE — an
+  exact partition, property-pinned + fuzz-asserted; bit 63 narrow-CPR evaluated
+  in i128 — NARROW_CPR_WIDTH_BPS=30 SUPERSEDES the earlier 50 lock: no
+  vendor/exchange standard exists, 0.3% of P is the most-cited practitioner
+  threshold, verified 2026-07-15; a flat prev day counts narrow BY DESIGN;
+  ANCHOR-DEPENDENT — cleared on cold-anchor days like close_above_pdh) with
+  SuperTrend slots 64/65 reserved LAYOUT-ONLY (implemented=false; math = a
+  later stacked PR hard-gated on the u128 kernel dispatch + an M4-Pro
+  measurement). EMITTED MASKS: IMPLEMENTED 0xffcfffffffffffff · RETIRED
+  0x30000000000000 (NEW, Python bits.py — the ONE rendering-authority key) ·
+  APPLIES_TO_1DAY 0x3ffcf0fffffffffff (the old "APPLIES ⊆ IMPLEMENTED"
+  invariant consciously replaced by an exact-residue pin — the SuperTrend pair
+  is the residue) · ANCHOR_DEPENDENT 0xf00f00003fffffc0 (Python == the Rust
+  in-file REAL_ANCHOR_DEP, verified). VERSIONS + RE-KEY: trading-core
+  Cargo.toml AND pyproject.toml 0.3.2 → 0.4.0 (lockstep test-pinned) — ONE
+  `current_indicator_version()` re-key window (Rule 4; `sweep-verify` over a
+  pre-bump tree reads `grid_mismatch` NAMING the vocabulary flip; the frozen
+  `_GOLDEN_RUN_ID`/`_GOLDEN_CONTENT_HASH` pin a recorded ind-v1 run,
+  deliberately NOT moved); default grid `default_condition_bits()`
+  C(60,k)→C(62,k) (k=5: 5,461,512→6,471,002; full-vocab K=5 keeps the
+  documented FAIL_CLOSED past-Bloom-capacity refusal — pre-size via
+  --sweep-cache-bloom-capacity); the wheel shim REFUSES a stale compiled
+  surface. POLICY: (REPL-01) CascadeManifest gains ADDITIVE
+  `indicator_version` + `code_commit_sha` via the NEW COMMON leaf
+  `brutex/engine/run_environment.py` — the manual replay gates FIRST,
+  fail-closed (legacy None ⇒ ONE WARN + typed refusal; recorded ≠ current ⇒
+  refusal naming every diverging field; the replay overwrites the report so
+  there is NO escape hatch; `sweep-verify --recount` keeps
+  --allow-context-mismatch — it only compares); (TOMB) ONE rendering authority
+  `describe.condition_display_name` (RETIRED_MASK-driven) → "(retired)" on
+  /results · leaderboard · top100 writer · oneclick reader · combo decoder ·
+  R33 phrases (table digest UNCHANGED — only the reference-assembly string
+  re-pinned); (CLI) parse_condition_ids REFUSES non-implemented bits (retired
+  names the wipe; declared-only names DEC-VOCAB-U128-CODEGEN-001); dashboard
+  _MAX_K = 62; (WIRE) /results rows keep `mask_bits` + gain lossless
+  `mask_hex` (%032x), cascade manifests gain the `winners_hex` twin —
+  divergence (incl. u128-limb truncation above bit 63) refuses as corrupt,
+  legacy parses fine; StrategySpec + FibDefinition.condition_scope refuse
+  non-implemented bits at construction (fails-before proven); CONFLICT_PAIRS
+  26→29 (+3 CPR partition pairs; NO tombstone pairs — a mask requiring one is
+  already zero-trade). GOLDENS (every regen under the frozen-input migration
+  invariant; plumbing commit strictly BEFORE the regen commit):
+  vocab_golden_vectors v2→v3 — inputs byte-identical 400/400,
+  new_mask&((1<<60)-1) == old_mask&~(52|53) 400/400, new_mask>>64==0 400/400,
+  the CPR nibble == an INDEPENDENT Decimal ROUND_HALF_EVEN recompute 400/400
+  (occupancy above_tc=185/below_bc=172/inside=43/narrow=95; the retired vwap
+  RNG draw BURNED in its historical position so input byte-identity is
+  provable; PERMANENT tests/golden/test_vocab_golden_migration.py suite over
+  the committed v2-mask companion + whole-file-SHA pin); truth table 1,364
+  rows (22×62 — rows only for IMPLEMENTED bits); futures-roll golden v2 (warm
+  middle day = CPR + anchor cross-roll teeth; positive tombstone-inertness
+  over ALL masks); stage1a batch golden v2 (5 columns dropped; 156 masks,
+  tombstone carriers 0); twin-state golden v2 (MS-only — the MS half PROVEN
+  byte-identical to the frozen v1 half); phrases table digest re-locked (66
+  rows; VWAP rows retired prose, positions unchanged). REVIEW RECORD: 4-lens
+  hostile review SHIP×4 (6 MINOR/NIT findings folded as ONE commit); 2 refuter
+  rounds CLEAN; the external finder's phrase-leg "(retired)" parity regression
+  root-cause-fixed through the ONE display authority. HONEST ENVELOPE: the
+  narrow-CPR REAL-LAKE fire rate is UNMEASURED (synthetic: 95/400 vocab
+  golden, 0/156 batch corpus) and the HOST-05 volume==0 census is deferred —
+  both operator lake evidence (no lake in the build env); the 30-bps threshold
+  is a practitioner convention, not an official standard; mutation not
+  re-measured in-PR (weekly gate); SuperTrend math · the
+  recorded-context-first plan_expected_stores redesign (REPL-02) · the per-row
+  indicator-version marker (REPL-04) · docs/TRACK1_VOCABULARY.md's 52-era
+  restructure · the fno-math prose reconcile are NAMED deferrals;
+  TickVault-side adoption of crate 0.4.0 is 0% here (attested — the crate is
+  shared per DEC-SHARED-CORE-001 #441): at adoption TickVault must pin
+  >= 0.4.0 and must not reference VwapState (coordinator follow-up flag, not a
+  merge blocker). GATES: cargo test --release (trading-core) 167/0 + fmt +
+  clippy -D warnings green; check_vocab_rust_parity 400/400; codegen --check +
+  both generator --check modes green; whole-engine ci gate 100.00% (10,355 st
+  / 2,928 br, 0 missed; 3,684 passed); golden+property battery 1,076 passed /
+  26 skipped; every touched gated module 100.00% line+branch (incl. NEW
+  run_environment 19/2); ruff + ruff-format clean; `mypy --strict` Success
+  (460 files); pyright 0 errors; conventional commits green over all branch
+  commits. ENGINE surface UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/rate change — the VOCABULARY change is this decision's
+  subject, consciously ledgered never silent (Golden Rule #3).)
+  Earlier: `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
   the file-disjoint fold of THREE PRs as ONE merge event off main tip d6ac9f85,
   in fold order: **#1434** memory/cache + RAM-residency hardening pack
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · **#1433** the
@@ -7797,7 +7908,14 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-q-dashboard`
+- **Active feature branch:** `claude/vocab-66-reshape`
+  (DEC-VOCAB-66-RESHAPE-IMPL-001, MIGRATION.md #1804 — the 66-declared /
+  62-active vocabulary reshape: VWAP bits 52/53 tombstoned + CPR bits 60-63
+  live (NARROW_CPR_WIDTH_BPS=30 supersedes 50) + SuperTrend 64/65 layout-only;
+  trading-core 0.4.0 re-key window; cascade-replay vocabulary-identity gate;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1804 for the full
+  blurb)
+  Earlier: `integration/club-q-dashboard`
   (CLUB Q merge vehicle — the file-disjoint fold of THREE PRs as ONE merge
   event off main tip d6ac9f85: #1434 memory/cache + RAM-residency hardening
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · #1433 the brutexd
@@ -8710,7 +8828,7 @@ bruteX/
 | Options instrument type | **`CE` / `PE`** (Call / Put); `FUT` for futures | `groww/constants.py:95`; `groww/api-reference/03-backtesting.md:16-22`; `04-annexures.md:107-108` |
 | Exchanges (in scope) | **NSE, BSE** (MCX excluded with the COMMODITY segment) | `groww/constants.py:92`; `groww/api-reference/04-annexures.md:39-43` |
 | Rate limit — backtesting | **500 req/min, NO daily quota** (operator-confirmed 2026-06-13, NOT vendor-documented; DEC-GROWW-RATE-PERMIN-001). The per-SECOND cap stays **UNVERIFIED** (`get_historical_candles` r/s UNDOCUMENTED; Phase-0 probe gate); the production per-second ceiling injected at both live build sites is the operator-DIRECTED **8 r/s** (`GROWW_RATE_LIMIT_RPS_CEILING=8.0`, operator-approved 2026-06-24, RAISED 5 → 8, DEC-GROWW-RATE-CEILING-8-002 supersedes DEC-GROWW-RATE-CEILING-5-001 — 8×60 = 480/min stays under the 500/min governor so the HARD cap can't be overshot; raised back to 8 once DEC-FETCH-WRITE-OVERLAP-001 Lever 2 (pool 2→4) gave enough connections to generate demand toward the ceiling; a CEILING raise only ALLOWS a higher rate, the AIMD ladder still steps DOWN on 429s and recovers only as far as the vendor tolerates; SUSTAINED 8 is UNVERIFIED — the log shows the vendor 429ing at 5 — revert to 5 is one constant; NOT a vendor-verified limit). The published "Live Data" group is 10 r/s · 300/min but is NOT confirmed to cover backtesting | `groww/constants.py:141-143,154,177` (`GROWW_RATE_LIMIT_RPS_UNVERIFIED=10.0`, `GROWW_RATE_LIMIT_PER_MIN=500`, `GROWW_RATE_LIMIT_RPS_CEILING=8.0`, `GROWW_DAILY_QUOTA_UNVERIFIED=None`); `groww/api-reference/01-introduction.md:130-134` |
-| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5114-5115` + this file §2 rule 6 |
+| Adapter effective cap | **Vendor-neutral adaptive token bucket** — injected `ceiling_rps` (the production live ceiling is the operator-DIRECTED **8 r/s**, `GROWW_RATE_LIMIT_RPS_CEILING`, DEC-GROWW-RATE-CEILING-8-002; the vendor-neutral DEFAULT stays 5), steps down to a 1 r/s floor on 429/timeout and recovers to the ceiling once clear — PLUS an injected `ceiling_per_min` HARD 500/min rolling-window governor on top (DEC-GROWW-RATE-PERMIN-001) | `adapters/rate_common.py:372-426`; `groww/constants.py:177`; `dashboard/pull_controller.py:984`; `cli.py:5173-5174` + this file §2 rule 6 |
 | Auth | **TOTP flow** — `GrowwAPI.get_access_token(api_key, totp=pyotp.TOTP(secret).now())`; creds are **AWS-SSM-only** (DEC-AWS-ONLY-CREDS-001, MIGRATION.md #1065): the api-key + TOTP secret + the shared daily access token are read fail-fast from AWS Parameter Store SecureStrings (`/tickvault/prod/groww/{api-key,totp-secret,access-token}`, region `ap-south-1`; non-secret path/region overrides `BRUTEX_TOKEN_PARAM_*` / `BRUTEX_TOKEN_AWS_REGION`) — NEVER env vars, NEVER a credentials file, NEVER a webpage (all three legacy paths REMOVED). The API-key+secret flow is REFUSED (daily manual approval violates §11 AUTOMATED). The daily access token (resets 06:00 IST) **self-heals mid-pull** on an auth-expiry — thread-safe, single-flight, bounded `max_reauths` (the #909 reauth seam) — by **RE-READING the Lambda-minted token from SSM and adopting it** (logs `groww.token.reauth` then `groww.token.reread`): production always resolves the READ-ONLY `ParameterStoreTokenStore`, so `SdkRefresher.reauth` takes the `readonly_reread` branch and the BruteX-side mint is deliberately UNREACHABLE — **BruteX NEVER mints on the read-only broker** (a stray local mint could invalidate TickVault's shared token; DEC-BROKER-READONLY-REAUTH-REREAD-001 #1072 + DEC-REAUTH-COLDSTART-READONLY-001 #1092, mechanism-superseding the local-mint reauth of DEC-GROWW-TOKEN-REAUTH-001 #909, which survives only for explicitly non-read-only local-dev configs). A persistently-stale token is remediated by re-deploying the Lambda minter (`deploy/aws_token_minter/deploy.sh`), never by a BruteX-side mint | `config/credentials_aws.py` (`load_groww_aws_credentials`); `groww/token_store_aws.py`; `groww/constants.py:487-509`; `groww/reauth.py` (`SdkRefresher`); `groww/client.py` (`_call` reauth branch); `groww/api-reference/01-introduction.md:34-96` |
 | Instrument master URL | `https://growwapi-assets.groww.in/instruments/instrument.csv` (single CSV; SSRF-allowlisted host) | `groww/constants.py:24-26`; `groww/api-reference/02-instruments.md:8` |
 | Instrument master schema | **21 columns** in fixed order; keys `exchange, exchange_token, trading_symbol, groww_symbol, name, instrument_type, segment, series, isin, underlying_symbol, …, lot_size, tick_size, freeze_quantity` | `groww/constants.py:28-53`; `groww/api-reference/02-instruments.md:112-134` |
