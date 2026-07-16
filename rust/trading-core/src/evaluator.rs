@@ -13,7 +13,11 @@
 //! BOS/CHoCH branch (bits 56-59) — the four booleans are RESOLVED upstream by the
 //! stateful, look-ahead-clean `indicators::market_structure::MarketStructureState`
 //! and threaded in via the snapshot exactly like the resolved `PriorBarHistory`
-//! flags, so `evaluate_atoms` stays a pure stateless bit-setter. A u128 AND is
+//! flags, so `evaluate_atoms` stays a pure stateless bit-setter;
+//! DEC-GAP-MIDPOINT-CONDITIONS-001 added the session-edge gap-midpoint branch
+//! (bits 66-68) — the level is resolved upstream (stateful Stage-1A X1/X2
+//! capture + `indicators::gap_mid::compute_gap_mid`) and threaded in as an
+//! optional level. A u128 AND is
 //! two u64 ANDs — still O(1) per bar (NOT an O(1)-total claim).
 
 use crate::bits;
@@ -65,6 +69,15 @@ pub struct IndicatorSnapshot {
     /// resolved `PriorBarHistory` flags. `default()` (all false) during warm-up
     /// (before any confirmed swing) so the Group-12 bits simply do not fire.
     pub market_structure: MarketStructureSignal,
+    /// Session-edge gap-midpoint level (paisa) for the Group-15 bits 66-68
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001), resolved upstream by the stateful
+    /// Stage-1A X1/X2 capture + [`crate::indicators::gap_mid::compute_gap_mid`]
+    /// and threaded in as an OPTIONAL level. `None` on a zero-gap day, when
+    /// X1/X2 are not captured (first stream day / post-roll / Muhurat-skipped
+    /// prior session), on the session's FIRST TF bar (the arm-from-bar-2 law)
+    /// and on the 1day timeframe — the Group-15 bits then simply do not fire.
+    /// APPENDED LAST (the grow-only FFI law; never reorder existing fields).
+    pub gap_mid_paisa: Option<i64>,
 }
 
 /// Proximity tolerances (basis points) for the `near_*` conditions.
@@ -78,6 +91,29 @@ pub struct ProximityParams {
     pub pivot_proximity_bps: i64,
     pub pdh_pdl_proximity_bps: i64,
     pub fib_proximity_bps: i64,
+    /// Tolerance for the Group-15 `near_gap_mid` bit
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001), matching the sibling 10-bps
+    /// defaults. APPENDED LAST; a serialized pre-gap spec (no field) loads the
+    /// default so old TickVault spec JSON stays readable. Deliberately NOT
+    /// encoded by `StrategySpec::canonical_bytes` (frozen at
+    /// `SPEC_SCHEMA_VERSION = 1`, exactly three bps) — BruteX carries a swept
+    /// non-default value in run identity via the default-omit
+    /// `canonical_trade_params` key instead (the
+    /// DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override-1 pattern).
+    #[cfg_attr(feature = "serde", serde(default = "default_gap_mid_proximity_bps"))]
+    pub gap_mid_proximity_bps: i64,
+}
+
+/// The default `gap_mid_proximity_bps` (10 bps — the sibling knobs' default;
+/// DEC-GAP-MIDPOINT-CONDITIONS-001). Also the serde default so a pre-gap
+/// serialized spec deserializes to the SAME evaluation it always had.
+pub const DEFAULT_GAP_MID_PROXIMITY_BPS: i64 = 10;
+
+/// serde default fn for [`ProximityParams::gap_mid_proximity_bps`] (serde
+/// requires a fn path, not a const).
+#[cfg(feature = "serde")]
+fn default_gap_mid_proximity_bps() -> i64 {
+    DEFAULT_GAP_MID_PROXIMITY_BPS
 }
 
 /// Rolling history of the last N bars' bullish (`true`) / bearish (`false`)
@@ -126,11 +162,14 @@ fn is_near(close: i64, level: i64, bps: i64) -> bool {
 
 /// Evaluate the implemented atomic conditions on one bar → a `u128` mask.
 ///
-/// Every IMPLEMENTED bit (0..=51, 54..=63) can fire — the tombstoned VWAP
-/// positions 52-53 are never set (their math was deleted; grow-only law). The
+/// Every IMPLEMENTED bit (0..=51, 54..=63, 66..=68) can fire — the tombstoned
+/// VWAP positions 52-53 are never set (their math was deleted; grow-only law)
+/// and the declared-only SuperTrend bits 64-65 await their math. The
 /// BOS/CHoCH bits (56..=59) read the resolved `snapshot.market_structure`
 /// flags (DEC-NIFTY-BOS-CHOCH-001); the CPR bits (60..=63) derive from the
-/// SAME prev-day pivot anchor as Groups 2/3/9.
+/// SAME prev-day pivot anchor as Groups 2/3/9; the Gap-Midpoint bits
+/// (66..=68) read the resolved `snapshot.gap_mid_paisa` level
+/// (DEC-GAP-MIDPOINT-CONDITIONS-001).
 #[must_use]
 pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorBarHistory) -> u128 {
     let mut mask: u128 = 0;
@@ -434,6 +473,27 @@ pub fn evaluate_atoms(s: &IndicatorSnapshot, p: &ProximityParams, prior: &PriorB
             <= i128::from(pv.p_paisa) * i128::from(NARROW_CPR_WIDTH_BPS)
     {
         mask |= bit(bits::BIT_NARROW_CPR_DAY);
+    }
+
+    // ── Group 15: Gap Midpoint (bits 66-68) ──
+    // The session-edge gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) is
+    // RESOLVED upstream (stateful Stage-1A X1/X2 capture + the pure
+    // `indicators::gap_mid::compute_gap_mid`) and threaded in as an OPTIONAL
+    // level: `None` (zero gap / missing X1/X2 / the session's first TF bar /
+    // 1day) ⇒ no bit fires. Strict-above and strict-below are mutually
+    // exclusive by construction; `near` uses the ONE `is_near` primitive with
+    // its own bps knob and may legally co-fire with either strict bit (the
+    // PDH/PDL family convention).
+    if let Some(gap_mid) = s.gap_mid_paisa {
+        if close > gap_mid {
+            mask |= bit(bits::BIT_CLOSE_ABOVE_GAP_MID);
+        }
+        if close < gap_mid {
+            mask |= bit(bits::BIT_CLOSE_BELOW_GAP_MID);
+        }
+        if is_near(close, gap_mid, p.gap_mid_proximity_bps) {
+            mask |= bit(bits::BIT_NEAR_GAP_MID);
+        }
     }
 
     mask

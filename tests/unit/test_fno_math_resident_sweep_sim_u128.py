@@ -16,7 +16,7 @@ what only the PyO3 boundary can prove:
   sibling's label) through the wheel.
 
 HONEST envelope (Golden Rule #10): today's production vocabulary is 60 bits
-(``IMPLEMENTED_MASK = (1 << 60) - 1``), so this kernel is future headroom —
+(``IMPLEMENTED_MASK = (1 << 63) - 1``), so this kernel is future headroom —
 production behaviour is unchanged and only tests (plus a future >64-bit
 vocabulary) drive it.
 """

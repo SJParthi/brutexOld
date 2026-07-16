@@ -18,8 +18,10 @@ wheel is built by maturin and installed in every CI job that imports
   the backtest==live deploy contract (thin wrapper over ``evaluate_with_levels``,
   the frozen kernel untouched). ``SPEC_SCHEMA_VERSION`` / ``IMPLEMENTED_MASK`` are
   the companion constants.
-* ``compute_pivot_levels`` / ``compute_fib_levels`` — the single-source indicator
-  math BruteX's ``brutex.indicators`` wrappers pack into their dataclasses.
+* ``compute_pivot_levels`` / ``compute_fib_levels`` / ``compute_gap_mid`` — the
+  single-source indicator math BruteX's ``brutex.indicators`` wrappers pack into
+  their dataclasses (``compute_gap_mid`` is the session-edge gap-midpoint level
+  for the Group-15 bits 66-68, DEC-GAP-MIDPOINT-CONDITIONS-001).
 * ``compute_ema`` / ``ema_alpha`` / ``ema_seed`` / ``ema_step`` — the single-source
   EMA 20/200 recurrence BruteX's ``brutex.indicators.ema`` shim delegates to
   (``DEC-EMA-RUST-PORT-001``).
@@ -114,6 +116,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "__version__",
     "compute_ema",
     "compute_fib_levels",
+    "compute_gap_mid",
     "compute_pivot_levels",
     "derive_bar_metadata",
     "ema_alpha",
@@ -197,6 +200,7 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     __version__,
     compute_ema,
     compute_fib_levels,
+    compute_gap_mid,
     compute_pivot_levels,
     derive_bar_metadata,
     ema_alpha,
@@ -248,6 +252,7 @@ __all__ = [
     "__version__",
     "compute_ema",
     "compute_fib_levels",
+    "compute_gap_mid",
     "compute_pivot_levels",
     "derive_bar_metadata",
     "ema_alpha",

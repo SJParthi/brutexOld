@@ -54,10 +54,11 @@ class TestDescribeMask:
         assert describe_mask(0) == []
 
     def test_reserved_bits_are_ignored(self) -> None:
-        # bit 66 is reserved u128 headroom (>= TOTAL_CONDITIONS) → ignored;
-        # only bit 0 decodes. (bit 60 became a REAL condition — above_cpr_tc —
-        # in the 60→66 reshape, so the headroom probe moved to 66.)
-        assert describe_mask(_mask(0, 66)) == [MaskGroup("EMA Position", ("close_above_ema20",))]
+        # bit 69 is reserved u128 headroom (>= TOTAL_CONDITIONS) → ignored;
+        # only bit 0 decodes. (bit 66 became a REAL condition —
+        # close_above_gap_mid — in the 66→69 growth, so the headroom probe
+        # moved to 69.)
+        assert describe_mask(_mask(0, 69)) == [MaskGroup("EMA Position", ("close_above_ema20",))]
 
 
 class TestMatchedConditionNames:

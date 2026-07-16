@@ -2,7 +2,7 @@
 
 DEC-PHASE2-TRUTH-TABLE-001 (Phase 2, ``docs/TRACK1_PHASE_PLAN.md`` corpus #7 —
 "condition truth table / per-condition determinism (G9)"; the table now
-spans the 66-declared / 62-active layout — rows exist only for IMPLEMENTED
+spans the 69-declared / 65-active layout — rows exist only for IMPLEMENTED
 bits).
 
 ``tests/golden/condition_truth_table.csv`` is the flat, human-auditable
@@ -50,11 +50,14 @@ _VECTORS_PATH = Path(__file__).parent / "fixtures" / "vocab_golden_vectors.json"
 #: SHA-256 of the frozen truth table (the README "SHA-256 manifest" drift guard).
 #: Regenerate with ``python scripts/gen_condition_truth_table.py`` then update this.
 # DELIBERATE RE-LOCK (the 60→66 vocab reshape): the table now projects the
-# 62 IMPLEMENTED bits per selected case (22 cases × 62 = 1364 rows); the
-# tombstoned VWAP bits (52/53) + the declared-only SuperTrend bits (64/65)
-# carry no row. Old digest:
+# IMPLEMENTED bits per selected case; the tombstoned VWAP bits (52/53) + the
+# declared-only SuperTrend bits (64/65) carry no row. Old digest:
 # e2d89a4e5e1afd6b8c547378349ab0d45f2ff311f097b3040cff13152fbc3c33.
-_EXPECTED_SHA256 = "ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126"
+# RE-LOCKED again at DEC-GAP-MIDPOINT-CONDITIONS-001 (the fixture regen
+# appended the three Group-15 gap-midpoint conditions at bits 66-68 — the
+# diff is +66 rows, additive; 22 cases × 65 implemented bits = 1430 rows).
+# Pre-gap digest: ea1671b986d5a95dfd304432d8d0e8c6c90c261c59e68c1264067728973df126.
+_EXPECTED_SHA256 = "0438918c703850f666b9ff47c176e1b7fc1b8f35b76e8ea0dd2d2b49314e34c0"
 
 
 def _read_rows() -> list[dict[str, str]]:

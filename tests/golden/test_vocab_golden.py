@@ -81,11 +81,15 @@ def _rebuild(case: dict[str, Any]) -> tuple[IndicatorSnapshot, ProximityParams, 
             choch_bullish=ms["choch_bullish"],
             choch_bearish=ms["choch_bearish"],
         ),
+        # Group-13 gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001) —
+        # carried VERBATIM like the VWAP.
+        gap_mid_paisa=case["gap_mid_paisa"],
     )
     proximity = ProximityParams(
         pivot_proximity_bps=case["proximity"]["pivot_bps"],
         pdh_pdl_proximity_bps=case["proximity"]["pdh_pdl_bps"],
         fib_proximity_bps=case["proximity"]["fib_bps"],
+        gap_mid_proximity_bps=case["proximity"]["gap_mid_bps"],
     )
     prior = PriorBarHistory(prior_n=case["prior"]["prior_n"], flags=list(case["prior"]["flags"]))
     return snapshot, proximity, prior
@@ -155,7 +159,11 @@ def test_fixture_metadata_is_consistent() -> None:
 #: SHA-256 of the frozen fixture bytes (GOLD-06 — the README "SHA-256
 #: manifest" drift guard). Regenerate with
 #: ``python scripts/gen_vocab_golden_vectors.py`` then update this.
-_EXPECTED_SHA256 = "0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0"
+# Re-pinned at DEC-GAP-MIDPOINT-CONDITIONS-001 (the 66→69 gap-midpoint
+# append; pre-existing inputs + low-66 mask bits byte-identical — the
+# migration harness pins that per case). Pre-gap digest:
+# 0f0f5f85b29941beff20ec71a7e4942bce681d80e3c8f3c313e28da2445057a0.
+_EXPECTED_SHA256 = "eb6fc33071ad2e161c4db05318d03a7a2d98ba81e2086ef3da9e658bba9bc7d2"
 
 
 def test_fixture_sha256_matches_pinned_manifest() -> None:

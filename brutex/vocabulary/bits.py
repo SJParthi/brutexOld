@@ -8,7 +8,7 @@ truth — by ``scripts/codegen_vocab.py`` (DEC-VOCAB-U128-CODEGEN-001). The Rust
 twin ``rust/trading-core/src/bits.rs`` is generated from the same manifest, so
 BruteX (PyO3) and TickVault (native) share an identical bit layout.
 
-The strategy mask is a u128 (ADR-0012 D4); bits 0..65
+The strategy mask is a u128 (ADR-0012 D4); bits 0..68
 are the live conditions. Never renumber a bit (grow-only, DEC-PLUGIN-001):
 new conditions append at the next free bit. LAYOUT-ONLY bits
 (``implemented=false``, ``reserved=false``) declare a position but the
@@ -38,6 +38,7 @@ __all__ = [
     "BIT_CHOCH_BULLISH",
     "BIT_CLOSE_ABOVE_EMA20",
     "BIT_CLOSE_ABOVE_EMA200",
+    "BIT_CLOSE_ABOVE_GAP_MID",
     "BIT_CLOSE_ABOVE_PDH",
     "BIT_CLOSE_ABOVE_PDL",
     "BIT_CLOSE_ABOVE_SUPERTREND",
@@ -46,6 +47,7 @@ __all__ = [
     "BIT_CLOSE_AT_DAY_LOW",
     "BIT_CLOSE_BELOW_EMA20",
     "BIT_CLOSE_BELOW_EMA200",
+    "BIT_CLOSE_BELOW_GAP_MID",
     "BIT_CLOSE_BELOW_PDH",
     "BIT_CLOSE_BELOW_PDL",
     "BIT_CLOSE_BELOW_SUPERTREND",
@@ -75,6 +77,7 @@ __all__ = [
     "BIT_NEAR_FIB_1272",
     "BIT_NEAR_FIB_1618",
     "BIT_NEAR_FIB_2618",
+    "BIT_NEAR_GAP_MID",
     "BIT_NEAR_PDH",
     "BIT_NEAR_PDL",
     "BIT_NEAR_PIVOT_P",
@@ -179,9 +182,13 @@ BIT_NARROW_CPR_DAY: Final[int] = 63
 # ────── Supertrend ──────
 BIT_CLOSE_ABOVE_SUPERTREND: Final[int] = 64
 BIT_CLOSE_BELOW_SUPERTREND: Final[int] = 65
+# ────── Gap Midpoint ──────
+BIT_CLOSE_ABOVE_GAP_MID: Final[int] = 66
+BIT_CLOSE_BELOW_GAP_MID: Final[int] = 67
+BIT_NEAR_GAP_MID: Final[int] = 68
 
 # ────── Metadata ──────
-TOTAL_CONDITIONS: Final[int] = 66
+TOTAL_CONDITIONS: Final[int] = 69
 #: The strategy-mask width in bits (u128 — ADR-0012 D4).
 MASK_WIDTH: Final[int] = 128
 
@@ -191,7 +198,7 @@ MASK_WIDTH: Final[int] = 128
 #: RETIRED (tombstone, never gets math): bit 53 ``BIT_CLOSE_BELOW_VWAP``.
 #: LAYOUT-ONLY (math in a later PR): bit 64 ``BIT_CLOSE_ABOVE_SUPERTREND``.
 #: LAYOUT-ONLY (math in a later PR): bit 65 ``BIT_CLOSE_BELOW_SUPERTREND``.
-IMPLEMENTED_MASK: Final[int] = 18433233274827440127
+IMPLEMENTED_MASK: Final[int] = 534942067338694885375
 
 #: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
 #: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever
@@ -202,7 +209,7 @@ IMPLEMENTED_MASK: Final[int] = 18433233274827440127
 RETIRED_MASK: Final[int] = 13510798882111488
 
 #: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative
-#: to the FULL declared layout it clears the 6 intraday-only bit(s)
+#: to the FULL declared layout it clears the 9 intraday-only bit(s)
 #: (derived from the manifest's ``applies_to_1day = false`` rows):
 #:   bit 44 ``BIT_EARLY_MORNING``
 #:   bit 45 ``BIT_MID_MORNING``
@@ -210,6 +217,9 @@ RETIRED_MASK: Final[int] = 13510798882111488
 #:   bit 47 ``BIT_AFTERNOON``
 #:   bit 52 ``BIT_CLOSE_ABOVE_VWAP``
 #:   bit 53 ``BIT_CLOSE_BELOW_VWAP``
+#:   bit 66 ``BIT_CLOSE_ABOVE_GAP_MID``
+#:   bit 67 ``BIT_CLOSE_BELOW_GAP_MID``
+#:   bit 68 ``BIT_NEAR_GAP_MID``
 #: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.
 APPLIES_TO_1DAY_MASK: Final[int] = 73773201613165428735
 
@@ -280,6 +290,9 @@ NAME_TO_BIT: Final[dict[str, int]] = {
     "narrow_cpr_day": BIT_NARROW_CPR_DAY,
     "close_above_supertrend": BIT_CLOSE_ABOVE_SUPERTREND,
     "close_below_supertrend": BIT_CLOSE_BELOW_SUPERTREND,
+    "close_above_gap_mid": BIT_CLOSE_ABOVE_GAP_MID,
+    "close_below_gap_mid": BIT_CLOSE_BELOW_GAP_MID,
+    "near_gap_mid": BIT_NEAR_GAP_MID,
 }
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
@@ -304,6 +317,7 @@ GROUP_RANGES: Final[tuple[tuple[str, range], ...]] = (
     ("Market Structure", range(56, 60)),
     ("Central Pivot Range", range(60, 64)),
     ("Supertrend", range(64, 66)),
+    ("Gap Midpoint", range(66, 69)),
 )
 
 

@@ -62,6 +62,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "TOTAL_CONDITIONS",
         "compute_ema",
         "compute_fib_levels",
+        "compute_gap_mid",
         "compute_pivot_levels",
         "derive_bar_metadata",
         "ema_alpha",

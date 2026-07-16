@@ -45,7 +45,7 @@ def test_vocab_bits_matches_total_conditions() -> None:
     """VOCAB_BITS tracks the codegen'd vocabulary size (grow-only)."""
     from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
-    assert VOCAB_BITS == TOTAL_CONDITIONS == 66
+    assert VOCAB_BITS == TOTAL_CONDITIONS == 69
 
 
 def test_max_vocab_bits_is_128() -> None:

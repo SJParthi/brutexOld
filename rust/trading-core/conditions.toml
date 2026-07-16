@@ -608,3 +608,39 @@ group = "Supertrend"
 description = "declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)"
 applies_to_1day = true
 implemented = false
+
+# ─────────────────────── Group 15: Gap Midpoint (bits 66-68) ────────────────────
+# Session-edge gap-midpoint level (DEC-GAP-MIDPOINT-CONDITIONS-001): on a nonzero
+# gap day (sign of open_of_day − pdc), the level is the round-half-even midpoint
+# of the prior session's LAST TF bar extreme and today's FIRST TF bar extreme —
+# HIGHs on a gap-up day, LOWs on a gap-down day (the ES Trading Academy
+# spreadsheet's (X1+X2)/2, generalized per-timeframe). The level is resolved
+# upstream (Stage-1A per-day state + `indicators::gap_mid::compute_gap_mid`) and
+# threaded into the evaluator as an OPTIONAL level (absent ⇒ the bits stay 0); no
+# level (zero gap / missing X1/X2 / the session's first TF bar — the
+# arm-from-bar-2 law) ⇒ all three bits stay 0. Masked on 1day (each 1day bar IS
+# its session's first TF bar, so the arming ordinal keeps the bits 0 there by
+# construction) — applies_to_1day=false.
+[[condition]]
+bit = 66
+name = "close_above_gap_mid"
+group = "Gap Midpoint"
+description = "close strictly above the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 67
+name = "close_below_gap_mid"
+group = "Gap Midpoint"
+description = "close strictly below the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true
+
+[[condition]]
+bit = 68
+name = "near_gap_mid"
+group = "Gap Midpoint"
+description = "close within tolerance of the session-edge gap-midpoint level"
+applies_to_1day = false
+implemented = true

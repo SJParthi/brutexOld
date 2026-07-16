@@ -21,6 +21,13 @@ regenerate-and-trust):
   recomputed INDEPENDENTLY here from the case's own prev-day anchors (exact
   integer/Decimal math — never the production helper).
 
+DEC-GAP-MIDPOINT-CONDITIONS-001 (the 66→69 growth) later APPENDED the
+gap-midpoint bits 66-68 with exactly two per-case input keys drawn from a
+SEPARATE second RNG stream — the pre-reshape invariants above still hold
+verbatim over the pre-existing fields/bits (the appended keys are enumerated
+and excluded from the input hash; the gap bits are the one sanctioned >= 64
+firing exception).
+
 The companion fixture is a committed copy of the OLD masks: its ``note`` field
 records the provenance prose, and its sibling ``source_fixture_sha256`` key
 records the pre-reshape fixture's WHOLE-FILE SHA-256
@@ -47,6 +54,14 @@ _OLD = json.loads(
 
 #: The two RETIRED tombstone bits the reshape cleared.
 _TOMBSTONE_MASK = (1 << 52) | (1 << 53)
+#: The per-case input keys APPENDED by DEC-GAP-MIDPOINT-CONDITIONS-001 (bits
+#: 66-68, drawn from a SEPARATE second RNG stream so every pre-existing draw is
+#: unshifted) — excluded from the pre-reshape input hash, enumerated so any
+#: OTHER new key still breaks the invariant.
+_GAP_APPENDED_KEYS = frozenset({"gap_mid_paisa"})
+_GAP_APPENDED_PROXIMITY_KEYS = frozenset({"gap_mid_bps"})
+#: The implemented gap-midpoint trio (bits 66-68).
+_GAP_MASK = 0b111 << 66
 #: The pre-reshape 60-bit vocabulary span.
 _LOW60 = (1 << 60) - 1
 #: The narrow-CPR width threshold (basis points of P) — restated literally
@@ -55,13 +70,24 @@ _NARROW_BPS = 30
 
 
 def _input_sha(case: dict[str, Any]) -> str:
-    """SHA-256 of a case's INPUT fields (everything except ``expected_mask``).
+    """SHA-256 of a case's PRE-RESHAPE input fields (everything except
+    ``expected_mask`` and the DEC-GAP-MIDPOINT-CONDITIONS-001 appends).
 
     Canonical JSON — ``sort_keys`` + compact separators — exactly how the
     companion fixture's ``inputs_sha256`` values were minted from the OLD
-    (version-2) fixture.
+    (version-2) fixture. The gap growth (bits 66-68) APPENDED exactly two
+    per-case input keys drawn from a SEPARATE second RNG stream
+    (``gap_mid_paisa`` + ``proximity.gap_mid_bps`` — the enumerated
+    ``_GAP_APPENDED_KEYS``); those are EXCLUDED here so the invariant stays
+    exactly the one the companion minted: every pre-existing input field is
+    byte-identical to the frozen pre-reshape corpus. A NEW key outside the
+    enumerated append-set still fails loudly (it lands in the hash).
     """
-    d = {k: v for k, v in case.items() if k != "expected_mask"}
+    d = {k: v for k, v in case.items() if k != "expected_mask" and k not in _GAP_APPENDED_KEYS}
+    prox = dict(d["proximity"])
+    for k in _GAP_APPENDED_PROXIMITY_KEYS:
+        prox.pop(k, None)
+    d["proximity"] = prox
     return hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -154,11 +180,22 @@ def test_pre_existing_bits_are_back_compat_and_tombstones_cleared() -> None:
     assert tombstones_cleared > 0
 
 
-def test_no_bit_at_or_above_64_is_ever_set() -> None:
-    """The declared-only SuperTrend bits (64/65) + reserved headroom stay inert."""
+def test_no_bit_at_or_above_64_is_ever_set_except_the_gap_trio() -> None:
+    """The declared-only SuperTrend bits (64/65) + reserved headroom stay inert.
+
+    Since DEC-GAP-MIDPOINT-CONDITIONS-001 the IMPLEMENTED gap-midpoint bits
+    66-68 legitimately fire past u64 — they are the ONLY sanctioned exception;
+    bits 64/65 and every bit >= 69 must never be set.
+    """
+    gap_fired = 0
     for case in _NEW["cases"]:
         mask = int(case["expected_mask"], 16)
-        assert mask >> 64 == 0, f"case {case['id']}: bit >= 64 fired ({mask:#034x})"
+        stray = mask >> 64 << 64 & ~_GAP_MASK
+        assert stray == 0, f"case {case['id']}: non-gap bit >= 64 fired ({mask:#034x})"
+        if mask & _GAP_MASK:
+            gap_fired += 1
+    # Anti-vacuity: the gap trio genuinely fires somewhere in the corpus.
+    assert gap_fired > 0
 
 
 def test_new_cpr_bits_are_exactly_the_independent_arithmetic() -> None:

@@ -40,13 +40,13 @@ def _mask(*names: str) -> int:
 
 
 def test_dual_label_dict_covers_every_one_of_the_60_names() -> None:
-    """The dual-label dict keys are EXACTLY the 60 manifest condition names.
+    """The dual-label dict keys are EXACTLY the 63 manifest condition names.
 
     If a future condition is appended to ``conditions.toml`` / ``bits.py``
     without a Pro+Simple label, this test FAILS — no silent gaps.
     """
     assert set(CONDITION_LABELS.keys()) == set(NAME_TO_BIT.keys())
-    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 66
+    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 69
 
 
 def test_every_label_is_a_nonempty_pro_and_simple_pair() -> None:

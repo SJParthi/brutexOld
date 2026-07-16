@@ -47,7 +47,11 @@ _GOLDEN_DECLARATION = {
     "forced_exit_ist": "15:20:00",
     "stop_loss_bps": None,
     "take_profit_bps": None,
-    "candidate_mask_hex": "0000000000000000ffcfffffffffffff",
+    # Re-locked at the 60→66 vocab reshape, then again at
+    # DEC-GAP-MIDPOINT-CONDITIONS-001: the empty condition_scope candidate
+    # mask IS IMPLEMENTED_MASK, which grew 66 → 69 declared bits (65 active —
+    # the ONE moved key in this declaration; every other field byte-identical).
+    "candidate_mask_hex": "000000000000001cffcfffffffffffff",
     "spec_mask_hex": "00000000000000001000100000400010",
 }
 

@@ -875,18 +875,22 @@ def test_applies_to_1day_mask_clears_exactly_tod_and_vwap_bits() -> None:
     """Pin the EXACT intraday-only bit set masked out on 1day (ADR-0012 D12).
 
     ``IMPLEMENTED_MASK & ~APPLIES_TO_1DAY_MASK`` must equal exactly the four
-    Time-of-Day bits 44-47 — built from the named BIT_* constants, never magic
+    Time-of-Day bits 44-47 PLUS the three Gap-Midpoint bits 66-68
+    (DEC-GAP-MIDPOINT-CONDITIONS-001 — the session-edge level degenerates when
+    the bar IS the session) — built from the named BIT_* constants, never magic
     numbers — so the bits.py comment can never drift from the constant again
     (DEC-CORP-ACTION-GATE-001 doc-drift fold). The tombstoned VWAP bits 52-53
     left IMPLEMENTED_MASK with the 66-bit reshape (they stay outside
-    APPLIES_TO_1DAY_MASK too, pinned below), so the implemented∖1day residue
-    is the ToD quartet alone.
+    APPLIES_TO_1DAY_MASK too, pinned below), so they are NOT in this residue.
     """
     expected_cleared = (
         (1 << B.BIT_EARLY_MORNING)
         | (1 << B.BIT_MID_MORNING)
         | (1 << B.BIT_MIDDAY)
         | (1 << B.BIT_AFTERNOON)
+        | (1 << B.BIT_CLOSE_ABOVE_GAP_MID)
+        | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        | (1 << B.BIT_NEAR_GAP_MID)
     )
     assert expected_cleared == B.IMPLEMENTED_MASK & ~B.APPLIES_TO_1DAY_MASK
     # The tombstoned VWAP pair sits outside BOTH masks (never 1day-enabled).

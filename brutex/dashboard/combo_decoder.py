@@ -135,12 +135,16 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
         "close<SuperTrend (inactive)",
         "price below the SuperTrend line (not yet active)",
     ),
+    # ── Gap Midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+    "close_above_gap_mid": ("close>gap-mid", "price above the opening-gap midpoint"),
+    "close_below_gap_mid": ("close<gap-mid", "price below the opening-gap midpoint"),
+    "near_gap_mid": ("near gap-mid", "at the opening-gap midpoint"),
 }
 
 #: Readable grouping order for composing a sentence: trend → level →
 #: candle/structure → time. Each entry is (group-label, set-of-condition-names).
 #: A condition not in any of these groups would be dropped from the sentence,
-#: so a coverage test asserts these four sets partition all 66 names exactly.
+#: so a coverage test asserts these four sets partition all 69 names exactly.
 _TREND_NAMES: Final[frozenset[str]] = frozenset(
     {
         "close_above_ema20",
@@ -187,6 +191,11 @@ _LEVEL_NAMES: Final[frozenset[str]] = frozenset(
         "below_cpr_bc",
         "inside_cpr",
         "narrow_cpr_day",
+        # Gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001): a price LEVEL family
+        # like PDH/PDL — the session-edge reversal level.
+        "close_above_gap_mid",
+        "close_below_gap_mid",
+        "near_gap_mid",
     }
 )
 _STRUCTURE_NAMES: Final[frozenset[str]] = frozenset(

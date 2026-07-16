@@ -66,6 +66,10 @@ def main() -> int:
             c["market_structure"]["bos_bearish"],
             c["market_structure"]["choch_bullish"],
             c["market_structure"]["choch_bearish"],
+            # Group-15 gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) —
+            # appended-last, carried VERBATIM like the VWAP.
+            c["gap_mid_paisa"],
+            c["proximity"]["gap_mid_bps"],
         )
         expected = int(c["expected_mask"], 16)
         if got != expected:

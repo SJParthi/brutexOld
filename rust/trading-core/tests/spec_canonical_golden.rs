@@ -23,6 +23,7 @@ fn fixture_spec() -> StrategySpec {
             pivot_proximity_bps: 50,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
+            gap_mid_proximity_bps: 10,
         },
         3,
         1,
@@ -67,6 +68,7 @@ fn each_field_perturbation_moves_the_encode() {
         pivot_proximity_bps: 50,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 25,
+        gap_mid_proximity_bps: 10,
     };
     let variants = [
         StrategySpec::new(0x1e, Direction::Long, prox, 3, 1).unwrap(),
@@ -113,4 +115,33 @@ fn each_field_perturbation_moves_the_encode() {
         assert_ne!(hex, base, "variant {i} must move the encode");
         assert_eq!(&hex[..8], "01000000", "variant {i} keeps the v1 prefix");
     }
+}
+
+#[test]
+fn gap_mid_bps_is_deliberately_not_encoded() {
+    // The FROZEN v1 law (DEC-GAP-MIDPOINT-CONDITIONS-001): `canonical_bytes`
+    // encodes exactly THREE proximity bps — a differing `gap_mid_proximity_bps`
+    // leaves the encode BYTE-IDENTICAL (every pre-gap run_id preserved). BruteX
+    // carries a swept non-default value in run identity via the default-omit
+    // `canonical_trade_params` key instead; growing this layout requires a
+    // coordinator-brokered SPEC_SCHEMA_VERSION bump.
+    let base = fixture_spec();
+    let gap_variant = StrategySpec::new(
+        0x1f,
+        Direction::Long,
+        ProximityParams {
+            pivot_proximity_bps: 50,
+            pdh_pdl_proximity_bps: 10,
+            fib_proximity_bps: 25,
+            gap_mid_proximity_bps: 25,
+        },
+        3,
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        to_hex(&gap_variant.canonical_bytes()),
+        FIXTURE_CANONICAL_HEX
+    );
+    assert_eq!(gap_variant.canonical_bytes(), base.canonical_bytes());
 }

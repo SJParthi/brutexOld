@@ -38,6 +38,14 @@ struct Proximity {
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    /// Group-15 gap-midpoint tolerance (DEC-GAP-MIDPOINT-CONDITIONS-001);
+    /// serde-defaulted (10 = the evaluator default) for pre-gap parses.
+    #[serde(default = "default_gap_mid_bps")]
+    gap_mid_bps: i64,
+}
+
+fn default_gap_mid_bps() -> i64 {
+    10
 }
 
 #[derive(Deserialize)]
@@ -73,6 +81,10 @@ struct Case {
     proximity: Proximity,
     prior: Prior,
     market_structure: MarketStructure,
+    /// Group-15 gap-midpoint level, carried VERBATIM
+    /// (DEC-GAP-MIDPOINT-CONDITIONS-001); serde-defaulted for pre-gap parses.
+    #[serde(default)]
+    gap_mid_paisa: Option<i64>,
     expected_mask: String,
 }
 
@@ -134,11 +146,13 @@ fn rebuild(c: &Case) -> (IndicatorSnapshot, ProximityParams, PriorBarHistory) {
             choch_bullish: c.market_structure.choch_bullish,
             choch_bearish: c.market_structure.choch_bearish,
         },
+        gap_mid_paisa: c.gap_mid_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: c.proximity.pivot_bps,
         pdh_pdl_proximity_bps: c.proximity.pdh_pdl_bps,
         fib_proximity_bps: c.proximity.fib_bps,
+        gap_mid_proximity_bps: c.proximity.gap_mid_bps,
     };
     let prior = PriorBarHistory {
         prior_n: c.prior.prior_n,

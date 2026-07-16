@@ -34,17 +34,19 @@ u128 as **two u64 limbs** `(lo, hi)` and tests
 `((bar_lo & m_lo) == m_lo) & ((bar_hi & m_hi) == m_hi)` — two u64 ANDs per bar,
 still O(1) per bar. The production Rust kernel (`fno_math`) is u64-native; when a
 mask or bar exceeds 64 bits the batch count routes to the two-limb numpy
-reference so no high bit is ever silently truncated (the 66-condition layout's
-bits 0-65 span past u64 only at the declared-only SuperTrend bits 64/65, which
-never fire today; the >=64-bit headroom is exercised by the tests).
+reference so no high bit is ever silently truncated (the 69-condition layout's
+bits 0-68 span past u64 at the declared-only SuperTrend bits 64/65 (which
+never fire today) AND the LIVE gap-midpoint bits 66-68
+(DEC-GAP-MIDPOINT-CONDITIONS-001) — a gap-bit mask/bar routes to the two-limb
+reference; the >=64-bit headroom is exercised by the tests).
 
 ## Combo iteration
 
-For the 66-condition vocab and AND-mask of size K, the count is C(66,K):
+For the 69-condition vocab and AND-mask of size K, the count is C(69,K):
 
-    K=1   66
-    K=2   2,145
-    K=3   45,760
+    K=1   69
+    K=2   2,346
+    K=3   52,394
 
 This module exposes ``iter_masks_k_of_n(k, n)`` that yields every
 u128 mask with exactly K bits set. The implementation is currently
@@ -91,7 +93,7 @@ __all__ = [
 # Constants
 # ─────────────────────────────────────────────────────────────────
 
-VOCAB_BITS: int = 66
+VOCAB_BITS: int = 69
 """Current condition vocabulary size (the dense bit count from
 ``rust/trading-core/conditions.toml`` / ``brutex.vocabulary.bits.TOTAL_CONDITIONS``).
 DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only)."""
@@ -230,7 +232,7 @@ def evaluate_mask(bar_bits: int, required_mask: int) -> bool:
     Parameters
     ----------
     bar_bits : int
-        u128 truth-vector at one bar (all 66 layout conditions evaluated).
+        u128 truth-vector at one bar (all 69 layout conditions evaluated).
     required_mask : int
         u128 strategy mask. A bit set here means the condition is
         required to fire.
@@ -407,10 +409,11 @@ def count_supermasks(bar_bits: Sequence[int], masks: Sequence[int]) -> list[int]
     # The Rust hot kernel is u64-native. If any mask OR bar uses a bit >= 64
     # (the u128 headroom) the kernel would silently truncate it — so route to the
     # bit-exact two-limb numpy reference instead (no high bit is ever dropped).
-    # Today's vocabulary's live bits (0-63, incl. bit 63 narrow_cpr_day) fit
-    # u64, so the fast Rust path is the norm; the >=64-bit branch is the
-    # correctness guard for the declared-only SuperTrend bits 64/65 (which
-    # need the second limb) and any future growth.
+    # The vocabulary's live bits now REACH past u64: the gap-midpoint bits
+    # 66-68 (DEC-GAP-MIDPOINT-CONDITIONS-001) are IMPLEMENTED second-limb bits,
+    # so any mask/bar carrying one routes to the bit-exact two-limb reference;
+    # masks confined to bits 0-63 keep the fast Rust path. The branch also
+    # guards the declared-only SuperTrend bits 64/65 and any future growth.
     if any(m > U64_MASK for m in masks) or any(b > U64_MASK for b in bar_bits):
         return count_supermasks_reference(bar_bits, masks)
     return list(fno_math.count_supermasks_u64s(list(bar_bits), list(masks)))
@@ -541,7 +544,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     k : int
         Number of required bits. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 69).
 
     Returns
     -------
@@ -553,11 +556,11 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     >>> count_combos(0)
     1
     >>> count_combos(1)
-    66
+    69
     >>> count_combos(2)
-    2145
+    2346
     >>> count_combos(3)
-    45760
+    52394
     >>> count_combos(0, n=5)
     1
     >>> count_combos(3, n=5)
@@ -602,7 +605,7 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
     k : int
         Number of bits to set in each yielded mask. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 69).
 
     Yields
     ------
@@ -644,7 +647,7 @@ def iter_masks_k_of_bits(bits: Sequence[int], k: int) -> Iterator[int]:
 
     Generalises :func:`iter_masks_k_of_n` — which enumerates over the first ``n``
     *contiguous* bits ``0..n-1`` — to an **arbitrary subset** of condition bits, so
-    a sweep can brute-force over a chosen handful of the 66 conditions (e.g. only
+    a sweep can brute-force over a chosen handful of the 69 conditions (e.g. only
     the pivot + Fibonacci bits), ``k`` at a time, instead of a contiguous prefix.
     Positions are de-duplicated and sorted ascending, so the iteration order is
     deterministic (lexicographic on the sorted positions) and the total count is

@@ -1,6 +1,6 @@
 """Golden byte-lock of the R33 phrase table (DEC-SWEEP-RESULTS-DEPTH-001, WP3).
 
-The 66 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
+The 69 plain-English phrases are hand-written ONCE and reviewed in PR (R33's
 "written+reviewed once" law) — this digest makes any wording edit a
 DELIBERATE golden re-lock, never a silent drift.
 
@@ -25,7 +25,11 @@ from brutex.ranking.phrases import PHRASE_TABLE, reason_for_mask
 # the declared-only SuperTrend 64-65) + the two VWAP rows reworded to the
 # honest RETIRED prose (bit positions unchanged). Old digest:
 # 92f9df06fa5b2b5aa7401505e664630ad22b56b2f53e982b611bc4a766346e79.
-_GOLDEN_TABLE_SHA256 = "221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883"
+# RE-LOCKED again at DEC-GAP-MIDPOINT-CONDITIONS-001: the three Group-15
+# gap-midpoint entries (bits 66-68) were APPENDED — pre-existing rows
+# byte-identical. Pre-gap digest:
+# 221e39fef632f95cb3b5b4c206970c0f837249471adda8ecf9e4012139a45883.
+_GOLDEN_TABLE_SHA256 = "0f69ada767c7d69e660f45508232c7f70459659532475763d1a8bb91257f80cf"
 
 
 def test_phrase_table_digest_locked() -> None:

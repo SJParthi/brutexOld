@@ -120,6 +120,10 @@ def _with_levels(case: dict[str, Any], pivot_levels: list[int], fib_levels: list
         case["market_structure"]["bos_bearish"],
         case["market_structure"]["choch_bullish"],
         case["market_structure"]["choch_bearish"],
+        # Group-13 gap-midpoint (DEC-GAP-MIDPOINT-CONDITIONS-001) —
+        # appended-last, carried VERBATIM like the VWAP.
+        case["gap_mid_paisa"],
+        case["proximity"]["gap_mid_bps"],
     )
     return result
 
@@ -175,6 +179,9 @@ class TestProductionPathParity:
                 case["market_structure"]["bos_bearish"],
                 case["market_structure"]["choch_bullish"],
                 case["market_structure"]["choch_bearish"],
+                # Group-13 gap-midpoint — appended-last, carried verbatim.
+                case["gap_mid_paisa"],
+                case["proximity"]["gap_mid_bps"],
             )
             if with_levels != from_raw:
                 mismatches.append(

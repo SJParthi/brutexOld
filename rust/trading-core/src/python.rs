@@ -13,12 +13,16 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use crate::bits::{IMPLEMENTED_MASK, TOTAL_CONDITIONS};
-use crate::evaluator::{IndicatorSnapshot, PriorBarHistory, ProximityParams, evaluate_atoms};
+use crate::evaluator::{
+    DEFAULT_GAP_MID_PROXIMITY_BPS, IndicatorSnapshot, PriorBarHistory, ProximityParams,
+    evaluate_atoms,
+};
 use crate::greeks::{
     DELTA_ADMISSION_FLOOR, IV_CLAMP_MAX, IV_CLAMP_MIN, T_FLOOR_YEARS, VEGA_ADMISSION_FLOOR, greeks,
 };
 use crate::indicators::ema::{compute_ema, ema_alpha, ema_seed, ema_step};
 use crate::indicators::fib::{FibLevels, compute_fib_levels};
+use crate::indicators::gap_mid::compute_gap_mid;
 use crate::indicators::market_structure::{
     MarketStructureSignal, MarketStructureState as CoreMarketStructureState,
 };
@@ -197,6 +201,7 @@ fn check_evaluate_inputs(
     pivot_bps: i64,
     pdh_pdl_bps: i64,
     fib_bps: i64,
+    gap_mid_bps: i64,
 ) -> Result<(), String> {
     // 1. Every per-bar price + optional EMA + `pdc` (the ONLY level the evaluator
     //    MULTIPLIES — `pdc * 50` in Group 9) must sit in the bar range so the
@@ -228,6 +233,7 @@ fn check_evaluate_inputs(
         ("pivot_bps", pivot_bps),
         ("pdh_pdl_bps", pdh_pdl_bps),
         ("fib_bps", fib_bps),
+        ("gap_mid_bps", gap_mid_bps),
     ] {
         if !(0..=MAX_BPS).contains(&bps) {
             return Err(format!(
@@ -274,6 +280,7 @@ fn check_evaluate_inputs(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
 ))]
 fn evaluate_from_raw(
     tod_seconds: u32,
@@ -298,6 +305,8 @@ fn evaluate_from_raw(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper: all logic + validation lives in the pure `_impl` (unit
     // tested without a libpython link), the boundary only maps `Err(String)` to a
@@ -327,6 +336,8 @@ fn evaluate_from_raw(
             choch_bullish,
             choch_bearish,
         },
+        gap_mid_paisa,
+        gap_mid_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -357,10 +368,23 @@ fn evaluate_from_raw_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> Result<u128, String> {
     // Validate at the boundary so corrupt / overflow-prone prev-day OHLC is
     // rejected instead of tripping the inner `assert!`/`overflow-checks` panic.
     check_prev_day_ohlc(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa)?;
+    // `gap_mid_paisa` is SUBTRACTED in `is_near` (never multiplied), so like
+    // every caller-supplied level it must be bar-bounded to keep
+    // `(close - level).abs()` inside i64 (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    if let Some(v) = gap_mid_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "gap_mid_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
+    }
     // Also bound every per-bar input the EVALUATOR multiplies/subtracts/`.abs()`es
     // (close × bps, body × 10, (close − day_low) × 3, pdc × 50, …). The
     // recomputed pivot/fib R/S/retrace levels are bounded by the validated anchor
@@ -381,6 +405,7 @@ fn evaluate_from_raw_impl(
         pivot_bps,
         pdh_pdl_bps,
         fib_bps,
+        gap_mid_bps,
     )?;
     let pivots = compute_pivot_levels(prev_pdh_paisa, prev_pdl_paisa, prev_pdc_paisa);
     let fib = compute_fib_levels(prev_pdh_paisa, prev_pdl_paisa);
@@ -398,11 +423,17 @@ fn evaluate_from_raw_impl(
         day_low_paisa,
         open_of_day_paisa,
         market_structure,
+        // The recompute path threads the session-edge gap-midpoint VERBATIM
+        // (it is NOT derivable from pdh/pdl/pdc; the stateful X1/X2 capture
+        // lives upstream), so the four-way golden bit-identity holds for the
+        // Group-15 bits too (DEC-GAP-MIDPOINT-CONDITIONS-001).
+        gap_mid_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
         pdh_pdl_proximity_bps: pdh_pdl_bps,
         fib_proximity_bps: fib_bps,
+        gap_mid_proximity_bps: gap_mid_bps,
     };
     let prior = PriorBarHistory {
         prior_n,
@@ -441,6 +472,7 @@ fn evaluate_from_raw_impl(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
 ))]
 fn evaluate_with_levels(
     tod_seconds: u32,
@@ -464,6 +496,8 @@ fn evaluate_with_levels(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> PyResult<u128> {
     // Thin PyO3 wrapper — the length-validation + the level-indexing it guards
     // live in the pure `_impl` (unit-tested without a libpython link). The
@@ -493,6 +527,8 @@ fn evaluate_with_levels(
             choch_bullish,
             choch_bearish,
         },
+        gap_mid_paisa,
+        gap_mid_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -522,6 +558,8 @@ fn evaluate_with_levels_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> Result<u128, String> {
     if pivot_levels.len() != PIVOT_LEVELS_LEN {
         return Err(format!(
@@ -548,6 +586,17 @@ fn evaluate_with_levels_impl(
             ));
         }
     }
+    // `gap_mid_paisa` is a caller-supplied LEVEL: it is SUBTRACTED in
+    // `is_near`, so it must be bar-bounded like the pivot/fib levels above
+    // (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    if let Some(v) = gap_mid_paisa
+        && !bar_in_range(v)
+    {
+        return Err(format!(
+            "gap_mid_paisa magnitude {v} out of the overflow-safe range \
+             [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+        ));
+    }
     // Bound the per-bar inputs + bps the evaluator multiplies/subtracts/`.abs()`es
     // (`pdc` = pivot_levels[9] is already bar-bounded above).
     check_evaluate_inputs(
@@ -564,6 +613,7 @@ fn evaluate_with_levels_impl(
         pivot_bps,
         pdh_pdl_bps,
         fib_bps,
+        gap_mid_bps,
     )?;
     let pivots = PivotLevels {
         p_paisa: pivot_levels[0],
@@ -624,11 +674,13 @@ fn evaluate_with_levels_impl(
         day_low_paisa,
         open_of_day_paisa,
         market_structure,
+        gap_mid_paisa,
     };
     let proximity = ProximityParams {
         pivot_proximity_bps: pivot_bps,
         pdh_pdl_proximity_bps: pdh_pdl_bps,
         fib_proximity_bps: fib_bps,
+        gap_mid_proximity_bps: gap_mid_bps,
     };
     let prior = PriorBarHistory {
         prior_n,
@@ -663,6 +715,7 @@ fn evaluate_with_levels_impl(
     day_high_paisa, day_low_paisa, open_of_day_paisa,
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n, prior_flags,
     bos_bullish, bos_bearish, choch_bullish, choch_bearish,
+    gap_mid_paisa = None, gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
 ))]
 fn evaluate_spec(
     condition_mask_hex: &str,
@@ -688,6 +741,8 @@ fn evaluate_spec(
     bos_bearish: bool,
     choch_bullish: bool,
     choch_bearish: bool,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> PyResult<(u128, bool, u8)> {
     // Thin PyO3 wrapper: all logic + validation in the pure `_impl` (unit-tested
     // without a libpython link); the boundary maps `Err(String)` to a clean
@@ -718,6 +773,8 @@ fn evaluate_spec(
             choch_bullish,
             choch_bearish,
         },
+        gap_mid_paisa,
+        gap_mid_bps,
     )
     .map_err(PyValueError::new_err)
 }
@@ -749,6 +806,8 @@ fn evaluate_spec_impl(
     prior_n: usize,
     prior_flags: Vec<bool>,
     market_structure: MarketStructureSignal,
+    gap_mid_paisa: Option<i64>,
+    gap_mid_bps: i64,
 ) -> Result<(u128, bool, u8), String> {
     // Parse + validate the spec axes BEFORE the (more expensive) bar evaluate.
     let condition_mask = u128::from_str_radix(condition_mask_hex, 16)
@@ -783,6 +842,8 @@ fn evaluate_spec_impl(
         prior_n,
         prior_flags,
         market_structure,
+        gap_mid_paisa,
+        gap_mid_bps,
     )?;
     let fires = (bar_bits & condition_mask) == condition_mask;
     Ok((bar_bits, fires, dir.as_u8()))
@@ -874,6 +935,10 @@ fn spec_canonical_bytes_impl(
             pivot_proximity_bps: pivot_bps,
             pdh_pdl_proximity_bps: pdh_pdl_bps,
             fib_proximity_bps: fib_bps,
+            // NOT encoded by the FROZEN v1 canonical_bytes (exactly three bps)
+            // — any value here leaves the bytes untouched; the default keeps
+            // the struct meaningful (DEC-GAP-MIDPOINT-CONDITIONS-001).
+            gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
         },
         prior_n_usize,
         symbol_id,
@@ -970,6 +1035,99 @@ fn py_compute_fib_levels_impl(pdh_paisa: i64, pdl_paisa: i64) -> Result<Vec<i64>
     ];
     debug_assert_eq!(out.len(), FIB_COMPUTE_LIST_LEN);
     Ok(out)
+}
+
+/// Compute the session-edge gap-midpoint level from the two session-edge
+/// candles' extremes + today's open and the previous session's close — the
+/// single-source indicator math for the Group-15 bits 66-68
+/// (DEC-GAP-MIDPOINT-CONDITIONS-001; `indicators::gap_mid::compute_gap_mid`).
+///
+/// Returns `None` on a ZERO gap (`open_of_day_paisa == pdc_paisa` — no level
+/// exists), else `Some((gap_mid_paisa, direction))` with `direction` `1` for a
+/// gap-UP day (the level is the round-half-even midpoint of the two HIGHs) and
+/// `-1` for a gap-DOWN day (the two LOWs). Corrupt candle extremes
+/// (`hi < lo` on either candle) or an overflow-prone magnitude are REJECTED at
+/// the boundary with a clean `ValueError` — the inner fn's always-on
+/// `assert!`s would otherwise panic → `abort` under `panic="abort"`.
+#[pyfunction]
+#[pyo3(name = "compute_gap_mid", signature = (
+    x1_hi_paisa, x1_lo_paisa, x2_hi_paisa, x2_lo_paisa, open_of_day_paisa, pdc_paisa,
+))]
+fn py_compute_gap_mid(
+    x1_hi_paisa: i64,
+    x1_lo_paisa: i64,
+    x2_hi_paisa: i64,
+    x2_lo_paisa: i64,
+    open_of_day_paisa: i64,
+    pdc_paisa: i64,
+) -> PyResult<Option<(i64, i8)>> {
+    // Thin PyO3 wrapper over the pure `_impl` (unit-tested without a GIL).
+    py_compute_gap_mid_impl(
+        x1_hi_paisa,
+        x1_lo_paisa,
+        x2_hi_paisa,
+        x2_lo_paisa,
+        open_of_day_paisa,
+        pdc_paisa,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+/// Pure logic for [`py_compute_gap_mid`] — `Result<..., String>` so a direct
+/// FFI caller is rejected cleanly instead of tripping the inner `assert!` /
+/// `overflow-checks` panic. Bounds every operand to [`MAX_BAR_PAISA`] so the
+/// midpoint sum `(X1 + X2)` can never overflow i64 (and stays f64-exact —
+/// `2 · MAX_BAR_PAISA ≈ 2.8·10¹⁴ ≪ 2⁵³`).
+fn py_compute_gap_mid_impl(
+    x1_hi_paisa: i64,
+    x1_lo_paisa: i64,
+    x2_hi_paisa: i64,
+    x2_lo_paisa: i64,
+    open_of_day_paisa: i64,
+    pdc_paisa: i64,
+) -> Result<Option<(i64, i8)>, String> {
+    for (name, hi, lo) in [
+        ("X1", x1_hi_paisa, x1_lo_paisa),
+        ("X2", x2_hi_paisa, x2_lo_paisa),
+    ] {
+        if hi < lo {
+            return Err(format!(
+                "{name} candle high ({hi}) must be >= its low ({lo})"
+            ));
+        }
+    }
+    for v in [
+        x1_hi_paisa,
+        x1_lo_paisa,
+        x2_hi_paisa,
+        x2_lo_paisa,
+        open_of_day_paisa,
+        pdc_paisa,
+    ] {
+        if !bar_in_range(v) {
+            return Err(format!(
+                "gap-mid input magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
+    Ok(compute_gap_mid(
+        x1_hi_paisa,
+        x1_lo_paisa,
+        x2_hi_paisa,
+        x2_lo_paisa,
+        open_of_day_paisa,
+        pdc_paisa,
+    )
+    .map(|(level, direction)| {
+        (
+            level,
+            match direction {
+                crate::indicators::gap_mid::GapDirection::Up => 1,
+                crate::indicators::gap_mid::GapDirection::Down => -1,
+            },
+        )
+    }))
 }
 
 /// Compute the full EMA series from a list of `f64` closes — the shared
@@ -1380,7 +1538,17 @@ fn check_stage1a_batch_values(
     inp: &crate::stage1a_batch::Stage1aBatchInputs<'_>,
 ) -> Result<(), String> {
     let n = crate::stage1a_batch::validate_structure(inp)?;
-    for v in inp.day_pivot_levels.iter().chain(inp.day_fib_levels.iter()) {
+    for v in inp
+        .day_pivot_levels
+        .iter()
+        .chain(inp.day_fib_levels.iter())
+        // The Group-15 X1 day tables are levels too: their values feed the
+        // `(X1 + X2)` midpoint sum in `compute_gap_mid` (with the bar-bounded
+        // first-bar extremes as X2), so bar-bounding them keeps that sum far
+        // inside i64 AND f64-exact (DEC-GAP-MIDPOINT-CONDITIONS-001).
+        .chain(inp.day_x1_hi_paisa.iter())
+        .chain(inp.day_x1_lo_paisa.iter())
+    {
         if !bar_in_range(*v) {
             return Err(format!(
                 "level magnitude {v} out of the overflow-safe range \
@@ -1428,6 +1596,7 @@ fn check_stage1a_batch_values(
             inp.pivot_bps,
             inp.pdh_pdl_bps,
             inp.fib_bps,
+            inp.gap_mid_bps,
         )?;
     }
     Ok(())
@@ -1459,6 +1628,8 @@ fn check_stage1a_batch_values(
     pivot_bps, pdh_pdl_bps, fib_bps, prior_n,
     anchor_dependent_mask, fib_dependent_mask, applies_to_1day_mask,
     apply_1day_mask, fractal_k = 2,
+    gap_mid_bps = DEFAULT_GAP_MID_PROXIMITY_BPS,
+    day_x1_hi_paisa = None, day_x1_lo_paisa = None, day_has_x1 = None,
 ))]
 fn stage1a_bar_bits_batch(
     open_paisa: Vec<i64>,
@@ -1483,10 +1654,27 @@ fn stage1a_bar_bits_batch(
     applies_to_1day_mask: u128,
     apply_1day_mask: bool,
     fractal_k: usize,
+    gap_mid_bps: i64,
+    day_x1_hi_paisa: Option<Vec<i64>>,
+    day_x1_lo_paisa: Option<Vec<i64>>,
+    day_has_x1: Option<Vec<bool>>,
 ) -> PyResult<Vec<u128>> {
     // Thin PyO3 wrapper: structure + value envelope validated by the pure
     // guard pass (unit-tested without a libpython link), then the feature-free
     // core computes. `Err(String)` → a clean, catchable `ValueError`.
+    //
+    // The Group-15 X1 day tables default to the ALL-COLD shape (`None` →
+    // zeroed values + all-false warm flags sized to the day count), so a
+    // pre-gap dispatch is byte-identical to the legacy build — the gap bits
+    // stay 0 exactly like the Python oracle before its Stage-1A state lands.
+    // Once the Python push() law computes gap bits, the dispatch MUST thread
+    // the real tables in the SAME change or the per-process burn-in parity
+    // mismatches and LOUDLY autoreverts the kernel
+    // (DEC-GAP-MIDPOINT-CONDITIONS-001; the #1743 one-change lockstep law).
+    let n_days = day_has_pivot.len();
+    let day_x1_hi_paisa = day_x1_hi_paisa.unwrap_or_else(|| vec![0; n_days]);
+    let day_x1_lo_paisa = day_x1_lo_paisa.unwrap_or_else(|| vec![0; n_days]);
+    let day_has_x1 = day_has_x1.unwrap_or_else(|| vec![false; n_days]);
     let inputs = crate::stage1a_batch::Stage1aBatchInputs {
         open_paisa: &open_paisa,
         high_paisa: &high_paisa,
@@ -1510,6 +1698,10 @@ fn stage1a_bar_bits_batch(
         anchor_dependent_mask,
         fib_dependent_mask,
         applies_to_1day_mask,
+        day_x1_hi_paisa: &day_x1_hi_paisa,
+        day_x1_lo_paisa: &day_x1_lo_paisa,
+        day_has_x1: &day_has_x1,
+        gap_mid_bps,
     };
     check_stage1a_batch_values(&inputs).map_err(PyValueError::new_err)?;
     crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs).map_err(PyValueError::new_err)
@@ -1575,6 +1767,7 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spec_canonical_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_pivot_levels, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_fib_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compute_gap_mid, m)?)?;
     m.add_function(wrap_pyfunction!(py_compute_ema, m)?)?;
     m.add_function(wrap_pyfunction!(py_ema_alpha, m)?)?;
     m.add_function(wrap_pyfunction!(py_ema_seed, m)?)?;
@@ -1759,6 +1952,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
     }
 
@@ -1815,6 +2010,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
     }
 
@@ -1943,6 +2140,7 @@ mod tests {
             MAX_BPS,
             0,
             0,
+            0,
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
@@ -1961,20 +2159,36 @@ mod tests {
                 0,
                 MAX_BPS,
                 0,
-                0
+                0,
+                0,
             )
             .is_err()
         );
         // A small close × MAX_BPS fits → accepted (the product guard does not
         // over-reject a legitimate large bps on a normal-priced bar).
         assert!(
-            check_evaluate_inputs(0, 0, 0, 1_000_000, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0)
+            check_evaluate_inputs(0, 0, 0, 1_000_000, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0,)
                 .is_ok()
         );
         // pdc out of range → rejected.
         assert!(
-            check_evaluate_inputs(0, 0, 0, 0, None, None, 0, 0, 0, MAX_BAR_PAISA + 1, 0, 0, 0)
-                .is_err()
+            check_evaluate_inputs(
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                0,
+                0,
+                0,
+                MAX_BAR_PAISA + 1,
+                0,
+                0,
+                0,
+                0,
+            )
+            .is_err()
         );
     }
 
@@ -1987,18 +2201,19 @@ mod tests {
         let over = fits + 1; // close * MAX_BPS  > i64::MAX
         // exact-fit product is ACCEPTED (reaches the inner evaluator).
         assert!(
-            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0).is_ok()
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0,).is_ok()
         );
         // one paisa over → product overflows i64 → REJECTED.
-        let err = check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0)
+        let err = check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, MAX_BPS, 0, 0, 0)
             .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
         // The same boundary holds per-bps-slot: only the offending slot rejects.
         assert!(
-            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, 0, MAX_BPS, 0).is_ok()
+            check_evaluate_inputs(0, 0, 0, fits, None, None, 0, 0, 0, 0, 0, MAX_BPS, 0, 0,).is_ok()
         );
         assert!(
-            check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, 0, 0, MAX_BPS).is_err()
+            check_evaluate_inputs(0, 0, 0, over, None, None, 0, 0, 0, 0, 0, 0, MAX_BPS, 0,)
+                .is_err()
         );
     }
 
@@ -2023,6 +2238,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
     }
 
@@ -2087,6 +2304,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
         .unwrap_err();
         assert!(err.contains("overflow-safe"), "got: {err}");
@@ -2110,6 +2329,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
         .unwrap_err();
         assert!(err.contains("overflows i64"), "got: {err}");
@@ -2180,6 +2401,8 @@ mod tests {
                 0,
                 vec![],
                 ms,
+                None,
+                DEFAULT_GAP_MID_PROXIMITY_BPS,
             )
             .expect("valid raw");
             assert_eq!((raw >> bit) & 1, 1, "from_raw bit {bit} should be set");
@@ -2203,6 +2426,8 @@ mod tests {
                 0,
                 vec![],
                 ms,
+                None,
+                DEFAULT_GAP_MID_PROXIMITY_BPS,
             )
             .expect("valid with_levels");
             assert_eq!((wl >> bit) & 1, 1, "with_levels bit {bit} should be set");
@@ -2250,6 +2475,8 @@ mod tests {
                 0,
                 vec![],
                 MarketStructureSignal::default(),
+                None,
+                DEFAULT_GAP_MID_PROXIMITY_BPS,
             )
             .unwrap();
             acc = acc.wrapping_add(m);
@@ -2287,6 +2514,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
     }
 
@@ -2331,6 +2560,11 @@ mod tests {
         let tombstone = 1u128 << 52;
         let err = spec_eval(&format!("{tombstone:032x}"), 0).unwrap_err();
         assert!(err.contains("unimplemented/reserved"), "got: {err}");
+        // Bit 69 is the first UNDECLARED bit (TOTAL_CONDITIONS == 69 since
+        // DEC-GAP-MIDPOINT-CONDITIONS-001 appended the gap trio at 66-68).
+        let undeclared = 1u128 << 69;
+        let err = spec_eval(&format!("{undeclared:032x}"), 0).unwrap_err();
+        assert!(err.contains("unimplemented/reserved"), "got: {err}");
     }
 
     #[test]
@@ -2363,6 +2597,8 @@ mod tests {
             0,
             vec![],
             MarketStructureSignal::default(),
+            None,
+            DEFAULT_GAP_MID_PROXIMITY_BPS,
         )
         .unwrap_err();
         assert!(err.contains("pivot_levels must have"), "got: {err}");
@@ -2382,6 +2618,9 @@ mod tests {
                 pivot_proximity_bps: 50,
                 pdh_pdl_proximity_bps: 10,
                 fib_proximity_bps: 25,
+                // Any value here leaves the FROZEN v1 encode untouched — the
+                // binding fills the default (DEC-GAP-MIDPOINT-CONDITIONS-001).
+                gap_mid_proximity_bps: DEFAULT_GAP_MID_PROXIMITY_BPS,
             },
             3,
             1,
@@ -2696,15 +2935,15 @@ mod tests {
             // the per-bar guard accepts every in-domain combination …
             prop_assert!(check_evaluate_inputs(
                 open, high, low, close, Some(close), Some(close),
-                day_high, day_low, open_of_day, 1_000_000, bps, bps, bps,
-            ).is_ok());
+                day_high, day_low, open_of_day, 1_000_000, bps, bps, bps, 0,
+        ).is_ok());
             // … and a full valid-anchor evaluate runs without panic.
             let mask = evaluate_from_raw_impl(
                 10 * 3600, open, high, low, close, Some(close), Some(close),
                 1_010_000, 990_000, 1_000_000, day_high, day_low, open_of_day,
                 bps, bps, bps, 0, vec![],
-                MarketStructureSignal::default(),
-            );
+                MarketStructureSignal::default(), None, DEFAULT_GAP_MID_PROXIMITY_BPS,
+        );
             prop_assert!(mask.is_ok());
         }
     }
@@ -2857,6 +3096,10 @@ mod tests {
             anchor_dependent_mask: 0,
             fib_dependent_mask: 0,
             applies_to_1day_mask: IMPLEMENTED_MASK,
+            day_x1_hi_paisa: &[0],
+            day_x1_lo_paisa: &[0],
+            day_has_x1: &[false],
+            gap_mid_bps: bps.2,
         };
         check_stage1a_batch_values(&inputs)?;
         crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs)
@@ -2920,6 +3163,8 @@ mod tests {
                 3,
                 Vec::new(),
                 MarketStructureSignal::default(),
+                None,
+                DEFAULT_GAP_MID_PROXIMITY_BPS,
             )
             .unwrap();
             let got = one_bar_batch_masks(
@@ -3030,6 +3275,10 @@ mod tests {
             anchor_dependent_mask: 0,
             fib_dependent_mask: 0,
             applies_to_1day_mask: IMPLEMENTED_MASK,
+            day_x1_hi_paisa: &[0],
+            day_x1_lo_paisa: &[0],
+            day_has_x1: &[false],
+            gap_mid_bps: 10,
         };
         let err = check_stage1a_batch_values(&inputs).unwrap_err();
         assert!(err.contains("start at 0"), "got: {err}");
@@ -3069,6 +3318,10 @@ mod tests {
             anchor_dependent_mask: 0,
             fib_dependent_mask: 0,
             applies_to_1day_mask: IMPLEMENTED_MASK,
+            day_x1_hi_paisa: &[0, 0],
+            day_x1_lo_paisa: &[0, 0],
+            day_has_x1: &[false, false],
+            gap_mid_bps: 10,
         };
         assert!(check_stage1a_batch_values(&inputs).is_ok());
         // …and the whole pipeline stays total over it.
@@ -3078,5 +3331,220 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    // ── gap-midpoint boundary + FFI laws (DEC-GAP-MIDPOINT-CONDITIONS-001) ──
+
+    #[test]
+    fn compute_gap_mid_impl_valid_up_down_zero() {
+        // Gap-UP: midpoint of the highs, direction +1.
+        assert_eq!(
+            py_compute_gap_mid_impl(
+                2_401_000, 2_399_000, 2_407_000, 2_404_500, 2_405_000, 2_400_000
+            ),
+            Ok(Some((2_404_000, 1)))
+        );
+        // Gap-DOWN: midpoint of the lows, direction -1.
+        assert_eq!(
+            py_compute_gap_mid_impl(
+                2_401_000, 2_399_000, 2_396_000, 2_394_000, 2_395_000, 2_400_000
+            ),
+            Ok(Some((2_396_500, -1)))
+        );
+        // Zero gap: no level.
+        assert_eq!(
+            py_compute_gap_mid_impl(
+                2_401_000, 2_399_000, 2_407_000, 2_404_500, 2_400_000, 2_400_000
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn compute_gap_mid_impl_rejects_corrupt_candles() {
+        // The boundary rejects hi < lo CLEANLY (the inner assert! would
+        // panic → SIGABRT under panic="abort").
+        let err = py_compute_gap_mid_impl(90, 100, 104, 95, 200, 100).unwrap_err();
+        assert!(err.contains("X1 candle high"), "got: {err}");
+        let err = py_compute_gap_mid_impl(100, 90, 95, 104, 200, 100).unwrap_err();
+        assert!(err.contains("X2 candle high"), "got: {err}");
+    }
+
+    #[test]
+    fn compute_gap_mid_impl_rejects_overflow_prone_magnitudes() {
+        // Any operand past MAX_BAR_PAISA is rejected BEFORE the (X1 + X2)
+        // midpoint sum could overflow / lose f64 exactness.
+        let big = MAX_BAR_PAISA + 1;
+        let err = py_compute_gap_mid_impl(big, 0, 100, 90, 200, 100).unwrap_err();
+        assert!(err.contains("overflow-safe range"), "got: {err}");
+        let err = py_compute_gap_mid_impl(100, 90, 104, 95, big, 100).unwrap_err();
+        assert!(err.contains("overflow-safe range"), "got: {err}");
+        let err = py_compute_gap_mid_impl(100, -big, 104, 95, 200, 100).unwrap_err();
+        assert!(err.contains("overflow-safe range"), "got: {err}");
+    }
+
+    #[test]
+    fn raw_impl_rejects_out_of_range_gap_mid() {
+        let err = evaluate_from_raw_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            PDH,
+            PDL,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+            Some(MAX_BAR_PAISA + 1),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.contains("gap_mid_paisa magnitude"), "got: {err}");
+    }
+
+    #[test]
+    fn with_levels_impl_rejects_out_of_range_gap_mid() {
+        let err = evaluate_with_levels_impl(
+            10 * 3600,
+            PDC,
+            PDH,
+            PDL,
+            PDC,
+            None,
+            None,
+            vec![0; PIVOT_LEVELS_LEN],
+            vec![0; FIB_LEVELS_LEN],
+            PDH,
+            PDL,
+            PDC,
+            10,
+            10,
+            10,
+            0,
+            vec![],
+            MarketStructureSignal::default(),
+            Some(-(MAX_BAR_PAISA + 1)),
+            10,
+        )
+        .unwrap_err();
+        assert!(err.contains("gap_mid_paisa magnitude"), "got: {err}");
+    }
+
+    #[test]
+    fn check_evaluate_inputs_rejects_bad_gap_mid_bps() {
+        // The 4th bps slot joins the SAME loop — a negative / absurd value is
+        // rejected NAMING the slot.
+        let err =
+            check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, 10, 10, 10, -1).unwrap_err();
+        assert!(err.contains("gap_mid_bps"), "got: {err}");
+        let err =
+            check_evaluate_inputs(0, 0, 0, 1, None, None, 0, 0, 0, 0, 10, 10, 10, MAX_BPS + 1)
+                .unwrap_err();
+        assert!(err.contains("gap_mid_bps"), "got: {err}");
+        // The gap slot also rides the exact product check.
+        let err = check_evaluate_inputs(
+            0,
+            0,
+            0,
+            MAX_BAR_PAISA,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            MAX_BPS,
+        )
+        .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
+    }
+
+    #[test]
+    fn with_levels_impl_fires_the_gap_bits_from_a_resolved_level() {
+        // A resolved level below/above/at the close fires exactly the
+        // documented Group-15 verdicts through the production entry point.
+        let eval = |gap_mid: Option<i64>| {
+            evaluate_with_levels_impl(
+                10 * 3600,
+                1_000_000,
+                1_010_000,
+                990_000,
+                1_000_000,
+                None,
+                None,
+                vec![0; PIVOT_LEVELS_LEN],
+                vec![0; FIB_LEVELS_LEN],
+                1_010_000,
+                990_000,
+                1_000_000,
+                10,
+                10,
+                10,
+                0,
+                vec![],
+                MarketStructureSignal::default(),
+                gap_mid,
+                10,
+            )
+            .expect("valid inputs")
+        };
+        let above = 1u128 << crate::bits::BIT_CLOSE_ABOVE_GAP_MID;
+        let below = 1u128 << crate::bits::BIT_CLOSE_BELOW_GAP_MID;
+        let near = 1u128 << crate::bits::BIT_NEAR_GAP_MID;
+        let family = above | below | near;
+        assert_eq!(eval(None) & family, 0, "no level ⇒ no gap bit");
+        assert_eq!(eval(Some(999_000)) & family, above | near);
+        assert_eq!(eval(Some(1_001_000)) & family, below | near);
+        assert_eq!(eval(Some(1_000_000)) & family, near);
+        assert_eq!(eval(Some(900_000)) & family, above);
+    }
+
+    #[test]
+    fn stage1a_batch_values_bounds_the_x1_day_tables() {
+        // An out-of-envelope X1 value is rejected by the SAME level bound the
+        // pivot/fib day tables ride (the midpoint-sum overflow guard).
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000],
+            high_paisa: &[10_100],
+            low_paisa: &[9_900],
+            close_paisa: &[10_050],
+            tod_seconds: &[34_000],
+            contract_reset: &[false],
+            day_index: &[0],
+            ema20_paisa: &[None],
+            ema200_paisa: &[None],
+            day_pivot_levels: &[0; 12],
+            day_fib_levels: &[0; 15],
+            day_has_pivot: &[false],
+            day_has_fib: &[false],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+            day_x1_hi_paisa: &[MAX_BAR_PAISA + 1],
+            day_x1_lo_paisa: &[0],
+            day_has_x1: &[true],
+            gap_mid_bps: 10,
+        };
+        let err = check_stage1a_batch_values(&inputs).unwrap_err();
+        assert!(err.contains("level magnitude"), "got: {err}");
     }
 }

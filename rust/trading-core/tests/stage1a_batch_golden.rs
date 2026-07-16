@@ -38,6 +38,16 @@ struct DayTables {
     day_fib_levels: Vec<i64>,
     day_has_pivot: Vec<bool>,
     day_has_fib: Vec<bool>,
+    /// Group-15 X1 day tables (DEC-GAP-MIDPOINT-CONDITIONS-001).
+    /// serde-defaulted: the frozen pre-gap fixture carries none — `load_fixture`
+    /// materializes the ALL-COLD shape (the legacy-identical build), so the
+    /// frozen oracle masks replay byte-for-byte.
+    #[serde(default)]
+    day_x1_hi_paisa: Vec<i64>,
+    #[serde(default)]
+    day_x1_lo_paisa: Vec<i64>,
+    #[serde(default)]
+    day_has_x1: Vec<bool>,
 }
 
 #[derive(Deserialize)]
@@ -72,8 +82,17 @@ fn load_fixture() -> Fixture {
         .join("fixtures")
         .join("stage1a_batch_golden.json");
     let text = fs::read_to_string(&path).expect("fixture readable");
-    let fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
+    let mut fixture: Fixture = serde_json::from_str(&text).expect("fixture parses");
     assert_eq!(fixture.schema, "stage1a-batch-golden-v2");
+    // Materialize the ALL-COLD Group-15 X1 shape for a pre-gap fixture (no
+    // level ever exists ⇒ bits 66-68 stay 0 ⇒ the frozen masks replay
+    // byte-for-byte; DEC-GAP-MIDPOINT-CONDITIONS-001).
+    let d = fixture.day_tables.day_has_pivot.len();
+    if fixture.day_tables.day_has_x1.is_empty() {
+        fixture.day_tables.day_x1_hi_paisa = vec![0; d];
+        fixture.day_tables.day_x1_lo_paisa = vec![0; d];
+        fixture.day_tables.day_has_x1 = vec![false; d];
+    }
     fixture
 }
 
@@ -101,6 +120,10 @@ fn inputs<'a>(f: &'a Fixture) -> Stage1aBatchInputs<'a> {
         anchor_dependent_mask: parse_mask_hex(&f.config.anchor_dependent_mask_hex),
         fib_dependent_mask: parse_mask_hex(&f.config.fib_dependent_mask_hex),
         applies_to_1day_mask: parse_mask_hex(&f.config.applies_to_1day_mask_hex),
+        day_x1_hi_paisa: &f.day_tables.day_x1_hi_paisa,
+        day_x1_lo_paisa: &f.day_tables.day_x1_lo_paisa,
+        day_has_x1: &f.day_tables.day_has_x1,
+        gap_mid_bps: 10,
     }
 }
 
@@ -186,6 +209,9 @@ fn golden_prefix_replay_is_suffix_independent() {
             day_fib_levels: &f.day_tables.day_fib_levels[..FIB_ROW_LEN * n_days],
             day_has_pivot: &f.day_tables.day_has_pivot[..n_days],
             day_has_fib: &f.day_tables.day_has_fib[..n_days],
+            day_x1_hi_paisa: &f.day_tables.day_x1_hi_paisa[..n_days],
+            day_x1_lo_paisa: &f.day_tables.day_x1_lo_paisa[..n_days],
+            day_has_x1: &f.day_tables.day_has_x1[..n_days],
             ..inputs(f)
         };
         let prefix = stage1a_bar_bits_batch_impl(&prefix_inputs).unwrap();
@@ -319,6 +345,10 @@ proptest! {
             anchor_dependent_mask: (1u128 << 60) - 1,
             fib_dependent_mask: 0x3FF8_0000,
             applies_to_1day_mask: u128::MAX,
+            day_x1_hi_paisa: &vec![0; day_has_pivot.len()],
+            day_x1_lo_paisa: &vec![0; day_has_pivot.len()],
+            day_has_x1: &vec![false; day_has_pivot.len()],
+            gap_mid_bps: spec.bps.2,
         };
         let got = stage1a_bar_bits_batch_impl(&inputs).expect("valid envelope is total");
         prop_assert_eq!(got.len(), open.len());
