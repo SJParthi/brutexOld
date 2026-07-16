@@ -355,6 +355,41 @@ The three colliding ledger rows were renumbered off main's taken #1712/#1715 (DE
 stable handles per DEC-LEDGER-RENUMBER-001). READ-side dashboard / lake-heal SPACE / docs only —
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. This header carries pointers, never round narration;
 each member's full record lives in its §1 Active-branch blurb + its MIGRATION.md entry.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md
+#1795a — the dashboard underlying-key READ-honesty pack (ONE umbrella entry;
+the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 / DEC-MOVERS-STORED-FRESHNESS-001
+/ DEC-FNO-UNDERLYING-EMPTY-GUARD-001 resolve via the #1795b–#1795d companion
+headers), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
+keyed through the COMMON F&O underlying-forms resolver via an injected
+plain-data `key_forms` map (hyphenated names' attempted-and-zero silent-vanish
+alarm live; the round-5 CROSS-OWNER guard — a normalize-colliding sibling's
+coverage can never mask an own-key attempted-and-zero — plus the MI-6
+attempted-match tooth, and the round-7 materialize-once memo so a
+single-shot `covered_years` iterator value can never exhaust into a
+false-RED; the writer's KEYING byte-untouched — the writer file
+gains only the sub-(c) blank-row isolation; default-None byte-identical), the /movers
+stored-first intraday read gains the VERIFY-EQUALITY freshness guard (a stored
+TF day frame is served only when it EQUALS the in-memory resample of the
+1-minute base — the round-1 day-max predicate was refuted by the executed
+#1031 interior-hole re-pull chain; stale ⇒ the existing 1m-resample fallback +
+one capped `movers.stored_stale_fallback` WARN, dedupe key (exchange, symbol,
+interval) per the #1649a precedent; the round-2 month-edge fold widens
+`read_stored_day_frame` to probe the PRIOR UTC month's file for sub-05:30-IST
+bucket labels on the 1st of an IST month — a fresh month-edge lake now serves
+its COMPLETE stored frame instead of a permanent false-stale WARN or main's
+silent bucket drop; fresh lakes byte-identical, pinned; the round-3 fold gates
+the probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+route-pinned; round-7: the equality wording corrected to the executed
+truth — value-exact, dtype-INSENSITIVE polars `.equals`, drift-pinned;
+daily arm = named
+follow-up DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made
+total for the blank-symbol degenerate (IndexError → self-key; blank rows
+skipped + counted at the kind-map AND the metadata grid — the round-1-falsified
+"inert key" metadata seam closed, `_first_nonempty_over_forms` made total;
+round-2 forensic completion: the pre-fix blank cells ALSO stopped the full
+pipeline after metadata via `metadata_phase_ok`). READ-side dashboard only —
+ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the §1
+Active-branch blurb + MIGRATION.md #1795a.)
 Earlier: 2026-07-12 (DEC-CROSSVERIFY-PRODUCER-001 +
 DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001,
 MIGRATION.md #1776–#1778 — the daily TickVault cross-verification PRODUCER:
@@ -442,6 +477,53 @@ revalidation stat sweep; the window-ledger survivor sentence deliberately
 kept + doc-pinned). READ-side only; clean lakes byte-identical (pinned);
 ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item record lives in the
 §1 Active-branch blurb + MIGRATION.md #1811.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1832 —
+bounded cold lake I/O on the dashboard read path: the SummaryCache COLD
+single-flight wait gains a TOTAL env-tunable budget (`BRUTEX_SUMMARY_COLD_WAIT_S`
+60 s, fail-safe) + a per-owner-Event fail-fast latch — at most the
+already-in-flight waiters pay the budget per wedged owner (sequentially
+exactly ONE; every later cold poll fails fast), a blown budget raises the typed
+`SummaryColdWaitTimeout` the five summary routes map to an honest 503
+(four JSON routes `summary_scan_pending`; scoreboard.csv text/plain — never
+a raw 500, never a fabricated empty payload;
+zero new threads — the waiter's own `Event.wait`, no scan takeover, warm/dirty
+paths byte-identical) — and the read-side lake METADATA sweeps (the
+stats-manifest consult + /db TOCTOU re-stat + `_bars_file_windows` +
+`lake_revision`'s composite generation probe) ride the ONE new breach-armed
+`StatSweepGate` leaf (`brutex/data/stat_deadline.py`,
+`BRUTEX_LAKE_STAT_DEADLINE_S` 5 s fail-safe): a wedged volume times out into
+the NAMED `consult_deadline`/`restat_deadline` fallback clauses / the probe's
+existing `None` no-signal contract, the /db seed is SUPPRESSED on a timeout
+(never re-hits the wedged volume), latched polls cost ZERO threads, and every
+zombie self-clears on the volume's release. Healthy-path stat COUNTS + bytes
+unchanged (parity-pinned); write-side hooks byte-untouched (already under the
+90 s spine guard); the movers_cache sibling wait is the named follow-up
+DEC-DASHBOARD-COLD-IO-DEADLINE-002 (PR #1488 LANDED 2026-07-12 —
+this branch is rebased over it; the follow-up is unblocked). READ-side dashboard +
+ONE data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; the per-item
+record lives in the §1 Active-branch blurb + MIGRATION.md #1832.)
+Earlier: 2026-07-12 (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 —
+the /oneclick/equity + /api/v1/launch/* lake-limiter fix: the equity route (the
+#1665 merge-seam straggler — the ONLY oneclick route left on the bare pool) and
+ALL THREE launch offloads (the #1642 HONEST-LIMITS named follow-up, CLOSED) now
+ride the app's OWN 32-token `_run_lake` LakeOffload limiter instead of AnyIO's
+DEFAULT 40-token pool — `register_launch_routes` gains the kw-only `run_lake=`
+injection seam (None → the lazy `run_in_threadpool`, byte-identical for direct
+callers), so a WEDGED lake volume pins lake tokens, never the default pool the
+deadline-guarded liveness routes live on. TEETH: the combined 44-request (22
+equity + 22 launch/state) realserver starvation regression (`held_peak <= 32`
+on the SHARED limiter — fails-before MEASURED: /pull/rate starved 5522 ms,
+held_peak 40), counting-offload dispatch pins + the api_pull_rate stays-default
+negative twin, order-exact launch dispatch pins, and the import-free AST drift
+pin (`tests/unit/test_dashboard_threadpool_pin.py` — Counter-equality over the
+FIVE sanctioned default-pool sites: api_pull_rate · api_sweep_progress ·
+api_preopen_xlsx · api_preopen_zip · api_logs). HONEST: isolation not a
+deadline — a wedged worker stays wedged until the volume recovers; the fix
+bounds the pile at 32 isolated tokens, it does not end it. READ-ONLY dashboard
+liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; healthy-lake payloads
+byte-identical; the per-item record lives in the §1 Active-branch blurb +
+MIGRATION.md #1757 — this header carries the one-line summary, never the
+story.)
 Earlier: 2026-07-12 (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001,
 MIGRATION.md #1751 — the dashboard pull-contention / feed-resilience slice:
 the COMMON `MoversSnapshotCache` gains an opt-in stale-while-revalidate arm —
@@ -3934,6 +4016,156 @@ hostile-review pass._
   dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no scope/vocab/rate change. Each member's full record lives in its own
   MIGRATION.md entry; the per-member blurbs are demoted to Earlier: below.)
+  Earlier: `claude/dashboard-read-honesty-pack` (**DEC-DASHBOARD-READ-HONESTY-PACK-001,
+  MIGRATION.md #1795a** — the dashboard underlying-key READ-honesty pack, three READ-side
+  fixes as ONE coordinator-assigned umbrella entry (+ #1795b–#1795d companion headers so
+  the sub-IDs resolve; consolidated from the pre-merge #1751–#1753 after main's PR #1488
+  took #1751 — the #1171 umbrella + #1298 companion precedents).
+  **(a — DEC-MAPPING-INTEGRITY-FORM-KEY-001, R2)** the /universe
+  mapping-integrity trust panel keys its eligible↔coverage compare through the COMMON F&O
+  underlying-forms resolver: the coverage WRITER keys cells on the PRIMARY F&O form
+  (`metadata_pull._resolve_underlying_forms` — `BAJAJ-AUTO` rows land under `BAJAJAUTO`,
+  MIGRATION.md #974) while the eligible set is SPOT-spelled, so the exact-key compare at
+  mapping_integrity.py read a fully-covered hyphenated name `not_attempted` forever and
+  its attempted-and-ZERO silent-vanish alarm (the M&M class) was structurally DEAD.
+  `reconcile_mapping_integrity(key_forms=)` — kw-only appended-last plain-data map (the
+  #1482 injection template; default `None` = exact-key byte-identical, all 20 prior unit
+  pins pass unmodified) — unions covered years + matches attempts across the ordered
+  forms superset (primary + normalized + raw, the #1128 legacy-key-era law, never
+  primary-only); display + whitelist stay the SPOT spelling; the empty-forms degenerate
+  degrades to the exact raw key via `or (symbol,)`; the map is built ONCE per cached
+  compute in app.py (zero new imports/reads; nav-latency/outage plumbing untouched); the
+  writer's KEYING is byte-untouched (refuter-round-1 honesty: the writer FILE gains only
+  the sub-(c) blank-row grid isolation); with-legs dual-spelling rows both resolve against
+  WRITER-keyed coverage (a legacy-RAW-keyed era leaves the primary-spelled arm a neutral
+  non-gating `not_attempted` — the fold is one-directional spot→forms, round-1-executed);
+  CSV golden byte-unmodified; route-executed fail-before regressions + the end-to-end
+  REAL-writer belt (the fake-SDK harness → the route reads green). REFUTER ROUND 5
+  folded (Z5-1 + Q5-1, both reproduced MINORs): the forms-union gains the CROSS-OWNER
+  guard — a form that is a DIFFERENT eligible symbol's own key (exact spot spelling OR
+  primary form, per exchange; ownership derived purely from the injected
+  eligible+key_forms data, the leaf stays dashboard-import-free) still RESOLVES coverage
+  (the with-legs law's pin passes unmodified) but can never RESCUE a symbol whose OWN
+  forms read attempted-and-zero, so two normalize-colliding eligible names (`{AB, A-B}`
+  — the executed route repro read GREEN where main read RED; nil real-master
+  reachability, executed check) can never mask each other's silent-vanish; the own spot
+  key always stays in the fold (main-parity floor — the guard's worst case is today's
+  exact-key verdict); and the previously-toothless attempted-match multi-form iteration
+  (the surviving MI-6 `forms[:1]` mutant) gains dedicated killers on the final guarded
+  semantics — 8 new unit pins + the route-executed colliding-pair port (RED + named,
+  the non-colliding union unchanged in the SAME store), all 8 applied mutants killed;
+  the guard mechanises the GATING direction only (a cross-owned form may still upgrade
+  a non-gating state in the unreachable collision world — no RED is ever masked).
+  REFUTER ROUND 7 folded (H1-2, reproduced MINOR): the round-2/5 fold read each
+  `covered_years` value TWICE (own_years + years — the raw key is in both), so a
+  single-shot `Iterable[int]` iterator value (annotation-legal; zero in-repo
+  producers) exhausted into a false-RED `none` where main read GREEN — closed by
+  the `_probe_years` per-call memo materializing each (exchange, form) probe
+  EXACTLY ONCE (re-iterable inputs byte-identical, the existing pin family green
+  unmodified; two new-signature regressions proven failing with the memo
+  stash-reverted — they pass `key_forms` explicitly, so they cannot even run at
+  merge-base).
+  **(b — DEC-MOVERS-STORED-FRESHNESS-001, R7)** the
+  /movers spot stored-first intraday read gains the FOURTH member of its decision
+  family — a VERIFY-EQUALITY freshness guard (REFUTER ROUND 1 folded): a stored TF day
+  frame is served only when it EQUALS — value-exact, column-name+order-exact,
+  dtype-INSENSITIVE polars `.equals` (the round-7 wording truth; value-exactness
+  is the load-bearing property) — the
+  in-memory `resample_1m_to_tf` of the UNCUT 1-minute base day frame, the SAME resampler
+  the fallback runs and the prebuild wrote the partition with (one implementation, §11;
+  fresh ⇒ byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 contract, probed + pinned).
+  The round-1 day-max predicate (`stored_max_open_min + minutes > base_day_max_min` —
+  itself the fix of the naive `>=` false-stale and the CUT-domain arithmetic trap) was
+  REFUTED by the executed #1031 interior-hole re-pull chain (holey pull → prebuild →
+  hole re-pull: a TAIL check read 565+5=570 > 569 = fresh and served stale volume
+  1110-vs-2136 / stale LTP ₹20,000-vs-₹20,040 silently) — equality SUBSUMES it and also
+  mechanises the live-edge sliver, the R7-M2 reverse-truncation and the value-poison
+  residuals; interval=1minute is the identity arm (zero extra I/O, read-spy-pinned);
+  base-absent fail-opens to serve-stored (the ONE remaining unverified serve); STALE ⇒
+  the EXISTING `_read_session_bars` fallback (only provenance flips into
+  `resampled_reads`, no new payload field) + ONE capped `movers.stored_stale_fallback`
+  WARN (a `_StoredStaleWarnState` mirroring the #1539 idiom, cap 20, dedupe key
+  (exchange, symbol, interval) — widened from (symbol, interval) per refuter defect 2 +
+  the #1649a dual-listing precedent, so a dual-listed symbol's second stale exchange is
+  named). The test_movers_stored_read.py:351 stale-serve pin is FLIPPED deliberately
+  ((1,0)→(0,1), snapshots==reference, one WARN — the bugfix-reversion-check proof), the
+  round-1 repro ports (interior-hole whole-day + aligned-cutoff + dual-exchange) land as
+  fail-before regressions, and two pre-existing idle-serves-poison dashboard pins are
+  flipped/reworked; the FULL fresh-lake equality/provenance pin family passes
+  UNMODIFIED. HONEST: +1 month-bounded 1m read per stored-served TF>1minute candidate
+  (2→3; stale 4; candidate-cache-memoised) PLUS one in-memory ≤session-size resample +
+  frame compare per guarded read (CPU-only — the "near-zero I/O" shared-frame
+  restructure is the named follow-up DEC-MOVERS-1M-FRAME-SHARE-001). REFUTER ROUND 2
+  folded (1 reproduced MINOR + 2 wording NITs): (B2) a stray 09:00 pre-open bar's 4hour
+  label (05:15 IST — the SAME IST day) is 23:45 UTC of the prior day, so on the 1st of
+  an IST month the prebuild files that bucket under the PRIOR UTC month's parquet — the
+  month-bounded stored read missed it (a genuinely FRESH NSE/BSE lake read permanently
+  false-stale, un-healable by a re-prebuild, falsifying the round-1 "NSE/BSE can never
+  hit it" claim; pre-guard, on main, the bucket-MISSING frame served silently) —
+  `read_stored_day_frame` now probes the prior month's file exactly on that edge
+  (`_prior_month_label_probe_applies`: 1st-of-month × derived TF × session-filtered;
+  every derived TF's lowest 09:15-anchored rung 555 mod m < 330 = 05:30 IST; healthy
+  path ZERO extra reads, spy-pinned; a genuinely STALE prior-month-filed bucket still
+  reads stale — the heal-away regression); (N1) the session-exempt disclosure's
+  "≥2hour" was an executed UNDERCOUNT — any TF with 555 % m ≠ 0 misfiles a
+  pre-(555 mod m) bar onto the prior IST date, pre-00:15 bars already hit
+  10minute/30minute/1hour (not healable by a re-prebuild; bounded by the dedupe + cap);
+  (N2) "R7-M2 caught too" is scoped to PARTIAL truncation — TOTAL day truncation rides
+  the disclosed base-absent fail-open, serving stored silently; the DAILY arm + the
+  stale default-DATE (movers_warm) stay OPEN — named follow-up
+  DEC-MOVERS-DAILY-FRESHNESS-001, an explicit partial delivery of the team memory's
+  two-arm scope. REFUTER ROUND 3 folded (1 reproduced MINOR, R3-N1): the probe's
+  `day - timedelta(days=1)` raised OverflowError for the ONE well-formed ISO date
+  `0001-01-01` (= date.min — accepted by `parse_snapshot_date`, which 400s only
+  MALFORMED dates), escaping the per-symbol `movers_read_skip_errors()` isolation
+  and 500ing the route on any derived TF (pre-probe code served the honest empty
+  200) — closed with the `day > date.min` FOURTH probe conjunct (no prior day ⇒ no
+  prior-month file, definitionally inapplicable; the explicit gate over a blanket
+  except) + predicate/read and route-level 200 regressions, both proven failing
+  with the gate reverted. REFUTER ROUND 7 folded (H1-1, docs accuracy): the
+  round-1 "dtype-exact" `.equals` claim was executed-FALSE — polars 1.42.1
+  `DataFrame.equals` is dtype-INSENSITIVE (Float64 ≡ Float32 with equal values;
+  name/order mismatches + precision-losing casts still unequal) — behavior fully
+  safe (value-exactness is the load-bearing property: any pun that compares equal
+  serves exactly the reference-resample values), so wording is corrected at all
+  three claim sites + the NEW `TestDtypeInsensitiveEqualsPin` drift pin (a
+  hand-recast value-identical partition serves from_stored with zero warns) locks
+  the documented semantics against a future polars bump.
+  **(c — DEC-FNO-UNDERLYING-EMPTY-GUARD-001, BUG-3)** `primary_fno_underlying` made TOTAL
+  for str input (guarantee-audit): the literal `""` returned IndexError — falsifying its
+  own "Never empty" docstring — and ONE blank-symbol EQ row (parser-retained in the
+  universe) poisoned EVERY whole-map consumer; now `forms[0] if forms else spot_symbol`
+  (`""` → itself; `fno_underlying_forms("")` deliberately stays `()`; whitespace-only
+  unchanged at the resolver; non-empty byte-identical, structural + pinned) and
+  `build_underlying_kind_map` skips blank/whitespace rows BEFORE resolving with ONE
+  aggregate `movers.underlying_kind_blank_symbol_skipped` WARN per build (≤5
+  exch:security_id samples; no broad except — the isolation is the pre-check). REFUTER
+  ROUND 1 folded: the "inert (exch, '') key" disclosure was FALSIFIED for metadata_pull
+  by execution — the blank pair's `()` forms made `_first_nonempty_over_forms` index
+  `forms[0]`, an IndexError per YEAR cell captured into N DURABLE `failed` coverage rows
+  keyed `('NSE','')` re-failing every pull and gating the mapping-integrity panel
+  permanently RED with an empty-string symbol; `metadata_pull._resolve_underlying_forms`
+  now SKIPS blank rows (the same isolation idiom, ONE aggregate
+  `metadata.underlying_blank_symbol_skipped` WARN; zero vendor calls, zero grid/coverage
+  rows, panel unpoisoned), `_first_nonempty_over_forms` is TOTAL (kw-only `empty`; `()`
+  forms → the honest no-data result, zero fetches), the sample cap is hoisted to the ONE
+  COMMON `fno_underlying.BLANK_SYMBOL_SAMPLE_CAP`, and the falsified docstring + ledger
+  envelope are corrected (composite_pull's inert-read-key claim was verified TRUE and
+  stands). ROUND 2 forensic completion (refuter-B OBS-1/OBS-2, both executed): the
+  pre-fix blank cells' durable failures ALSO failed `pipeline_pull.metadata_phase_ok`,
+  so `run_full_pipeline` STOPPED after metadata — one blank row blocked the ENTIRE
+  candle phase, not just the panel (the round-1 narration understated the severity);
+  and durable junk `''`/`'  '` coverage rows persisted by PRE-fix eras are NOT
+  retroactively cleaned — the fixed panel honestly gates RED on them (main-parity
+  fail-safe; `''` is unmintable by any released code; remediation = delete the rows).
+  ALL THREE: READ-side dashboard only; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no lake/schema/scope/vocab/rate change; healthy/fresh lakes byte-identical (pinned);
+  `mapping_integrity.py` + `fno_underlying.py` + `movers_underlying_class.py` +
+  `metadata_pull.py` + `movers_stored_read.py` + `lake_day_glob.py` 100% line+branch on
+  their stem-matched suites, `movers_snapshot.py` 100% on the movers
+  family (its documented discovery-gate exclusion stands); ruff/ruff-format clean,
+  `mypy --strict` clean, pyright errors at the pre-change baseline.)
   Earlier: `claude/crossverify-producer` (**DEC-CROSSVERIFY-PRODUCER-001 +
   DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 + DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778** — the daily
   TickVault cross-verification PRODUCER: NEW package `brutex/crossverify/` (config · canonical mapper · CSV byte
@@ -4196,6 +4428,143 @@ hostile-review pass._
   100.00% on its ci.yml gate; ruff/ruff-format/`mypy --strict` clean,
   pyright 0 errors. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
   lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/dashboard-cold-io-deadline` (**DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1832** —
+  bounded cold lake I/O on the dashboard read path (guarantee-audit BUG-1 + BUG-2 — the audit report is
+  NOT in-repo, stated honestly; BUG-1 is equally the #1648 honest-limits named follow-up). **BUG-1:**
+  `SummaryCache.get_or_refresh`'s COLD cross-thread arm no longer parks waiters in an UNBOUNDED
+  `decision.wait()` on a lake-limiter token — the wait runs under a TOTAL budget across re-plan
+  iterations (`BRUTEX_SUMMARY_COLD_WAIT_S`, default 60 s = 2× the observed 27-30 s legitimate mid-pull
+  cold scan; fail-SAFE via the COMMON `resolve_env_seconds`, resolved ONCE at construction — the hit arm
+  gains no env read, no clock read, no lock: one local None initialisation only), a blown budget ARMS a per-owner-Event fail-fast latch (the budget is paid
+  by AT MOST the waiters already parked when it first expires — each runs out its own deadline, the
+  latch is checked at loop entry; sequentially exactly ONE — and every later cold poll raises
+  instantly in O(1), so stacked 4-15 s pollers' token pressure is bounded to ONE budget window, never
+  the pre-fix unbounded march toward the 32-token `_LakeOffload` exhaustion; ONE
+  `cold_wait_timeout` WARN per (kind, owner-Event) latch flip — a photo-finish sibling raises
+  silently) and raises the typed
+  `SummaryColdWaitTimeout(RuntimeError` — deliberately NOT `TimeoutError ⊂ OSError`, the
+  `except OSError` misclassification leak class`)`; the timed-out waiter NEVER takes the scan over (the
+  single-scan law stays structural) and NEVER touches `_refreshing`; the latch identity-matches the
+  CURRENT owner Event (a fresh post-takeover owner auto-invalidates a stale latch), clears on the
+  owner's success (ONE identity-guarded `cold_wait_recovered` INFO — a swept STALE entry logs
+  nothing) and silently on its abort. FIVE app.py route arms
+  (the per-route `_store_outage_response` precedent — an app-level exception handler has zero in-repo
+  precedent, REJECTED): /coverage/spot · /completeness/scoreboard · scoreboard.csv (text/plain) ·
+  /universe/completeness (beside its store-outage arm) · /coverage/options each map the timeout to an
+  honest **503** — the four JSON routes via the NEW `_summary_warming_response(kind)` body
+  `error_type="summary_scan_pending"`; scoreboard.csv bypasses the helper with its own text/plain 503
+  body (no `error_type` marker — a CSV consumer gets no JSON envelope) — a truly
+  cold kind has NOTHING last-known, so a labeled empty 200 would fabricate an empty lake (Golden Rule
+  #1); byte-STABLE degrade bodies (skip-render poller discipline), pollers already self-recover from
+  non-ok ticks — zero JS edits. ZERO new threads on BUG-1 (bounded `Event.wait` on the waiter's own
+  thread; `run_with_deadline` around the recompute is FORBIDDEN — DEC-DASHBOARD-FASTREAD-001's
+  store-connection thread law). **BUG-2:** NEW leaf `brutex/data/stat_deadline.py` — `StatSweepGate`,
+  ONE `run_with_deadline` daemon per WHOLE metadata sweep (never per file) behind a BREACH-armed
+  per-`str(lake_root)` fail-fast latch (the `StoreWriteDeadlineGuard` family adapted for lock-less
+  concurrent readers: armed ONLY by an actual breach — healthy concurrent consults/probes ALL proceed;
+  latched calls raise `StatSweepTimeout(latched=True)` instantly with ZERO new threads; the FIRST
+  breached flight owns the latch via `setdefault`, its zombie's `finally` token-identity clears it +
+  ONE `stat_gate.recovered` INFO; the done-flag race law — a fn completing inside the expiry→latch
+  window can never wedge the latch; `StatSweepTimeout` is caught + converted to RETURN SHAPES inside
+  the two leaf modules, never crossing into db_view/app). Applied at: (a) `lake_stats_manifest.py` —
+  the clause-1..4 body extracted VERBATIM to `_validate_dataset_stats`; NEW
+  `load_valid_dataset_stats_guarded → StatsConsult(stats, timed_out)` + the NAMED `consult_deadline`
+  fallback clause (a volume outage never misattributed as `stat_token`/`file_set` drift); the public
+  `load_valid_dataset_stats` stays the never-raises thin wrapper; NEW `bounded_token_sweep`
+  (`TOKEN_SWEEP_OK/MOVED/TIMEOUT`, first-moved rel in today's exact order) under the SAME gate + key;
+  (b) `db_view.py`, 5 touch points ONLY (the PR #1488 hotspot minimized): `consult_timed_out` ctx
+  field, `should_seed` SUPPRESSION on a timeout (the seed's three unbounded stat sweeps + grouped scan
+  never re-hit the wedged volume; NO `statseed|` latch entry — a genuinely-absent shard still seeds on
+  the next healthy click), the guarded-consult call, `_stats_tokens_intact` on ONE `bounded_token_sweep`
+  pass (MOVED payload byte-preserved; TIMEOUT → `restat_deadline`, no fabricated `rel`; both → the
+  existing whole-request legacy degrade), and `_bars_file_windows`' timeout-early-return BEFORE the
+  grammar arm's O(files) `rglob` (the D1 hole closed); (c) `lake_revision.py` — the composite probe
+  body extracted to `_lake_revision_probe`, the public fn gate-wrapped, timeout → the module's EXACT
+  existing `None` no-signal contract (never a fabricated token, never `ABSENT_TOKEN`; every consumer
+  verified `None`-safe — SummaryCache no-bump, app's never-raising closure, `pull_jobs`' abstain now
+  bounded for free). ONE shared stat knob `BRUTEX_LAKE_STAT_DEADLINE_S` (default 5 s, ≥1000× healthy
+  headroom — pure hang detection), fail-SAFE (the disclosed divergence from the rate-bridge fail-loud
+  resolvers). WRITE hooks byte-untouched (already under the 90 s `GROWW_WRITE_DEADLINE_S` spine guard;
+  guarding the shared `_load_shard_with_clause` would add a surprise thread inside the pull's
+  partition-locked section). HONEST: bounds the WAITERS + the SWEEPS, never the wedged syscall
+  (abandoned daemons unkillable, #999; at most the sweeps already in flight during one deadline
+  window — sequentially exactly one — zero NEW threads while latched, all self-clearing on the
+  volume's release; the wedged BUG-1 owner still pins one thread + one token; the legacy DuckDB scan the degrades fall back to — and
+  `query_candles`' pre-existing early `base.is_dir()` guard stat — stay UNBOUNDED on a truly dead
+  volume, the 32-token limiter remains that containment); healthy-path payloads, clause logs, stat
+  COUNTS + bytes pinned unchanged (the whole pre-existing byte-equality/fallback/TOCTOU/seed suites
+  re-run UNMODIFIED through the guarded wrappers; no module-level `os.stat` capture — the bench
+  stat-spy law test-pinned); the five wedge regressions (W1/W2 summary_cache · W3 lake_stats_manifest ·
+  W4 through the REAL `query_candles` in the db_view 21-file gate — zero ci.yml edits · W5
+  lake_revision) are join/SIGALRM-watchdog-bounded and EXECUTED failing at the merge-base with their
+  GENUINE hang shapes; seven hand-applied mutants killed (evidence in #1832); NEW
+  `tests/unit/test_stat_deadline.py` (+ the mutation.yml proven-pair line, wiring test-pinned) + NEW
+  `tests/unit/test_dashboard_cold_degrade_routes.py`; `stat_deadline.py` + `summary_cache.py` +
+  `lake_stats_manifest.py` 100.00% line+branch on their gates. NAMED follow-up
+  DEC-DASHBOARD-COLD-IO-DEADLINE-002: the `MoversSnapshotCache` sibling cold wait (movers_cache.py —
+  PR #1488's SWR rewrite of that module's very cold path LANDED 2026-07-12 and this branch is
+  rebased over it; the mechanism ports 1:1 onto the landed shape). READ-side
+  dashboard + ONE new data leaf — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+  lake/schema/scope/vocab/rate change; ruff/ruff-format clean, `mypy --strict` clean, pyright at the
+  pre-change baseline.)
+  Earlier: `claude/lake-limiter-equity-launch` (**DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757** —
+  renumbered #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles
+  (main took #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, PR #1488;
+  #1752–#1756 are the coordinator's reserved post-#1488 drain block — PRs
+  #1486/#1487/#1485/#1482 + one further reserved slot) —
+  the R3-MAJOR lake-limiter completion: GET /api/v1/oneclick/equity (pre-fix
+  app.py:7815, now :7928 — the #1665 merge-seam straggler, the ONLY oneclick
+  route still on the bare default pool) joins its six siblings on
+  `await _run_lake(_resolve)`, and
+  `register_launch_routes` gains the kw-only injection seam
+  `run_lake: Callable[..., Awaitable[Any]] | None = None` (None → the
+  lazily-imported default-pool `run_in_threadpool`, byte-identical for direct
+  callers — the existing ~20 launch route tests pass UNMODIFIED; app.py:8908
+  (pre-fix :8699) passes the app's `_run_lake`; no-fastapi-at-import contract +
+  one-way import direction preserved) so ALL THREE /api/v1/launch/* offloads
+  (`build_launch_state` · `run_preconditions` · `launch_sweep` — 21 partition
+  dir stats + disk_usage + the `<lake>/sweeps/.launch/` pidfile + the launch.log
+  tail + the POST's flock/atomic writes, ALL lake I/O) ride the 32-token
+  limiter, closing #1642's HONEST-LIMITS named follow-up. TEETH: the combined
+  44-request realserver starvation regression (22 equity + 22 launch/state
+  wedged → exactly ≤32 enter the SHARED limiter, /pull/rate + /state answer
+  < 2.5 s vs the 6 s stall; fails-before MEASURED on the reverted files —
+  the shipped test fails FIRST at the starved /pull/rate probe (5522 ms);
+  held_peak 40 = the default pool's exact size, measured by the same wedge
+  run's diagnostic probe-less variant;
+  `held_peak <= 32` also kills a partial wiring or a second minted limiter);
+  counting-LakeOffload dispatch pins via the `build_app(lake_offload=)` seam
+  (equity `_resolve` positive + the api_pull_rate stays-default negative twin);
+  order-exact launch dispatch pins (`["run_preconditions", "launch_sweep"]` +
+  the 412 single-dispatch arm + the None-arm back-compat branch); and the
+  import-free AST drift pin (`tests/unit/test_dashboard_threadpool_pin.py` —
+  Counter-EQUALITY over (file, enclosing-def) vs the FIVE sanctioned
+  default-pool sites (api_pull_rate · api_sweep_progress · api_preopen_xlsx ·
+  api_preopen_zip · api_logs), importer-set belt {app.py, launch_button.py},
+  anti-vacuousness + detector teeth per the #1492-G3 idiom — the guaranteed
+  reversion-gate kill, pure ast, no importorskip). The stale app.py:7405
+  (now :7515) section comment reconciled to name `_run_lake` (the wording now
+  at :7519).
+  HONEST: ISOLATION not a
+  deadline — a wedged worker stays wedged until the volume recovers and a
+  client abort never cancels the offload (the token is held to thread
+  completion); the AST pin cannot see an aliased call (disclosed residual,
+  owned by the behavioral pins); the launch POST queues FIFO on the lake
+  limiter under an outage (it queued on the default pool before); app.py:8070's
+  log tail (pre-fix :7953) stays DELIBERATELY default-pool (~/.brutex/logs
+  LOCAL disk).
+  REFUTER ROUND-3 FOLD (finding G, MINOR — prose-claim drift, made TRUE at the
+  source): the pin's "each named deliberate in-code at its site" claim was
+  ahead of the code — only api_sweep_progress carried an at-site pool-choice
+  naming, and api_logs's at-site comment affirmatively said the OPPOSITE
+  (stale since #1642 moved the lake reads onto the limiter); the four unmarked
+  sanctioned sites now carry at-site "Deliberately on the DEFAULT AnyIO pool
+  (not the lake limiter)" namings with site-specific reasons (api_logs's stale
+  sentence REPLACED, never stacked), and the pin's docstring + _SANCTIONED
+  comment reworded to the precise central-enumeration + at-site truth.
+  READ-ONLY dashboard liveness — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  zero wire/payload change on healthy lakes; launch_button.py 100% line+branch
+  on the discovery gate's stem suite; app.py rides the whole-package floor.)
   Earlier: `claude/pull-contention-feed-decoupled` (**DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751** —
   the dashboard pull-contention / feed-resilience slice: **(G1)** the COMMON `MoversSnapshotCache` gains an opt-in
   `stale_while_revalidate` ctor flag — PAST the #1250 adaptive floor a flagged cache serves the last-known entry
@@ -8184,6 +8553,41 @@ hostile-review pass._
   #1288 DEC-DASHBOARD-READPATH-WEDGE-001 #1763 · #1441 docs club DEC-EAP-FEEDBACK-INDEX-001
   #1764; READ-side dashboard / lake-heal SPACE / docs only — ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; see §1 Active branch for the full blurb)
+  Earlier: `claude/dashboard-read-honesty-pack`
+  (DEC-DASHBOARD-READ-HONESTY-PACK-001, MIGRATION.md #1795a — the dashboard
+  underlying-key READ-honesty pack, ONE umbrella entry (+ #1795b–#1795d
+  companion headers for the sub-IDs DEC-MAPPING-INTEGRITY-FORM-KEY-001 /
+  DEC-MOVERS-STORED-FRESHNESS-001 / DEC-FNO-UNDERLYING-EMPTY-GUARD-001;
+  consolidated from the pre-merge #1751–#1753 after main's PR #1488 took
+  #1751), REFUTER ROUNDS 1 + 2 + 3 + 5 + 7 folded: the /universe mapping-integrity compare
+  keyed through the COMMON F&O underlying-forms resolver via the injected
+  plain-data `key_forms` map (the writer's KEYING byte-untouched — the writer
+  file gains only the sub-(c) blank-row isolation; default-None
+  byte-identical; the hyphenated/aliased silent-vanish alarm live; the round-5
+  CROSS-OWNER guard — a normalize-colliding sibling's coverage can never mask
+  an own-key attempted-and-zero — plus the MI-6 attempted-match tooth;
+  round-7: the materialize-once memo — a single-shot `covered_years`
+  iterator value can no longer exhaust into a false-RED), the
+  /movers stored-first intraday read freshness-guarded by VERIFY-EQUALITY
+  (a stored TF day frame serves only when it equals the in-memory resample of
+  the 1-minute base — the round-1 day-max predicate was refuted by the
+  executed #1031 interior-hole re-pull chain; stale prebuilt TF ⇒ the existing
+  1m-resample fallback + one capped `movers.stored_stale_fallback` WARN,
+  dedupe key (exchange, symbol, interval); the :351 stale-serve pin
+  deliberately FLIPPED; the round-2 month-edge fold probes the PRIOR UTC
+  month's file for sub-05:30-IST bucket labels on the 1st of an IST month —
+  a fresh month-edge lake serves its COMPLETE stored frame, never a permanent
+  false-stale WARN or main's silent bucket drop; the round-3 fold gates the
+  probe `day > date.min` — the `0001-01-01` OverflowError 500 closed,
+  route-pinned; round-7: the equality wording corrected to value-exact,
+  dtype-INSENSITIVE polars `.equals`, drift-pinned; daily arm = named follow-up
+  DEC-MOVERS-DAILY-FRESHNESS-001), and `primary_fno_underlying` made total
+  for the blank-symbol degenerate (IndexError → self-key; blank rows skipped
+  + counted at the kind-map AND the metadata grid — the round-1-falsified
+  "inert key" metadata seam closed; round-2: the pre-fix blank cells also
+  stopped the full pipeline after metadata via `metadata_phase_ok`);
+  READ-side dashboard only; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line)
   Earlier: `claude/crossverify-producer`
   (DEC-CROSSVERIFY-PRODUCER-001 + DEC-CROSSVERIFY-S3-WRITE-POSTURE-001 +
   DEC-CROSSVERIFY-DAY-DERIVE-001, MIGRATION.md #1776–#1778 — the daily
@@ -8245,6 +8649,39 @@ hostile-review pass._
   stats-manifest claim sites relabel to the #1614 honest envelope (the
   window-ledger survivor kept + doc-pinned); READ-side only; ENGINE
   UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/dashboard-cold-io-deadline`
+  (DEC-DASHBOARD-COLD-IO-DEADLINE-001, MIGRATION.md #1832 — bounded cold lake
+  I/O on the dashboard read path: the SummaryCache cold single-flight wait
+  gains a TOTAL budget + per-owner-Event fail-fast latch with the honest 503
+  degrade on the five summary routes (four JSON `summary_scan_pending`;
+  scoreboard.csv text/plain) (BUG-1), and the
+  read-side lake metadata sweeps — the stats-manifest consult, the /db TOCTOU
+  re-stat, `_bars_file_windows`, `lake_revision`'s generation probe — ride the
+  ONE new breach-armed `StatSweepGate` leaf (`brutex/data/stat_deadline.py`)
+  with named `consult_deadline`/`restat_deadline` fallback clauses, seed
+  suppression on a timeout, and zero-thread latched polls (BUG-2); knobs
+  `BRUTEX_SUMMARY_COLD_WAIT_S` 60 s / `BRUTEX_LAKE_STAT_DEADLINE_S` 5 s, both
+  fail-safe; write-side hooks byte-untouched; healthy-path stat counts + bytes
+  unchanged; the movers_cache sibling wait is the named follow-up
+  DEC-DASHBOARD-COLD-IO-DEADLINE-002; READ-side dashboard + one data leaf —
+  ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1832 for the full blurb)
+  Earlier: `claude/lake-limiter-equity-launch`
+  (DEC-DASHBOARD-LAKE-IO-LIMITER-002, MIGRATION.md #1757 — renumbered
+  #1751 → #1752 → #1757 across the 2026-07-12 merge-reconciles: main took
+  #1751 for DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (PR #1488) and
+  #1752–#1756 are the coordinator's reserved post-#1488 drain block for PRs
+  #1486/#1487/#1485/#1482 + one further reserved slot — the lake-limiter
+  completion for the two straggler route families: GET /api/v1/oneclick/equity
+  joins its six siblings on `await _run_lake(_resolve)` and the THREE
+  /api/v1/launch/* offloads ride the NEW kw-only `run_lake=` injection seam on
+  `register_launch_routes` (None → the lazy default-pool `run_in_threadpool`,
+  byte-identical for direct callers) — a wedged lake volume pins the 32 lake
+  tokens, never the default pool; teeth = the combined 44-request realserver
+  starvation regression + counting-offload dispatch pins + the import-free AST
+  drift pin over brutex/dashboard/'s five sanctioned bare sites; READ-ONLY
+  dashboard liveness; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line)
   Earlier: `claude/pull-contention-feed-decoupled`
   (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001, MIGRATION.md #1751 — the
   dashboard pull-contention / feed-resilience slice: SWR serve-last-known on
