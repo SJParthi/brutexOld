@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     import polars as pl
 
 from brutex.data.errors import ResampleInputError
+from brutex.data.lake_rust_resample import lake_rust_resample_enabled, resample_frame_via_rust
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
 from brutex.data.timeframes import ALL_TF_MINUTES, is_intraday
 
@@ -221,14 +222,35 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         >>> int(df_5m.get_column("volume")[0])
         30
     """
-    import polars as pl
-
     _validate_input(df_1m)
     if target_tf_minutes not in ALL_TF_MINUTES:
         raise ValueError(
             f"Unsupported target TF: {target_tf_minutes} minutes. "
             f"Must be one of {sorted(ALL_TF_MINUTES)}."
         )
+    if lake_rust_resample_enabled():
+        # ADR-0020 Wave-B seam (DEC-LAKE-RUST-RESAMPLE-001, default OFF):
+        # route the validated frame through the brutex_lake crate, with the
+        # verbatim Python body below as the LIVE parity oracle — every
+        # guard/degrade/burn-in-mismatch path serves it, so resampled
+        # values never depend on the wheel being present or correct.
+        return resample_frame_via_rust(
+            df_1m, target_tf_minutes, oracle=_resample_1m_to_tf_python
+        )
+    return _resample_1m_to_tf_python(df_1m, target_tf_minutes)
+
+
+def _resample_1m_to_tf_python(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped-def]
+    """The verbatim pre-seam resample body (Slice-0-style decomposition).
+
+    Extracted token-for-token from :func:`resample_1m_to_tf` by
+    DEC-LAKE-RUST-RESAMPLE-001 so the public fn can gate the Rust seam
+    while the OFF (default) path stays byte-identical — AND the live
+    parity oracle every seam degrade path serves. Assumes an
+    ALREADY-validated frame and an ``ALL_TF_MINUTES`` member (the public
+    fn's contract; never call this directly from production code).
+    """
+    import polars as pl
 
     # 1m -> 1m is a no-op (shallow copy preserves immutability semantics) —
     # it carries WHATEVER columns the input has (OI present for F&O, absent
