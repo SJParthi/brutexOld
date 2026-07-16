@@ -2950,7 +2950,46 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-datalake-io-slice8-pr2` (**DEC-RUST-DATALAKE-IO-SLICE8-PR2-001,
+- **Active branch:** `claude/rust-lake-merge-dedup` (**DEC-LAKE-RUST-MERGE-DEDUP-001,
+  MIGRATION.md #1911 — allocator-final** — ADR-0020 PR-3: the bars-writer merge/dedup
+  DECISION kernel in Rust, default-OFF behind `BRUTEX_LAKE_RUST_MERGE` (the
+  DEC-FEED-RUST-CORE-001 decision-kernel shape — Rust decides, Python materializes):
+  NEW `rust/brutex-lake/src/merge.rs` `merge_decision_from_ipc` takes the stored +
+  batch bars as two ALWAYS-17-column Arrow-IPC decision frames
+  (`parquet_writer._decision_frame`; prices arrive 2dp-snapped, never re-rounded)
+  and returns ONE action code per batch row (`0=skip · 1=insert · 2=overwrite ·
+  3=conflict`) mirroring the `_merge_write` fold law token-for-token
+  (`_bar_values_equal` · the `_overlay_equal` silent-keep-first law · within-batch
+  statefulness · the R7-1 keep-first physical-copy law); the verbatim fold is
+  EXTRACTED to `ParquetWriter._merge_fold` (flag OFF runs it in place —
+  byte-identical, never-routes spy-pinned) and the NEW facade
+  `brutex/data/lake_rust_merge.py` routes the ON path INSIDE the existing
+  `lake_write_guard` (OOM → `LakeWriteHalt("out_of_memory")`, ENOSPC →
+  `"disk_full"` — both pinned flag-ON) with the PR-1 fail-closed layers: its OWN
+  crate-surface check (a pre-PR-3 wheel latches HERE, the render seam untouched —
+  a disclosed handoff deviation), the polars version guard kept deliberately,
+  16-merge burn-in + shape gate bit-comparing winner-object IDENTITY against the
+  verbatim Python fold with ship-the-Python-result autorevert, and a NEW
+  refuse-poison gate (law-contradicting actions refused wholesale on a work COPY —
+  a poisoned crate can only degrade, never corrupt). Shared helpers IMPORTED from
+  `lake_rust_render` (which gains public `degrade_errors`/`panic_belt_errors`
+  aliases). PROOF executed: the 6-case golden parity corpus green against the
+  COMPILED crate through the REAL `write()` in steady-state mode with the
+  crate-engagement witness (bytes sha256+raw + every WriteResult field + conflicts
+  equal ON-vs-OFF; the `file_rewritten` #1614 stats-keying law pinned; EMPTY merge
+  zero renders; dup-poisoned dest heals at bars_added==0); the #1023 snap goldens +
+  the PR-1 render corpus pass UNMODIFIED with the new wheel; 27 cargo tests incl. a
+  400-case differential fuzz vs a naive reference (inline generator — Cargo.lock
+  byte-untouched); facade 100.00% line+branch (55 tests) + `parquet_writer.py`
+  re-measured 100.00% over its discovered suite; five hand-applied mutants
+  EXECUTED killed (mutation.yml has no lake wiring — the #1892 hand-kill
+  precedent, disclosed). ci.yml deliberately untouched (the per-module gate rides
+  `coverage_gate_discovery`); the corpus legs join the NON-required
+  `lake-rust-parity.yml` lane. HONEST: payoff ≈ 0 — uniformity, not speed; ships
+  INERT (a default flip needs its own DEC). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
+  change; run identity untouched.)
+  Earlier: `claude/rust-datalake-io-slice8-pr2` (**DEC-RUST-DATALAKE-IO-SLICE8-PR2-001,
   MIGRATION.md #1771 (its own steward-assigned ledger row; parent roadmap
   DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891)** —
   PR-2 of the datalake Rust conversion roadmap (the roadmap ADR at
@@ -8607,7 +8646,19 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-datalake-io-slice8-pr2`
+- **Active feature branch:** `claude/rust-lake-merge-dedup`
+  (DEC-LAKE-RUST-MERGE-DEDUP-001, MIGRATION.md #1911 — allocator-final —
+  ADR-0020 PR-3: the bars-writer merge/dedup DECISION kernel in Rust behind the
+  default-OFF `BRUTEX_LAKE_RUST_MERGE`; `merge_decision_from_ipc` returns one
+  action code per batch row over two 17-column Arrow-IPC decision frames and
+  Python materializes the fold (bytes identical by construction); the verbatim
+  fold extracted to `ParquetWriter._merge_fold` (flag OFF byte-identical,
+  spy-pinned); PR-1 guard pattern + burn-in identity bit-compare +
+  ship-the-Python-result autorevert + the refuse-poison gate; the 6-case golden
+  parity corpus EXECUTED green against the compiled crate; LakeWriteHalt
+  taxonomy pinned both arms; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1911 for the full blurb)
+  Earlier: `claude/rust-datalake-io-slice8-pr2`
   (DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, MIGRATION.md #1771 — its own
   steward-assigned ledger row; parent roadmap
   DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891; PR-2 of the datalake
