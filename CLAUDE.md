@@ -18,7 +18,21 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
+_Last updated: 2026-07-16 (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN
+(placeholder — allocate via queue-master) — the Rust mirror of compute.py's
+Slice-0 FOLD layer (`fno_math.metrics_fold_trades` + the seam
+`brutex/metrics/compute_rust.py`) behind the NEW default-OFF
+`BRUTEX_METRICS_RUST_FOLD`; the fold-in-Rust / combine-in-Python split (the
+combine tail carries libm `pow` — the MUST-STAY-PYTHON class), the returns
+column stays Python-computed (CPython correctly-rounded int/int), the
+downside Σr² mirrors CPython 3.12+'s Neumaier-compensated `sum()`
+(burn-in-caught 1-ulp class), 16-sample burn-in + autorevert per
+#1531/#1532; flag OFF (default) byte-identical, flag ON bit-identical —
+the #1685 golden + differential suites and the frozen run-identity goldens
+executed GREEN on BOTH arms. Ships INERT. The per-item record lives in the
+§1 Active-branch blurb + the MIGRATION.md entry — this header carries the
+pointer, never the story. ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX.)
+Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
 DEFAULT-OMITTED (baseline (hlc3,close) → existing run_ids BYTE-IDENTICAL, no
@@ -2945,7 +2959,51 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
+- **Active branch:** `claude/rust-metrics-compute-fold`
+  (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
+  allocate via queue-master** — the Rust mirror of `compute.py`'s Slice-0
+  FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
+  (`fold_trades_checked` pure `Result` core + the `metrics_fold_trades`
+  pyfunction over five parallel per-trade columns; i128 integer sums →
+  exact Python ints; the Welford/Pébay recurrence transcribed line-by-line;
+  the p95/p5 percentile mirror) + the NEW seam leaf
+  `brutex/metrics/compute_rust.py` behind the default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD` (inline `_TRUTHY`/`_FALSY` mirror-pinned — the
+  `feed_rust` LEAF discipline; a metrics→engine import edge would close a
+  cycle) and ONE `compute.py` dispatch chokepoint (`_resolve_folds`; flag
+  OFF = the verbatim `_fold_trades` call, never-routes bomb-spy-pinned).
+  THE SPLIT (recorded honestly): fold-in-Rust / combine-in-Python — the
+  combine tail carries libm `pow` (CAGR `**`, skewness `math.pow`), the
+  NOT-correctly-rounded-portable MUST-STAY-PYTHON class `metrics.rs`
+  documents, so the shipped split holds bit-identity BY CONSTRUCTION; the
+  returns column stays PYTHON-computed at the seam (CPython's
+  correctly-rounded big-int `int/int` — no exactness envelope needed).
+  BURN-IN-CAUGHT FINDING: the first flag-ON corpus run autoreverted on
+  `dense_1500` — CPython 3.12+'s builtin `sum()` is NEUMAIER-COMPENSATED
+  for floats (gh-100425), so the kernel's downside Σr² now mirrors
+  `builtin_sum`'s float fast path exactly (Rust exact-bits pin + seam pin;
+  the oracle value shipped throughout — no wrong number ever served).
+  Burn-in 16-sample bit-compare + autorevert latch (#1531/#1532 pattern);
+  greeks-batch fault taxonomy (MemoryError raw; any other kernel fault →
+  warn-once → oracle; refuse-poison wire gate). PROOF executed BOTH arms:
+  the 52-test #1685 byte-parity golden + the C23 differential (56 passed
+  each arm), the non-vacuous flag-ON corpus pin (engagement spy, every
+  case burn-in cross-checked, zero autoreverts), the hypothesis dual-arm
+  property (150 examples), the frozen `_GOLDEN_CONTENT_HASH`/
+  `_GOLDEN_RUN_ID` run-identity goldens byte-identical flag-OFF AND
+  flag-ON; cargo test 586 green (7 new), fmt/clippy `-D warnings` clean;
+  `compute_rust.py` 100.00% line+branch standalone (NEW ci.yml numpy-safe
+  stanza), `compute.py` 100.00% under its stem suite; ruff/ruff-format
+  clean, `mypy --strict` clean, `pyright brutex tests` 0 errors; SIX
+  hand-applied seam mutants verified killed (ledgered — the mutmut pair
+  list deliberately not extended, the greeks-batch cheaper-honest-option
+  precedent). HONEST: both arms O(n·log n) per fold; ships INERT — a
+  default flip is its own later DEC; measured 6.08× fold-only on the
+  dense_1500 case (sandbox micro-bench, NOT an SLA — the combine tail +
+  `_drawdown_stats` are outside this seam). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched.)
+  Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
   — the fixed-close-comparison bias hazard, both left in the enum for a cheap round-2), mirroring the
@@ -8545,7 +8603,21 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/vwap-ema-price-source-axis`
+- **Active feature branch:** `claude/rust-metrics-compute-fold`
+  (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
+  allocate via queue-master — the Rust mirror of `compute.py`'s Slice-0
+  FOLD layer (`fno_math.metrics_fold_trades` + the seam
+  `brutex/metrics/compute_rust.py`) behind the NEW default-OFF Pattern-A
+  `BRUTEX_METRICS_RUST_FOLD`; fold-in-Rust / combine-in-Python (the combine
+  tail carries libm `pow` — MUST-STAY-PYTHON), the returns column stays
+  Python-computed, the downside Σr² mirrors CPython 3.12+'s
+  Neumaier-compensated `sum()` (burn-in-caught), 16-sample burn-in +
+  autorevert; flag OFF (default) byte-identical, flag ON bit-identical —
+  the #1685 golden + differential suites and the frozen run-identity
+  goldens executed GREEN on BOTH arms; ships INERT; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 + the
+  MIGRATION.md entry for the full blurb)
+  Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis; DEFAULT-OMITTED
