@@ -260,6 +260,25 @@ class MetadataPullReport:
     note: str
     store_write_deferrals: int = 0
 
+    @property
+    def ok(self) -> bool:
+        """The metadata stage verdict — the ONE home of the metadata phase-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): this report
+        SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol, and the
+        sequencer's :func:`~brutex.dashboard.pipeline_pull.metadata_phase_ok`
+        gate DELEGATES here (expression MOVED verbatim — this module sits below
+        the sequencer in the import graph; CLAUDE.md §11 COMMON). ``True`` iff
+        NO expiry cell raised, NO contract job raised, and NO store write batch
+        was deferred — the full law lives on the gate's docstring.
+        """
+        return (
+            self.expiry_failures == 0
+            and self.contract_failures == 0
+            and self.store_write_deferrals == 0
+        )
+
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the metadata-pull route + the live panel."""
         return {
