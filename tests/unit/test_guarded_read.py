@@ -356,12 +356,12 @@ class TestScanParquetRegular:
         is polars' own empty-expansion behavior, byte-identical to the plain
         scan (same exception type)."""
         pattern = str(tmp_path / "absent" / "*.parquet")
-        try:
+        # pytest.raises binds ``plain_type`` unconditionally (the plain scan
+        # raising on empty expansion IS the premise — a non-raise fails here),
+        # so the name can never be read unbound (CodeQL alert #1169 class).
+        with pytest.raises((pl.exceptions.PolarsError, OSError)) as plain_exc:
             pl.scan_parquet(pattern).collect()
-        except (pl.exceptions.PolarsError, OSError) as exc:
-            plain_type = type(exc)
-        else:  # pragma: no cover — polars raises on empty expansion today
-            pytest.fail("plain scan unexpectedly succeeded on a zero-match glob")
+        plain_type = type(plain_exc.value)
         with pytest.raises(plain_type):
             scan_parquet_regular(pattern).collect()
 
