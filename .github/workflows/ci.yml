@@ -679,9 +679,10 @@ jobs:
           else
             echo "(brutex.execution.errors test file not present yet — gate inactive)"
           fi
-          # DEC-FILL-WORST-CASE-001: the stdlib-only global fill-mode
-          # vocabulary leaf (FillMode + DEFAULT_FILL_MODE + the fail-loud
-          # $BRUTEX_FILL_MODE resolver) — 100% line+branch standalone.
+          # DEC-FILL-WORST-CASE-ONLY-001: the stdlib-only global fill-mode
+          # vocabulary leaf (the single-member WORST_CASE token + the
+          # fail-loud require_fill_mode_env_unset refusal guard) — 100%
+          # line+branch standalone.
           if compgen -G "tests/unit/test_execution_fill_mode.py" > /dev/null; then
             pytest --cov=brutex.execution.fill_mode --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_fill_mode.py
           else
@@ -995,6 +996,7 @@ jobs:
             pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
             pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
             pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
+            pytest --cov=brutex.crossverify.owed         --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_owed.py
             pytest --cov=brutex.crossverify.s3_publish   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_s3_publish.py
             pytest --cov=brutex.crossverify.pull_leg     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_pull_leg.py
             pytest --cov=brutex.crossverify.prebuild_leg --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_prebuild_leg.py
@@ -1851,6 +1853,20 @@ jobs:
           else
             echo "(brutex.dashboard.auto_pull_scheduler test file not present yet — gate inactive)"
           fi
+          # DEC-SETTLE-EVIDENCE-ADOPTION-001 (MIGRATION.md #1793): the measured-settle
+          # evidence channel — the schema-1 validator/loader leaf + the moved COMMON
+          # regular-file-only sidecar loader. Both ship at 100% line+branch standalone
+          # from the start.
+          if compgen -G "tests/unit/test_settle_evidence.py" > /dev/null; then
+            pytest --cov=brutex.calendars.settle_evidence --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_settle_evidence.py
+          else
+            echo "(brutex.calendars.settle_evidence test file not present yet — gate inactive)"
+          fi
+          if compgen -G "tests/unit/test_sidecar_read.py" > /dev/null; then
+            pytest --cov=brutex.data.sidecar_read --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_sidecar_read.py
+          else
+            echo "(brutex.data.sidecar_read test file not present yet — gate inactive)"
+          fi
           # DEC-MOVERS-OPTIONS-PCR-001: the COMMON two-side ratio primitive (stdlib-only,
           # cycle-proof — the moneyness.py precedent) + its /movers per-underlying PCR
           # adapter. Both ship at 100% line+branch standalone from the start.
@@ -2418,6 +2434,25 @@ jobs:
             pytest --cov=brutex.dashboard.oneclick_view --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_oneclick_view.py
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
           fi
           # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
           # unkillable-run-core modules ship at 100% line+branch STANDALONE —

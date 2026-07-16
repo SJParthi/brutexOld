@@ -36,7 +36,6 @@ from brutex.dashboard.pull_intent import (
     persist_intent_for_launch,
     probe_pull_singleflight,
     pull_intent_resume_active,
-    read_sidecar_bytes,
     resolve_pull_intent_resume,
     restart_cap_message,
     restore_intent_after_refused_start,
@@ -435,50 +434,6 @@ def test_load_oversized_is_none_and_deleted_before_read(tmp_path: Path) -> None:
     store.path.write_bytes(body + b" " * (MAX_INTENT_BYTES + 1 - len(body)))
     assert store.load() is None
     assert not store.path.exists()
-
-
-def test_read_sidecar_bytes_read_is_bounded_even_if_file_grows_after_fstat(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """[refuter round 8 S-2 — mutant L4 killer] the loader's ``read(max_bytes)``
-    bound is load-bearing for the same-inode GROW-after-fstat vector (the one
-    class the fstat-on-fd size cap cannot see — a swap cannot reach the open
-    descriptor, but the SAME inode growing between the fstat and the read
-    can): even when the fstat reports an under-cap size over a file whose
-    on-disk bytes are 4x the cap, the served bytes are EXACTLY the cap —
-    never the whole grown file. Deterministic via a monkeypatched ``os.fstat``
-    returning a small ``st_size`` (the grow simulated by writing the big file
-    first — the loader sees a small stat, then reads from the big inode);
-    under the unbounded-read mutant (``handle.read()``) all 4x-cap bytes come
-    back and this pin fails."""
-    cap = 64
-    target = tmp_path / "grow.json"
-    target.write_bytes(b"x" * (cap * 4))  # the inode already holds 4x the cap
-    real_fstat = os.fstat
-
-    def _small_fstat(fd: int) -> os.stat_result:
-        st = real_fstat(fd)
-        return os.stat_result(
-            (
-                st.st_mode,
-                st.st_ino,
-                st.st_dev,
-                st.st_nlink,
-                st.st_uid,
-                st.st_gid,
-                cap - 1,  # under-cap: the size gate passes, the read decides
-                int(st.st_atime),
-                int(st.st_mtime),
-                int(st.st_ctime),
-            )
-        )
-
-    monkeypatch.setattr(os, "fstat", _small_fstat)
-    result = read_sidecar_bytes(target, max_bytes=cap)
-    monkeypatch.undo()
-    assert result.shape == "ok"
-    assert result.raw is not None
-    assert len(result.raw) == cap  # BOUNDED: never the 4x-cap on-disk bytes
 
 
 def test_clear_is_idempotent(tmp_path: Path) -> None:

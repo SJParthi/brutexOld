@@ -624,6 +624,29 @@ def test_stdout_defensive_none_fields_render_question_marks(
     assert "prebuild:  ? symbol(s), ? bars" in capsys.readouterr().out
 
 
+def test_stdout_no_source_line_emit_on_nonzero(
+    lake: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T22 (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): the structured no-source
+    line renders ONLY when the count is non-zero (capped names + the honest
+    remainder from the TRUE count); the clean run's stdout stays
+    byte-identical — no line, no token (the sibling clean-run pins above pass
+    unmodified)."""
+    report = _report(
+        prebuild_no_source=("RELIANCE", "IDEA", "YESBANK", "SUZLON"),
+        prebuild_no_source_count=6,
+    )
+    assert _Harness(report=report).run(lake) == EXIT_OK
+    out = capsys.readouterr().out
+    assert (
+        "[brutex]   no-source: 6 symbol(s) skipped — no stored 1-minute data "
+        "(vendor-empty or never pulled): RELIANCE, IDEA, YESBANK (+3 more)" in out
+    )
+    # The clean run renders NO no-source token at all (emit-on-nonzero).
+    assert _Harness().run(lake) == EXIT_OK
+    assert "no-source" not in capsys.readouterr().out
+
+
 def test_stdout_ok_headline_carries_note_warning_clauses(
     lake: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -730,3 +753,203 @@ def test_dispatch_wires_all_flags(lake: Path, monkeypatch: pytest.MonkeyPatch) -
             "strict_exit": True,
         }
     ]
+
+
+# ── the settle-evidence adoption channel (DEC-SETTLE-EVIDENCE-ADOPTION-001) ─
+
+
+def test_auto_evidence_adopted_defers_measured(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A valid committed evidence file (adopts 16:00) drives the --auto gate:
+    a 15:50 run defers with ONE line carrying the MEASURED provenance, exit 0
+    (cron-green) — the e2e half of the evidence tier."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    from tests.unit.test_settle_evidence import write_evidence
+
+    evidence = write_evidence(tmp_path / "settle_evidence.json")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(evidence))
+    h = _Harness()
+    code = h.run(lake, auto=True, now=lambda: datetime(2024, 1, 2, 15, 50))
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    assert out.count("pull-all-spot deferred:") == 1
+    assert "waiting for post-close settle time 16:00 IST" in out
+    assert "measured" in out
+    assert "UNMEASURED" not in out  # a measured value never reads UNMEASURED
+    assert h.builder_kwargs == []  # nothing built on a deferral
+    # ... and 16:00 exactly RUNS (the inclusive boundary, evidence tier).
+    code2 = h.run(lake, auto=True, now=lambda: datetime(2024, 1, 2, 16, 0))
+    assert code2 == EXIT_OK
+    assert h.builder_kwargs != []
+    capsys.readouterr()
+
+
+def test_settle_ist_flag_beats_present_evidence(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[tier-1 supremacy e2e — the env_map trick] --settle-ist ALWAYS wins
+    over a present valid evidence file: evidence adopts 16:00 but the flag
+    says 18:00, so a 17:00 run still defers NAMING 18:00 with the operator
+    override provenance."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    from tests.unit.test_settle_evidence import write_evidence
+
+    evidence = write_evidence(tmp_path / "settle_evidence.json")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(evidence))
+    h = _Harness()
+    code = h.run(lake, auto=True, settle_ist="18:00", now=lambda: datetime(2024, 1, 2, 17, 0))
+    assert code == EXIT_OK
+    out = capsys.readouterr().out
+    deferral_lines = [line for line in out.splitlines() if "pull-all-spot deferred:" in line]
+    assert len(deferral_lines) == 1
+    assert "waiting for post-close settle time 18:00 IST" in deferral_lines[0]
+    assert "16:00" not in deferral_lines[0]  # the evidence value never leaks past tier 1
+    assert "operator override BRUTEX_PULL_ALL_SETTLE_IST" in deferral_lines[0]
+    assert h.builder_kwargs == []
+
+
+def test_junk_explicit_evidence_path_exits_user_error_before_lock(
+    lake: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[§3.2 — the latent-junk killer, CLI arm] a junk EXPLICIT evidence path
+    fails loud PRE-lock even while --settle-ist masks the resolver's own
+    evidence read (the tier-1 short-circuit): the eager probe-only
+    ``evidence_settle(env_map)`` line catches it."""
+    from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+
+    junk = tmp_path / "settle_evidence.json"
+    junk.write_bytes(b"{junk")
+    monkeypatch.setenv(SETTLE_EVIDENCE_PATH_ENV, str(junk))
+    locks: list[str] = []
+
+    def lock_factory(*_a: Any, **_k: Any) -> Any:
+        locks.append("lock")  # pragma: no cover — must never run
+        return contextlib.nullcontext()
+
+    with pytest.raises(CliUserError, match=SETTLE_EVIDENCE_PATH_ENV):
+        cmd_pull_all_spot(lake_root=lake, settle_ist="18:00", lock_factory=lock_factory)
+    assert locks == []
+
+
+# ── the durable owed-day sentinel (DEC-CROSSVERIFY-OWED-SENTINEL-001) ─────
+
+
+def test_owed_marker_written_before_the_chain_real_run_only(lake: Path) -> None:
+    """A REAL run writes the owed marker at pull-tail-commit ENTRY — locks
+    held, BEFORE the pipeline builder ever runs — so a death anywhere
+    downstream (mid-pull / mid-prebuild / pre-tail) leaves the sentinel; the
+    marker SURVIVES the finished run when the injected tail never completes
+    the day (the crash-sentinel shape)."""
+    from datetime import date
+
+    from brutex.crossverify.owed import list_owed_days
+
+    day = date(2024, 1, 2)
+    h = _Harness()
+    real_builder = h.builder
+    seen_at_builder: list[list[date]] = []
+
+    def builder(**kwargs: Any) -> Any:
+        seen_at_builder.append(list_owed_days(lake))
+        return real_builder(**kwargs)
+
+    rc = cmd_pull_all_spot(
+        lake_root=lake,
+        now=lambda: _TRADING_EVENING,
+        pipeline_builder=builder,
+        pipeline_executor=h.executor,
+        crossverify_tail=h.tail,
+    )
+    assert rc == EXIT_OK
+    assert seen_at_builder == [[day]]  # marked BEFORE the chain ran
+    assert list_owed_days(lake) == [day]  # …and kept (the tail spy cleared nothing)
+
+
+def test_owed_marker_absent_for_dry_run_and_refused_lock(lake: Path) -> None:
+    from brutex.crossverify.owed import list_owed_days
+
+    h = _Harness()
+    assert h.run(lake, dry_run=True, now=lambda: _TRADING_EVENING) == EXIT_OK
+    assert list_owed_days(lake) == []  # a dry-run owes nothing
+
+    def refusing_lock(*_args: Any, **_kwargs: Any) -> Any:
+        raise PullAlreadyRunningError(Path("/x.lock"), "pull already running (holder: peer)")
+
+    h2 = _Harness()
+    rc = h2.run(lake, lock_factory=refusing_lock, now=lambda: _TRADING_EVENING)
+    assert rc == EXIT_USER_ERROR
+    assert list_owed_days(lake) == []  # a refused start commits to nothing
+
+
+def test_owed_marker_cleared_by_a_real_tail_completed_verdict(lake: Path) -> None:
+    """The happy-path-clears pin on the CLI surface: the injected tail runs
+    the REAL ``run_crossverify`` (a Saturday launch → the honest
+    ``skipped_non_trading`` completed verdict), whose clear-on-verdict
+    removes the marker the CLI wrote at entry — no marker lingers."""
+    from datetime import date, datetime
+
+    from brutex.calendars.nse import get_session_checked
+    from brutex.crossverify.config import resolve_crossverify_config
+    from brutex.crossverify.owed import list_owed_days
+    from brutex.crossverify.run import CrossverifySeams, run_crossverify
+    from brutex.dashboard.pull_scope import CrossverifyTailOutcome as _Outcome
+
+    saturday = date(2024, 1, 6)
+
+    def _never(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("seam must not be reached on a non-trading day")
+
+    def real_tail() -> Any:
+        config = resolve_crossverify_config(lake_root=lake, day=saturday)
+        seams = CrossverifySeams(
+            acquire_locks=lambda _stack: True,
+            session_for=get_session_checked,
+            classifier_factory=_never,
+            reader=_never,
+            enumerate_targets=_never,
+            run_pull=_never,
+            run_settle_retry=_never,
+            run_prebuild=_never,
+            s3_client_factory=_never,
+            alerter=_RecordingTailAlerter(),
+            emit_pull_halt=_never,
+            market_hours_blocked=lambda: False,
+            now_ist=lambda: datetime(2024, 1, 6, 18, 0),
+            sleeper=lambda _s: None,
+        )
+        cv = run_crossverify(config, seams)
+        return _Outcome(status=cv.verdict, human=cv.verdict)
+
+    h = _Harness()
+    rc = cmd_pull_all_spot(
+        lake_root=lake,
+        now=lambda: datetime(2024, 1, 6, 18, 0),
+        pipeline_builder=h.builder,
+        pipeline_executor=h.executor,
+        crossverify_tail=real_tail,
+    )
+    assert rc == EXIT_OK
+    assert list_owed_days(lake) == []  # written at entry, cleared by the verdict
+
+
+class _RecordingTailAlerter:
+    """A no-op CrossverifyAlerter for the real-tail clear pin."""
+
+    def crossverify_summary(self, *, run_id: str, report: Any) -> bool:
+        _ = (run_id, report)
+        return True
+
+    def crossverify_refused(self, *, run_id: str, reason: str) -> bool:
+        _ = (run_id, reason)
+        return True

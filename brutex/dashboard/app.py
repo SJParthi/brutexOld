@@ -142,6 +142,7 @@ from brutex.dashboard.fno_underlying import (
     resolve_fno_index_aliases,
 )
 from brutex.dashboard.greeks_health import GreeksEnrichHealth
+from brutex.dashboard.health_hub import HealthHub
 from brutex.dashboard.historical_pull import pull_contract_candles
 from brutex.dashboard.host_allowlist import DEFAULT_ALLOWED_HOSTS
 from brutex.dashboard.lake_census_holder import (
@@ -246,6 +247,7 @@ from brutex.dashboard.pull_jobs import (
     BackgroundPullJob,
     ProgressHook,
 )
+from brutex.dashboard.pull_outcome import LastPullOutcome, classify_retained_pull_outcome
 from brutex.dashboard.pull_scope import (
     SCOPE_FNO_ONLY,
     SCOPE_FULL,
@@ -1236,6 +1238,8 @@ def build_app(
     session_rate: SessionRateController | None = None,
     census_spawn: Callable[[Callable[[], None]], None] | None = None,
     census_clock: Callable[[], float] | None = None,
+    pull_outcome_probe: Callable[[], LastPullOutcome] | None = None,
+    health_hub: HealthHub | None = None,
     loop_watchdog: LoopWatchdog | None = None,
     crossverify_runner: Callable[[Any], Any] | None = None,
     crossverify_tail: CrossverifyTail | None = None,
@@ -1405,6 +1409,21 @@ def build_app(
         assert the dry-run / job-end eviction through the REAL routes); ``None``
         (the default) builds a fresh production holder — byte-identical to the
         pre-seam construction (mirrors the ``summary_cache`` injection pattern).
+    pull_outcome_probe
+        Optional zero-arg probe returning the app's live
+        :class:`~brutex.dashboard.pull_outcome.LastPullOutcome`
+        (DEC-OPERATOR-HEALTH-TRUTH-001).  The production default classifies
+        THIS app's own retained last-pull state + id-correlated verdict holder
+        through the ONE :func:`~brutex.dashboard.pull_outcome.\
+classify_retained_pull_outcome`; tests inject a deterministic probe (or a
+        probe over their OWN real :class:`BackgroundPullJob`) to drive every
+        outcome state through the real routes (mirrors ``pull_active_probe``).
+    health_hub
+        Optional :class:`~brutex.dashboard.health_hub.HealthHub` backing the
+        ``GET /api/v1/health/hub`` fold (DEC-OPERATOR-HEALTH-TRUTH-001).
+        Injected so tests pin lane states with a deterministic clock/env;
+        ``None`` (the default) builds the production hub over this app's lake
+        root resolver + the resolved *pull_outcome_probe*.
     loop_watchdog
         Optional :class:`~brutex.observability.loop_watchdog.LoopWatchdog`
         (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): when given, the app
@@ -2437,6 +2456,14 @@ def build_app(
         # written in exactly ONE place — every pre-existing key stays byte-identical.
         payload = view.to_dict()
         stamp_bridge_freshness(payload, bridge_result)
+        # ONE more ADDITIVE key (DEC-OPERATOR-HEALTH-TRUTH-001): the honest
+        # LAST-PULL OUTCOME block. ``flow_state == "done"`` is true-but-weak
+        # evidence ("no pull running + a fresh tick") — the pre-fix operator
+        # page rendered it as a green "completed cleanly", the SAME green a
+        # disk-full / market-hours / quota HALT showed. The heartbeat now joins
+        # this block: a halted pull renders its named degraded state, never the
+        # clean-completion green. Every pre-existing key stays byte-identical.
+        payload["last_pull"] = _pull_outcome_probe_resolved().to_dict()
         return JSONResponse(payload)
 
     # The former ``GET /api/v1/quota`` route (DEC-DASHBOARD-QUOTA-PERSISTED-001)
@@ -3250,10 +3277,71 @@ def build_app(
     # background _work closure stamps the BulkSpotReport's `.verdict.to_dict()`
     # here when a pull / retry completes; GET /pull-verdict maps it through the
     # pure banner_for() helper so /universe can SHOW the coloured banner. A
-    # one-key holder (not a module-global — CLAUDE.md §4); the write is a single
-    # atomic reference assignment on the job thread, the read is on the request
-    # thread (CPython GIL → torn-state-free). `None` until the first pull lands.
-    _last_pull_verdict: dict[str, dict[str, Any] | None] = {"verdict": None}
+    # two-key holder (not a module-global — CLAUDE.md §4); each write assigns
+    # BOTH keys on the job thread, the read is on the request thread (CPython
+    # GIL → torn-state-free for the outcome probe's purposes: a mid-stamp read
+    # at worst sees the OLD id with the NEW verdict or vice versa, and either
+    # mismatch makes the probe honestly SKIP the verdict, never mis-colour).
+    # `verdict` is None until the first pull lands; `pull_id` is the STAMPING
+    # run's correlation id (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2:
+    # the outcome probe consults the verdict ONLY when it matches the retained
+    # snapshot's run — an un-timestamped stale verdict can never colour a
+    # different run's outcome; "" = stamped outside any run, e.g. the pre-pull
+    # credentials refusal, which correlates with the never-ran slot only).
+    _last_pull_verdict: dict[str, Any] = {"verdict": None, "pull_id": ""}
+
+    def _stamp_pull_verdict(verdict: dict[str, Any]) -> None:
+        """Stamp *verdict* + the CURRENT run's correlation id into the holder.
+
+        Called from the pull routes' _work closures, which run inside the
+        job's ``pull_id_scope`` — so ``current_pull_id()`` is the run the
+        verdict describes (``""`` at the pre-pull refusal gate, by design).
+        ONE writer helper so no stamp site can forget the id half
+        (DEC-OPERATOR-HEALTH-TRUTH-001, hostile-review M2).
+        """
+        from brutex.observability.correlation import current_pull_id
+
+        _last_pull_verdict["verdict"] = verdict
+        _last_pull_verdict["pull_id"] = current_pull_id()
+
+    def _default_pull_outcome_probe() -> LastPullOutcome:
+        """The honest LAST-PULL OUTCOME of THIS app's job slot (DEC-OPERATOR-HEALTH-TRUTH-001).
+
+        Joins the two truths the app already records — the job's RETAINED last
+        PULL-kind snapshot (``last_pull_state`` — live while a pull runs;
+        sweep-proof between runs, so a halted pull's red outcome survives a
+        later sweep — hostile-review M2/m5) and the last finished-pull verdict
+        holder above, consulted ONLY when its stamped run id matches the
+        retained snapshot's run — through the ONE pure classifier. O(1),
+        in-memory, read-only.
+        """
+        return classify_retained_pull_outcome(
+            _pull_job.last_pull_state(),
+            verdict=_last_pull_verdict["verdict"],
+            verdict_pull_id=_last_pull_verdict["pull_id"],
+        )
+
+    # Resolved probe (injection seam mirrors ``pull_active_probe``): the
+    # ``/api/v1/pull/rate`` additive ``last_pull`` block AND the health hub's
+    # pull lane both read THIS one callable — one truth source, two surfaces.
+    _pull_outcome_probe_resolved: Callable[[], LastPullOutcome] = (
+        pull_outcome_probe if pull_outcome_probe is not None else _default_pull_outcome_probe
+    )
+
+    # The unified health hub (DEC-OPERATOR-HEALTH-TRUTH-001): nightly chain +
+    # backup dead-man from durable local state, the pull lane from the probe
+    # above, doctor-daily + mutation honestly NOT WIRED (GitHub-Actions-only
+    # gates with no local artifact — never a fabricated green). Injected for
+    # deterministic tests; the production hub rides the same read-side lake
+    # root resolver the rate bridge uses.
+    _health_hub: HealthHub = (
+        health_hub
+        if health_hub is not None
+        else HealthHub(
+            lake_root_resolver=lambda: _rate_bridge_lake_root_or_none(instrument_store),
+            pull_outcome_probe=_pull_outcome_probe_resolved,
+        )
+    )
 
     def _gate_pull_dry_run(dry_run_requested: bool, *, route: str) -> bool:
         """Resolve a pull route's EFFECTIVE dry_run — explicit opt-in or LOUD refusal.
@@ -3287,7 +3375,7 @@ def build_app(
         if refusal is not None:
             # Stamp the RED refusal verdict so the /universe banner shows the
             # fix text too — needs_operator semantics, not just a 503 body.
-            _last_pull_verdict["verdict"] = refusal.to_dict()
+            _stamp_pull_verdict(refusal.to_dict())
             if liveproof is not None:
                 # Mirror the SAME relayed fix text onto the persistent
                 # live-proof banner (DEC-DOCTOR-LIVE-AUTORUN-001): the banner
@@ -3483,7 +3571,7 @@ def build_app(
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         # Initial total = symbols × the chosen fetch intervals (1d / 1m / both) — a
@@ -4370,6 +4458,22 @@ def build_app(
             # movers are NEVER left blocked by a failed pull.
             prebuild_ok = False
 
+            if spot_only and not dry_run:
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the moment this REAL
+                # spot-only pull COMMITS to owing the day a cross-verify —
+                # BEFORE the pull/prebuild chain runs — write the durable
+                # owed marker, so a box that dies/sleeps/closes anywhere
+                # downstream (the crossverify tail below is the launcher's
+                # LAST step) leaves a persistent sentinel the next run's
+                # step-D3 owed catchup completes. Best-effort + kill-switch
+                # coherent (mark_owed_for_pull marks nothing under
+                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
+                # failed pull); the runner clears the marker at the day's
+                # completed material verdict.
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                mark_owed_for_pull(lake_root, launch_day, source="dashboard-pipeline")
+
             # ONE durable &-form winner map for the WHOLE pipeline run
             # (DEC-FORM-WINNER-PERSIST-001): the metadata phase's %26 win reorders
             # the historical phase's very first fetch for that underlying (both key
@@ -5040,7 +5144,7 @@ def build_app(
                 # vacuous "clean" verdict must never clobber the last REAL
                 # pull's verdict surface (the B H1 honesty law's spot axis).
                 if report.spot is not None and not fno_only:
-                    _last_pull_verdict["verdict"] = report.spot.verdict.to_dict()
+                    _stamp_pull_verdict(report.spot.verdict.to_dict())
                 # Consecutive-failure health over the post-pull Greeks pass
                 # (DEC-GREEKS-ENRICH-OBSERVE-001), via the nested candle
                 # sub-report. A stopped-early / no-candle pipeline (either
@@ -5541,7 +5645,7 @@ def build_app(
                 # set mid-pull can never crash a long pull).
                 market_closed=resolve_market_closed(),
             )
-            _last_pull_verdict["verdict"] = report.verdict.to_dict()
+            _stamp_pull_verdict(report.verdict.to_dict())
             return report
 
         unit_total = len(instruments) * len(fetch_intervals)
@@ -5857,6 +5961,23 @@ def build_app(
             return None
         return load_last_run(lake_root)
 
+    def _crossverify_owed_days() -> list[str]:
+        """Owed-day names for the panel (DEC-CROSSVERIFY-OWED-SENTINEL-001).
+
+        A NAMES-only ``os.scandir`` of ``<lake_root>/.crossverify/owed/`` —
+        no entry is ever OPENED, so a planted FIFO/device symlink can never
+        hang the poll; corruption-tolerant (junk entries WARN + skip inside
+        :func:`~brutex.crossverify.owed.list_owed_days`); honest ``[]`` on
+        no resolvable lake root — never a 500. Runs on the threadpool via
+        the route so a wedged volume can never block the event loop.
+        """
+        from brutex.crossverify.owed import list_owed_days
+
+        lake_root = _rate_bridge_lake_root_or_none(instrument_store)
+        if lake_root is None:
+            return []
+        return [owed.isoformat() for owed in list_owed_days(lake_root)]
+
     @app.get("/api/v1/crossverify/progress")
     async def api_crossverify_progress() -> JSONResponse:
         """GET /api/v1/crossverify/progress — the producer job snapshot.
@@ -5869,10 +5990,19 @@ def build_app(
         failed keys + detail), so a finished failure survives a page reload
         AND a dashboard restart (DEC-CROSSVERIFY-WITHHELD-REGATE-001). One
         O(1) small-sidecar stat+read per poll, off the event loop; ``null``
-        when absent/corrupt/unresolvable — never a fabricated record.
+        when absent/corrupt/unresolvable — never a fabricated record. The
+        EMIT-ON-PRESENT ``owed_days`` field (DEC-CROSSVERIFY-OWED-SENTINEL-001)
+        lists days whose pull committed to a cross-verify that never reached a
+        completed verdict — the no-owed payload stays byte-identical.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
         snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
+        owed_days = await run_in_threadpool(_crossverify_owed_days)
+        if owed_days:
+            # EMIT-ON-PRESENT + additive-only (DEC-CROSSVERIFY-OWED-SENTINEL-001):
+            # the no-owed wire stays BYTE-IDENTICAL to the pre-change payload
+            # (pinned); an owed day reads loud on the /universe panel.
+            snapshot["owed_days"] = owed_days
         return JSONResponse(snapshot)
 
     @app.get("/api/v1/universe/pull-progress")
@@ -5983,6 +6113,29 @@ def build_app(
             if resume is not None:
                 payload["resume"] = resume
         return JSONResponse(payload)
+
+    @app.get("/api/v1/health/hub")
+    async def api_health_hub() -> JSONResponse:
+        """GET /api/v1/health/hub — the unified operator health fold.
+
+        DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747). ONE green/red fold
+        over the automation lanes with durable LOCAL state — pull outcome ·
+        nightly chain (`<lake>/sweeps/nightly/<id>/report.json`) · backup
+        dead-man (the PURE :func:`brutex.backup.deadman.evaluate_deadman`
+        verdict, read-only) — plus the honestly NOT-WIRED doctor-daily +
+        mutation lanes (GitHub-Actions-only gates, no local artifact; the
+        honesty law: unknown/unwired reads unknown/not-wired, NEVER a
+        fabricated green). Payload: ``{"fold": {verdict, headline},
+        "lanes": [{lane, verdict, headline, detail, checked_at, age_s}, …],
+        "generated_at", "ttl_s"}``.
+
+        Honest O-envelope: a poll within the hub's TTL serves the memoised
+        file lanes (O(1)); a refresh is one bounded ``scandir`` + three tiny
+        JSON reads — never a lake scan. Runs on a threadpool worker (the
+        app.py offload doctrine) so the event loop never touches the
+        filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
+        """
+        return JSONResponse(await run_in_threadpool(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
