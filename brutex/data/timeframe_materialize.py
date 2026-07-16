@@ -1011,7 +1011,6 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     bucket HIGH/LOW or the ``1day`` anchor. Clean frames are returned
     object-identical (zero-copy); clean lakes stay byte-identical.
     """
-    import polars as pl
 
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
     from brutex.data.price_sanity import validate_frame_price_sanity
@@ -1058,8 +1057,14 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
         # OPTION contract's month files may mix the raw 7-column and the
         # Greeks-enriched 17-column shape (plan §15.3); only the base
         # OHLCV(+OI) columns are selected below, which every shape carries —
-        # byte-identical for a uniform tree.
-        df = pl.scan_parquet(
+        # byte-identical for a uniform tree. Lazily scanned through the EAGER
+        # per-file fd probe (DEC-LAKE-READ-INODE-GUARD-002) — covers BOTH
+        # source shapes (the months-bounded file LIST and the whole-tree GLOB
+        # string): a planted FIFO raises NotRegularFileError at scan-build
+        # instead of hanging the collect; regular files byte-identical.
+        from brutex.data.guarded_read import scan_parquet_regular
+
+        df = scan_parquet_regular(
             source,
             missing_columns="insert",
             extra_columns="ignore",

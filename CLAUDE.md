@@ -18,7 +18,27 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832,
+_Last updated: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1833,
+branch `claude/lake-read-inode-guard-residual` — the #1832 guard reaches the
+FOUR verifier-identified residual sites: the three LAZY `pl.scan_parquet`
+reads (spot_daily_resample window reader · spot_join window reader ·
+timeframe_materialize 1m reader, BOTH source shapes) ride the NEW
+eager-probing `guarded_read.scan_parquet_regular` (per-file fd probe at
+scan-BUILD, then polars' OWN lazy scan — lazy semantics + regular-file
+results byte-identical, pinned), and the rate_bridge byte-read rides
+`read_regular_bytes` inside its existing `except OSError → None` arm —
+closing the class where the file OPEN defers to `.collect()` (C-level
+fifo_open, unguardable at Python level) or a bare `read_bytes()` wedges the
+deadline daemon forever. Fails-before proven per site (the three LIST arms +
+rate_bridge genuinely HUNG at the pre-fix tree; the GLOB arm is a disclosed
+CORRECTNESS improvement — polars glob expansion silently IGNORES a
+non-regular inode, probed); the #1832 headline's "every … byte read"
+overclaim is SCOPE-AMENDED in the same ledger touch. READ-side lake reads
+only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1833.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832,
 branch `claude/lake-read-inode-guard` — the file-read boundaries gain the
 COMMON two-defense inode/stall guard: (a) the PLANTED-INODE fd-level
 `S_ISREG` gate (`os.open(O_RDONLY|O_NONBLOCK)` → `fstat` on the SAME
@@ -2784,7 +2804,84 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-read-inode-guard`
+- **Active branch:** `claude/lake-read-inode-guard-residual`
+  (**DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1833** — the #1832
+  two-defense guard reaches the FOUR verifier-identified residual sites,
+  stacked off the #1832 branch head 7636bb0 (the PR opens DRAFT and lands
+  strictly AFTER PR #1579). THE RESIDUAL CLASS: a LAZY `pl.scan_parquet`
+  performs NO open at build time — the open happens inside `.collect()`,
+  deep in polars' native scan executor, so a non-regular inode among the
+  scanned files hung the collect in C-level `fifo_open` where neither the
+  #1832 fd gate nor a SIGALRM could fire. The four sites:
+  `spot_daily_resample.make_lake_read_1m_window` · `spot_join.
+  spot_close_by_ts_window` (both scanning `ist_span_partition_files`) ·
+  `timeframe_materialize.make_lake_read_1m` (BOTH source shapes — the
+  months-bounded `month_partition_files` LIST arm + the whole-tree
+  `**/*.parquet` GLOB-string arm) · `rate_bridge.read_rate_snapshot`'s bare
+  `path.read_bytes()` (real site `brutex/data/rate_bridge.py:313` — the
+  brief's `adapters/groww/` citation corrected in #1833). THE FIX: NEW
+  COMMON `guarded_read.scan_parquet_regular(source, *, missing_columns,
+  extra_columns)` — EAGERLY fd-probes every candidate via
+  `open_regular_binary` at scan-BUILD time, then returns polars' OWN
+  LazyFrame (lazy semantics, projection pushdown + schema-tolerant kwargs
+  preserved, pinned; a str/Path/glob source is probed over its sorted
+  recursive glob expansion and handed to polars UNTOUCHED; an explicit
+  sequence is handed over as the normalized `list[str]` in CALLER order —
+  an identity for the three production call sites); a planted
+  FIFO/device/directory raises the typed `NotRegularFileError(OSError)`
+  at scan-build into each site's EXISTING `parquet_read_skip_errors()` /
+  `except OSError` degrade arm — zero except-clause churn (the #1832
+  fold-in law); the DEC-LAKE-READ-UNIQUE-001 bypass gate is TAUGHT the new
+  spelling (`scan_parquet_regular(` joins `_RAW_READ_RE` — callers stay
+  accountable). rate_bridge swaps onto `read_regular_bytes` inside the
+  existing `try/except OSError → None` — byte-identical for a regular
+  bridge file; a planted FIFO now reads the honest `None` instantly
+  instead of wedging the `RateBridgeCache` deadline daemon forever with
+  the single-flight `_inflight` never clearing (the #1522 at-most-one-
+  zombie posture now genuinely self-heals — the daemon RETURNS).
+  FAILS-BEFORE (executed at the pre-fix tree; the per-site split is
+  HONEST, Golden Rule #10): the three LIST-shaped sites genuinely HUNG —
+  forced deterministically via the enumeration-seam monkeypatch (their
+  `is_file()` gates exclude a statically planted FIFO, so the reachable
+  class is the enumeration→collect inode-SWAP window; the monkeypatch
+  feeds the exact `list[str]` polars opened pre-fix), each bounded
+  subprocess timeout-KILLED at exit 143 (the in-test SIGALRM could not
+  interrupt the GIL-held C read — exactly the class disclosure); the
+  rate_bridge statically-planted FIFO hung with the in-test 5 s SIGALRM
+  watchdog firing. The GLOB arm is statically plantable but NOT statically
+  hangable — PROBED on polars 1.42.1: glob expansion SILENTLY IGNORES a
+  non-regular inode (the pre-fix collect served the sibling's rows, no
+  hang, no error — a silent read-set drop); the guard there is a
+  CORRECTNESS improvement (loud typed raise, correct-or-absent) plus a
+  hang belt should polars' glob semantics change; its fails-before shape
+  is "DID NOT RAISE", never a hang claim — this probe forced the #1832
+  headline's "every … byte read" SCOPE AMENDMENT, folded into the SAME
+  ledger touch. TESTS: `TestScanParquetRegular` (8 — list+glob collect
+  byte-parity vs plain `pl.scan_parquet` · kwargs pass-through ·
+  projection-pushdown survival · FIFO-in-list + FIFO-under-glob eager
+  typed raise · vanished-entry eager OSError · zero-match glob keeps
+  polars' own error contract) + NEW
+  `tests/unit/test_inode_guard_residual_sites.py` (9 — per-site
+  regular-file parity + the forced swap-class FIFO raises under the
+  SIGALRM watchdog + the glob-arm correctness pin + rate_bridge
+  FIFO→bounded honest None + absent-bridge None). GATES: `guarded_read.py`
+  100.00% line+branch standalone (82/20, 46 tests) ·
+  `timeframe_materialize.py` 100.00% (176/56) · `spot_join.py` 100.00%
+  (28/4, the 12e stanza) · `spot_daily_resample.py` 100.00% (204/54) ·
+  `rate_bridge.py` 100.00% (59/4); the bypass-gate trio green;
+  ruff/ruff-format clean; `mypy --strict` 0 new (the `stage3_refine` `cma`
+  note is the stash-verified pre-existing baseline); pyright 0 errors.
+  HONEST LIMITS: the scan sites carry defense (a) only — NO stall deadline
+  wraps the `.collect()` (the #1832 tier-2 envelope); the eager probe is
+  O(candidate files) at scan-build (one open/fstat/close per file; the
+  glob arm additionally pays one Python recursive glob — the same
+  enumeration the scan performs; disclosed); a probe→collect inode SWAP
+  window remains (the same per-read TOCTOU residual class #1832
+  discloses — the probe closes the PLANTED-inode class, not a racing
+  writer); healthy lakes byte-identical (parity-pinned). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `claude/lake-read-inode-guard`
   (**DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832** — the file-read
   boundaries gain the COMMON two-defense inode/stall guard, closing the
   planted-non-regular-inode / wedged-volume hang class REPO-WIDE. DEFENSE
@@ -7965,7 +8062,25 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-read-inode-guard`
+- **Active feature branch:** `claude/lake-read-inode-guard-residual`
+  (DEC-LAKE-READ-INODE-GUARD-002, MIGRATION.md #1833 — the #1832 guard
+  reaches the FOUR verifier-identified residual sites: the three LAZY
+  `pl.scan_parquet` reads (spot_daily_resample / spot_join /
+  timeframe_materialize — the open defers to `.collect()`, C-level
+  fifo_open) ride the NEW eager-probing `guarded_read.scan_parquet_regular`
+  (fd probe per candidate at scan-BUILD, then polars' OWN lazy scan —
+  regular-file results byte-identical, pinned), and
+  `rate_bridge.read_rate_snapshot` rides `read_regular_bytes` inside its
+  existing `except OSError → None` arm (a planted FIFO reads honest None
+  instantly — the deadline daemon returns, the single-flight self-heals);
+  fails-before proven per site (the three LIST arms + rate_bridge genuinely
+  HUNG pre-fix; the GLOB arm is a disclosed correctness improvement —
+  polars glob expansion silently ignores non-regular inodes, probed); the
+  #1832 "every … byte read" overclaim SCOPE-AMENDED in the same ledger
+  touch; stacked off 7636bb0, the PR opens DRAFT after #1579; ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line —
+  see §1 + MIGRATION.md #1833 for the full blurb)
+  Earlier: `claude/lake-read-inode-guard`
   (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832 — the file-read
   boundaries gain the COMMON two-defense inode/stall guard: the fd-level
   `O_NONBLOCK`+`S_ISREG`-on-`fstat` gate (`NotRegularFileError(OSError)` — a

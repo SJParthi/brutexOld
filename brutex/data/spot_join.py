@@ -107,6 +107,7 @@ def spot_close_by_ts_window(
     """
     import polars as pl
 
+    from brutex.data.guarded_read import scan_parquet_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     for segment in SPOT_PROBE_SEGMENTS:
@@ -114,8 +115,11 @@ def spot_close_by_ts_window(
         files = ist_span_partition_files(base, start, end)
         if not files:
             continue
+        # EAGER per-file fd probe on the lazy scan (DEC-LAKE-READ-INODE-GUARD-002):
+        # a planted FIFO among the month files raises NotRegularFileError at
+        # scan-build instead of hanging the collect; regular files byte-identical.
         frame = (
-            pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore")
+            scan_parquet_regular(files, missing_columns="insert", extra_columns="ignore")
             .select("timestamp", "close")
             .filter(pl.col("close").is_not_null())
             .collect()
