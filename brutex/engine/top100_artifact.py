@@ -89,6 +89,7 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_bytes_deadline
 from brutex.models import BruteXError
 from brutex.ranking import MIN_TRADES
 from brutex.ranking.presets import (
@@ -895,7 +896,13 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
 
     target_dir = runs_dir / run_id
     try:
-        stamp_raw = (target_dir / TOP100_STAMP_FILENAME).read_bytes()
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — this loader
+        # feeds the oneclick top100 route's fresh parse): a planted FIFO /
+        # wedged volume folds into the existing NAMED-invalid arms (both
+        # guard errors are OSError subclasses), never a hung poll.
+        stamp_raw = read_regular_bytes_deadline(
+            target_dir / TOP100_STAMP_FILENAME, what="top100 stamp read"
+        )
     except OSError:
         _invalid("stamp_unreadable")
         return None
@@ -922,7 +929,7 @@ def load_top100(runs_dir: Path, run_id: str) -> Top100Artifact | None:
         return None
 
     try:
-        raw = (target_dir / TOP100_FILENAME).read_bytes()
+        raw = read_regular_bytes_deadline(target_dir / TOP100_FILENAME, what="top100 artifact read")
     except OSError:
         _invalid("artifact_unreadable")
         return None

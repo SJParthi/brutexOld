@@ -69,12 +69,11 @@ def read_lake_bars_frame(symbol_dir: Path, interval: str, *, source: str = "") -
     projected to the resampler's canonical ``ts_utc``/OHLCV columns, sorted.
     *source* labels the dedup log event; blank derives ``<symbol>/<interval>``.
     """
-    import polars as pl
-
+    from brutex.data.guarded_read import read_parquet_glob_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet((symbol_dir / interval).as_posix() + "/**/*.parquet"),
+        read_parquet_glob_regular((symbol_dir / interval).as_posix() + "/**/*.parquet"),
         source=source or f"{symbol_dir.name}/{interval}",
     )
     return (

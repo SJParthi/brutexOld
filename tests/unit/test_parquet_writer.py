@@ -693,14 +693,18 @@ class TestCorruptExistingPartition:
         }
         writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
 
-        original_read_bytes = _Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the partition byte read rides the
+        # guarded reader now — fault THAT seam (Path.read_bytes is unused).
+        import brutex.data.parquet_writer as pw_mod
 
-        def _io_fault(self: _Path) -> bytes:
-            if self.suffix == ".parquet":
+        original_read_bytes = pw_mod.read_regular_bytes
+
+        def _io_fault(target: _Path) -> bytes:
+            if target.suffix == ".parquet":
                 raise OSError("simulated read I/O fault")
-            return original_read_bytes(self)
+            return original_read_bytes(target)
 
-        monkeypatch.setattr(_Path, "read_bytes", _io_fault)
+        monkeypatch.setattr(pw_mod, "read_regular_bytes", _io_fault)
         with pytest.raises(WriterError, match="unreadable existing partition"):
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
 
@@ -769,10 +773,13 @@ class TestNoOpReusesExistingBytes:
         bar = _bar(0, open_="100", high="110", low="90", close="105")
         writer.write(bars=[bar], **coords)
 
-        def _oom_read_bytes(self: _Path) -> bytes:
+        # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded reader seam.
+        import brutex.data.parquet_writer as pw_mod
+
+        def _oom_read_bytes(target: _Path) -> bytes:
             raise MemoryError("partition byte read OOM")
 
-        monkeypatch.setattr(_Path, "read_bytes", _oom_read_bytes)
+        monkeypatch.setattr(pw_mod, "read_regular_bytes", _oom_read_bytes)
         with pytest.raises(LakeWriteHalt) as exc_info:
             writer.write(bars=[bar], **coords)
         assert exc_info.value.reason == "out_of_memory"

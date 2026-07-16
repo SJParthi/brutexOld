@@ -291,18 +291,21 @@ class TestVerdictMatrix:
         """An artifact that exists as a FILE but cannot be hashed raises loudly
         (an infrastructure defect, not a stamp verdict). The read failure is
         injected (chmod is invisible to a root test runner)."""
-        import builtins
+        # DEC-LAKE-READ-INODE-GUARD-001: the hash now opens the artifact via
+        # the guarded `open_regular_binary` seam (os.open based, never
+        # builtins.open) — fault it there so the loud-raise teeth stay real.
+        import brutex.observability.stage_stamp as ss_mod
 
         artifact = _artifact(tmp_path)
         write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
-        real_open = builtins.open
+        real_open = ss_mod.open_regular_binary
 
-        def _boom(file: object, *args: object, **kwargs: object) -> object:
-            if str(file) == str(artifact):
+        def _boom(path: object, *args: object, **kwargs: object) -> object:
+            if str(path) == str(artifact):
                 raise OSError("I/O error")
-            return real_open(file, *args, **kwargs)  # type: ignore[call-overload]
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(builtins, "open", _boom)
+        monkeypatch.setattr(ss_mod, "open_regular_binary", _boom)
         with pytest.raises(StageStampError, match="cannot hash artifact"):
             validate_stage_stamp(artifact, expected_stage="s")
 

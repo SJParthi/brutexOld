@@ -1607,9 +1607,16 @@ class TestOptionForeignScan:
         for skip in skips:
             error = skip["error"]
             assert isinstance(error, str)
+            # DEC-LAKE-READ-INODE-GUARD-001: the targeted sibling read now
+            # rides the fd-validated `read_parquet_regular` seam — polars is
+            # handed the OPEN handle, so the vendor-influenceable ESC/newline
+            # path never appears in its error message AT ALL (a strictly
+            # STRONGER property than the round-17 repr-escaped embed the old
+            # `assert "\\x1b" in error` positive pin asserted). The no-raw
+            # control-char law keeps its teeth verbatim.
             assert "\x1b" not in error
             assert "\n" not in error
-            assert "\\x1b" in error
+            assert error.startswith(("'", '"'))  # repr()-wrapped convention
 
 
 class TestOptionKeyDtypeGate:

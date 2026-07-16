@@ -156,14 +156,18 @@ class TestBuild:
         """An unreadable member is skipped + WARNed + honestly listed in meta."""
         run_dir = _seed_run_dir(tmp_path)
         poison = run_dir / "manifest.json"
-        real_read_bytes = Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: the bundle member read rides the
+        # module-level guarded seam, not Path.read_bytes — fault it there.
+        import brutex.observability.diag_bundle as db_mod
 
-        def _boom(self: Path) -> bytes:
-            if self == poison:
+        real_read_bytes = db_mod.read_regular_bytes
+
+        def _boom(path: Path) -> bytes:
+            if Path(path) == poison:
                 raise OSError("I/O error")
-            return real_read_bytes(self)
+            return real_read_bytes(path)
 
-        monkeypatch.setattr(Path, "read_bytes", _boom)
+        monkeypatch.setattr(db_mod, "read_regular_bytes", _boom)
         with capture_logs() as logs:
             bundle = build_diagnostic_bundle(tmp_path, run_id=_RUN_ID, env={})
         assert bundle is not None

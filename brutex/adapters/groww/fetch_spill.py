@@ -445,7 +445,11 @@ class FetchSpillArea:
         processed, so a consumer crash mid-tail leaves the spill on disk for :meth:`cleanup` rather
         than losing the bars before they were written.
         """
-        data = handle.path.read_bytes()
+        from brutex.data.guarded_read import (
+            read_regular_bytes,
+        )
+
+        data = read_regular_bytes(handle.path)
         return _decode_bars(data)
 
     def discard(self, handle: SpilledWindow) -> None:

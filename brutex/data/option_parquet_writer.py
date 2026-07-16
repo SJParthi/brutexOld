@@ -66,6 +66,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.data.lake_stats_manifest import (
     KIND_OPTIONS,
     partition_stats_tracked,
@@ -581,7 +582,7 @@ class OptionParquetWriter:
         ):
             self._assert_options_containment(dest)
             try:
-                return pl.read_parquet(io.BytesIO(dest.read_bytes()))
+                return pl.read_parquet(io.BytesIO(read_regular_bytes(dest)))
             except parquet_read_skip_errors() as exc:
                 raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
 

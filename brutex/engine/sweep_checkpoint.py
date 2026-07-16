@@ -45,6 +45,7 @@ from time import time
 from typing import Any, Final
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.models import BruteXError
 
 #: Schema version stamped on every checkpoint so a future format change is
@@ -284,7 +285,14 @@ class SweepCheckpointStore:
                 "refusing to read it (corruption/tampering)"
             )
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses): this load
+            # runs while the greeks-backfill holds the lake-root pull
+            # single-flight lock — a planted FIFO (defense a) or a wedged
+            # volume (defense b) here would block EVERY later pull, so the
+            # read rides the fd-level S_ISREG gate + the wall-clock deadline.
+            # NotRegularFileError/ReadStallError are OSError subclasses and
+            # fold into the existing SweepCheckpointError contract below.
+            raw = read_regular_text_deadline(self._path, what="sweep checkpoint read")
         except OSError as exc:
             raise SweepCheckpointError(f"Failed to read checkpoint {self._path}: {exc}") from exc
         try:

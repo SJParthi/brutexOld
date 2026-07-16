@@ -1992,14 +1992,18 @@ class TestRecountVixDivergence:
             str(_store_path(scratch, grid)),
         }
         counts: dict[str, int] = {}
-        real_read_bytes = Path.read_bytes
+        # DEC-LAKE-READ-INODE-GUARD-001: sweep_verify reads store bytes via
+        # the guarded module-level seam, not Path.read_bytes — count there.
+        import brutex.engine.sweep_verify as sv_mod
 
-        def counting_read_bytes(self: Path) -> bytes:
-            if str(self) in store_strs:
-                counts[str(self)] = counts.get(str(self), 0) + 1
-            return real_read_bytes(self)
+        real_read_bytes = sv_mod.read_regular_bytes
 
-        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+        def counting_read_bytes(path: Path) -> bytes:
+            if str(path) in store_strs:
+                counts[str(path)] = counts.get(str(path), 0) + 1
+            return real_read_bytes(path)
+
+        monkeypatch.setattr(sv_mod, "read_regular_bytes", counting_read_bytes)
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         assert _codes(report) == {"recount_vix_divergence"}  # attribution unchanged

@@ -6137,8 +6137,8 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         completed verdict — the no-owed payload stays byte-identical.
         """
         snapshot = _crossverify_job.snapshot().to_dict()
-        snapshot["last_run"] = await run_in_threadpool(_crossverify_last_run)
-        owed_days = await run_in_threadpool(_crossverify_owed_days)
+        snapshot["last_run"] = await _run_lake(_crossverify_last_run)
+        owed_days = await _run_lake(_crossverify_owed_days)
         if owed_days:
             # EMIT-ON-PRESENT + additive-only (DEC-CROSSVERIFY-OWED-SENTINEL-001):
             # the no-owed wire stays BYTE-IDENTICAL to the pre-change payload
@@ -6276,7 +6276,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
         app.py offload doctrine) so the event loop never touches the
         filesystem; a corrupt state file is a NAMED degraded lane, never a 500.
         """
-        return JSONResponse(await run_in_threadpool(_health_hub.payload))
+        return JSONResponse(await _run_lake(_health_hub.payload))
 
     @app.get("/api/v1/coverage/counters")
     async def api_coverage_counters() -> JSONResponse:
@@ -8968,7 +8968,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 fixture_root_active=fixture_root is not None,
             )
 
-        return JSONResponse(await run_in_threadpool(_resolve))
+        return JSONResponse(await _run_lake(_resolve))
 
     @app.get("/api/v1/oneclick/verify")
     async def api_oneclick_verify(

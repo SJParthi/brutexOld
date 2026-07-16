@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_bytes
 from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -993,7 +994,7 @@ def verify_structural(root: Path) -> TreeVerifyReport:
                 "filename carries no 16-hex tuple digest — pairing unverifiable",
             )
             continue
-        actual_hash = hashlib.sha256(store_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(read_regular_bytes(store_path)).hexdigest()
 
         sidecar_path = trial_stats_sidecar_path(store_path)
         sidecar_ok = False
@@ -1829,8 +1830,8 @@ def compare_recount(
             nonlocal store_digest_memo
             if store_digest_memo is None:
                 store_digest_memo = (
-                    hashlib.sha256(store_path.read_bytes()).hexdigest(),
-                    hashlib.sha256(scratch_store.read_bytes()).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(store_path)).hexdigest(),
+                    hashlib.sha256(read_regular_bytes(scratch_store)).hexdigest(),
                 )
             return store_digest_memo
 
@@ -1893,7 +1894,7 @@ def compare_recount(
                     )
                 )
                 continue
-            if original.read_bytes() == scratch.read_bytes():
+            if read_regular_bytes(original) == read_regular_bytes(scratch):
                 continue  # byte-identical — verified (silence is the verdict)
             # VIX-only divergence (see the docstring's VIX RESIDUAL). All
             # THREE artifacts necessarily ride a VIX-only lake movement: the

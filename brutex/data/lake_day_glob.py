@@ -116,8 +116,7 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
         The month's bars (all columns as stored, incl. ``open_interest``), or
         ``None`` when the month file is absent.
     """
-    import polars as pl
-
+    from brutex.data.guarded_read import read_parquet_regular
     from brutex.data.lake_read import dedup_bars_frame
 
     path = day_month_file(base, day)
@@ -126,8 +125,12 @@ def read_day_month_frame(base: Path, day: date_cls) -> pl.DataFrame | None:
     # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): every /movers session/day
     # reader flows through here — a poisoned-era duplicated month file would
     # otherwise double-count session volume/turnover. Keep-FIRST, warned.
+    # DEC-LAKE-READ-INODE-GUARD-001 defense (a): fd-validated literal read —
+    # a FIFO/device planted at the month file folds into the callers'
+    # existing movers skip arms (NotRegularFileError is an OSError) instead
+    # of hanging the /movers route.
     frame, _dropped = dedup_bars_frame(
-        pl.read_parquet(path.as_posix()), source=f"lake_day:{path.as_posix()}"
+        read_parquet_regular(path), source=f"lake_day:{path.as_posix()}"
     )
     return frame
 
@@ -167,16 +170,16 @@ def read_day_intraday_frame(base: Path, day: date_cls, *, symbol: str) -> pl.Dat
         # GIFT Nifty (and any future exempt symbol): its full-day series can cross
         # a UTC month boundary, so read the whole partition (the old O(all-bars)
         # path) to stay byte-equivalent — the caller's IST-day filter is unchanged.
-        import polars as pl
-
+        from brutex.data.guarded_read import read_parquet_glob_regular
         from brutex.data.lake_read import dedup_bars_frame
 
         if not (base.is_dir() and any(base.rglob("*.parquet"))):
             return None
         # SAME keep-FIRST read gate as the month-bounded path
-        # (DEC-LAKE-READ-UNIQUE-001) — warned, never silent.
+        # (DEC-LAKE-READ-UNIQUE-001) — warned, never silent; the glob read is
+        # per-file fd-validated (DEC-LAKE-READ-INODE-GUARD-001 defense (a)).
         frame, _dropped = dedup_bars_frame(
-            pl.read_parquet(base.as_posix() + "/**/*.parquet"),
+            read_parquet_glob_regular(base.as_posix() + "/**/*.parquet"),
             source=f"lake_day:{base.as_posix()}",
         )
         return frame

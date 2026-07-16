@@ -127,15 +127,19 @@ def test_with_age_returns_none_when_stat_fails(tmp_path: Path) -> None:
     """
     target = tmp_path / "ntm_constituents.csv"
     save_constituent_csv(_CSV, cache_dir=tmp_path)
-    real_read_text = Path.read_text
+    # DEC-LAKE-READ-INODE-GUARD-001: the body read rides the guarded
+    # deadline reader now — wrap THAT seam (Path.read_text is no longer used).
+    from brutex.dashboard import ntm_cache as ntm_mod
 
-    def _read_then_delete(self: Path, *args: object, **kwargs: object) -> str:
-        text = real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+    real_read = ntm_mod.read_regular_text_deadline
+
+    def _read_then_delete(*args: object, **kwargs: object) -> str:
+        text = real_read(*args, **kwargs)  # type: ignore[arg-type]
         os.unlink(target)  # remove before the stat() call inside the helper
         return text
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Path, "read_text", _read_then_delete)
+        mp.setattr(ntm_mod, "read_regular_text_deadline", _read_then_delete)
         assert load_cached_constituent_with_age(cache_dir=tmp_path) is None
 
 

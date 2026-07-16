@@ -28,6 +28,7 @@ from brutex.dashboard.movers_cache import (
     MoversSnapshotCache,
     candidate_key,
     deep_size_bytes,
+    native_frame_in_payload,
     revision_generation,
 )
 from structlog.testing import capture_logs
@@ -965,3 +966,88 @@ class TestSizingHint:
         finished_at = src.index("finished_at = self._clock()")
         lock_at = src.index("with self._lock:", finished_at)
         assert sizing_at < finished_at < lock_at
+
+
+class TestNativeFrameGuard:
+    """DEC-LAKE-READ-INODE-GUARD-001 — the #1721 watermark companion guard.
+
+    A polars/pyarrow object cached in a ``max_bytes``-carrying instance defeats
+    the byte accounting (``deep_size_bytes`` sees only the Python shell of the
+    off-heap buffers), so the store path detects one and WARNs loudly — once
+    per instance, never refusing the insert.
+    """
+
+    def test_probe_detects_a_polars_frame_at_top_level(self) -> None:
+        import polars as pl
+
+        found = native_frame_in_payload(pl.DataFrame({"a": [1, 2]}))
+        assert found is not None and found.startswith("polars")
+
+    def test_probe_detects_a_pyarrow_table_nested_in_containers(self) -> None:
+        import pyarrow as pa
+
+        table = pa.table({"a": [1, 2]})
+        found = native_frame_in_payload({"rows": [("x", table)]})
+        assert found is not None and found.startswith("pyarrow")
+
+    def test_probe_detects_a_frame_used_as_a_dict_key_position_probe(self) -> None:
+        """Both dict probe arms (key OR value) have teeth — the key arm here."""
+        import polars as pl
+
+        # A Series is unhashable so it cannot BE a key; probe the key arm via
+        # a container key that itself abstains, plus the value arm separately.
+        assert native_frame_in_payload({("k",): pl.Series("s", [1])}) is not None
+
+    def test_probe_abstains_on_plain_payloads(self) -> None:
+        assert native_frame_in_payload({"rows": [(1, "a"), (2, "b")], "note": None}) is None
+        assert native_frame_in_payload(bytes(64)) is None
+
+    def test_probe_abstains_past_the_depth_cap(self) -> None:
+        import polars as pl
+
+        deep: object = pl.DataFrame({"a": [1]})
+        for _ in range(5):  # buried 5 containers deep — beyond _NATIVE_FRAME_MAX_DEPTH=4
+            deep = [deep]
+        assert native_frame_in_payload(deep) is None
+
+    def test_probe_fault_abstains_never_raises(self) -> None:
+        class _RaisingItems(dict):  # type: ignore[type-arg]  # test double
+            def items(self) -> Any:
+                raise RuntimeError("mid-walk mutation stand-in")
+
+        assert native_frame_in_payload(_RaisingItems(a=1)) is None
+
+    def test_watermark_store_warns_once_per_instance_and_keeps_the_insert(self) -> None:
+        import polars as pl
+
+        frame = pl.DataFrame({"a": [1, 2, 3]})
+        cache = MoversSnapshotCache(capacity=8, max_bytes=1_000_000)
+        with capture_logs() as logs:
+            got = cache.get_or_compute("k1", generation=0, compute=lambda: {"df": frame})
+            assert isinstance(got, dict) and got["df"] is frame  # insert NEVER refused
+            # A hit never re-probes; a SECOND frame insert never re-warns (per instance).
+            assert cache.get_or_compute("k1", generation=0, compute=lambda: None) is got
+            cache.get_or_compute("k2", generation=0, compute=lambda: {"df": frame})
+        warns = [e for e in logs if e["event"] == "movers_cache.native_frame_payload"]
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert warns[0]["payload_type"] == "dict"
+        assert str(warns[0]["native_type"]).startswith("polars")
+        assert warns[0]["max_bytes"] == 1_000_000
+
+    def test_watermark_store_clean_payload_never_warns(self) -> None:
+        cache = MoversSnapshotCache(capacity=8, max_bytes=1_000_000)
+        with capture_logs() as logs:
+            cache.get_or_compute("k", generation=0, compute=lambda: {"rows": [1, 2, 3]})
+        assert not [e for e in logs if e["event"] == "movers_cache.native_frame_payload"]
+
+    def test_default_no_watermark_never_probes_or_warns(self) -> None:
+        """The #1721 zero-sizing-work default parity extends to the guard: with
+        ``max_bytes=None`` the probe never runs — no event even for a frame."""
+        import polars as pl
+
+        frame = pl.DataFrame({"a": [1]})
+        cache = MoversSnapshotCache(capacity=4)
+        with capture_logs() as logs:
+            cache.get_or_compute("k", generation=0, compute=lambda: frame)
+        assert not [e for e in logs if e["event"] == "movers_cache.native_frame_payload"]

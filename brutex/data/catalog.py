@@ -544,6 +544,8 @@ class Catalog:
                 "'pip install -e .[data]' to enable the P2 data lake"
             ) from exc
 
+        from brutex.data.guarded_read import read_parquet_regular
+
         entries = self.list_partitions(
             exchange=exchange,
             segment=segment,
@@ -571,7 +573,7 @@ class Catalog:
                     f"catalog references missing partition file {path} "
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
-            frames.append(pl.read_parquet(str(path)))
+            frames.append(read_parquet_regular(path))
 
         combined = pl.concat(frames, how="vertical_relaxed")
         # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned

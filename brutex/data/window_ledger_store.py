@@ -85,6 +85,7 @@ from brutex.calendars.nse import IST
 from brutex.data.atomic_io import atomic_write_via
 from brutex.data.errors import PartitionLockTimeout
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.guarded_read import open_regular_binary, read_regular_text
 from brutex.data.interior_gap_detect import interior_gap_runs
 from brutex.data.partition_lock import partition_write_lock
 from brutex.data.window_ledger import (
@@ -432,7 +433,8 @@ def _read_ledger_file_rows(
     """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(path)  # type: ignore[no-untyped-call, unused-ignore]
+    with open_regular_binary(path) as handle:
+        table = pq.read_table(handle)  # type: ignore[no-untyped-call, unused-ignore]
     present = set(table.schema.names)
     intern_memo: dict[str, str] = {} if memo is None else memo
     columns = {
@@ -1762,7 +1764,7 @@ def load_skipped_audit_cursor(
 
     path = skipped_audit_cursor_path(lake_root)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(path))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:

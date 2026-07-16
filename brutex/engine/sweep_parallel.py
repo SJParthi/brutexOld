@@ -167,6 +167,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, Protocol, cast
 
 import structlog
 
+from brutex.data.guarded_read import read_regular_text_deadline
 from brutex.engine.combo_mask import count_combos
 from brutex.engine.results_store import VixTrioConflictError
 from brutex.engine.sweep_mem_budget import BUDGET_WORKERS_ENV, MEM_BUDGET_ENV
@@ -669,7 +670,12 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
 
     path = quarantine_sidecar_path(root)
     try:
-        raw = path.read_text(encoding="utf-8")
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 (BOTH defenses — the resume
+        # load runs under the G6 sweep single-flight): a planted FIFO /
+        # wedged volume folds into the loud advisory arms below instead of
+        # wedging the whole resume (NotRegularFileError / ReadStallError are
+        # OSError subclasses).
+        raw = read_regular_text_deadline(path, what="sweep quarantine sidecar read")
     except FileNotFoundError:
         return set()
     except OSError as exc:
@@ -723,7 +729,12 @@ def append_quarantine_entries(
 
     path = quarantine_sidecar_path(root)
     try:
-        existing = json.loads(path.read_text(encoding="utf-8"))["entries"]
+        # DEC-LAKE-READ-INODE-GUARD-001 tier 1 — same guarded read as the
+        # resume load above (this append runs on the failure path while the
+        # G6 sweep lock is held).
+        existing = json.loads(
+            read_regular_text_deadline(path, what="sweep quarantine sidecar read")
+        )["entries"]
         if not isinstance(existing, list):
             existing = []
     except (OSError, ValueError, TypeError, KeyError):

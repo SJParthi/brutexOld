@@ -130,6 +130,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.errors import PartitionLockTimeout
+from brutex.data.guarded_read import read_regular_text
 from brutex.data.partition_lock import partition_write_lock
 
 _LOG = structlog.get_logger("brutex.data.lake_manifest")
@@ -362,7 +363,7 @@ def _manifest_lock(lake_root: Path) -> Generator[None, None, None]:
 def _read_meta(lake_root: Path) -> dict[str, Any] | None:
     """Parse the meta header, or ``None`` when absent / corrupt / wrong shape."""
     try:
-        raw = manifest_meta_path(lake_root).read_text(encoding="utf-8")
+        raw = read_regular_text(manifest_meta_path(lake_root))
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -471,7 +472,7 @@ def load_manifest_datasets(lake_root: Path) -> list[dict[str, str]] | None:
             if meta is None:
                 return None
             try:
-                body = manifest_data_path(lake_root).read_text(encoding="utf-8")
+                body = read_regular_text(manifest_data_path(lake_root))
             except FileNotFoundError:
                 _LOG.warning("lake_manifest.data_missing_with_meta")
                 return None
@@ -538,7 +539,7 @@ def rebuild_manifest(
                 as_row: dict[str, str] = dict(zip(_ROW_FIELDS, key, strict=True))
                 merged.setdefault(key, _row_line(as_row, first_seen=now))
             with contextlib.suppress(OSError):
-                existing = _parse_lines(manifest_data_path(lake_root).read_text(encoding="utf-8"))
+                existing = _parse_lines(read_regular_text(manifest_data_path(lake_root)))
                 for old in existing or ():
                     key = (old["exchange"], old["segment"], old["symbol"], old["interval"])
                     merged.setdefault(key, _row_line(old, first_seen=now))

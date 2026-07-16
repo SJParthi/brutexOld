@@ -188,6 +188,7 @@ from brutex.data.greeks_revision import (
     revision_marker_path,
     touch_greeks_revision_marker,
 )
+from brutex.data.guarded_read import read_parquet_regular, read_regular_text
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
 from brutex.engine.sweep_checkpoint import (
@@ -513,7 +514,7 @@ def _marker_last_writer(marker: Path, *, size: int) -> str:
     if size > MAX_CHECKPOINT_BYTES:
         return "unknown"
     try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload = json.loads(read_regular_text(marker))
     except (OSError, ValueError, RecursionError):
         return "unknown"
     if not isinstance(payload, dict):
@@ -825,7 +826,7 @@ def _read_driver_frames(
             return None
         has_timestamp = "timestamp" in schema
         columns = ["timestamp", *needed] if has_timestamp else needed
-        frame = pl.read_parquet(path, columns=columns)
+        frame = read_parquet_regular(path, columns=columns)
         view = _driver_row_view(frame, path) if has_timestamp else frame
     except (pl.exceptions.PolarsError, OSError):
         return None
@@ -1131,7 +1132,9 @@ def _probe_contract_staleness(
         emit_progress_beat()
         files_probed += 1
         try:
-            series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
+            series = read_parquet_regular(path, columns=["greeks_provenance_id"])[
+                "greeks_provenance_id"
+            ]
         except pl.exceptions.ColumnNotFoundError:
             # A legacy 7-column partition — every bar is unstamped; the
             # driver-actionability gate decides (fix round 7).

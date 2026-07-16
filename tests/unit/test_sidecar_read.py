@@ -198,3 +198,91 @@ def test_pull_intent_reexport_identity() -> None:
     assert pull_intent.SidecarReadResult is SidecarReadResult
     assert "read_sidecar_bytes" in pull_intent.__all__
     assert "SidecarReadResult" in pull_intent.__all__
+
+
+# --------------------------------------------------------------------------- #
+# open_regular_binary / read_regular_bytes — the fd-validated raw primitives
+# (DEC-LAKE-READ-INODE-GUARD-001: homed HERE, re-exported by
+# brutex.data.guarded_read; this gate's standalone coverage of the new defs).
+# --------------------------------------------------------------------------- #
+def test_open_regular_binary_reads_regular_file(tmp_path: Path) -> None:
+    """A regular file opens + reads byte-identically to a plain open."""
+    from brutex.data.sidecar_read import open_regular_binary
+
+    target = tmp_path / "plain.bin"
+    target.write_bytes(b"\x00\x01payload")
+    with open_regular_binary(target) as handle:
+        assert handle.read() == b"\x00\x01payload"
+
+
+def test_open_regular_binary_fifo_raises_not_regular_no_hang(tmp_path: Path) -> None:
+    """A planted FIFO raises NotRegularFileError WITHOUT blocking (the (a) defense).
+
+    Fails-before shape: a plain ``open(fifo, "rb")`` blocks for a writer
+    FOREVER — the watchdog turns that hang into a loud failure.
+    """
+    from brutex.data.sidecar_read import NotRegularFileError, open_regular_binary
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    with _hang_watchdog(), pytest.raises(NotRegularFileError):
+        open_regular_binary(fifo)
+
+
+def test_open_regular_binary_absent_raises_filenotfound(tmp_path: Path) -> None:
+    """An absent path raises its ordinary FileNotFoundError (never wrapped)."""
+    from brutex.data.sidecar_read import open_regular_binary
+
+    with pytest.raises(FileNotFoundError):
+        open_regular_binary(tmp_path / "ghost.bin")
+
+
+def test_open_regular_binary_not_regular_closes_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refused fd is CLOSED on the not-regular arm (the owned-finally law)."""
+    import brutex.data.sidecar_read as sr_mod
+    from brutex.data.sidecar_read import NotRegularFileError, open_regular_binary
+
+    fifo = tmp_path / "pipe2"
+    os.mkfifo(fifo)
+    closed: list[int] = []
+    real_close = os.close
+
+    def _spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(sr_mod.os, "close", _spy_close)
+    with _hang_watchdog(), pytest.raises(NotRegularFileError):
+        open_regular_binary(fifo)
+    assert len(closed) == 1  # exactly one close — never leaked, never doubled
+
+
+def test_read_regular_bytes_full_content(tmp_path: Path) -> None:
+    """read_regular_bytes returns the COMPLETE bytes (deliberately uncapped)."""
+    from brutex.data.sidecar_read import read_regular_bytes
+
+    target = tmp_path / "big.bin"
+    payload = b"z" * 70_000
+    target.write_bytes(payload)
+    assert read_regular_bytes(target) == payload
+
+
+def test_read_regular_bytes_fifo_raises_not_regular(tmp_path: Path) -> None:
+    """The whole-bytes convenience inherits the fd gate verbatim."""
+    from brutex.data.sidecar_read import NotRegularFileError, read_regular_bytes
+
+    fifo = tmp_path / "pipe3"
+    os.mkfifo(fifo)
+    with _hang_watchdog(), pytest.raises(NotRegularFileError):
+        read_regular_bytes(fifo)
+
+
+def test_guarded_read_reexport_identity() -> None:
+    """guarded_read re-exports THE SAME primitive objects (never a copy)."""
+    from brutex.data import guarded_read, sidecar_read
+
+    assert guarded_read.open_regular_binary is sidecar_read.open_regular_binary
+    assert guarded_read.read_regular_bytes is sidecar_read.read_regular_bytes
+    assert guarded_read.NotRegularFileError is sidecar_read.NotRegularFileError

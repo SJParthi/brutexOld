@@ -83,6 +83,7 @@ from brutex.dashboard.pull_outcome import (
     TONE_WARN,
     LastPullOutcome,
 )
+from brutex.data.guarded_read import open_regular_binary
 from brutex.nightly.report import NIGHTLY_DIRNAME, REPORT_FILENAME
 
 _LOG = structlog.get_logger(__name__)
@@ -280,7 +281,7 @@ def _read_report_json(report_file: Path) -> Mapping[str, Any] | str:
     reason, never raise.
     """
     try:
-        with report_file.open("rb") as handle:
+        with open_regular_binary(report_file) as handle:
             raw = handle.read(MAX_REPORT_BYTES)
             over = handle.read(1)
     except FileNotFoundError:

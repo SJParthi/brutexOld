@@ -632,7 +632,9 @@ def _read_key_columns(path: Path, columns: Sequence[str]) -> pl.DataFrame:
     note). Covers the ``bars/`` tree's hand-planted twin for free (the bars
     writer itself already reads via ``BytesIO``).
     """
-    return pl.read_parquet(path, columns=list(columns), glob=False)
+    from brutex.data.guarded_read import read_parquet_regular
+
+    return read_parquet_regular(path, columns=columns)
 
 
 def _missing_columns_reason(path: Path, columns: Sequence[str]) -> str | None:

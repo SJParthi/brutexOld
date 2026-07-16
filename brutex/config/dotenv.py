@@ -104,7 +104,11 @@ def load_dotenv_file(path: Path) -> dict[str, str]:
     """
     if not path.is_file():
         return {}
-    return parse_dotenv(path.read_text(encoding="utf-8"))
+    from brutex.data.guarded_read import (
+        read_regular_text,
+    )
+
+    return parse_dotenv(read_regular_text(path))
 
 
 def apply_dotenv(values: Mapping[str, str], *, env: MutableMapping[str, str]) -> tuple[str, ...]:

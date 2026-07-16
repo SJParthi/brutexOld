@@ -70,6 +70,7 @@ from typing import Final
 import structlog
 
 from brutex.data.atomic_io import atomic_write_simple
+from brutex.data.guarded_read import open_regular_binary, read_regular_text
 from brutex.models import BruteXError
 from brutex.nightly.probes import NightlyEnvError
 
@@ -231,7 +232,7 @@ def fsync_file(path: Path) -> None:
 def sha256_file(path: Path) -> str:
     """Streamed sha256 hex digest of *path* (integrity-only — not run identity)."""
     digest = hashlib.sha256()
-    with open(path, "rb") as fp:
+    with open_regular_binary(path) as fp:
         while True:
             chunk = fp.read(_HASH_CHUNK)
             if not chunk:
@@ -684,7 +685,7 @@ def _manifest_created_utc(snapshot_dir: Path) -> float:
     """Snapshot age for retention ordering: manifest ``created_utc``, mtime fallback."""
     manifest_path = snapshot_dir / MANIFEST_NAME
     try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data = json.loads(read_regular_text(manifest_path))
         return float(str(data["created_utc"]))
     except (OSError, ValueError, KeyError, TypeError):
         with contextlib.suppress(OSError):

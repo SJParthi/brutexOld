@@ -18,7 +18,30 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (CLUB Q merge vehicle, branch
+_Last updated: 2026-07-16 (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832,
+branch `claude/lake-read-inode-guard` — the file-read boundaries gain the
+COMMON two-defense inode/stall guard: (a) the PLANTED-INODE fd-level
+`S_ISREG` gate (`os.open(O_RDONLY|O_NONBLOCK)` → `fstat` on the SAME
+descriptor — TOCTOU-safe; a planted FIFO / `/dev/zero` char-device symlink /
+directory raises the NEW `NotRegularFileError(OSError)` instead of hanging
+the boot / an engine sweep / a route forever) and (b) the WEDGED-VOLUME
+STALL deadline (`run_with_deadline`-wrapped reads raising the NEW
+`ReadStallError(OSError)`, tier-1 route/lock-held sites only — the #999
+abandoned-daemon stance); both errors are `OSError` subclasses folding into
+every site's EXISTING `except OSError` / `parquet_read_skip_errors()`
+degrade arm — zero per-site except-clause churn. ONE COMMON module
+`brutex/data/guarded_read.py` (primitives homed in `sidecar_read.py`,
+re-exported identity-pinned; parquet helpers hand polars the validated OPEN
+handle — glob interpretation structurally impossible, subsuming the #1594
+round-15 glob=False law) wired across the tiered site enumeration (~70
+modules); BONUS: the #1721 movers_cache byte-watermark gains the
+native-frame guard (a cached payload never holds a polars/Arrow frame —
+deep_size undercounts off-heap). HONEST severity: DoS/hang, NOT corruption;
+regular-file behavior byte-identical (pinned). ENGINE UNCHANGED —
+NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change. This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1832.)
+Earlier: 2026-07-15 (CLUB Q merge vehicle, branch
 `integration/club-q-dashboard` — the file-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1434 memory/cache + RAM-residency
 hardening pack (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) ·
@@ -2753,7 +2776,69 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
+- **Active branch:** `claude/lake-read-inode-guard`
+  (**DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832** — the file-read
+  boundaries gain the COMMON two-defense inode/stall guard, closing the
+  planted-non-regular-inode / wedged-volume hang class REPO-WIDE. DEFENSE
+  (a) — PLANTED INODE: every guarded read opens
+  `os.open(path, O_RDONLY|O_NONBLOCK)` then `S_ISREG`-checks `os.fstat(fd)`
+  on the SAME descriptor (TOCTOU-safe; NEVER a pre-open `stat()`, NEVER
+  `st_size` as the gate — a `/dev/zero` char-device symlink reads size 0), so
+  a planted FIFO / device / socket / directory raises the NEW
+  `NotRegularFileError(OSError)` instead of blocking forever or OOMing —
+  fails-before PROVEN: the health_hub FIFO hang reproduced at merge-base
+  6b9947d9 (SIGALRM probe exit 42). DEFENSE (b) — WEDGED-VOLUME STALL:
+  tier-1 (route / lock-held) sites ride
+  `read_regular_bytes_deadline`/`read_regular_text_deadline` over the COMMON
+  `run_with_deadline` (READ_DEADLINE_S=5.0; `DeadlineExceeded`/spawn-failure
+  → the NEW `ReadStallError(OSError)` with `__cause__`; the abandoned worker
+  is a daemon — the #999 no-kill stance). BOTH errors are `OSError`
+  subclasses, so every site's EXISTING `except OSError` /
+  `parquet_read_skip_errors()` degrade arm absorbs them with ZERO per-site
+  except-clause churn (the one sanctioned error-token change:
+  `NotRegularFileError` replaces `IsADirectoryError` at guarded sites — a
+  directory IS a non-regular inode). ONE COMMON module
+  `brutex/data/guarded_read.py`: the primitives
+  (`NotRegularFileError`/`open_regular_binary`/`read_regular_bytes`) are
+  HOMED in the stdlib-only `sidecar_read.py` (the #1793 leaf; guarded_read
+  re-exports THE SAME objects, identity-pinned) beside the pre-existing
+  capped `read_sidecar_bytes`; guarded_read adds `read_regular_text`, the
+  deadline variants, and the parquet helpers
+  (`read_parquet_regular`/`read_parquet_glob_regular`/
+  `read_parquet_schema_regular` — polars imported function-locally,
+  wheel-free import posture; polars receives the validated OPEN handle, so
+  path-glob interpretation is STRUCTURALLY impossible — subsumes the #1594
+  round-15 `glob=False` law at every wired site). WIRED across the tiered
+  site enumeration (~70 modules: boot/config/token sidecars · engine sweep
+  verify/checkpoint/stage-stamp/diag-bundle · crossverify journal/S3 staging
+  · lake manifest/invariants/heal/stats · dashboard health_hub / oneclick /
+  window-ledger / caches — per-tier table in MIGRATION.md #1832; the
+  ALREADY-SAFE list + `app.py:8514`/`app.py:8863` deliberately untouched per
+  the task fence). BONUS GUARD (the #1721 byte-watermark): `movers_cache.py`
+  gains `native_frame_in_payload` + the warn-once `_size_payload` probe — a
+  cached payload never holds a polars/Arrow frame (deep_size undercounts
+  off-heap buffers → silent OOM). HONEST: severity is DoS/hang, NOT
+  corruption; regular-file behavior BYTE-IDENTICAL (byte-identity +
+  frame-identity pins); the stall deadline covers tier-1 sites only (tier-2
+  batch/CLI reads stay fd-gated but undeadlined — disclosed); a wedged read's
+  daemon thread cannot be killed (#999). TESTS: NEW
+  `tests/unit/test_guarded_read.py` (31 — FIFO/dev-zero/dir/dangling-symlink/
+  fstat-fault-closes-fd/byte-identity/parquet-frame+glob-identity/deadline
+  stall+spawn/OSError-membership/wheel-free-import) + NEW
+  `tests/unit/test_inode_guard_sites.py` (4 tier-1 site regressions under
+  the SIGALRM watchdog) + 7 primitive tests appended to
+  `test_sidecar_read.py`; 7 existing-suite seam-drift repoints (monkeypatch
+  targets moved from `Path.read_text`/`Path.read_bytes`/`builtins.open` to
+  the module-level guarded seams — each test's teeth preserved). GATES:
+  `guarded_read.py` 100.00% (41/8) + `sidecar_read.py` 100.00% (51/10) +
+  `movers_cache.py` 100.00% (455/174) on their ci.yml stanzas; the 139-file
+  unit battery 5729 passed / 0 failed; the 17-file integration batch 245
+  passed / 2 env-skips; ruff/ruff-format clean; `mypy --strict` 0 new (the
+  one `stage3_refine` cma import note is the pre-existing baseline,
+  stash-verified); pyright 0 errors. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
+  lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
+  Earlier: `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
   the file-disjoint fold of THREE PRs as ONE merge event off main tip d6ac9f85,
   in fold order: **#1434** memory/cache + RAM-residency hardening pack
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · **#1433** the
@@ -7797,7 +7882,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-q-dashboard`
+- **Active feature branch:** `claude/lake-read-inode-guard`
+  (DEC-LAKE-READ-INODE-GUARD-001, MIGRATION.md #1832 — the file-read
+  boundaries gain the COMMON two-defense inode/stall guard: the fd-level
+  `O_NONBLOCK`+`S_ISREG`-on-`fstat` gate (`NotRegularFileError(OSError)` — a
+  planted FIFO/device/directory never hangs the boot / a sweep / a route;
+  fails-before proven at merge-base via the health_hub FIFO SIGALRM probe)
+  + the tier-1 `run_with_deadline` stall bound (`ReadStallError(OSError)`,
+  READ_DEADLINE_S=5.0, the #999 daemon stance); both fold into every site's
+  existing `except OSError` degrade arm — zero except-clause churn; ONE
+  COMMON `brutex/data/guarded_read.py` (primitives homed in
+  `sidecar_read.py`, identity-pinned re-exports; parquet helpers hand polars
+  the validated OPEN handle — glob interpretation structurally impossible)
+  wired across ~70 modules + the #1721 movers_cache native-frame watermark
+  guard; DoS/hang severity, NOT corruption; regular-file behavior
+  byte-identical (pinned); ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX;
+  matches §1's Active branch line — see §1 + MIGRATION.md #1832 for the
+  full blurb)
+  Earlier: `integration/club-q-dashboard`
   (CLUB Q merge vehicle — the file-disjoint fold of THREE PRs as ONE merge
   event off main tip d6ac9f85: #1434 memory/cache + RAM-residency hardening
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · #1433 the brutexd
