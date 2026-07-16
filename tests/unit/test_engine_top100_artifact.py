@@ -1108,3 +1108,76 @@ class TestTierAtWriter:
         artifact = _build([cand])
         tier = cast("dict[str, Any]", artifact.entries[0]["tier"])
         assert set(tier) == {"label", "blocked_next"}
+
+
+class TestTierMinutePathScaleLaw:
+    """Hostile-review round-1 MAJOR-1: the fraction→pct-points scale at the wiring.
+
+    The agg's ``max_dd_minute_path_pct`` is a 0-1 FRACTION (``minute_path.py``
+    ``drop / peak``) while the classifier's ``max_minute_dd_pct`` ceilings are
+    PERCENTAGE POINTS — fed verbatim, a 40% intraday dip read ``0.40 <= 7.5``
+    and the minute-path axis could NEVER fire (S+/S awardable over brutal
+    intraday drawdowns). ``_tier_payload`` must scale ×100. Verified
+    FAILS-BEFORE: both trip-tests below fail with the one-line scale reverted.
+    """
+
+    @staticmethod
+    def _minute_path_candidate(minute_dd_fraction: float) -> Top100Candidate:
+        """An S+-grade candidate WITH a present minute path (every other axis clears)."""
+        from decimal import Decimal
+
+        return make_candidate(
+            1,
+            fingerprint=fingerprint_seed(1),
+            row_overrides={
+                "total_trades": 600,
+                "winning_trades": 390,
+                "losing_trades": 210,
+                "win_rate": 0.70,
+                "profit_factor": 2.5,
+                "expectancy_paisa": 3_000,
+                "max_drawdown_pct": 4.0,
+                # sl 80 paisa on a ₹24,000 entry = 0.33 bps — well inside 10.
+                "avg_entry_price": Decimal("24000.00"),
+                "avg_exit_price": Decimal("24010.00"),
+            },
+            agg_overrides={
+                "win_loss_ratio": 1.5,
+                "max_consecutive_losses": 5,
+                # Contained: 100 <= 1.5 × sl(80) = 120.
+                "mae_1m_worst_paisa": 100,
+                # > 0 is what the availability predicate needs (the agg's
+                # exit-tally invariant keeps the fixture's n_trades=40).
+                "trades_with_1m": 40,
+                "equity_status": "ok",
+                "max_dd_minute_path_pct": minute_dd_fraction,  # 0-1 FRACTION (writer scale)
+            },
+        )
+
+    def _tier_for(self, minute_dd_fraction: float) -> dict[str, Any]:
+        candidate = self._minute_path_candidate(minute_dd_fraction)
+        rid = candidate.row.run_id
+        artifact = _build([candidate], cascade_join=_join({rid: _view(rid)}))
+        return cast("dict[str, Any]", artifact.entries[0]["tier"])
+
+    def test_an_8pct_fraction_trips_the_splus_minute_dd_ceiling(self) -> None:
+        # 0.08 fraction = 8 pct-points > the S+ 7.5 ceiling (and <= S's 15):
+        # the entry demotes to S naming EXACTLY the minute-path axis. With
+        # the scale reverted this read 0.08 <= 7.5 → a false S+ (fails-before).
+        tier = self._tier_for(0.08)
+        assert tier["label"] == "S"
+        assert tier["blocked_next"] == ["minute_path_drawdown"]
+
+    def test_a_5pct_fraction_passes_the_splus_ceiling(self) -> None:
+        # 0.05 fraction = 5 pct-points <= 7.5 — every axis clears → S+.
+        tier = self._tier_for(0.05)
+        assert tier["label"] == "S+"
+        assert tier["blocked_next"] == []
+
+    def test_a_40pct_fraction_trips_even_the_s_ceiling(self) -> None:
+        # The reviewer's motivating shape: a brutal 40% intraday dip must
+        # block BOTH minute-path tiers (0.40 fraction = 40 > 15), demoting
+        # to A with the axis named among the S blockers.
+        tier = self._tier_for(0.40)
+        assert tier["label"] == "A"
+        assert "minute_path_drawdown" in tier["blocked_next"]

@@ -645,7 +645,18 @@ def _tier_payload(candidate: Top100Candidate, *, cascade_status: str) -> dict[st
             trades_with_1m=agg.trades_with_1m,
             equity_status=agg.equity_status,
             max_drawdown_pct=row.max_drawdown_pct,
-            max_dd_minute_path_pct=agg.max_dd_minute_path_pct,
+            # SCALE LAW (hostile-review round-1 MAJOR-1): the agg's
+            # ``max_dd_minute_path_pct`` is a 0-1 FRACTION
+            # (``minute_path.py`` ``drop / peak`` — the bx-oneclick.js
+            # bxMinutePathDdText ×100 display law), while the classifier's
+            # ``max_minute_dd_pct`` ceilings (7.5 / 15.0) are PERCENTAGE
+            # POINTS like the sibling ``max_drawdown_pct`` (which compute.py
+            # already ×100s). Fed verbatim, a 40% intraday dip read 0.40 ≤
+            # 7.5 and the axis could NEVER fire — scale ×100 HERE (an exact
+            # unit projection, never a rounding).
+            max_dd_minute_path_pct=(
+                None if agg.max_dd_minute_path_pct is None else agg.max_dd_minute_path_pct * 100.0
+            ),
             max_consecutive_losses=agg.max_consecutive_losses,
             cascade_status=cascade_status,
         ),

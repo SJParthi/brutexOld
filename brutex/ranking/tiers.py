@@ -360,7 +360,11 @@ S_THRESHOLDS: Final[TierThresholds] = TierThresholds(
 #: PF 1.2, DD 30%, streak 10) plus win 0.40 / payoff 0.6 / expectancy
 #: STRICTLY > 0; NO stop and NO minute-path demands (an A tier must be
 #: reachable on a lake without minute data); cascade merely NOT ``fail``
-#: (absent / not_validated is acceptable).
+#: (absent / not_validated is acceptable). NOTE (hostile-review round-1
+#: NIT-2, deliberate): the gate-mirroring axes (trades/PF/DD/streak) are
+#: STRUCTURAL no-ops at the top-100 writer — every classified entry already
+#: passed the hard gates — they exist so ``classify_tier`` stays a total,
+#: self-contained law for ANY caller, not just the artifact writer.
 A_THRESHOLDS: Final[TierThresholds] = TierThresholds(
     label=TIER_A,
     min_trades=30,
