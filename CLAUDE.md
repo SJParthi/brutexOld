@@ -19,7 +19,7 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
-MIGRATION.md #1832, branch `claude/lake-read-nonfinite-ohlc-guard` —
+MIGRATION.md #1832, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
 non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries:
 `arrow_table_to_bars` gains the explicit finiteness gate (an inf-HIGH bar
 previously served `Decimal('Infinity')` into the engine SILENTLY — the
@@ -2787,7 +2787,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-read-nonfinite-ohlc-guard`
+- **Active branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
   (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1832** —
   non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries,
   closing two PRE-EXISTING latent defects the assurance session
@@ -2830,7 +2830,14 @@ hostile-review pass._
   no lake/schema/scope/vocab/rate change; no new routes, no new env vars;
   all six touched modules 100.00% line+branch on their ci.yml gates;
   ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors on
-  touched files.)
+  touched files. Shipped via the REPLACEMENT-PR remedy (the #1580
+  `+`-in-scope conventional-commit lesson — the original PR #1581 branch's
+  pushed `fix(data+feed)`/`docs(migration+claude)` subjects are
+  charset-illegal and pushed commits are never rewritten; tree rebuilt
+  verbatim under comma-form subjects, identity-proven); the independent
+  hostile review verdict is SHIP with its two honesty NITs folded
+  (transitive-consumer disclosure + the pre-existing null-price TypeError
+  limit — both recorded in MIGRATION.md #1832).)
   Earlier: `claude/vwap-ema-price-source-axis` (**DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681** —
   a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
   {open,high,low,close,hlc3} (hl2/ohlc4 EXCLUDED — HLC3-clones + the /2,/4 half-paisa tie; high/low DEFERRED
@@ -7907,7 +7914,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-read-nonfinite-ohlc-guard`
+- **Active feature branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
   (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1832 — non-finite
   OHLC (inf/-inf/NaN) rejected at BOTH lake-read boundaries: the engine read
   boundary's explicit finiteness gate + the `(ValueError, ArithmeticError)`
