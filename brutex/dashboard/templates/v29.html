@@ -814,7 +814,13 @@
   .oc-msg { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
   .oc-source-badge { padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .oc-disabled-note { font-size: 11px; color: var(--muted); }
-  #bxTip { position: absolute; z-index: 1200; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
+  /* R6-a11y-2 (round 5): the tip must paint ABOVE the strategy drawer
+     (z 1300) + backdrop (z 1290) — both body-level siblings in the ROOT
+     stacking context — or every [data-explain] hover inside the open
+     drawer is invisible. 1310 sits above the drawer stack and below the
+     2000/3000 modal layers (which hold no explain targets); the tip is
+     pointer-events:none so painting above is interaction-safe. */
+  #bxTip { position: absolute; z-index: 1310; max-width: 340px; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text); box-shadow: var(--elev-2); pointer-events: none; }
   .equity-host { min-height: 120px; }
   .equity-host svg { width: 100%; height: 220px; display: block; }
   .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
@@ -842,23 +848,69 @@
      back in. The hidden-tab pause rides BXUI.initVisibilityPause()'s
      .bx-paused rule in bx-design.css. */
   .bx-anim-off, .bx-anim-off *, .bx-anim-off *::before, .bx-anim-off *::after { animation-play-state: paused !important; }
+
+  /* ── All-100-winners unfold (DEC-OPERATOR-PAGE-CONSOLIDATE-001) ──
+     HONESTY NOTE (R9): the grid-template-rows 0fr→1fr unfold is the ONE
+     sanctioned LAYOUT transition in the portal — one container, one-shot,
+     browser-managed; every other portal motion is transform/opacity/
+     stroke-dashoffset only. The idiom restyles the existing
+     .filter-reveal-toggle pattern. */
+  #ocWinnersSection .winners-body { display: grid; grid-template-rows: 0fr;
+    transition: grid-template-rows .38s var(--ease); }
+  #ocWinnersSection .winners-body.open { grid-template-rows: 1fr; }
+  /* overflow: clip (with the hidden fallback for older engines) clips the
+     unfold EXACTLY like hidden but does NOT create a scroll container —
+     so the .wn-filterbar position:sticky actually engages against the
+     PAGE scrollport (adversarial-review fold, E-M3; under the hidden
+     fallback the bar simply never sticks — the pre-fix behavior).
+     The COLLAPSED body is visibility:hidden (the drawer's own delayed-
+     visibility idiom — adversarial-review fold, C-M2) so its 8 filter
+     controls + rows + Show-all are untabbable while clipped; the flip is
+     instant on open and delayed past the .38s fold on close. */
+  #ocWinnersSection .winners-body-inner { overflow: hidden; overflow: clip;
+    min-height: 0; visibility: hidden; transition: visibility 0s linear .4s; }
+  #ocWinnersSection .winners-body.open .winners-body-inner {
+    visibility: visible; transition: visibility 0s; }
+  .winners-toggle { display: inline-flex; align-items: center; gap: 8px;
+    cursor: pointer; border: 1px solid var(--border-strong); border-radius: 10px;
+    padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 800;
+    color: var(--text); background: var(--surface-2); }
+  .winners-toggle .chev { display: inline-block; transition: transform .3s var(--ease); }
+  .winners-toggle.expanded .chev { transform: rotate(180deg); }
+  #ocWinnersJump { cursor: pointer; border: 1px dashed var(--border-strong);
+    border-radius: 8px; padding: 4px 10px; font: inherit; font-size: 11px;
+    color: var(--muted); background: transparent; }
+  /* The winners copy reuses the shared .bx-scpanel component rules from
+     bx-oneclick-panels.css; only this page-chrome unfold lives inline. */
 </style>
 <!-- Shared design system (DEC-DASHBOARD-UX-ANIMATE-001): tokens, skeleton
      shimmer, honest .bx-state states, .bx-live-dot, .bx-wrap fluid layout.
      Linked AFTER the page's inline styles so shared tokens win ties. -->
 <link rel="stylesheet" href="/static/bx-design.css">
+<!-- Shared panel-component + choreography CSS (DEC-OPERATOR-PAGE-
+     CONSOLIDATE-001) — the winners section + strategy drawer styles,
+     shared with screener.html/strategy.html. -->
+<link rel="stylesheet" href="/static/bx-oneclick-panels.css">
 <script defer src="/static/bx-ui.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 <!-- One-click REAL wiring (DEC-OPERATOR-PAGE-REAL-001) — load order law:
-     bx-ui → bx-poll → bx-explain → bx-chart → bx-oneclick (defer preserves
-     document order, so BXOneclick sees every dependency namespace). -->
+     bx-ui → bx-poll → bx-explain → bx-chart → bx-screener →
+     bx-portal-state → bx-oneclick → bx-screener-panel → bx-strategy-panel
+     → bx-operator-portal (defer preserves document order, so every
+     consumer sees its dependency namespaces —
+     DEC-OPERATOR-PAGE-CONSOLIDATE-001 extends the chain). -->
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
+<script defer src="/static/bx-screener.js"></script>
+<script defer src="/static/bx-portal-state.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
+<script defer src="/static/bx-screener-panel.js"></script>
+<script defer src="/static/bx-strategy-panel.js"></script>
+<script defer src="/static/bx-operator-portal.js"></script>
 <!-- Health hub widget (DEC-OPERATOR-HEALTH-TRUTH-001): ONE BXPoll-disciplined
      poller over /api/v1/health/hub — loaded AFTER bx-poll.js (defer preserves
      document order, so window.BXPoll exists when the widget boots). -->
@@ -1509,6 +1561,7 @@
       </table>
       <div class="show-more-row">
         <a class="show-more-btn" href="/screener" style="text-decoration:none; display:inline-block;">🏆 Winners — open the full strategy screener →</a>
+        <button id="ocWinnersJump" type="button">↓ or unfold all 100 winners right here</button>
       </div>
     </div>
   </div>
@@ -1549,6 +1602,64 @@
     <div class="oc-sub" style="margin-top:12px;">Selected run <span data-oc="run_id">—</span> · window <span data-oc="date_range">—</span> · symbols <span data-oc="sel_symbols">—</span> · <span data-oc="suspect">verification pending</span></div>
   </div>
 </div>
+
+<!-- ══ All 100 winners (DEC-OPERATOR-PAGE-CONSOLIDATE-001): the screener
+     panel folded into the Operator page. The markup below is the VERBATIM
+     twin of screener.html's panel block (the hook-parity fence asserts BOTH
+     copies against ONE canonical inventory); wiring is the SAME shared
+     bx-screener-panel.js, mounted LAZILY by bx-operator-portal.js on the
+     first expand (a collapsed section costs zero row work). A row click
+     opens the in-page strategy drawer; /screener stays a first-class
+     deep-link page. -->
+<section class="oc-section show-operator-only bx-scpanel" id="ocWinnersSection" aria-label="All 100 winners">
+  <h3><button class="winners-toggle" id="ocWinnersToggle" type="button" aria-expanded="false" aria-controls="ocWinnersBody">🏆 All 100 winners <span class="chev">▾</span></button></h3>
+  <div class="oc-sub">the stored top-100 Best-of-Best — filter/sort in place; a row click opens the strategy drawer (the same artifact rows /screener serves)</div>
+  <div class="winners-body" id="ocWinnersBody">
+    <div class="winners-body-inner">
+      <div class="strip">
+        <span>run <code id="scRunId">—</code></span>
+        <span id="scDetail">awaiting real run artifact — run a sweep from the Operator page Run controls</span>
+      </div>
+
+      <div class="controls wn-filterbar">
+        <div class="ctl"><label for="scTf">Timeframe</label>
+          <select id="scTf"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scDir">Direction</label>
+          <select id="scDir"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scInstrument">Instrument</label>
+          <select id="scInstrument"><option value="">All</option></select></div>
+        <div class="ctl"><label for="scMinWin">Min win %</label>
+          <input id="scMinWin" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMinPf">Min PF</label>
+          <input id="scMinPf" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scMaxDd">Max |DD| (paisa)</label>
+          <input id="scMaxDd" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scVixLo">VIX band ≥</label>
+          <input id="scVixLo" type="number" step="any" placeholder="any"></div>
+        <div class="ctl"><label for="scVixHi">VIX band ≤</label>
+          <input id="scVixHi" type="number" step="any" placeholder="any"></div>
+      </div>
+
+      <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+      <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
+           the artifact order is its R30 preset (default min_dd_first), which
+           deliberately DIFFERS from /results (Rank-by metric, descending);
+           loadRows fills the live preset via textContent — no sort is changed. -->
+      <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+
+      <div id="scPanel"></div>
+      <div class="tablewrap">
+        <table id="scTable">
+          <thead><tr id="scHead"></tr></thead>
+          <tbody id="scRows"></tbody>
+        </table>
+      </div>
+      <div class="showall" id="scShowAllWrap" hidden>
+        <button id="scShowAll" type="button">show all rows (itself render-capped at 1000 — an oversized/corrupt artifact never freezes the tab)</button>
+      </div>
+    </div>
+  </div>
+</section>
 
 <!-- ══ Live run observability (DEC-OPERATOR-PAGE-REAL-001) — always
      visible, never tab-gated: chain map (R41) · per-stage progress strips ·
@@ -1604,20 +1715,161 @@
      contract source exists for a share reel; it can return fed from real
      artifacts. -->
 
-<!-- Hover-explain tooltip host: bx-oneclick.js binds BXExplain.bindExplainHover
-     iff this node exists (the single-bind law) — it serves the page's
-     data-explain hover depth; the #bxTip CSS above styles it. -->
+<!-- ══ Strategy drawer (DEC-OPERATOR-PAGE-CONSOLIDATE-001): the strategy
+     panel folded into the Operator page as a slide-over dialog. Body-level
+     sibling of <main> so the open-state `inert` on main never touches it.
+     The drawer-head chrome is portal-owned (v29-only); the panel content
+     below is the VERBATIM twin of strategy.html's panel block (hook-parity
+     fenced), wired by the SAME shared bx-strategy-panel.js via
+     bx-operator-portal.js (mount once + gen-guarded update per rank).
+     /strategy stays a first-class deep-link page. -->
+<div class="drawer-back" id="ocDrawerBack" hidden></div>
+<aside class="strategy-drawer bx-stpanel" id="ocStrategyDrawer" role="dialog"
+       aria-modal="true" aria-label="Strategy detail" hidden>
+  <div class="drawer-head">
+    <button id="ocDrawerPrev" type="button" title="previous winner" disabled>‹</button>
+    <span class="drawer-rank-pill" id="ocDrawerRankPill">—</span>
+    <button id="ocDrawerNext" type="button" title="next winner" disabled>›</button>
+    <a id="ocDrawerOpenFull" href="/strategy" hidden>open full page ↗</a>
+    <button id="ocDrawerClose" class="drawer-close" type="button" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body">
+  <section id="stHeadCard">
+    <h3><span id="stRank">—</span> · <span id="stName">awaiting real run artifact</span></h3>
+    <div class="note">run <code id="stRunId">—</code> ·
+      instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
+      direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
+      mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
+      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
+  </section>
+
+  <section aria-label="Candle chart">
+    <h3>📈 Candle chart · entry/exit arrows drawn on it</h3>
+    <div class="note" id="stChartCoords">chart window resolves from the trade (?trade=N centers on that trade's entry) or the run's last session</div>
+    <div id="stChartError"></div>
+    <div class="chart-host" id="stChartHost">
+      <div class="note">no candles loaded yet — awaiting run + stored 1-minute data</div>
+    </div>
+    <div class="warnnote" id="stArrowNote" hidden></div>
+  </section>
+
+  <section aria-label="Equity curve">
+    <h3>📉 Equity curve <span class="note" style="display:inline" id="stEquityLabel">awaiting real run artifact</span></h3>
+    <!-- DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (item 4C — the #48 overlap):
+         the stored minute-path equity SERIES (/api/v1/oneclick/equity, the
+         entry's equity_ref sidecar) renders when it exists; the per-trade
+         close cumsum stays the HONEST fallback, relabeled so the two can
+         never be confused. The operator #ocEquityHost above deliberately
+         stays per-trade (the #48 owner ruling). -->
+    <div class="equity-host" id="stEquityHost">
+      <div class="note">no trades yet — awaiting real run artifact</div>
+    </div>
+  </section>
+
+  <!-- F-M5: the trade list is an INLINE section, visible AT LOAD — never a
+       tab-gated reveal. -->
+  <section aria-label="List of trades" id="stTradesSection">
+    <h3>📜 List of trades <span class="oc-source-badge" id="stTradesSource">source: none</span></h3>
+    <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
+    <div id="stTradesError"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Dir</th><th>Entry ts</th><th>Entry px</th><th>Exit ts</th><th>Exit px</th><th>Lots</th><th>Exit reason</th><th>P&amp;L</th><th>Costs</th><th>MAE</th><th>MFE</th><th>VIX in</th><th>VIX out</th><th>Chart</th></tr></thead>
+        <tbody id="stTradesBody"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button id="stPrev" type="button">← prev page</button>
+      <span id="stPage">page 1</span>
+      <button id="stNext" type="button">next page →</button>
+    </div>
+  </section>
+
+  <section aria-label="Combo story card">
+    <h3>🧾 Combo story — Edge · Risk · Consistency · Real-or-Fluke</h3>
+    <!-- HIGH #12 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the persistent
+         signal-only honesty chip — Track 1 never trades, so the P&L is the
+         GROSS signal figure, never a costed "net". -->
+    <div class="vixband" id="stSignalOnly">signal-only — costs modeled in the options-translation track</div>
+    <div class="story-grid" style="margin-top:10px">
+      <div class="story-cell"><div class="k">Edge — gross signal P&amp;L</div><div class="v" id="stNet" data-explain="gross_signal_pnl">—</div></div>
+      <div class="story-cell"><div class="k">Risk — max drawdown</div><div class="v" id="stMaxDd" data-explain="max_dd_paisa">—</div></div>
+      <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
+      <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
+      <div class="story-cell"><div class="k">CPCV pass %</div><div class="v" id="stCpcv" data-explain="cpcv_pass_pct">—</div></div>
+      <div class="story-cell"><div class="k">Win rate</div><div class="v" id="stWinRate" data-explain="win_rate">—</div></div>
+      <div class="story-cell"><div class="k">Profit factor</div><div class="v" id="stPf" data-explain="profit_factor">—</div></div>
+      <div class="story-cell"><div class="k">Trades</div><div class="v" id="stTrades" data-explain="trades">—</div></div>
+    </div>
+    <!-- R31: the per-combo VIX regime band, rendered on the card -->
+    <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
+    <div class="note" id="stArith"></div>
+  </section>
+
+  <!-- HIGH #14 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the SHIPPED
+       results-depth aggregates the card previously omitted — rendered
+       verbatim from entry.metrics (top100_artifact._metrics_payload keys),
+       honest "—" for anything the artifact does not carry. Pro mode shows
+       the numbers; Beginner sees the fixed plain-English summary (the
+       jargon/plain-eng block convention). -->
+  <section aria-label="Deep stats — stored results-depth aggregates">
+    <h3>🔬 <span class="jargon">Deep stats — stored results-depth aggregates</span><span class="plain-eng">How rough was the ride?</span></h3>
+    <div class="plain-eng-block">
+      <div class="note">Worst days, losing streaks, adverse moves and how trades ended — from the stored run. Switch to Pro for the numbers.</div>
+    </div>
+    <div class="jargon-block">
+      <div class="story-grid">
+        <div class="story-cell"><div class="k">Expectancy / trade</div><div class="v" id="stExpectancy" data-explain="expectancy_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Recovery factor</div><div class="v" id="stRecovery" data-explain="recovery_factor">—</div></div>
+        <div class="story-cell"><div class="k">Max consecutive losses</div><div class="v" id="stLossStreak" data-explain="max_consecutive_losses">—</div></div>
+        <div class="story-cell"><div class="k">MAE (tf)</div><div class="v" id="stMae" data-explain="mae_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">MFE (tf)</div><div class="v" id="stMfe" data-explain="mfe_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Minute-path max DD</div><div class="v" id="stMinuteDd" data-explain="max_dd_minute_path_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Exit mix</div><div class="v" id="stExitMix" data-explain="exit_mix" style="font-size:13px">—</div></div>
+        <div class="story-cell"><div class="k">Worst 5 days</div><div class="v" id="stWorst5" data-explain="worst5_days" style="font-size:13px">—</div></div>
+        <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined Stage-4 verdict
+             line — server-built status_text + the verdict's own detail /
+             survivor rank / provisional caveat (mechanical joins only). -->
+        <div class="story-cell"><div class="k">Cascade validation</div><div class="v" id="stCascadeDeep" data-explain="cascade_status" style="font-size:13px">—</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown
+       from entry.regime (one_regime_wonder + axis + by_trend) — rendered
+       for real; family drill-down (R34) stays a named later PR. -->
+  <section aria-label="Regime breakdown">
+    <h3>🌦 Regime breakdown</h3>
+    <div class="story-grid">
+      <div class="story-cell"><div class="k">P&amp;L by trend regime</div><div class="v" id="stTrendSplit" data-explain="by_trend" style="font-size:13px">—</div></div>
+      <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
+    </div>
+    <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
+  </section>
+  </div>
+</aside>
+
+<!-- Hover-explain tooltip host: v29 carried the #bxTip CSS but no node —
+     bx-oneclick binds hover explain iff the node exists (the single-bind
+     law; DEC-OPERATOR-PAGE-CONSOLIDATE-001 adds the node once). -->
 <div id="bxTip" hidden></div>
 
 <div class="modal-back" id="modalBack">
   <div class="modal">
     <h3>Screenshot instructions</h3>
     <p>PNG export needs the html2canvas library (offline?). For now use your OS screenshot tool: macOS <kbd>⌘+Shift+4</kbd> · Windows <kbd>Win+Shift+S</kbd>. For a real reel: open Reel mode → screen-record while scrolling.</p>
-    <button onclick="document.getElementById('modalBack').classList.remove('open')">Got it</button>
+    <!-- Bound via addEventListener in the tail script (fix round 2,
+         seccov LOW-1): the page carries ZERO inline on*= handlers, so the
+         widened hostile sink scan can ban the raw-HTML handler class. -->
+    <button id="modalBackOk" type="button">Got it</button>
   </div>
 </div>
 
 <script>
+  document.getElementById('modalBackOk').addEventListener('click', () => {
+    document.getElementById('modalBack').classList.remove('open');
+  });
+
   document.querySelectorAll('.tabs button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
@@ -1811,9 +2063,13 @@
     btn.addEventListener('click', () => {
       const expanded = grid.classList.toggle('show-all');
       btn.classList.toggle('expanded', expanded);
-      btn.innerHTML = expanded
-        ? 'Hide last 6 filters <span class="chev">▾</span>'
-        : 'Show 6 more filters <span class="chev">▾</span>';
+      // Static-string label rebuilt sink-free: textContent + one span node
+      // (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — v29 joins the hostile sink scan).
+      btn.textContent = expanded ? 'Hide last 6 filters ' : 'Show 6 more filters ';
+      const chev = document.createElement('span');
+      chev.className = 'chev';
+      chev.textContent = '▾';
+      btn.appendChild(chev);
     });
   })();
 
