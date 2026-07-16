@@ -528,6 +528,7 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
     from brutex.config.credentials import resolve_groww_aws_credentials
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.sink import ParquetBarSink
+    from brutex.data.write_domain import primary_write_domain
 
     aws_creds = resolve_groww_aws_credentials()
     creds = GrowwCredentials(api_key=aws_creds.api_key, totp_secret=aws_creds.totp_secret)
@@ -536,7 +537,15 @@ def _build_live_client(  # pragma: no cover - live Groww TOTP token + SDK + netw
         creds, size=pool_size, pace=pace, on_rate_limit=on_rate_limit, on_success=on_success
     )
     _LOG.info("historical.client_pool", connections=pool_size)
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root))
+    # Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001): the live
+    # F&O candle pull writes under the PRIMARY (Groww-exclusive) write domain
+    # — a mis-rooted dest (e.g. under `feeds/<vendor>/`) refuses typed BEFORE
+    # any byte is touched; every legitimate primary dest passes silently (the
+    # A/B byte-identity pinned through the real writer path). Wiring pinned by
+    # tests/unit/test_write_domain_binding_pin.py.
+    sink = ParquetBarSink(
+        writer=ParquetWriter(lake_root=lake_root, write_domain=primary_write_domain(lake_root))
+    )
     return client, sink
 
 
