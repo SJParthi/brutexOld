@@ -55,10 +55,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from brutex.calendars.nse import IST
-from brutex.data.bad_tick import BadTickScreen, bad_tick_screen_enabled
+from brutex.data.bad_tick import (
+    BAD_TICK_MAX_RATIO,
+    BadTickScreen,
+    bad_tick_screen_enabled,
+    emit_bad_tick_warn,
+)
 from brutex.data.catalog import Catalog
 from brutex.data.models import CandleBar
 from brutex.feed.errors import FeedError, LookAheadError
+from brutex.feed_rust import (
+    ScanResult,
+    feed_rust_enabled,
+    resolve_feed_kernel,
+    validate_scan,
+    warn_degrade_once,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     import pyarrow as pa
@@ -318,6 +330,25 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     volumes: list[int] = table.column("volume").to_pylist()
     open_interests: list[int | None] = table.column("open_interest").to_pylist()
 
+    screen_on = bad_tick_screen_enabled()
+
+    # ── OPTIONAL Rust decision kernel (DEC-FEED-RUST-CORE-001) ──────────
+    # Default-OFF (`BRUTEX_FEED_RUST`, Pattern A opt-in). When enabled AND
+    # the kernel serves (canonical schema, zero nulls on ts/prices/volume,
+    # timestamps inside the fixed-IST envelope, output passes the
+    # refuse-poison gate), the DECISIONS come from Rust while EVERY
+    # materialized object — Decimal/CandleBar/error/WARN — is still built
+    # HERE by the same shared helpers over the same `to_pylist()` objects,
+    # so run identity (`bxsnap2`) is byte-preserved by construction. ANY
+    # degrade condition falls through to the retained oracle loop below.
+    if feed_rust_enabled():
+        result = _scan_via_kernel_or_none(table, screen_on, opens, highs, lows, closes)
+        if result is not None:
+            return _bars_from_scan(
+                result, source, timestamps, opens, highs, lows, closes, volumes, open_interests
+            )
+
+    # ── The retained Python oracle (byte-identical legacy path) ─────────
     # Bounded bad-tick (spike / fat-finger / vendor-scaling) screen
     # (DEC-SWEEP-DATA-EDGE-GUARDS-001): a self-consistent SCALED bar — every
     # OHLC field ×~10 but internally ordered and positive — passes the
@@ -327,25 +358,20 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
     # never fabricates) comparing each close to the previous IN-SESSION kept
     # close; the first bar of each session is exempt (no reopen-gap false trip).
     # Default ON, ``BRUTEX_BAD_TICK_SCREEN`` kill switch. O(1)/bar.
-    screen = BadTickScreen(source=source) if bad_tick_screen_enabled() else None
+    screen = BadTickScreen(source=source) if screen_on else None
 
+    origin = f" in {source}" if source is not None else ""
     bars: list[CandleBar] = []
     for ts, o, h, lo, c, v, oi in zip(
         timestamps, opens, highs, lows, closes, volumes, open_interests, strict=True
     ):
-        origin = f" in {source}" if source is not None else ""
         # Engine-boundary POSITIVITY (DEC-STORED-DATA-VALIDATION-001): checked
         # BEFORE construction so an internally-ORDERED all-negative bar (which
         # the ordering-only constructor would accept) is refused with the real
         # defect named, never laundered into Stage-1A / run identity.
         for price_name, price in (("open", o), ("high", h), ("low", lo), ("close", c)):
             if price <= 0:
-                raise ValueError(
-                    f"corrupt stored bar{origin} at timestamp {ts!r}: "
-                    f"{price_name}={price} is a non-positive price (a traded Indian "
-                    f"price is never <= 0) — refusing to serve corrupt data to the "
-                    f"engine (DEC-STORED-DATA-VALIDATION-001)"
-                )
+                raise _positivity_error(origin, ts, price_name, price)
         # Bad-tick screen (post-positivity, pre-construction): a scaled spike is
         # DROPPED (not built, not appended) and counted; the last kept good close
         # carries forward as the comparison baseline. IST session date drives the
@@ -353,26 +379,205 @@ def arrow_table_to_bars(table: pa.Table, *, source: str | None = None) -> list[C
         # a naive datetime, so ``.astimezone`` is safe).
         if screen is not None and not screen.keep(ist_date=ts.astimezone(IST).date(), close=c):
             continue
-        try:
-            bars.append(
-                CandleBar(
-                    timestamp=ts,
-                    open=Decimal(str(o)),
-                    high=Decimal(str(h)),
-                    low=Decimal(str(lo)),
-                    close=Decimal(str(c)),
-                    volume=int(v),
-                    open_interest=int(oi) if oi is not None else None,
-                )
-            )
-        except ValueError as exc:
-            raise ValueError(
-                f"corrupt stored bar{origin} at timestamp {ts!r}: {exc} — "
-                f"refusing to serve corrupt data to the engine "
-                f"(DEC-STORED-DATA-VALIDATION-001)"
-            ) from exc
+        bars.append(_build_bar(origin, ts, o, h, lo, c, v, oi))
     if screen is not None:
         screen.finish()
+    return bars
+
+
+def _positivity_error(origin: str, ts: Any, price_name: str, price: float) -> ValueError:
+    """Build the engine-boundary positivity refusal (the ONE message source).
+
+    MOVED VERBATIM from the loop body (DEC-STORED-DATA-VALIDATION-001 wording
+    byte-untouched) so the oracle loop and the Rust-kernel replay raise the
+    IDENTICAL error from one f-string (CLAUDE.md §11 COMMON).
+    """
+    return ValueError(
+        f"corrupt stored bar{origin} at timestamp {ts!r}: "
+        f"{price_name}={price} is a non-positive price (a traded Indian "
+        f"price is never <= 0) — refusing to serve corrupt data to the "
+        f"engine (DEC-STORED-DATA-VALIDATION-001)"
+    )
+
+
+def _build_bar(
+    origin: str,
+    ts: Any,
+    o: float,
+    h: float,
+    lo: float,
+    c: float,
+    v: int,
+    oi: int | None,
+) -> CandleBar:
+    """Materialize ONE ``CandleBar`` + the corrupt-bar ``ValueError`` wrap.
+
+    MOVED VERBATIM from the loop body: the ``Decimal(str(price))`` re-wrap
+    and the wrapped constructor-refusal message are the run-identity-critical
+    expressions (`bxsnap2` streams ``str(Decimal)``), kept in ONE place so
+    the oracle loop and the Rust-kernel replay can never fork. Catches ONLY
+    ``ValueError`` — the oracle's ``TypeError`` (null price/volume) and
+    ``decimal.InvalidOperation`` (NaN comparison) escapes stay escapes.
+    """
+    try:
+        return CandleBar(
+            timestamp=ts,
+            open=Decimal(str(o)),
+            high=Decimal(str(h)),
+            low=Decimal(str(lo)),
+            close=Decimal(str(c)),
+            volume=int(v),
+            open_interest=int(oi) if oi is not None else None,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"corrupt stored bar{origin} at timestamp {ts!r}: {exc} — "
+            f"refusing to serve corrupt data to the engine "
+            f"(DEC-STORED-DATA-VALIDATION-001)"
+        ) from exc
+
+
+def _scan_via_kernel_or_none(
+    table: pa.Table,
+    screen_on: bool,
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+) -> ScanResult | None:
+    """Consult the Rust decision kernel; ``None`` = degrade to the oracle.
+
+    The eligibility allow-list (DEC-FEED-RUST-CORE-001 §5): the wheel must
+    resolve; the 7 canonical columns must carry EXACTLY the canonical types
+    (``timestamp[us, tz=UTC]`` + four ``float64`` + two ``int64`` — extra
+    columns are fine, ignored exactly as today; a MISSING column never
+    reaches this gate — the shared ``to_pylist()`` extractions upstream
+    raise pyarrow's own ``KeyError`` at the identical site in both arms);
+    timestamp/price/volume columns must be null-free (``open_interest``
+    nulls are legal and never cross the FFI). Each refusal emits one named
+    warn-once and returns ``None`` — the caller falls through to the
+    byte-identical oracle loop.
+    """
+    kernel = resolve_feed_kernel()
+    if kernel is None:
+        return None
+    import pyarrow as pa  # local: module-scope pyarrow stays TYPE_CHECKING-only
+
+    n_rows: int = table.num_rows
+    schema = table.schema
+    expected_types = (
+        ("timestamp", pa.timestamp("us", tz="UTC")),
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+        ("volume", pa.int64()),
+        ("open_interest", pa.int64()),
+    )
+    for name, expected in expected_types:
+        if not schema.field(name).type.equals(expected):
+            warn_degrade_once("schema_mismatch", n_rows=n_rows, column=name)
+            return None
+    for name in ("timestamp", "open", "high", "low", "close", "volume"):
+        if table.column(name).null_count > 0:
+            warn_degrade_once("null_column", n_rows=n_rows, column=name)
+            return None
+    # Epoch-µs UTC ints for the kernel's IST session math — ONLY when the
+    # screen is on (the oracle never touches timestamps screen-off; the
+    # kernel contract demands [] then).
+    ts_us: list[int] = table.column("timestamp").cast(pa.int64()).to_pylist() if screen_on else []
+    try:
+        result = kernel(ts_us, opens, highs, lows, closes, screen_on, BAD_TICK_MAX_RATIO)
+    except Exception as exc:  # the defensive belt: ANY kernel raise degrades to the oracle
+        warn_degrade_once("kernel_error", n_rows=n_rows, error=repr(exc))
+        return None
+    if result is None:
+        # The kernel abstained: some timestamp lies outside the fixed-IST
+        # envelope [epoch 0, 9999-12-31T00:00:00Z) where the day-ordinal law
+        # is provably identical to `astimezone(IST).date()`.
+        warn_degrade_once("ts_out_of_ist_fixed_range", n_rows=n_rows)
+        return None
+    if not validate_scan(result, n_rows):
+        return None
+    return result
+
+
+def _emit_warn(
+    event: tuple[int, int, int, int, int],
+    source: str | None,
+    timestamps: list[Any],
+    closes: list[float],
+) -> None:
+    """Replay ONE kernel warn event through the shared bad-tick WARN seam.
+
+    The kernel returns ROW COORDINATES only; the session ISO string comes
+    from Python's OWN datetime object (the REAL ``ZoneInfo`` conversion) and
+    the offender closes are the SAME float objects the oracle's screen would
+    have captured — so the WARN record is byte-identical by construction.
+    """
+    _, session_first_row, skipped, first_prev_row, first_skip_row = event
+    emit_bad_tick_warn(
+        source=source,
+        session_iso=timestamps[session_first_row].astimezone(IST).date().isoformat(),
+        skipped=skipped,
+        max_ratio=BAD_TICK_MAX_RATIO,
+        first_prev_close=closes[first_prev_row],
+        first_close=closes[first_skip_row],
+    )
+
+
+def _bars_from_scan(
+    result: ScanResult,
+    source: str | None,
+    timestamps: list[Any],
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    volumes: list[int],
+    open_interests: list[int | None],
+) -> list[CandleBar]:
+    """Materialize kernel decisions with the ORACLE's exact side-effect order.
+
+    The replay law (DEC-FEED-RUST-CORE-001 §6): warn anchors are always kept
+    rows (a session's first row is always kept) or ``n_rows`` (the finish
+    flush), so draining every event with ``emit_at_row <= i`` before
+    building bar *i* emits each boundary WARN exactly where the oracle's
+    ``keep()`` would — after row *i*'s positivity, before row *i*'s
+    construction. A constructor raise at kept row *j* leaves later warns
+    un-emitted (the exception propagates first — identical to the oracle's
+    mid-loop raise); a positivity stop was truncated KERNEL-side (no event
+    at/after the stop row, no finish event), so raising after the kept loop
+    reproduces the oracle's log/raise ordering exactly.
+    """
+    kept, warns, stop = result
+    origin = f" in {source}" if source is not None else ""
+    bars: list[CandleBar] = []
+    wi = 0
+    for i in kept:
+        while wi < len(warns) and warns[wi][0] <= i:
+            _emit_warn(warns[wi], source, timestamps, closes)
+            wi += 1
+        bars.append(
+            _build_bar(
+                origin,
+                timestamps[i],
+                opens[i],
+                highs[i],
+                lows[i],
+                closes[i],
+                volumes[i],
+                open_interests[i],
+            )
+        )
+    if stop is not None:
+        row, field = stop
+        price_name = ("open", "high", "low", "close")[field]
+        price = (opens, highs, lows, closes)[field][row]
+        raise _positivity_error(origin, timestamps[row], price_name, price)
+    while wi < len(warns):
+        _emit_warn(warns[wi], source, timestamps, closes)
+        wi += 1
     return bars
 
 

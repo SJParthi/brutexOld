@@ -54,12 +54,23 @@ ENGINE is UNCHANGED (NIFTY / BANKNIFTY / SENSEX). Pure functions, no I/O, no net
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Final
 
 from brutex.dashboard.instrument_loader import (
     FNO_INDEX_ALIASES_OVERRIDE_ENV,
     resolve_fno_index_aliases,
 )
 from brutex.universe import normalize_underlying_symbol
+
+#: Max ``exch:security_id`` sample refs carried on a blank-symbol-row skip's ONE
+#: aggregate WARNING (the symbol itself is blank, so the security id is the only
+#: nameable handle). The ONE cap shared by every blank-row isolation site — the
+#: kind-map builder
+#: (:func:`brutex.dashboard.movers_underlying_class.build_underlying_kind_map`)
+#: and the metadata grid resolve
+#: (``brutex.dashboard.metadata_pull._resolve_underlying_forms``, REFUTER
+#: ROUND 1) — per CLAUDE.md §11 COMMON (DEC-FNO-UNDERLYING-EMPTY-GUARD-001).
+BLANK_SYMBOL_SAMPLE_CAP: Final[int] = 5
 
 
 def fno_underlying_forms(spot_symbol: str, *, aliases: Mapping[str, str]) -> tuple[str, ...]:
@@ -91,8 +102,15 @@ def fno_underlying_forms(spot_symbol: str, *, aliases: Mapping[str, str]) -> tup
     Returns
     -------
     tuple[str, ...]
-        At least one form (the original spelling is always a candidate); 1–3 forms,
-        de-duplicated, in try order. Never empty.
+        1–3 forms, de-duplicated, in try order — never empty for a NON-empty
+        *spot_symbol* (the original spelling is always a candidate). The degenerate
+        EMPTY string yields ``()`` — no vendor form can be derived from nothing,
+        and a consumer must treat the empty tuple as "fetch NOTHING": the metadata
+        fetch helper is TOTAL for it (``_first_nonempty_over_forms`` returns its
+        honest *empty* result with zero SDK calls — REFUTER ROUND 1 made this
+        explicit after the round-1 ``forms[0]`` index raised per year cell) and
+        the grid/map builders skip blank rows outright
+        (DEC-FNO-UNDERLYING-EMPTY-GUARD-001).
     """
     forms: list[str] = []
 
@@ -116,9 +134,20 @@ def primary_fno_underlying(spot_symbol: str, *, aliases: Mapping[str, str]) -> s
     registry KEY (the persisted ``underlying``), independent of which form ends up
     answering the vendor. The remaining forms are still TRIED in turn at fetch time
     (see :mod:`brutex.dashboard.metadata_pull`); this returns only the key. Never
-    empty (the original spelling is always a fallback candidate).
+    raises: for a NON-empty *spot_symbol* the original spelling is always a
+    candidate, so ``forms[0]`` exists; the degenerate EMPTY string (forms ``()``)
+    returns the symbol itself verbatim — never a fabricated form (guarantee-audit
+    BUG-3, DEC-FNO-UNDERLYING-EMPTY-GUARD-001). HONESTY (REFUTER ROUND 1): the
+    self-key is NOT intrinsically inert — its inertness rests on the CONSUMERS
+    skipping blank rows before keying anything on it (the kind-map builder and
+    the metadata grid resolve both do, each with one aggregate WARN). Pre-skip,
+    the metadata writer's per-YEAR cells IndexError'd inside its per-form fetch
+    and wrote DURABLE ``failed`` coverage rows keyed ``(exch, "")`` that gated
+    the mapping-integrity panel RED — the round-1 "inert key no coverage row
+    ever matches" claim was falsified by execution.
     """
-    return fno_underlying_forms(spot_symbol, aliases=aliases)[0]
+    forms = fno_underlying_forms(spot_symbol, aliases=aliases)
+    return forms[0] if forms else spot_symbol
 
 
 def resolve_fno_underlying_forms(spot_symbol: str) -> tuple[str, ...]:
@@ -133,6 +162,7 @@ def resolve_fno_underlying_forms(spot_symbol: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "BLANK_SYMBOL_SAMPLE_CAP",
     "FNO_INDEX_ALIASES_OVERRIDE_ENV",
     "fno_underlying_forms",
     "primary_fno_underlying",
