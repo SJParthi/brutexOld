@@ -34,7 +34,7 @@ DEC-PROPERTY-INVARIANTS-LIVE-001 (``docs/MIGRATION.md``):
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
 
@@ -468,7 +468,15 @@ def _two_session_scenarios(draw: st.DrawFn) -> tuple[list[CandleBar], list[bool]
     """
     n = draw(st.integers(min_value=2, max_value=30))
     split = draw(st.integers(min_value=0, max_value=n))
-    day1_anchor = _FORCED_OPEN_UTC + timedelta(minutes=330)  # 15:10 IST day-1
+    # 15:10 IST day-1 — ``_FORCED_OPEN_UTC`` IS 09:40 UTC == 15:10 IST already.
+    # (Generator-repair fold, DEC-TRADESIM-OPEN-SESSION-GUARD-001: the original
+    # ``+ timedelta(minutes=330)`` landed every day-1 bar at 20:40 IST — ALWAYS
+    # a forced bar, so day-1 could never open a position and the day-1 arm of
+    # this generator was vacuous. Anchoring at the documented 15:10 IST makes
+    # short splits (< 11 bars) end day-1 BEFORE the forced window — exactly the
+    # session-tail-hole shape the truncation-equivalence property needs —
+    # while longer splits still cross 15:20 as the docstring promises.)
+    day1_anchor = _FORCED_OPEN_UTC
     bars: list[CandleBar] = []
     for minute in range(n):
         open_p = draw(_PRICE_PAISA)
@@ -521,3 +529,51 @@ def test_entry_fill_never_crosses_a_session_boundary(
         armed_day = bars[k - 1].timestamp.astimezone(IST).date()
         fill_day = bars[k].timestamp.astimezone(IST).date()
         assert armed_day == fill_day
+
+
+@given(
+    scenario=_two_session_scenarios(),
+    direction=st.sampled_from([Side.BUY, Side.SELL]),
+    sl=st.none() | _LEG_PAISA,
+    tp=st.none() | _LEG_PAISA,
+    policy=_POLICIES,
+)
+@settings(suppress_health_check=[HealthCheck.too_slow], max_examples=200)
+def test_session_boundary_close_is_truncation_equivalent(
+    scenario: tuple[list[CandleBar], list[bool], list[bool]],
+    direction: Side,
+    sl: int | None,
+    tp: int | None,
+    policy: FillPolicy,
+) -> None:
+    """DEC-TRADESIM-OPEN-SESSION-GUARD-001 — suffix independence by construction.
+
+    Day-1's trade list is identical whether the feed CONTINUES into day-2 or
+    TRUNCATES at day-1's last stored bar: the (A2) session-boundary guard
+    closes an open position at exactly the record ``finish()`` would emit for
+    the truncated feed (same fill price / instants / excursions — only the
+    ``TradeDetail`` reason differs, and ``ClosedTrade`` carries no reason).
+    Pre-fix this FAILED: an open position (or a pending next-open exit) on
+    day-1's last stored bar closed against day-2's prices in the full world,
+    while the truncated world closed it at day-1's last close.
+    """
+    bars, entry, exit_ = scenario
+    day1 = date(2024, 1, 2)
+    n1 = sum(1 for bar in bars if bar.timestamp.astimezone(IST).date() == day1)
+
+    def _run(feed: list[CandleBar], entries: list[bool], exits: list[bool]) -> list[ClosedTrade]:
+        return simulate_trades(
+            feed,
+            entries,
+            direction=direction,
+            tf_minutes=1,
+            stop_loss_paisa=sl,
+            take_profit_paisa=tp,
+            exit_signals=exits,
+            policy=policy,
+        )
+
+    full = _run(bars, entry, exit_)
+    truncated = _run(bars[:n1], entry[:n1], exit_[:n1])
+    day1_closes = [t for t in full if t.exit_ts.astimezone(IST).date() == day1]
+    assert day1_closes == truncated

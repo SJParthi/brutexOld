@@ -577,6 +577,91 @@ class TestRunIdConflicts:
         assert not [log for log in logs if log["event"] == "sweep_results.run_id_conflict"]
 
 
+class TestVixOnlyDivergence:
+    """A VIX-only cross-store difference is NOT the run_id_conflict family.
+
+    Fails-before: the REFERENCE-ONLY trio sits deliberately OUTSIDE the run
+    identity (DEC-VIX-STAMP-WIRE-001 — a moved India-VIX lake / a pre-VIX
+    store beside a stamped one), yet ``_load_rows_resilient`` counted and
+    framed it as the corruption-grade ``sweep_results.run_id_conflict``
+    ("upstream non-determinism") and first-wins could keep the less-informed
+    all-``None`` trio over the known one.
+    """
+
+    @staticmethod
+    def _with_trio(
+        row: ResultRow, mean: float | None, lo: float | None, hi: float | None
+    ) -> ResultRow:
+        from dataclasses import replace
+
+        return replace(row, vix_mean=mean, vix_min=lo, vix_max=hi)
+
+    def test_more_informed_trio_wins_and_logs_the_distinct_event(self, tmp_path: Path) -> None:
+        """All-None first, known second → the KNOWN trio wins, zero conflicts."""
+        from structlog.testing import capture_logs
+
+        base = _row(seed=7)
+        # Sorted store-path order: the 15m store loads FIRST with the
+        # less-informed all-None trio; the stamped 5m twin must still win.
+        _write_store(tmp_path, instrument="NIFTY", tf="15m", direction="bull", rows=[base])
+        _write_store(
+            tmp_path,
+            instrument="NIFTY",
+            tf="5m",
+            direction="bull",
+            rows=[self._with_trio(base, 13.5, 13.0, 14.0)],
+        )
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.run_id_conflicts == 0  # never the corruption-grade counter
+        assert board.total_rows == 1
+        assert not [log for log in logs if log["event"] == "sweep_results.run_id_conflict"]
+        vix_logs = [log for log in logs if log["event"] == "sweep_results.vix_only_divergence"]
+        assert len(vix_logs) == 1
+        assert vix_logs[0]["run_id"] == _run_id(7)
+        assert vix_logs[0]["policy"] == "most-informed-wins"
+
+    def test_both_known_differ_keeps_deterministic_first(self, tmp_path: Path) -> None:
+        """Two KNOWN trios (the moved-lake case): tie on informedness → first wins."""
+        from structlog.testing import capture_logs
+
+        base = _row(seed=7)
+        first = self._with_trio(base, 12.5, 12.0, 13.0)  # 15m sorts first
+        second = self._with_trio(base, 20.5, 20.0, 21.0)
+        _write_store(tmp_path, instrument="NIFTY", tf="15m", direction="bull", rows=[first])
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[second])
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.run_id_conflicts == 0
+        assert board.total_rows == 1
+        assert (
+            len([log for log in logs if log["event"] == "sweep_results.vix_only_divergence"]) == 1
+        )
+        # The kept row is the deterministic FIRST (sorted paths), proven via
+        # the private loader — the leaderboard renders no VIX column.
+        from brutex.dashboard import sweep_results_view as view_mod
+
+        rows, _, _, conflicts = view_mod._load_rows_resilient(
+            view_mod._iter_store_paths(tmp_path / "sweeps")
+        )
+        assert conflicts == 0
+        assert [(r.vix_mean, r.vix_min, r.vix_max) for r in rows] == [(12.5, 12.0, 13.0)]
+
+    def test_non_vix_divergence_still_counts_as_run_id_conflict(self, tmp_path: Path) -> None:
+        """A metric divergence WITH a VIX divergence stays the conflict family."""
+        from structlog.testing import capture_logs
+
+        first = _row(seed=7, sharpe=1.0)
+        divergent = self._with_trio(_row(seed=7, sharpe=9.9), 13.5, 13.0, 14.0)
+        _write_store(tmp_path, instrument="NIFTY", tf="15m", direction="bull", rows=[first])
+        _write_store(tmp_path, instrument="NIFTY", tf="5m", direction="bull", rows=[divergent])
+        with capture_logs() as logs:
+            board = build_sweep_leaderboard(tmp_path)
+        assert board.run_id_conflicts == 1
+        assert [r["sharpe_ratio"] for r in board.rows] == [1.0]  # first-wins unchanged
+        assert not [log for log in logs if log["event"] == "sweep_results.vix_only_divergence"]
+
+
 def test_prescanned_scan_is_ranked_without_a_rescan(tmp_path: Path) -> None:
     """An explicitly-passed ``scan=`` is ranked AS-IS — equal to scan-and-rank.
 

@@ -143,3 +143,24 @@ def test_formula_injection_symbol_is_neutralised() -> None:
     text = mapping_integrity_to_csv(_report(under=(evil,), total=1, fully=0))
     # The leading '=' is defused with a single quote so a spreadsheet never executes it.
     assert "'=HYPERLINK(0)" in text
+
+
+def test_revision_probe_marker_row_prepended() -> None:
+    # Review fold (DEC-CACHE-SERVE-LAST-KNOWN-001): a last-known report served
+    # during a store outage carries ONE in-band informational marker row.
+    marker = "outage — serving last-known (store unreachable)"
+    text = mapping_integrity_to_csv(_report(), revision_probe=marker)
+    assert text.startswith(f"# revision_probe: {marker}\n")
+    rows = _parse(text)
+    assert rows[0] == [f"# revision_probe: {marker}"]
+    # exactly ONE marker row, prepended — the report body is untouched.
+    assert text.count("# revision_probe") == 1
+
+
+def test_revision_probe_default_none_is_byte_identical() -> None:
+    # Regression pin: the healthy serve (revision_probe=None) is byte-identical
+    # to the pre-fold output — the golden oracle stays valid.
+    assert mapping_integrity_to_csv(_report()) == mapping_integrity_to_csv(
+        _report(), revision_probe=None
+    )
+    assert "# revision_probe" not in mapping_integrity_to_csv(_report())

@@ -28,6 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,6 +43,7 @@ from brutex.dashboard.movers_snapshot import (
     _read_daily_bars,
     _read_session_bars,
     filter_to_ist_minute,
+    resolve_prev_close,
     run_movers_snapshot,
 )
 from brutex.data.instrument_store import InstrumentStore
@@ -416,6 +418,139 @@ class TestPrevDayClose:
             )
             is None
         )
+
+
+# ── resolve_prev_close: the CE/PE 1-minute-native gate ────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as
+# relayed via the coordinator — ADR-0021 RULING B, draft PR #1555): option
+# contracts never receive derived-timeframe prebuild any more, so a STORED
+# option ``1day`` partition is frozen at retirement eve. Reading it FIRST
+# would serve a stale prev-close (and a wrong %CHNG) forever — the resolver
+# must skip the 1day read entirely for CE/PE and go straight to the bounded
+# 1-minute prior-session walk-back. SPOT + FUT stay byte-identical
+# (1day-first), pinned below.
+
+
+_CE_SYMBOL = "NSE-NIFTY-27Jun24-20000-CE"
+_FUT_SYMBOL = "NSE-NIFTY-27Jun24-FUT"
+
+
+def _write_fno(tmp_path: Path, symbol: str, interval: str, bars: list[CandleBar]) -> None:
+    ParquetWriter(lake_root=tmp_path).write(
+        exchange=_EXCHANGE, segment="FNO", symbol=symbol, interval=interval, bars=bars
+    )
+
+
+class TestOptionPrevCloseOneMinuteNative:
+    def _seed_stale_1day_fresh_minute(self, tmp_path: Path, symbol: str) -> None:
+        """A FROZEN (stale) stored ``1day`` beside a FRESH 1-minute prior session.
+
+        The retirement-eve shape: the stored 1day's 2024-06-12 close (100 —
+        derived before later 06-12 minutes were pulled) diverges from the TRUE
+        06-12 last 1-minute close (123.45).
+        """
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            symbol,
+            "1minute",
+            [
+                _min_bar(hour=9, minute=15, close="120", volume=5, day=date(2024, 6, 12)),
+                _min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12)),
+            ],
+        )
+
+    def test_option_prev_close_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the resolver read the frozen option
+        1day FIRST and served the stale close 100; the gate must serve the
+        TRUE 1-minute prior-session close 123.45."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_option_prev_close_never_opens_the_1day_partition(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read spy: the CE baseline resolve performs ZERO 1day-partition reads."""
+        from brutex.dashboard import movers_snapshot as ms
+
+        self._seed_stale_1day_fresh_minute(tmp_path, _CE_SYMBOL)
+        calls: list[str] = []
+        real = ms._read_daily_partition
+
+        def _spy(lake_root: Path, **kwargs: Any) -> Any:
+            calls.append(str(kwargs.get("symbol")))
+            return real(lake_root, **kwargs)
+
+        monkeypatch.setattr(ms, "_read_daily_partition", _spy)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert calls == []  # the option 1day is never opened
+
+    def test_fut_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild under the
+        ruling, so the FUT baseline still reads the stored 1day FIRST even
+        when a diverging 1-minute prior session exists."""
+        self._seed_stale_1day_fresh_minute(tmp_path, _FUT_SYMBOL)
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_FUT_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("100")  # the stored 1day close — 1day-first
+        assert got.found_date == date(2024, 6, 12)
+
+    def test_spot_prev_close_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """SPOT byte-identity pin: the gate is CE/PE-only — a spot symbol with a
+        diverging 1-minute prior session still serves the stored 1day close."""
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="99", close="100", volume=10)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol="NIFTY", day=_DAY
+        )
+        assert got.value == Decimal("100")
+
+    def test_option_prev_close_equal_when_both_sources_fresh(self, tmp_path: Path) -> None:
+        """Equivalence pin: when the stored option 1day IS fresh (its close ==
+        the session's last 1-minute close, the derive law) the gate changes
+        nothing — the walk-back recovers the byte-equal value."""
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1day",
+            [_day_bar(day=date(2024, 6, 12), open_="120", close="123.45", volume=10)],
+        )
+        _write_fno(
+            tmp_path,
+            _CE_SYMBOL,
+            "1minute",
+            [_min_bar(hour=15, minute=29, close="123.45", volume=5, day=date(2024, 6, 12))],
+        )
+        got = resolve_prev_close(
+            tmp_path, exchange=_EXCHANGE, segment="FNO", symbol=_CE_SYMBOL, day=_DAY
+        )
+        assert got.value == Decimal("123.45")
+        assert got.found_date == date(2024, 6, 12)
 
 
 # ── run_movers_snapshot (direct, every branch) ────────────────────────────
@@ -915,30 +1050,37 @@ class TestMoversAsofLatestDefault:
     def test_teeth_old_per_tf_default_slot_would_differ(
         self, store: InstrumentStore, tmp_path: Path
     ) -> None:
-        # The bug reproduction: the OLD per-TF default pinned 3minute to its last
-        # grid slot 15:27 → the 15:27 partial-bucket close 21800, DIFFERENT from
-        # the new default's 15:29 latest close 22000. Explicit times still cut honestly.
+        # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 UPDATE: an explicit bucket-anchor pick
+        # now resolves FORWARD to the COMPLETED bucket, so 3minute @ 15:27 reads the
+        # completed 15:27–15:29 bucket close (22000 — the broker's), NOT the old
+        # partial 15:27 close (21800). That partial close is still observable on
+        # 1minute @ 15:27 (identity). DEC-MOVERS-ASOF-LATEST-DEFAULT-001's invariant
+        # (the no-time DEFAULT reaches the latest minute 22000 on every TF) holds.
         _seed_finalized_day_lake(tmp_path)
         client = TestClient(build_app(DashboardState(), instrument_store=store))
-        at_1527 = client.get(
+        at_1527_3m = client.get(
             "/api/v1/movers",
             params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        at_0915 = client.get(
+        at_1527_1m = client.get(
             "/api/v1/movers",
-            params={"asset": "spot", "interval": "3minute", "date": "2024-06-13", "time": "09:15"},
+            params={"asset": "spot", "interval": "1minute", "date": "2024-06-13", "time": "15:27"},
         ).json()
-        # Read the LTP from the volume category (always includes the row — at 09:15
-        # the pct change is 0% so it is not a gainer/loser).
-        assert at_1527["volume"][0]["ltp"] == "₹21,800.00"
-        assert at_0915["volume"][0]["ltp"] == "₹20,000.00"
-        # The per-TF slots DIFFER from each other AND from the new default's 22000 —
-        # exactly the operator-reported divergence the default fix removes.
-        assert at_1527["volume"][0]["ltp"] != at_0915["volume"][0]["ltp"]
+        # Read the LTP from the volume category (always includes the row).
+        # 3minute @ 15:27 = the completed bucket close 22000; 1minute @ 15:27 = the
+        # partial 15:27 close 21800 (the value the OLD 3minute default wrongly froze).
+        assert at_1527_3m["volume"][0]["ltp"] == "₹22,000.00"
+        assert at_1527_1m["volume"][0]["ltp"] == "₹21,800.00"
+        assert at_1527_3m["volume"][0]["ltp"] != at_1527_1m["volume"][0]["ltp"]
+        # Provenance is honest: the 3minute pick echoes its resolved bucket end.
+        assert at_1527_3m["asof_through"] == "15:29"
+        assert "15:27 bucket · through 15:29" in at_1527_3m["note"]
+        # The no-time DEFAULT reaches the latest minute (22000) — the completed bucket.
         default = client.get(
             "/api/v1/movers", params={"asset": "spot", "interval": "3minute"}
         ).json()
         assert default["price_gainers"][0]["ltp"] == "₹22,000.00"
+        assert default["asof_through"] is None  # no explicit pick → no bucket provenance
 
     def test_default_intraday_echoes_latest_time_and_null_time(
         self, store: InstrumentStore, tmp_path: Path
@@ -1071,14 +1213,18 @@ class TestMoversPage:
 
 from structlog.testing import capture_logs  # noqa: E402
 
-#: The FROZEN additive-key vocabulary this decision may ever add to a movers
-#: row — a new key needs a conscious edit here (the key-NAME set pin).
+#: The FROZEN additive-key vocabulary this decision family may ever add to a
+#: movers row — a new key needs a conscious edit here (the key-NAME set pin).
+#: DELIBERATE widening 2026-07-09 (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the
+#: two EMIT-ON-TRUE-ONLY Muhurat keys join the #1539 EMIT-ON-FALSE pair.
 _CONTIGUITY_KEYS = frozenset(
     {
         "prev_close_session",
         "prev_close_contiguous",
         "oi_baseline_session",
         "oi_baseline_contiguous",
+        "prev_close_muhurat",
+        "oi_baseline_muhurat",
     }
 )
 
@@ -1232,3 +1378,274 @@ class TestPrevCloseContiguityGoldens:
         )
         assert set(row) & _CONTIGUITY_KEYS == set()
         assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+
+# ── Muhurat-boundary display-baseline coherence (DEC-PREVSESSION-MUHURAT-COHERENCE-001) ──
+#
+# The CONFIRMED W2-3 repro, promoted to a committed fixture: a HEALTHY lake
+# legitimately carrying the 2024-11-01 Diwali Muhurat session (the ingest keeps
+# Muhurat bars, DEC-INGEST-BOUNDARY-INTEGRITY-001; the prebuild derives their
+# 1-day bar). PRE-FIX WIRE (captured 2026-07-09 on the pre-fix code): the
+# day-after row (Mon 2024-11-04) served change=₹-2.00 / pct −1.9047…% but
+# stamped {"prev_close_session": "2024-11-01", "prev_close_contiguous": false}
+# + the " *" marker + ONE movers.prev_baseline_noncontiguous WARN — a FALSE
+# "lake hole" on a healthy lake, annually, across up to 21 events/build × the
+# 39 warm-grid keys. POST-FIX (the SANCTIONED wire delta): the SAME served
+# values, the false pair DROPPED, {"prev_close_muhurat": true} GAINED, zero
+# WARNs, exactly ONE movers.prev_baseline_muhurat INFO per build.
+
+
+_IST_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _day_bar_mid_ist(*, day: date, open_: str, close: str, volume: int) -> CandleBar:
+    """A 1-day bar stamped at MIDNIGHT IST (18:30 UTC prior day) — the
+    production derived-1day convention (``spot_daily_resample``)."""
+    o = Decimal(open_)
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(day.year, day.month, day.day, 0, 0, tzinfo=_IST_TZ).astimezone(UTC),
+        open=o,
+        high=max(o, c),
+        low=min(o, c),
+        close=c,
+        volume=volume,
+        open_interest=None,
+    )
+
+
+def _seed_muhurat_boundary_lake(tmp_path: Path) -> None:
+    """The W2-3 fixture: Thu 2024-10-31 regular (close 101.00) → Fri 2024-11-01
+    Muhurat evening (1m 18:00/18:59, DISTINCT 1-day close 105.00) → Mon
+    2024-11-04 regular (open 102.00, close 103.00). Real ``ParquetWriter``;
+    1-day bars midnight-IST stamped (both Oct/Nov UTC partitions exercised)."""
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1minute",
+        [
+            _min_bar(hour=9, minute=15, close="100.00", volume=100, day=date(2024, 10, 31)),
+            _min_bar(hour=15, minute=29, close="101.00", volume=100, day=date(2024, 10, 31)),
+        ],
+    )
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1minute",
+        [
+            # The Muhurat EVENING session (18:00-19:00 IST) — kept by the
+            # calendar-aware ingest filter; a real session's real bars.
+            _min_bar(hour=18, minute=0, close="104.00", volume=50, day=date(2024, 11, 1)),
+            _min_bar(hour=18, minute=59, close="105.00", volume=50, day=date(2024, 11, 1)),
+            _min_bar(hour=9, minute=15, close="102.00", volume=200, day=date(2024, 11, 4)),
+            _min_bar(hour=15, minute=29, close="103.00", volume=300, day=date(2024, 11, 4)),
+        ],
+    )
+    # Midnight-IST 1-day stamps: 10-31 + 11-01 land in the OCTOBER UTC month
+    # partition (18:30Z on the prior calendar day), 11-04 in NOVEMBER.
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1day",
+        [
+            _day_bar_mid_ist(day=date(2024, 10, 31), open_="100.00", close="101.00", volume=200),
+            _day_bar_mid_ist(day=date(2024, 11, 1), open_="103.50", close="105.00", volume=100),
+        ],
+    )
+    _write(
+        tmp_path,
+        "NIFTY",
+        "1day",
+        [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+    )
+
+
+class TestMuhuratBaselineCoherence:
+    def test_day_after_diwali_1day_served_flagged_muhurat_no_warn(self, tmp_path: Path) -> None:
+        """FIX-REVERSION TEETH: with the muhurat arm reverted this test FAILS
+        (the row regains the false contiguous:false pair + a WARN and loses
+        prev_close_muhurat). Values are byte-identical to the pre-fix wire."""
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_losers"]
+        # VALUE-EQUALITY: the served numbers are UNCHANGED by the fix — the
+        # display law serves the real Muhurat close (105.00) either way.
+        assert row["ltp"] == "₹103.00"
+        assert row["change"] == "₹-2.00"
+        assert row["pct_change"] == str(
+            (Decimal("103.00") - Decimal("105.00")) / Decimal("105.00") * 100
+        )
+        assert row["pct_change"].startswith("-1.9047619047")
+        # The SANCTIONED wire delta: the false EMIT-ON-FALSE pair is GONE,
+        # exactly the ONE EMIT-ON-TRUE muhurat key is added.
+        assert "prev_close_session" not in row
+        assert "prev_close_contiguous" not in row
+        assert row["prev_close_muhurat"] is True
+        assert set(row) - _SPOT_ROW_KEYS == {"prev_close_muhurat"}
+        # ZERO noncontiguous WARNs; exactly ONE per-build muhurat INFO.
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        infos = [e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]
+        assert len(infos) == 1
+        assert infos[0]["kind"] == "prev_close"
+        assert infos[0]["symbol"] == "NIFTY"
+        assert infos[0]["found_session"] == "2024-11-01"
+        assert infos[0]["snapshot_day"] == "2024-11-04"
+
+    def test_day_after_diwali_1minute_basis_identical_values_and_flag(self, tmp_path: Path) -> None:
+        # The intraday (1minute) basis reads the SAME 1-day baseline — values
+        # byte-identical to the daily basis, same muhurat flag, zero WARNs.
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1minute", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_losers"]
+        assert row["change"] == "₹-2.00"
+        assert row["pct_change"] == str(
+            (Decimal("103.00") - Decimal("105.00")) / Decimal("105.00") * 100
+        )
+        assert row["prev_close_muhurat"] is True
+        assert "prev_close_contiguous" not in row
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        assert len([e for e in logs if e["event"] == "movers.prev_baseline_muhurat"]) == 1
+
+    def test_missing_muhurat_bar_lake_reads_plain_contiguous_no_flag(self, tmp_path: Path) -> None:
+        # The ASYMMETRY pin: a lake WITHOUT the Muhurat bar (10-31 + 11-04
+        # only) baselines 11-04 on 10-31 — the calendar's prior REGULAR
+        # session — so the row is plain contiguous: NO muhurat key, no WARN
+        # (the Muhurat date is a calendar NON-session for the daily walk).
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 10, 31), open_="100.00", close="101.00", volume=200)],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+        )
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹2.00"  # vs the 10-31 close 101.00
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_muhurat_days_own_row_is_plain_contiguous(self, tmp_path: Path) -> None:
+        # The Muhurat day's OWN row (snapshot 2024-11-01, baseline the 10-31
+        # regular close) is an ORDINARY contiguous row — no flag, no WARN.
+        _seed_muhurat_boundary_lake(tmp_path)
+        with capture_logs() as logs:
+            payload = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-01", time=None, top_n=5
+            )
+        (row,) = payload["price_gainers"]
+        assert row["change"] == "₹4.00"  # 105.00 vs the 10-31 close 101.00
+        assert set(row) & _CONTIGUITY_KEYS == set()
+        assert [e for e in logs if e["event"].startswith("movers.prev_baseline")] == []
+
+    def test_hole_before_muhurat_flags_its_own_rows_not_the_day_after(self, tmp_path: Path) -> None:
+        # The MASKING-concern pin (ledgered honest limit): a lake missing
+        # 10-31 but holding the 11-01 Muhurat bar. The 11-04 row is genuinely
+        # muhurat-served (11-01 IS its nearest real prior session — nothing is
+        # masked for it), while the 10-31 hole flags on ITS OWN affected row:
+        # the 11-01 snapshot's baseline (found 10-30 ≠ expected 10-31) reads
+        # strictly False + one WARN.
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [
+                _day_bar_mid_ist(day=date(2024, 10, 30), open_="99.00", close="99.50", volume=100),
+                # 2024-10-31 DELIBERATELY absent (the genuine hole).
+                _day_bar_mid_ist(day=date(2024, 11, 1), open_="103.50", close="105.00", volume=100),
+            ],
+        )
+        _write(
+            tmp_path,
+            "NIFTY",
+            "1day",
+            [_day_bar_mid_ist(day=date(2024, 11, 4), open_="102.00", close="103.00", volume=500)],
+        )
+        with capture_logs() as logs_after:
+            payload_after = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-04", time=None, top_n=5
+            )
+        (row_after,) = payload_after["price_losers"]
+        assert row_after["prev_close_muhurat"] is True
+        assert "prev_close_contiguous" not in row_after
+        noncontig = [e for e in logs_after if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert noncontig == []
+        with capture_logs() as logs_on:
+            payload_on = run_movers_snapshot(
+                lake_root=tmp_path, interval="1day", date="2024-11-01", time=None, top_n=5
+            )
+        (row_on,) = payload_on["price_gainers"]
+        assert row_on["prev_close_session"] == "2024-10-30"
+        assert row_on["prev_close_contiguous"] is False
+        assert "prev_close_muhurat" not in row_on
+        warns = [e for e in logs_on if e["event"] == "movers.prev_baseline_noncontiguous"]
+        assert len(warns) == 1
+        assert warns[0]["expected_session"] == "2024-10-31"
+
+    def test_warm_grid_over_muhurat_lake_emits_zero_noncontiguous_warns(
+        self, tmp_path: Path
+    ) -> None:
+        # The FLOOD pin: the FULL 39-key post-pull warm grid (3 spot + 9
+        # futures + 27 options coordinates, DEC-MOVERS-WARM-GRID-001) over the
+        # healthy Muhurat-boundary lake fires ZERO noncontiguous WARNs — the
+        # pre-fix behaviour re-warned every warm key, annually.
+        from brutex.dashboard.movers_futures import compute_futures_candidates
+        from brutex.dashboard.movers_options import compute_options_candidates
+        from brutex.dashboard.movers_snapshot import compute_spot_candidates
+        from brutex.dashboard.movers_warm import (
+            futures_warm_grid,
+            options_warm_grid,
+            spot_warm_grid,
+        )
+
+        _seed_muhurat_boundary_lake(tmp_path)
+        keys = 0
+        with capture_logs() as logs:
+            for coord in spot_warm_grid():
+                compute_spot_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                )
+                keys += 1
+            for coord in futures_warm_grid():
+                compute_futures_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                    expiry_tier=coord["expiry_tier"] or "near",
+                )
+                keys += 1
+            for coord in options_warm_grid():
+                compute_options_candidates(
+                    lake_root=tmp_path,
+                    interval="1day",
+                    date="2024-11-04",
+                    time=None,
+                    exchange=coord["exchange"],
+                    expiry_tier=coord["expiry_tier"] or "near",
+                    expiry_track=coord["expiry_track"] or "all",
+                )
+                keys += 1
+        assert keys == 39  # the full DEC-MOVERS-WARM-GRID-001 grid
+        assert [e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous"] == []
+        assert [
+            e for e in logs if e["event"] == "movers.prev_baseline_noncontiguous_suppressed"
+        ] == []

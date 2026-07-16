@@ -9,6 +9,13 @@ from typing import Any
 
 import pytest
 from brutex.adapters.groww.constants import GROWW_TOKEN_CACHE_PATH_ENV
+from brutex.calendars.market_hours import MARKET_HOURS_GUARD_ENV
+from brutex.calendars.settle_evidence import SETTLE_EVIDENCE_PATH_ENV
+from brutex.dashboard.lake_revision import REVISION_PROBE_TTL_ENV
+from brutex.data.today_completeness import (
+    TODAY_COMPLETENESS_GATE_ENV,
+    reset_today_gate_log_state,
+)
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from hypothesis import HealthCheck
 from hypothesis import settings as _hyp_settings
@@ -43,6 +50,81 @@ _hyp_settings.register_profile(
     suppress_health_check=(HealthCheck.too_slow,),
 )
 _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
+
+# DEC-GROWW-MARKET-HOURS-GUARD-001 test hermeticity (the #1380 philosophy —
+# hermetic against the real HOST, here the WALL CLOCK instead of the disk):
+# the market-hours START gate's production default (`guard_active_default`)
+# reads the REAL clock + `os.environ`, so any test that starts a
+# `BackgroundPullJob` / drives a pull route WITHOUT injecting a guard would
+# pass out-of-hours and FAIL between 08:45-15:35 IST on an NSE trading day (a
+# wall-clock flake class over the whole suite — reproduced locally 2026-07-10
+# 12:02 IST: 13 untouched `test_dashboard_pull_stall.py` starts deferred).
+# The suite therefore runs under the DOCUMENTED operator kill switch
+# (`BRUTEX_MARKET_HOURS_GUARD=0`, `setdefault` so an explicit outer choice
+# wins). The guard's OWN tests stay fully armed on both arms — they inject
+# `env=` mappings / guard callables / monkeypatched clocks explicitly
+# (test_market_hours.py, the gate tests in test_pull_jobs.py /
+# test_cli_retry_storm.py / test_nightly_pipeline_binding.py) — so this
+# default disables ONLY the ambient real-clock read, never the tested law.
+os.environ.setdefault(MARKET_HOURS_GUARD_ENV, "0")
+
+# DEC-PULL-TODAY-COMPLETENESS-GATE-001 test hermeticity (the #1692 philosophy —
+# hermetic against the WALL CLOCK): the gate's four production arm sites resolve
+# the REAL ``os.environ`` (``resolve_today_completeness_enabled``) and the gate
+# then judges real-clock-clamped windows, so a production-wrapper test that
+# fabricates a today-ending window and runs at/after 15:30 IST on a trading day
+# would wall-clock-flake. The suite therefore runs under the DOCUMENTED operator
+# kill switch (``setdefault`` so an explicit outer choice wins). The gate's OWN
+# tests stay fully armed on both arms — they inject ``env=`` mappings + explicit
+# ``clamp_today`` dates / ``now_ist`` clocks (test_today_completeness.py, the
+# gate tests in test_groww_ingest.py / test_groww_option_ingest.py) — so this
+# default disables ONLY the ambient real-environ read, never the tested law.
+os.environ.setdefault(TODAY_COMPLETENESS_GATE_ENV, "0")
+
+# DEC-O1-GUARANTEE-HARDEN-001 (H2) test hermeticity (the same philosophy —
+# hermetic against the WALL CLOCK): the revision-probe TTL memo
+# (``lake_revision.RevisionProbeMemo``, default TTL 1 s) would make any test
+# that writes a sweep/run artifact and RE-POLLS a probe-keyed route within one
+# second serve the pre-write token — a timing-dependent flake class over every
+# /results + oneclick-runs invalidation test. The suite therefore runs under
+# the DOCUMENTED kill switch (``BRUTEX_REVISION_PROBE_TTL_S=0`` = the memo is
+# a pass-through, byte-identical per-poll probes; ``setdefault`` so an
+# explicit outer choice wins). The memo's OWN tests stay fully armed — they
+# inject ``ttl_s=`` + clocks explicitly (test_lake_revision.py, the route pins
+# in tests/bench/test_revision_probe_ttl_o1.py) — so this default disables
+# ONLY the ambient real-clock TTL, never the tested law.
+os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
+
+# DEC-SETTLE-EVIDENCE-ADOPTION-001 test hermeticity (the market-hours-guard
+# philosophy — hermetic against the REPO CHECKOUT instead of the wall clock):
+# resolve_settle_time's evidence tier reads the repo-committed
+# docs/groww/probe/settle_evidence.json by default, so the DAY a measured
+# evidence file lands, every env=None / injected-mapping-without-the-key test
+# would silently change settle semantics (17:30 -> the measured value) — a
+# whole-suite flake class armed by a FUTURE commit. The suite therefore runs
+# with the channel off (`setdefault` so an explicit outer choice wins). The
+# channel's OWN tests stay fully armed — they inject env mappings + tmp paths
+# and monkeypatch settle_evidence.default_evidence_path explicitly; the ONE
+# committed-file CI test bypasses env entirely (validates default_evidence_path()
+# directly) — so this default disables ONLY the ambient repo read, never the
+# tested law.
+os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_today_gate_log_state() -> None:
+    """Reset the TODAY-gate's per-pull capped-event counters before EVERY test.
+
+    DEC-PULL-TODAY-COMPLETENESS-GATE-001 round-1 R2-M1: the module keeps
+    thread-safe per-``pull_id`` counters for its capped WARN/INFO events (the
+    per-pull design — production never resets them). Tests that drive the gate
+    without a bound pull scope share the ``""`` key, so without a reset a
+    later-added test could inherit a prior test's counts and flake on its
+    event-count asserts (measured headroom was 11/20 at review time). The reset
+    is the module's OWN test seam (``reset_today_gate_log_state``) — never a
+    production-code reset; 5 dict clears per test, negligible.
+    """
+    reset_today_gate_log_state()
 
 
 @pytest.fixture
@@ -80,6 +162,32 @@ def _isolate_groww_token_cache(
     """
     cache = tmp_path_factory.mktemp("groww-token-cache") / "groww_access_token.json"
     monkeypatch.setenv(GROWW_TOKEN_CACHE_PATH_ENV, str(cache))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_run_forensics_mirror(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Redirect the Row-15 run-forensics mirror at a per-test tmp root for the suite.
+
+    DEC-SWEEP-UNKILLABLE-CORE-001 Row 15: the sweep run core mirrors its R40
+    forensics to ``~/.brutex/runs/<run_id>/`` on the INTERNAL disk by default.
+    Point every test's mirror at a fresh tmp root (via the public
+    ``BRUTEX_RUN_MIRROR_ROOT`` env override) so a run-core exercise NEVER writes
+    into the operator's real home — the same isolation discipline as the Groww
+    token cache above. A per-file fixture can still re-point or disable it (empty
+    value); ``monkeypatch`` auto-restores at teardown.
+    """
+    # LITERAL env-var name, deliberately NOT `from brutex.engine.run_layout
+    # import MIRROR_ROOT_ENV`: this fixture is suite-wide autouse, and the
+    # nightly red-team harness (redteam-nightly.yml) runs a PYTHON-ONLY
+    # editable install with no Rust wheels — importing brutex.engine here
+    # (package __init__ -> combo_mask -> fno_math) errored the SETUP of all
+    # 156 pre-existing tests/redteam tests (run 29145422566). The literal is
+    # drift-pinned against run_layout.MIRROR_ROOT_ENV by
+    # tests/unit/test_run_layout.py (a wheels-present suite).
+    mirror = tmp_path_factory.mktemp("run-forensics-mirror")
+    monkeypatch.setenv("BRUTEX_RUN_MIRROR_ROOT", str(mirror))
 
 
 @pytest.fixture(autouse=True)

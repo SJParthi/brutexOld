@@ -102,9 +102,11 @@ from brutex.engine.combo_mask import (
     iter_masks_k_of_bits,
     mask_to_entry_signals,
 )
-from brutex.engine.results_store import ResultRow, ResultsStore
-from brutex.engine.rust_trade_sim import ResidentTradeSim
-from brutex.engine.stage1a import build_bar_bits
+from brutex.engine.reference_wire import aggregate_trade_vix
+from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
+from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
+from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
+from brutex.engine.sweep_apriori import apriori_enabled
 from brutex.engine.sweep_driver import (
     DEFAULT_MAX_COMBOS,
     DEFAULT_START_EQUITY_PAISA,
@@ -150,6 +152,7 @@ from brutex.strategies.types import (
     Side,
     price_source_params_fragment,
 )
+from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 from brutex.vocabulary import ProximityParams, has_conflict
 
 if TYPE_CHECKING:
@@ -164,6 +167,7 @@ if TYPE_CHECKING:
     # path, a ``BufferedAuditCollector`` in a parallel-sweep worker,
     # DEC-MULTICORE-SWEEP-PHASE1-001) — neither is constructed here.
     from brutex.data.option_dedup import OptionDedupIndex
+    from brutex.engine.reference_series import TradeReferenceStamper
     from brutex.engine.sweep_kernel import ResidentSweepKernel
     from brutex.orchestrator.audit import AuditSink
 
@@ -217,6 +221,43 @@ class SweepComboError(BruteXError):
     mask-specific edge cannot be ruled out — skipping the whole tuple is the conservative
     response. The grid drivers SKIP the whole tuple (deterministic redo next run), never
     the one mask.
+    """
+
+
+class SweepAprioriBudgetError(SweepComboError):
+    """The Apriori pruned candidate set would exceed the per-cell mask·bar budget.
+
+    Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when the PURE-INTEGER
+    work estimate ``len(candidates) * n_bars`` STRICTLY EXCEEDS
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS`` (a mask·bar count — no float division,
+    no wall clock, so the trip is DETERMINISTIC and bit-identical Python↔Rust,
+    Golden Rule #7). Subclassing :class:`SweepComboError` rides the existing
+    tuple-skip contract UNCHANGED — the grid drivers count it in
+    ``tuples_failed``, emit ``TUPLE_FAILED``, leave the tuple un-sentineled for a
+    deterministic redo, and exit non-zero — a LOUD refusal of a degenerate cell
+    rather than a silent multi-day run. The message NAMES the cell, ``k``, the
+    candidate count, the ``mask·bar`` product / limit, and the remedies (raise
+    ``BRUTEX_SWEEP_APRIORI_MAX_MASK_BARS``, tighten ``min_hits``, reduce ``k``, or
+    unset the flag). The wall-clock runaway backstop is the separate #1608 stall
+    watchdog (non-identity-bearing), which this deterministic breaker never
+    touches.
+    """
+
+
+class SweepAprioriUnsupportedError(SweepComboError):
+    """The Apriori frontier cannot represent a ``>= 64``-bit vocabulary — GRACEFUL refusal.
+
+    Raised by :func:`brutex.engine.sweep_apriori.generate_apriori_candidates`
+    (only when ``BRUTEX_SWEEP_APRIORI`` is enabled) when a chosen condition bit is
+    ``>= 64``: the sorted-``uint64`` frequent frontier holds each mask in a single
+    64-bit limb, so a u128 vocabulary is out of range. Subclassing
+    :class:`SweepComboError` rides the existing tuple-skip contract UNCHANGED — the
+    grid drivers count it in ``tuples_failed``, emit ``TUPLE_FAILED``, leave the
+    tuple un-sentineled for a deterministic redo, and exit non-zero — a LOUD
+    per-tuple refusal instead of a raw ``ValueError`` that would crash the WHOLE
+    grid. The remedy is to unset ``BRUTEX_SWEEP_APRIORI``: the byte-identical
+    brute-force enumeration path supports the full u128 vocabulary.
     """
 
 
@@ -492,9 +533,17 @@ class SweepRunConfig:
         ranking term, DEC-RANKING-OVERFIT-001) inside :func:`brutex.ranking.rank_combos`.
         ``None`` (the default) keeps the legacy five-gate / seven-term ranking. The
         leaderboard's trial count ``N`` is this tuple's backtested-combo count —
-        the authoritative per-(instrument, TF) ``N`` — so the persisted store is, by
-        construction, the overfit-gated output (see the ``overfit`` module's honest
-        envelope: no statistically-valid post-store re-gate exists).
+        the authoritative per-(instrument, TF) ``N`` (see the ``overfit`` module's
+        honest envelope: no statistically-valid post-store re-gate exists). The
+        gate identity is now encoded in the store ADDRESS itself: the
+        active-only gate config folds into
+        :func:`~brutex.engine.sweep_orchestrator._tuple_digest`
+        (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so a gated vs an ungated run
+        over ONE results root map to DIFFERENT Parquet + completion-sentinel
+        addresses — an ungated store can never be served as a gated one via the
+        sentinel short-circuit, and a same-address collision differing only in
+        the nullable DSR metric is a tuple-scoped skip (C5), never a silent
+        overwrite.
 
     Raises
     ------
@@ -532,11 +581,40 @@ class SweepRunConfig:
     top_k: int | None = None
     min_hits: int = MIN_TRADES
     overfit: OverfitGateConfig | None = None
+    #: ADR-0012 NIFTY-futures roll schedule (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001
+    #: / DEC-STAGE1A-ROLL-RESET-001): strictly increasing owning-expiry
+    #: day-ordinals from ``resolve_futures_series`` — the roll boundaries the
+    #: Stage-1A build hard-resets on. PRESENCE IS A TOTAL FUNCTION OF THE
+    #: ``instrument`` IDENTITY FIELD (the ``__post_init__`` hard invariant,
+    #: both directions), so no instrument can ever mint both a with-key and a
+    #: without-key run identity (the #1062 conditional-params bug class is
+    #: contained). ``None`` — every spot config — emits NO params key, so spot
+    #: run_ids stay byte-identical.
+    roll_schedule: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf", "mode"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
+        # Instrument ⟺ schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+        # the futures alias REQUIRES a schedule, everything else FORBIDS one —
+        # presence is a pure function of the identity field, never a caller mood.
+        if (self.instrument == NIFTY_FUTURES_SERIES_SYMBOL) != (self.roll_schedule is not None):
+            raise ValueError(
+                "SweepRunConfig: roll_schedule is required for (and only for) the "
+                f"NIFTY-futures series alias {NIFTY_FUTURES_SERIES_SYMBOL!r} — got "
+                f"instrument={self.instrument!r} with roll_schedule="
+                f"{self.roll_schedule!r}"
+            )
+        if self.roll_schedule is not None and (
+            not self.roll_schedule
+            or list(self.roll_schedule) != sorted(set(self.roll_schedule))
+            or self.roll_schedule[0] < 0
+        ):
+            raise ValueError(
+                "SweepRunConfig.roll_schedule must be a non-empty strictly increasing "
+                f"tuple of non-negative day ordinals, got {self.roll_schedule!r}"
+            )
         for name in ("data_snapshot_hash", "indicator_version", "code_commit_sha"):
             if not getattr(self, name):
                 raise ValueError(f"SweepRunConfig.{name} must be non-empty")
@@ -647,6 +725,7 @@ def canonical_trade_params(
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     vwap_source: PriceSource = PriceSource.HLC3,
     ema_source: PriceSource = PriceSource.CLOSE,
+    roll_schedule: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
 
@@ -676,6 +755,19 @@ def canonical_trade_params(
       optional-param convention. A default cell is byte-identical to the pre-axis
       run-identity; a non-default cell gets a distinct one (no store collision).
 
+    The ADR-0012 futures ``roll_schedule`` enters CONDITIONALLY
+    (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): ``bar_bits`` are a function of
+    ``(bars, schedule)`` and the schedule derives from LAKE state (dir names) —
+    ``code_commit_hash`` cannot capture it — so Golden Rule #4 demands it in
+    the recorded identity, and the recorded key makes each futures run
+    SELF-DESCRIBING for the recount's evidence check. The conditional emission
+    can never re-open the #1062 bug class because
+    :class:`SweepRunConfig.__post_init__` pins presence ⟺ the futures alias
+    (both directions) — a spot config emits NO key and stays byte-identical.
+    ``canonical_spec_params`` (the spec-axis params builder) deliberately does
+    NOT carry ``roll_schedule`` — the spec axis has no futures sweep tree and
+    its params vocabulary stays dormant (test-pinned on both builders).
+
     This is the ONE source of the params layout inside every persisted mask
     run-identity (CLAUDE.md §11 COMMON): the sweep hashes through it via
     :func:`_canonical_params`, and the Stage-3 wiring re-derives survivor
@@ -702,6 +794,8 @@ def canonical_trade_params(
     # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
     # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
     params.update(price_source_params_fragment(vwap_source, ema_source))
+    if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
+        params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
     return params
 
 
@@ -716,6 +810,7 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         fib_anchor=cfg.fib_anchor,
         vwap_source=cfg.vwap_source,
         ema_source=cfg.ema_source,
+        roll_schedule=cfg.roll_schedule,
     )
 
 
@@ -732,6 +827,7 @@ def ranked_combo_to_result_row(
     tf_minutes: int,
     sl_paisa: int | None,
     tp_paisa: int | None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> ResultRow:
     """Project a :class:`~brutex.ranking.RankedCombo` into a storable :class:`ResultRow`.
 
@@ -796,6 +892,20 @@ def ranked_combo_to_result_row(
     tf_minutes, sl_paisa, tp_paisa
         Trade-sim knobs — must match the sweep's so the re-simulated trades
         reproduce the ranked combo's trades exactly.
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001): the FINALIST projection is the OBSERVABLE
+        re-simulation feeding the persisted row, so the run's stamper is bound
+        HERE — the finalist's trades carry ``vix_at_entry`` / ``vix_at_exit``,
+        which the ONE COMMON
+        :func:`~brutex.engine.reference_wire.aggregate_trade_vix` folds into
+        the row's nullable ``vix_mean`` / ``vix_min`` / ``vix_max`` trio.
+        REFERENCE ONLY (CLAUDE.md §2 Rule 3): the trio is never rankable and
+        never in the run identity — the row's ``run_id`` is byte-identical
+        with or without stamping (regression-pinned); ONLY the three nullable
+        VIX columns differ. ``None`` (default) = unstamped → the honest
+        ``(None, None, None)`` trio, never a fabricated level.
 
     Returns
     -------
@@ -812,6 +922,7 @@ def ranked_combo_to_result_row(
         tf_minutes=tf_minutes,
         stop_loss_paisa=sl_paisa,
         take_profit_paisa=tp_paisa,
+        reference_stamper=reference_stamper,
     )
     if trades:
         # Keep-FIRST timestamp map (DEC-LAKE-READ-UNIQUE-001): a plain dict
@@ -830,6 +941,11 @@ def ranked_combo_to_result_row(
         # placeholder pair (a sweep-ranked combo still always has >= MIN_TRADES).
         avg_entry = round_money(Decimal("0"))
         avg_exit = round_money(Decimal("0"))
+
+    # The per-combo VIX summary (DEC-VIX-STAMP-WIRE-001): the ONE COMMON fold
+    # over the finalist's stamped trades. Unstamped / all-miss / zero trades →
+    # the honest (None, None, None) — never fabricated (Golden Rule #1).
+    vix_mean, vix_min, vix_max = aggregate_trade_vix(trades)
 
     return ResultRow(
         run_id=run_id,
@@ -855,6 +971,9 @@ def ranked_combo_to_result_row(
         max_drawdown_pct=m.max_drawdown_pct,
         avg_entry_price=avg_entry,
         avg_exit_price=avg_exit,
+        vix_mean=vix_mean,
+        vix_min=vix_min,
+        vix_max=vix_max,
     )
 
 
@@ -938,6 +1057,9 @@ def _build_trade_sim(
     bar_bits: Sequence[int],
     cfg: SweepRunConfig,
     direction_label: str,
+    *,
+    reference_stamper: TradeReferenceStamper | None,
+    kernel_columns: PriceColumns | None = None,
 ) -> ResidentTradeSim:
     """Build the tuple's resident trade-sim; map a failure to the #904 tuple-skip contract.
 
@@ -958,10 +1080,29 @@ def _build_trade_sim(
 
     The path choice is logged (``sweep_run.trade_sim_path``, INFO) so a
     Python-degraded sweep is observable, not a silent 40× regression (Golden
-    Rule #10); the wrapper itself already WARNs on every fallback cause.
+    Rule #10); the wrapper itself already WARNs on every fallback cause. The
+    log also carries ``vix_stamped`` (DEC-VIX-STAMP-WIRE-001) so an unstamped
+    inner stream is a stated fact, never a silent omission.
+
+    ``reference_stamper`` is REQUIRED (no default) so every caller makes an
+    EXPLICIT stamping decision for the trades this sim will emit — the
+    one-kwarg revert lever the coordinator ruling demands.
+
+    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) threads a
+    :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`'s once-per-window
+    :class:`~brutex.engine.rust_trade_sim.PriceColumns` into the sim so a
+    kernel-reusing tuple skips the per-tuple 4×-Decimal-snap derivation;
+    ``None`` (the default — every kernel-less caller) derives locally,
+    byte-identical.
     """
     try:
-        sim = ResidentTradeSim(bars, bar_bits, tf_minutes=cfg.tf_minutes)
+        sim = ResidentTradeSim(
+            bars,
+            bar_bits,
+            tf_minutes=cfg.tf_minutes,
+            reference_stamper=reference_stamper,
+            precomputed_columns=kernel_columns,
+        )
     except MemoryError:
         # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a tuple skip.
         raise
@@ -973,6 +1114,7 @@ def _build_trade_sim(
     _LOG.info(
         "sweep_run.trade_sim_path",
         rust_active=sim.rust_active,
+        vix_stamped=sim.reference_stamper is not None,
         n_bars=sim.n_bars,
         chunk_masks=_trade_sim_chunk_masks(sim.n_bars),
         instrument=cfg.instrument,
@@ -991,6 +1133,8 @@ def _reattribute_chunk_failure(
     direction_label: str,
     batch_exc: Exception,
     run_id_of: Callable[[int], str],
+    *,
+    reference_stamper: TradeReferenceStamper | None,
 ) -> NoReturn:
     """A batched trade-sim chunk raised — attribute the culprit mask, then fail LOUD.
 
@@ -1004,6 +1148,11 @@ def _reattribute_chunk_failure(
     :func:`mask_run_id` is pure; DEC-SWEEP-STREAMING-RANK-001). ``MemoryError``
     during re-attribution re-raises BARE (the global-stop law holds under
     memory pressure too — never a downgrade to a tuple skip).
+    ``reference_stamper`` is the SIM'S OWN stamper, handed in by
+    :func:`_iter_mask_metrics` (DEC-VIX-STAMP-WIRE-001) so the oracle replay
+    simulates with the EXACT stamping input the failed batch used — the
+    STRUCTURAL oracle≡batch guarantee (required, no default: a second wiring
+    could silently diverge).
 
     If EVERY mask passes the oracle, the failure was batch-level (a PyO3
     marshalling error, a kernel-only validator, a kernel bug): the oracle's
@@ -1035,6 +1184,7 @@ def _reattribute_chunk_failure(
                 stop_loss_paisa=cfg.sl_paisa,
                 take_profit_paisa=cfg.tp_paisa,
                 start_equity_paisa=cfg.start_equity_paisa,
+                reference_stamper=reference_stamper,
             )
         except MemoryError:
             raise
@@ -1111,7 +1261,18 @@ def _iter_mask_metrics(
         except MemoryError:
             raise
         except Exception as exc:
-            _reattribute_chunk_failure(bars, bar_bits, chunk, cfg, direction_label, exc, run_id_of)
+            # The sim's OWN stamper rides into the oracle replay — the
+            # STRUCTURAL oracle≡batch stamping guarantee (DEC-VIX-STAMP-WIRE-001).
+            _reattribute_chunk_failure(
+                bars,
+                bar_bits,
+                chunk,
+                cfg,
+                direction_label,
+                exc,
+                run_id_of,
+                reference_stamper=sim.reference_stamper,
+            )
         for mask, (trades, exit_indices) in zip(chunk, chunk_pairs, strict=True):
             try:
                 metrics = metrics_from_trades(
@@ -1195,6 +1356,7 @@ def run_persisted_sweep(
     audit: AuditSink,
     kernel: ResidentSweepKernel | None = None,
     trial_stats_digest: str | None = None,
+    reference_stamper: TradeReferenceStamper | None = None,
 ) -> SweepRunSummary:
     """Run a reproducible, deduped, audited K-of-bits sweep over ONE (instrument, TF).
 
@@ -1294,6 +1456,21 @@ def run_persisted_sweep(
         path. ``None`` (default) keeps the legacy probe semantics and writes
         no sidecar/sentinel (library callers; the launcher path supplies the
         digest via :func:`~brutex.engine.sweep_orchestrator.run_one_tuple`).
+    reference_stamper
+        Optional India-VIX
+        :class:`~brutex.engine.reference_series.TradeReferenceStamper`
+        (DEC-VIX-STAMP-WIRE-001). Bound ONLY at the OBSERVABLE surface — the
+        finalist projection (:func:`ranked_combo_to_result_row`), whose
+        re-simulated trades feed the persisted rows. The K-of-N inner mask
+        stream stays deliberately UNSTAMPED (see the explicit literal at the
+        ``_build_trade_sim`` call). Each persisted finalist row carries the
+        stamps' :func:`~brutex.engine.reference_wire.aggregate_trade_vix`
+        summary in its nullable ``vix_mean`` / ``vix_min`` / ``vix_max``
+        columns (unstamped → the honest ``None`` trio). REFERENCE ONLY: VIX
+        is never a signal, never ranked on, never in the run identity — every
+        persisted ``run_id`` and every non-VIX column is byte-identical with
+        or without the stamper (regression-pinned); ONLY the three nullable
+        VIX columns differ.
 
     Returns
     -------
@@ -1425,6 +1602,8 @@ def run_persisted_sweep(
             fib_anchor=cfg.fib_anchor,
             vwap_source=cfg.vwap_source,
             ema_source=cfg.ema_source,
+            roll_schedule=cfg.roll_schedule,
+            apply_1day_mask=apply_1day_mask_for(cfg.instrument, cfg.tf),
         )
     else:
         if kernel.n_bars != len(bars):
@@ -1458,7 +1637,41 @@ def run_persisted_sweep(
                 f"{kernel.ema_source.value!r} but the tuple sweeps "
                 f"{cfg.ema_source.value!r} — the kernel must match this tuple's source"
             )
+        # ADR-0012 roll-schedule twin of the anchor guard: the ``bar_bits``
+        # matrix is schedule-SPECIFIC (the per-contract hard resets), so a
+        # kernel built under a different schedule would silently misplace
+        # every roll boundary (DEC-STAGE1A-ROLL-RESET-001).
+        if kernel.roll_schedule != cfg.roll_schedule:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for roll_schedule "
+                f"{kernel.roll_schedule!r} but the tuple sweeps "
+                f"{cfg.roll_schedule!r} — the kernel must match this tuple's schedule"
+            )
+        # D12 twin (review round-1 finding 5): a kernel built under the wrong
+        # ``apply_1day_mask`` flag carries intraday-only bits (ToD 44-47 /
+        # VWAP 52-53) on a futures ``1day`` grid — unreachable through the
+        # production cache (the flag is a pure function of instrument+tf,
+        # both in its key) but guarded for a hand-built kernel, exactly like
+        # the schedule twin above.
+        if kernel.apply_1day_mask != apply_1day_mask_for(cfg.instrument, cfg.tf):
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built with apply_1day_mask="
+                f"{kernel.apply_1day_mask!r} but the tuple requires "
+                f"{apply_1day_mask_for(cfg.instrument, cfg.tf)!r} — the kernel "
+                f"must match this tuple's D12 flag"
+            )
         bar_bits = kernel.bar_bits
+
+    # ONE shared superset-hit counter (CLAUDE.md §11 COMMON) — the resident
+    # kernel's buffer when reusing a pre-built kernel (no bar re-marshal), else
+    # the free ``count_supermasks``; both delegate to the SAME Rust kernel /
+    # numpy fallback, so they are bit-identical (Golden Rule #4). Consumed by BOTH
+    # the Stage-1B pre-filter below AND (when ``BRUTEX_SWEEP_APRIORI`` is on) the
+    # Apriori frequent-frontier build, so the two provably agree on frequency.
+    def _count_hits(masks: Sequence[int]) -> list[int]:
+        if kernel is not None:
+            return kernel.count_hits(masks)
+        return count_supermasks(bar_bits, masks)
 
     # Sentinel-authoritative redo (DEC-MARK-MANY-SENTINEL-001): with a digest
     # and NO paired sentinel, the marks cannot be trusted (a crash inside the
@@ -1488,7 +1701,31 @@ def run_persisted_sweep(
     #: Legacy no-digest arm ONLY — the probe-time run_ids, parallel to
     #: ``survivors`` (consumed by ``mark_many`` + reused for finalists/errors).
     survivor_run_ids: list[str] = []
-    for mask in iter_masks_k_of_bits(cfg.condition_bits, cfg.k):
+    # Enumeration source (DEC-SWEEP-APRIORI-TUPLE-001): default is the
+    # brute-force ``iter_masks_k_of_bits`` (every C(n, k) combo). With
+    # ``BRUTEX_SWEEP_APRIORI`` enabled it is the Apriori level-wise pruned
+    # candidate list — a SUBSEQUENCE of the brute-force enumeration whose
+    # Stage-1B-kept set is provably identical (byte-identical leaderboard); only
+    # the honest ``enumerated``/``conflict_pruned`` tallies shrink. The generator
+    # is imported LAZILY here (sweep_apriori raises this module's
+    # SweepAprioriBudgetError at its breaker via a lazy import too, so neither
+    # module tops the other — no import cycle).
+    mask_source: Iterable[int]
+    if apriori_enabled():
+        from brutex.engine.sweep_apriori import generate_apriori_candidates
+
+        mask_source = generate_apriori_candidates(
+            bar_bits,
+            condition_bits=cfg.condition_bits,
+            k=cfg.k,
+            min_hits=cfg.min_hits,
+            count_hits=_count_hits,
+            n_bars=len(bar_bits),
+            cell_label=subject,
+        )
+    else:
+        mask_source = iter_masks_k_of_bits(cfg.condition_bits, cfg.k)
+    for mask in mask_source:
         enumerated += 1
         if has_conflict(mask):
             conflict_pruned += 1
@@ -1518,11 +1755,8 @@ def run_persisted_sweep(
     if cfg.min_hits > 0 and survivors:
         # Resident buffer (kernel) avoids re-marshalling the bar window; both arms
         # are bit-identical (same SUPERSET kernel) so the kept set never differs.
-        hits = (
-            kernel.count_hits(survivors)
-            if kernel is not None
-            else count_supermasks(bar_bits, survivors)
-        )
+        # Routed through the ONE shared ``_count_hits`` the Apriori generator uses.
+        hits = _count_hits(survivors)
         kept = [mask for mask, hit in zip(survivors, hits, strict=True) if hit >= cfg.min_hits]
     evaluated = len(survivors)
 
@@ -1572,7 +1806,34 @@ def run_persisted_sweep(
     columns = SurvivorColumns(with_overfit=cfg.overfit is not None) if plan.bounded else None
     sim: ResidentTradeSim | None = None
     if kept:
-        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label)
+        # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, coordinator ruling): the
+        # K-of-N inner mask stream's trades are DISCARDED after the metrics
+        # tail — no row, report or operator surface ever sees them — so
+        # stamping every one of the O(kept x trades) inner trades would be
+        # pure wasted work with zero observable output. The stream is
+        # therefore EXPLICITLY unstamped via this literal (one of the
+        # ENUMERATED sanctioned literal-None seam bindings — five after the
+        # round-6 review also unstamped the cascade candidate re-simulation
+        # — AST-pinned with exact counts by
+        # tests/unit/test_vix_stamper_binding_pin.py — never a silent
+        # omission). REVERT LEVER: pass ``reference_stamper=reference_stamper``
+        # here to stamp the inner stream too (one kwarg; its stamps are
+        # discarded WITH the trades so the persisted bytes are identical
+        # either way — the finalist row's VIX trio derives from the
+        # projector's OWN re-simulation, never this stream — and
+        # trade_sim_path logs vix_stamped=False so the unstamped stream is a
+        # stated fact).
+        sim = _build_trade_sim(
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            reference_stamper=None,
+            # The W2 rider (DEC-STAGE1A-RUST-BATCH-001): a kernel-reusing
+            # tuple hands its once-per-window columns; the kernel=None arm
+            # derives locally (byte-identical).
+            kernel_columns=kernel.kernel_columns if kernel is not None else None,
+        )
         for mask, metrics in _iter_mask_metrics(
             sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
         ):
@@ -1624,8 +1885,25 @@ def run_persisted_sweep(
             tf_minutes=cfg.tf_minutes,
             sl_paisa=cfg.sl_paisa,
             tp_paisa=cfg.tp_paisa,
+            # The OBSERVABLE bind (DEC-VIX-STAMP-WIRE-001): the finalist
+            # re-simulation feeds the persisted row, so the run's stamper
+            # lands here.
+            reference_stamper=reference_stamper,
         )
-        store.append(row)
+        try:
+            store.append(row)
+        except ResultsStoreGateConflictError as exc:
+            # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config re-run
+            # into the same store address surfaces here as an all-nullable-metric
+            # conflict. Convert AT THE SOURCE to a SweepComboError — a SIBLING of
+            # ResultsStoreError — so it sails PAST run_one_tuple's
+            # ``except ResultsStoreError`` (which, with store_quarantine=None,
+            # re-raises as a GLOBAL grid abort) and lands on the driver's
+            # ``except SweepComboError`` tuple-skip + TUPLE_FAILED-count ladder.
+            raise SweepComboError(
+                f"gate-config conflict persisting {cfg.instrument}/{cfg.tf}/"
+                f"{direction_label} k={cfg.k}: {exc}"
+            ) from exc
         persisted += 1
 
     flush = store.flush()
@@ -1725,6 +2003,8 @@ def run_persisted_sweep(
 
 __all__ = [
     "ComboDedup",
+    "SweepAprioriBudgetError",
+    "SweepAprioriUnsupportedError",
     "SweepComboError",
     "SweepMemoryBudgetError",
     "SweepRunConfig",

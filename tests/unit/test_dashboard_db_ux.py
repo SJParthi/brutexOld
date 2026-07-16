@@ -172,3 +172,17 @@ def test_column_picker_stays_removed_everywhere() -> None:
         'id="capply"',
     ):
         assert gone not in html, f"the removed column picker leaked back: {gone!r}"
+
+
+def test_candle_grid_carries_the_prev_close_anchor_footnote() -> None:
+    """DEC-PREVSESSION-MUHURAT-COHERENCE-001 — the STATIC display-law footnote
+    ships beside the candle grid: the /db derived %-change anchors on the
+    nearest STORED prior bar INCLUDING a Diwali Muhurat session's close (the
+    display baseline law), while the engine's day anchors deliberately use the
+    prior REGULAR session (#1616). Template-only — zero payload/backend change;
+    the per-row marker is the named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001."""
+    html = _render_db_html()
+    assert (
+        "%CHNG anchors on the nearest stored prior bar "
+        "(including a Diwali Muhurat session\\'s close)."
+    ) in html

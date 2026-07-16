@@ -118,6 +118,10 @@
      per-card entrance stagger. Linked AFTER bx-theme (the header authority). -->
 <link rel="stylesheet" href="/static/bx-design.css">
 <script defer src="/static/bx-ui.js"></script>
+<!-- The ONE shared poll-discipline core (DEC-FRONTEND-LATENCY-HARDENING-001,
+     MIGRATION.md #1720): hidden guard, one-in-flight chain, 10 s fetch abort,
+     capped 3 s→30 s backoff, visibilitychange catch-up. -->
+<script defer src="/static/bx-poll.js"></script>
 <!-- Live pull-rate monitor widget (DEC-LIVE-RATE-MONITOR-001): self-injecting,
      polls /api/v1/pull/rate. Idle until a pull runs; never blocks first paint. -->
 <script defer src="/static/bx-rate-monitor.js"></script>
@@ -137,9 +141,15 @@
       <span class="sep">·</span>
       <a href="/coverage" aria-current="page">Coverage</a>
       <span class="sep">·</span>
+      <a href="/completeness">Completeness</a>
+      <span class="sep">·</span>
       <a href="/movers">Movers</a>
       <span class="sep">·</span>
       <a href="/results">Results</a>
+      <span class="sep">·</span>
+      <a href="/screener">Screener</a>
+      <span class="sep">·</span>
+      <a href="/strategy">Strategy</a>
       <span class="sep">·</span>
       <a href="/reports">Reports</a>
     </nav>
@@ -197,7 +207,8 @@
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the four endpoint fetches run in
    PARALLEL (Promise.allSettled — one slow endpoint mid-pull no longer stalls
-   the other three), each through BXUI.fetchWithTimeout (12 s deadline) so a
+   the other three), each through the shared BXUI.fetchTextBounded (abort
+   armed THROUGH the body read — DEC-O1-GUARANTEE-HARDEN-001) so a
    hung endpoint always resolves; the pre-JS placeholders are skeleton shimmer
    bars that ALWAYS resolve (data / an honest "—" / an amber "… retrying" chip
    on the failing card — a 500 is no longer indistinguishable from a
@@ -253,22 +264,25 @@ function statError(statEl, kpis, msg) {
 }
 function failMsg(e) { return e && e.timeout ? "timed out · retrying" : "offline · retrying"; }
 
-/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
-   catch instead of pending forever. bx-ui.js is deferred, so only the very
-   first tick can fall back to bare fetch — every later 4 s tick is guarded. */
-function doFetch(url) {
-  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
+function fetchTextBounded(url, timeoutMs) {
+  if (window.BXUI && BXUI.fetchTextBounded) {
+    return BXUI.fetchTextBounded(url, timeoutMs);
+  }
+  return fetch(url).then(function (r) {
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
+  });
 }
 
-async function pollOptions() {
+async function pollOptions(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/options");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/options", timeoutMs);
+    if (!res.ok) {
       lastPayload.opt = null;
-      statError(cOpt, [ulEl, serEl], "error " + r.status + " · retrying");
+      statError(cOpt, [ulEl, serEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.opt) {
       lastPayload.opt = txt;
       const h = JSON.parse(txt).headline || {};
@@ -285,21 +299,26 @@ async function pollOptions() {
   }
 }
 
-async function pollSpot() {
+async function pollSpot(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/spot");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/spot", timeoutMs);
+    if (!res.ok) {
       lastPayload.spot = null;
-      statError(cSpot, [spotdsEl], "error " + r.status + " · retrying");
+      statError(cSpot, [spotdsEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.spot) {
       lastPayload.spot = txt;
-      const h = JSON.parse(txt).headline || {};
+      const body = JSON.parse(txt);
+      const h = body.headline || {};
       cSpot.classList.remove("err");
       setKpi(spotdsEl, num(h.datasets));
-      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars");
+      /* Floor-stale suffix (DEC-STALENESS-CACHE-TRUTH-001): the payload's own
+         duty_degraded honesty field (SummaryCache.stamp_freshness) — a
+         pull-held stale snapshot is marked, never silently served as live. */
+      setText(cSpot, num(h.datasets) + " datasets · " + num(h.total_bars) + " bars"
+        + (body.duty_degraded === true ? " · stale" : ""));
     }
     return true;
   } catch (e) {
@@ -309,18 +328,18 @@ async function pollSpot() {
   }
 }
 
-async function pollWindows() {
+async function pollWindows(timeoutMs) {
   try {
     /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this card renders ONE integer
        (b.count) — ?limit=0 keeps the identical counts/meta while dropping the
        up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
-    const r = await doFetch("/api/v1/coverage/windows?limit=0");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/windows?limit=0", timeoutMs);
+    if (!res.ok) {
       lastPayload.win = null;
-      statError(cWin, [wincEl], "error " + r.status + " · retrying");
+      statError(cWin, [wincEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.win) {
       lastPayload.win = txt;
       const b = JSON.parse(txt);
@@ -336,15 +355,15 @@ async function pollWindows() {
   }
 }
 
-async function pollCompleteness() {
+async function pollCompleteness(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/completeness/scoreboard");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/completeness/scoreboard", timeoutMs);
+    if (!res.ok) {
       lastPayload.cmp = null;
-      statError(cCmp, [], "error " + r.status + " · retrying");
+      statError(cCmp, [], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.cmp) {
       lastPayload.cmp = txt;
       const b = JSON.parse(txt);
@@ -364,17 +383,12 @@ async function pollCompleteness() {
   }
 }
 
-async function poll() {
-  /* Hidden-tab pause (DEC-DASHBOARD-POLL-HYGIENE-001, the bx-liveproof / v29.html
-     pattern): a background tab fires ZERO fetches — the 4 s interval keeps ticking
-     (a hidden tick is free) and the visibilitychange listener below fires an
-     immediate catch-up poll() on return, so a returning operator is never stale
-     beyond one RTT (Golden Rule #1). */
-  if (document.hidden) return;
+async function poll(timeoutMs) {
   /* Parallel fan-out: one slow endpoint no longer stalls the other three
      (the old serial awaits froze the whole tick behind the slowest call). */
   const settled = await Promise.allSettled(
-    [pollOptions(), pollSpot(), pollWindows(), pollCompleteness()]);
+    [pollOptions(timeoutMs), pollSpot(timeoutMs),
+     pollWindows(timeoutMs), pollCompleteness(timeoutMs)]);
   let ok = 0;
   for (const s of settled) { if (s.status === "fulfilled" && s.value) ok++; }
   liveTxt.textContent =
@@ -383,16 +397,47 @@ async function poll() {
     : "partial · " + ok + "/4";
   /* Truthful heartbeat: green pulse ONLY when all 4 surfaces answered. */
   if (window.BXUI) { BXUI.setDotState(liveDot, ok === 4 ? "ok" : ok === 0 ? "down" : "warn"); }
+  return ok > 0;
 }
 
-poll();
-setInterval(poll, 4000);
-/* Immediate catch-up on tab return (DEC-DASHBOARD-POLL-HYGIENE-001): the hidden
-   guard in poll() suppresses background fetches, so re-poll NOW on becoming
-   visible instead of waiting out the interval. */
-document.addEventListener("visibilitychange", function () {
-  if (!document.hidden) poll();
-});
+/* Self-recovering scheduler (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md
+   #1720): the composite tick above rides the ONE shared BXPoll discipline core
+   (bx-poll.js — hidden-tab guard BEFORE any fetch, ONE-in-flight self-scheduling
+   chain so a slow 4-fetch tick can never overlap the next one, capped 3 s→30 s
+   failure backoff when ALL FOUR surfaces fail, visibilitychange catch-up)
+   instead of a bare fixed setInterval; the visible-tab cadence is unchanged
+   (pollMs: 4000) and every per-endpoint render/degrade above is byte-identical
+   (a PARTIAL tick renders honestly and keeps the normal cadence — only a
+   0/4 total failure backs off). The poller starts at DOMContentLoaded, by
+   which every deferred script has executed; a missing bx-poll.js degrades to
+   the legacy guarded interval — the page never goes pollerless. */
+function startPolling() {
+  if (window.BXPoll) {
+    window.BXPoll.createPoller({
+      url: "/api/v1/coverage/options", // informational — the tick owns its own 4 fetches
+      pollMs: 4000,
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
+          if (!ok) { throw new Error("all four coverage surfaces failed"); }
+          return { ok: true };
+        });
+      },
+      onData: function () { /* the tick already rendered */ }
+    }).start();
+  } else {
+    const legacyTick = function () { if (!document.hidden) void poll(); };
+    legacyTick();
+    setInterval(legacyTick, 4000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) void poll();
+    });
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startPolling);
+} else {
+  startPolling();
+}
 /* Deferred bx-ui.js is guaranteed executed by DOMContentLoaded: pause every
    ambient animation while the tab is hidden (richer feel, lower cost). */
 document.addEventListener("DOMContentLoaded", function () {

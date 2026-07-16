@@ -107,8 +107,10 @@ def _vendor_status(exc: Exception) -> int | None:
     The Groww SDK's ``GrowwAPIException`` carries a ``code`` (e.g. ``400``, or the
     digit-string ``"503"``); a plain exception (``RuntimeError``) carries none. A
     ``bool`` is rejected (it is an ``int`` subclass but never a status). Only a
-    genuine NUMERIC status survives — an int, or a digit-only string coerced to int
-    (mirroring :func:`brutex.adapters.groww.errors._classify_generic`) — so an
+    genuine NUMERIC status survives — an int, or an ASCII-digit-only string coerced
+    to int (mirroring :func:`brutex.adapters.groww.errors._classify_generic`;
+    ``'²'.isdigit()`` is True but ``int('²')`` raises, so a non-ASCII digit returns
+    ``None`` instead of raising — DEC-GROWW-ERRORCODE-ASCII-GUARD-001) — so an
     arbitrary vendor-controlled ``code`` string can NEVER reach the ``status`` log
     field unscrubbed (the secret surface stays narrow; ``reason`` is the only
     free-text channel and it is sanitized). Anything non-numeric returns ``None``.
@@ -118,7 +120,7 @@ def _vendor_status(exc: Exception) -> int | None:
         return None
     if isinstance(code, int):
         return code
-    if isinstance(code, str) and code.strip().isdigit():
+    if isinstance(code, str) and code.strip().isascii() and code.strip().isdigit():
         return int(code)
     return None
 

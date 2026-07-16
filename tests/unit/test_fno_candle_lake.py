@@ -154,6 +154,50 @@ class TestStoredGreeksOverlayColumns:
     def test_cheap_family_stays_derived(self) -> None:
         # The COST-CLASS hybrid (ADR-0015 D10): moneyness/spot/intrinsic/
         # time_value/days_to_expiry remain read-time derived, never stored.
-        for name in ("moneyness", "spot", "intrinsic", "time_value", "days_to_expiry"):
+        for name in (
+            "moneyness",
+            "spot",
+            "intrinsic",
+            "time_value",
+            "days_to_expiry",
+            "greeks_status",
+        ):
             col = next(c for c in FNO_CANDLE_COLUMNS if c.name == name)
             assert col.source == "derived"
+
+
+# ── is_option_contract_coords — the ONE 1-minute-native gate predicate ──────
+# (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+# relayed via the coordinator, ADR-0021 RULING B, draft PR #1555.)
+
+
+class TestIsOptionContractCoords:
+    def test_ce_and_pe_contracts_are_options(self) -> None:
+        from brutex.data.fno_candle_lake import is_option_contract_coords
+
+        assert is_option_contract_coords("FNO", "NSE-NIFTY-30Sep25-24000-CE") is True
+        assert is_option_contract_coords("FNO", "NSE-NIFTY-30Sep25-24000-PE") is True
+        assert is_option_contract_coords("FNO", "NSE-BAJAJ-AUTO-30Sep25-9000-CE") is True
+
+    def test_fut_contract_is_not_an_option(self) -> None:
+        # Futures keep their derived timeframes under the ruling.
+        from brutex.data.fno_candle_lake import is_option_contract_coords
+
+        assert is_option_contract_coords("FNO", "NSE-NIFTY-30Sep25-FUT") is False
+
+    def test_spot_segments_are_never_options(self) -> None:
+        # An option-SHAPED symbol outside the FNO segment is not an option
+        # coordinate — the segment gate fires first.
+        from brutex.data.fno_candle_lake import is_option_contract_coords
+
+        assert is_option_contract_coords("INDEX", "NIFTY") is False
+        assert is_option_contract_coords("CASH", "RELIANCE") is False
+        assert is_option_contract_coords("INDEX", "NSE-NIFTY-30Sep25-24000-CE") is False
+
+    def test_undecodable_fno_symbol_is_conservatively_not_an_option(self) -> None:
+        # An unparsable F&O symbol keeps its pre-ruling behaviour — never
+        # guessed to be an option (Golden Rule #1).
+        from brutex.data.fno_candle_lake import is_option_contract_coords
+
+        assert is_option_contract_coords("FNO", "JUNK") is False
+        assert is_option_contract_coords("FNO", "NSE-NIFTY-30Xxx25-24000-CE") is False

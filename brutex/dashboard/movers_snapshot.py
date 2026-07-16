@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.calendars.nse import previous_trading_session
+from brutex.calendars.nse import has_muhurat_session, previous_trading_session
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_stored_read import read_stored_day_frame
 from brutex.dashboard.movers_underlying_class import (
@@ -61,7 +61,9 @@ from brutex.dashboard.movers_underlying_class import (
     normalize_underlying_class,
     spot_kind_from_segment,
 )
+from brutex.data.bar_screen import screen_frame
 from brutex.data.derive_lock import derive_in_progress
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -78,10 +80,12 @@ __all__ = [
     "PrevDayBaseline",
     "ScreenInstrument",
     "SpotCandidates",
+    "asof_through_label",
     "build_snapshot_payload",
     "compute_snapshot",
     "compute_spot_candidates",
     "filter_to_ist_minute",
+    "info_prev_baseline_muhurat",
     "interval_minutes",
     "is_intraday_interval",
     "make_expected_session_resolver",
@@ -90,6 +94,7 @@ __all__ = [
     "parse_snapshot_date",
     "pending_asset_payload",
     "prev_baseline_provenance",
+    "resolve_asof_cutoff",
     "resolve_prev_close",
     "run_movers_snapshot",
     "session_bar_times",
@@ -238,13 +243,26 @@ class MoverSnapshot:
     prev_close_contiguous
         ``True`` when ``prev_close_session`` IS the immediately-preceding NSE
         session of the snapshot day
-        (:func:`brutex.calendars.nse.previous_trading_session`), ``False`` when
-        the calendar proves a nearer session should exist (a lake hole — the
-        served %-change baselines on an OLDER session, stamped honestly),
-        ``None`` when no baseline resolved OR the calendar abstained
-        (out-of-coverage snapshot day). The row projector emits the pair ONLY
-        on ``False`` (EMIT-ON-FALSE — contiguous and abstain payloads stay
-        byte-identical to the pre-fix wire).
+        (:func:`brutex.calendars.nse.previous_trading_session`) — OR the
+        legitimate Diwali Muhurat close of the day-after boundary
+        (``prev_close_muhurat`` below, DEC-PREVSESSION-MUHURAT-COHERENCE-001);
+        ``False`` when the calendar proves the served baseline provably
+        skipped a nearer REGULAR session, or a stray non-session bar served it
+        (a lake defect either way — the served %-change baselines on the wrong
+        session, stamped honestly); ``None`` when no baseline resolved OR the
+        calendar abstained (out-of-coverage snapshot day). The row projector
+        emits the pair ONLY on ``False`` (EMIT-ON-FALSE — contiguous and
+        abstain payloads stay byte-identical to the pre-fix wire).
+    prev_close_muhurat
+        ``True`` iff the served baseline is a Diwali **Muhurat** session's
+        close sitting AFTER the calendar's prior REGULAR session — a REAL NSE
+        session the lake legitimately carries (the ingest keeps Muhurat bars,
+        DEC-INGEST-BOUNDARY-INTEGRITY-001), NOT a lake hole. The DISPLAY
+        baseline law serves it (this screen); the ENGINE anchor law
+        deliberately skips it (``stage1a.muhurat_prev_day_anchor_skip``,
+        DEC-SWEEP-DATA-EDGE-GUARDS-001 #1616) — the recorded two-law design of
+        DEC-PREVSESSION-MUHURAT-COHERENCE-001. Emitted ON TRUE ONLY, so every
+        non-Muhurat row stays byte-identical.
     underlying_kind
         The resolved index-vs-stock class of this instrument
         (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
@@ -264,6 +282,7 @@ class MoverSnapshot:
     bar_count: int
     prev_close_session: str | None = None
     prev_close_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
     underlying_kind: str = KIND_UNKNOWN
 
     @property
@@ -500,6 +519,12 @@ def _row(snap: MoverSnapshot) -> dict[str, Any]:
     if snap.prev_close_contiguous is False:
         row["prev_close_session"] = snap.prev_close_session
         row["prev_close_contiguous"] = snap.prev_close_contiguous
+    # EMIT-ON-TRUE-ONLY (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the baseline
+    # is the Diwali Muhurat session's close — a real NSE session the lake
+    # legitimately carries under the DISPLAY baseline law, never a lake hole.
+    # Every non-Muhurat row stays byte-identical to the pre-fix wire.
+    if snap.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
     return row
 
 
@@ -516,6 +541,7 @@ def build_snapshot_payload(
     resampled_reads: int = 0,
     latest_time: str | None = None,
     underlying_class: str | None = None,
+    resolved_through: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -547,6 +573,14 @@ def build_snapshot_payload(
     explicit *time*, a daily interval, or an empty lake — the frontend then
     renders a plain "latest" label. It NEVER affects the ranked numbers (the cut
     is unchanged); ``echo == cut`` in value by construction.
+
+    *resolved_through* is the ADDITIVE display-only provenance echoed as
+    ``asof_through`` (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): when an explicit
+    bucket-ANCHOR *time* was resolved FORWARD to the completed bucket's final
+    minute (:func:`asof_through_label`), it is that ``"HH:MM"`` and the note
+    reads "``HH:MM`` bucket · through ``HH:MM``"; ``None`` (the default) for a
+    daily / whole-day / TF-1minute / non-anchor coordinate keeps the payload +
+    note byte-identical to the pre-fix wire.
     """
     floor = normalize_min_volume(min_volume)
     # DEC-MOVERS-UNDERLYING-CLASS-001: RANK-time `All | Indices | Stocks` filter over
@@ -588,6 +622,11 @@ def build_snapshot_payload(
         note = (
             f"As-of {date} {time or '(daily)'} · {interval} — reference-only lake view "
             "(CLAUDE.md §3); % is vs the previous day's close, volume is the fresh session."
+            + (
+                f" {time} bucket · through {resolved_through}."
+                if resolved_through is not None and time
+                else ""
+            )
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
             + class_note
         )
@@ -602,6 +641,7 @@ def build_snapshot_payload(
         "stored_reads": stored_reads,
         "resampled_reads": resampled_reads,
         "latest_time": latest_time,
+        "asof_through": resolved_through,
         "note": note,
         **class_echo(wanted_class, excluded_unclassified),
         **ranked,
@@ -675,6 +715,79 @@ def _cutoff_minute(time_str: str | None) -> int | None:
         return int(hh) * 60 + int(mm)
     except ValueError as exc:
         raise ValueError(f"malformed time {time_str!r} — expected HH:MM") from exc
+
+
+def resolve_asof_cutoff(interval: str, time: str | None) -> int | None:
+    """Resolve the EFFECTIVE as-of minute-of-day cutoff for a snapshot coordinate.
+
+    THE one COMMON as-of resolution seam every ``/movers`` tab shares
+    (spot / futures / options — CLAUDE.md §11 COMMON), replacing the three
+    copy-pasted ``None if daily else _cutoff_minute(time)`` computations.
+
+    ``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001`` — the explicit-bucket-time fix. The
+    frontend "time" dropdown offers the 09:15-anchored bucket-ANCHOR grid
+    (:func:`session_bar_times`), so a picked ``HH:MM`` names a bucket's OPEN
+    minute. Cutting the raw 1-minute frame at that anchor kept only the FIRST
+    minute of the bucket → a PARTIAL forming bucket whose LTP is the
+    bucket-open minute's close, NOT the completed bucket's close (the operator
+    repro: NIFTYIT 2026-07-07, 3-minute @ 15:27 showed ₹27,932.80, not the
+    completed 15:27–15:29 bucket close ₹27,940.85 = the broker's). This seam
+    resolves an anchor pick FORWARD to the bucket's FINAL minute so the selected
+    candle IS the completed candle:
+
+    * daily / unknown interval, or blank *time* → ``None`` (whole-day cut,
+      byte-identical to the pre-fix and the ``latest`` default —
+      ``DEC-MOVERS-ASOF-LATEST-DEFAULT-001``);
+    * an explicit *time* that lands on a bucket ANCHOR of *interval*'s
+      09:15-grid → ``min(anchor + minutes - 1, _SESSION_CLOSE_MIN - 1)`` (the
+      bucket's final minute, clamped to the session's last minute 15:29);
+      TF = 1-minute has ``minutes == 1`` so ``anchor == end`` (identity —
+      byte-unchanged);
+    * an explicit *time* that is NOT a grid anchor (a hand-crafted query — the
+      dropdown never emits one) → the raw picked minute (the pre-fix partial
+      cut, honest for a genuine mid-bucket as-of).
+
+    The ``<= cutoff`` filter (:func:`filter_to_ist_minute`) that consumes this
+    naturally caps at the day's latest available minute (no bar past the bucket
+    end exists to include), so the resolved cut never leaks a minute past the
+    completed bucket — NO look-ahead (Golden Rule #1).
+
+    Raises :class:`ValueError` on a malformed *time* (propagated from
+    :func:`_cutoff_minute`; the route maps it to a 400).
+    """
+    minutes = interval_minutes(interval)
+    if minutes is None or minutes >= _DAILY_MIN_FLOOR:
+        return None
+    raw = _cutoff_minute(time)
+    if raw is None:
+        return None
+    if _SESSION_OPEN_MIN <= raw < _SESSION_CLOSE_MIN and (raw - _SESSION_OPEN_MIN) % minutes == 0:
+        return min(raw + minutes - 1, _SESSION_CLOSE_MIN - 1)
+    return raw
+
+
+def asof_through_label(interval: str, time: str | None) -> str | None:
+    """The resolved bucket-END ``HH:MM`` when an explicit anchor pick was extended, else ``None``.
+
+    Display-only provenance (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): returns
+    the ``HH:MM`` of :func:`resolve_asof_cutoff` ONLY when it resolved an
+    explicit anchor pick FORWARD past the picked minute (a coarse-TF bucket) —
+    so the note can honestly read "picked HH:MM · through HH:MM". Returns
+    ``None`` for the whole-day / latest cut, a daily interval, TF = 1-minute
+    (anchor == end), and a non-anchor pick (no extension) — every case whose
+    payload/note stays byte-identical to the pre-fix wire.
+
+    Pure + O(1). ``time`` is guaranteed valid whenever :func:`resolve_asof_cutoff`
+    returns non-``None`` (it parses *time* via :func:`_cutoff_minute` first), so
+    the second parse here never raises for a resolved coordinate.
+    """
+    resolved = resolve_asof_cutoff(interval, time)
+    if resolved is None:
+        return None
+    raw = _cutoff_minute(time)
+    if raw is None or resolved == raw:
+        return None
+    return minute_to_hhmm(resolved)
 
 
 def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
@@ -755,7 +868,8 @@ def _read_cut_1m_frame(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns AND
+    its price-sanity gate — DEC-READ-GUARD-PARITY-001, §11).
 
     **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
     the ``cutoff_min`` filter is applied to the RAW 1-minute frame via the COMMON
@@ -770,6 +884,7 @@ def _read_cut_1m_frame(
     import polars as pl
 
     from brutex.data.lake_day_glob import read_day_intraday_frame
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
     month = read_day_intraday_frame(base, day, symbol=symbol)
@@ -784,8 +899,28 @@ def _read_cut_1m_frame(
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
+    # Screen bad-tick + insane bars through the ONE COMMON engine-parity screen
+    # (DEC-DASHBOARD-READ-SCREEN-001): a scaled fat-finger spike the engine drops
+    # must not be SERVED here (it fabricated the Top-Value turnover + the %-move
+    # and poisoned the movers cache). Clean frames return the SAME object; the
+    # screen itself is an O(rows) Python pass per read (honest cost, not free).
+    # The frame is ascending-sorted + as-of-cut, so the causal screen is exact.
+    day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
+    # DEC-READ-GUARD-PARITY-001: mirror make_lake_read_1m's price-sanity gate
+    # on the SAME column shape (the docstring above already claims the column
+    # mirror — this closes the GATE mirror). An inverted / non-positive stored
+    # 1m row must be an honest skip+count (ResampleInputError is ALREADY in
+    # movers_read_skip_errors) — never a silently laundered resampled bucket,
+    # never a CandleBar ValueError 500 (movers_resilient deliberately keeps
+    # ValueError out of the skip set as the code-bug class). Validated on the
+    # POST-cut frame — exactly the rows served: a corrupt row strictly AFTER
+    # the as-of cutoff never blanks an earlier-cut view (correct-or-absent,
+    # the #1719 strictly-narrower-degrade law).
+    validate_frame_price_sanity(
+        day_df, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+    )
     return day_df
 
 
@@ -989,6 +1124,15 @@ def _read_intraday_bars(
                 if cutoff_min is None
                 else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
             )
+            # Screen the STORED derived-TF partition too (DEC-DASHBOARD-READ-SCREEN-001):
+            # the prebuild's make_lake_read_1m applies price_sanity but NOT the
+            # bad-tick screen, so a scaled spike can derive into a stored 5m/etc
+            # bucket unscreened — screen the stored read so it agrees with the
+            # 1m-resample path (and /db). Clean partitions return the SAME
+            # object; the screen is an O(rows) Python pass per read.
+            res = screen_frame(
+                res, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/{interval}"
+            )
             return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
     return (
         _read_session_bars(
@@ -1058,7 +1202,17 @@ def _read_daily_bars(
     # The 1-day partition stores the lake instant in `timestamp`; the shared
     # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
     # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
-    return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
+    # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
+    # bar is its own session (first-of-session exempt), so only the insane
+    # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
+    # dropped, never served raw. Clean partitions return the SAME object; the
+    # screen is an O(rows) Python pass per read (honest cost, not free).
+    screened = screen_frame(
+        sel.rename({"timestamp": "ts_utc"}),
+        ts_col="ts_utc",
+        source=f"{exchange}/{segment}/{symbol}/1day",
+    )
+    return [_row_to_bar(row) for row in screened.iter_rows(named=True)]
 
 
 #: Max calendar days to walk back searching for the prior trading day's last
@@ -1156,19 +1310,37 @@ def resolve_prev_close(
     DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — this resolver ADDS only the found
     session date. Pure lake read — provenance judgement (and any warning) stays
     at the candidate-loop level.
+
+    A CE/PE OPTION contract SKIPS the ``1day`` read entirely and goes straight
+    to the 1-minute walk-back (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator
+    ruling of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B,
+    draft PR #1555): the derived option ``1day`` is retired, so a stored one
+    is FROZEN at retirement eve — reading it first would serve a stale
+    prev-close (a wrong %CHNG) for weeks. The recovered 1-minute close is the
+    TRUE prior session's last bar; SPOT + FUT keep the 1day-first read
+    byte-identically (the gate is the COMMON
+    :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
+    HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): this baseline read is NOT
+    routed through the bad-tick/insane screen, so a prior-session last bar that is
+    itself a scaled spike would inflate ``prev_close`` and thus the %-move on the
+    BASELINE side (the live LTP/turnover side IS screened). Disclosed, not fixed
+    here — re-pulling / healing the poisoned prior session is the real remedy; the
+    screened live side already closes the fabricated Top-Value class.
     """
     import polars as pl
 
-    df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
-    if df is not None:
-        prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
-            "timestamp"
-        )
-        if not prior.is_empty():
-            last = prior.tail(1)
-            close = Decimal(str(last.get_column("close")[0]))
-            found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
-            return PrevDayBaseline(value=close, found_date=found)
+    if not is_option_contract_coords(segment, symbol):
+        df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        if df is not None:
+            prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+                "timestamp"
+            )
+            if not prior.is_empty():
+                last = prior.tail(1)
+                close = Decimal(str(last.get_column("close")[0]))
+                found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
+                return PrevDayBaseline(value=close, found_date=found)
     recovered = _prior_session_last_from_minute(
         lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
@@ -1210,18 +1382,34 @@ def prev_baseline_provenance(
     *,
     exchange: str | None,
     expected_session: date_cls | None | EllipsisType = ...,
-) -> tuple[str | None, bool | None]:
+) -> tuple[str | None, bool | None, bool]:
     """Judge a resolved baseline's calendar contiguity (pure, side-effect-free).
 
-    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — the ONE COMMON verdict shared by the
-    spot close, futures close/OI, and options close/OI stampings:
+    DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 (+ the Muhurat coherence fold,
+    DEC-PREVSESSION-MUHURAT-COHERENCE-001) — the ONE COMMON verdict shared by
+    the spot close, futures close/OI, and options close/OI stampings. Returns
+    ``(session_iso, contiguous, muhurat_baseline)``:
 
-    * ``found_date is None`` (no baseline resolved) → ``(None, None)``;
+    * ``found_date is None`` (no baseline resolved) → ``(None, None, False)``;
     * the calendar ABSTAINS (:func:`brutex.calendars.nse.previous_trading_session`
       returns ``None`` — out-of-coverage snapshot day) →
-      ``(found_iso, None)`` — the value is still served, contiguity unknown;
-    * otherwise → ``(found_iso, found_date == expected)`` — ``False`` means the
-      served baseline provably skipped a nearer NSE session (a lake hole).
+      ``(found_iso, None, False)`` — the value is still served, contiguity
+      unknown;
+    * ``found_date == expected`` → ``(found_iso, True, False)`` — the ordinary
+      contiguous baseline;
+    * ``found_date > expected`` AND
+      :func:`brutex.calendars.nse.has_muhurat_session` confirms *found_date* →
+      ``(found_iso, True, True)`` — the day-after-Diwali boundary: the served
+      baseline is the **Muhurat** session's close, a REAL NSE session the lake
+      legitimately carries (never a lake hole; previously false-flagged
+      ``False`` annually on a healthy lake). This is the DISPLAY baseline law;
+      the ENGINE anchor law deliberately uses the prior REGULAR session
+      instead (``stage1a.muhurat_prev_day_anchor_skip``, #1616) — a recorded,
+      deliberate two-law divergence, not a drift;
+    * otherwise → ``(found_iso, False, False)`` — the served baseline provably
+      skipped a nearer REGULAR session, or a stray non-session bar served it
+      (a lake defect either way; a Muhurat bar BEHIND the expected regular
+      session stays a genuine hole — the direction guard is strict).
 
     *expected_session* is a pure perf seam: the expected previous session is
     invariant per ``(snapshot_day, exchange)``, so the candidate builds hoist
@@ -1231,15 +1419,19 @@ def prev_baseline_provenance(
     every existing call site/test byte-valid. Same verdict either way.
     """
     if found_date is None:
-        return None, None
+        return None, None, False
     expected = (
         previous_trading_session(snapshot_day, exchange=exchange)
         if isinstance(expected_session, EllipsisType)
         else expected_session
     )
     if expected is None:
-        return found_date.isoformat(), None
-    return found_date.isoformat(), found_date == expected
+        return found_date.isoformat(), None, False
+    if found_date == expected:
+        return found_date.isoformat(), True, False
+    if found_date > expected and has_muhurat_session(found_date):
+        return found_date.isoformat(), True, True
+    return found_date.isoformat(), False, False
 
 
 def make_expected_session_resolver(
@@ -1280,18 +1472,23 @@ class _NoncontiguousWarnState:
     Function-local per ``compute_*_candidates`` call (never module-global —
     CLAUDE.md §4 no global mutable state): ``emitted`` counts sent warnings,
     ``seen`` dedupes per ``(symbol, kind)``, ``suppressed`` counts past-cap
-    drops. :meth:`reset` is the test seam.
+    drops, ``muhurat_info_emitted`` is the one-shot latch for the
+    informational ``movers.prev_baseline_muhurat`` event
+    (DEC-PREVSESSION-MUHURAT-COHERENCE-001 — at most ONE per candidate
+    build, never a per-row flood). :meth:`reset` is the test seam.
     """
 
     emitted: int = 0
     seen: set[tuple[str, str]] = field(default_factory=set)
     suppressed: int = 0
+    muhurat_info_emitted: bool = False
 
     def reset(self) -> None:
         """Reset the state (test seam — a fresh build constructs a fresh state)."""
         self.emitted = 0
         self.seen.clear()
         self.suppressed = 0
+        self.muhurat_info_emitted = False
 
 
 def warn_prev_baseline_noncontiguous(
@@ -1338,6 +1535,40 @@ def warn_prev_baseline_noncontiguous(
         snapshot_day=snapshot_day.isoformat(),
         found_session=found_session,
         expected_session=(expected_session.isoformat() if expected_session is not None else None),
+    )
+
+
+def info_prev_baseline_muhurat(
+    state: _NoncontiguousWarnState,
+    *,
+    kind: str,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    snapshot_day: date_cls,
+    found_session: str,
+) -> None:
+    """Emit AT MOST ONE ``movers.prev_baseline_muhurat`` INFO per candidate build.
+
+    DEC-PREVSESSION-MUHURAT-COHERENCE-001: the day-after-Diwali boundary is a
+    HEALTHY lake — the served baseline is the Muhurat session's real close, so
+    it is informational (INFO, never a WARN) and one-shot per build (the
+    ``muhurat_info_emitted`` latch on the shared per-build *state* — up to 21
+    index/contract rows share one boundary, and the 39-key warm grid must not
+    flood the log annually). The event names the FIRST such row; *kind* names
+    the baseline (``"prev_close"`` / ``"oi"``).
+    """
+    if state.muhurat_info_emitted:
+        return
+    state.muhurat_info_emitted = True
+    _LOG.info(
+        "movers.prev_baseline_muhurat",
+        kind=kind,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        snapshot_day=snapshot_day.isoformat(),
+        found_session=found_session,
     )
 
 
@@ -1480,7 +1711,10 @@ def compute_spot_candidates(
         return SpotCandidates(snapshots=(), skipped=0, date=date_str)
 
     is_daily = minutes >= _DAILY_MIN_FLOOR
-    cutoff_min = None if is_daily else _cutoff_minute(time)
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: the ONE COMMON as-of seam — an explicit
+    # bucket-anchor pick resolves FORWARD to the bucket's final minute (the
+    # completed candle), daily/blank stays whole-day, TF=1minute is identity.
+    cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     # A daily snapshot reads the `1day` partitions directly (the `1day` series is
     # DERIVED from the fetched 1-minute — DEC-1MINUTE-ONLY-DERIVE-1DAY-001); an
@@ -1591,10 +1825,13 @@ def compute_spot_candidates(
         # Baseline calendar-contiguity provenance (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001):
         # stamp the session the served prev_close actually came from + whether it IS
         # the immediately-preceding NSE session; a strictly-False verdict also gets
-        # ONE capped WARN. The VALUE served above is untouched in every branch.
+        # ONE capped WARN. The VALUE served above is untouched in every branch. A
+        # legitimate day-after-Diwali Muhurat baseline is contiguous-True + flagged
+        # `prev_close_muhurat` with ONE per-build INFO instead (never a false WARN —
+        # DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(dataset["exchange"])
         expected_session = expected_session_for(cal_exchange)
-        session_iso, contiguous = prev_baseline_provenance(
+        session_iso, contiguous, muhurat = prev_baseline_provenance(
             baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         # DEC-MOVERS-UNDERLYING-CLASS-001: resolve the index-vs-stock class from the
@@ -1606,6 +1843,7 @@ def compute_spot_candidates(
             snap,
             prev_close_session=session_iso,
             prev_close_contiguous=contiguous,
+            prev_close_muhurat=muhurat,
             underlying_kind=spot_kind_from_segment(dataset["segment"]),
         )
         if session_iso is not None and contiguous is False:
@@ -1618,6 +1856,16 @@ def compute_spot_candidates(
                 snapshot_day=day,
                 found_session=session_iso,
                 expected_session=expected_session,
+            )
+        if muhurat and session_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=dataset["exchange"],
+                segment=dataset["segment"],
+                symbol=dataset["symbol"],
+                snapshot_day=day,
+                found_session=session_iso,
             )
         # Read-path provenance (DEC-PIPELINE-AUTOPREBUILD-001 chunk 2): count
         # ONLY the instruments that contributed a snapshot, by which path

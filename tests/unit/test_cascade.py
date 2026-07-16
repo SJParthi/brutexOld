@@ -809,3 +809,119 @@ def test_monte_carlo_input_error_rejects_candidate() -> None:
     (v,) = rep.verdicts
     assert v.rejected_at is FilterStage.MONTE_CARLO
     assert "could not be evaluated" in v.detail
+
+
+# ── DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the CPCV pass-rate capture matrix ──
+# The recording law: the stage-3 rate is captured the moment cpcv_pass_rate()
+# returns and BEFORE the threshold compare, then stamped onto EVERY verdict by
+# ONE final dataclasses.replace pass — provably recording-only (no ordering /
+# RNG / threshold / statistic change; the determinism + field-preservation
+# pins below are the teeth).
+
+
+def _oracle_rate(candidate: CandidateInput, cfg: CascadeConfig) -> float:
+    """The independent stage-3 oracle — the SAME pure engine the cascade calls."""
+    from brutex.metrics.cpcv import cpcv_pass_rate
+
+    return cpcv_pass_rate(
+        candidate.returns,
+        n_groups=cfg.cpcv_n_groups,
+        n_test_groups=cfg.cpcv_n_test_groups,
+    )
+
+
+class TestCpcvRateCapture:
+    """Semantics table: None before-#3/ValueError; the measured rate after."""
+
+    def test_pass_carries_the_measured_rate(self) -> None:
+        cfg = _pass_config()
+        cand = _candidate("a", seed=1)
+        rep = run_stage4_cascade([cand], cfg)
+        (v,) = rep.verdicts
+        assert v.passed is True
+        assert v.cpcv_pass_rate == _oracle_rate(cand, cfg)
+
+    def test_cpcv_threshold_reject_carries_the_failing_rate(self) -> None:
+        cfg = _pass_config(cpcv_min_pass_rate=1.01)
+        cand = _candidate("x", seed=1)
+        rep = run_stage4_cascade([cand], cfg)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.CPCV
+        rate = _oracle_rate(cand, cfg)
+        # The FAILING rate is recorded (captured BEFORE the compare — the
+        # record-only-on-pass mutant dies here) and matches the detail prose.
+        assert v.cpcv_pass_rate == rate
+        assert f"{rate:.4f}" in v.detail
+
+    def test_later_stage_reject_carries_its_stage3_rate(self) -> None:
+        # Rejected at WALK-FORWARD (#7) — the stage-3 rate still rides.
+        cfg = _pass_config(wfo_min_pass_rate=1.01)
+        cand = _candidate("x", seed=1)
+        rep = run_stage4_cascade([cand], cfg)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.WALK_FORWARD
+        assert v.cpcv_pass_rate == _oracle_rate(cand, cfg)
+
+    def test_hard_gate_reject_never_reached_stage3(self) -> None:
+        cfg = _pass_config()
+        rep = run_stage4_cascade([_candidate("x", seed=1, total_trades=10)], cfg)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.HARD_GATES
+        assert v.cpcv_pass_rate is None
+
+    def test_dsr_reject_never_reached_stage3(self) -> None:
+        cfg = _pass_config(dsr_min=0.95)
+        rep = run_stage4_cascade([_candidate("x", seed=1, sharpe_ratio=0.0)], cfg)
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.DEFLATED_SHARPE
+        assert v.cpcv_pass_rate is None
+
+    def test_cpcv_valueerror_arm_records_no_rate(self) -> None:
+        # A 2-obs series cannot form 4 CPCV groups → the engine raises → the
+        # candidate rejects at CPCV with NO rate (never a fabricated number).
+        cfg = _pass_config(run_hard_gates=False)
+        rep = run_stage4_cascade(
+            [_candidate("x", seed=1, returns=(0.1, 0.2), total_trades=600)], cfg
+        )
+        (v,) = rep.verdicts
+        assert v.rejected_at is FilterStage.CPCV
+        assert "could not be evaluated" in v.detail
+        assert v.cpcv_pass_rate is None
+
+    def test_determinism_two_runs_identical_verdicts(self) -> None:
+        cfg = _pass_config(cpcv_min_pass_rate=1.01)
+        cands = [_candidate("a", seed=1), _candidate("b", seed=2, total_trades=10)]
+        first = run_stage4_cascade(cands, cfg)
+        second = run_stage4_cascade(cands, cfg)
+        assert first.verdicts == second.verdicts
+        assert first.survivor_ids == second.survivor_ids
+
+    def test_replace_stamp_preserves_every_other_field(self) -> None:
+        import dataclasses
+
+        cfg = _pass_config()
+        mixed = [
+            _candidate("a", seed=1),
+            _candidate("b", seed=2, total_trades=10),
+        ]
+        rep = run_stage4_cascade(mixed, cfg)
+        by_id = {v.candidate_id: v for v in rep.verdicts}
+        # Nulling ONLY the new field reproduces the pre-change verdict shape
+        # exactly — passed/rejected_at/detail/composite/provisional intact.
+        a = dataclasses.replace(by_id["a"], cpcv_pass_rate=None)
+        assert a.passed is True and a.rejected_at is None
+        assert a.detail == "survived all Stage-4 filters"
+        assert a.composite_score == by_id["a"].composite_score
+        # No trial_stats threaded here → the pool-N fallback → provisional
+        # (R2-SR-F4) — preserved verbatim through the stamp.
+        assert a.provisional is True
+        b = dataclasses.replace(by_id["b"], cpcv_pass_rate=None)
+        assert b.passed is False and b.rejected_at is FilterStage.HARD_GATES
+        # The verdict ORDER stays the input id order (the pre-change law).
+        assert [v.candidate_id for v in rep.verdicts] == ["a", "b"]
+
+    def test_default_construction_none(self) -> None:
+        from brutex.metrics.cascade import CandidateVerdict
+
+        v = CandidateVerdict(candidate_id="x", passed=False, rejected_at=None, detail="d")
+        assert v.cpcv_pass_rate is None

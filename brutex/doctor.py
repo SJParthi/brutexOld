@@ -367,6 +367,14 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     Any drift — a stale table left behind by a 1m backfill, or a
     pre-DEC-RESAMPLE-ANCHOR-002 gapped-day grid — is a loud ``FAIL``.
 
+    CE/PE OPTION contract partitions are EXCLUDED from the verdicts
+    (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator ruling of 2026-07-15 as
+    relayed via the coordinator, ADR-0021 RULING B, draft PR #1555): the
+    derived option TFs are retired (options are 1-minute-native), so a
+    stored legacy option TF is FROZEN by design and its inevitable staleness
+    must never red the doctor. SPOT + FUT verdicts are unchanged (the gate
+    is the COMMON :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
     SKIP (a valid state, not a failure) when: the lake root is absent, no
     symbol has derived partitions yet (the auto-derive opt-in is OFF), or
     polars is unavailable.
@@ -381,6 +389,7 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
     try:
         import polars as pl
 
+        from brutex.data.fno_candle_lake import is_option_contract_coords
         from brutex.data.tf_autoderive import compare_derived_freshness, read_lake_bars_frame
         from brutex.data.timeframe_materialize import INTRADAY_TF_INTERVALS
         from brutex.data.timeframes import parse_label
@@ -396,6 +405,13 @@ def check_derived_freshness(lake_root: Path) -> CheckResult:
             )
 
         for symbol_dir in sorted(p for p in bars_root.glob("*/*/*") if p.is_dir()):
+            # The path shape is bars/<exchange>/<segment>/<symbol>: exclude
+            # CE/PE option contract dirs (DEC-OPTIONS-PREBUILD-RETIRE-001 —
+            # their derived TFs are retired + frozen, never re-derived, so
+            # comparing them against a fresh re-derivation is meaningless
+            # and would red the doctor on a healthy lake).
+            if is_option_contract_coords(symbol_dir.parent.name, symbol_dir.name):
+                continue
             base = symbol_dir / "1minute"
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
                 continue
@@ -486,6 +502,7 @@ def check_lake_uniqueness(lake_root: Path) -> CheckResult:
 
         offenders: list[str] = []
         files = 0
+        skipped = 0
         for exchange, segment, symbol in ENGINE_INDEX_COORDS:
             report = scan_lake_invariants(
                 lake_root,
@@ -495,20 +512,39 @@ def check_lake_uniqueness(lake_root: Path) -> CheckResult:
                 include_options=False,
             )
             files += report.files_scanned
+            skipped += report.files_skipped
             offenders.extend(_lake_offender(finding) for finding in report.findings)
         if offenders:
             named = ", ".join(offenders[:3])
             extra = len(offenders) - len(offenders[:3])
             suffix = f" (+{extra} more)" if extra else ""
+            # DEC-AUDIT-CENSUS-HONESTY-001: name any UNREADABLE engine file too —
+            # a poisoned lake that ALSO has skips is still incompletely audited.
+            skip_note = f"; {skipped} engine-index file(s) UNREADABLE (skipped)" if skipped else ""
             return CheckResult(
                 name="lake_uniqueness",
                 status="FAIL",
                 detail=(
-                    f"engine-index partitions poisoned: {named}{suffix} — heal runs "
-                    "automatically (BRUTEX_LAKE_HEAL=auto) on dashboard startup / "
+                    f"engine-index partitions poisoned: {named}{suffix}{skip_note} — heal "
+                    "runs automatically (BRUTEX_LAKE_HEAL=auto) on dashboard startup / "
                     "post-pull / sweep start; run `brutex lake audit-unique --json` "
                     "for the full census; quarantined originals under "
                     f"{lake_root / '.quarantine'}"
+                ),
+            )
+        if skipped:
+            # No classifiable findings, but some engine-index file was UNREADABLE
+            # (garbage bytes / schema drift) so the scan could not certify it
+            # clean — a FAIL, never a silent PASS over corruption
+            # (DEC-AUDIT-CENSUS-HONESTY-001).
+            return CheckResult(
+                name="lake_uniqueness",
+                status="FAIL",
+                detail=(
+                    f"engine-index census INCOMPLETE: {skipped} file(s) UNREADABLE "
+                    "(garbage bytes / schema drift) — cannot certify clean; run "
+                    "`brutex lake audit-unique --json` for the full census + "
+                    f"re-pull or quarantine the offending partition(s) under {lake_root}"
                 ),
             )
         sweep = load_last_sweep(lake_root)

@@ -116,7 +116,7 @@
   /* Strike-step honesty note (DEC-MONEYNESS-REGISTRY-STEP-001): a small muted line
      under the F&O candle grid when the ATM±N grid came from the sparse lake ladder
      only (no vendor registry chain) — the step may be overestimated. */
-  .stepnote { color:var(--muted); font-size:11px; padding:6px 2px 0; }
+  .stepnote, .tfnote { color:var(--muted); font-size:11px; padding:6px 2px 0; }
   /* Click-to-copy cell flash — a brief green pulse on the copied cell. */
   @keyframes cellCopied { 0% { background:var(--green-dim); } 100% { background:transparent; } }
   td.copied { animation: cellCopied .6s ease both; color:var(--green-bright); }
@@ -225,8 +225,11 @@
       <a href="/universe">Universe</a>
       <a href="/db" aria-current="page">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <span class="dbpath" id="dbpath">5 tables · click a table to browse</span>
@@ -341,6 +344,15 @@ function fmtCell(col, cell) {
   if (col === "iv") return Number.isFinite(n) ? (n * 100).toFixed(2) : cell;
   if (Object.prototype.hasOwnProperty.call(GREEK_DP, col)) {
     return Number.isFinite(n) ? n.toFixed(GREEK_DP[col]) : cell;
+  }
+  /* Post-expiry marker (DEC-DB-FNO-DISPLAY-TRUTH-001 item 10): a stored bar dated
+     AFTER the decoded expiry (an explicitly-dated operator pull past expiry / a
+     vendor edge) renders its negative days_to_expiry with an explanation instead of
+     a bare negative int. The served VALUE is untouched — marked, never silently
+     changed (the #1539 doctrine); the suffix is appended INSIDE the esc()'d payload
+     string exactly like the contiguity " *". */
+  if (col === "days_to_expiry") {
+    return Number.isFinite(n) && n < 0 ? (cell + " (expired)") : cell;
   }
   return cell;
 }
@@ -502,11 +514,28 @@ function countUp(el, target) {
   requestAnimationFrame(tick);
 }
 
+/* The sidebar TABLES-list loader — self-recovering since the pull-contention
+   slice (the operator-evidenced arm: a mid-pull 12 s timeout painted the dead
+   "offline — couldn't reach the server" card and never recovered). Every
+   user-driven (re)load — boot, the Refresh button, the sidebar ↻ Retry —
+   supersedes any pending tables retry chain + resets its backoff; the fetch
+   unit below re-runs itself on the shared capped-backoff driver.
+   bxOfflineHtml + BXUI.fetchWithTimeout are SHARED helpers and stay untouched
+   — the recovery lives entirely at this call site. */
 async function loadTables() {
-  try {
-    const r = await bxFetch("/api/v1/db/tables");
-    if (!r.ok) { tablesEl.innerHTML = '<h3>Tables</h3>' + bxErrorHtml("error " + r.status); return; }
-    const body = await r.json();
+  dbTblGen += 1;
+  dbDiscOk("db-tables");
+  await dbFetchTables();
+}
+async function dbFetchTables() {
+  const gen = dbTblGen;
+  const body = await dbFetchJsonBounded("/api/v1/db/tables");
+  if (bxDiscStale(gen, dbTblGen)) return;   /* a stale late response never repaints */
+  if (body === null) { dbTblFail(); return; }
+  dbDiscOk("db-tables");
+  renderTablesSidebar(body);
+}
+function renderTablesSidebar(body) {
     const tables = body.tables || [];
     counts = {};
     tables.forEach(t => { counts[t.table] = t.row_count; });
@@ -583,9 +612,39 @@ async function loadTables() {
     else if (mode === "registry") markRegistry(rstate.kind);
     else if (mode === "ledger") markLedger("window_ledger");
     else if (selected) markSelected(selected);
-  } catch (e) {
-    tablesEl.innerHTML = '<h3>Tables</h3>' + bxOfflineHtml(e);
+}
+
+/* The sidebar tables-list failure sink. KEEP-LAST-GOOD: a failed REFRESH
+   leaves the existing sidebar rows rendered + clickable and appends a status
+   line (createElement + textContent); only a first-ever load (no rows yet)
+   renders the error card — ONCE — then updates only its retained .hint text
+   per tick. The auto-retry never gives up; the card's ↻ Retry still forces an
+   immediate attempt (the delegated listener below → loadTables → gen bump). */
+function dbTblFail() {
+  const delay = dbDiscRetry("db-tables", dbFetchTables, dbTblGenNow);
+  const attempt = dbDiscFails["db-tables"];
+  if (tablesEl.querySelector(".tbl")) {
+    dbTblStatusLine(bxDiscLastGoodNote("the tables list", delay));
+    return;
   }
+  let hint = tablesEl.querySelector(".bx-state .hint");
+  if (!hint) {
+    tablesEl.innerHTML = '<h3>Tables</h3>' + bxErrorHtml("couldn't load the tables list");
+    hint = tablesEl.querySelector(".bx-state .hint");
+  }
+  if (hint) hint.textContent = bxDiscRetryHint(delay, attempt);
+}
+/* The keep-last-good status line under the still-usable sidebar rows (the
+   next successful rebuild naturally drops it). */
+function dbTblStatusLine(text) {
+  let line = document.getElementById("dbTblStatus");
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "dbTblStatus";
+    line.className = "hint";
+    tablesEl.appendChild(line);
+  }
+  line.textContent = text;
 }
 
 /* Delegated Retry for the sidebar's error/offline cards (never re-attached). */
@@ -846,13 +905,19 @@ function gridTableOpen(cols) {
      or empty repaint can never leave a stale match behind. */
   return '<table data-cols="' + esc(JSON.stringify(cols)) + '">';
 }
-function gridTheadHtml(cols) {
+function gridTheadHtml(cols, titles) {
+  /* Optional per-column <th title="…"> provenance map (DEC-DB-FNO-DISPLAY-TRUTH-001
+     item 10): three same-looking "spot"-family headers carry three different
+     provenances (FNO derived-at-read vs stored enrich stamp vs expired-options
+     stored ingest stamp) — the title disambiguates on hover. Default undefined →
+     byte-identical markup for every caller that passes nothing. esc()'d — XSS-safe. */
   return '<thead><tr>' + cols.map(c => {
     const t = colType(c);
-    return '<th><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
+    const prov = titles && titles[c] ? ' title="' + esc(titles[c]) + '"' : "";
+    return '<th' + prov + '><span class="tchip ' + t.cls + '" title="' + t.title + '">' + t.glyph + '</span>' + esc(c) + '</th>';
   }).join("") + '</tr></thead>';
 }
-function gridRowsHtml(cols, rows) {
+function gridRowsHtml(cols, rows, spotJoinMark) {
   /* Prev-close CONTIGUITY marker (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001 — the /db
      twin of the /movers #1539 " *"): when a row's prev_close_contiguous cell is
      `false`, the %-change baseline BRIDGED a real NSE-session lake hole, so the
@@ -874,6 +939,19 @@ function gridRowsHtml(cols, rows) {
       if (cell == null) return '<td class="nullcell">null</td>';
       let txt = fmtCell(col, cell);
       if (noncontig && (col === "change_pct" || col === "open_gap_pct")) txt += " *";
+      /* Spot-join FALLBACK marker (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9, per-cell —
+         the review-fold twin of the " *" above): when the page's spot join fell
+         back to the 1minute base feed (`spotJoinMark`, page-level — the payload's
+         spot_join_interval != interval), the derived spot/moneyness cells gain a
+         trailing " ~" mirroring the .tfnote legend's glyph, so the differing
+         provenance (bucket-OPEN 1-minute instant vs a prebuilt bucket's resampled
+         close) is visible ON the cell, not only at page level. Values MARKED,
+         never changed (#1539 doctrine); the " ~" is appended INSIDE the esc'd
+         payload string exactly like " *". A "?"/"—" cell carries NO fallback-
+         joined value (no spot at that instant / no derivation) so it is honestly
+         NOT marked; a null spot cell already rendered `null` above. Every
+         non-candle caller passes nothing → undefined → inert, byte-identical. */
+      if (spotJoinMark && (col === "spot" || col === "moneyness") && cell !== "?" && cell !== "—") txt += " ~";
       return '<td class="' + moneynessClass(col, cell).trim() + '">' + esc(txt) + '</td>';
     }).join("") + '</tr>';
   }).join("");
@@ -890,7 +968,12 @@ function gridPagerHtml(total, off, rowCount) {
     + '<span class="prange">' + gridRangeText(from, to, total) + '</span>'
     + '<button id="dbnext"' + (hasNext ? "" : " disabled") + '>Next ›</button></div>';
 }
-function gridAndPager(cols, rows, total, off, lim, note) {
+function gridAndPager(cols, rows, total, off, lim, note, titles, spotJoinMark) {
+  /* `titles` (optional, default undefined → markup byte-identical): the per-column
+     <th title> provenance map threaded to gridTheadHtml — only the candle view
+     passes one (DEC-DB-FNO-DISPLAY-TRUTH-001 item 10). `spotJoinMark` (optional,
+     default undefined → inert): the item-9 per-cell " ~" flag threaded to
+     gridRowsHtml — only the candle view passes one (the review fold). */
   let html = "";
   if (!rows.length) {
     /* Schema-when-empty: when the table has no rows BUT the backend returned its
@@ -898,14 +981,14 @@ function gridAndPager(cols, rows, total, off, lim, note) {
        columns exist, plus the honest note. With no columns at all, the plain
        "no rows" message. Never fabricates a data row (Golden Rule #1). */
     if (cols.length) {
-      html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols) + '</table></div>';
+      html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols, titles) + '</table></div>';
       html += '<div class="empty">' + esc(note || "no rows on this page") + '</div>';
     } else {
       html += '<div class="empty">no rows on this page</div>';
     }
   } else {
-    html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols)
-      + '<tbody>' + gridRowsHtml(cols, rows) + '</tbody></table></div>';
+    html += '<div class="gridwrap">' + gridTableOpen(cols) + gridTheadHtml(cols, titles)
+      + '<tbody>' + gridRowsHtml(cols, rows, spotJoinMark) + '</tbody></table></div>';
   }
   html += gridPagerHtml(total, off, rows.length);
   return html;
@@ -919,7 +1002,7 @@ function gridAndPager(cols, rows, total, off, lim, note) {
    the paging click. Returns false when the shapes differ — no table/tbody yet,
    an empty page, a column-set change — so the caller falls back to today's full
    grid.innerHTML rebuild; error/empty states always take the full-rebuild path. */
-function patchGridRows(grid, cols, rows, total, off) {
+function patchGridRows(grid, cols, rows, total, off, spotJoinMark) {
   if (!rows.length || !cols.length || !(total > 0)) return false;
   const table = grid.querySelector(".gridwrap > table");
   if (!table || table.getAttribute("data-cols") !== JSON.stringify(cols)) return false;
@@ -927,7 +1010,10 @@ function patchGridRows(grid, cols, rows, total, off) {
   const prev = grid.querySelector("#dbprev"), next = grid.querySelector("#dbnext");
   const range = grid.querySelector(".pager .prange");
   if (!tbody || !prev || !next || !range) return false;
-  tbody.innerHTML = gridRowsHtml(cols, rows);
+  /* `spotJoinMark` rides the SAME builder as the full rebuild so a tbody-only
+     patch marks identically (the wantTfNote gate above the caller already forces
+     a full rebuild on any presence FLIP, so the flag is stable within a patch). */
+  tbody.innerHTML = gridRowsHtml(cols, rows, spotJoinMark);
   const to = off + rows.length;
   prev.disabled = !(off > 0);
   next.disabled = !(to < total);
@@ -1106,6 +1192,10 @@ function fnoLabel(d) {
 async function selectCandles(kind) {
   mode = "candles";
   selected = null;
+  /* A mode/tab entry (and the manual ↻ Retry via rerunCurrent) supersedes any
+     pending discovery retry chain + resets its backoff (the shared dbDiscGen
+     guard — the universe.html gbPollGen idiom). */
+  dbDiscBump();
   /* Switching between the spot lake and the expired-options lake resets the
      per-lake view (selected dataset / page) so the two dedicated rows never
      leak each other's pager position. */
@@ -1118,24 +1208,182 @@ async function selectCandles(kind) {
   /* F&O uses the lazy symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001);
      SPOT uses the symbol→interval cascade (DEC-DB-SPOT-CASCADE-001) — both O(1)
      tiny payloads, not a flat thousand/750-row dropdown. Only the expired-options
-     lake keeps the flat dataset dropdown below. */
+     lake keeps the flat dataset dropdown below (loadOptionDatasets). */
   if (isFno) { await loadFnoCascade(); return; }
   if (!isOpt) { await loadSpotCascade(); return; }
-  try {
-    const r = await bxFetch("/api/v1/db/candles/datasets");
-    /* An HTTP error is an ERROR, never a fake "no data yet" empty (Golden Rule #1). */
-    if (!r.ok) { renderCandleView(null, "error " + r.status); return; }
-    const body = await r.json();
-    /* Only the expired-options lake reaches here (spot + F&O returned early to their
-       cascades) — tag each so buildCandleUrl() picks the option query route. */
-    cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
-    if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
-    if (cstate.datasets.length) runCandleQuery(false);
-    else renderCandleView(null, null, { kind: "empty",
-      text: "No expired-option data yet — pull an instrument's options on /universe first." });
-  } catch (e) {
-    dataEl.innerHTML = bxOfflineHtml(e);
+  await loadOptionDatasets();
+}
+
+/* ── Self-recovering discovery loaders (the #1529 DEC-PULL-UI-STALENESS-001
+   posture applied to the /db discovery fetches) ──
+   Every discovery arm (spot cascade · F&O underlyings/expiries/contracts ·
+   expired-options datasets · the sidebar TABLES list) RECOVERS on its own: a
+   failed fetch schedules a
+   capped-exponential auto-retry (3 s→30 s, NEVER gives up) instead of the old
+   one-shot dead error card; a hidden tab fires ZERO fetches (the tick defers to
+   ONE visibilitychange catch-up); and a shared generation counter (the
+   universe.html gbPollGen idiom) makes a superseded chain self-cancel so a
+   stale late response never repaints a newer view. Copy: with NO usable
+   last-good list the honest error card renders ONCE and only its retained
+   .hint text updates per tick (textContent — ZERO new innerHTML sinks); with a
+   last-good list the picker STAYS rendered + usable and a small status line
+   (createElement + textContent) says so. The manual ↻ Retry stays and forces
+   an immediate attempt (rerunCurrent → selectCandles → dbDiscBump). */
+let dbDiscGen = 0;   /* data-pane discovery chains (the five cascade/dataset arms) */
+let dbTblGen = 0;    /* sidebar tables-list chain — INDEPENDENT: a candle-pane
+                        selection change must never cancel the sidebar's recovery */
+function dbDiscGenNow() { return dbDiscGen; }
+function dbTblGenNow() { return dbTblGen; }
+const DB_DISC_DATA_LABELS = ["spot-symbols", "fno-underlyings", "fno-expiries",
+  "fno-contracts", "option-datasets"];
+const dbDiscFails = Object.create(null);   /* label → consecutive failure count */
+const dbDiscVis = Object.create(null);     /* label → latest hidden-tab deferred {run, gen, genFn} */
+let dbDiscVisArmed = false;
+
+/* Pure capped-exponential backoff (node-goldened): 3s→6s→12s→24s→30s cap. */
+function bxDiscBackoff(n) { return Math.min(3000 * Math.pow(2, n), 30000); }
+/* Pure supersede law (node-goldened): a chain scheduled at `scheduledGen` is
+   stale once the live generation moved — its tick / late response must no-op. */
+function bxDiscStale(scheduledGen, currentGen) { return scheduledGen !== currentGen; }
+/* Pure keep-last-good merge (node-goldened): a FAILED refresh (fresh === null/
+   undefined) keeps the previous usable list; a successful refresh — including a
+   genuinely EMPTY one — replaces it (an honest empty is data, not a failure). */
+function bxDiscKeepLast(freshList, prevList) {
+  return (freshList === null || freshList === undefined) ? (prevList || []) : freshList;
+}
+/* Pure retry-copy builders (node-goldened). The countdown text is set once at
+   schedule time — no per-second ticker. */
+function bxDiscRetryHint(delayMs, attempt) {
+  return "the server may be busy (a pull/prebuild may be running) — retrying in "
+    + Math.round(delayMs / 1000) + "s (attempt " + attempt + ")";
+}
+function bxDiscLastGoodNote(what, delayMs) {
+  return "couldn't refresh " + what + " — showing the last-loaded list · retrying in "
+    + Math.round(delayMs / 1000) + "s";
+}
+
+/* A user action on the candle pane (tab/mode entry, a cascade selection
+   change, the manual ↻ Retry) supersedes every pending DATA-pane retry chain
+   and resets its backoff; the sidebar tables chain (dbTblGen) is untouched. */
+function dbDiscBump() {
+  dbDiscGen += 1;
+  DB_DISC_DATA_LABELS.forEach(k => { delete dbDiscFails[k]; });
+  return dbDiscGen;
+}
+function dbDiscOk(label) { delete dbDiscFails[label]; }
+
+/* Schedule the next auto-retry tick for a failed arm; returns the delay used.
+   A hidden tab fires ZERO fetches — the tick defers to ONE visibilitychange
+   catch-up per label (latest-wins) so a background tab never polls (#1623
+   discipline). `genFn` reads the arm's LIVE generation at fire time, so a
+   superseded chain self-cancels. */
+function dbDiscRetry(label, run, genFn) {
+  const gen = genFn();
+  const n = dbDiscFails[label] || 0;
+  dbDiscFails[label] = n + 1;
+  const delay = bxDiscBackoff(n);
+  setTimeout(() => {
+    if (bxDiscStale(gen, genFn())) return;        /* superseded — self-cancel */
+    if (document.hidden) { dbDiscArmVis(label, run, gen, genFn); return; }
+    run();
+  }, delay);
+  return delay;
+}
+function dbDiscArmVis(label, run, gen, genFn) {
+  dbDiscVis[label] = { run: run, gen: gen, genFn: genFn };
+  if (dbDiscVisArmed) return;
+  dbDiscVisArmed = true;
+  document.addEventListener("visibilitychange", dbDiscOnVis);
+}
+function dbDiscOnVis() {
+  if (document.hidden) return;
+  document.removeEventListener("visibilitychange", dbDiscOnVis);
+  dbDiscVisArmed = false;
+  for (const label in dbDiscVis) {
+    const v = dbDiscVis[label];
+    delete dbDiscVis[label];
+    if (v && !bxDiscStale(v.gen, v.genFn())) v.run();
   }
+}
+
+/* Failure sink for every discovery arm: schedule the retry, then paint the
+   honest state. `lastGoodRepaint` non-null ⇒ a usable last-good list exists —
+   re-render the picker from it + the status line; null ⇒ render the error card
+   ONCE through the EXISTING renderCandleView error arm (no new innerHTML sink)
+   and update only its retained .hint text on later ticks. */
+function dbDiscFail(label, errText, what, run, lastGoodRepaint) {
+  const delay = dbDiscRetry(label, run, dbDiscGenNow);
+  const attempt = dbDiscFails[label];
+  if (lastGoodRepaint) {
+    lastGoodRepaint();
+    dbDiscStatusLine(bxDiscLastGoodNote(what, delay));
+    return;
+  }
+  let hint = dataEl.querySelector(".bx-state.error .hint");
+  if (!hint) {
+    renderCandleView(null, errText);   /* render-once — the existing error card */
+    hint = dataEl.querySelector(".bx-state.error .hint");
+  }
+  if (hint) hint.textContent = bxDiscRetryHint(delay, attempt);
+}
+/* The keep-last-good status line under the still-usable picker (createElement +
+   textContent only; the next successful full render naturally drops it). */
+function dbDiscStatusLine(text) {
+  let line = document.getElementById("dbDiscStatus");
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "dbDiscStatus";
+    line.className = "hint";
+    dataEl.appendChild(line);
+  }
+  line.textContent = text;
+}
+
+/* Bounded THROUGH the body read (the universe.html gbFetchJson / #1720
+   fetchTextBounded discipline): BXUI.fetchWithTimeout (bx-ui.js) clears its
+   abort timer as soon as the HEADERS resolve, so a headers-then-stalled-body
+   response would hang `await r.json()` forever — nothing thrown, no retry
+   scheduled, the discovery chain wedged. This helper keeps ONE deadline armed
+   across fetch AND the body read; every failure shape (timeout, non-ok,
+   rejection, malformed body) collapses to null for the retry path. */
+async function dbFetchJsonBounded(url) {
+  const ms = 12000;   /* the sibling pages' client deadline (bx-ui.js) */
+  const ctrl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, ms);
+  try {
+    const r = await fetch(url, ctrl ? { signal: ctrl.signal } : {});
+    if (!r.ok) return null;
+    /* timer deliberately still armed through the body read */
+    return await r.json();
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* The expired-options flat-dropdown datasets arm — the fifth discovery loader
+   on the shared self-recovering driver. */
+async function loadOptionDatasets() {
+  const gen = dbDiscGen;
+  const body = await dbFetchJsonBounded("/api/v1/db/candles/datasets");
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    /* KEEP-LAST-GOOD: a failed refresh leaves the existing dropdown usable. */
+    const keep = bxDiscKeepLast(null, cstate.datasets);
+    dbDiscFail("option-datasets", "couldn't load the expired-option datasets",
+      "the dataset list", loadOptionDatasets,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick a dataset" }) : null);
+    return;
+  }
+  dbDiscOk("option-datasets");
+  /* Only the expired-options lake reaches here (spot + F&O run their own
+     cascades) — tag each so buildCandleUrl() picks the option query route. */
+  cstate.datasets = (body.options || []).map(d => ({ kind: "option", ...d }));
+  if (!curDataset() && cstate.datasets.length) cstate.key = dsKey(cstate.datasets[0]);
+  if (cstate.datasets.length) runCandleQuery(false);
+  else renderCandleView(null, null, { kind: "empty",
+    text: "No expired-option data yet — pull an instrument's options on /universe first." });
 }
 
 /* ── F&O symbol→expiry→contract cascade (DEC-DB-FNO-CASCADE-001) ──
@@ -1143,17 +1391,31 @@ async function selectCandles(kind) {
    build the (interval) dataset descriptors so curDataset()/buildCandleUrl() work
    exactly as for spot — the cascade is purely the picker, the query path is shared. */
 async function _fnoFetch(url) {
-  try { const r = await bxFetch(url); return r.ok ? await r.json() : null; }
-  catch (e) { return null; }
+  /* The null-collapsing contract is UNCHANGED (timeout / non-ok / malformed
+     body / rejection → null); the fetch itself is now BOUNDED through the
+     body read via dbFetchJsonBounded (see the self-recovering driver above). */
+  return dbFetchJsonBounded(url);
 }
 async function loadFnoCascade() {
+  const gen = dbDiscGen;
   const body = await _fnoFetch("/api/v1/db/fno/underlyings");
-  cstate.fno = { unds: (body && body.underlyings) || [],
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  /* KEEP-LAST-GOOD (the fails-before clobber): the fresh list is adopted only
+     BELOW the null check — a failed refresh (500 / offline / timeout) schedules
+     an auto-retry and leaves the existing picker usable, never clobbering it
+     with [] (the old shape assigned `cstate.fno = { unds: … || [] }` FIRST). */
+  if (body === null) {
+    const keep = bxDiscKeepLast(null, cstate.fno.unds);
+    cstate.fno.unds = keep;
+    dbDiscFail("fno-underlyings", "couldn't load the F&O underlyings",
+      "the F&O underlyings", loadFnoCascade,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick an underlying → expiry → contract" }) : null);
+    return;
+  }
+  dbDiscOk("fno-underlyings");
+  cstate.fno = { unds: bxDiscKeepLast(body.underlyings || [], cstate.fno.unds),
                  und: "", exps: [], exp: "", counts: [], cons: [], con: "" };
   cstate.datasets = []; cstate.key = null;
-  /* A failed fetch (500 / offline / timeout) is an ERROR card with Retry —
-     never the false "No F&O candle data yet" empty (Golden Rule #1). */
-  if (body === null) { renderCandleView(null, "couldn't load the F&O underlyings"); return; }
   if (!cstate.fno.unds.length) {
     renderCandleView(null, null, { kind: "empty",
       text: "No F&O candle data yet — pull an instrument's futures/options history on /universe first." });
@@ -1162,33 +1424,57 @@ async function loadFnoCascade() {
   renderCandleView(null, null, { kind: "prompt", text: "pick an underlying → expiry → contract" });
 }
 async function onFnoUnderlyingChange(und) {
+  /* A selection change supersedes any pending retry chain (dbDiscGen bump);
+     the pre-fetch state reset below is a legitimate selection change (kept) —
+     the retryable unit re-fetches for the CURRENT selection on failure. */
+  dbDiscBump();
   cstate.fno.und = und; cstate.fno.exp = ""; cstate.fno.exps = []; cstate.fno.counts = [];
   cstate.fno.con = ""; cstate.fno.cons = []; cstate.datasets = []; cstate.key = null;
-  if (und) {
-    const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(und));
-    if (body === null) { renderCandleView(null, "couldn't load the expiries"); return; }
-    cstate.fno.exps = (body && body.expiries) || [];
-    /* Per-expiry "listed N with data M" rows, aligned with `expiries`
-       (DEC-DB-UX-PACK-001 Feature 6). */
-    cstate.fno.counts = (body && body.expiry_counts) || [];
+  if (!und) { renderCandleView(null, null, { kind: "prompt", text: "pick an expiry" }); return; }
+  await dbFetchFnoExpiries();
+}
+async function dbFetchFnoExpiries() {
+  const gen = dbDiscGen;
+  const body = await _fnoFetch("/api/v1/db/fno/expiries?underlying=" + encodeURIComponent(cstate.fno.und));
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    dbDiscFail("fno-expiries", "couldn't load the expiries", "the expiries",
+      dbFetchFnoExpiries, null);
+    return;
   }
+  dbDiscOk("fno-expiries");
+  cstate.fno.exps = (body && body.expiries) || [];
+  /* Per-expiry "listed N with data M" rows, aligned with `expiries`
+     (DEC-DB-UX-PACK-001 Feature 6). */
+  cstate.fno.counts = (body && body.expiry_counts) || [];
   renderCandleView(null, null, { kind: "prompt", text: "pick an expiry" });
 }
 async function onFnoExpiryChange(exp) {
+  /* A selection change supersedes any pending retry chain (dbDiscGen bump). */
+  dbDiscBump();
   cstate.fno.exp = exp; cstate.fno.con = ""; cstate.fno.cons = [];
   cstate.datasets = []; cstate.key = null;
-  if (exp) {
-    const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
-      + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(exp));
-    if (body === null) { renderCandleView(null, "couldn't load the contracts"); return; }
-    cstate.fno.cons = (body && body.contracts) || [];
+  if (!exp) { renderCandleView(null, null, { kind: "prompt", text: "pick a contract" }); return; }
+  await dbFetchFnoContracts();
+}
+async function dbFetchFnoContracts() {
+  const gen = dbDiscGen;
+  const body = await _fnoFetch("/api/v1/db/fno/contracts?underlying="
+    + encodeURIComponent(cstate.fno.und) + "&expiry=" + encodeURIComponent(cstate.fno.exp));
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  if (body === null) {
+    dbDiscFail("fno-contracts", "couldn't load the contracts", "the contracts",
+      dbFetchFnoContracts, null);
+    return;
   }
+  dbDiscOk("fno-contracts");
+  cstate.fno.cons = (body && body.contracts) || [];
   renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
 /* A contract carries its available intervals; materialise ONE fno dataset
    descriptor per interval so the shared candle query path can address it, then
    select the first interval and run the page. */
-function onFnoContractChange(symbol) {
+function onFnoContractChange(symbol, prefInterval) {
   cstate.fno.con = symbol;
   const con = cstate.fno.cons.find(c => c.symbol === symbol) || null;
   if (!con) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a contract" }); return; }
@@ -1198,8 +1484,12 @@ function onFnoContractChange(symbol) {
     strike: con.strike, instrument_type: con.instrument_type, option_type: con.option_type }));
   cstate.offset = 0;
   /* Default to 1-minute (the fetched granularity an operator most wants for an F&O
-     contract); fall back to the first available interval otherwise. */
-  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+     contract); fall back to the first available interval otherwise. `prefInterval`
+     (optional — the deep link, DEC-MOVERS-DRILL-DOWN-001) wins ONLY when that
+     interval is actually STORED for the contract; the change listener passes no
+     second arg, so the manual path is byte-identical. */
+  const pref = (prefInterval && cstate.datasets.find(x => x.interval === prefInterval))
+    || cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a contract" });
 }
@@ -1213,12 +1503,24 @@ function onFnoContractChange(symbol) {
    exchanges' same-named symbols never alias. */
 function _spotKey(s) { return [s.exchange, s.segment, s.symbol].join("|"); }
 async function loadSpotCascade() {
+  const gen = dbDiscGen;
   const body = await _fnoFetch("/api/v1/db/spot/symbols");
-  cstate.spot = { syms: (body && body.symbols) || [], sym: "" };
+  if (bxDiscStale(gen, dbDiscGen)) return;   /* a stale late response never repaints */
+  /* KEEP-LAST-GOOD (the fails-before clobber): the fresh list is adopted only
+     BELOW the null check — a failed refresh (500 / offline / timeout) schedules
+     an auto-retry and leaves the existing picker usable, never clobbering it
+     with [] (the old shape assigned `cstate.spot = { syms: … || [] }` FIRST). */
+  if (body === null) {
+    const keep = bxDiscKeepLast(null, cstate.spot.syms);
+    cstate.spot = { syms: keep, sym: cstate.spot.sym || "" };
+    dbDiscFail("spot-symbols", "couldn't load the spot symbols",
+      "the symbol list", loadSpotCascade,
+      keep.length ? () => renderCandleView(null, null, { kind: "prompt", text: "pick a symbol → interval" }) : null);
+    return;
+  }
+  dbDiscOk("spot-symbols");
+  cstate.spot = { syms: bxDiscKeepLast(body.symbols || [], cstate.spot.syms), sym: "" };
   cstate.datasets = []; cstate.key = null;
-  /* A failed fetch is an ERROR card with Retry — never the false "No spot
-     candle data yet" empty (Golden Rule #1). */
-  if (body === null) { renderCandleView(null, "couldn't load the spot symbols"); return; }
   if (!cstate.spot.syms.length) {
     renderCandleView(null, null, { kind: "empty",
       text: "No spot candle data yet — pull an instrument's timeframes on /universe first." });
@@ -1229,14 +1531,19 @@ async function loadSpotCascade() {
 /* A symbol carries its available STORED intervals; materialise ONE spot dataset
    descriptor per interval so the shared candle query path can address it, then
    default to 1-minute and run the page. */
-function onSpotSymbolChange(key) {
+function onSpotSymbolChange(key, prefInterval) {
   cstate.spot.sym = key;
   const s = cstate.spot.syms.find(x => _spotKey(x) === key) || null;
   if (!s) { cstate.datasets = []; cstate.key = null; renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" }); return; }
   cstate.datasets = (s.intervals || []).map(iv => ({
     kind: "spot", exchange: s.exchange, segment: s.segment, symbol: s.symbol, interval: iv }));
   cstate.offset = 0;
-  const pref = cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
+  /* `prefInterval` (optional — the deep link, DEC-MOVERS-DRILL-DOWN-001) wins ONLY
+     when that interval is actually STORED; an unstored one silently falls back to
+     the existing 1-minute preference (only stored intervals are offerable —
+     DEC-DB-SPOT-CASCADE-001). The change listener passes no second arg. */
+  const pref = (prefInterval && cstate.datasets.find(x => x.interval === prefInterval))
+    || cstate.datasets.find(x => x.interval === "1minute") || cstate.datasets[0];
   cstate.key = pref ? dsKey(pref) : null;
   if (cstate.key) runCandleQuery(false); else renderCandleView(null, null, { kind: "prompt", text: "pick a symbol" });
 }
@@ -1458,8 +1765,15 @@ function candleGridHtml(body, err, notice) {
       : '<div class="empty">' + esc(notice.text) + '</div>';
   }
   const stepNote = body.strike_step_confidence === "observed"
-    ? '<div class="stepnote">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
+    ? '<div class="stepnote stepnote-strike">~ ATM±N strike grid estimated from pulled strikes only (no vendor registry chain) — the step may be overestimated on a sparsely-pulled expiry.</div>'
     : "";
+  /* STATIC display-law footnote (DEC-PREVSESSION-MUHURAT-COHERENCE-001): the /db
+     derived %-change baseline is the nearest STORED prior bar — including a Diwali
+     Muhurat session's close, a real NSE session the lake legitimately carries —
+     while the engine's day anchors deliberately use the prior REGULAR session
+     (#1616). Template-only honesty text, zero payload/backend change; a per-row
+     Muhurat marker is the named follow-up DEC-DB-MUHURAT-PREVCLOSE-MARK-001. */
+  const prevAnchorNote = '<div class="stepnote">%CHNG anchors on the nearest stored prior bar (including a Diwali Muhurat session\'s close).</div>';
   /* Prev-close contiguity legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001, the /db
      twin of the /movers #1539 legend): only when THIS page actually has a bridged
      baseline — computed from the CURRENT rows so a paging click drops/adds it
@@ -1467,7 +1781,42 @@ function candleGridHtml(body, err, notice) {
   const contigNote = candleHasNoncontiguousRow(body)
     ? '<div class="contignote">* previous close is NOT the immediately-preceding NSE session (a lake hole was bridged; nearest-prior shown) — the %-change is marked, not changed.</div>'
     : "";
-  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100)) + stepNote + contigNote;
+  /* Spot-join provenance note (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9): when the F&O
+     page's per-bar spot/moneyness join fell back to the always-present 1minute base
+     feed (no display-interval spot partition prebuilt — a partially-prebuilt /
+     CLI-pulled lake), say so — real stored values, honestly provenance-labelled.
+     The SAME flag threads to gridAndPager as the per-cell " ~" marker (the review
+     fold — full #1539 parity: page-level note AND per-cell marker), and the legend
+     line explains the marker. The interval token is server-validated but esc()'d
+     anyway (defence in depth). */
+  const spotJoinMark = !!(body.spot_join_interval && body.interval
+    && body.spot_join_interval !== body.interval);
+  const tfNote = spotJoinMark
+    ? '<div class="tfnote">~ underlying spot joined from the 1minute series (no ' + esc(body.interval) + ' spot partition prebuilt) — spot/moneyness cells marked " ~" carry the bar-instant 1-minute values; run a pipeline pull to prebuild.</div>'
+    : "";
+  return gridAndPager(body.columns || [], body.rows || [], Number(body.total || 0), Number(body.offset || 0), Number(body.limit || 100), null, candleHeaderTitles(), spotJoinMark) + stepNote + contigNote + prevAnchorNote + tfNote;
+}
+
+/* Per-tab <th title> provenance map for the same-looking "spot"-family headers
+   (DEC-DB-FNO-DISPLAY-TRUTH-001 item 10): the FNO candles tab's `spot` is DERIVED at
+   read time while the expired-options tab's `spot` is a STORED per-bar ingest stamp,
+   and `spot_at_bar` is a third provenance (the stored enrich-join stamp) — three
+   identical-looking headers, three provenances. Spot tabs (no entry) pass null →
+   markup byte-identical. */
+const SPOT_TITLES = {
+  fno: {
+    spot: "underlying spot close at the bar — derived at read time (not stored)",
+    spot_at_bar: "stored spot used by the Greeks enrichment (per-bar stamp)",
+    days_to_expiry: "calendar days to expiry; negative = bar after expiry (expired)",
+    greeks_status: "decoded Greeks provenance status (stored stamp)",
+  },
+  option: {
+    spot: "stored per-bar spot stamp written at ingest",
+  },
+};
+function candleHeaderTitles() {
+  const d = curDataset();
+  return (d && SPOT_TITLES[d.kind]) || null;
 }
 
 /* True when a candle page carries at least one row whose prev-close baseline
@@ -1541,16 +1890,31 @@ function updateCandleGrid(body, err) {
   grid.classList.remove("is-loading");
   /* The honesty step-note (DEC-MONEYNESS-REGISTRY-STEP-001) renders OUTSIDE the
      table, so the tbody-only patch also requires its presence to be unchanged —
-     a confidence flip falls back to the full rebuild, never a stale note. */
+     a confidence flip falls back to the full rebuild, never a stale note. The
+     gate keys on the DISCRIMINATOR class .stepnote-strike, NOT the shared
+     .stepnote styling class: the STATIC prev-close anchor footnote
+     (DEC-PREVSESSION-MUHURAT-COHERENCE-001) also carries .stepnote and is
+     ALWAYS present, so gating on .stepnote would force a full grid rebuild on
+     every paging click (the browser-truth DOM-identity pin caught exactly
+     that regression). */
   const wantNote = !!(body && body.strike_step_confidence === "observed");
   /* The contiguity legend also renders OUTSIDE the tbody, so a change in its
      presence across pages must fall back to a full rebuild — else a paging click
      would leave a stale " *" legend (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001). */
   const wantContig = candleHasNoncontiguousRow(body);
-  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote")
+  /* The spot-join fallback note also renders OUTSIDE the tbody — a presence change
+     (the join interval flipping across pages/datasets) falls back to a full rebuild,
+     never a stale note (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 — the wantNote/wantContig
+     idiom). The SAME flag threads into patchGridRows so the tbody-only patch marks
+     its spot/moneyness cells " ~" exactly like the full rebuild (the review fold);
+     the presence gate above guarantees the flag matches the standing legend. */
+  const wantTfNote = !!(body && body.spot_join_interval && body.interval
+    && body.spot_join_interval !== body.interval);
+  const patched = !err && !!body && wantNote === !!grid.querySelector(".stepnote-strike")
     && wantContig === !!grid.querySelector(".contignote")
+    && wantTfNote === !!grid.querySelector(".tfnote")
     && patchGridRows(grid, body.columns || [], body.rows || [],
-      Number(body.total || 0), Number(body.offset || 0));
+      Number(body.total || 0), Number(body.offset || 0), wantTfNote);
   if (!patched) grid.innerHTML = candleGridHtml(body, err);
   const sub = dataEl.querySelector(".datahead .sub");
   if (sub) sub.textContent = body ? (Number(body.total || 0).toLocaleString() + " bars match") : "";
@@ -1612,12 +1976,80 @@ dataEl.addEventListener("click", (ev) => {
   showCopyToast();
 });
 
+/* ── Boot-time deep link (DEC-MOVERS-DRILL-DOWN-001) ──────────────────────
+   /db?candles=spot|fno&symbol=…&exchange=…&segment=…&interval=…&date=…
+   drives the EXISTING cascades (the /movers row drill-down builds these
+   URLs; no new backend route). Server-truth-gated at every level: a
+   symbol / underlying / expiry / contract the cascade payloads do not list
+   degrades to the pre-existing honest "pick a …" prompt — never a wrong or
+   fabricated selection (Golden Rule #1). Param values feed ONLY JS
+   comparisons + encodeURIComponent-built API URLs; the only ones that reach
+   markup are cstate.start/cstate.end, regex-gated to \d{4}-\d{2}-\d{2}
+   FIRST and rendered through the existing esc() value-attribute path.
+   Runs once at boot; Refresh + manual navigation are untouched. */
+const _FNO_MONTHS = { Jan:"01", Feb:"02", Mar:"03", Apr:"04", May:"05", Jun:"06",
+                      Jul:"07", Aug:"08", Sep:"09", Oct:"10", Nov:"11", Dec:"12" };
+/* Longest-prefix match against the SERVER's own underlyings list (never a
+   re-derived grammar) — the client twin of the right-anchored fno_symbol
+   parse (the #1530 precedent), so a hyphenated underlying
+   (NSE-BAJAJ-AUTO-30Sep25-FUT) or an &-underlying (M&M) is correct by
+   construction. */
+function _fnoUnderlyingFor(symbol) {
+  const exch = symbol.split("-")[0];
+  let best = "";
+  for (const u of cstate.fno.unds) {
+    if (u.length > best.length && symbol.startsWith(exch + "-" + u + "-")) best = u;
+  }
+  return best;
+}
+/* Right-anchored DDMmmYY expiry token → ISO, returned ONLY when the server's
+   own expiry list carries it — a mis-parse can never SELECT a wrong expiry,
+   it can only fail to match and degrade to the honest "pick an expiry"
+   prompt (the never-select-a-wrong-expiry law). */
+function _fnoExpiryFor(symbol) {
+  const t = symbol.split("-");
+  const last = t[t.length - 1];
+  const token = last === "FUT" ? t[t.length - 2]
+              : (last === "CE" || last === "PE") ? t[t.length - 3]
+              : "";
+  const m = /^(\d{1,2})([A-Z][a-z]{2})(\d{2})$/.exec(token || "");
+  if (!m || !_FNO_MONTHS[m[2]]) return "";
+  const iso = "20" + m[3] + "-" + _FNO_MONTHS[m[2]] + "-" + ("0" + m[1]).slice(-2);
+  return cstate.fno.exps.includes(iso) ? iso : "";
+}
+async function applyDeepLink() {
+  const q = new URLSearchParams(location.search);
+  const kind = q.get("candles");
+  if (kind !== "spot" && kind !== "fno") return;          /* no/unknown param → today's behavior */
+  const date = q.get("date") || "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { cstate.start = date; cstate.end = date; }
+  const interval = q.get("interval") || "";
+  const symbol = q.get("symbol") || "";
+  await selectCandles(kind);                              /* loads the cascade level 1 */
+  if (!symbol) return;                                    /* bare tab open → honest prompt */
+  if (kind === "spot") {
+    const key = [q.get("exchange") || "", q.get("segment") || "", symbol].join("|");
+    if (cstate.spot.syms.some(s => _spotKey(s) === key)) onSpotSymbolChange(key, interval);
+    return;                                               /* no match → honest "pick a symbol" prompt */
+  }
+  const und = _fnoUnderlyingFor(symbol);                  /* server-vocabulary longest-prefix match */
+  if (!und) return;
+  await onFnoUnderlyingChange(und);
+  const exp = _fnoExpiryFor(symbol);                      /* DDMmmYY → ISO, gated ∈ cstate.fno.exps */
+  if (!exp) return;
+  await onFnoExpiryChange(exp);
+  if (cstate.fno.cons.some(c => c.symbol === symbol)) onFnoContractChange(symbol, interval);
+}
+
 /* Boot after DOMContentLoaded so the deferred shared helpers (bx-ui.js) are
    guaranteed loaded — every boot fetch then rides the 12 s timeout. A missing
    helper file degrades gracefully (bxFetch falls back to plain fetch). */
 function boot() {
   if (window.BXUI) BXUI.initVisibilityPause();
   loadTables();
+  /* Deep-link driver AFTER loadTables() (fire-and-forget async — it awaits
+     its own cascade fetches; the sidebar renders independently). */
+  applyDeepLink();
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
 else boot();

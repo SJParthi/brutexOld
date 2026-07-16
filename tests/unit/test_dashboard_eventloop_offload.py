@@ -331,7 +331,13 @@ def test_universe_summary_read_runs_off_the_event_loop(
 
     status, payload = _assert_loop_free_while_blocked(client, stub, "/api/v1/universe/summary")
     assert status == 200
-    assert payload == {"index_count": 0, "stock_count": 0, "total": 0}
+    assert payload == {
+        "index_count": 0,
+        "stock_count": 0,
+        "total": 0,
+        "reference_stock_count": 0,
+        "stock_count_total": 0,
+    }
 
 
 def test_universe_index_constituents_reads_run_off_the_event_loop(

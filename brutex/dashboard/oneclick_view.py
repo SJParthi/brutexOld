@@ -39,12 +39,14 @@ from brutex.dashboard.oneclick_artifacts import (
 
 __all__ = [
     "CHAIN_STAGES",
+    "build_equity_payload",
     "build_events_payload",
     "build_manifest_payload",
     "build_runs_payload",
     "build_top100_payload",
     "build_trades_payload",
     "build_verify_payload",
+    "cascade_status_text",
     "chain_links",
     "reconcile_funnel",
     "run_pill_state",
@@ -206,6 +208,48 @@ def build_manifest_payload(
     }
 
 
+#: The two ``not_validated`` reasons whose display suffix is ACTIONABLE for
+#: an operator (a stale report / ambiguous evidence) — every other reason
+#: (``no_report`` / ``not_in_cascade_pool``) reads the plain "not validated"
+#: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001).
+_CASCADE_REASON_SUFFIX: Final[dict[str, str]] = {
+    "sweep_id_mismatch": " · sweep_id_mismatch",
+    "duplicate_candidate_id": " · duplicate verdict",
+}
+
+
+def cascade_status_text(
+    status: str | None,
+    *,
+    rejected_at: str | None = None,
+    provisional: bool = False,
+    reason: str | None = None,
+) -> str:
+    """The ONE server-built cascade-verdict display string (no prose in JS).
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001: every surface (the one-click bridge
+    ``oneclick_artifacts._bridge_cascade`` AND the ``/results`` row
+    projection in ``sweep_results_view``) renders THIS builder's output via
+    ``textContent`` — no client ever composes a "PASS" default. ``None`` /
+    absent / an unknown token → the honest "—"; a fail names its VERBATIM
+    stage token (unknown FUTURE tokens included — never a guess, ``?`` when
+    the report carried none); a provisional pass can never read as a bare
+    PASS (the pool-N DSR honesty stamp).
+    """
+    if status == "provisional_pass":
+        return "PASS (provisional)"
+    if status == "pass":
+        # Defense-in-depth: a "pass" carrying provisional=True (a shape the
+        # writer never emits — it mints provisional_pass) still can never
+        # read as a bare proven PASS.
+        return "PASS (provisional)" if provisional else "PASS"
+    if status == "fail":
+        return f"FAIL @ {rejected_at or '?'}"
+    if status == "not_validated":
+        return "not validated" + _CASCADE_REASON_SUFFIX.get(reason or "", "")
+    return "—"
+
+
 def build_top100_payload(
     run_id: str, top100: Top100Result, *, fixture_root_active: bool
 ) -> dict[str, Any]:
@@ -228,9 +272,12 @@ def build_top100_payload(
     -------
     dict
         ``{status, run_id, rows[], row_count, preset, empty_note, detail,
-        revision, fixture_root_active}`` — ``preset`` is the artifact's R30
-        ranking token (the client's sort-basis label source; ``null`` until
-        the object root parsed — the label then falls back honestly).
+        revision, fixture_root_active, cascade_join}`` — ``preset`` is the
+        artifact's R30 ranking token (the client's sort-basis label source;
+        ``null`` until the object root parsed — the label then falls back
+        honestly); ``cascade_join`` is the artifact root's ADDITIVE
+        Stage-4 join meta (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``null``
+        on a pre-change artifact, the clients render "—").
     """
     empty_note = (
         "0 winners stored for this run" if top100.status == "ok" and not top100.rows else None
@@ -245,6 +292,7 @@ def build_top100_payload(
         "detail": top100.detail,
         "revision": top100.revision,
         "fixture_root_active": fixture_root_active,
+        "cascade_join": top100.cascade_join,
     }
 
 
@@ -332,6 +380,45 @@ def build_trades_payload(
         "detail": page.detail,
         "fixture_root_active": fixture_root_active,
     }
+
+
+def build_equity_payload(
+    run_id: str,
+    rank: int,
+    page: TradesResult,
+    *,
+    offset: int,
+    limit: int,
+    fixture_root_active: bool,
+) -> dict[str, Any]:
+    """Project one equity-series page into the ``GET /api/v1/oneclick/equity`` payload.
+
+    DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (audit item 4C): the SAME page wire
+    shape + honesty laws as the trades payload (``total`` stays ``None`` when
+    unknown — never a fabricated 0; ``source`` is a visible badge), over rows
+    that are the stored ``{session_date, equity_close_paisa,
+    equity_intraday_low_paisa, trades_closed}`` points — so this DELEGATES to
+    the ONE page projector rather than growing a second copy (§11 COMMON).
+
+    Parameters
+    ----------
+    run_id, rank
+        The requested coordinates (echoed).
+    page
+        The reader's equity page verdict.
+    offset, limit
+        The requested page window (echoed).
+    fixture_root_active
+        Stamped into the payload (C-MINOR-1).
+
+    Returns
+    -------
+    dict
+        The :func:`build_trades_payload` shape over equity points.
+    """
+    return build_trades_payload(
+        run_id, rank, page, offset=offset, limit=limit, fixture_root_active=fixture_root_active
+    )
 
 
 # ── R41 chain map ───────────────────────────────────────────────────────

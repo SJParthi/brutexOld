@@ -23,6 +23,7 @@ from brutex.notifications.sweep_alerts import (
     CRASH_LOOP_RELAUNCH_THRESHOLD,
     SweepAlerter,
     emit_lake_heal_alert,
+    emit_lake_heal_still_refused_alert,
     emit_pull_halt_alert,
     escape_markdown_v2,
 )
@@ -235,6 +236,29 @@ class TestAlerts:
         # The body is MarkdownV2-escaped (underscore → `\_`), so assert the escaped forms.
         assert escape_markdown_v2("disk_full") in ev.message
         assert escape_markdown_v2("Pull HALTED") in ev.message
+
+    def test_loop_stalled(self) -> None:
+        """loop_stalled (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 G5): the
+        pull_halted twin — PHASE_BLOCKED CRITICAL, observe-only wording, fired
+        by the LoopWatchdog's CRITICAL edge (its state machine owns the real
+        coalescing; the dedupe_key is identification only at the 0.0-window
+        kind)."""
+        fake = FakeNotifier()
+        assert SweepAlerter(notifier=fake).loop_stalled(stalled_s=36.4, threshold_s=30.0)
+        ev = fake.published[0]
+        assert ev.kind == TelegramEventKind.PHASE_BLOCKED
+        assert ev.severity == TelegramSeverity.CRITICAL
+        assert ev.dedupe_key == "loop-stalled"
+        assert escape_markdown_v2("event loop STALLED") in ev.message
+        assert escape_markdown_v2("36.4") in ev.message
+        assert "30" in ev.message
+        assert escape_markdown_v2("observes only") in ev.message
+
+    def test_loop_stalled_disabled_notifier_is_silent_noop(self) -> None:
+        """Telegram disabled (no notifier resolves) → False, never a raise —
+        the best-effort law the watchdog's alert lane depends on."""
+        alerter = SweepAlerter(resolver=lambda: None)
+        assert alerter.loop_stalled(stalled_s=31.0, threshold_s=30.0) is False
 
     def test_vendor_down(self) -> None:
         """vendor_down (DEC-VENDOR-DOWN-BREAKER-001): CRITICAL, WAIT-worded, deduped."""
@@ -724,6 +748,101 @@ class TestEmitLakeHealAlert:
         assert event.kind == TelegramEventKind.QUARANTINE_NEW
         assert event.severity == TelegramSeverity.WARN
         assert "quarantined\\=1" in event.message
+
+
+# ────────────────────────────────────────────────────────────────────────
+# lake_heal_still_refused + emit_lake_heal_still_refused_alert
+# (DEC-LAKE-INVARIANTS-PREINDEX-001 review fold — the standing mass-heal-
+# refusal RE-alert a deterministic boot skip fires from PERSISTED values)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestLakeHealStillRefused:
+    _ATTEMPT_UTC = "2026-07-10T02:00:00+00:00"
+
+    def test_still_refused_is_critical_phase_blocked(self) -> None:
+        """The re-alert names the PRIOR sweep's persisted tallies + wall time
+        — explicitly a re-alert, never a fresh heal report — on the CRITICAL
+        operator-must-act ``PHASE_BLOCKED`` house pattern."""
+        fake = FakeNotifier()
+        ok = SweepAlerter(notifier=fake).lake_heal_still_refused(
+            findings=7,
+            files_scanned=10,
+            attempt_utc=self._ATTEMPT_UTC,
+            scope="startup-sweep",
+        )
+        assert ok is True
+        (event,) = fake.published
+        assert event.kind == TelegramEventKind.PHASE_BLOCKED
+        assert event.severity == TelegramSeverity.CRITICAL
+        assert event.dedupe_key == f"lake-heal-still-refused:startup-sweep:{self._ATTEMPT_UTC}"
+        assert "STILL REFUSED" in event.message
+        assert escape_markdown_v2("re-alert of a prior sweep") in event.message
+        assert escape_markdown_v2(f"still refused since {self._ATTEMPT_UTC}") in event.message
+        assert escape_markdown_v2("7 finding(s)") in event.message
+        assert escape_markdown_v2("10 scanned file(s)") in event.message
+        assert "NOTHING was fixed" in event.message
+
+    def test_distinct_attempts_never_coalesce_on_the_dedupe_key(self) -> None:
+        """A NEW refusal (fresh attempt timestamp) carries a NEW dedupe key —
+        only re-alerts of the SAME standing attempt coalesce."""
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        alerter.lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc="2026-07-10T02:00:00+00:00", scope="s"
+        )
+        alerter.lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc="2026-07-11T02:00:00+00:00", scope="s"
+        )
+        first, second = fake.published
+        assert first.dedupe_key != second.dedupe_key
+
+    def test_disabled_notifier_returns_false(self) -> None:
+        ok = SweepAlerter(resolver=lambda: None).lake_heal_still_refused(
+            findings=1, files_scanned=2, attempt_utc=self._ATTEMPT_UTC, scope="startup-sweep"
+        )
+        assert ok is False
+
+
+class TestEmitLakeHealStillRefusedAlert:
+    def test_routes_the_persisted_values_verbatim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[dict[str, object]] = []
+
+        class _FakeAlerter:
+            def lake_heal_still_refused(self, **kwargs: object) -> bool:
+                calls.append(kwargs)
+                return True
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _FakeAlerter)
+        emit_lake_heal_still_refused_alert(
+            findings=3,
+            files_scanned=4,
+            attempt_utc="2026-07-10T02:00:00+00:00",
+            scope="startup-sweep",
+        )
+        (kwargs,) = calls
+        assert kwargs == {
+            "findings": 3,
+            "files_scanned": 4,
+            "attempt_utc": "2026-07-10T02:00:00+00:00",
+            "scope": "startup-sweep",
+        }
+
+    def test_swallows_its_own_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The blanket guard: an alert failure can never fail the boot."""
+
+        class _RaisingAlerter:
+            def lake_heal_still_refused(self, **_kwargs: object) -> bool:
+                raise RuntimeError("simulated alert failure")
+
+        from brutex.notifications import sweep_alerts as mod
+
+        monkeypatch.setattr(mod, "SweepAlerter", _RaisingAlerter)
+        emit_lake_heal_still_refused_alert(
+            findings=1, files_scanned=2, attempt_utc="t", scope="startup-sweep"
+        )  # must not raise
 
 
 # ────────────────────────────────────────────────────────────────────────

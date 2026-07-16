@@ -102,6 +102,14 @@
   .cond { color:var(--text); font-size:12px; display:inline-block; max-width:420px;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }
   .cond.none { color:var(--muted); font-style:italic; }
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the Stage-4 cascade verdict badge.
+     A FAILED row stays RANKED (marker never exclusion) but reads loudly red;
+     a provisional pass reads amber (never a bare green PASS). */
+  .cascbadge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px;
+    font-weight:700; border:1px solid var(--border); color:var(--muted); white-space:nowrap; }
+  .cascbadge.pass { color:var(--green); border-color:var(--green-dim); }
+  .cascbadge.prov { color:var(--yellow); border-color:var(--yellow); }
+  .cascbadge.fail { color:var(--red); border-color:var(--red); }
   .erabanner { display:none; margin:12px 24px 0; padding:10px 14px; border:1px solid var(--yellow);
     border-radius:var(--r-md); background:rgba(255,183,77,.09); color:var(--yellow);
     font-size:13px; line-height:1.6; }
@@ -149,8 +157,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results" aria-current="page">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <div class="live" id="live"><span class="dot bx-live-dot" id="livedot"></span><span id="livetxt">loading</span></div>
@@ -301,6 +312,33 @@ function setDot(state) {
   if (window.BXUI) { BXUI.setDotState(liveDot, state); }
 }
 
+/* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the payload's cascade_join meta —
+   drives the badge's honest fallback text (client law: meta joined + row
+   lacks cascade_status ⇒ "not validated"; any other/absent state ⇒ "—"). */
+let CASC_META = null;
+
+/* The cascade verdict badge cell. cascade_status_text is SERVER-built
+   (sweep_results_view via the ONE oneclick_view.cascade_status_text builder
+   — no verdict prose is composed here); the FAIL/provisional detail rides
+   the title (esc()'d). The badge title carries the cascade's OWN score
+   labelled "Cascade score" — a DIFFERENT formula from the ranking
+   Composite column, never conflated. */
+function cascadeBadge(r) {
+  let txt = r.cascade_status_text;
+  if (txt == null) {
+    if (!(CASC_META && CASC_META.state === "joined")) return "—";
+    txt = "not validated";
+  }
+  const cls = r.cascade_status === "fail" ? "cascbadge fail"
+    : r.cascade_status === "pass" ? "cascbadge pass"
+    : r.cascade_status === "provisional_pass" ? "cascbadge prov" : "cascbadge";
+  const bits = [];
+  if (r.cascade_detail != null) bits.push(String(r.cascade_detail));
+  if (r.cascade_composite != null) bits.push("Cascade score " + metric(r.cascade_composite));
+  if (r.cascade_provisional === true) bits.push("provisional — pool-N DSR fallback");
+  return '<span class="' + cls + '" title="' + esc(bits.join(" · ")) + '">' + esc(txt) + "</span>";
+}
+
 /* The sortable columns: key → (header label, cell renderer). The server already
    ranked by the chosen metric; client-side sort re-orders the fetched page only. */
 const COLS = [
@@ -315,13 +353,20 @@ const COLS = [
   ["profit_factor", "PF", (r) => metric(r.profit_factor)],
   ["win_rate", "Win %", (r) => pct(r.win_rate)],
   ["total_trades", "Trades", (r) => num(r.total_trades)],
+  /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the three joined columns —
+     the badge sorts by the raw status TOKEN (cascade_status); CPCV % and
+     Composite (the RANKING composite from the aggs index) read "—" when
+     unjoined (EMIT-ON-PRESENT keys — absence is honest, never 0). */
+  ["cascade_status", "Cascade", (r) => cascadeBadge(r)],
+  ["cpcv_pass_pct", "CPCV %", (r) => metric(r.cpcv_pass_pct)],
+  ["composite_score", "Composite", (r) => metric(r.composite_score)],
   ["conditions", "Matched conditions", (r) =>
     r.conditions
       ? '<span class="cond" title="' + esc(r.conditions) + '">' + esc(r.conditions) + "</span>"
       : '<span class="cond none">(no conditions — enters every bar)</span>'],
 ];
 const NUMERIC = new Set(["rank", "net_pnl_rupees", "sharpe_ratio", "sortino_ratio",
-  "profit_factor", "win_rate", "total_trades"]);
+  "profit_factor", "win_rate", "total_trades", "cpcv_pass_pct", "composite_score"]);
 
 /* The 4 KPI cards: label + formatter. Values are the SAME num() strings as ever
    (DEC-SURFACE-TRIAL-001) — countUp writes the final exact string synchronously
@@ -520,10 +565,29 @@ async function load() {
     fillSelect(fInstrument, board.instruments);
     fillSelect(fTf, board.timeframes);
     fillSelect(fDirection, board.directions);
+    /* DEC-RESULTS-CASCADE-VERDICT-JOIN-001: keep the cascade meta for the
+       badge fallback law + the header line. Absent key (no report / legacy
+       payload) ⇒ null ⇒ every badge reads "—" — never a fabricated state. */
+    CASC_META = board.cascade_join && typeof board.cascade_join === "object"
+      ? board.cascade_join : null;
     ROWS = (board.rows || []).slice();
     sortKey = "rank"; sortAsc = true;
     animateRows = ROWS.length > 0;
     renderTable();
+    /* The cascade header segment — counts render "?" when the meta carries
+       null (a failed load names its state; never a fabricated 0). */
+    let cascNote = "";
+    if (CASC_META) {
+      cascNote = " · cascade: sweep "
+        + (CASC_META.sweep_id == null ? "?" : esc(String(CASC_META.sweep_id).slice(0, 12)))
+        + " · " + (CASC_META.n_input == null ? "?" : num(CASC_META.n_input)) + " in · "
+        + (CASC_META.n_survived == null ? "?" : num(CASC_META.n_survived)) + " survived · "
+        + esc(String(CASC_META.state));
+      if (board.cascade_flagged) {
+        cascNote += " · " + num(board.cascade_flagged)
+          + " cascade-FAILED row(s) flagged (ranked, never hidden)";
+      }
+    }
     statusEl.textContent = board.available
       ? num((board.rows || []).length) + " of " + num(board.total_rows) + " combos shown · ranked by "
         + esc(board.rank_by) + " · " + num(board.store_count) + " sweep file(s)"
@@ -532,6 +596,7 @@ async function load() {
           ? " · " + num(board.run_id_conflicts)
             + " run-id conflict(s) — duplicate run_ids with different metrics (first-wins, logged)"
           : "")
+        + cascNote
       : "no sweep has been run yet — run one from the dashboard";
     liveTxt.textContent = board.available ? "live · " + num((board.rows || []).length) + " rows" : "no data";
     setDot(board.available ? "ok" : "");
@@ -545,7 +610,17 @@ async function load() {
 }
 
 [fInstrument, fTf, fDirection, fRankBy].forEach((el) => { el.onchange = load; });
-fTop.onchange = load;
+/* ~200 ms trailing debounce for the Top-N NUMBER input
+   (DEC-FRONTEND-LATENCY-HARDENING-001, MIGRATION.md #1720 — the movers.html
+   #topn precedent): a spinner run fires a discrete `change` per click —
+   the debounce coalesces the burst into ONE fetch. The selects keep the
+   immediate load (a single discrete user action; nothing to coalesce). */
+const FTOP_DEBOUNCE_MS = 200;
+let fTopDebounceTimer = null;
+fTop.onchange = () => {
+  clearTimeout(fTopDebounceTimer);
+  fTopDebounceTimer = setTimeout(load, FTOP_DEBOUNCE_MS);
+};
 document.getElementById("refreshBtn").onclick = load;
 /* First load waits for DOMContentLoaded so the deferred bx-ui.js helpers are
    available (defer scripts run before DOMContentLoaded); everything above also

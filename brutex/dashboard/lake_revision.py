@@ -95,13 +95,19 @@ Honest envelope (Golden Rule #10 — stated, not hidden)
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import threading
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar, cast
 
 import structlog
 
 _LOG = structlog.get_logger("brutex.dashboard.lake_revision")
+
+_T = TypeVar("_T")
 
 #: Stable sentinel component for a lake whose window ledger / sweeps tree does
 #: not exist yet (a fresh/empty lake, or one populated before the ledger
@@ -132,6 +138,14 @@ _GREEKS_REVISION_FILENAME: Final[str] = "revision.json"
 #: test, not imported (the :data:`_SWEEPS_DIRNAME` precedent: this module stays
 #: a lean stdlib-only probe surface).
 _SWEEP_AUDIT_RELPATH: Final[tuple[str, str]] = ("audit", "sweep-all.jsonl")
+
+#: The ``<sweeps>``-relative path of the Stage-4 cascade report
+#: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001). MUST equal
+#: ``cascade_wire.report_path(<sweeps>)`` — i.e. ``CASCADE_DIRNAME`` /
+#: ``REPORT_FILENAME`` — pinned by test, not imported (the
+#: :data:`_SWEEPS_DIRNAME` precedent: the engine wire module pulls the
+#: metrics/numpy import graph; this probe stays lean stdlib-only).
+_CASCADE_REPORT_RELPATH: Final[tuple[str, str]] = ("cascade", "cascade-report.json")
 
 
 def _stat_token(target: Path, *, event: str, include_ino: bool = False) -> str | None:
@@ -301,6 +315,32 @@ def sweep_results_revision(lake_root: Path) -> str | None:
     return f"{dirs}|{chain}"
 
 
+def cascade_report_revision(lake_root: Path) -> str | None:
+    """Return the Stage-4 cascade report's stat content token, or ``None``.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001: one ``os.stat`` of
+    ``<lake_root>/sweeps/cascade/cascade-report.json``
+    (:data:`_CASCADE_REPORT_RELPATH`) folded to ``"<mtime_ns>:<size>"``.
+    A DEDICATED file token is needed because the report is atomically
+    OVERWRITTEN in place each sweep (``cascade_wire.write_report`` —
+    tmp → ``os.replace``): the rewrite moves NO directory mtime that
+    :func:`sweeps_revision` digests, so without this probe a ``/results``
+    poll could serve verdicts from the PREVIOUS sweep's report forever
+    (the ``sweep_results_revision`` audit-stat precedent).
+
+    Inherited :func:`_stat_token` semantics verbatim: a missing file → the
+    stable :data:`ABSENT_TOKEN` (its first-ever creation moves the token
+    exactly once); ``None`` — "unknown, no signal" — on any other
+    :class:`OSError`, logged (``lake_revision.cascade_report_stat_failed``).
+    The caller folds ``None`` as a probe OUTAGE (the served payload holds —
+    bounded staleness, never a fake flip).
+    """
+    return _stat_token(
+        lake_root.joinpath(_SWEEPS_DIRNAME, *_CASCADE_REPORT_RELPATH),
+        event="lake_revision.cascade_report_stat_failed",
+    )
+
+
 def rate_bridge_revision(lake_root: Path) -> str | None:
     """Return the CLI rate-bridge file's stat content token, or ``None``.
 
@@ -343,6 +383,237 @@ def rate_bridge_revision(lake_root: Path) -> str | None:
         event="lake_revision.rate_bridge_stat_failed",
         include_ino=True,
     )
+
+
+def registry_revision(registry_path: Path) -> str | None:
+    """Return the F&O ``registry.duckdb`` cache's stat content token, or ``None``.
+
+    DEC-O1-GUARANTEE-HARDEN-001 (the H1 registry-pager count cache): the ``/db``
+    registry pagers' FILTERED ``COUNT(*)`` totals are paging-invariant, so they
+    are memoised per registry CONTENT — and this token is the content signal.
+    The SECOND consumer (DEC-MEMORY-FOOTPRINT-HARDENING-001, consolidated onto
+    this ONE probe at the merge-reconcile — the two in-flight twins collapsed
+    per Golden Rule #11 COMMON): the options expiry-calendar / strike-chain /
+    CANDIDATE cache keys fold it at the ``app.py`` key-build sites
+    (``_registry_key_component``), so a CROSS-PROCESS metadata pull — which
+    bumps NO write generation — re-keys them on the next poll.
+    TWO stat probes folded into one token (O(1), never a table read):
+
+    * the ``registry.duckdb`` file itself — a metadata pull's write session
+      moves it on checkpoint/close;
+    * its ``registry.duckdb.wal`` sibling — a CONCURRENT writer's rows land in
+      the DuckDB write-ahead log BEFORE the main file's checkpoint, so folding
+      the WAL's stat closes the mid-write staleness window (an appended WAL
+      moves the token even while the main file's stat is still).
+
+    Inherited :func:`_stat_token` semantics per component: a missing piece →
+    the stable :data:`ABSENT_TOKEN` (an absent registry keys stably; its
+    creation moves the token exactly once), any other :class:`OSError` → a
+    structlog WARN (``lake_revision.registry_stat_failed``) + ``None`` =
+    "unknown, no signal" — the consumer then computes fresh UNCACHED (the
+    lake_revision-family outage posture: never a stale illusion).
+
+    HONESTY NOTE (Golden Rule #10, review round 2): both components are
+    default ``include_ino=False`` stat tokens, so an in-place overwrite that
+    leaves a component's ``(mtime_ns, size)`` pair unchanged (an equal-size
+    rewrite landing within one mtime granule) moves neither token — the
+    documented family-wide stat-token residual (the DEC-LAKE-STATS-MANIFEST-001
+    #1614 wording); a cached total can be served stale for that granule until
+    the next stat moves.
+
+    Parameters
+    ----------
+    registry_path
+        The ``registry.duckdb`` path
+        (:func:`brutex.dashboard.db_view.registry_path_for`).
+
+    Returns
+    -------
+    str | None
+        ``"<main token>|<wal token>"``, or ``None`` when either probe failed
+        with a non-missing-file :class:`OSError`.
+    """
+    base = _stat_token(registry_path, event="lake_revision.registry_stat_failed")
+    if base is None:
+        return None
+    wal = _stat_token(
+        registry_path.with_name(registry_path.name + ".wal"),
+        event="lake_revision.registry_stat_failed",
+    )
+    if wal is None:
+        return None
+    return f"{base}|{wal}"
+
+
+#: Default TTL (seconds) for :class:`RevisionProbeMemo` — how long ONE probe
+#: result may be re-served before the directory sweep re-runs. 1 s bounds the
+#: per-poll O(dirs) probes (DEC-O1-GUARANTEE-HARDEN-001 H2) at a staleness far
+#: under the 120 s adaptive-floor norm; the RateBridgeCache 2 s TTL
+#: (DEC-PULL-RATE-BRIDGE-NONBLOCK-CACHE-001) is the precedent.
+DEFAULT_REVISION_PROBE_TTL_S: Final[float] = 1.0
+
+#: The fail-loud env override for :func:`resolve_revision_probe_ttl`.
+#: ``0`` disables the memo entirely (byte-identical legacy: every call
+#: re-probes); junk raises at the memo's FIRST use, never a silent fallback.
+REVISION_PROBE_TTL_ENV: Final[str] = "BRUTEX_REVISION_PROBE_TTL_S"
+
+
+def resolve_revision_probe_ttl(env: Mapping[str, str] | None = None) -> float:
+    """Resolve the revision-probe memo TTL from the environment — fail-loud.
+
+    Reads :data:`REVISION_PROBE_TTL_ENV`; absent/blank →
+    :data:`DEFAULT_REVISION_PROBE_TTL_S`. A junk value (non-float, negative,
+    NaN, infinite) raises :class:`ValueError` — the house fail-loud env idiom
+    (never a silent fallback that would mask an operator typo). ``0`` is the
+    documented kill switch: the memo becomes a pass-through and every call
+    runs the real probe (byte-identical legacy behaviour).
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+
+    Returns
+    -------
+    float
+        The TTL in seconds, ``>= 0`` and finite.
+
+    Raises
+    ------
+    ValueError
+        On a non-float / negative / non-finite override value.
+    """
+    source = os.environ if env is None else env
+    raw = source.get(REVISION_PROBE_TTL_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_REVISION_PROBE_TTL_S
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid {REVISION_PROBE_TTL_ENV}={raw!r}: expected a finite float >= 0"
+        ) from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"invalid {REVISION_PROBE_TTL_ENV}={raw!r}: expected a finite float >= 0")
+    return value
+
+
+class RevisionProbeMemo:
+    """A tiny TTL memo bounding per-poll revision-probe cost — COMMON, injectable.
+
+    DEC-O1-GUARANTEE-HARDEN-001 (H2): two freshness probes are honest
+    O(dirs)-per-poll sweeps — ``oneclick_artifacts.runs_revision_probe`` (an
+    UNCAPPED O(run dirs) manifest-stat walk, the F5 ruling) and
+    :func:`sweep_results_revision` (an O(sweep dirs) scandir digest) — and both
+    re-ran on EVERY request. This memo serves the last probe RESULT for a short
+    TTL (:func:`resolve_revision_probe_ttl` — default 1 s, env-overridable,
+    ``0`` = disabled/pass-through), so N polls within one TTL pay ONE sweep.
+
+    Honest envelope (Golden Rule #10):
+
+    * staleness is bounded by the TTL — a write landing right after a probe is
+      seen at most ``ttl`` seconds late (default 1 s, far under the 120 s
+      adaptive-floor norm); a poll AFTER the TTL always re-probes, so there is
+      no permanent-staleness state (clock-injected test-pinned).
+    * within one TTL window a consumer that ALSO reads fresh (un-memoised)
+      revision signals can transiently mix generations — e.g. the /results
+      leaderboard keys its sweep-scan cache on THIS memo's (≤TTL-stale)
+      ``sweep_results_revision`` while its cascade/composite revisions are
+      probed fresh per poll, so for ≤TTL after a new sweep lands the payload
+      can join a stale scan generation with a fresh cascade join (review
+      round 1 MINOR-2). Graceful by construction — the cascade join is
+      per-item-tolerant (an unmatched verdict is excluded, never a crash) —
+      and it self-heals at the next TTL expiry.
+    * a probe result the *cacheable* predicate rejects (default: ``None`` — the
+      probe-outage verdict) is NEVER memoised and evicts any prior entry, so an
+      outage/recovery verdict is re-derived per call exactly as before.
+    * the probe runs INSIDE the lock (single-flight): concurrent cold pollers
+      pay one sweep and the rest wait — on a WEDGED volume that serialises the
+      pollers behind one wedged probe instead of wedging each independently
+      (the pre-memo behaviour); the memo is a cost bound, not wedge protection.
+    * entries are keyed by caller-supplied server-derived keys (a handful per
+      app — never client-typed), so the dict is bounded by construction.
+    * the TTL is resolved lazily at the FIRST :meth:`get` (junk env fails loud
+      there) and latched for the instance's lifetime; the production wiring
+      additionally validates the env EAGERLY at ``build_app`` (review round 1
+      MINOR-1) AND ``cmd_dashboard`` validates it FIRST with the clean
+      ``[brutex]`` one-liner + ``EXIT_USER_ERROR`` — the loop-watchdog sibling
+      idiom (review round 2) — so a junk value refuses at dashboard startup,
+      never as a first-request 500 nor a raw CLI traceback.
+
+    Parameters
+    ----------
+    ttl_s
+        Explicit TTL override (tests / injection); ``None`` resolves the env
+        via :func:`resolve_revision_probe_ttl` at first use.
+    clock
+        Injectable monotonic clock (tests); production keeps
+        :func:`time.monotonic`.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_s: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, object]] = {}
+        self._resolved_ttl: float | None = ttl_s
+
+    def _resolve_ttl(self) -> float:
+        """Latch the TTL — the injected override, else the fail-loud env resolve.
+
+        The lazy resolve+latch runs under ``self._lock`` (double-checked), so
+        two racing first-callers latch exactly ONE resolved value (review
+        round 1 — the prior unlocked write was benign under CPython but a
+        race nonetheless; the fast path stays lock-free once latched).
+        """
+        resolved = self._resolved_ttl
+        if resolved is None:
+            with self._lock:
+                resolved = self._resolved_ttl
+                if resolved is None:
+                    resolved = resolve_revision_probe_ttl()
+                    self._resolved_ttl = resolved
+        return resolved
+
+    def get(
+        self,
+        key: str,
+        probe: Callable[[], _T],
+        *,
+        cacheable: Callable[[_T], bool] | None = None,
+    ) -> _T:
+        """Return *key*'s memoised probe result, re-running *probe* past the TTL.
+
+        The caller owns key↔type discipline (one probe result type per key —
+        both production keys embed the probed root path). *cacheable* decides
+        whether a fresh result may be memoised; ``None`` means
+        ``value is not None`` (a ``None`` probe verdict — outage — is never
+        held for the TTL). O(1) per call on a hit; one probe per TTL window
+        per key otherwise.
+        """
+        ttl = self._resolve_ttl()
+        if ttl <= 0.0:
+            return probe()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and (self._clock() - entry[0]) < ttl:
+                return cast("_T", entry[1])
+            value = probe()
+            ok = (value is not None) if cacheable is None else cacheable(value)
+            if ok:
+                self._entries[key] = (self._clock(), value)
+            else:
+                self._entries.pop(key, None)
+            return value
+
+    def reset(self) -> None:
+        """Drop every memoised entry (the house cache reset seam)."""
+        with self._lock:
+            self._entries.clear()
 
 
 def _greeks_backfill_revision(lake_root: Path) -> str | None:
@@ -409,8 +680,14 @@ def lake_revision(lake_root: Path) -> str | None:
 
 __all__ = [
     "ABSENT_TOKEN",
+    "DEFAULT_REVISION_PROBE_TTL_S",
+    "REVISION_PROBE_TTL_ENV",
+    "RevisionProbeMemo",
+    "cascade_report_revision",
     "lake_revision",
     "rate_bridge_revision",
+    "registry_revision",
+    "resolve_revision_probe_ttl",
     "sweep_results_revision",
     "sweeps_revision",
 ]

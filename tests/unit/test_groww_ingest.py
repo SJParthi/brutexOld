@@ -36,6 +36,7 @@ from brutex.data.models import CandleBar
 from brutex.data.parquet_writer import BarConflict, WriteResult
 from brutex.data.partial_window_detect import last_completed_session_on_or_before
 from brutex.data.sink import SinkAppendResult
+from brutex.data.today_completeness import TODAY_INCOMPLETE
 from brutex.models import Exchange, Instrument, InstrumentType, Segment
 from brutex.observability.correlation import pull_id_scope
 from brutex.orchestrator.universe_phases import ItemResult
@@ -232,6 +233,61 @@ def _sync_run_parallel[ItemT, ResultT](
 def _events(logs: Sequence[Mapping[str, object]], name: str) -> list[Mapping[str, object]]:
     """All captured events with ``event == name`` (in emission order)."""
     return [e for e in logs if e["event"] == name]
+
+
+class TestMarketHoursGuard:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the per-window market-hours halt."""
+
+    def test_blocked_guard_raises_before_any_fetch(self) -> None:
+        from brutex.data.errors import MarketHoursHalt
+
+        adapter = _Adapter()
+        sink = _Sink()
+        with pytest.raises(MarketHoursHalt) as excinfo:
+            ingest_spot(
+                adapter,  # type: ignore[arg-type]
+                sink,
+                instrument=_INST,
+                interval="1day",
+                start=date(2021, 1, 1),
+                end=date(2021, 8, 1),
+                market_closed=lambda: True,
+            )
+        assert excinfo.value.reason == "market_hours"
+        # The guard fires BEFORE the vendor fetch — no call, no write.
+        assert adapter.calls == 0
+        assert sink.appends == []
+
+    def test_open_market_guard_does_not_gate(self) -> None:
+        """market_closed returning False (the A-True/B-False branch) never halts."""
+        adapter = _Adapter()
+        sink = _Sink()
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            market_closed=lambda: False,
+        )
+        assert report.windows == 2
+        assert adapter.calls == 2
+
+    def test_none_guard_is_pre_guard_behaviour(self) -> None:
+        """The default (None) guard never consults a clock — byte-identical to before."""
+        adapter = _Adapter()
+        sink = _Sink()
+        report = ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            sink,
+            instrument=_INST,
+            interval="1day",
+            start=date(2021, 1, 1),
+            end=date(2021, 8, 1),
+            market_closed=None,
+        )
+        assert report.windows == 2
 
 
 class TestIngestSpot:
@@ -3056,3 +3112,384 @@ class TestRetryCounterSplitSpot:
         assert rec.empty_retries == 1
         assert rec.transient_retries == 1
         assert rec.empty_retries + rec.transient_retries == rec.in_pull_fetches
+
+
+# ---------------------------------------------------------------------------
+# DEC-PULL-TODAY-COMPLETENESS-GATE-001 — the pre-settle TODAY gate fixtures.
+# ---------------------------------------------------------------------------
+_TODAY_IST = __import__("zoneinfo").ZoneInfo("Asia/Kolkata")
+#: The gate tests' TODAY — a regular NSE trading Friday inside coverage.
+_GATE_TODAY = date(2021, 3, 5)
+#: An injected post-close IST clock (17:00) — clamp_window_end mints end == today+1.
+_GATE_EVENING = datetime(2021, 3, 5, 17, 0, tzinfo=_TODAY_IST)
+
+
+def _gate_now() -> datetime:
+    return _GATE_EVENING
+
+
+def _day_minute(day: date, minute_index: int) -> CandleBar:
+    """The day's 1-minute session bar at 09:15 + *minute_index* IST, stored UTC."""
+    open_dt = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_TODAY_IST)
+    return _bar((open_dt + timedelta(minutes=minute_index)).astimezone(UTC))
+
+
+def _full_gate_day(day: date) -> list[CandleBar]:
+    return [_day_minute(day, i) for i in range(375)]
+
+
+class _BarsSink:
+    """Recording sink capturing the exact bar SEQUENCES the tail appends."""
+
+    def __init__(self) -> None:
+        self.batches: list[list[CandleBar]] = []
+
+    def append(
+        self,
+        *,
+        exchange: str,
+        segment: str,
+        symbol: str,
+        interval: str,
+        bars: Sequence[CandleBar],
+        merge_mode: str = "keep-first",
+    ) -> SinkAppendResult:
+        del exchange, segment, symbol, interval
+        self.batches.append(list(bars))
+        return SinkAppendResult(bars_appended=len(bars), partitions_written=1, write_results=())
+
+
+class _MutableAdapter:
+    """Fake adapter whose bar list can be swapped between passes (the re-pull story)."""
+
+    def __init__(self, bars: Sequence[CandleBar]) -> None:
+        self.bars = list(bars)
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self, *, symbol: str, exchange: object, interval: str, start: date, end: date
+    ) -> list[CandleBar]:
+        del symbol, exchange, interval, start, end
+        self.calls += 1
+        return list(self.bars)
+
+
+def _record_essence(rec: object) -> tuple[object, ...]:
+    """A ledger record's behavior-visible fields (timestamps excluded — wall-clock)."""
+    return (
+        rec.market,  # type: ignore[attr-defined]
+        rec.security_id,  # type: ignore[attr-defined]
+        rec.interval,  # type: ignore[attr-defined]
+        rec.window_start,  # type: ignore[attr-defined]
+        rec.window_end,  # type: ignore[attr-defined]
+        rec.status,  # type: ignore[attr-defined]
+        rec.bars,  # type: ignore[attr-defined]
+        rec.attempts,  # type: ignore[attr-defined]
+        rec.last_error,  # type: ignore[attr-defined]
+        rec.empty_streak,  # type: ignore[attr-defined]
+        rec.in_pull_fetches,  # type: ignore[attr-defined]
+        rec.bars_net_new,  # type: ignore[attr-defined]
+        rec.empty_retries,  # type: ignore[attr-defined]
+        rec.transient_retries,  # type: ignore[attr-defined]
+    )
+
+
+class TestIngestSpotTodayGate:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window failing the per-class
+    completeness criteria has today's bars WITHHELD from the sink and is demoted FAILED
+    under the streak-EXEMPT TODAY_INCOMPLETE reason; every other shape is byte-identical."""
+
+    def _run(
+        self,
+        adapter: object,
+        sink: object,
+        ledger: object,
+        *,
+        instrument: Instrument = _INST,
+        start: date = date(2021, 3, 4),
+        end: date = date(2021, 3, 6),
+        gate: bool = True,
+    ) -> IngestReport:
+        return ingest_spot(
+            adapter,  # type: ignore[arg-type]
+            sink,  # type: ignore[arg-type]
+            instrument=instrument,
+            interval="1minute",
+            start=start,
+            end=end,
+            ledger=ledger,  # type: ignore[arg-type]
+            now_ist=_gate_now,
+            today_completeness_gate=gate,
+        )
+
+    def test_incomplete_today_withheld_and_demoted(self) -> None:
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        prior = [
+            _bar(datetime(2021, 3, 4, 4, 5, tzinfo=UTC)),
+            _bar(datetime(2021, 3, 4, 4, 6, tzinfo=UTC)),
+        ]
+        today = _full_gate_day(_GATE_TODAY)[:-1]  # 374 minutes — still settling
+        sink = _BarsSink()
+        led = WindowLedger()
+        with capture_logs() as logs:
+            self._run(_Adapter(bars=prior + today), sink, led)
+        # The write guard: ONLY the settled prior-day history reached the sink.
+        assert len(sink.batches) == 1
+        assert sink.batches[0] == prior
+        rec = led.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == TODAY_INCOMPLETE
+        assert rec.empty_streak == 0  # streak-exempt — never a step toward SKIPPED
+        events = [e for e in logs if e["event"] == "ingest.window.today_incomplete"]
+        assert len(events) == 1
+        assert events[0]["withheld_bars"] == 374
+        assert events[0]["reason"] == "count_short"
+
+    def test_complete_today_settles_success_byte_identical(self) -> None:
+        # The spec's complete-day pin: a genuinely-complete day settles SUCCESS
+        # with ALL bars appended and a ledger record equal to a gate-off run.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        bars = [_bar(datetime(2021, 3, 4, 4, 5, tzinfo=UTC)), *_full_gate_day(_GATE_TODAY)]
+        results = []
+        for gate in (True, False):
+            sink = _BarsSink()
+            led = WindowLedger()
+            with capture_logs() as logs:
+                self._run(_Adapter(bars=bars), sink, led, gate=gate)
+            results.append((sink.batches, [_record_essence(r) for r in led.records()], logs))
+        (on_batches, on_recs, on_logs), (off_batches, off_recs, _off_logs) = results
+        assert on_batches == off_batches  # the ORIGINAL bars landed — 376 bars
+        assert on_batches[0] == bars
+        assert on_recs == off_recs
+        assert on_recs[0][5] == SUCCESS
+        assert not any(e["event"].startswith("ingest.window.today_") for e in on_logs)
+
+    def test_non_today_window_byte_identical(self, tmp_path: Path) -> None:
+        # The spec's non-today pin: a historical window under an armed gate is
+        # BYTE-identical (month-file SHA-256 + ledger record) to a gate-off run,
+        # and the classifier is never consulted (spy).
+        import hashlib
+
+        from brutex.data import today_completeness as tc_mod
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+        from brutex.data.window_ledger import WindowLedger
+
+        bars = [*_full_gate_day(date(2021, 3, 1)), _bar(datetime(2021, 3, 2, 4, 5, tzinfo=UTC))]
+        shas: list[str] = []
+        recs: list[list[tuple[object, ...]]] = []
+        for arm, gate in (("on", True), ("off", False)):
+            lake = tmp_path / arm
+            sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+            led = WindowLedger()
+            calls: list[object] = []
+            real = tc_mod.classify_today_completeness
+
+            def _spy(
+                _calls: list[object] = calls,
+                _real: object = real,
+                **kw: object,
+            ) -> object:
+                _calls.append(kw)
+                return _real(**kw)  # type: ignore[operator]
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(tc_mod, "classify_today_completeness", _spy)
+                with capture_logs() as logs:
+                    self._run(
+                        _Adapter(bars=bars),
+                        sink,
+                        led,
+                        start=date(2021, 3, 1),
+                        end=date(2021, 3, 3),
+                        gate=gate,
+                    )
+            assert calls == []  # non-today: the classifier is NOT consulted
+            assert not any(e["event"].startswith("ingest.window.today_") for e in logs)
+            files = sorted((lake / "bars").rglob("*.parquet"))
+            assert files
+            shas.append(hashlib.sha256(b"".join(f.read_bytes() for f in files)).hexdigest())
+            recs.append([_record_essence(r) for r in led.records()])
+        assert shas[0] == shas[1]
+        assert recs[0] == recs[1]
+
+    def test_clamp_today_none_inert(self) -> None:
+        # A legacy/un-threaded payload (clamp_today None) keeps the gate INERT —
+        # fail-open to pre-gate behavior even with the flag armed.
+        from brutex.adapters.groww.ingest import _process_window_tail, _RawWindow
+        from brutex.data.fetch_coverage import WindowKey
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        bars = _full_gate_day(_GATE_TODAY)[:-1]  # would demote if judged
+        raw = _RawWindow(
+            instrument=_INST,
+            interval="1minute",
+            window=(date(2021, 3, 4), date(2021, 3, 6)),
+            key=WindowKey(
+                market="groww",
+                security_id="NIFTY",
+                interval="1minute",
+                start=date(2021, 3, 4),
+                end=date(2021, 3, 6),
+            ),
+            raw_bars=list(bars),
+            fetch_count=1,
+            settle_empty=False,
+        )
+        assert raw.clamp_today is None  # the appended-last defaulted field
+        sink = _BarsSink()
+        led = WindowLedger()
+        _process_window_tail(
+            sink,  # type: ignore[arg-type]
+            raw,
+            ledger=led,
+            on_success=None,
+            pull_id="p",
+            series_fields={"symbol": "NIFTY", "interval": "1minute"},
+            today_completeness_gate=True,
+        )
+        assert sink.batches[0] == bars  # nothing withheld
+        assert led.records()[0].status == SUCCESS
+
+    def test_dry_run_false_arm(self) -> None:
+        # The #1031 false-red regression: a synthetic/dry-run pull (flag False)
+        # over a today-ending window settles SUCCESS byte-identically.
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        bars = [_day_minute(_GATE_TODAY, i) for i in range(3)]  # first-day-only shape
+        sink = _BarsSink()
+        led = WindowLedger()
+        with capture_logs() as logs:
+            self._run(_Adapter(bars=bars), sink, led, gate=False)
+        assert led.records()[0].status == SUCCESS
+        assert sink.batches[0] == bars
+        assert not any(e["event"].startswith("ingest.window.today_") for e in logs)
+
+    def test_kill_switch_off_env_resolves_false(self) -> None:
+        # The arm sites pass ``(not dry_run) and resolve_today_completeness_enabled()``
+        # — env "0" resolves False (gate-off byte-identity is the dry-run pin above);
+        # junk raises at the resolve (pull start), pinned in test_today_completeness.
+        from brutex.data.today_completeness import (
+            TODAY_COMPLETENESS_GATE_ENV,
+            resolve_today_completeness_enabled,
+        )
+
+        assert resolve_today_completeness_enabled(env={TODAY_COMPLETENESS_GATE_ENV: "0"}) is False
+        with pytest.raises(ValueError):
+            resolve_today_completeness_enabled(env={TODAY_COMPLETENESS_GATE_ENV: "junk"})
+
+    def test_cash_non_index_not_count_demoted(self) -> None:
+        from brutex.data.window_ledger import FAILED, SUCCESS, WindowLedger
+
+        equity = Instrument(
+            exch_id=Exchange.NSE,
+            security_id=99,
+            symbol_name="RELIANCE",
+            display_name="RELIANCE",
+            instrument=InstrumentType.EQ,
+            segment=Segment.CASH,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=1,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+            asm_gsm_flag=False,
+        )
+        # A short CASH day with real volume: NOT demoted (no count demand).
+        short_day = [_day_minute(_GATE_TODAY, i) for i in range(40)]
+        led = WindowLedger()
+        self._run(_Adapter(bars=short_day), _BarsSink(), led, instrument=equity)
+        assert led.records()[0].status == SUCCESS
+        # An all-zero-volume CASH day: demoted (the #837 settling shape).
+        zero_vol = [
+            CandleBar(
+                timestamp=b.timestamp,
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=0,
+                open_interest=None,
+            )
+            for b in short_day
+        ]
+        led2 = WindowLedger()
+        sink2 = _BarsSink()
+        self._run(_Adapter(bars=zero_vol), sink2, led2, instrument=equity)
+        rec = led2.records()[0]
+        assert rec.status == FAILED
+        assert rec.last_error == TODAY_INCOMPLETE
+        assert sink2.batches[0] == []  # today withheld (no prior history in-window)
+
+    def test_repull_convergence(self, tmp_path: Path) -> None:
+        # Demote round 1 → the vendor settles → round 2 SUCCESS with ALL bars
+        # stored and ZERO BarConflicts — the write guard is exactly what makes
+        # the re-pull LAND (a stored partial day would keep-first-freeze it).
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+        from brutex.data.window_ledger import FAILED, SUCCESS, WindowLedger
+
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=tmp_path))
+        led = WindowLedger()
+        full = _full_gate_day(_GATE_TODAY)
+        adapter = _MutableAdapter(full[:-1])  # round 1: still settling
+        report1 = self._run(adapter, sink, led)
+        assert led.records()[0].status == FAILED
+        assert led.records()[0].last_error == TODAY_INCOMPLETE
+        adapter.bars = list(full)  # the vendor settles
+        report2 = self._run(adapter, sink, led)
+        rec = led.records()[0]
+        assert rec.status == SUCCESS
+        assert report1.conflicts == 0
+        assert report2.conflicts == 0  # nothing partial was ever stored
+        assert report2.bars_appended == 375
+
+    def test_evening_rounds_never_skip(self) -> None:
+        # 3+ consecutive same-evening demotions (each until-clean round re-pulls
+        # the FAILED window): status FAILED throughout, NEVER SKIPPED, one
+        # bounded fetch per round — the streak-exempt law end-to-end.
+        from brutex.data.window_ledger import FAILED, WindowLedger
+
+        adapter = _MutableAdapter(_full_gate_day(_GATE_TODAY)[:-1])
+        led = WindowLedger()
+        for round_no in range(1, 5):
+            self._run(adapter, _BarsSink(), led)
+            rec = led.records()[0]
+            assert rec.status == FAILED
+            assert rec.last_error == TODAY_INCOMPLETE
+            assert rec.empty_streak == 0
+            assert adapter.calls == round_no  # one fetch per round — bounded
+
+    def test_session_exempt_symbol_inert(self) -> None:
+        from brutex.data.window_ledger import SUCCESS, WindowLedger
+
+        gift = _inst("GIFTNIFTY")
+        bars = [_day_minute(_GATE_TODAY, i) for i in range(10)]
+        led = WindowLedger()
+        sink = _BarsSink()
+        with capture_logs() as logs:
+            self._run(_Adapter(bars=bars), sink, led, instrument=gift)
+        assert led.records()[0].status == SUCCESS  # never judged — not the NSE grid
+        assert sink.batches[0] == bars
+        assert not any(e["event"].startswith("ingest.window.today_") for e in logs)
+
+    def test_raw_empty_today_window_rides_empty_machinery(self) -> None:
+        # A covers-today raw-EMPTY fetch is the EMPTY channel's (visibility WARN
+        # only) — the spec's "legit vendor-empty day never false-demotes" pin,
+        # spot side.
+        from brutex.data.window_ledger import EMPTY, WindowLedger
+
+        led = WindowLedger()
+        with capture_logs() as logs:
+            self._run(_Adapter(bars=[]), _BarsSink(), led)
+        rec = led.records()[0]
+        assert rec.status == EMPTY
+        assert rec.last_error is None
+        assert any(e["event"] == "ingest.window.today_empty" for e in logs)
+        assert not any(e["event"] == "ingest.window.today_incomplete" for e in logs)

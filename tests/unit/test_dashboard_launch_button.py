@@ -130,10 +130,38 @@ class TestLaunchStateRoute:
         # coordinator delta: base command display carries NO ack flag
         assert lb.SLA_ACK_FLAG not in payload["cards"]["spot"]["command_display"]
         assert payload["cards"]["spot"]["sla_ack_flag"] == lb.SLA_ACK_FLAG
-        # On main the futures alias layer (PR #1264) is absent — honest verdict.
+        # DEC-ENGINE-SPOT-ONLY-001: the request-time probe (the REAL scope
+        # classifier; zero code change in launch_button, exactly as its
+        # docstring promises) honestly reads UNAVAILABLE — the futures track
+        # is retired from engine scope, so the card is disabled with the
+        # DEC-citing reason (the pre-flip PR-#1264-merged available arm is
+        # pinned via the monkeypatched probe tests).
         assert payload["futures"]["available"] is False
         assert payload["cards"]["futures"]["enabled"] is False
-        assert "PR #1264" in payload["cards"]["futures"]["reason"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in payload["cards"]["futures"]["reason"]
+
+    def test_futures_card_disabled_when_alias_unavailable(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The UNAVAILABLE futures CARD arm: disabled + the probe's reason.
+
+        Covers ``_card_payload``'s ``reason = futures.reason`` branch (the
+        #1311-fold flip of ``test_state_payload`` to available=True left it
+        unexercised) via a monkeypatched probe, mirroring the 400-arm test.
+        """
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
+        payload = client.get("/api/v1/launch/state").json()
+        assert payload["futures"]["available"] is False
+        card = payload["cards"]["futures"]
+        assert card["enabled"] is False
+        assert card["reason"] == lb.FUTURES_DEPENDENCY_NOTE
+        assert "DEC-ENGINE-SPOT-ONLY-001" in card["reason"]
+        # The spot card is untouched by the futures probe.
+        assert payload["cards"]["spot"]["enabled"] is True
 
     def test_state_without_store_is_honest(self, bare_client: TestClient) -> None:
         payload = bare_client.get("/api/v1/launch/state").json()
@@ -162,10 +190,31 @@ class TestLaunchSweepRoute:
         resp = bare_client.post("/api/v1/launch/sweep?card=spot")
         assert resp.status_code == 503
 
-    def test_futures_unavailable_400_on_main(self, client: TestClient) -> None:
+    def test_futures_unavailable_400_when_alias_absent(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The honest-refusal arm, pinned via a monkeypatched probe (the REAL
+        # probe also refuses under DEC-ENGINE-SPOT-ONLY-001 — see the
+        # real-probe 400 test below).
+        monkeypatch.setattr(
+            lb,
+            "probe_futures_alias",
+            lambda: lb.FuturesAvailability(available=False, reason=lb.FUTURES_DEPENDENCY_NOTE),
+        )
         resp = client.post("/api/v1/launch/sweep?card=futures")
         assert resp.status_code == 400
-        assert "PR #1264" in resp.json()["detail"]
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
+
+    def test_futures_card_400_under_the_real_spot_only_probe(self, client: TestClient) -> None:
+        """DEC-ENGINE-SPOT-ONLY-001: the REAL probe refuses a futures launch.
+
+        No monkeypatch — the request-time probe consults the real scope
+        classifier, so a POST on the futures card is a loud 400 citing the
+        DEC, never a spawned NSE-NIFTY-FUT sweep.
+        """
+        resp = client.post("/api/v1/launch/sweep?card=futures")
+        assert resp.status_code == 400
+        assert "DEC-ENGINE-SPOT-ONLY-001" in resp.json()["detail"]
 
     def test_missing_partitions_412_nothing_spawned(
         self, tmp_path: Path, fake_spawner: dict[str, Any]

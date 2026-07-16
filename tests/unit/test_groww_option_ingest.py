@@ -412,6 +412,47 @@ def test_ampersand_fallback_stays_one_logical_fetch_for_ledger_accounting() -> N
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# ingest_option_contract — market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001)
+# ─────────────────────────────────────────────────────────────────────────
+def test_option_market_hours_guard_blocked_raises_before_fetch() -> None:
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    sink = _Sink()
+    with pytest.raises(MarketHoursHalt) as excinfo:
+        ingest_option_contract(
+            _client(sdk),
+            sink,
+            contract=_ce(),
+            interval="1day",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 2),
+            now_ist=_now,
+            market_closed=lambda: True,
+        )
+    assert excinfo.value.reason == "market_hours"
+    assert sdk.calls == 0  # the guard fires before any vendor call
+    assert sink.appends == []
+
+
+def test_option_market_hours_guard_open_does_not_gate() -> None:
+    """market_closed returning False (the A-True/B-False branch) never halts."""
+    sdk = _FakeSDK(payload=_candles(_OUT_SESSION))
+    sink = _Sink()
+    report = ingest_option_contract(
+        _client(sdk),
+        sink,
+        contract=_ce(),
+        interval="1day",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 2),
+        now_ist=_now,
+        market_closed=lambda: False,
+    )
+    assert report.windows == 1 and report.bars_appended == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # ingest_option_contract — happy / skip / clamp
 # ─────────────────────────────────────────────────────────────────────────
 def test_ingest_success_no_ledger_no_hooks() -> None:
@@ -4863,3 +4904,322 @@ class TestRetryCounterSplitOption:
         assert rec.empty_retries == 2
         assert rec.transient_retries == 1
         assert rec.empty_retries + rec.transient_retries + 1 == rec.in_pull_fetches
+
+
+# ---------------------------------------------------------------------------
+# DEC-PULL-TODAY-COMPLETENESS-GATE-001 — the pre-settle TODAY gate, F&O side.
+# ---------------------------------------------------------------------------
+from brutex.data.today_completeness import TODAY_INCOMPLETE  # noqa: E402
+
+
+def _gate_fut(symbol: str = "NSE-NIFTY-25Jan24-FUT") -> DerivativeContract:
+    return DerivativeContract(
+        underlying_symbol="NIFTY",
+        expiry=date(2024, 1, 25),
+        symbol=symbol,
+        contract_type="FUT",
+        strike=None,
+    )
+
+
+def _fno_rows(
+    day: str, count: int, *, volume: object = 5, oi: object = 7, start_hm: tuple[int, int] = (9, 15)
+) -> list[list[object]]:
+    """*count* consecutive 1-minute vendor rows on *day* from ``start_hm`` IST."""
+    hour, minute = start_hm
+    base = datetime(2000, 1, 1, hour, minute)  # pure wall-clock arithmetic
+    rows: list[list[object]] = []
+    for i in range(count):
+        t = base + timedelta(minutes=i)
+        rows.append([f"{day}T{t:%H:%M}:00", 100.0, 110.0, 90.0, 105.0, volume, oi])
+    return rows
+
+
+def _fno_payload(rows: Sequence[Sequence[object]]) -> Mapping[str, object]:
+    return {"candles": [list(r) for r in rows]}
+
+
+#: An injected post-close IST clock on the gate tests' TODAY (2024-01-02, a
+#: regular trading Tuesday) — clamp_window_end mints ``end == today + 1``.
+_FNO_GATE_NOW = datetime(2024, 1, 2, 17, 0, tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Kolkata"))
+
+
+def _fno_gate_now() -> datetime:
+    return _FNO_GATE_NOW
+
+
+def _fno_record_essence(rec: object) -> tuple[object, ...]:
+    return (
+        rec.market,  # type: ignore[attr-defined]
+        rec.security_id,  # type: ignore[attr-defined]
+        rec.interval,  # type: ignore[attr-defined]
+        rec.window_start,  # type: ignore[attr-defined]
+        rec.window_end,  # type: ignore[attr-defined]
+        rec.status,  # type: ignore[attr-defined]
+        rec.bars,  # type: ignore[attr-defined]
+        rec.attempts,  # type: ignore[attr-defined]
+        rec.last_error,  # type: ignore[attr-defined]
+        rec.empty_streak,  # type: ignore[attr-defined]
+        rec.in_pull_fetches,  # type: ignore[attr-defined]
+        rec.bars_net_new,  # type: ignore[attr-defined]
+        rec.empty_retries,  # type: ignore[attr-defined]
+        rec.transient_retries,  # type: ignore[attr-defined]
+    )
+
+
+class TestOptionIngestTodayGate:
+    """DEC-PULL-TODAY-COMPLETENESS-GATE-001, the F&O tail: the #837 still-settling
+    shape (OI-null / all-zero-volume-FUT) on a covers-today window is withheld from
+    the lake + demoted streak-exempt; settled/sparse/empty/non-today shapes are
+    byte-identical."""
+
+    def _run(
+        self,
+        sdk: _FakeSDK,
+        sink: object,
+        ledger: WindowLedger,
+        *,
+        contract: DerivativeContract | None = None,
+        gate: bool = True,
+        now: Callable[[], datetime] = _fno_gate_now,
+        start: date = date(2024, 1, 1),
+        end: date = date(2024, 1, 3),
+    ) -> IngestReport:
+        return ingest_option_contract(
+            _client(sdk),
+            sink,  # type: ignore[arg-type]
+            contract=contract if contract is not None else _gate_fut(),
+            interval="1minute",
+            start=start,
+            end=end,
+            ledger=ledger,
+            now_ist=now,
+            today_completeness_gate=gate,
+        )
+
+    def test_fut_oi_null_withheld_demoted(self, tmp_path: Path) -> None:
+        # The P2 lifecycle over a REAL lake: evening FUT window whose today bars
+        # carry the still-settling OI-null shape ⇒ NO today rows land + FAILED/
+        # TODAY_INCOMPLETE ⇒ the settled re-pull lands cleanly (SUCCESS, streak
+        # 0, ZERO conflicts). THEN the counterfactual gate-off teeth: the same
+        # sequence stores the forming rows and keep-first FREEZES them (the
+        # mechanism proof — the bug this gate exists to kill).
+        import polars as pl
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        prior = _fno_rows("2024-01-01", 5, volume=5, oi=7)
+        forming_today = _fno_rows("2024-01-02", 5, volume=0, oi=None)
+        settled_today = _fno_rows("2024-01-02", 5, volume=5, oi=7)
+
+        # --- gate ON: withhold + demote, then the re-pull LANDS ---
+        lake = tmp_path / "gated"
+        sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+        led = WindowLedger()
+        sdk = _FakeSDK(payload=_fno_payload(prior + forming_today))
+        with capture_logs() as logs:
+            self._run(sdk, sink, led)
+        rec = led.records()[0]
+        assert rec.status == "FAILED"
+        assert rec.last_error == TODAY_INCOMPLETE
+        assert rec.empty_streak == 0
+        assert any(
+            e["event"] == "ingest.window.today_incomplete"
+            and e["reason"] == "oi_null_settling"
+            and e["withheld_bars"] == 5
+            for e in logs
+        )
+        month = next((lake / "bars").rglob("*.parquet"))
+        frame = pl.read_parquet(month)
+        assert frame.height == 5  # ONLY the settled prior-day rows landed
+        # Round 2: the vendor settled — the re-pull lands with zero conflicts.
+        sdk2 = _FakeSDK(payload=_fno_payload(prior + settled_today))
+        report2 = self._run(sdk2, sink, led)
+        rec2 = led.records()[0]
+        assert rec2.status == "SUCCESS"
+        assert rec2.empty_streak == 0
+        assert report2.conflicts == 0
+        frame2 = pl.read_parquet(month)
+        assert frame2.height == 10
+        assert frame2.filter(pl.col("open_interest").is_null()).height == 0
+
+        # --- counterfactual, gate OFF: the forming rows FREEZE (keep-first) ---
+        lake_off = tmp_path / "ungated"
+        sink_off = ParquetBarSink(writer=ParquetWriter(lake_root=lake_off))
+        led_off = WindowLedger()
+        self._run(
+            _FakeSDK(payload=_fno_payload(prior + forming_today)), sink_off, led_off, gate=False
+        )
+        assert led_off.records()[0].status == "SUCCESS"  # settled over forming rows
+        # The settled re-pull (a fresh ledger forces the fetch — the settled row
+        # would otherwise be SKIPPED outright, the even-worse arm) hits keep-first.
+        report_off = self._run(
+            _FakeSDK(payload=_fno_payload(prior + settled_today)),
+            sink_off,
+            WindowLedger(),
+            gate=False,
+        )
+        assert report_off.conflicts == 5  # every settled today row DISCARDED
+        month_off = next((lake_off / "bars").rglob("*.parquet"))
+        frozen = pl.read_parquet(month_off)
+        assert frozen.filter(pl.col("open_interest").is_null()).height == 5  # frozen forever
+
+    def test_option_sparse_day_success_byte_identical(self) -> None:
+        # The illiquid-but-legit pin, FNO side: a sparse CE day with settled
+        # (OI-non-null) bars settles SUCCESS byte-identically gate-on vs off.
+        rows = _fno_rows("2024-01-02", 12, volume=0, oi=3)
+        essences = []
+        for gate in (True, False):
+            sink = _Sink()
+            led = WindowLedger()
+            with capture_logs() as logs:
+                self._run(
+                    _FakeSDK(payload=_fno_payload(rows)), sink, led, contract=_ce(), gate=gate
+                )
+            assert not any(e["event"].startswith("ingest.window.today_") for e in logs)
+            essences.append(
+                ([a[4] for a in sink.appends], [_fno_record_essence(r) for r in led.records()])
+            )
+        assert essences[0] == essences[1]
+        assert essences[0][1][0][5] == "SUCCESS"
+
+    def test_legit_vendor_empty_day_never_demoted(self) -> None:
+        # The spec's vendor-empty pin (FNO side; the spot twin lives in
+        # TestIngestSpotTodayGate): raw 0 on a covers-today trading day stays
+        # the EMPTY machinery's — status EMPTY, byte-identical gate-on vs off.
+        essences = []
+        for gate in (True, False):
+            led = WindowLedger()
+            with capture_logs() as logs:
+                self._run(_FakeSDK(payload={"candles": []}), _Sink(), led, gate=gate)
+            assert not any(e["event"] == "ingest.window.today_incomplete" for e in logs)
+            essences.append([_fno_record_essence(r) for r in led.records()])
+            rec = led.records()[0]
+            assert rec.status == "EMPTY"
+            assert rec.last_error is None
+        assert essences[0] == essences[1]
+
+    def test_non_today_fno_window_byte_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A historical contract window under an armed gate: classifier never
+        # consulted, ledger record identical to gate-off.
+        from brutex.data import today_completeness as tc_mod
+
+        calls: list[object] = []
+        real = tc_mod.classify_today_completeness
+
+        def _spy(**kw: object) -> object:
+            calls.append(kw)
+            return real(**kw)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(tc_mod, "classify_today_completeness", _spy)
+        rows = _fno_rows("2024-01-01", 10, volume=0, oi=None)  # would demote if judged
+        essences = []
+        for gate in (True, False):
+            led = WindowLedger()
+            self._run(
+                _FakeSDK(payload=_fno_payload(rows)),
+                _Sink(),
+                led,
+                gate=gate,
+                start=date(2024, 1, 1),
+                end=date(2024, 1, 2),  # end == today: NOT covering (end-exclusive)
+            )
+            essences.append([_fno_record_essence(r) for r in led.records()])
+        assert calls == []
+        assert essences[0] == essences[1]
+        assert essences[0][0][5] == "SUCCESS"
+
+    def test_muhurat_fut_60_60_success(self) -> None:
+        # A settled Muhurat session (2025-10-21, 13:45-14:45 IST — 60 minutes)
+        # passes: session-aware expected count, never a hardcoded 375.
+        ist = __import__("zoneinfo").ZoneInfo("Asia/Kolkata")
+        rows = _fno_rows("2025-10-21", 60, volume=5, oi=7, start_hm=(13, 45))
+        led = WindowLedger()
+        with capture_logs() as logs:
+            self._run(
+                _FakeSDK(payload=_fno_payload(rows)),
+                _Sink(),
+                led,
+                now=lambda: datetime(2025, 10, 21, 16, 0, tzinfo=ist),
+                start=date(2025, 10, 20),
+                end=date(2025, 10, 22),
+            )
+        rec = led.records()[0]
+        assert rec.status == "SUCCESS"
+        assert not any(e["event"] == "ingest.window.today_incomplete" for e in logs)
+        # 60/60 — no count-shortfall observation either.
+        assert not any(e["event"] == "ingest.window.today_count_short" for e in logs)
+
+    def test_fut_count_short_observe_only_warn(self) -> None:
+        # A sparse settled FUT day (200 of 375 minutes, OI non-null): SUCCESS +
+        # the observe-only count INFO carrying demoted=False — never a demotion.
+        rows = _fno_rows("2024-01-02", 200, volume=5, oi=7)
+        led = WindowLedger()
+        with capture_logs() as logs:
+            self._run(_FakeSDK(payload=_fno_payload(rows)), _Sink(), led)
+        assert led.records()[0].status == "SUCCESS"
+        infos = [e for e in logs if e["event"] == "ingest.window.today_count_short"]
+        assert len(infos) == 1
+        assert infos[0]["demoted"] is False
+        assert infos[0]["distinct_minutes"] == 200
+        assert infos[0]["expected_minutes"] == 375
+
+    def test_fut_all_zero_volume_withheld_demoted(self) -> None:
+        # The second FUT shape arm: OI present but EVERY today minute volume 0.
+        rows = _fno_rows("2024-01-02", 50, volume=0, oi=7)
+        led = WindowLedger()
+        sink = _Sink()
+        with capture_logs() as logs:
+            self._run(_FakeSDK(payload=_fno_payload(rows)), sink, led)
+        rec = led.records()[0]
+        assert rec.status == "FAILED"
+        assert rec.last_error == TODAY_INCOMPLETE
+        assert sink.appends[0][4] == 0  # every today bar withheld
+        assert any(
+            e["event"] == "ingest.window.today_incomplete" and e["reason"] == "volume_all_zero"
+            for e in logs
+        )
+
+    def test_sync_vs_pipeline_parity(self, tmp_path: Path) -> None:
+        # The ONE-tail law: sync inline and async pipeline-consumer modes yield
+        # identical ledger rows + identical lake bytes for the SAME gated fixture
+        # (clamp_today rides the frozen payload across the queue).
+        import hashlib
+
+        from brutex.adapters.groww.fetch_pipeline import FetchPipeline
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        prior = _fno_rows("2024-01-01", 5, volume=5, oi=7)
+        forming_today = _fno_rows("2024-01-02", 5, volume=0, oi=None)
+        payload = _fno_payload(prior + forming_today)
+        shas: list[str] = []
+        essences = []
+        for mode in ("sync", "pipeline"):
+            lake = tmp_path / mode
+            sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake))
+            led = WindowLedger()
+            pipeline = FetchPipeline(workers=1, queue_maxsize=8) if mode == "pipeline" else None
+            try:
+                ingest_option_contract(
+                    _client(_FakeSDK(payload=payload)),
+                    sink,
+                    contract=_gate_fut(),
+                    interval="1minute",
+                    start=date(2024, 1, 1),
+                    end=date(2024, 1, 3),
+                    ledger=led,
+                    now_ist=_fno_gate_now,
+                    fetch_pipeline=pipeline,
+                    today_completeness_gate=True,
+                )
+            finally:
+                if pipeline is not None:
+                    pipeline.drain()
+            files = sorted((lake / "bars").rglob("*.parquet"))
+            shas.append(hashlib.sha256(b"".join(f.read_bytes() for f in files)).hexdigest())
+            essences.append([_fno_record_essence(r) for r in led.records()])
+        assert shas[0] == shas[1]
+        assert essences[0] == essences[1]
+        assert essences[0][0][5] == "FAILED"
+        assert essences[0][0][8] == TODAY_INCOMPLETE

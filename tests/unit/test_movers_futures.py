@@ -59,6 +59,57 @@ class TestParseFutureSymbol:
     def test_stock_future(self) -> None:
         assert parse_future_symbol("NSE-RELIANCE-25Jun26-FUT") == ("RELIANCE", date(2026, 6, 25))
 
+    # ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001: right-anchored via the canonical
+    # grammar — a hyphenated underlying is preserved INTACT. ──
+
+    def test_hyphenated_underlying_preserved(self) -> None:
+        # Fails-before regression: the deleted LEFT-anchored local parse took
+        # parts[1] → "BAJAJ", so the spot probe hit the nonexistent
+        # bars/NSE/CASH/BAJAJ/ and premium was silently dropped for every
+        # hyphenated F&O underlying (DEC-GROWW-HYPHEN-SYMBOL-RESOLVE-001).
+        assert parse_future_symbol("NSE-BAJAJ-AUTO-30Sep25-FUT") == (
+            "BAJAJ-AUTO",
+            date(2025, 9, 30),
+        )
+
+    def test_multi_hyphen_underlying_preserved(self) -> None:
+        # The grammar joins EVERY token between the exchange and the expiry —
+        # a 3-token exotic name survives intact (right-anchored, not arity-bound).
+        assert parse_future_symbol("NSE-A-B-C-30Sep25-FUT") == ("A-B-C", date(2025, 9, 30))
+
+    def test_ampersand_underlying_was_and_remains_correct(self) -> None:
+        # '&' names (M&M, M&MFIN) carry NO hyphen in the symbol grammar, so they
+        # parsed correctly under the old left-anchored split too — this pins that
+        # the delegation does not regress them (was-and-remains-correct).
+        assert parse_future_symbol("NSE-M&M-30Sep25-FUT") == ("M&M", date(2025, 9, 30))
+        assert parse_future_symbol("NSE-M&MFIN-25Jun26-FUT") == ("M&MFIN", date(2026, 6, 25))
+
+    def test_delegation_parity_with_canonical_grammar(self) -> None:
+        # parse_future_symbol IS the canonical parse_fno_symbol restricted to
+        # FUT — pinned over well-formed, hyphenated, junk and option corpora so
+        # the two grammars can never diverge again (CLAUDE.md §11 COMMON).
+        from brutex.data.fno_symbol import parse_fno_symbol
+
+        corpus = [
+            "NSE-NIFTY-30Sep25-FUT",
+            "NSE-BAJAJ-AUTO-30Sep25-FUT",
+            "NSE-M&M-30Sep25-FUT",
+            "BSE-SENSEX-25Sep25-FUT",
+            "NSE-NIFTY-30Sep25-24000-CE",
+            "NSE-NIFTY-30Xxx25-FUT",
+            "NIFTY-FUT",
+            "NSE--30Sep25-FUT",
+            "NSE-NIFTY-30Jun75-FUT",
+        ]
+        for symbol in corpus:
+            canonical = parse_fno_symbol(symbol)
+            expected = (
+                (canonical.underlying, canonical.expiry)
+                if canonical is not None and canonical.instrument_type == "FUT"
+                else None
+            )
+            assert parse_future_symbol(symbol) == expected, symbol
+
     def test_hyphenated_underlying_preserved_intact(self) -> None:
         # Review round 1 (DEC-MOVERS-UNDERLYING-CLASS-001 fix round): the parse is
         # right-ANCHORED, mirroring the canonical parse_fno_symbol — the prior
@@ -70,8 +121,9 @@ class TestParseFutureSymbol:
         )
 
     def test_option_symbol_is_none(self) -> None:
-        # An option ends -CE / -PE (last part is not FUT) → not a future.
+        # An option ends -CE / -PE (decodes with instrument_type CE/PE) → not a future.
         assert parse_future_symbol("NSE-NIFTY-30Sep25-24000-CE") is None
+        assert parse_future_symbol("NSE-NIFTY-30Sep25-24000-PE") is None
 
     def test_junk_too_few_parts_is_none(self) -> None:
         assert parse_future_symbol("NIFTY-FUT") is None
@@ -79,9 +131,17 @@ class TestParseFutureSymbol:
     def test_bad_month_is_none(self) -> None:
         assert parse_future_symbol("NSE-NIFTY-30Xxx25-FUT") is None
 
-    def test_bad_expiry_length_is_none(self) -> None:
-        # Expiry token is not 7 chars (DDMmmYY).
-        assert parse_future_symbol("NSE-NIFTY-3Sep25-FUT") is None
+    def test_lenient_expiry_shapes_match_canonical(self) -> None:
+        # SANCTIONED delta (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001, disclosed in the
+        # ledger): the deleted local twin was shape-stricter (exactly 7 chars,
+        # title-case month) and REJECTED tokens the canonical strptime("%d%b%y")
+        # grammar accepts — so a junk/foreign lake dir like NSE-NIFTY-30SEP25-FUT
+        # was visible in /db + options but invisible on the Futures tab. The one
+        # grammar now judges both identically. Every well-formed vendor symbol
+        # (DDMmmYY title-case) is byte-identical either way.
+        assert parse_future_symbol("NSE-NIFTY-3Sep25-FUT") == ("NIFTY", date(2025, 9, 3))
+        assert parse_future_symbol("NSE-NIFTY-30SEP25-FUT") == ("NIFTY", date(2025, 9, 30))
+        assert parse_future_symbol("NSE-NIFTY-30sep25-FUT") == ("NIFTY", date(2025, 9, 30))
 
     def test_non_numeric_day_is_none(self) -> None:
         assert parse_future_symbol("NSE-NIFTY-XXSep25-FUT") is None
@@ -716,6 +776,95 @@ class TestPrevDayOi:
         )
 
 
+# ── resolve_prev_oi: the CE/PE 1-minute-native gate ─────────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as relayed
+# via the coordinator — ADR-0021 RULING B, draft PR #1555): a CE/PE contract's
+# derived ``1day`` is retired, so a stored one is frozen at retirement eve —
+# the OI baseline must skip the 1day read entirely and recover from the
+# bounded 1-minute prior-session walk-back. FUT stays 1day-first (pinned).
+
+
+class TestOptionPrevOiOneMinuteNative:
+    _CE: ClassVar[str] = "NSE-NIFTY-25Sep25-24000-CE"
+    _FUT: ClassVar[str] = "NSE-NIFTY-30Sep25-FUT"
+
+    @staticmethod
+    def _min_bar(*, day: date, close: str, oi: int) -> CandleBar:
+        """A 1-minute bar at 09:15 IST (03:45 UTC) on *day* carrying OI."""
+        c = Decimal(close)
+        return CandleBar(
+            timestamp=datetime(day.year, day.month, day.day, 3, 45, tzinfo=UTC),
+            open=c,
+            high=c,
+            low=c,
+            close=c,
+            volume=1,
+            open_interest=oi,
+        )
+
+    def _seed(self, tmp_path: Path, symbol: str) -> None:
+        """FROZEN stored 1day (OI 900) beside a FRESH 1-minute prior session (OI 1234)."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="1day",
+            bars=[_day_bar(day=date(2025, 8, 29), close="100", oi=900)],
+        )
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="1minute",
+            bars=[self._min_bar(day=date(2025, 8, 29), close="101", oi=1234)],
+        )
+
+    def test_option_prev_oi_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the OI baseline read the frozen option
+        1day FIRST (OI 900); the gate must serve the TRUE 1-minute
+        prior-session OI 1234."""
+        self._seed(tmp_path, self._CE)
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._CE, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=1234, found_date=date(2025, 8, 29))
+
+    def test_option_prev_oi_never_opens_the_1day_partition(self, tmp_path: Path) -> None:
+        """Read spy: a CORRUPT stored option 1day is inert — the resolver never
+        opens it (pre-gate it raised out of the 1day read)."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        garbage = tmp_path / "bars" / "NSE" / "FNO" / self._CE / "1day" / "2025"
+        garbage.mkdir(parents=True)
+        (garbage / "08.parquet").write_bytes(b"this is not a parquet file")
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=self._CE,
+            interval="1minute",
+            bars=[self._min_bar(day=date(2025, 8, 29), close="101", oi=1234)],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._CE, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=1234, found_date=date(2025, 8, 29))
+
+    def test_fut_prev_oi_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild, so the FUT
+        OI baseline still reads the stored 1day FIRST even when a diverging
+        1-minute prior session exists."""
+        self._seed(tmp_path, self._FUT)
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=900, found_date=date(2025, 8, 29))
+
+
 # ── compute_futures_candidates: per-exchange discovery filter ──────────────
 #
 # Standalone unit coverage of the per-exchange discovery ``continue`` branch
@@ -764,6 +913,409 @@ class TestComputeFuturesCandidatesExchangeFilter:
         )
         # The BSE future is filtered out by the per-exchange discovery ``continue``.
         assert {m.underlying for m in nse.movers} == {"NIFTY"}
+
+
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001: end-to-end over a real lake ──
+#
+# The fails-before flip on the REAL compute path: with the left-anchored local
+# parse, ``NSE-BAJAJ-AUTO-30Sep25-FUT`` bucketed under ``"BAJAJ"``, so
+# ``_underlying_spot_ltp`` probed the nonexistent ``bars/NSE/CASH/BAJAJ/`` and
+# the row shipped ``spot=None`` / ``premium=None`` despite the spot partition
+# existing under the correct ``BAJAJ-AUTO`` key.
+
+
+def _spot_min_bar(*, close: str) -> CandleBar:
+    """A flat 1-minute SPOT bar at 09:15 IST (03:45 UTC) on 2024-06-13."""
+    c = Decimal(close)
+    return CandleBar(
+        timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+        open=c,
+        high=c,
+        low=c,
+        close=c,
+        volume=100,
+        open_interest=None,
+    )
+
+
+def _write_hyphen_lake(tmp_path: Path) -> None:
+    """A real lake: one hyphenated + one plain future, each with its spot partition."""
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-BAJAJ-AUTO-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="BAJAJ-AUTO",
+        interval="1minute",
+        bars=[_spot_min_bar(close="8010")],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-NIFTY-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="22010", volume=100, oi=1000)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        interval="1minute",
+        bars=[_spot_min_bar(close="22000")],
+    )
+
+
+class TestHyphenatedUnderlyingEndToEnd:
+    def test_spot_and_premium_present_for_hyphenated_underlying(self, tmp_path: Path) -> None:
+        """The fails-before flip: BAJAJ-AUTO keeps its full name + spot + premium."""
+        _write_hyphen_lake(tmp_path)
+        got = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        by_underlying = {m.underlying: m for m in got.movers}
+        # The underlying is the FULL hyphenated name, never the "BAJAJ" truncation.
+        assert set(by_underlying) == {"BAJAJ-AUTO", "NIFTY"}
+        bajaj = by_underlying["BAJAJ-AUTO"]
+        # Spot resolved from the REAL bars/NSE/CASH/BAJAJ-AUTO partition
+        # (pre-fix: spot=None / premium=None — the silent drop).
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
+        assert bajaj.symbol == "NSE-BAJAJ-AUTO-27Jun24-FUT"
+        assert got.skipped == 0
+
+    def test_non_hyphenated_row_byte_parity(self, tmp_path: Path) -> None:
+        """A plain underlying's row is byte-identical to the pre-delegation output."""
+        _write_hyphen_lake(tmp_path)
+        got = compute_futures_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+        )
+        nifty = next(m for m in got.movers if m.underlying == "NIFTY")
+        # The exact pre-fix NIFTY values (the left-anchored parse already handled
+        # plain names) — zero behavior change for non-hyphenated underlyings.
+        assert nifty.symbol == "NSE-NIFTY-27Jun24-FUT"
+        assert nifty.expiry == date(2024, 6, 27)
+        assert nifty.ltp == Decimal("22010.00")
+        assert nifty.spot == Decimal("22000.00")
+        assert nifty.premium == Decimal("10.00")
+        assert nifty.oi == 1000
+        assert nifty.volume == 100
+
+    def test_warm_grid_cache_serves_correct_hyphenated_rows(self, tmp_path: Path) -> None:
+        """The warmed cache entry carries the CORRECT rows (never re-cached truncations).
+
+        Mirrors the ``futures_warm_grid`` → ``candidate_key`` →
+        ``compute_futures_candidates`` wiring the app's post-pull warmer uses
+        (DEC-MOVERS-WARM-GRID-001): the grid coordinate is warmed once, then the
+        route-shaped second read is an O(1) cache HIT (compute NOT re-run) serving
+        the full hyphenated underlying + spot + premium — pre-fix the warmer
+        persisted the truncated spot-less rows as cache hits.
+        """
+        from brutex.dashboard.movers_cache import MoversSnapshotCache, candidate_key
+        from brutex.dashboard.movers_warm import futures_warm_grid
+
+        _write_hyphen_lake(tmp_path)
+        grid = futures_warm_grid()
+        coord = next(c for c in grid if c["exchange"] == "NSE" and c["expiry_tier"] == "near")
+        cache = MoversSnapshotCache(capacity=16)
+        key = candidate_key(
+            asset="futures",
+            exchange=coord["exchange"],
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            expiry_tier=coord["expiry_tier"],
+        )
+        computes: list[int] = []
+
+        def _compute() -> object:
+            computes.append(1)
+            return compute_futures_candidates(
+                lake_root=tmp_path,
+                interval="1day",
+                date="2024-06-13",
+                time=None,
+                exchange=coord["exchange"],
+                expiry_tier=coord["expiry_tier"] or "near",
+            )
+
+        warmed = cache.get_or_compute(key, generation=1, compute=_compute)
+        served = cache.get_or_compute(key, generation=1, compute=_compute)
+        assert len(computes) == 1  # the second read is a cache HIT, no re-scan.
+        assert served is warmed
+        bajaj = next(m for m in served.movers if m.underlying == "BAJAJ-AUTO")  # type: ignore[attr-defined]
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
+
+
+# ── DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in: the #1482 spot-drift ──
+# recovery ladder on the movers spot probe. Fails-before: a spelling-drifted
+# stock spot dir (vendor-folded chain underlying BAJAJAUTO vs the master's
+# on-disk BAJAJ-AUTO) yielded spot=None / premium=None on the REAL compute even
+# though the spot data existed (executed repro 2026-07-09).
+
+
+def _eq_instrument(symbol: str) -> object:
+    """A minimal NSE cash-equity master row (the test_spot_drift `_eq` pattern)."""
+    from brutex.data.instrument_store import Instrument
+    from brutex.models import Exchange, InstrumentType, Segment
+
+    return Instrument(
+        exch_id=Exchange.NSE,
+        security_id=abs(hash(symbol)) % 100_000,
+        symbol_name=symbol,
+        display_name=symbol,
+        instrument=InstrumentType.EQ,
+        segment=Segment.CASH,
+        series="EQ",
+        isin=None,
+        underlying_symbol=None,
+        underlying_security_id=None,
+        lot_size=1,
+        tick_size=Decimal("0.05"),
+        sm_freeze_qty=None,
+        sm_expiry_date=None,
+        strike_price=None,
+        asm_gsm_flag=False,
+    )
+
+
+def _seed_master(lake: Path, *symbols: str) -> None:
+    """Write a REAL DuckDB instrument master at ``<lake>/instruments.duckdb``."""
+    from brutex.data.instrument_store import InstrumentStore
+
+    lake.mkdir(parents=True, exist_ok=True)
+    with InstrumentStore.open(lake / "instruments.duckdb") as store:
+        store.upsert_many(
+            [_eq_instrument(s) for s in symbols],  # type: ignore[misc]
+            snapshot_date=date(2024, 1, 1),
+            run_id="test-movers-drift",
+            csv_source_sha256="0" * 64,
+        )
+
+
+def _write_drifted_lake(tmp_path: Path) -> None:
+    """The #1482 drift shape: chain underlying BAJAJAUTO, spot dir BAJAJ-AUTO."""
+    from brutex.data.parquet_writer import ParquetWriter
+
+    writer = ParquetWriter(lake_root=tmp_path)
+    writer.write(
+        exchange="NSE",
+        segment="FNO",
+        symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+        interval="1minute",
+        bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+    )
+    writer.write(
+        exchange="NSE",
+        segment="CASH",
+        symbol="BAJAJ-AUTO",
+        interval="1minute",
+        bars=[_spot_min_bar(close="8010")],
+    )
+    _seed_master(tmp_path, "BAJAJ-AUTO")
+
+
+class TestStockDriftSpotRecovery:
+    def test_drifted_stock_spot_and_premium_recover(self, tmp_path: Path) -> None:
+        """The fails-before flip: the drifted stock resolves spot + premium
+        exactly like the Greeks enrichment does (rung-attributed, one log)."""
+        _write_drifted_lake(tmp_path)
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        # Pre-fix (executed repro): spot=None / premium=None despite the REAL
+        # bars/NSE/CASH/BAJAJ-AUTO partition + the master carrying BAJAJ-AUTO.
+        assert bajaj.spot == Decimal("8010.00")
+        assert bajaj.premium == Decimal("120.00")
+        assert got.skipped == 0
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1
+        assert events[0]["source"] == "futures"
+        assert events[0]["underlying"] == "BAJAJAUTO"
+        assert events[0]["recovered_key"] == "BAJAJ-AUTO"
+        assert events[0]["rung"] == "stock_drift"
+
+    def test_non_drifted_lake_byte_identity_zero_drift_io(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every exact-key probe resolves ⇒ the drift map is NEVER built (spy),
+        no recovery log fires, and the rows are the pre-fold-in values
+        byte-for-byte (index NIFTY + hyphenated stock alike)."""
+        from brutex.dashboard import movers_futures as mf
+
+        _write_hyphen_lake(tmp_path)
+
+        def _never(lake_root: Path) -> None:
+            raise AssertionError("load_stock_drift_map must not run on a resolving lake")
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _never)
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        by_underlying = {m.underlying: m for m in got.movers}
+        assert by_underlying["NIFTY"].spot == Decimal("22000.00")
+        assert by_underlying["NIFTY"].premium == Decimal("10.00")
+        assert by_underlying["BAJAJ-AUTO"].spot == Decimal("8010.00")
+        assert by_underlying["BAJAJ-AUTO"].premium == Decimal("120.00")
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+    def test_missing_spot_no_master_stays_honest_none(self, tmp_path: Path) -> None:
+        """No spot dir anywhere + no instrument master: the loader fail-softs to
+        ``None`` and the row keeps today's honest spot=None / premium=None."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+        )
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        assert bajaj.spot is None
+        assert bajaj.premium is None
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+    def test_ambiguous_master_fold_poisoned_no_recovery(self, tmp_path: Path) -> None:
+        """Two REAL master instruments share the fold ⇒ the #1482 builder
+        POISONS it (capped warn) and the spot stays an honest ``None`` —
+        never a guess between real instruments."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol="NSE-BAJAJAUTO-27Jun24-FUT",
+            interval="1minute",
+            bars=[_fut_min_bar(close="8130", volume=70, oi=700)],
+        )
+        writer.write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="BAJAJ-AUTO",
+            interval="1minute",
+            bars=[_spot_min_bar(close="8010")],
+        )
+        _seed_master(tmp_path, "BAJAJ-AUTO", "BAJAJ AUTO")  # both fold to BAJAJAUTO
+        with capture_logs() as logs:
+            got = compute_futures_candidates(
+                lake_root=tmp_path, interval="1day", date="2024-06-13", time=None, exchange="NSE"
+            )
+        bajaj = next(m for m in got.movers if m.underlying == "BAJAJAUTO")
+        assert bajaj.spot is None
+        assert bajaj.premium is None
+        assert [e for e in logs if e["event"] == "spot_drift.ambiguous_master"]
+        assert not [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+
+
+class TestSpotLtpResolver:
+    """Direct resolver-branch coverage: the per-compute memo + lazy drift build."""
+
+    def test_recovery_outcome_memoised_one_walk_one_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two calls for the SAME drifted underlying: the drift map builds once,
+        ONE log fires, and the second call re-probes the memoised recovered key
+        (exactly like the exact key is re-probed per row today)."""
+        from brutex.dashboard import movers_futures as mf
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+
+        _write_drifted_lake(tmp_path)
+        loads: list[int] = []
+        real_load = mf.load_stock_drift_map
+
+        def _counting(lake_root: Path) -> object:
+            loads.append(1)
+            return real_load(lake_root)
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _counting)
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        with capture_logs() as logs:
+            first = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+            second = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+        assert first == second == Decimal("8010.00")
+        assert loads == [1]
+        assert len([e for e in logs if e["event"] == "movers.spot_key_recovered"]) == 1
+
+    def test_exhaustion_memoised_no_rewalk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely spot-less underlying exhausts the ladder ONCE — the
+        second call answers the memoised honest ``None`` with zero re-walk."""
+        from brutex.dashboard import movers_futures as mf
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+
+        walks: list[str] = []
+        real_candidates = mf.spot_recovery_candidates
+
+        def _counting(underlying: str, exchange: str, **kwargs: object) -> tuple[str, ...]:
+            walks.append(underlying)
+            return real_candidates(underlying, exchange, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(mf, "spot_recovery_candidates", _counting)
+        loads: list[int] = []
+        real_load = mf.load_stock_drift_map
+
+        def _counting_load(lake_root: Path) -> object:
+            loads.append(1)
+            return real_load(lake_root)
+
+        monkeypatch.setattr(mf, "load_stock_drift_map", _counting_load)
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        assert resolver.ltp(exchange="NSE", underlying="GHOST") is None
+        assert resolver.ltp(exchange="NSE", underlying="GHOST") is None
+        # No master ⇒ drift=None ⇒ exactly ONE ladder build on the first call;
+        # the second call answers from the exhaustion memo.
+        assert walks == ["GHOST"]
+        # A SECOND missing underlying walks its own ladder but REUSES the
+        # already-loaded drift verdict — the loader still ran exactly once.
+        assert resolver.ltp(exchange="NSE", underlying="GHOST2") is None
+        assert walks == ["GHOST", "GHOST2"]
+        assert loads == [1]
+
+    def test_alias_ladder_rung_attribution_without_drift_map(self, tmp_path: Path) -> None:
+        """A #911 ``"<EXCH>-<underlying>"`` legacy dir recovers on the alias
+        ladder (drift map honestly ``None`` — no master) and the log says so."""
+        from brutex.dashboard.movers_futures import _SpotLtpResolver
+        from brutex.data.parquet_writer import ParquetWriter
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-BAJAJAUTO",
+            interval="1minute",
+            bars=[_spot_min_bar(close="8010")],
+        )
+        resolver = _SpotLtpResolver(
+            tmp_path, day=date(2024, 6, 13), cutoff_min=None, source="futures"
+        )
+        with capture_logs() as logs:
+            got = resolver.ltp(exchange="NSE", underlying="BAJAJAUTO")
+        assert got == Decimal("8010.00")
+        events = [e for e in logs if e["event"] == "movers.spot_key_recovered"]
+        assert len(events) == 1
+        assert events[0]["recovered_key"] == "NSE-BAJAJAUTO"
+        assert events[0]["rung"] == "alias_ladder"
 
 
 # ── DEC-MOVERS-MIN-VOLUME-001: the opt-in Top-Volume floor (futures) ──
@@ -902,6 +1454,7 @@ class TestResolvePrevOi:
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-24",
             False,
+            False,
         )
 
     def test_noncontiguous_minute_arm_judged_false(self, tmp_path: Path) -> None:
@@ -920,6 +1473,7 @@ class TestResolvePrevOi:
         assert got == PrevOiBaseline(value=555, found_date=date(2025, 9, 25))
         assert prev_baseline_provenance(got.found_date, date(2025, 9, 29), exchange="NSE") == (
             "2025-09-25",
+            False,
             False,
         )
 

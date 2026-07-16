@@ -151,6 +151,20 @@ class TestEngineWriterThroughDisplayReader:
             # The engine names ride along verbatim (additive mapping).
             assert metrics["sharpe_ratio"] == raw["sharpe_ratio"]
 
+    def test_instrument_flows_writer_to_reader_rows_untouched(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-INSTRUMENT-DISPLAY-001: the writer's additive per-entry
+        ``instrument`` (``_entry_payload`` — the winner's OWN market, from
+        ``ResultRow.instrument``) passes through ``load_top100`` UNTOUCHED to
+        every consumer row — the operator rank-1 card / combos Inst column /
+        /strategy identity strip / /screener column all read this ONE key."""
+        artifact = _engine_artifact()
+        _write_engine_artifact(tmp_path / "lake", artifact)
+        result = oc.load_top100((tmp_path / "lake" / "sweep_runs") / _GRID_RUN_ID)
+        assert result.status == "ok"
+        for row, entry in zip(result.rows, artifact.entries, strict=True):
+            assert entry["instrument"] == "NIFTY"  # writer truth (ResultRow.instrument)
+            assert row["instrument"] == entry["instrument"]  # verbatim passthrough
+
     def test_arm_dict_bridges_to_the_display_string_never_object_object(
         self, tmp_path: Path
     ) -> None:
@@ -308,7 +322,158 @@ class TestEngineWriterThroughRoutes:
             assert row["arm"] == "SL ₹0.80 · TP ₹0.50"
             assert row["arm_raw"] == {"sl_paisa": 80, "tp_paisa": 50}
         # /strategy consumes exactly this payload: stArm is fed from row.arm
-        # of the top100 fetch — no second, unbridged arm source exists.
+        # of the top100 fetch — no second, unbridged arm source exists. The
+        # wiring lives in the ONE shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved verbatim).
+        panel = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-strategy-panel.js"
+        ).read_text(encoding="utf-8")
+        assert "byId('stArm').textContent = String(row.arm);" in panel
+        # The row source is the memo'd getTop100 promise — which fetches the
+        # ONE /api/v1/oneclick/top100 route (pinned in bx-oneclick.js).
+        assert "getTop100(state.runId)" in panel
+        oneclick_js = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-oneclick.js"
+        ).read_text(encoding="utf-8")
+        assert '"/api/v1/oneclick/top100"' in oneclick_js
+        assert panel.count("arm") >= 1
+        assert client.get("/strategy").status_code == 200
+
+    def test_instrument_is_on_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-INSTRUMENT-DISPLAY-001 route twin: every wire row of
+        ``/api/v1/oneclick/top100`` carries the writer's ``instrument``, and
+        the three consumer surfaces are WIRED to read it (template/JS pins —
+        the rank-1 card + combos Inst cell via ``bxInstrumentText``, the
+        /strategy identity strip via ``BXOneclick.instrumentText``, the
+        /screener column via ``BXScreener.COLUMNS``)."""
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        assert all(row["instrument"] == "NIFTY" for row in payload["rows"])
+        root = Path(__file__).resolve().parents[2] / "brutex" / "dashboard"
+        strategy = (root / "templates" / "strategy.html").read_text(encoding="utf-8")
+        assert 'id="stInstr"' in strategy
+        # The fill line lives VERBATIM in the shared strategy panel module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001 — moved out of the template).
+        strategy_panel = (root / "static" / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        assert (
+            "byId('stInstr').textContent = window.BXOneclick.instrumentText(row.instrument);"
+            in strategy_panel
+        )
+        oneclick_js = (root / "static" / "bx-oneclick.js").read_text(encoding="utf-8")
+        assert 'setOc("r1_instrument", bxInstrumentText(row.instrument));' in oneclick_js
+        assert "td(bxInstrumentText(row.instrument)" in oneclick_js
+        screener_js = (root / "static" / "bx-screener.js").read_text(encoding="utf-8")
+        assert '{ key: "instrument", label: "Inst", type: "str"' in screener_js
+
+    def test_equity_route_serves_the_real_sidecar_series(self, tmp_path: Path) -> None:
+        """DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 item 4C (the #48 overlap): the
+        NEW ``/api/v1/oneclick/equity`` route pages the REAL results-depth
+        equity sidecar — engine writers end-to-end (``build_top100`` +
+        ``write_tuple_sidecars``) → the adapter's rank → ``equity_ref`` chain
+        → the wire; before the sidecars land the same coordinates read the
+        honest awaiting (never a fabricated curve)."""
+        from datetime import date
+
+        from brutex.dashboard import oneclick_artifacts as oc_mod
+        from brutex.engine.minute_path import PathStatus, SessionEquityPoint
+        from brutex.engine.trade_capture import ComboCapture
+        from brutex.engine.trade_store import write_tuple_sidecars
+
+        from tests.fakes.wp5_depth_fixtures import run_id_of as rid_of
+
+        lake = tmp_path / "lake"
+        artifact = _engine_artifact()
+        _write_engine_artifact(lake, artifact)
+        client = self._client(lake)
+        # Pre-sidecars: honest awaiting, total null.
+        before = client.get(f"/api/v1/oneclick/equity?run_id={_GRID_RUN_ID}&rank=1").json()
+        assert before["status"] == "awaiting"
+        assert before["total"] is None
+        # Now land the REAL sidecars for the rank-1 entry's equity_ref.
+        run_dir = (lake / "sweep_runs") / _GRID_RUN_ID
+        rank1_ref = artifact.entries[0]["equity_ref"]
+        assert isinstance(rank1_ref, dict)
+        paths = oc_mod.sidecar_paths_from_ref(run_dir, str(rank1_ref["tuple"]))
+        assert paths is not None
+        combo = str(artifact.entries[0]["run_id"])
+        assert combo == rid_of(1)  # min_dd_first: candidate 1 ranks first
+        capture = ComboCapture(
+            run_id=combo,
+            trades=(),
+            equity=(
+                SessionEquityPoint(date(2026, 7, 1), 1_000, 900, 1),
+                SessionEquityPoint(date(2026, 7, 2), 1_500, None, 1),
+            ),
+            equity_status=PathStatus.OK,
+            vix_missing_trades=0,
+            parity_ok=True,
+            parity_detail="",
+        )
+        write_tuple_sidecars(paths, [capture], [], store_content_hash="0" * 64)
+        payload = client.get(f"/api/v1/oneclick/equity?run_id={_GRID_RUN_ID}&rank=1").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert payload["source"] == "results_store"
+        assert payload["total"] == 2
+        assert [row["equity_close_paisa"] for row in payload["rows"]] == [1_000, 1_500]
+        assert payload["rows"][1]["equity_intraday_low_paisa"] is None  # honest None low
+        # The strategy panel module consumes exactly this route + the shared
+        # series builder (minute-path label; per-trade cumsum stays the
+        # fallback) — the page wiring moved verbatim into the module
+        # (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
+        panel = (
+            Path(__file__).resolve().parents[2]
+            / "brutex"
+            / "dashboard"
+            / "static"
+            / "bx-strategy-panel.js"
+        ).read_text(encoding="utf-8")
+        assert "/api/v1/oneclick/equity" in panel
+        assert "window.BXChart.minutePathSeries(state.equity)" in panel
+        assert "per-trade close equity (minute-path unavailable for this run)" in panel
+
+    def test_strategy_link_contract_run_id_rank_params(self, tmp_path: Path) -> None:
+        """Item 5 (BLOCKER-3, our half): the STABLE deep-link contract
+        ``/strategy?run_id=<id>&rank=<n>`` — the route serves 200 with params,
+        the wire payload carries the addressed rank, and the template resolves
+        rank from the query (exact-match loop; honest rank-miss message;
+        latest-run fallback when no run_id is given). The display-truth
+        session builds the /results-side link against THIS contract."""
+        lake = tmp_path / "lake"
+        artifact = _engine_artifact()
+        _write_engine_artifact(lake, artifact)
+        client = self._client(lake)
+        page = client.get(f"/strategy?run_id={_GRID_RUN_ID}&rank=3")
+        assert page.status_code == 200
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        ranks = [row["rank"] for row in payload["rows"]]
+        assert 3 in ranks  # the addressed rank exists on the wire
+        static = Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "static"
+        codec = (static / "bx-portal-state.js").read_text(encoding="utf-8")
+        panel = (static / "bx-strategy-panel.js").read_text(encoding="utf-8")
+        # The client-side contract, pinned (no browser harness — honest
+        # envelope). The R2 documented split (DEC-OPERATOR-PAGE-CONSOLIDATE-
+        # 001): the two PARSE expressions live in the pure BXPortalState
+        # codec (executed for real by node goldens); the row-match loop, the
+        # honest rank-miss message and the latest-run fallback live in the
+        # strategy panel module — each string asserted verbatim in exactly
+        # one file, never weakened.
+        assert "state.runId = params.get('run_id');" in codec
+        assert "state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);" in codec
+        assert "if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }" in panel
+        assert "is not in the stored top-100 (" in panel  # honest rank-miss
+        assert "runs.latest_run_id" in panel  # no-run_id fallback
+        # The strategy page loads both modules + self-mounts the panel.
         template = (
             Path(__file__).resolve().parents[2]
             / "brutex"
@@ -316,10 +481,18 @@ class TestEngineWriterThroughRoutes:
             / "templates"
             / "strategy.html"
         ).read_text(encoding="utf-8")
-        assert "byId('stArm').textContent = String(row.arm);" in template
-        assert "/api/v1/oneclick/top100?run_id=" in template
-        assert template.count("arm") >= 1
-        assert client.get("/strategy").status_code == 200
+        assert "/static/bx-portal-state.js" in template
+        assert "/static/bx-strategy-panel.js" in template
+        assert 'data-bx-autopanel="strategy"' in template
+        # Contract consumer #3: the v29 drawer's open-full link is built by
+        # the SAME BXPortalState.strategyHref (DEC-OPERATOR-PAGE-
+        # CONSOLIDATE-001 — one href law, three consumers).
+        v29 = (
+            Path(__file__).resolve().parents[2] / "brutex" / "dashboard" / "templates" / "v29.html"
+        ).read_text(encoding="utf-8")
+        assert 'id="ocDrawerOpenFull"' in v29
+        portal = (static / "bx-operator-portal.js").read_text(encoding="utf-8")
+        assert "window.BXPortalState.strategyHref(state.runId, rank)" in portal
 
     def test_route_names_a_future_schema_version_corruptly_never_500(self, tmp_path: Path) -> None:
         """A NEWER writer's artifact degrades to a NAMED corrupt through the
@@ -336,3 +509,151 @@ class TestEngineWriterThroughRoutes:
         assert payload["status"] == "corrupt"
         assert payload["row_count"] == 0
         assert "schema_version" in payload["detail"]
+
+
+class TestCascadeJoinWriterToWire:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the REAL cascade → join → writer →
+    display-reader → route chain (never a hand-forged cascade object)."""
+
+    @staticmethod
+    def _real_join(sweep_id: str) -> Any:
+        """A REAL join: run_stage4_cascade → wire dict → build_cascade_join."""
+        import numpy as np
+        import numpy.typing as npt
+        from brutex.engine.cascade_join import build_cascade_join
+        from brutex.engine.cascade_wire import CascadeWireReport, wire_report_to_dict
+        from brutex.metrics.cascade import CandidateInput, CascadeConfig, run_stage4_cascade
+
+        def _null_exit(_positions: npt.NDArray[np.intp]) -> float:
+            return 0.0
+
+        rng = np.random.default_rng(11)
+        lb_returns = tuple((rng.standard_normal(40) * 0.05 + 0.2).tolist())
+
+        def _cand(cid: str, *, total_trades: int) -> CandidateInput:
+            return CandidateInput(
+                candidate_id=cid,
+                sharpe_ratio=2.0,
+                sortino_ratio=2.4,
+                calmar_ratio=1.6,
+                profit_factor=1.8,
+                win_rate=0.55,
+                win_loss_ratio=2.5,
+                recovery_factor=2.1,
+                max_drawdown_pct=12.0,
+                max_consecutive_losses=4,
+                total_trades=total_trades,
+                training_sharpe=0.1,
+                training_max_drawdown=5.0,
+                skew=0.0,
+                kurtosis=3.0,
+                returns=tuple((np.random.default_rng(3).standard_normal(32) + 1.0).tolist()),
+                lockbox_returns=lb_returns,
+                lockbox_days=tuple(range(40)),
+                mc_n_bars=400,
+                mc_n_entries=20,
+                mc_evaluate=_null_exit,
+            )
+
+        config = CascadeConfig(
+            seed=7,
+            n_resamples=200,
+            dsr_min=0.0,
+            cpcv_min_pass_rate=0.0,
+            cpcv_n_groups=4,
+            cpcv_n_test_groups=2,
+            pbo_max=1.0,
+            pbo_n_splits=8,
+            wfo_min_pass_rate=0.0,
+            wfo_train_size=10,
+            wfo_test_size=6,
+            wfo_step=6,
+            lockbox_min_trades=4,
+            lockbox_default_window_days=5,
+            mc_n_permutations=100,
+        )
+        # run_id_of(1) FAILS the hard gates (10 trades); run_id_of(2) passes.
+        report = run_stage4_cascade(
+            [_cand(run_id_of(1), total_trades=10), _cand(run_id_of(2), total_trades=600)],
+            config,
+        )
+        wire = CascadeWireReport(sweep_id=sweep_id, groups=(("NIFTY", "1minute", report),))
+        return build_cascade_join(wire_report_to_dict(wire))
+
+    def test_rank1_fail_reaches_every_wire_surface(self, tmp_path: Path) -> None:
+        from brutex.dashboard import oneclick_artifacts as oc_mod
+
+        lake = tmp_path / "lake"
+        join = self._real_join(_GRID_RUN_ID)
+        candidates = [
+            make_candidate(
+                1,
+                fingerprint="fp01" + "0" * 60,
+                row_overrides={"max_drawdown_pct": 5.0},
+            ),
+            make_candidate(
+                2,
+                fingerprint="fp02" + "0" * 60,
+                row_overrides={"max_drawdown_pct": 15.0},
+            ),
+        ]
+        families = TwinFamilies(
+            family_by_run_id={run_id_of(n): run_id_of(n) for n in (1, 2)},
+            members_by_family={run_id_of(n): (run_id_of(n),) for n in (1, 2)},
+        )
+        artifact = build_top100(
+            candidates,
+            run_id=_GRID_RUN_ID,
+            preset="min_dd_first",
+            families=families,
+            counts=PoolCounts(
+                stores=1, excluded_no_aggs=0, zero_trade_excluded=0, parity_excluded=0
+            ),
+            data_snapshot_hashes=["a" * 64],
+            baselines={},
+            cascade_join=join,
+        )
+        _write_engine_artifact(lake, artifact)
+        # The display reader stamps the server-built status_text.
+        result = oc_mod.load_top100(lake / "sweep_runs" / _GRID_RUN_ID)
+        assert result.status == "ok", result.detail
+        assert result.cascade_join is not None
+        assert result.cascade_join["state"] == "joined"
+        rows = {row["run_id"]: row for row in result.rows}
+        # rank-1 (min dd) is the CASCADE-FAILED candidate — flagged, not hidden.
+        assert result.rows[0]["run_id"] == run_id_of(1)
+        fail = rows[run_id_of(1)]["cascade"]
+        assert fail["status"] == "fail"
+        assert fail["rejected_at"] == "hard_gates"
+        assert fail["status_text"] == "FAIL @ hard_gates"
+        ok = rows[run_id_of(2)]["cascade"]
+        assert ok["status"] in {"pass", "provisional_pass"}
+        assert ok["cpcv_pass_rate"] is not None
+        assert rows[run_id_of(2)]["metrics"]["cpcv_pass_pct"] == (ok["cpcv_pass_rate"] * 100.0)
+        # …and the route serves the same truth on the wire.
+        client = TestCascadeJoinWriterToWire._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok"
+        assert payload["cascade_join"]["state"] == "joined"
+        wire_rows = {row["run_id"]: row for row in payload["rows"]}
+        assert wire_rows[run_id_of(1)]["cascade"]["status_text"] == "FAIL @ hard_gates"
+        assert wire_rows[run_id_of(2)]["metrics"]["cpcv_pass_pct"] == (ok["cpcv_pass_rate"] * 100.0)
+
+    _client = staticmethod(TestEngineWriterThroughRoutes._client)
+
+    def test_frozen_pre_change_fixture_serves_dashes_on_the_wire(self, tmp_path: Path) -> None:
+        """The back-compat oracle end-to-end: a PRE-change artifact serves with
+        NO cascade keys (the clients render '—'), never corrupt."""
+        import shutil
+
+        fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+        run_id = "grid" + "0" * 60
+        lake = tmp_path / "lake"
+        (lake / "sweep_runs").mkdir(parents=True)
+        shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, lake / "sweep_runs" / run_id)
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert payload["cascade_join"] is None
+        assert all("cascade" not in row for row in payload["rows"])
+        assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])

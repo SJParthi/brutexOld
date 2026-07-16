@@ -72,7 +72,7 @@ A clean run reaches all three and reports ``stopped_after = None``.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Final
@@ -97,8 +97,10 @@ from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
 from brutex.dashboard.pull_controller import BulkSpotReport
+from brutex.data.errors import MarketHoursHalt
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.data.window_ledger_store import shared_pull_ledger_scope
 from brutex.money import format_inr, round_money
 from brutex.notifications.sweep_alerts import emit_vendor_conflict_alert
 
@@ -108,6 +110,13 @@ _LOG = structlog.get_logger(__name__)
 PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
+#: The DEFERRED-before-any-vendor-phase marker (DEC-GROWW-MARKET-HOURS-GUARD-001):
+#: the whole pipeline was skipped because the clock is inside the NSE market-hours
+#: window ``[08:45, 15:35)`` IST — no vendor call was issued (spot / metadata /
+#: historical all ``None``), keeping the shared Groww account free for TickVault's
+#: live feed. The non-vendor prebuild / movers stages are inapplicable (there was no
+#: pull to derive from) and also do not run.
+PHASE_MARKET_HOURS = "market_hours"
 #: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after the
 #: prebuild SUCCEEDED over the clean symbol set (``PrebuildOutcome.ok`` —
 #: DEC-PREBUILD-CLEANSET-001 dropped the ``fetch_clean`` arm of the
@@ -497,6 +506,23 @@ class PipelinePullReport:
         The prebuild's failing symbol names (capped at 10 by the producer —
         :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`); empty when
         the phase did not run or had no failures.
+    prebuild_no_source
+        The prebuild's NO-SOURCE spot-target names — ZERO stored 1-minute
+        bars at derive time, nothing to derive (vendor-empty or never pulled;
+        DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — capped at 10 by the
+        producer, exactly the ``quarantined_symbols``/``quarantined_count``
+        template; empty when the phase did not run or every target had
+        stored data. NOT failures: the movers warm still fires, and a
+        no-source symbol with NO parquet in ANY timeframe is structurally
+        absent from the warmed snapshots (no parquet ⇒ no discovery row);
+        previously stored DERIVED timeframes (a legacy vendor-fetched
+        ``1day``, a partially heal-emptied lake) still serve — genuine
+        stored bars, never fabricated (refuter round 2, MIGRATION.md
+        #1792) — counted + NAMED in the note instead of silently
+        vanishing (Golden Rule #1).
+    prebuild_no_source_count
+        The TRUE (uncapped) no-source total — the note's ``(+K more)``
+        remainder derives from it, so the cap never lies.
     prebuild_crashed
         The error TYPE NAME (e.g. ``"ValueError"``) when the guarded prebuild
         CRASHED whole-run instead of completing
@@ -568,6 +594,11 @@ class PipelinePullReport:
     #: numbers, and the movers warm was consequently skipped (gated on
     #: ``PrebuildOutcome.ok``).
     prebuild_disk_guarded: bool = False
+    #: The no-source spot targets (capped names + TRUE count — the
+    #: quarantined_symbols/quarantined_count template;
+    #: DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, see the docstring above).
+    prebuild_no_source: tuple[str, ...] = ()
+    prebuild_no_source_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -588,7 +619,7 @@ class PipelinePullReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/pull-pipeline`` route + panel."""
-        return {
+        payload: dict[str, Any] = {
             "ok": self.ok,
             "stopped_after": self.stopped_after,
             "note": self.note,
@@ -609,6 +640,13 @@ class PipelinePullReport:
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
         }
+        if self.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — the
+            # #1539/#1649b emit-on-non-default precedent): the default
+            # all-stored-data payload stays byte-identical.
+            payload["prebuild_no_source"] = list(self.prebuild_no_source)
+            payload["prebuild_no_source_count"] = self.prebuild_no_source_count
+        return payload
 
 
 def _spot_stop_note(report: BulkSpotReport) -> str:
@@ -625,6 +663,15 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     return (
         f"stopped after metadata — {report.expiry_failures} expiry + "
         f"{report.contract_failures} contract failure(s); historical NOT started"
+    )
+
+
+def _market_hours_stop_note() -> str:
+    """Build the honest stop-note for a market-hours deferral (no vendor phase ran)."""
+    return (
+        "deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull "
+        "issued (spot / metadata / historical skipped to keep the shared Groww account "
+        "free for the live feed); resume on the next out-of-hours run"
     )
 
 
@@ -661,6 +708,24 @@ def _movers_note_clause(
 _NOTE_FAILURE_NAMES = 3
 
 
+def format_capped_names(
+    names: Sequence[str], true_count: int, cap: int = _NOTE_FAILURE_NAMES
+) -> str:
+    """``"A, B, C (+K more)"`` — capped names + the honest remainder from the TRUE count.
+
+    The ONE capped-names note formatter (CLAUDE.md §11 COMMON,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): shows up to *cap* of *names* and
+    appends ``(+K more)`` from *true_count* — the producer may have already
+    capped *names* (e.g. :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`),
+    so the remainder derives from the UNCAPPED total, never the shown tuple
+    (Golden Rule #1). Shared by the prebuild-failures clause, the no-source
+    clause, and the ``brutex pull-all-spot`` stdout line — zero drift.
+    """
+    shown = ", ".join(names[:cap])
+    more = true_count - min(cap, len(names))
+    return f"{shown} (+{more} more)" if more > 0 else shown
+
+
 def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     """Build the ``, timeframes pre-built …`` note clause from the prebuild outcome.
 
@@ -673,7 +738,11 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     clause naming up to :data:`_NOTE_FAILURE_NAMES` symbols with the TRUE
     remainder count (``failed_count`` — the producer caps
     :attr:`PrebuildOutcome.failed` at 10 names, so the remainder uses the
-    uncapped total; Golden Rule #1).
+    uncapped total; Golden Rule #1). A non-zero ``no_source_count``
+    (vendor-empty / never-pulled spot targets,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) renders its own DISTINCT
+    counted+named clause BEFORE the failures clause (benign class first) —
+    both via the ONE :func:`format_capped_names` formatter.
     """
     if prebuild is None:
         return ""
@@ -699,11 +768,26 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # daily open fell back to a non-09:15 first minute — full-history,
         # recomputed per run). Zero keeps the note byte-identical.
         clause += f", {prebuild.opens_substituted} daily open(s) substituted"
+    if prebuild.no_source_count:
+        # DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: the benign no-source class
+        # renders BEFORE the failure class — counted + named (capped), wording
+        # deliberately distinct from "quarantined" (healthy vendor behavior,
+        # not a failure) and from "prebuild failures" (nothing failed), and
+        # naming BOTH causes honestly (the probe cannot prove the vendor arm).
+        # The clause claims ONLY the timeframe-build exclusion — the probe
+        # proves zero stored 1-MINUTE parquet, not zero parquet at all, and a
+        # previously stored DERIVED timeframe (a legacy vendor-fetched 1day)
+        # legitimately keeps the symbol in warm discovery (refuter round 2,
+        # MIGRATION.md #1792). Zero keeps the note byte-identical.
+        clause += (
+            f", {prebuild.no_source_count} symbol(s) skipped — no stored 1-minute data "
+            "(vendor-empty or never pulled), excluded from timeframe build: "
+            f"{format_capped_names(prebuild.no_source, prebuild.no_source_count)}"
+        )
     if prebuild.failed:
-        shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
-        more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
-        suffix = f" (+{more} more)" if more > 0 else ""
-        clause += f", prebuild failures: {shown}{suffix}"
+        clause += (
+            f", prebuild failures: {format_capped_names(prebuild.failed, prebuild.failed_count)}"
+        )
     if prebuild.fs_note is not None:
         # DEC-LAKE-FS-PROBE-001: a COARSE-allocation lake volume is named in the
         # headline too — the slack is spent by exactly this phase's tiny files.
@@ -890,6 +974,7 @@ def run_full_pipeline(
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    market_closed: Callable[[], bool] | None = None,
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
 
@@ -962,6 +1047,15 @@ def run_full_pipeline(
     it triggers is the real multi-hour vendor fill + the O(symbols × bars)
     prebuild (no throughput claim, Golden Rule #10).
 
+    **One ledger load per run (DEC-LEDGER-LOAD-SPACE-V1-001):** the fetch
+    phases run inside ONE
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, so the
+    spot phase's full window-ledger materialisation is REUSED by the
+    historical phase (previously each phase loaded the whole O(rows) ledger —
+    two full loads + two co-resident copies per pipeline run). Per-phase saves
+    are unchanged; the scope closes before the prebuild/movers post-steps so
+    the ledger is released, not held through the derive.
+
     Parameters
     ----------
     run_spot
@@ -1011,43 +1105,126 @@ def run_full_pipeline(
     PipelinePullReport
         The combined, auditable outcome of every phase that ran.
     """
-    spot = run_spot()
-    if not spot_phase_ok(spot):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+    # Market-hours belt (DEC-GROWW-MARKET-HOURS-GUARD-001): if the clock is inside the
+    # NSE market-hours window ``[08:45, 15:35)`` IST, skip the ENTIRE vendor chain
+    # (spot / metadata / historical) so a pipeline pull that reached this call (e.g. a
+    # pull already dispatched as the market opened) never issues a vendor call that
+    # would compete with TickVault's live feed for the shared Groww account. The
+    # non-vendor prebuild / movers stages are inapplicable here (there is no pull to
+    # derive from) and also do not run. The mid-run per-window ``MarketHoursHalt`` is
+    # the belt for a pull already in flight; this is the belt for one about to start.
+    # Checked BEFORE the shared-ledger scope opens — a deferred pull never pays the
+    # whole-ledger materialisation (DEC-LEDGER-LOAD-SPACE-V1-001).
+    if market_closed is not None and market_closed():
+        _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS)
         return PipelinePullReport(
-            spot=spot,
+            spot=None,
             metadata=None,
             historical=None,
-            stopped_after=PHASE_SPOT,
-            note=_spot_stop_note(spot),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
         )
+    # ONE whole-ledger materialisation for the fetch phases
+    # (DEC-LEDGER-LOAD-SPACE-V1-001): the spot phase and the historical phase
+    # each `begin_pull_ledger` the SAME lake — inside this scope the second
+    # (and any later) live begin reuses the first load's instance instead of
+    # re-materialising every recorded window row (measured 1,305 B/row RSS +
+    # ~13.6 µs/row per full load; two distinct materialisations co-resided
+    # across the phase boundary pre-scope). Per-phase SAVES are unchanged
+    # (durability byte-identical); the scope closes BEFORE the post-steps
+    # (prebuild/movers), releasing the ledger instead of holding it through
+    # the O(symbols × bars) derive — and every market-hours defer below exits
+    # (releases) it too. Safe by construction: the phases run sequentially on
+    # this one thread under the pull single-flight lock (the scope is a
+    # ContextVar — confined to this thread/context).
+    with shared_pull_ledger_scope():
+        spot = run_spot()
+        if not spot_phase_ok(spot):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_SPOT,
+                note=_spot_stop_note(spot),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    metadata = run_metadata()
-    if not metadata_phase_ok(metadata):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=PHASE_METADATA,
-            note=_metadata_stop_note(metadata),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
+        # Market-hours belt BEFORE the metadata vendor phase (DEC-GROWW-MARKET-HOURS-GUARD-001):
+        # spot finishing ~08:43 must NOT leak a `get_expiries`/`get_contracts` storm into the
+        # trading window. Re-check the guard here (the top check covers a pull dispatched into
+        # the window; this covers a spot phase that finished just before it opened). The
+        # metadata phase itself ALSO consults the guard per-cell so a metadata pull that
+        # CROSSES 08:45 halts mid-phase; this is the between-phases stop.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        try:
+            metadata = run_metadata()
+        except MarketHoursHalt:
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the metadata phase CROSSED 08:45 mid-flight
+            # — its per-cell guard raised MarketHoursHalt and run_two_phase re-raised it as a
+            # global stop. Committed expiries/contracts are already persisted (record-in-the-
+            # fetcher); the un-persisted cells re-pull next out-of-hours run. Stop cleanly.
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, crossed="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        if not metadata_phase_ok(metadata):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_METADATA,
+                note=_metadata_stop_note(metadata),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
+
+        # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
+        # cleanliness threaded INTO the historical phase (the Greeks seam at the
+        # historical tail cannot otherwise see a spot-side quarantine under the
+        # strict barrier). Computed AFTER both gates passed — the gate arms are
+        # True by construction here; the quarantine check is the strict extra.
+        prior = PriorStepsVerdict(
+            spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
+            metadata_clean=metadata_phase_ok(metadata),
+            strict=strict_gate,
         )
-
-    # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
-    # cleanliness threaded INTO the historical phase (the Greeks seam at the
-    # historical tail cannot otherwise see a spot-side quarantine under the
-    # strict barrier). Computed AFTER both gates passed — the gate arms are
-    # True by construction here; the quarantine check is the strict extra.
-    prior = PriorStepsVerdict(
-        spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
-        metadata_clean=metadata_phase_ok(metadata),
-        strict=strict_gate,
-    )
-    historical = run_historical(prior)
+        # Market-hours belt BEFORE the historical (F&O) vendor phase
+        # (DEC-GROWW-MARKET-HOURS-GUARD-001): a metadata phase that finished just before the
+        # window opens must not leak the F&O candle storm into it. The F&O spine ALSO
+        # consults the guard per-contract (a contract already started at 08:45 finishes its
+        # few small windows — an acceptable, bounded residue), so this is the between-phases
+        # stop; a phase that crosses mid-flight halts on its next contract.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="historical"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        historical = run_historical(prior)
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of
@@ -1088,7 +1265,17 @@ def run_full_pipeline(
     #    warming over them would cache a wrong snapshot. The `fetch_clean`
     #    arm is DROPPED (DEC-PREBUILD-CLEANSET-001): on a dirty-fetch day the
     #    movers warm over the freshly-derived CLEAN symbols, honestly
-    #    omitting the quarantined ones the note names.
+    #    omitting the quarantined ones the note names. A vendor-empty
+    #    NO-SOURCE spot target does NOT withhold the warm
+    #    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive, and
+    #    when NO timeframe holds parquet it is structurally absent from warm
+    #    discovery (no parquet ⇒ no dataset row, db_view's
+    #    _walk_candle_datasets any-parquet gate); a surviving previously
+    #    stored DERIVED timeframe legitimately keeps it discoverable — the
+    #    warm then serves genuine stored bars, never fabricated (refuter
+    #    round 2, MIGRATION.md #1792) — counted + named in the note either
+    #    way. The gate EXPRESSION below is unchanged — the behavioral flip
+    #    is entirely `ok` now staying True.
     segment_movers_warmed: dict[str, int] = {}
     segment_movers_failed: dict[str, int] = {}
     if prebuild is not None and prebuild.ok:
@@ -1153,6 +1340,8 @@ def run_full_pipeline(
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
+        prebuild_no_source=prebuild.no_source if prebuild is not None else (),
+        prebuild_no_source_count=(prebuild.no_source_count if prebuild is not None else 0),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
         prebuild_disk_guarded=prebuild.disk_guard_blocked if prebuild is not None else False,

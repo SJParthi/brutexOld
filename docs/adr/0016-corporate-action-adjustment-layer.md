@@ -1,6 +1,6 @@
 # ADR-0016 — Corporate-action adjustment layer (design sketch + hard gate)
 
-**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1269)
+**Decision ID:** `DEC-CORP-ACTION-GATE-001` (MIGRATION.md entry #1351 — renumbered from the stale #1269 pointer at merge; corrected by DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001)
 **Date:** 2026-07-03 (reconciled 2026-07-04 with DEC-ENGINE-SCOPE-GUARD-001, entry #1178)
 **Status:** **Proposed** — design sketch for a FUTURE layer. **NOT implemented.** The
 shipped enforcement is the sweep-entry scope gate of DEC-ENGINE-SCOPE-GUARD-001
@@ -177,16 +177,24 @@ index symbols); 100% line+branch per CLAUDE.md §12.
 
 ADR-0012 authorizes the engine on **NIFTY futures** for the dynamic-strategy track.
 Futures need no split adjustment (an index future tracks the divisor-adjusted index),
-so the gate does not conflict with ADR-0012. DEC-ENGINE-SCOPE-GUARD-001's classifier
-already admits the two NIFTY-futures addressing shapes under NSE/FNO (the
+so the gate does not conflict with ADR-0012. **THIS OBLIGATION IS SATISFIED
+(2026-07-06, DEC-FUTURES-ADDRESSING-PIN-001 + DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001,
+MIGRATION.md #1700–#1701):** the launch PR pinned the final addressing shape — the ONE
+series alias `NSE-NIFTY-FUT` — in `brutex.universe.is_engine_sweep_symbol` AND assigned
+its `symbol_id` (4) in `brutex/strategies/spec.py` in the SAME reviewed PR, exactly as
+required below. The pre-launch dual-acceptance envelope (the
 `FuturesContract.series_key` form `NIFTY-FUT-YYYY-MM-DD` OR a `parse_fno_symbol`-
-decodable `NSE-NIFTY-<DDMmmYY>-FUT` lake contract symbol — dual acceptance, the honest
-pre-launch envelope) — but **no futures sweep wiring exists today**:
-`brutex/strategies/spec.py` deliberately does not pre-assign the NIFTY-futures
-`symbol_id` ("it lands with the futures-sweep PR once its real instrument label
-exists"), and no sweep path resolves an FNO contract symbol. The futures-sweep launch
+decodable `NSE-NIFTY-<DDMmmYY>-FUT` lake contract symbol) is RETIRED — both shapes are
+now refused with a did-you-mean hint naming the alias — and the sweep path resolves the
+alias roll-aware via `brutex/data/futures_series.py`. Historical requirement text
+(recorded as written pre-launch): the futures-sweep launch
 PR MUST pin its final addressing shape in `brutex.universe.is_engine_sweep_symbol` in
 the same reviewed PR that assigns its symbol id.
+
+**SUPERSEDED-IN-PART by DEC-ENGINE-SPOT-ONLY-001 (MIGRATION.md #1790):** the engine
+is spot-only again — `NSE-NIFTY-FUT` is refused at every sweep entry (the alias +
+symbol_id remain pinned as the lake/registry record; this section's present-tense
+"authorizes the engine on NIFTY futures" reading no longer holds).
 
 ## 7. References
 

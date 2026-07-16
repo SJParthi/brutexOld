@@ -29,7 +29,9 @@ exactly ONE place each. This module IMPORTS:
   options uses the ``value_paisa`` field DIRECTLY, so the option's session frame is
   read ONCE — no separate value reader), the prior-day OI resolver
   :func:`~brutex.dashboard.movers_futures.resolve_prev_oi`, and the underlying spot
-  resolver :func:`~brutex.dashboard.movers_futures._underlying_spot_ltp`.
+  resolver :class:`~brutex.dashboard.movers_futures._SpotLtpResolver` (the exact-key
+  probe first + the #1482 drift-recovery ladder on a miss — the
+  DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3 fold-in).
 
 It adds only what options need: the contract-symbol parser (strike + CE/PE), the
 options ranking (highest OI / OI gainers / OI losers / volume / value / price
@@ -113,24 +115,25 @@ import structlog
 from brutex.dashboard.instrument_loader import resolve_fno_index_aliases
 from brutex.dashboard.movers_futures import (
     _read_future_session,
-    _underlying_spot_ltp,
+    _SpotLtpResolver,
     format_contract_date,
     resolve_prev_oi,
 )
 from brutex.dashboard.movers_pcr import PcrLeg, UnderlyingPcr, compute_pcr_rows, pcr_row_json
 from brutex.dashboard.movers_resilient import log_movers_skip, movers_read_skip_errors
 from brutex.dashboard.movers_snapshot import (
-    _DAILY_MIN_FLOOR,
     _calendar_exchange,
-    _cutoff_minute,
     _NoncontiguousWarnState,
+    info_prev_baseline_muhurat,
     interval_minutes,
     make_expected_session_resolver,
     normalize_min_volume,
     parse_snapshot_date,
     prev_baseline_provenance,
+    resolve_asof_cutoff,
     resolve_candle_datasets,
     resolve_prev_close,
+    value_crore_str,
     value_meets_volume_floor,
     warn_prev_baseline_noncontiguous,
 )
@@ -322,12 +325,21 @@ class OptionMover:
         Calendar-contiguity provenance of the ``pct_change`` baseline
         (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — the ISO session date the prior
         close actually came from + whether it IS the immediately-preceding NSE
-        session (``None`` = no baseline / calendar abstained). Additive +
+        session (``False`` = the baseline provably skipped a nearer REGULAR
+        session, or a stray non-session bar served it — a lake defect either
+        way; ``None`` = no baseline / calendar abstained). Additive +
         defaulted; the row projector emits the pair ONLY on ``False``.
     oi_baseline_session, oi_baseline_contiguous
         The INDEPENDENT OI twin — a null-OI 1-day bar makes the OI baseline
         fall to the minute fallback on a possibly DIFFERENT day than the close
         baseline, so the two flags never share a verdict.
+    prev_close_muhurat, oi_baseline_muhurat
+        ``True`` iff that baseline is a legitimate Diwali **Muhurat** session
+        close after the prior REGULAR session (the day-after-Diwali boundary —
+        a healthy lake, never a hole; DEC-PREVSESSION-MUHURAT-COHERENCE-001).
+        Judged INDEPENDENTLY per baseline like the contiguity pair; emitted
+        ON TRUE ONLY. The engine's day anchors deliberately skip the Muhurat
+        session instead (#1616) — the recorded two-law design.
     underlying_kind
         The resolved index-vs-stock class of this contract's underlying
         (``index`` / ``stock`` / ``unknown``, DEC-MOVERS-UNDERLYING-CLASS-001) —
@@ -361,6 +373,8 @@ class OptionMover:
     prev_close_contiguous: bool | None = None
     oi_baseline_session: str | None = None
     oi_baseline_contiguous: bool | None = None
+    prev_close_muhurat: bool = False
+    oi_baseline_muhurat: bool = False
     underlying_kind: str = KIND_UNKNOWN
 
     @property
@@ -383,6 +397,17 @@ class OptionMover:
         if strike == strike.to_integral_value():
             strike = strike.quantize(Decimal(1))
         return f"{self.underlying} {format_contract_date(self.expiry)} {strike} {self.opt_type}"
+
+    @property
+    def value_crore(self) -> str:
+        """Cumulative HLC3 turnover rendered in ₹ crore (2dp) — shares the COMMON formatter.
+
+        Mirrors :attr:`~brutex.dashboard.movers_snapshot.MoverSnapshot.value_crore`
+        and the Futures tab, so the "Top Value" ranking metric (``value_paisa``,
+        DEC-MOVERS-VWAP-VALUE-001) is VISIBLE on the Options screen's "Value (Cr)"
+        column instead of ranking by an invisible field.
+        """
+        return value_crore_str(self.value_paisa)
 
     @property
     def ltp_inr(self) -> str:
@@ -607,6 +632,10 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
         "oi_chg": mover.oi_chg,
         "oi_chg_pct": str(mover.oi_chg_pct) if mover.oi_chg_pct is not None else None,
         "volume": mover.volume,
+        # The HLC3 session turnover behind the "Top Value" ranking, rendered in ₹ crore
+        # (2dp) — mirrors the spot + futures "value_cr" cell so the ranking metric is
+        # VISIBLE on-screen (DEC-MOVERS-VWAP-VALUE-001).
+        "value_cr": mover.value_crore,
         # The ONE moneyness cell the screen shows — bucket + signed depth as a single
         # string ("ITM -1" / "OTM +10" / "ATM"); DEC-FNO-MONEYNESS-001. The raw bucket
         # + signed ATM±N stay in the payload for sorting / programmatic use.
@@ -635,6 +664,13 @@ def _option_row(mover: OptionMover) -> dict[str, Any]:
     if mover.oi_baseline_contiguous is False:
         row["oi_baseline_session"] = mover.oi_baseline_session
         row["oi_baseline_contiguous"] = mover.oi_baseline_contiguous
+    # EMIT-ON-TRUE-ONLY, each baseline INDEPENDENT (DEC-PREVSESSION-MUHURAT-
+    # COHERENCE-001): the baseline is the legitimate Diwali Muhurat session's
+    # close/OI — a healthy lake, never a hole; non-Muhurat rows byte-identical.
+    if mover.prev_close_muhurat:
+        row["prev_close_muhurat"] = True
+    if mover.oi_baseline_muhurat:
+        row["oi_baseline_muhurat"] = True
     return row
 
 
@@ -653,6 +689,7 @@ def build_options_payload(
     pcr: Sequence[UnderlyingPcr] = (),
     latest_time: str | None = None,
     underlying_class: str | None = None,
+    resolved_through: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -709,6 +746,12 @@ def build_options_payload(
         (``"HH:MM"`` IST, DEC-MOVERS-ASOF-LATEST-DEFAULT-001) — shown as
         ``latest (HH:MM)`` while the default cut stays whole-day; ``None`` for an
         explicit *time* / daily interval / empty lake. Never affects a number.
+    resolved_through
+        ADDITIVE display-only provenance echoed as ``asof_through``
+        (``DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001``): the completed-bucket final
+        ``"HH:MM"`` an explicit bucket-anchor *time* was resolved forward to;
+        ``None`` (default) for daily / whole-day / TF-1minute / non-anchor keeps
+        the payload + note byte-identical. Never affects a number.
 
     Returns
     -------
@@ -741,6 +784,12 @@ def build_options_payload(
     instrument_count = len(ranked_movers) + skipped
     lake_population = len(movers) + skipped
     floor_note = f" Min volume ≥ {floor:,}." if floor > 0 else ""
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001 provenance (ADDITIVE, empty by default).
+    bucket_note = (
+        f" {time} bucket · through {resolved_through}."
+        if resolved_through is not None and time
+        else ""
+    )
     # The "empty" messages key on the UNFILTERED population so a class filter that
     # empties the ranked set never mis-reads as "no data pulled" (for `all` the two
     # counts are equal — byte-identical default).
@@ -773,6 +822,7 @@ def build_options_payload(
             "(CLAUDE.md §3); the contract's expiry nearest the selected date "
             "(Near/Next/Far) on the chosen cadence track (All/Monthly/Weekly); "
             "% is vs the contract's previous close, OI change is vs its prior day."
+            + bucket_note
             + floor_note
             + class_note
         )
@@ -785,6 +835,7 @@ def build_options_payload(
         "instrument_count": instrument_count,
         "skipped_count": skipped,
         "latest_time": latest_time,
+        "asof_through": resolved_through,
         "note": note,
         "pcr": [pcr_row_json(row) for row in pcr],
         **class_echo(wanted_class, excluded_unclassified),
@@ -1203,7 +1254,10 @@ def compute_options_candidates(
     minutes = interval_minutes(interval)
     day = parse_snapshot_date(date)
     date_str = day.isoformat()
-    cutoff_min = None if (minutes is None or minutes >= _DAILY_MIN_FLOOR) else _cutoff_minute(time)
+    # DEC-MOVERS-EXPLICIT-BUCKET-ASOF-001: the ONE COMMON as-of seam — an explicit
+    # bucket-anchor pick resolves FORWARD to the bucket's final minute (the completed
+    # candle); daily/blank whole-day + TF=1minute identity are byte-unchanged.
+    cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     tier, track = normalize_options_selectors(expiry_tier, expiry_track)
     contracts = _discover_options(lake_root, exchange=exchange, datasets=datasets)
@@ -1271,6 +1325,12 @@ def compute_options_candidates(
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
     expected_session_for = make_expected_session_resolver(day)
+    # ONE per-compute spot resolver (DEC-MOVERS-FUTURES-HYPHEN-PARSE-001 W3
+    # fold-in — the futures loop's twin): exact-key probes stay byte-identical;
+    # a drifted stock spot dir (the #1482 class, which pre-fix read a silent
+    # '?' moneyness) recovers via the COMMON ladder, walked + logged ONCE per
+    # (exchange, underlying) even across a many-contract chain.
+    spot_resolver = _SpotLtpResolver(lake_root, day=day, cutoff_min=cutoff_min, source="options")
     # The spot→F&O index alias map for the class lookup, resolved ONCE per compute
     # call (an env parse + dict copy) and threaded into every per-candidate
     # `fno_kind_from_underlying` — the lookup stays O(1)/candidate (review round 1).
@@ -1284,6 +1344,14 @@ def compute_options_candidates(
                 symbol=symbol,
                 day=day,
                 cutoff_min=cutoff_min,
+                # OPTIONS pass bad_tick=False (DEC-DASHBOARD-READ-SCREEN-001): option
+                # premia legitimately move ≥4×/minute on leverage, so the
+                # index-circuit-breaker-calibrated 4× bad-tick screen is INVALID for
+                # premia (it would drop legit bars → a wrong Top-Value / stale LTP)
+                # and the engine never screens options. Insane (positivity/ordering)
+                # bars ARE still dropped (universal). /db options screens the same way,
+                # so /movers-options == /db-options.
+                bad_tick=False,
             )
             if read is None:  # no session bar on the selected day/time → skip, never faked.
                 skipped += 1
@@ -1305,13 +1373,7 @@ def compute_options_candidates(
             # The underlying spot is probed under the PARSED underlying (NIFTY); the
             # row's display name keeps the parsed underlying (the strike/type are in
             # `OptionMover.name`), optionally renamed via `names`.
-            spot_ltp = _underlying_spot_ltp(
-                lake_root,
-                exchange=contract_exchange,
-                underlying=underlying,
-                day=day,
-                cutoff_min=cutoff_min,
-            )
+            spot_ltp = spot_resolver.ltp(exchange=contract_exchange, underlying=underlying)
         except skip_errors as exc:
             # A corrupt / unreadable Parquet for ONE option must not 500 the screen —
             # skip it (logged + counted), never fabricate (DEC-MOVERS-CORRUPT-SKIP-001).
@@ -1345,12 +1407,15 @@ def compute_options_candidates(
         # Baseline calendar-contiguity provenance, close + OI judged INDEPENDENTLY
         # (DEC-MOVERS-PREVCLOSE-CONTIGUITY-001 — mirrors the Futures loop). Served
         # values are untouched; each strictly-False verdict gets ONE capped WARN.
+        # A legitimate day-after-Diwali Muhurat baseline is contiguous-True +
+        # flagged per baseline with ONE per-build INFO instead (never a false
+        # WARN — DEC-PREVSESSION-MUHURAT-COHERENCE-001).
         cal_exchange = _calendar_exchange(contract_exchange)
         expected_session = expected_session_for(cal_exchange)
-        close_iso, close_contig = prev_baseline_provenance(
+        close_iso, close_contig, close_muhurat = prev_baseline_provenance(
             close_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
-        oi_iso, oi_contig = prev_baseline_provenance(
+        oi_iso, oi_contig, oi_muhurat = prev_baseline_provenance(
             oi_baseline.found_date, day, exchange=cal_exchange, expected_session=expected_session
         )
         mover = replace(
@@ -1359,6 +1424,8 @@ def compute_options_candidates(
             prev_close_contiguous=close_contig,
             oi_baseline_session=oi_iso,
             oi_baseline_contiguous=oi_contig,
+            prev_close_muhurat=close_muhurat,
+            oi_baseline_muhurat=oi_muhurat,
             # DEC-MOVERS-UNDERLYING-CLASS-001: index-vs-stock class from the
             # stored-master kind map. The PARSED token is hyphen-preserving
             # (parse_fno_symbol yields BAJAJ-AUTO) while the map keys the
@@ -1390,6 +1457,26 @@ def compute_options_candidates(
                 snapshot_day=day,
                 found_session=oi_iso,
                 expected_session=expected_session,
+            )
+        if close_muhurat and close_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="prev_close",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=close_iso,
+            )
+        if oi_muhurat and oi_iso is not None:
+            info_prev_baseline_muhurat(
+                warn_state,
+                kind="oi",
+                exchange=contract_exchange,
+                segment=_FNO_SEGMENT,
+                symbol=symbol,
+                snapshot_day=day,
+                found_session=oi_iso,
             )
         movers.append(mover)
 

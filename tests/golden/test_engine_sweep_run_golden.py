@@ -167,7 +167,14 @@ def test_golden_run_id_is_byte_stable() -> None:
 # 1<<1 / 1<<3 had none and are byte-identical). Dropping those fills changes the
 # trade streams → per-mask metrics → one more mask passes the rank gates
 # (ranked/persisted 4 → 5) and the store bytes move BY DESIGN.
-_GOLDEN_CONTENT_HASH = "2387cc884944768ee271fad117edb953f538d4d6d2d3b3c1c4b9ca3f4bd4d147"
+# Re-locked AGAIN for DEC-VIX-STAMP-WIRE-001 (Stage C): the persisted schema
+# gained the three appended nullable REFERENCE-ONLY vix_mean/vix_min/vix_max
+# columns (all null on this UNSTAMPED fixture — the honest unknown), so the
+# deterministic byte stream moved by design. Every row VALUE, every run_id and
+# the summary tally are unchanged (pinned by test_golden_summary_is_stable +
+# test_golden_run_id_is_byte_stable; the pre-column layout itself stays pinned
+# by tests/golden/test_results_store_backcompat_golden.py's frozen fixture).
+_GOLDEN_CONTENT_HASH = "18129707c1bf493120668dd9d3645e9e24d8dfcac2e7e90d9a744db3c986ca8b"
 
 
 def test_golden_summary_is_stable(tmp_path: Path) -> None:
@@ -207,7 +214,12 @@ def test_golden_content_hash_literal(tmp_path: Path) -> None:
 
 
 def _forced_fallback_sim(
-    bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    *,
+    tf_minutes: int,
+    reference_stamper: object = None,
+    precomputed_columns: object = None,
 ) -> ResidentTradeSim:
     """ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
@@ -215,8 +227,17 @@ def _forced_fallback_sim(
     fallback tests use, applied over ``sweep_run.ResidentTradeSim`` (as a
     ctor-signature FACTORY, so no subclass ``__init__`` overwrites the
     superclass attribute) so the WHOLE persisted sweep runs the oracle.
+    ``precomputed_columns`` tracks the additive W2-rider kwarg
+    (DEC-STAGE1A-RUST-BATCH-001) — signature glue only; every pinned literal
+    in this module is byte-untouched.
     """
-    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=tf_minutes)
+    sim = ResidentTradeSim(
+        bars,
+        bar_bits,
+        tf_minutes=tf_minutes,
+        reference_stamper=reference_stamper,  # type: ignore[arg-type]
+        precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
+    )
     sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
     return sim
 

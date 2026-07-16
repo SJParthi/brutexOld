@@ -69,7 +69,14 @@ def _trade_specs(draw: st.DrawFn) -> list[dict[str, Any]]:
                 ),
                 "reason": draw(
                     st.sampled_from(
-                        ["stop_loss", "take_profit", "signal", "forced_1520", "end_of_data"]
+                        [
+                            "stop_loss",
+                            "take_profit",
+                            "signal",
+                            "forced_1520",
+                            "end_of_data",
+                            "session_gap",
+                        ]
                     )
                 ),
                 "day_step": draw(st.integers(min_value=0, max_value=3)),
@@ -193,6 +200,7 @@ def test_tallies_and_histograms_sum_to_n_trades(specs: list[dict[str, Any]]) -> 
         + agg.exits_signal
         + agg.exits_forced_1520
         + agg.exits_end_of_data
+        + agg.exits_session_gap
     )
     assert exits == n
     assert sum(json.loads(agg.entry_hour_hist_json).values()) == (n if n else 0)

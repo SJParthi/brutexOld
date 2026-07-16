@@ -56,39 +56,12 @@
   .mode-btn { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
     padding:6px 12px; font:inherit; font-size:12px; font-weight:700; color:var(--text);
     background:var(--surface-2); }
-  section { margin:16px 24px 0; padding:16px 18px; background:var(--surface);
-    border:1px solid var(--border); border-radius:12px; }
-  section h3 { margin:0 0 10px; font-size:14px; font-weight:800; }
-  .note { font-size:11.5px; color:var(--muted); margin-top:8px; overflow-wrap:anywhere; }
-  .warnnote { font-size:12px; color:var(--yellow); font-weight:700; margin-top:8px; }
-  .chart-host svg { width:100%; height:340px; display:block; background:rgba(0,0,0,0.25);
-    border-radius:8px; }
-  .equity-host svg { width:100%; height:220px; display:block; background:rgba(0,0,0,0.25);
-    border-radius:8px; }
-  .bx-candle-wick { stroke: var(--muted); stroke-width: 1; }
-  .bx-candle-up { fill: #26D9B0; stroke: #26D9B0; }
-  .bx-candle-down { fill: #FF5C5C; stroke: #FF5C5C; }
-  .bx-arrow-entry { fill: #26D9B0; }
-  .bx-arrow-exit { fill: #FFB74D; }
-  .bx-equity-line { stroke: #FFC857; stroke-width: 2.4; }
-  table { width:100%; border-collapse:collapse; font-size:12px; }
-  th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--border); white-space:nowrap; }
-  th { color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; }
-  td.pos { color:var(--green-bright); }
-  td.neg { color:var(--red); }
-  .tablewrap { overflow-x:auto; }
-  .oc-source-badge { padding:2px 8px; border:1px solid var(--border-strong); border-radius:6px;
-    font-size:10.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
-  .story-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
-  .story-cell { background:var(--surface-2); border:1px solid var(--border-strong);
-    border-radius:10px; padding:12px 14px; }
-  .story-cell .k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
-  .story-cell .v { font-size:18px; font-weight:800; margin-top:4px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
-  .vixband { margin-top:10px; padding:8px 12px; border:1px solid var(--border-strong);
-    border-radius:8px; font-size:12px; color:var(--yellow); display:inline-block; }
-  .pager { display:flex; gap:10px; align-items:center; margin-top:10px; font-size:12px; }
-  .pager button { cursor:pointer; border:1px solid var(--border-strong); border-radius:var(--r-md);
-    padding:6px 12px; font:inherit; font-size:12px; color:var(--text); background:var(--surface-2); }
+  /* The panel-component rules (section/.note/.warnnote/chart-host/
+     equity-host/candle+arrow+equity classes/table/.tablewrap/
+     .oc-source-badge/.story-grid/.story-cell/.vixband/.pager + the
+     Beginner/Pro BLOCK twins) moved to the SHARED
+     /static/bx-oneclick-panels.css under the .bx-stpanel scope
+     (DEC-OPERATOR-PAGE-CONSOLIDATE-001) — page chrome stays inline. */
   #bxTip { position:absolute; z-index:1200; max-width:340px; background:var(--surface-3);
     border:1px solid var(--border-strong); border-radius:8px; padding:8px 10px; font-size:12px;
     color:var(--text); box-shadow:var(--elev-2); pointer-events:none; }
@@ -96,15 +69,22 @@
   .plain-eng { display:none; }
   body.share-mode .jargon { display:none; }
   body.share-mode .plain-eng { display:inline; }
+  /* The block-level Beginner/Pro twins (the deep-stats grid) AND the
+     DEC-RESULTS-CASCADE-VERDICT-JOIN-001 .cascade-fail red badge moved
+     VERBATIM to /static/bx-oneclick-panels.css — the one shared law,
+     consumed by this page AND the v29 strategy drawer. */
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <link rel="stylesheet" href="/static/bx-design.css">
+<link rel="stylesheet" href="/static/bx-oneclick-panels.css">
 <script defer src="/static/bx-ui.js"></script>
 <script defer src="/static/bx-poll.js"></script>
 <script defer src="/static/bx-explain.js"></script>
 <script defer src="/static/bx-chart.js"></script>
 <script defer src="/static/bx-screener.js"></script>
 <script defer src="/static/bx-oneclick.js"></script>
+<script defer src="/static/bx-portal-state.js"></script>
+<script defer src="/static/bx-strategy-panel.js"></script>
 <script defer src="/static/bx-rate-monitor.js"></script>
 <script defer src="/static/bx-liveproof.js"></script>
 </head>
@@ -117,8 +97,11 @@
       <a href="/universe">Universe</a>
       <a href="/db">Database</a>
       <a href="/coverage">Coverage</a>
+      <a href="/completeness">Completeness</a>
       <a href="/movers">Movers</a>
       <a href="/results">Results</a>
+      <a href="/screener">Screener</a>
+      <a href="/strategy" aria-current="page">Strategy</a>
       <a href="/reports">Reports</a>
     </nav>
     <a href="/screener" style="color:var(--yellow); font-size:13px; text-decoration:none;">🏆 Winners</a>
@@ -128,11 +111,18 @@
   <!-- R36 "always visible" ticker strip (shared component — bx-oneclick.js) -->
   <div class="ticker"><span id="bxTickerStrip">sweep: — · no runs yet — awaiting real run artifact</span></div>
 
+  <!-- The strategy PANEL block (DEC-OPERATOR-PAGE-CONSOLIDATE-001): markup
+       mirrored verbatim into v29's #ocStrategyDrawer — the hook-parity
+       fence asserts BOTH copies; wiring lives in the ONE shared
+       /static/bx-strategy-panel.js (self-mounts on data-bx-autopanel). -->
+  <div class="bx-stpanel" data-bx-autopanel="strategy">
   <section id="stHeadCard">
     <h3><span id="stRank">—</span> · <span id="stName">awaiting real run artifact</span></h3>
-    <div class="note">run <code id="stRunId">—</code> · TF <span id="stTf">—</span> ·
+    <div class="note">run <code id="stRunId">—</code> ·
+      instrument <span id="stInstr" data-explain="instrument">—</span> · TF <span id="stTf">—</span> ·
       direction <span id="stDir">—</span> · SL/TP arm <span id="stArm">—</span> ·
-      mask <code id="stMask">—</code> · family <span id="stFamily">—</span></div>
+      mask <code id="stMask">—</code> · family <span id="stFamily">—</span> ·
+      cascade <span id="stCascade" data-explain="cascade_status">—</span></div>
   </section>
 
   <section aria-label="Candle chart">
@@ -146,7 +136,12 @@
   </section>
 
   <section aria-label="Equity curve">
-    <h3>📉 Equity curve <span class="note" style="display:inline">per-trade close equity — minute-path equity lands with P3</span></h3>
+    <h3>📉 Equity curve <span class="note" style="display:inline" id="stEquityLabel">awaiting real run artifact</span></h3>
+    <!-- DEC-ONECLICK-WINNER-DETAIL-TRUTH-001 (item 4C — the #48 overlap):
+         the stored minute-path equity SERIES (/api/v1/oneclick/equity, the
+         entry's equity_ref sidecar) renders when it exists; the per-trade
+         close cumsum stays the HONEST fallback, relabeled so the two can
+         never be confused. -->
     <div class="equity-host" id="stEquityHost">
       <div class="note">no trades yet — awaiting real run artifact</div>
     </div>
@@ -155,7 +150,11 @@
   <!-- F-M5: the trade list is an INLINE section, visible AT LOAD — never a
        tab-gated reveal. -->
   <section aria-label="List of trades" id="stTradesSection">
-    <h3>📜 List of trades <span class="oc-source-badge" id="ocTradesSource">source: none</span></h3>
+    <!-- The ONE id rename (DEC-OPERATOR-PAGE-CONSOLIDATE-001):
+         ocTradesSource → stTradesSource. v29 owns #ocTradesSource for its
+         rank-1 trades tab and bx-oneclick writes it unconditionally — the
+         st* id frees this badge from that latent cross-page stomp. -->
+    <h3>📜 List of trades <span class="oc-source-badge" id="stTradesSource">source: none</span></h3>
     <div class="note" id="stTradesNote">awaiting real run artifact — trades appear once the run's results-depth sidecars land</div>
     <div id="stTradesError"></div>
     <div class="tablewrap">
@@ -173,8 +172,12 @@
 
   <section aria-label="Combo story card">
     <h3>🧾 Combo story — Edge · Risk · Consistency · Real-or-Fluke</h3>
-    <div class="story-grid">
-      <div class="story-cell"><div class="k">Edge — net P&amp;L</div><div class="v" id="stNet" data-explain="net_pnl_paisa">—</div></div>
+    <!-- HIGH #12 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the persistent
+         signal-only honesty chip — Track 1 never trades, so the P&L is the
+         GROSS signal figure, never a costed "net". -->
+    <div class="vixband" id="stSignalOnly">signal-only — costs modeled in the options-translation track</div>
+    <div class="story-grid" style="margin-top:10px">
+      <div class="story-cell"><div class="k">Edge — gross signal P&amp;L</div><div class="v" id="stNet" data-explain="gross_signal_pnl">—</div></div>
       <div class="story-cell"><div class="k">Risk — max drawdown</div><div class="v" id="stMaxDd" data-explain="max_dd_paisa">—</div></div>
       <div class="story-cell"><div class="k">Consistency — Sharpe</div><div class="v" id="stSharpe" data-explain="sharpe">—</div></div>
       <div class="story-cell"><div class="k">Real-or-Fluke — DSR</div><div class="v" id="stDsr" data-explain="dsr">—</div></div>
@@ -185,370 +188,59 @@
     </div>
     <!-- R31: the per-combo VIX regime band, rendered on the card -->
     <div class="vixband" id="stVixBand" data-explain="vix_band">no VIX band</div>
-    <div class="note">regime breakdown + family drill-down land with the P3 data they visualize (R46/R34 — named out of scope this PR). Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
     <div class="note" id="stArith"></div>
   </section>
 
+  <!-- HIGH #14 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the SHIPPED
+       results-depth aggregates the card previously omitted — rendered
+       verbatim from entry.metrics (top100_artifact._metrics_payload keys),
+       honest "—" for anything the artifact does not carry. Pro mode shows
+       the numbers; Beginner sees the fixed plain-English summary (the
+       jargon/plain-eng block convention). -->
+  <section aria-label="Deep stats — stored results-depth aggregates">
+    <h3>🔬 <span class="jargon">Deep stats — stored results-depth aggregates</span><span class="plain-eng">How rough was the ride?</span></h3>
+    <div class="plain-eng-block">
+      <div class="note">Worst days, losing streaks, adverse moves and how trades ended — from the stored run. Switch to Pro for the numbers.</div>
+    </div>
+    <div class="jargon-block">
+      <div class="story-grid">
+        <div class="story-cell"><div class="k">Expectancy / trade</div><div class="v" id="stExpectancy" data-explain="expectancy_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Recovery factor</div><div class="v" id="stRecovery" data-explain="recovery_factor">—</div></div>
+        <div class="story-cell"><div class="k">Max consecutive losses</div><div class="v" id="stLossStreak" data-explain="max_consecutive_losses">—</div></div>
+        <div class="story-cell"><div class="k">MAE (tf)</div><div class="v" id="stMae" data-explain="mae_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">MFE (tf)</div><div class="v" id="stMfe" data-explain="mfe_avg_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Minute-path max DD</div><div class="v" id="stMinuteDd" data-explain="max_dd_minute_path_paisa">—</div></div>
+        <div class="story-cell"><div class="k">Exit mix</div><div class="v" id="stExitMix" data-explain="exit_mix" style="font-size:13px">—</div></div>
+        <div class="story-cell"><div class="k">Worst 5 days</div><div class="v" id="stWorst5" data-explain="worst5_days" style="font-size:13px">—</div></div>
+        <!-- DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the joined Stage-4 verdict
+             line — server-built status_text + the verdict's own detail /
+             survivor rank / provisional caveat (mechanical joins only). -->
+        <div class="story-cell"><div class="k">Cascade validation</div><div class="v" id="stCascadeDeep" data-explain="cascade_status" style="font-size:13px">—</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HIGH #13 (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001): the regime breakdown
+       from entry.regime (one_regime_wonder + axis + by_trend) — the card
+       previously read only vix_band; the stale "lands with the P3 data"
+       deferral note is DELETED (the data ships in the artifact). Family
+       drill-down (R34) stays a named later PR. -->
+  <section aria-label="Regime breakdown">
+    <h3>🌦 Regime breakdown</h3>
+    <div class="story-grid">
+      <div class="story-cell"><div class="k">P&amp;L by trend regime</div><div class="v" id="stTrendSplit" data-explain="by_trend" style="font-size:13px">—</div></div>
+      <div class="story-cell"><div class="k">Regime concentration</div><div class="v" id="stRegimeWonder" data-explain="one_regime_wonder" style="font-size:13px">—</div></div>
+    </div>
+    <div class="note">family drill-down (R34) is a named later PR; Beginner phrasing beyond the fixed lookup lands with the P3 phrase table (R33).</div>
+  </section>
+  </div>
+
   <div id="bxTip" hidden></div>
 
-<script>
-/* Chart-first strategy page (DEC-OPERATOR-PAGE-REAL-001).
-   DOM LAW: every artifact-derived string reaches the DOM via textContent;
-   the SVG is built with createElementNS ONLY (bx-chart.js builders). The
-   candle window: ?trade=N centers the /api/v1/db/candles fetch on that
-   trade's entry_ts session (F-B1a); a trade timestamp outside the loaded
-   window DROPS its arrow + shows the loud BXChart.ARROW_DROPPED_NOTE
-   (F-B1b) — never a snapped wrong-candle arrow. */
-(function () {
-  'use strict';
-  var TRADES_LIMIT = 100;
-  var state = {
-    runId: null,
-    rank: 1,
-    tradeIdx: null, // ?trade= (0-based row index on the current page)
-    offset: 0,
-    symbol: null,
-    interval: null,
-    trades: [],
-    candles: []
-  };
-
-  function byId(id) { return document.getElementById(id); }
-
-  function money(paisa) {
-    if (!window.BXExplain) { return '—'; }
-    var r = window.BXExplain.paisaToRupees(paisa);
-    if (r === null) { return '—'; }
-    return (Number(paisa) >= 0 ? '+₹' : '−₹') + r.replace(/^-/, '');
-  }
-
-  /* tf label ("5m"/"1h"/"1d") → the lake interval partition name. Unmapped
-     labels return null and the chart shows an HONEST "cannot map" note —
-     never a guessed partition. */
-  function tfToInterval(tf) {
-    var s = String(tf || '');
-    if (/^\d+minute$|^\d+hour$|^1day$/.test(s)) { return s; }
-    var m = /^(\d+)m$/.exec(s);
-    if (m) { return m[1] + 'minute'; }
-    var h = /^(\d+)h$/.exec(s);
-    if (h) { return h[1] + 'hour'; }
-    if (s === '1d') { return '1day'; }
-    return null;
-  }
-
-  /* TZ-SAFE parse ([W3-R1] second layer): the ONE shared BXChart.parseTsIst —
-     a naive API string is IST wall-clock pinned to +05:30, an offset-carrying
-     trade timestamp passes through — so arrow placement is TZ-invariant in
-     every browser, never a browser-local Date.parse of a naive string. */
-  function parseTs(raw) {
-    return window.BXChart.parseTsIst(raw);
-  }
-
-  /* ── candle chart ── */
-
-  function renderChart() {
-    var host = byId('stChartHost');
-    if (!host || !window.BXChart || !window.BXUI) { return; }
-    window.BXUI.clear(host);
-    var geom = window.BXChart.candleGeom(state.candles, 1000, 340, 10);
-    if (geom.empty) {
-      host.appendChild(window.BXUI.el('div', 'note',
-        'no candles in the window — pull data on /universe or widen the range'));
-      return;
-    }
-    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 340', preserveAspectRatio: 'none' });
-    var nodes = window.BXChart.candleNodes(geom);
-    for (var i = 0; i < nodes.length; i++) { svg.appendChild(nodes[i]); }
-    // Entry/exit arrows for the focused trade (or every loaded trade when
-    // none is focused): the -1 sentinel DROPS the arrow + shows the loud
-    // note — never a snapped wrong-candle arrow (F-B1).
-    var focus = state.tradeIdx === null ? state.trades : [state.trades[state.tradeIdx]];
-    var droppedAny = false;
-    for (var t = 0; t < focus.length; t++) {
-      var trade = focus[t];
-      if (!trade) { continue; }
-      var entryMs = parseTs(trade.entry_ts);
-      var exitMs = parseTs(trade.exit_ts);
-      var arrow = window.BXChart.tradeArrow(entryMs, exitMs, state.candles);
-      if (arrow.dropped) { droppedAny = true; continue; }
-      var eC = geom.candles[arrow.entry_idx];
-      var xC = geom.candles[arrow.exit_idx];
-      svg.appendChild(window.BXChart.arrowNode(eC.x, eC.yLow + 10, 'entry', String(trade.direction)));
-      svg.appendChild(window.BXChart.arrowNode(xC.x, xC.yHigh - 10, 'exit', String(trade.direction)));
-    }
-    host.appendChild(svg);
-    if (geom.flat) {
-      host.appendChild(window.BXUI.el('div', 'note', 'flat price range in this window'));
-    }
-    var noteEl = byId('stArrowNote');
-    if (noteEl) {
-      noteEl.hidden = !droppedAny;
-      if (droppedAny) { noteEl.textContent = window.BXChart.ARROW_DROPPED_NOTE; }
-    }
-  }
-
-  function loadCandles() {
-    if (!state.symbol || !state.interval) {
-      byId('stChartCoords').textContent =
-        'chart unavailable — the run selection carries no mappable symbol/timeframe yet';
-      return;
-    }
-    // F-B1a: the window centers on the focused trade's entry session; the
-    // fallback is the last loaded trade's session (or none → honest note).
-    var anchor = null;
-    if (state.tradeIdx !== null && state.trades[state.tradeIdx]) {
-      anchor = parseTs(state.trades[state.tradeIdx].entry_ts);
-    } else if (state.trades.length) {
-      anchor = parseTs(state.trades[0].entry_ts);
-    }
-    if (anchor === null) {
-      byId('stChartCoords').textContent =
-        'no trade timestamps yet — chart loads once trades exist (awaiting real run artifact)';
-      return;
-    }
-    // The session-day anchor is the IST calendar date of the entry instant
-    // (pure epoch arithmetic — TZ-invariant, never a browser-local Date).
-    var day = window.BXChart.istDateOfEpoch(anchor);
-    var parts = String(state.symbol).split('-');
-    var exchange = parts.length > 1 ? parts[0] : 'NSE';
-    var url = '/api/v1/db/candles' +
-      '?exchange=' + encodeURIComponent(exchange) +
-      '&segment=INDEX' +
-      '&symbol=' + encodeURIComponent(state.symbol) +
-      '&interval=' + encodeURIComponent(state.interval) +
-      '&start=' + encodeURIComponent(day) +
-      '&end=' + encodeURIComponent(day) +
-      '&limit=500';
-    byId('stChartCoords').textContent =
-      state.symbol + ' · ' + state.interval + ' · session ' + day +
-      (state.tradeIdx !== null ? ' · centered on trade #' + String(state.tradeIdx + 1) : '');
-    window.BXOneclick.oneshotFetch(url, byId('stChartError'), function (payload) {
-      /* [W3-R1]: the ONE route-shape-driven mapper (BXChart) — the route's
-         column is "timestamp" (db_view.CANDLE_COLUMNS); the old inline
-         idx.ts read undefined on every REAL payload so no candle ever
-         plotted (the fixture blindspot). A missing required column shows
-         an honest note, never a silently empty chart. */
-      var mapped = window.BXChart.candleRowsFromDbPayload(payload);
-      if (mapped.missing !== null) {
-        byId('stChartCoords').textContent =
-          'candle payload is missing the "' + mapped.missing + '" column — cannot chart';
-        return;
-      }
-      state.candles = mapped.rows;
-      renderChart();
-    });
-  }
-
-  /* ── trades (inline at load — F-M5) ── */
-
-  function renderTrades() {
-    var tbody = byId('stTradesBody');
-    if (!tbody) { return; }
-    while (tbody.firstChild) { tbody.removeChild(tbody.firstChild); }
-
-    function td(text, cls) {
-      var cell = document.createElement('td');
-      if (cls) { cell.className = cls; }
-      cell.textContent = text;
-      return cell;
-    }
-
-    for (var i = 0; i < state.trades.length; i++) {
-      var r = state.trades[i];
-      var tr = document.createElement('tr');
-      var pnl = typeof r.pnl_paisa === 'number' ? r.pnl_paisa : null;
-      tr.appendChild(td(String(r.direction).toUpperCase(), null));
-      tr.appendChild(td(String(r.entry_ts), null));
-      tr.appendChild(td(String(r.entry_px), null));
-      tr.appendChild(td(String(r.exit_ts), null));
-      tr.appendChild(td(String(r.exit_px), null));
-      tr.appendChild(td(r.lots === null || r.lots === undefined ? '—' : String(r.lots), null));
-      tr.appendChild(td(String(r.exit_reason), null));
-      tr.appendChild(td(pnl === null ? '—' : money(pnl), pnl !== null && pnl < 0 ? 'neg' : 'pos'));
-      tr.appendChild(td(r.costs_paisa === undefined ? '—' : money(r.costs_paisa), null));
-      /* Additive #1275 honesty flag: mae/mfe carry their granularity ("1m"|"tf"). */
-      var gran = typeof r.mae_granularity === 'string' ? ' (' + r.mae_granularity + ')' : '';
-      tr.appendChild(td(String(r.mae) + gran, null));
-      tr.appendChild(td(String(r.mfe) + gran, null));
-      tr.appendChild(td(r.vix_entry === null || r.vix_entry === undefined ? 'null' : String(r.vix_entry), null));
-      tr.appendChild(td(r.vix_exit === null || r.vix_exit === undefined ? 'null' : String(r.vix_exit), null));
-      var chartTd = document.createElement('td');
-      var link = document.createElement('a');
-      link.textContent = '📈 chart';
-      link.setAttribute('href',
-        '/strategy?run_id=' + encodeURIComponent(state.runId || '') +
-        '&rank=' + encodeURIComponent(String(state.rank)) +
-        '&trade=' + encodeURIComponent(String(i)));
-      chartTd.appendChild(link);
-      tr.appendChild(chartTd);
-      tbody.appendChild(tr);
-    }
-  }
-
-  function renderEquity() {
-    var host = byId('stEquityHost');
-    if (!host || !window.BXChart || !window.BXUI) { return; }
-    window.BXUI.clear(host);
-    var series = window.BXChart.equitySeries(state.trades);
-    if (series.empty) {
-      host.appendChild(window.BXUI.el('div', 'note', 'no trades yet — awaiting real run artifact'));
-      return;
-    }
-    var svg = window.BXChart.svgEl('svg', { viewBox: '0 0 1000 220', preserveAspectRatio: 'none' });
-    var path = window.BXChart.equityPathNode(series, 1000, 220, 8);
-    if (path) { svg.appendChild(path); }
-    host.appendChild(svg);
-    var bits = ['per-trade close equity — minute-path equity lands with P3'];
-    if (series.overflow) { bits.push('OVERFLOW: curve truncated at the safe-integer wall'); }
-    if (series.invalid_rows) { bits.push(String(series.invalid_rows) + ' invalid row(s) skipped'); }
-    // [W2-4] Ruling-18 null costs: counted at ₹0 — the curve is honestly
-    // labeled gross of those unverified costs, never an empty chart.
-    if (series.null_cost_rows) {
-      bits.push(String(series.null_cost_rows) + ' row(s) carry null costs (by design until P5) — curve is gross of those costs');
-    }
-    bits.push('net ' + money(series.final_paisa));
-    host.appendChild(window.BXUI.el('div', 'note', bits.join(' · ')));
-    // R44 #4: the plain-English claim decomposes to line-by-line arithmetic
-    // over the trades LOADED on this page (self-scoping — C-M4b).
-    if (window.BXExplain) {
-      var arith = window.BXExplain.tradeArithmetic(state.trades);
-      byId('stArith').textContent = arith.lines.join(' · ');
-    }
-  }
-
-  function loadTrades() {
-    var url = '/api/v1/oneclick/trades' +
-      '?run_id=' + encodeURIComponent(state.runId) +
-      '&rank=' + encodeURIComponent(String(state.rank)) +
-      '&offset=' + String(state.offset) +
-      '&limit=' + String(TRADES_LIMIT);
-    window.BXOneclick.oneshotFetch(url, byId('stTradesError'), function (payload) {
-      var badge = byId('ocTradesSource');
-      if (badge) { badge.textContent = 'source: ' + String(payload.source); }
-      var note = byId('stTradesNote');
-      if (payload.status === 'ok' || payload.status === 'partial') {
-        state.trades = payload.rows || [];
-        var total = payload.total === null || payload.total === undefined
-          ? 'unknown total' : 'of ' + String(payload.total);
-        note.textContent = String(state.trades.length) + ' trade(s) shown ' + total +
-          ' · offset ' + String(state.offset) +
-          (payload.status === 'partial' ? ' — PARTIAL: ' + String(payload.detail) : '');
-      } else {
-        state.trades = [];
-        note.textContent = String(payload.detail || 'awaiting real run artifact');
-      }
-      byId('stPage').textContent = 'page ' + String(Math.floor(state.offset / TRADES_LIMIT) + 1);
-      renderTrades();
-      renderEquity();
-      loadCandles();
-    });
-  }
-
-  /* ── the story card from the top-100 row ── */
-
-  function loadRow() {
-    window.BXOneclick.oneshotFetch(
-      '/api/v1/oneclick/top100?run_id=' + encodeURIComponent(state.runId),
-      null,
-      function (payload) {
-        if (payload.status !== 'ok' && payload.status !== 'partial') {
-          byId('stName').textContent = String(payload.detail || 'awaiting real run artifact');
-          return;
-        }
-        var rows = payload.rows || [];
-        var row = null;
-        for (var i = 0; i < rows.length; i++) {
-          if (Number(rows[i].rank) === state.rank) { row = rows[i]; break; }
-        }
-        if (!row) {
-          byId('stName').textContent =
-            'rank ' + String(state.rank) + ' is not in the stored top-100 (' +
-            String(payload.row_count) + ' rows stored)';
-          return;
-        }
-        var m = row.metrics && typeof row.metrics === 'object' ? row.metrics : {};
-        byId('stRank').textContent = '#' + String(row.rank);
-        byId('stName').textContent = Array.isArray(row.conditions) ? row.conditions.join(' × ') : '—';
-        byId('stTf').textContent = String(row.tf);
-        byId('stDir').textContent = String(row.direction);
-        byId('stArm').textContent = String(row.arm);
-        byId('stMask').textContent = String(row.mask_hex);
-        byId('stFamily').textContent = String(row.family_id);
-        byId('stNet').textContent = m.net_pnl_paisa === undefined ? '—' : money(m.net_pnl_paisa);
-        byId('stMaxDd').textContent = m.max_dd_paisa === undefined ? '—' : money(m.max_dd_paisa);
-        byId('stSharpe').textContent = m.sharpe === undefined ? '—' : String(m.sharpe);
-        byId('stDsr').textContent = m.dsr === undefined ? '—' : String(m.dsr);
-        byId('stCpcv').textContent = m.cpcv_pass_pct === undefined ? '—' : String(m.cpcv_pass_pct);
-        byId('stWinRate').textContent = m.win_rate === undefined ? '—' : String(m.win_rate);
-        byId('stPf').textContent = m.profit_factor === undefined ? '—' : String(m.profit_factor);
-        byId('stTrades').textContent = m.trades === undefined ? '—' : String(m.trades);
-        /* [W3-R4]: the ONE shared band builder — a null-lo/hi writer band
-           reads the honest not-stamped copy, never "between null–null". */
-        byId('stVixBand').textContent = window.BXOneclick.vixBandText(row.vix_band);
-        state.interval = tfToInterval(row.tf);
-        loadTrades();
-      }
-    );
-  }
-
-  function loadManifestSymbol(next) {
-    window.BXOneclick.oneshotFetch(
-      '/api/v1/oneclick/manifest?run_id=' + encodeURIComponent(state.runId),
-      null,
-      function (payload) {
-        var m = payload.manifest;
-        if (m && m.selection && Array.isArray(m.selection.symbols) && m.selection.symbols.length) {
-          state.symbol = String(m.selection.symbols[0]);
-        }
-        next();
-      }
-    );
-  }
-
-  function init() {
-    var params = new URLSearchParams(window.location.search);
-    state.runId = params.get('run_id');
-    state.rank = Math.max(1, parseInt(params.get('rank') || '1', 10) || 1);
-    var tr = params.get('trade');
-    state.tradeIdx = tr === null ? null : Math.max(0, parseInt(tr, 10) || 0);
-    var tip = byId('bxTip');
-    if (tip && window.BXExplain) {
-      window.BXExplain.bindExplainHover(document.body, tip);
-    }
-    byId('stPrev').addEventListener('click', function () {
-      state.offset = Math.max(0, state.offset - TRADES_LIMIT);
-      state.tradeIdx = null;
-      loadTrades();
-    });
-    byId('stNext').addEventListener('click', function () {
-      state.offset += TRADES_LIMIT;
-      state.tradeIdx = null;
-      loadTrades();
-    });
-    function go() {
-      byId('stRunId').textContent = state.runId;
-      loadManifestSymbol(loadRow);
-    }
-    if (state.runId) {
-      go();
-    } else {
-      window.BXOneclick.oneshotFetch('/api/v1/oneclick/runs', null, function (runs) {
-        if (runs.latest_run_id) {
-          state.runId = runs.latest_run_id;
-          go();
-        } else {
-          byId('stName').textContent = String(runs.detail || 'awaiting real run artifact');
-        }
-      });
-    }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-})();
-</script>
+<!-- The page wiring moved VERBATIM into the shared
+     /static/bx-strategy-panel.js (DEC-OPERATOR-PAGE-CONSOLIDATE-001):
+     it self-mounts on the data-bx-autopanel="strategy" attribute above
+     (deep-link params parsed by the pure BXPortalState codec; no run_id
+     → the latest discovered run). -->
 </body>
 </html>

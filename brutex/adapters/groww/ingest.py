@@ -103,7 +103,7 @@ from brutex.adapters.ingest_common import (
     now_ist as _now_ist,
 )
 from brutex.adapters.protocol import MarketAdapter
-from brutex.data.errors import PartitionLockTimeout, WriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, PartitionLockTimeout, WriteDeadlineExceeded
 from brutex.data.fetch_coverage import WindowKey
 from brutex.data.interior_gap_detect import INTERIOR_GAP, observe_interior_gap
 from brutex.data.models import CandleBar
@@ -116,6 +116,11 @@ from brutex.data.session import (
     observe_all_filtered,
 )
 from brutex.data.sink import BarSink
+from brutex.data.today_completeness import (
+    TODAY_INCOMPLETE,
+    InstrumentClass,
+    observe_today_completeness,
+)
 from brutex.data.window_ledger import WindowLedger
 from brutex.data.write_breaker import WriteHealthBreaker, partition_health_key
 from brutex.models import Instrument
@@ -303,6 +308,15 @@ class _RawWindow:
     #: (the structural floor of a first-try win) so the field rides the frozen
     #: payload additively; the producer always passes the real count.
     empty_fetches: int = 0
+    #: The IST date of the SAME clock instant the producer passed to
+    #: ``clamp_window_end`` (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — the tail's
+    #: covers-today predicate (``window_end == clamp_today + 1 day``) is judged
+    #: against the date that MINTED the clamped end, so clamp and gate stay
+    #: coherent across a midnight-crossing async drain (the tail NEVER reads a
+    #: clock for the gate). ``None`` (a legacy/un-threaded constructor) keeps
+    #: the gate INERT for the window — fail-open to pre-gate behavior. Appended
+    #: LAST + defaulted (the ``empty_fetches`` additive-field precedent).
+    clamp_today: date | None = None
 
 
 def _windows(interval: str, start: date, end: date) -> list[tuple[date, date]]:
@@ -341,11 +355,13 @@ def ingest_spot(
     on_window: WindowTick | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> IngestReport:
     """Pull *instrument*'s spot OHLCV over ``[start, end)`` into *sink* (Groww).
 
@@ -443,6 +459,20 @@ def ingest_spot(
         dry-run / synthetic / unit-test callers) never probes; ONLY the
         real-vendor production sites arm it (the ``storm_breaker`` gating
         pattern). Best-effort: a learner failure can never crash the pull.
+    today_completeness_gate
+        The pre-settle TODAY minute-completeness gate
+        (DEC-PULL-TODAY-COMPLETENESS-GATE-001,
+        :mod:`brutex.data.today_completeness`): when ``True``, a ``1minute``
+        window covering TODAY's IST session whose fetched bars fail the
+        per-class completeness criteria has today's bars WITHHELD from the sink
+        (keep-first would freeze the still-settling rows forever) and is demoted
+        to a re-pullable ``FAILED`` under the streak-EXEMPT
+        ``TODAY_INCOMPLETE`` reason. Default ``False`` (library-inert — the
+        dry-run synthetic adapter anchors bars on the window-START day, so an
+        armed dry-run today-window would false-red, the #1031 lesson); the
+        production sites pass ``(not dry_run) and
+        resolve_today_completeness_enabled()`` (env kill switch
+        ``BRUTEX_TODAY_COMPLETENESS_GATE``, resolved ONCE per pull).
 
     Returns
     -------
@@ -466,6 +496,11 @@ def ingest_spot(
     # injected clock the current-day clamp uses, so a test's injected ``now_ist`` makes the
     # decision deterministic. Passed down to ``_ingest_one_window``.
     old_cutoff = now_for_clamp.date() - timedelta(days=OLD_GAP_HORIZON_DAYS)
+    # TODAY-gate clamp date (DEC-PULL-TODAY-COMPLETENESS-GATE-001): the SAME clock
+    # instant the clamp used, stamped on every _RawWindow so the tail's
+    # covers-today predicate is judged against the date that MINTED the clamped
+    # end (a midnight-crossing drain stays coherent; the tail never reads a clock).
+    clamp_today_date = now_for_clamp.date()
     if clamped_end != end:
         _LOG.info(
             "ingest.window.clamped",
@@ -531,13 +566,16 @@ def ingest_spot(
                 empty_retry_attempts=empty_retry_attempts,
                 empty_retry_backoff=empty_backoff,
                 old_cutoff=old_cutoff,
+                clamp_today=clamp_today_date,
                 fetch_pipeline=fetch_pipeline,
                 detect_completeness_gaps=detect_completeness_gaps,
+                today_completeness_gate=today_completeness_gate,
                 observed_holidays=observed_holidays,
                 empty_breaker=empty_breaker,
                 storm_breaker=storm_breaker,
                 write_breaker=write_breaker,
                 floor_learner=floor_learner,
+                market_closed=market_closed,
             )
 
     backoff = retry_backoff if retry_backoff is not None else _default_retry_backoff
@@ -679,13 +717,16 @@ def _ingest_one_window(
     empty_retry_attempts: int = _DEFAULT_EMPTY_RETRY_ATTEMPTS,
     empty_retry_backoff: Callable[[int], None] = _noop_empty_backoff,
     old_cutoff: date | None = None,
+    clamp_today: date | None = None,
     fetch_pipeline: FetchPipeline | None = None,
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
+    market_closed: Callable[[], bool] | None = None,
 ) -> _WindowOutcome:
     """Fetch + session-filter + sink-append ONE window; return its outcome.
 
@@ -710,7 +751,15 @@ def _ingest_one_window(
     (DEC-EMPTY-INPULL-RETRY-001) — see :func:`_fetch_window_raw`. *old_cutoff*
     (DEC-OLD-GAP-FAST-SETTLE-001) drives the OLD-gap fast-settle — see
     :func:`_process_window_tail`.
+
+    Market-hours guard (DEC-GROWW-MARKET-HOURS-GUARD-001): consulted FIRST — before
+    the vendor fetch, the ledger-skip probe, or any I/O — so a pull that crossed into
+    the NSE trading window ``[08:45, 15:35)`` IST halts on THIS window instead of
+    issuing a vendor call. ``MarketHoursHalt`` is a ``_GLOBAL_STOP_ERRORS`` member, so
+    it propagates past the per-symbol quarantine and stops the whole pull gracefully.
     """
+    if market_closed is not None and market_closed():
+        raise MarketHoursHalt()
     outcome, raw = _fetch_window_raw(
         adapter,
         instrument=instrument,
@@ -725,6 +774,7 @@ def _ingest_one_window(
         empty_retry_attempts=empty_retry_attempts,
         empty_retry_backoff=empty_retry_backoff,
         old_cutoff=old_cutoff,
+        clamp_today=clamp_today,
         empty_breaker=empty_breaker,
         storm_breaker=storm_breaker,
         floor_learner=floor_learner,
@@ -742,6 +792,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             write_breaker=write_breaker,
@@ -768,6 +819,7 @@ def _ingest_one_window(
             pull_id=pull_id,
             series_fields=series_fields,
             detect_completeness_gaps=detect_completeness_gaps,
+            today_completeness_gate=today_completeness_gate,
             observed_holidays=observed_holidays,
             empty_breaker=empty_breaker,
             write_breaker=write_breaker,
@@ -835,6 +887,7 @@ def _fetch_window_raw(
     empty_retry_attempts: int,
     empty_retry_backoff: Callable[[int], None],
     old_cutoff: date | None,
+    clamp_today: date | None = None,
     empty_breaker: EmptySettleBreaker | None = None,
     storm_breaker: ErrorStormBreaker | None = None,
     floor_learner: VendorFloorLearner | None = None,
@@ -1082,6 +1135,7 @@ def _fetch_window_raw(
             fetch_count=fetch_count,
             settle_empty=settle_empty,
             empty_fetches=empty_fetches,
+            clamp_today=clamp_today,
         ),
     )
 
@@ -1095,6 +1149,7 @@ def _process_window_tail(
     pull_id: str,
     series_fields: dict[str, str],
     detect_completeness_gaps: bool = False,
+    today_completeness_gate: bool = False,
     observed_holidays: frozenset[date] = frozenset(),
     empty_breaker: EmptySettleBreaker | None = None,
     write_breaker: WriteHealthBreaker | None = None,
@@ -1169,6 +1224,43 @@ def _process_window_tail(
     # this only ever removes an out-of-window / clock-skew phantom — a bar ON the boundary
     # is KEPT, so the existing behaviour is byte-unchanged for every legitimate in-range bar.
     bars = drop_bars_after(bars, window_end)
+    # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001):
+    # a covers-today window (``window_end == clamp_today + 1 day`` — mintable only at/after
+    # 15:30 IST via clamp_window_end) whose fetched TODAY bars fail the per-class criteria
+    # must NOT store today's bars (the keep-first merge law would freeze the still-settling
+    # #837 forming-shape rows FOREVER) nor settle SUCCESS. The guarded wrapper returns
+    # ``None`` (⇒ append the ORIGINAL bars, never demote) for every inert/abstain shape —
+    # a legacy payload (clamp_today None), a non-1minute interval, a non-today window
+    # (classifier not consulted — byte-identity pinned), a raw-EMPTY fetch (the EMPTY
+    # machinery owns it), out-of-coverage/non-trading dates, or an internal error
+    # (fail-open). On a FAIL only the bars strictly BEFORE clamp_today are appended (the
+    # window's settled history still lands; today + any boundary today+1 leak are withheld)
+    # and the record below is demoted under the streak-EXEMPT ``TODAY_INCOMPLETE`` reason.
+    # Session-exempt symbols (their grid is not the NSE session) are not judged.
+    today_incomplete = False
+    append_bars = bars
+    if today_completeness_gate and not is_session_exempt(instrument.symbol_name):
+        gate_result = observe_today_completeness(
+            _LOG,
+            bars=bars,
+            clamp_today=raw.clamp_today,
+            window_end=window_end,
+            instrument_class=(
+                InstrumentClass.INDEX_SPOT if instrument.is_index else InstrumentClass.CASH_SPOT
+            ),
+            symbol=instrument.symbol_name,
+            interval=interval,
+            pull_id=pull_id,
+            raw_count=len(raw_bars),
+            fields={
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                **series_fields,
+            },
+        )
+        if gate_result is not None and gate_result[1].incomplete:
+            today_incomplete = True
+            append_bars = gate_result[0].prior
     # ALL-FILTERED at the WHOLE boundary (DEC-DATA-HONESTY-ALLFILTERED-SEED-001,
     # widening DEC-INGEST-BOUNDARY-INTEGRITY-001's session-filter-only check): the
     # kept count is read AFTER the session filter AND the future-bar drop, so a
@@ -1213,7 +1305,10 @@ def _process_window_tail(
             segment=instrument.segment.value,
             symbol=instrument.symbol_name,
             interval=interval,
-            bars=bars,
+            # The TODAY-gate write guard: on a today-incomplete verdict only the
+            # settled pre-today history is appended (``append_bars``); every
+            # other path appends the ORIGINAL ``bars`` object — byte-identical.
+            bars=append_bars,
         )
     except (PartitionLockTimeout, WriteDeadlineExceeded) as exc:
         # DEFER this window to the next pull, exactly like a 429 / timeout transient — record
@@ -1391,9 +1486,16 @@ def _process_window_tail(
     # dedup: a re-pull whose bars all dedup to zero NET-NEW still passes bars
     # THROUGH the boundary (``bars`` non-empty), so it stays SUCCESS.
     all_filtered = detect_completeness_gaps and interval != _DAILY and all_boundary_filtered
-    degraded = all_filtered or (demotable and (truncated or interior_gap))
-    if all_filtered:
-        degraded_reason: str | None = ALL_FILTERED
+    # Demotion priority (DEC-PULL-TODAY-COMPLETENESS-GATE-001 Ruling G-5): the TODAY gate's
+    # verdict WINS when it fired — TODAY_INCOMPLETE is the streak-EXEMPT reason, so if the
+    # streak-BUMPING ALL_FILTERED won on a covers-today window, three same-evening rounds
+    # could still walk it to SKIPPED. Overlap is narrow anyway (an all-filtered covers-today
+    # INDEX window has zero today bars, so the count check fails it first).
+    degraded = today_incomplete or all_filtered or (demotable and (truncated or interior_gap))
+    if today_incomplete:
+        degraded_reason: str | None = TODAY_INCOMPLETE
+    elif all_filtered:
+        degraded_reason = ALL_FILTERED
     elif demotable and interior_gap:
         degraded_reason = INTERIOR_GAP
     elif demotable and truncated:
