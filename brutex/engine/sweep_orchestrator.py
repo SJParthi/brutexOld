@@ -98,8 +98,15 @@ from brutex.engine.sweep_run import (
 )
 from brutex.execution.fill_mode import FillMode
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
-from brutex.strategies.types import FibAnchorKind, Side
-from brutex.universe import is_engine_sweep_symbol
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+    price_source_params_fragment,
+)
+from brutex.universe import is_engine_spot_symbol, is_engine_sweep_symbol
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -265,6 +272,13 @@ class SweepGridConfig:
     #: The swept Fib-anchor axis (DEC-NIFTY-FIB-AXIS-001). Defaults to prev-day
     #: only so an unset grid is byte-identical to the pre-axis sweep.
     fib_anchors: Sequence[FibAnchorKind] = (FibAnchorKind.PREV_DAY,)
+    #: The swept VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001).
+    #: Defaults to the single baseline cell ``(HLC3, CLOSE)`` so an unset grid is
+    #: cardinality-1 and byte-identical to the pre-axis sweep (dormant axis). A
+    #: non-default cell is an OFAT (one-factor-at-a-time) variant — the honest
+    #: budget verdict is STAGED: each cell runs as a SEPARATE cardinality-1
+    #: invocation (~baseline ≤ 2 days), a combined 5-cell run does NOT fit ≤ 2 days.
+    price_source_cells: Sequence[PriceSourceCell] = (DEFAULT_PRICE_SOURCE_CELL,)
     prior_n: int = 3
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
@@ -309,6 +323,7 @@ class SweepGridConfig:
         object.__setattr__(self, "take_profits", _dedup_seq(self.take_profits))
         object.__setattr__(self, "proximities", _dedup_seq(self.proximities))
         object.__setattr__(self, "fib_anchors", _dedup_seq(self.fib_anchors))
+        object.__setattr__(self, "price_source_cells", _dedup_seq(self.price_source_cells))
 
         for name in (
             "instruments",
@@ -320,6 +335,7 @@ class SweepGridConfig:
             "take_profits",
             "proximities",
             "fib_anchors",
+            "price_source_cells",
         ):
             if not getattr(self, name):
                 raise ValueError(f"SweepGridConfig.{name} must be a non-empty axis")
@@ -349,6 +365,30 @@ class SweepGridConfig:
             raise ValueError(
                 "SweepGridConfig.directions must not contain Side.HOLD "
                 "(a sweep backtests a directional edge)"
+            )
+        # VWAP-source-on-spot advisory (DEC-NIFTY-PRICE-SOURCE-AXIS-001): a spot
+        # index carries NO traded volume, so a VWAP-variant cell (vwap_source !=
+        # HLC3) produces meaningless bits 52-53 on it — a likely operator mistake
+        # that would waste a ~2-day run. NON-BLOCKING: warn once, never refuse (the
+        # operator may deliberately probe it; the run still completes).
+        vwap_variant_cells = sorted(
+            {
+                c.vwap_source.value
+                for c in self.price_source_cells
+                if c.vwap_source is not PriceSource.HLC3
+            }
+        )
+        spot_instruments = sorted({s for s in self.instruments if is_engine_spot_symbol(s)})
+        if vwap_variant_cells and spot_instruments:
+            _LOG.warning(
+                "stage1a.vwap_source_on_spot",
+                vwap_variant_sources=vwap_variant_cells,
+                spot_instruments=spot_instruments,
+                detail=(
+                    "VWAP-source cells are meaningless on spot indices (no traded "
+                    "volume → bits 52-53 never fire); they apply only to NIFTY "
+                    "futures — this run will produce junk VWAP bits for these symbols"
+                ),
             )
         for name in ("mode", "data_snapshot_hash", "indicator_version", "code_commit_sha"):
             if not getattr(self, name):
@@ -481,6 +521,10 @@ class SweepTuple:
     tp_paisa: int | None
     proximity: ProximityParams | None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP/EMA price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001) this
+    #: tuple evaluates against. Defaults to the baseline ``(HLC3, CLOSE)`` cell so
+    #: a tuple built without the axis keeps the pre-axis behaviour + store address.
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL
 
     def to_run_config(
         self,
@@ -531,6 +575,8 @@ class SweepTuple:
             prior_n=grid.prior_n,
             proximity=self.proximity,
             fib_anchor=self.fib_anchor,
+            vwap_source=self.price_source.vwap_source,
+            ema_source=self.price_source.ema_source,
             start_equity_paisa=grid.start_equity_paisa,
             max_combos=grid.max_combos,
             top_k=grid.top_k,
@@ -616,6 +662,7 @@ def count_sweep_tuples(grid: SweepGridConfig) -> int:
             len(grid.take_profits),
             len(grid.proximities),
             len(grid.fib_anchors),
+            len(grid.price_source_cells),
         )
     )
 
@@ -624,8 +671,9 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     """Yield every :class:`SweepTuple` of *grid*'s outer product, deterministically.
 
     Streams the product in a fixed nested order (instrument → timeframe →
-    direction → k → stop-loss → take-profit → proximity → fib-anchor) so the
-    enumeration is reproducible. Each ``next`` is O(1) (an :func:`itertools.product`
+    direction → k → stop-loss → take-profit → proximity → fib-anchor →
+    price-source) so the enumeration is reproducible. Each ``next`` is O(1) (an
+    :func:`itertools.product`
     step) with O(1) memory; the generator never materialises the full product.
 
     Parameters
@@ -638,7 +686,17 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
     SweepTuple
         One grid point per step.
     """
-    for instrument, tf, direction, k, sl, tp, proximity, fib_anchor in itertools.product(
+    for (
+        instrument,
+        tf,
+        direction,
+        k,
+        sl,
+        tp,
+        proximity,
+        fib_anchor,
+        price_source,
+    ) in itertools.product(
         grid.instruments,
         grid.timeframes,
         grid.directions,
@@ -647,6 +705,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
         grid.take_profits,
         grid.proximities,
         grid.fib_anchors,
+        grid.price_source_cells,
     ):
         yield SweepTuple(
             instrument=instrument,
@@ -657,6 +716,7 @@ def iter_sweep_tuples(grid: SweepGridConfig) -> Iterator[SweepTuple]:
             tp_paisa=tp,
             proximity=proximity,
             fib_anchor=fib_anchor,
+            price_source=price_source,
         )
 
 
@@ -693,6 +753,7 @@ def bloom_capacity_hint(grid: SweepGridConfig) -> int:
             len(grid.take_profits),
             len(grid.proximities),
             len(grid.fib_anchors),
+            len(grid.price_source_cells),
         )
     )
     return max(1, masks_per_tuple * other_axes)
@@ -748,10 +809,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     overfit(dsr_min)/top_k/min_hits/max_combos or Stage-3 config re-keys the
     Parquet + completion-sentinel + trial-stats-sidecar address instead of
     serving the prior config's finalists via the sentinel short-circuit
-    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001). BYTE-STABLE at defaults: an
-    ungated default-selection grid emits NEITHER fragment, so the descriptor is
-    byte-identical to the pre-fold 16-key dict and no existing on-disk store
-    re-keys.
+    (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) — and the DEFAULT-OMITTED swept
+    price-source cell (:func:`price_source_params_fragment`,
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001). BYTE-STABLE at defaults: an ungated
+    default-selection ``(HLC3, CLOSE)`` grid emits NONE of the fragments, so the
+    descriptor is byte-identical to the pre-fold 16-key dict and no existing
+    on-disk store re-keys.
     """
     proximity_bps = (
         None
@@ -784,6 +847,17 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
         "indicator_version": grid.indicator_version,
         "code_commit_sha": grid.code_commit_sha,
     }
+    # The swept price-source cell distinguishes the store address
+    # (DEC-NIFTY-PRICE-SOURCE-AXIS-001): two tuples differing ONLY by source
+    # evaluate DIFFERENT bits 52-53 / 0-5, so they MUST map to different Parquet
+    # files. DEFAULT-OMITTED (Override 1) via the ONE COMMON fragment (CLAUDE.md
+    # §11): the keys are absent for the baseline ``(HLC3, CLOSE)`` cell so an
+    # existing tuple's store path is byte-identical.
+    descriptor.update(
+        price_source_params_fragment(
+            tuple_.price_source.vwap_source, tuple_.price_source.ema_source
+        )
+    )
     # DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001: fold the non-default SELECTION
     # knobs + the ACTIVE gate config into the store address, each as a nested
     # object mirroring the supervisor's #1330 ``gate_config`` style. Both are
@@ -1075,6 +1149,8 @@ def run_one_tuple(
             proximity=tuple_.proximity,
             prior_n=grid.prior_n,
             fib_anchor=tuple_.fib_anchor,
+            vwap_source=tuple_.price_source.vwap_source,
+            ema_source=tuple_.price_source.ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask_for(tuple_.instrument, tuple_.tf.label),
         )
@@ -1241,22 +1317,28 @@ def run_sweep_grid(
         f"grid:{len(grid.instruments)}i×{len(grid.timeframes)}tf×"
         f"{len(grid.directions)}d:tuples={total}"
     )
-    audit.append(
-        action=_ACTION_GRID_START,
-        subject=subject,
-        payload={
-            "tuples_total": total,
-            "instruments": list(grid.instruments),
-            "timeframes": [tf.label for tf in grid.timeframes],
-            "directions": [d.value for d in grid.directions],
-            "k_values": list(grid.k_values),
-            "fib_anchors": [a.value for a in grid.fib_anchors],
-            "mode": grid.mode,
-            "data_snapshot_hash": grid.data_snapshot_hash,
-            "indicator_version": grid.indicator_version,
-            "code_commit_sha": grid.code_commit_sha,
-        },
-    )
+    grid_start_payload: dict[str, Any] = {
+        "tuples_total": total,
+        "instruments": list(grid.instruments),
+        "timeframes": [tf.label for tf in grid.timeframes],
+        "directions": [d.value for d in grid.directions],
+        "k_values": list(grid.k_values),
+        "fib_anchors": [a.value for a in grid.fib_anchors],
+        "mode": grid.mode,
+        "data_snapshot_hash": grid.data_snapshot_hash,
+        "indicator_version": grid.indicator_version,
+        "code_commit_sha": grid.code_commit_sha,
+    }
+    # DEFAULT-OMIT the price-source axis from the audit config line (Override 1) for
+    # symmetry with every identity/store/cache site: a sole-baseline ``(HLC3, CLOSE)``
+    # grid's GRID_SWEEP_START payload stays byte-identical to the pre-axis form. A
+    # non-default axis surfaces the cells (intended observability).
+    price_source_cells = grid.price_source_cells
+    if not (len(price_source_cells) == 1 and price_source_cells[0].is_default):
+        grid_start_payload["price_source_cells"] = [
+            [c.vwap_source.value, c.ema_source.value] for c in price_source_cells
+        ]
+    audit.append(action=_ACTION_GRID_START, subject=subject, payload=grid_start_payload)
 
     tuples_run = 0
     tuples_skipped_no_bars = 0
@@ -1269,13 +1351,16 @@ def run_sweep_grid(
     persisted = 0
 
     # Bounded resident-kernel cache (DEC-SWEEP-RESIDENT-KERNEL-001): one bar window
-    # per distinct (instrument, tf, proximity, prior_n, fib_anchor). Sized to the
-    # proximity × fib-anchor fan-out (DEC-NIFTY-FIB-AXIS-001 — the kernel's bar_bits
-    # is anchor-SPECIFIC, so each anchor needs its own resident kernel) so a fixed
-    # (instrument, tf) reuses every kernel across its direction/K/sl/tp tuples.
-    # `None` when reuse is disabled (legacy rebuild path).
+    # per distinct (instrument, tf, proximity, prior_n, fib_anchor, price_source).
+    # Sized to the proximity × fib-anchor × price-source fan-out (the kernel's
+    # bar_bits is anchor- AND source-SPECIFIC — DEC-NIFTY-FIB-AXIS-001 /
+    # DEC-NIFTY-PRICE-SOURCE-AXIS-001 — so each combination needs its own resident
+    # kernel) so a fixed (instrument, tf) reuses every kernel across its
+    # direction/K/sl/tp tuples. `None` when reuse is disabled (legacy rebuild path).
     kernel_cache = (
-        ResidentKernelCache(capacity=len(grid.proximities) * len(grid.fib_anchors))
+        ResidentKernelCache(
+            capacity=len(grid.proximities) * len(grid.fib_anchors) * len(grid.price_source_cells)
+        )
         if reuse_bar_bits
         else None
     )
@@ -1314,6 +1399,8 @@ def run_sweep_grid(
                 f"{tuple_.instrument}/{tuple_.tf.label}/{tuple_.direction.value}"
                 f"/k={tuple_.k}/sl={tuple_.sl_paisa}/tp={tuple_.tp_paisa}"
                 f"/fib={tuple_.fib_anchor.value}"
+                f"/vwap={tuple_.price_source.vwap_source.value}"
+                f"/ema={tuple_.price_source.ema_source.value}"
             )
             error = f"{type(exc).__name__}: {exc}"
             audit.append(

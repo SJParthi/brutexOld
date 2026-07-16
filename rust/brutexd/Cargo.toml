@@ -1,0 +1,69 @@
+# brutexd — the BruteX Rust HTTP front (SERVING track, Wave 1).
+#
+# Roadmap: the Rust-uniformity program's opener (roadmap_final.md §3 / PR-1).
+# brutexd binds the OPERATOR port 127.0.0.1-only, serves `/static/*` (the
+# `brutex/dashboard/static/` tree) and `/health` natively, and reverse-proxies
+# EVERY other path verbatim to the FastAPI job host on a private loopback
+# port. Default-OFF behind the fail-loud `BRUTEX_RUST_FRONT` env flag wired in
+# `brutex/dashboard/rust_front.py` — flag OFF (the default) spawns no brutexd
+# process and the dashboard behaviour is byte-identical to before this crate
+# existed.
+#
+# LEANNESS LAW (coordinator ruling, PR-1): brutexd sits IN FRONT of the same
+# DuckDB + Parquet substrate — it NEVER opens the lake itself in this wave.
+# No duckdb / polars / parquet / arrow dependencies may appear here; the
+# Python parity suite (tests/integration/test_sidecar_parity_static.py)
+# pins this Cargo.toml lean.
+
+[package]
+name = "brutexd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.1"
+description = "BruteX Rust HTTP front: native /static + /health, verbatim reverse proxy to the FastAPI job host (Wave 1)"
+license = "Proprietary"
+repository = "https://github.com/SJParthi/bruteX"
+readme = "README.md"
+# Proprietary, never published to crates.io (same posture as fno-math /
+# trading-core; `publish = false` also excludes the crate itself from
+# cargo-deny SPDX checks while real deps stay checked).
+publish = false
+
+[lib]
+name = "brutexd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brutexd"
+path = "src/main.rs"
+
+[dependencies]
+# The unexotic default HTTP stack (roadmap engine pick: "axum-or-equivalent").
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "signal"] }
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+# Panic-to-degrade: a handler panic becomes a logged 500-class response,
+# never a process death (roadmap §3 behaviour law). Requires unwind panics —
+# see [profile.release] below (deliberately NOT panic = "abort").
+tower-http = { version = "0.6", features = ["catch-panic"] }
+# Logging (structured; stderr fmt subscriber installed in main).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-stream = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true
+# DELIBERATE deviation from the fno-math profile: NO `panic = "abort"`.
+# The tower-http CatchPanicLayer (the panic-to-degrade law above) needs
+# unwinding panics; abort would turn any handler panic into process death.

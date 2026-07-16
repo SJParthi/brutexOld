@@ -388,3 +388,93 @@ def test_as_datetime_naive_becomes_utc() -> None:
 def test_as_decimal_coerces_float_and_passes_decimal() -> None:
     assert _as_decimal(150.5) == Decimal("150.5")
     assert _as_decimal(Decimal("210.00")) == Decimal("210.00")
+
+
+# ── bounded LRU bar cache (DEC-MEMORY-FOOTPRINT-HARDENING-001) ───────────────
+def _kw(strike: int) -> dict[str, object]:
+    return {
+        "instrument": OptionsUnderlying.NIFTY,
+        "expiry_date": date(2025, 1, 2),
+        "strike": strike,
+        "option_type": "CE",
+        "entry_ts": _ENTRY,
+        "exit_ts": _EXIT,
+    }
+
+
+@pytest.fixture
+def lake_with_three_ces(tmp_path: Path) -> Path:
+    """Three NIFTY CE contracts (strikes 24000/24100/24200), distinct premiums."""
+    lake = tmp_path / "lake"
+    for strike, close in ((24000, "150.00"), (24100, "120.00"), (24200, "90.00")):
+        _write_contract(
+            lake,
+            exchange="NSE",
+            symbol=f"NSE-NIFTY-02Jan25-{strike}-CE",
+            bars=[_bar(_ENTRY, close), _bar(_EXIT, close)],
+        )
+    return lake
+
+
+def test_rejects_non_positive_bar_cache_capacity(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="bar_cache_capacity"):
+        LakeOptionBarSource(tmp_path / "lake", bar_cache_capacity=0)
+
+
+def test_bar_cache_capacity_is_respected(lake_with_three_ces: Path) -> None:
+    """At most `bar_cache_capacity` contracts stay resident — never the pre-fix
+    unbounded growth (one map per ever-touched contract)."""
+    src = LakeOptionBarSource(lake_with_three_ces, bar_cache_capacity=2)
+    for strike in (24000, 24100, 24200):
+        assert src.load_pair(**_kw(strike)) is not None  # type: ignore[arg-type]
+    assert len(src._bar_cache) == 2  # bounded — the pre-fix dict held all 3
+
+
+def test_bar_cache_evicts_lru_not_the_recently_used(lake_with_three_ces: Path) -> None:
+    """LRU order: a HIT refreshes recency, so the least-recently-USED map evicts."""
+    src = LakeOptionBarSource(lake_with_three_ces, bar_cache_capacity=2)
+    assert src.load_pair(**_kw(24000)) is not None  # type: ignore[arg-type]  # A
+    assert src.load_pair(**_kw(24100)) is not None  # type: ignore[arg-type]  # B
+    assert src.load_pair(**_kw(24000)) is not None  # type: ignore[arg-type]  # HIT A → B is LRU
+    assert src.load_pair(**_kw(24200)) is not None  # type: ignore[arg-type]  # C evicts B, not A
+    assert set(src._bar_cache) == {
+        "NSE-NIFTY-02Jan25-24000-CE",
+        "NSE-NIFTY-02Jan25-24200-CE",
+    }
+
+
+def test_hit_after_evict_recomputes_identical_bars(lake_with_three_ces: Path) -> None:
+    """An evicted contract re-reads its immutable partition: byte-identical pair.
+
+    Eviction = a recomputable read cache, never a changed result (the bounded-LRU
+    correctness law of DEC-MEMORY-FOOTPRINT-HARDENING-001).
+    """
+    src = LakeOptionBarSource(lake_with_three_ces, bar_cache_capacity=1)
+    first = src.load_pair(**_kw(24000))  # type: ignore[arg-type]
+    assert first is not None
+    # Touch another contract → the 24000 map is evicted (capacity 1).
+    assert src.load_pair(**_kw(24100)) is not None  # type: ignore[arg-type]
+    assert "NSE-NIFTY-02Jan25-24000-CE" not in src._bar_cache
+    again = src.load_pair(**_kw(24000))  # type: ignore[arg-type]
+    assert again is not None
+    for field in (
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "open_interest",
+        "side",
+        "strike",
+        "spot",
+        "iv",
+    ):
+        assert getattr(again.entry_bar, field) == getattr(first.entry_bar, field)
+        assert getattr(again.exit_bar, field) == getattr(first.exit_bar, field)
+
+
+def test_default_capacity_is_generous(tmp_path: Path) -> None:
+    """The default keeps 256 contracts resident (a strike chain's worth)."""
+    src = LakeOptionBarSource(tmp_path / "lake")
+    assert src._bar_cache_capacity == 256
