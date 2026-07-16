@@ -30,6 +30,14 @@ wheel is built by maturin and installed in every CI job that imports
   solves IV from the traded price first (historical path). BruteX's thin
   ``brutex.options.greeks`` wrapper delegates here; the ``GREEKS_*`` constants
   mirror the kernel's clamp / floor / admission constants.
+* ``greeks_batch`` — the columnar batch face of ``greeks``
+  (``DEC-GREEKS-RUST-BATCH-001``): seven parallel columns → one
+  ``(values, error)`` element per row (exactly one is non-``None``; the error
+  string carries the kernel's ``invalid_input:`` / ``no_solution:`` prefix
+  VERBATIM), calling the SAME frozen kernel per element. The only whole-call
+  error is a column-length mismatch (``ValueError``). Consumed by the
+  default-OFF ``BRUTEX_GREEKS_RUST_BATCH`` enrich seam via
+  ``brutex.options.greeks.compute_greeks_batch``.
 * ``MarketStructureState`` — the stateful, look-ahead-clean BOS/CHoCH detector
   BruteX's ``stage1a`` engine drives per bar so the per-bar compute runs in Rust
   (the bit-identical backtest==live path; ``DEC-NIFTY-BOS-CHOCH-001``). The
@@ -115,6 +123,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "evaluate_spec",
     "evaluate_with_levels",
     "greeks",
+    "greeks_batch",
     "minute_of_session",
     "resolve_near_month",
     "seconds_of_day",
@@ -197,6 +206,7 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     evaluate_spec,
     evaluate_with_levels,
     greeks,
+    greeks_batch,
     minute_of_session,
     resolve_near_month,
     seconds_of_day,
@@ -247,6 +257,7 @@ __all__ = [
     "evaluate_spec",
     "evaluate_with_levels",
     "greeks",
+    "greeks_batch",
     "minute_of_session",
     "resolve_near_month",
     "seconds_of_day",

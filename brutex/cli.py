@@ -396,6 +396,22 @@ def _add_sweep_grid_args(
         ),
     )
     parser.add_argument(
+        "--price-source-cells",
+        default="hlc3:close",
+        dest="price_source_cells",
+        help=(
+            "Comma-separated VWAP/EMA price-source cells '<vwap>:<ema>' — "
+            "open/high/low/close/hlc3 (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Default "
+            "'hlc3:close' (byte-identical to the pre-axis sweep — the axis is "
+            "dormant at cardinality 1). The 5-cell OFAT lattice is "
+            "'hlc3:close,open:close,close:close,hlc3:open,hlc3:hlc3'. HONEST BUDGET "
+            "(Golden Rule #10): a combined 5-cell run does NOT fit the ≤2-day bar "
+            "(≈2.3-7.4 M4-days); run each non-default cell as a SEPARATE "
+            "cardinality-1 invocation (≈baseline ≤2 days each). VWAP-source cells "
+            "are only meaningful on NIFTY futures (spot indices carry no volume)"
+        ),
+    )
+    parser.add_argument(
         "--conditions",
         default=None,
         help=(
@@ -7154,6 +7170,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     max_combos: int | None,
     data_snapshot_hash: str | None,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     overfit_gate: bool = False,
     dsr_min: float = 0.95,
     options_sim: bool = True,
@@ -7298,6 +7315,21 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         valid = ", ".join(a.value for a in FibAnchorKind)
         print(
             f"[brutex] unknown --fib-anchors value in {fib_anchors!r}; choose from {valid}",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
@@ -7530,6 +7562,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": _indicator_version(),
@@ -8675,6 +8708,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
     scratch_root: Path | None,
     allow_context_mismatch: bool,
     fib_anchors: str = "prev_day",
+    price_source_cells: str = "hlc3:close",
     emit_heal_plan: bool = False,
     stage3_enable: bool = False,
     stage3_top_k: int | None = None,
@@ -8843,6 +8877,21 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             file=sys.stderr,
         )
         return EXIT_USER_ERROR
+    # VWAP/EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001): parse the OFAT
+    # lattice CSV into PriceSourceCell. Default 'hlc3:close' == the baseline (the
+    # axis is dormant at cardinality 1). An unknown token is a clean user error.
+    from brutex.strategies.types import PriceSource, parse_price_source_cells
+
+    try:
+        price_source_cell_list = parse_price_source_cells(price_source_cells)
+    except ValueError as exc:
+        valid_sources = ", ".join(src.value for src in PriceSource)
+        print(
+            f"[brutex] unknown --price-source-cells value in {price_source_cells!r}: {exc} "
+            f"(each cell is '<vwap>:<ema>'; choose from {valid_sources})",
+            file=sys.stderr,
+        )
+        return EXIT_USER_ERROR
     k_list = _parse_int_csv(k, flag="--k")
     condition_bits = parse_condition_ids(conditions) if conditions else default_condition_bits()
     # tf_minutes via the SHARED trading-minutes parser (DEC-STAGE3-RECOUNT-001
@@ -8864,6 +8913,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
         "take_profits": _parse_paisa_list(tp),
         "proximities": [None],
         "fib_anchors": fib_anchor_list,
+        "price_source_cells": price_source_cell_list,
         "mode": mode,
         "data_snapshot_hash": snapshot,
         "indicator_version": indicator,
@@ -9857,6 +9907,15 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
 
     if not bars:
         return []
+    # HONEST-LIMITS (DEC-NIFTY-PRICE-SOURCE-AXIS-001 / DEC-NIFTY-FIB-AXIS-001): the
+    # bar_bits here are rebuilt at the BASELINE fib_anchor (prev-day) + price source
+    # (HLC3, CLOSE) because a persisted ResultRow carries neither the fib_anchor nor
+    # the (vwap, ema) source as a column. So this options-translation replay is
+    # BASELINE-SOURCE ONLY: a survivor swept under a non-default fib_anchor or
+    # price-source cell replays here with the wrong Group-4 / VWAP-EMA bits. This is
+    # a PRE-EXISTING limitation (equally true for fib_anchor since #1011) — threading
+    # the source in would require ResultRow to carry it; documented in
+    # docs/price_source_sweep_axis.md ("options-translation replay is baseline-only").
     bar_bits = build_bar_bits(bars)
     entry_signals = mask_to_entry_signals(bar_bits, row.mask_bits)
     # HONEST ENVELOPE (DEC-VIX-STAMP-WIRE-001, round-2 review): these
@@ -10542,6 +10601,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -10597,6 +10657,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,
@@ -10684,6 +10745,7 @@ def _dispatch(argv: list[str] | None) -> int:
             directions=args.directions,
             k=args.k,
             fib_anchors=args.fib_anchors,
+            price_source_cells=args.price_source_cells,
             conditions=args.conditions,
             sl=args.sl,
             tp=args.tp,

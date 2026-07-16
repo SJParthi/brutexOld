@@ -71,6 +71,7 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
         "evaluate_spec",
         "evaluate_with_levels",
         "greeks",
+        "greeks_batch",
         "minute_of_session",
         "resolve_near_month",
         "seconds_of_day",
