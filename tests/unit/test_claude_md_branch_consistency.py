@@ -209,7 +209,10 @@ _STATS_CITATION_FILES: Final[dict[str, frozenset[int]]] = {
     "brutex/data/lake_stats_manifest.py": frozenset({867, 1914}),
     "tests/bench/test_stats_manifest_write_ab.py": frozenset(),
     "tests/unit/test_claude_md_branch_consistency.py": frozenset(),
-    "tests/unit/test_lake_stats_manifest.py": frozenset({1597}),
+    # 1914 = DEC-LAKE-RUST-STATS-MANIFEST-001 (2026-07-16): the
+    # TestRenderShardRustSeamRouting class docstring cites THAT decision's
+    # entry for the render_shard Rust-seam routing tests, not this one.
+    "tests/unit/test_lake_stats_manifest.py": frozenset({1597, 1914}),
 }
 
 
