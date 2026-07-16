@@ -90,6 +90,11 @@ body.share-mode .plain-eng-block { display:block; }
    v29 strategy drawer share the one law. */
 .cascade-fail { color:var(--red); font-weight:700; }
 
+/* DEC-RANKING-SPLUS-TIER-001: the identity-strip tier badge — GREEN for an
+   S+/S label, neutral for A / not tiered; the honesty chip beside it is
+   plain note text (one constant string, template-pinned). */
+.tier-good { color:var(--green); font-weight:700; }
+
 /* ════════════════════════════════════════════════════════════════════
    Operator-portal choreography (DEC-OPERATOR-PAGE-CONSOLIDATE-001).
    Motion covenants: numbers never count-animate (values snap via

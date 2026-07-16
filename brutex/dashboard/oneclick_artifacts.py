@@ -71,6 +71,7 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 import structlog
 
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
+from brutex.ranking.tiers import TIER_LABELS
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
     SWEEP_RUNS_DIRNAME,
@@ -1484,6 +1485,64 @@ def _bridge_cascade(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return bridged, False
 
 
+#: The tier-label wire vocabulary (DEC-RANKING-SPLUS-TIER-001 — the writer's
+#: :data:`brutex.ranking.tiers.TIER_LABELS`, imported never re-minted).
+_TIER_LABEL_TOKENS: Final[frozenset[str]] = frozenset(TIER_LABELS)
+
+
+def _tier_object_defect(tier: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``tier`` object, or ``None``.
+
+    The :func:`_cascade_object_defect` law applied to the writer's
+    ``{"label": "S+"|"S"|"A"|null, "blocked_next": [str, ...]}`` shape: an
+    unknown label token or any type violation names itself — the caller then
+    DROPS the key for that row (rendered "—") and counts it; the row itself
+    is KEPT (the #1631 named-partial-degrade law).
+    """
+    label = tier.get("label")
+    if label is not None and (not isinstance(label, str) or label not in _TIER_LABEL_TOKENS):
+        return f"unknown tier label {label!r}"
+    blocked = tier.get("blocked_next")
+    if not isinstance(blocked, list) or not all(isinstance(token, str) for token in blocked):
+        return "tier blocked_next is not a string array"
+    return None
+
+
+def _bridge_tier(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Validate + display-stamp one row's optional ``tier`` object.
+
+    The :func:`_bridge_cascade` law verbatim (DEC-RANKING-SPLUS-TIER-001):
+    a row without the key passes through untouched (a pre-change artifact —
+    absence renders "—"); a VALID object gains the server-built
+    ``status_text`` via the ONE
+    :func:`brutex.dashboard.oneclick_view.tier_status_text` builder (no tier
+    prose is ever composed in JS); an invalid object is DROPPED from the row
+    + flagged ``True`` so the caller counts it into the named partial
+    degrade — never a fabricated tier (Golden Rule #1).
+    """
+    if "tier" not in row:
+        return row, False
+    tier = row.get("tier")
+    if not isinstance(tier, dict) or _tier_object_defect(tier) is not None:
+        stripped = dict(row)
+        stripped.pop("tier", None)
+        return stripped, True
+    # Function-local import — the _bridge_cascade cycle law (oneclick_view
+    # imports THIS module at top level; the builder itself is pure).
+    from brutex.dashboard.oneclick_view import tier_status_text
+
+    label = tier.get("label")
+    blocked = tier.get("blocked_next")
+    stamped = dict(tier)
+    stamped["status_text"] = tier_status_text(
+        label if isinstance(label, str) else None,
+        blocked_next=tuple(blocked) if isinstance(blocked, list) else (),
+    )
+    bridged = dict(row)
+    bridged["tier"] = stamped
+    return bridged, False
+
+
 def load_top100(run_dir: Path) -> Top100Result:
     """Load ``top100.json`` — the WRITER's object root, entries validated per row.
 
@@ -1605,6 +1664,7 @@ def load_top100(run_dir: Path) -> Top100Result:
     cascade_join = cascade_join_raw if isinstance(cascade_join_raw, dict) else None
     rows: list[dict[str, Any]] = []
     cascade_dropped = 0
+    tier_dropped = 0
     for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
             return Top100Result(
@@ -1638,6 +1698,9 @@ def load_top100(run_dir: Path) -> Top100Result:
         bridged, dropped = _bridge_cascade(_bridge_top100_arm(_map_top100_metrics(row)))
         if dropped:
             cascade_dropped += 1
+        bridged, dropped_tier = _bridge_tier(bridged)
+        if dropped_tier:
+            tier_dropped += 1
         rows.append(bridged)
     if cascade_dropped:
         _LOG.warning(
@@ -1645,14 +1708,26 @@ def load_top100(run_dir: Path) -> Top100Result:
             path=str(path),
             dropped=cascade_dropped,
         )
+    if tier_dropped:
+        _LOG.warning(
+            "oneclick.tier_object_dropped",
+            path=str(path),
+            dropped=tier_dropped,
+        )
     if cap_detail:
         return Top100Result("partial", tuple(rows), cap_detail, revision, preset, cascade_join)
-    if cascade_dropped:
+    if cascade_dropped or tier_dropped:
+        # The cascade-only wording is byte-preserved (" + " joins only when
+        # BOTH object families dropped — the #1631 named-partial law).
+        parts: list[str] = []
+        if cascade_dropped:
+            parts.append(f"{cascade_dropped} row(s) carried an invalid cascade object")
+        if tier_dropped:
+            parts.append(f"{tier_dropped} row(s) carried an invalid tier object")
         return Top100Result(
             "partial",
             tuple(rows),
-            f"{cascade_dropped} row(s) carried an invalid cascade object — "
-            "dropped (those rows render the honest '—')",
+            " + ".join(parts) + " — dropped (those rows render the honest '—')",
             revision,
             preset,
             cascade_join,

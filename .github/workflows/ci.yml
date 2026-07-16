@@ -1367,6 +1367,25 @@ jobs:
           else
             echo "(brutex.ranking test files not present yet — gate inactive)"
           fi
+          # 19i3 · brutex.ranking.tiers — the S+/S/A tier classifier
+          # (DEC-RANKING-SPLUS-TIER-001): 100% line+branch STANDALONE from
+          # ONLY its own suite (the package-level 19i2 gate above also covers
+          # it). Numpy-safe form (the spa/cpcv/lockbox precedent): a dotted
+          # --cov=brutex.ranking.tiers target imports the numpy-eager
+          # brutex.ranking package at coverage startup and trips numpy 2.x's
+          # "cannot load module more than once" C-extension guard under
+          # pytest-cov, so coverage is driven with the package source and
+          # asserted on JUST tiers.py via `coverage report --include` (the
+          # grep guard fails the gate if tiers.py was not measured — no
+          # silent false-pass).
+          if compgen -G "tests/unit/test_ranking_tiers.py" > /dev/null; then
+            pytest tests/unit/test_ranking_tiers.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/ranking/tiers.py" | grep -q "brutex/ranking/tiers.py" \
+              || { echo "ERROR: brutex/ranking/tiers.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/ranking/tiers.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.ranking.tiers test file not present yet — gate inactive)"
+          fi
           # 19j · brutex.strategies.types (31 stmts, 4 branches, 10 tests)
           if compgen -G "tests/unit/test_strategies_types.py" > /dev/null; then
             pytest --cov=brutex.strategies.types --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_types.py

@@ -2669,3 +2669,89 @@ class TestBridgeCascade:
         # The oversized-cap detail wins the slot; the drops still happened.
         assert "beyond the" in result.detail
         assert all("cascade" not in row for row in result.rows)
+
+
+class TestBridgeTier:
+    """DEC-RANKING-SPLUS-TIER-001: the per-row tier bridge (the cascade law)."""
+
+    def test_absent_key_passes_through_untouched(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1)])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        assert "tier" not in result.rows[0]
+
+    @pytest.mark.parametrize(
+        ("label", "blocked", "expected_text"),
+        [
+            ("S+", [], "S+ — exceptional (all axes passed)"),
+            ("S", ["win_rate", "stop_too_wide"], "S — blocked from S+: win_rate, stop_too_wide"),
+            ("A", ["min_trades"], "A — blocked from S: min_trades"),
+            (None, ["expectancy_headroom"], "not tiered — blocked from A: expectancy_headroom"),
+            (None, [], "not tiered"),
+        ],
+    )
+    def test_valid_objects_stamped_with_server_text(
+        self, tmp_path: Path, label: str | None, blocked: list[str], expected_text: str
+    ) -> None:
+        _write_top100(tmp_path, [_top100_row(1, tier={"label": label, "blocked_next": blocked})])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "ok"
+        tier = result.rows[0]["tier"]
+        assert tier["status_text"] == expected_text
+        # The raw fields ride through untouched beside the stamp.
+        assert tier["label"] == label
+        assert tier["blocked_next"] == blocked
+
+    @pytest.mark.parametrize(
+        "obj",
+        [
+            "not-a-dict",
+            {"label": "B", "blocked_next": []},  # unknown label token
+            {"label": 7, "blocked_next": []},
+            {"label": "S", "blocked_next": "win_rate"},  # not an array
+            {"label": "S", "blocked_next": [1, 2]},  # non-string tokens
+            {"label": "S"},  # blocked_next missing entirely
+            None,
+        ],
+    )
+    def test_invalid_object_dropped_and_named_partial(self, tmp_path: Path, obj: Any) -> None:
+        _write_top100(tmp_path, [_top100_row(1, tier=obj)])
+        with capture_logs() as logs:
+            result = oc.load_top100(tmp_path)
+        # Row KEPT, key DROPPED, degrade NAMED — never a fabricated tier.
+        assert result.status == "partial"
+        assert "invalid tier object" in result.detail
+        assert "tier" not in result.rows[0]
+        assert [e for e in logs if e["event"] == "oneclick.tier_object_dropped"]
+
+    def test_cascade_and_tier_drops_compose_in_one_named_detail(self, tmp_path: Path) -> None:
+        # BOTH object families invalid on one artifact: each count is named;
+        # the cascade-only wording is byte-preserved when only it drops.
+        _write_top100(tmp_path, [_top100_row(1, cascade="junk", tier="junk")])
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert result.detail == (
+            "1 row(s) carried an invalid cascade object + 1 row(s) carried an "
+            "invalid tier object — dropped (those rows render the honest '—')"
+        )
+
+    def test_cascade_only_drop_wording_is_byte_preserved(self, tmp_path: Path) -> None:
+        _write_top100(tmp_path, [_top100_row(1, cascade="junk")])
+        result = oc.load_top100(tmp_path)
+        assert result.detail == (
+            "1 row(s) carried an invalid cascade object — "
+            "dropped (those rows render the honest '—')"
+        )
+
+    def test_row_cap_partial_detail_wins_over_tier_drop(self, tmp_path: Path) -> None:
+        rows = [_top100_row(i + 1, tier="junk") for i in range(oc.TOP100_ROW_CAP + 1)]
+        _write_top100(tmp_path, rows)
+        result = oc.load_top100(tmp_path)
+        assert result.status == "partial"
+        assert "beyond the" in result.detail
+        assert all("tier" not in row for row in result.rows)
+
+    def test_label_vocabulary_is_the_writer_import(self) -> None:
+        from brutex.ranking.tiers import TIER_LABELS
+
+        assert oc._TIER_LABEL_TOKENS == frozenset(TIER_LABELS) == {"S+", "S", "A"}

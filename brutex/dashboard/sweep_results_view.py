@@ -1019,6 +1019,33 @@ def _cascade_row_keys(run_id: str, load: CascadeJoinLoad | None) -> dict[str, An
     return keys
 
 
+def _tier_row_keys(run_id: str, tier_of: Mapping[str, Mapping[str, Any]] | None) -> dict[str, Any]:
+    """One row's ADDITIVE tier keys (DEC-RANKING-SPLUS-TIER-001 — EMIT-ON-PRESENT).
+
+    The tier objects arrive from the newest run's ``top100.json`` via the ONE
+    display reader (``oneclick_artifacts.load_top100`` → the composite
+    index's ``tier_by_run_id`` — bridge-validated, ``status_text``
+    server-built by :func:`~brutex.dashboard.oneclick_view.tier_status_text`;
+    no tier prose is ever composed in JS). A matched row emits ``tier`` (the
+    label token or ``null`` — an explicitly-judged "not tiered"),
+    ``tier_blocked_next`` (the stable reason tokens, verbatim) and
+    ``tier_status_text``; an unmatched row emits NOTHING — a no-artifact /
+    pre-tier lake's payload stays BYTE-IDENTICAL (the cascade/composite law,
+    json-equality-pinned). Annotation only — never a rank change.
+    """
+    if tier_of is None:
+        return {}
+    tier = tier_of.get(run_id)
+    if tier is None:
+        return {}
+    blocked = tier.get("blocked_next")
+    return {
+        "tier": tier.get("label"),
+        "tier_blocked_next": list(blocked) if isinstance(blocked, list) else [],
+        "tier_status_text": tier.get("status_text"),
+    }
+
+
 def build_sweep_leaderboard(
     lake_root: Path,
     *,
@@ -1112,6 +1139,12 @@ def build_sweep_leaderboard(
     composite_of: Mapping[str, float] | None = None
     if composite is not None and composite.state == "joined" and composite.by_run_id:
         composite_of = composite.by_run_id
+    # The joined tier map (DEC-RANKING-SPLUS-TIER-001) — non-None ONLY when
+    # the SAME newest-run index carries tier objects (a pre-tier artifact
+    # reads an empty map → NO tier keys → byte-identical payload).
+    tier_of: Mapping[str, Mapping[str, Any]] | None = None
+    if composite is not None and composite.state == "joined" and composite.tier_by_run_id:
+        tier_of = composite.tier_by_run_id
 
     filtered = [
         r for r in scan.rows if _matches(r, instrument=instrument, tf=tf, direction=direction)
@@ -1171,6 +1204,9 @@ def build_sweep_leaderboard(
                 # The RANKING composite (label "Composite") — distinct from
                 # the cascade's own composite (label "Cascade score").
                 projected["composite_score"] = score
+        tier_keys = _tier_row_keys(r.run_id, tier_of)
+        if tier_keys:
+            projected.update(tier_keys)
         rows_list.append(projected)
     rows = tuple(rows_list)
 

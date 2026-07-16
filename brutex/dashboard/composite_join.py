@@ -46,14 +46,15 @@ import hashlib
 import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from brutex.dashboard.lake_revision import ABSENT_TOKEN
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
-from brutex.dashboard.oneclick_artifacts import newest_run_name, runs_root
+from brutex.dashboard.oneclick_artifacts import load_top100, newest_run_name, runs_root
+from brutex.engine.top100_artifact import TOP100_STAMP_FILENAME
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from pathlib import Path
@@ -93,7 +94,15 @@ _RESULTS_DEPTH_DIRNAME: Final[str] = "results-depth"
 
 @dataclass(frozen=True, slots=True)
 class CompositeIndex:
-    """The newest run's ``{run_id → ranking composite}`` read-time index."""
+    """The newest run's ``{run_id → ranking composite}`` read-time index.
+
+    ``tier_by_run_id`` is the ADDITIVE tier join (DEC-RANKING-SPLUS-TIER-001):
+    the SAME newest run's ``top100.json`` tier objects (bridge-validated +
+    ``status_text``-stamped by :func:`~brutex.dashboard.oneclick_artifacts.load_top100`
+    — the ONE reader, never a second parser), keyed by entry ``run_id``.
+    Empty on a pre-tier artifact / an unreadable artifact (honest absence —
+    the ``/results`` rows then emit NO tier keys).
+    """
 
     by_run_id: Mapping[str, float]
     run_id: str | None
@@ -101,6 +110,7 @@ class CompositeIndex:
     scored_rows: int
     skipped_files: int
     dropped_values: int
+    tier_by_run_id: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
 def _empty(state: str, run_id: str | None = None) -> CompositeIndex:
@@ -113,6 +123,26 @@ def _empty(state: str, run_id: str | None = None) -> CompositeIndex:
         skipped_files=0,
         dropped_values=0,
     )
+
+
+def _tier_index(results_root: Path, run_id: str) -> dict[str, Mapping[str, object]]:
+    """The newest run's ``{run_id → tier object}`` join (DEC-RANKING-SPLUS-TIER-001).
+
+    Rides the ONE display reader (:func:`~brutex.dashboard.oneclick_artifacts.load_top100`
+    — stamped ``status_text``, invalid tier objects already DROPPED per row by
+    its bridge), so this join can never disagree with the /screener wire. An
+    awaiting/corrupt artifact reads an honestly EMPTY index — never a raise
+    (``load_top100`` returns a status, it does not throw on lake damage).
+    O(artifact) — ≤ 100 entries, one bounded read per memoised index build.
+    """
+    result = load_top100(runs_root(results_root) / run_id)
+    tiers: dict[str, Mapping[str, object]] = {}
+    for row in result.rows:
+        rid = row.get("run_id")
+        tier = row.get("tier")
+        if isinstance(rid, str) and rid and isinstance(tier, dict):
+            tiers.setdefault(rid, tier)
+    return tiers
 
 
 def load_composite_index(results_root: Path) -> CompositeIndex:
@@ -184,6 +214,7 @@ def load_composite_index(results_root: Path) -> CompositeIndex:
         scored_rows=len(by_run_id),
         skipped_files=skipped_files,
         dropped_values=dropped_values,
+        tier_by_run_id=_tier_index(results_root, run_id),
     )
 
 
@@ -240,13 +271,35 @@ def composite_index_revision(results_root: Path) -> str | None:
     run_id = newest_run_name(results_root)
     if run_id is None:
         return ABSENT_TOKEN
+    # DEC-RANKING-SPLUS-TIER-001: the index now ALSO reads the newest run's
+    # top100.json (the tier join), which write_top100 lands into the run dir
+    # AFTER the depth-tree aggs writes — the depth-dir digest alone would
+    # freeze a tier-less index cached by a poll landing in that window (the
+    # fix-round-1 composite class). ONE stat of the top100 STAMP (written
+    # LAST — the token moves only once the artifact pair is complete) folds
+    # into every returned token; a stat outage is a probe outage (None).
+    stamp_path = runs_root(results_root) / run_id / TOP100_STAMP_FILENAME
+    try:
+        st_stamp = os.stat(stamp_path)
+    except (FileNotFoundError, NotADirectoryError):
+        stamp_part = f"top100:{ABSENT_TOKEN}"
+    except OSError as exc:
+        _LOG.warning(
+            "composite_join.revision_stat_failed",
+            path=str(stamp_path),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return None
+    else:
+        stamp_part = f"top100:{st_stamp.st_mtime_ns}:{st_stamp.st_size}"
     depth_dir = runs_root(results_root) / run_id / _RESULTS_DEPTH_DIRNAME
     try:
         st_depth = os.stat(depth_dir)
     except (FileNotFoundError, NotADirectoryError):
         # The depth pass has not created the tree yet — a stable PER-RUN
         # absent component: its first creation moves the token exactly once.
-        return f"{run_id}|{ABSENT_TOKEN}"
+        return f"{run_id}|{ABSENT_TOKEN}|{stamp_part}"
     except OSError as exc:
         _LOG.warning(
             "composite_join.revision_stat_failed",
@@ -255,7 +308,7 @@ def composite_index_revision(results_root: Path) -> str | None:
             error=str(exc),
         )
         return None
-    parts: list[str] = [run_id, f".:{st_depth.st_mtime_ns}"]
+    parts: list[str] = [run_id, f".:{st_depth.st_mtime_ns}", stamp_part]
     try:
         with os.scandir(depth_dir) as level1:
             for d1 in sorted(

@@ -657,3 +657,48 @@ class TestCascadeJoinWriterToWire:
         assert payload["cascade_join"] is None
         assert all("cascade" not in row for row in payload["rows"])
         assert all("cpcv_pass_pct" not in row["metrics"] for row in payload["rows"])
+
+
+class TestTierWriterToWire:
+    """DEC-RANKING-SPLUS-TIER-001: the tier object writer → reader → wire chain."""
+
+    _client = staticmethod(TestEngineWriterThroughRoutes._client)
+
+    def test_tier_flows_writer_to_reader_stamped_with_server_text(self, tmp_path: Path) -> None:
+        artifact = _engine_artifact()
+        run_dir = tmp_path / "sweep_runs"
+        write_top100(run_dir, artifact)
+        result = oc.load_top100(run_dir / _GRID_RUN_ID)
+        assert result.status == "ok", result.detail
+        for row in result.rows:
+            tier = row["tier"]
+            # The wp5 fixture rows classify at "A" (the golden's audit);
+            # the bridge stamped the ONE server-built display text.
+            assert tier["label"] == "A"
+            assert isinstance(tier["blocked_next"], list) and tier["blocked_next"]
+            assert tier["status_text"].startswith("A — blocked from S: ")
+
+    def test_tier_reaches_the_wire_for_every_display_consumer(self, tmp_path: Path) -> None:
+        lake = tmp_path / "lake"
+        _write_engine_artifact(lake, _engine_artifact())
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={_GRID_RUN_ID}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        for row in payload["rows"]:
+            assert row["tier"]["label"] == "A"
+            assert isinstance(row["tier"]["status_text"], str)
+
+    def test_frozen_pre_change_fixture_serves_no_tier_keys(self, tmp_path: Path) -> None:
+        """Back-compat end-to-end: a PRE-tier artifact serves with NO tier
+        keys (the clients render '—'), never corrupt."""
+        import shutil
+
+        fixtures = Path(__file__).resolve().parents[1] / "golden" / "fixtures"
+        run_id = "grid" + "0" * 60
+        lake = tmp_path / "lake"
+        (lake / "sweep_runs").mkdir(parents=True)
+        shutil.copytree(fixtures / "top100_pre_cascade_v1" / run_id, lake / "sweep_runs" / run_id)
+        client = self._client(lake)
+        payload = client.get(f"/api/v1/oneclick/top100?run_id={run_id}").json()
+        assert payload["status"] == "ok", payload["detail"]
+        assert all("tier" not in row for row in payload["rows"])

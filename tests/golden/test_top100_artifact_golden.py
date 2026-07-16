@@ -50,7 +50,22 @@ _RUN = "a1" * 32
 #: (zero-count on this fixture — the wp5 fixture aggs carry no session-gap
 #: closes). Readers stay presence-tolerant, so every committed pre-change
 #: artifact fixture still loads byte-untouched.
-_GOLDEN_TOP100_SHA256 = "c890213a1c1b19cb892fd2a45d7bcd2cb8a3fb8ed8037c7a1d03c429052d138d"
+#: RE-LOCKED 2026-07-16 for DEC-RANKING-SPLUS-TIER-001 (the S+/S/A tier
+#: classifier): the writer now ALWAYS emits the additive root ``tier_config``
+#: threshold echo + the per-entry ``tier`` object ``{"label", "blocked_next"}``.
+#: On this fixture every kept entry classifies ``label="A"`` (the wp5
+#: defaults pass every A axis) with ``blocked_next`` naming its S blockers
+#: (``min_trades`` 40 < 200 · ``profit_factor`` 1.5 < 1.6 ·
+#: ``expectancy_headroom`` 250 < H=1000 · ``stop_too_wide`` 80 paisa on a
+#: ₹100 entry = 80 bps > 20 · ``missing_input:mae_1m`` — the fixture aggs
+#: carry no 1-minute path · ``cascade`` not_validated; the deep singleton
+#: adds ``max_drawdown`` 22.5 > 10). The diff vs the pre-change bytes is
+#: pinned ADDITIVE-ONLY in ``test_engine_top100_artifact.py::``
+#: ``test_no_kwarg_build_is_additive_only_vs_frozen_pre_change_fixture``
+#: (strip ``tier_config`` + per-entry ``tier`` → the frozen fixture bytes).
+#: Readers stay presence-tolerant; committed pre-change artifact fixtures
+#: load byte-untouched.
+_GOLDEN_TOP100_SHA256 = "6f83b322fb0ffdf50fd6a9defeef0291818adb0079a2fc069f732397a8318e2c"
 
 
 def _fixture_artifact() -> Top100Artifact:
