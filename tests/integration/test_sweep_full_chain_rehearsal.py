@@ -62,7 +62,7 @@ import json
 import os
 import time
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -130,7 +130,7 @@ _CI_MC_PERMUTATIONS = 100
 
 
 @contextlib.contextmanager
-def _rehearsal_env() -> Iterator[None]:
+def _rehearsal_env() -> Generator[None]:
     """Bound one rehearsal chain run: CI budgets + the INFO log-volume guard.
 
     DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817). Three scoped bounds,
