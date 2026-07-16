@@ -6,8 +6,9 @@ clears at the day's completed material verdict. Laws pinned here: names-only
 scan (a planted FIFO/symlink/corrupt marker still reads OWED and is never
 opened by the scan — no hang, no crash), best-effort-loud mark/clear (one
 WARN on failure, never a raise), kill-switch-coherent ``mark_owed_for_pull``
-(no marker under ``BRUTEX_CROSSVERIFY=off`` / junk env), and the D3 window
-law (prior days only; beyond-window/future markers KEPT + surfaced).
+(no marker under ``BRUTEX_CROSSVERIFY=off`` / ``BRUTEX_CROSSVERIFY_PUBLISH=off``
+/ junk env — the mark/auto-clearer parity law), and the D3 window law (prior
+days only; beyond-window/future markers KEPT + surfaced).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import structlog.testing
-from brutex.crossverify.config import ENV_KILL_SWITCH
+from brutex.crossverify.config import ENV_KILL_SWITCH, ENV_PUBLISH
 from brutex.crossverify.owed import (
     MAX_OWED_MARKER_BYTES,
     OWED_VERSION,
@@ -118,6 +119,17 @@ class TestMarkOwedForPull:
         assert list_owed_days(tmp_path) == []
         (skipped,) = _events(logs, "crossverify.owed_mark_skipped")
         assert "disabled" in str(skipped["reason"])
+
+    def test_publish_off_marks_nothing(self, tmp_path: Path) -> None:
+        # Mark/auto-clearer PARITY (round-1 review MINOR-1): the D3 catchup
+        # that completes an owed day sits behind run.py's publish gate, so
+        # staged-only mode (BRUTEX_CROSSVERIFY_PUBLISH=off) must write NO
+        # marker — the mark-side twin of test_owed_scan_gated_off_for_no_publish.
+        with structlog.testing.capture_logs() as logs:
+            assert mark_owed_for_pull(tmp_path, _DAY, source="s", env={ENV_PUBLISH: "off"}) is False
+        assert list_owed_days(tmp_path) == []
+        (skipped,) = _events(logs, "crossverify.owed_mark_skipped")
+        assert "publish disabled" in str(skipped["reason"])
 
     def test_junk_env_warns_and_marks_nothing(self, tmp_path: Path) -> None:
         with structlog.testing.capture_logs() as logs:
@@ -275,6 +287,20 @@ class TestScanOwedDays:
         (warned,) = _events(logs, "crossverify.owed_beyond_window")
         assert warned["days"] == ["2026-07-20"]
         assert list_owed_days(tmp_path) == [future]
+
+    def test_window_floor_boundary_exact(self, tmp_path: Path) -> None:
+        # Round-1 review NIT (b): the floor day (today − lookback) is IN the
+        # scan; the day just past it (today − lookback − 1) is OUT of the
+        # scan but KEPT + surfaced via the beyond-window WARN.
+        at_floor = date(2026, 7, 5)  # today(10th) − 5 — exactly the floor
+        past_floor = date(2026, 7, 4)  # floor − 1 — first excluded day
+        mark_owed(tmp_path, at_floor, source="s")
+        mark_owed(tmp_path, past_floor, source="s")
+        with structlog.testing.capture_logs() as logs:
+            assert scan_owed_days(tmp_path, today=_DAY, lookback_days=5) == [at_floor]
+        (warned,) = _events(logs, "crossverify.owed_beyond_window")
+        assert warned["days"] == ["2026-07-04"]
+        assert list_owed_days(tmp_path) == [past_floor, at_floor]  # both KEPT
 
     def test_corrupt_in_window_marker_stays_owed_with_one_warn(self, tmp_path: Path) -> None:
         owed_dir(tmp_path).mkdir(parents=True)

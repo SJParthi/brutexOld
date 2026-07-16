@@ -114,7 +114,12 @@ def mark_owed(lake_root: Path, day: date, *, source: str) -> bool:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_simple(dest, lambda tmp: tmp.write_bytes(body))
-    except Exception as exc:  # best-effort sentinel — never fail the pull
+    except OSError as exc:
+        # Best-effort sentinel — never fail the pull. NARROW (round-1
+        # hostile review NIT, the sibling clear_owed's discipline): mkdir +
+        # the guard-free atomic_write_simple raise only OSError classes
+        # here (the payload is plain json.dumps-able data); a genuine code
+        # bug still propagates loudly.
         _LOG.warning(
             "crossverify.owed_mark_failed",
             day=day.isoformat(),
@@ -139,8 +144,13 @@ def mark_owed_for_pull(
     logs ONE WARN and marks nothing: a tail that will read ``not_configured``
     owes nothing a catchup could complete) and skips marking under the
     ``BRUTEX_CROSSVERIFY=off`` kill switch (markers must never accumulate
-    while the feature is deliberately off). Returns ``True`` iff a marker was
-    durably written.
+    while the feature is deliberately off) AND under
+    ``BRUTEX_CROSSVERIFY_PUBLISH=off`` — the mark/auto-clearer PARITY law
+    (round-1 hostile review MINOR-1): the D3 owed catchup runs only on the
+    publish path (``run.py``'s ``config.publish and not config.dry_run``
+    gate), so a marker written in staged-only mode would be surfaced forever
+    yet never auto-completed. Returns ``True`` iff a marker was durably
+    written.
     """
     from brutex.crossverify.config import resolve_crossverify_config
 
@@ -161,6 +171,18 @@ def mark_owed_for_pull(
             day=day.isoformat(),
             source=source,
             reason="disabled (BRUTEX_CROSSVERIFY=off)",
+        )
+        return False
+    if not config.publish:
+        # Mark/auto-clearer parity: the D3 catchup that COMPLETES an owed
+        # day sits behind run.py's publish gate — staged-only mode must not
+        # accumulate markers no automatic pass will ever clear.
+        _LOG.info(
+            "crossverify.owed_mark_skipped",
+            day=day.isoformat(),
+            source=source,
+            reason="publish disabled (BRUTEX_CROSSVERIFY_PUBLISH=off) — the "
+            "D3 catchup only completes days on the publish path",
         )
         return False
     return mark_owed(lake_root, day, source=source)
