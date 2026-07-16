@@ -161,6 +161,27 @@ class CompositePullReport:
     historical: HistoricalPullReport | None
     note: str
 
+    @property
+    def ok(self) -> bool:
+        """The historical stage verdict — the ONE home of the composite-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): this report
+        SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol, and the
+        sequencer's :func:`~brutex.dashboard.pipeline_pull.historical_phase_ok`
+        gate DELEGATES here (the composed law MOVED verbatim — this module sits
+        below the sequencer in the import graph; CLAUDE.md §11 COMMON).
+        BOTH inner sub-reports must be clean: the inner metadata sub-report
+        rides :attr:`~brutex.dashboard.metadata_pull.MetadataPullReport.ok`,
+        the inner candle sub-report rides
+        :attr:`~brutex.dashboard.historical_pull.HistoricalPullReport.ok`; a
+        ``None`` sub-report is a reported no-op, NOT a failure — the full law
+        + rationale lives on the gate's docstring.
+        """
+        if self.metadata is not None and not self.metadata.ok:
+            return False
+        return self.historical is None or self.historical.ok
+
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the composite route + the live panel."""
         return {
