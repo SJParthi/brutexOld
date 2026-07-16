@@ -511,6 +511,37 @@ class TestCorruptStoredBarRefused:
         bars = arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
         assert [b.close for b in bars] == [Decimal("100.5"), Decimal("101.0")]
 
+    def test_clean_table_bars_are_field_for_field_identical(self) -> None:
+        """HEALTHY-LAKE IDENTITY PIN (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001):
+        on a clean table the finiteness gate is a pure pass-through — every
+        constructed bar equals the hand-built expected bar field-for-field
+        (frozen-dataclass equality compares the Decimals exactly)."""
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._poisoned_table(open_=100.0, high=102.0, low=99.5, close=101.0)
+        bars = arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        t0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
+        assert bars == [
+            CandleBar(
+                timestamp=t0,
+                open=Decimal("100.0"),
+                high=Decimal("101.0"),
+                low=Decimal("99.0"),
+                close=Decimal("100.5"),
+                volume=10,
+                open_interest=None,
+            ),
+            CandleBar(
+                timestamp=t0 + timedelta(minutes=1),
+                open=Decimal("100.0"),
+                high=Decimal("102.0"),
+                low=Decimal("99.5"),
+                close=Decimal("101.0"),
+                volume=11,
+                open_interest=None,
+            ),
+        ]
+
     def test_replay_feed_names_the_partition_on_poisoned_lake(self, tmp_path: Path) -> None:
         # Poison a REAL lake partition (raw pyarrow — the writer refuses
         # corrupt bars, exactly like a legacy pre-#912 lake), then prove the
@@ -531,6 +562,179 @@ class TestCorruptStoredBarRefused:
                     "high": pa.array([-1.0], type=pa.float64()),
                     "low": pa.array([-1000.0], type=pa.float64()),
                     "close": pa.array([-2.0], type=pa.float64()),
+                    "volume": pa.array([10], type=pa.int64()),
+                    "open_interest": pa.array([None], type=pa.int64()),
+                }
+            ),
+            dest,
+        )
+        catalog_path = tmp_path / "catalog.duckdb"
+        with Catalog.open(catalog_path) as cat:
+            from brutex.data.models import CatalogEntry
+
+            cat.upsert(
+                CatalogEntry(
+                    exchange="NSE",
+                    segment="INDEX",
+                    symbol=symbol,
+                    interval="1minute",
+                    year=2024,
+                    month=1,
+                    raw_hash="a" * 64,
+                    row_count=1,
+                    first_ts=t0,
+                    last_ts=t0,
+                    fetched_at=t0,
+                )
+            )
+            feed = ReplayFeed(
+                catalog=cat,
+                lake_root=lake_root,
+                exchange="NSE",
+                segment="INDEX",
+                symbols=[symbol],
+                interval="1minute",
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 2, 1, tzinfo=UTC),
+            )
+            with pytest.raises(ValueError, match="NSE/INDEX/NSE-NIFTY/1minute"):
+                list(feed)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Non-finite OHLC guard (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestNonFiniteOhlcGuard:
+    """The engine read boundary refuses non-finite OHLC — loudly and TYPED.
+
+    Two PRE-EXISTING latent defects, executed-repro'd by the assurance
+    session on planted stored data (no production writer emits a non-finite
+    price — the vendor parse rejects it via ``candle_fields.to_price``):
+
+    * FAILS-BEFORE #2 (silent wrong-value corruption): a ``high = +inf`` bar
+      was SILENTLY ACCEPTED — the positivity (``<= 0``) and ordering checks
+      pass VACUOUSLY on ``inf`` — and served to the engine as
+      ``CandleBar(high=Decimal('Infinity'))``.
+    * FAILS-BEFORE #3 (uncaught crash): a ``NaN`` price raised a raw
+      ``decimal.InvalidOperation`` (an ``ArithmeticError``, NOT a
+      ``ValueError``) out of the Decimal ordering compare, escaping the
+      boundary's ``except ValueError`` — the whole ``Catalog.get_bars`` read
+      aborted instead of surfacing the typed corrupt-bar error the
+      per-symbol quarantines handle.
+    """
+
+    @staticmethod
+    def _table(
+        *,
+        open_: float = 100.0,
+        high: float = 101.0,
+        low: float = 99.0,
+        close: float = 100.5,
+        volume: object = 10,
+    ) -> object:
+        import pyarrow as pa
+
+        t0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
+        volume_type = pa.float64() if isinstance(volume, float) else pa.int64()
+        return pa.table(
+            {
+                "timestamp": pa.array([t0], type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array([open_], type=pa.float64()),
+                "high": pa.array([high], type=pa.float64()),
+                "low": pa.array([low], type=pa.float64()),
+                "close": pa.array([close], type=pa.float64()),
+                "volume": pa.array([volume], type=volume_type),
+                "open_interest": pa.array([None], type=pa.int64()),
+            }
+        )
+
+    def test_inf_high_is_rejected_not_silently_served(self) -> None:
+        """FAILS-BEFORE (#2): pre-fix this RETURNED a bar with
+        ``high=Decimal('Infinity')`` — no raise, no skip, no count — which
+        then poisoned Stage-1A and every derived-TF max aggregation."""
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._table(high=float("inf"))
+        with pytest.raises(ValueError, match="non-finite") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NSE-NIFTY/1minute" in message  # partition named
+        assert "2024, 1, 2, 3, 45" in message  # offending bar ts named
+        assert "high=inf" in message  # the defective field named
+
+    @pytest.mark.parametrize("field", ["open", "high", "low", "close"])
+    def test_nan_price_raises_typed_corrupt_bar_error_not_invalid_operation(
+        self, field: str
+    ) -> None:
+        """FAILS-BEFORE (#3): pre-fix a NaN price in open/high/low escaped as a
+        raw uncaught ``decimal.InvalidOperation`` (``pytest.raises(ValueError)``
+        does NOT catch it — ``InvalidOperation`` is an ``ArithmeticError``),
+        aborting the whole read instead of the typed corrupt-bar surface."""
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._table(**{("open_" if field == "open" else field): float("nan")})
+        with pytest.raises(ValueError, match="corrupt stored bar") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        assert "non-finite" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("close", float("inf"), id="+inf-close"),
+            pytest.param("open_", float("inf"), id="+inf-open"),
+            pytest.param("low", float("-inf"), id="-inf-low"),
+            pytest.param("high", float("-inf"), id="-inf-high"),
+        ],
+    )
+    def test_already_refused_nonfinite_shapes_stay_refused(self, field: str, value: float) -> None:
+        """POSITIVE-EVIDENCE GUARDRAIL: these shapes ALREADY raised the
+        corrupt-bar ValueError pre-fix (``inf`` close/open tripped the
+        ordering compare; ``-inf`` tripped ``<= 0``) — the new finiteness
+        gate must keep the SAME typed outcome, never a regression."""
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._table(**{field: value})
+        with pytest.raises(ValueError, match="corrupt stored bar"):
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+
+    def test_arithmetic_error_in_construction_is_rewrapped(self) -> None:
+        """The ``except (ValueError, ArithmeticError)`` re-wrap belt: a
+        float-typed count column holding ``inf`` makes ``int(v)`` raise
+        ``OverflowError`` (an ``ArithmeticError``) INSIDE the construction —
+        pre-fix it escaped ``except ValueError`` uncaught; now it rides the
+        SAME corrupt-bar ValueError naming source + timestamp."""
+        from brutex.feed.replay import arrow_table_to_bars
+
+        table = self._table(volume=float("inf"))
+        with pytest.raises(ValueError, match="corrupt stored bar") as excinfo:
+            arrow_table_to_bars(table, source="NSE/INDEX/NSE-NIFTY/1minute")  # type: ignore[arg-type]
+        message = str(excinfo.value)
+        assert "NSE/INDEX/NSE-NIFTY/1minute" in message
+        assert "2024, 1, 2, 3, 45" in message
+
+    def test_replay_feed_nan_partition_raises_typed_error_not_crash(self, tmp_path: Path) -> None:
+        """END-TO-END (#3): a NaN-planted REAL partition read through
+        ``ReplayFeed`` → ``Catalog.get_bars`` now surfaces the typed
+        corrupt-bar ValueError naming the partition — pre-fix the raw
+        ``decimal.InvalidOperation`` aborted the read uncaught."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        symbol = "NSE-NIFTY"
+        lake_root = tmp_path / "lake"
+        dest = lake_root / "bars" / "NSE" / "INDEX" / symbol / "1minute" / "2024" / "01.parquet"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        t0 = datetime(2024, 1, 2, 3, 45, tzinfo=UTC)
+        pq.write_table(
+            pa.table(
+                {
+                    "timestamp": pa.array([t0], type=pa.timestamp("us", tz="UTC")),
+                    "open": pa.array([100.0], type=pa.float64()),
+                    "high": pa.array([float("nan")], type=pa.float64()),
+                    "low": pa.array([99.0], type=pa.float64()),
+                    "close": pa.array([100.5], type=pa.float64()),
                     "volume": pa.array([10], type=pa.int64()),
                     "open_interest": pa.array([None], type=pa.int64()),
                 }
