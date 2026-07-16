@@ -591,11 +591,24 @@ def render_parquet_bytes(
     return rust_bytes
 
 
+#: PUBLIC re-exports for the sibling lake facades (ADR-0020 PR-3+ — §11
+#: COMMON): the degrade / panic-belt catch sets are PURE and stateless —
+#: nothing about them is render-specific — so sibling seams
+#: (``brutex/data/lake_rust_merge.py``) import THESE names instead of
+#: minting copies. The per-facade LATCH/warn state stays per-facade by
+#: design (a render autorevert must never silence the merge seam and vice
+#: versa), so only the stateless helpers are shared.
+degrade_errors = _degrade_errors
+panic_belt_errors = _panic_belt_errors
+
+
 __all__ = [
     "BURN_IN_SAMPLES",
     "LAKE_RUST_RENDER_ENV",
+    "degrade_errors",
     "env_flag_tristate",
     "lake_rust_render_enabled",
+    "panic_belt_errors",
     "render_parquet_bytes",
     "reset_lake_rust_render_for_tests",
     "rust_render_disabled",
