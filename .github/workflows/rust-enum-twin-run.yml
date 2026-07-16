@@ -65,6 +65,7 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[dev,data]"
           pip install ./rust/fno-math
+          pip install ./rust/trading-core
 
       - name: Twin-run (both arms, byte compare)
         # The dispatch inputs feed the script's own TWIN_START/TWIN_END env
