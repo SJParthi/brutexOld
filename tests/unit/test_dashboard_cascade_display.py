@@ -33,6 +33,13 @@ _EXPLAIN = (_STATIC / "bx-explain.js").read_text(encoding="utf-8")
 _RESULTS = (_TEMPLATES / "results.html").read_text(encoding="utf-8")
 _STRATEGY = (_TEMPLATES / "strategy.html").read_text(encoding="utf-8")
 _V29 = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+# DEC-OPERATOR-PORTAL-REFOLD-001: the /strategy inline IIFE that rendered
+# the cascade verdict is EXTRACTED into the shared bx-strategy-panel.js
+# mount-once + update() module, and the `.cascade-fail` badge CSS moved into
+# the scoped bx-oneclick-panels.css shared by the standalone page AND the v29
+# strategy drawer. The cascade pins repoint here from the (now thin) template.
+_STRATEGY_PANEL = (_STATIC / "bx-strategy-panel.js").read_text(encoding="utf-8")
+_PANELS_CSS = (_STATIC / "bx-oneclick-panels.css").read_text(encoding="utf-8")
 
 
 class TestScreenerColumn:
@@ -61,13 +68,23 @@ class TestOperatorBadge:
 
 class TestStrategyPage:
     def test_identity_and_deep_cells(self) -> None:
-        assert 'id="stCascade"' in _STRATEGY
-        assert 'id="stCascadeDeep"' in _STRATEGY
-        assert "cascade-fail" in _STRATEGY
+        # The identity strip (stCascade) + Deep-stats cell (stCascadeDeep)
+        # markup lives in BOTH consuming copies — the standalone /strategy
+        # page AND the v29 in-page drawer — per the T-N2 hook-parity fence.
+        for markup in (_STRATEGY, _V29):
+            assert 'id="stCascade"' in markup
+            assert 'id="stCascadeDeep"' in markup
+        # The `.cascade-fail` red-badge rule moved into the ONE shared scoped
+        # stylesheet consumed by both surfaces (no longer inline in strategy.html).
+        assert ".cascade-fail" in _PANELS_CSS
 
     def test_fill_reads_server_text(self) -> None:
-        assert "casc.status_text" in _STRATEGY
-        assert "classList.toggle('cascade-fail'" in _STRATEGY
+        # The render lives in the extracted shared panel module now, not the
+        # template. It reads SERVER-built status_text (never composes prose)
+        # and toggles the fail badge off the RAW status token.
+        assert "casc.status_text" in _STRATEGY_PANEL
+        assert "classList.toggle('cascade-fail'" in _STRATEGY_PANEL
+        assert "casc.status === 'fail'" in _STRATEGY_PANEL
 
 
 class TestResultsPage:
@@ -98,6 +115,7 @@ class TestNoClientComposedVerdict:
         [
             ("bx-screener.js", _SCREENER),
             ("bx-oneclick.js", _ONECLICK),
+            ("bx-strategy-panel.js", _STRATEGY_PANEL),
             ("results.html", _RESULTS),
             ("strategy.html", _STRATEGY),
             ("v29.html", _V29),
@@ -118,14 +136,20 @@ class TestNoClientComposedVerdict:
 
 
 class TestNodeSyntax:
-    @pytest.mark.parametrize("name", ["bx-screener.js", "bx-oneclick.js", "bx-explain.js"])
+    @pytest.mark.parametrize(
+        "name",
+        ["bx-screener.js", "bx-oneclick.js", "bx-explain.js", "bx-strategy-panel.js"],
+    )
     def test_touched_js_parses(self, name: str, tmp_path: Path) -> None:
         node = shutil.which("node")
         if node is None:
             pytest.skip("node not installed locally (CI installs it)")
         subprocess.run([node, "--check", str(_STATIC / name)], check=True, capture_output=True)
 
-    @pytest.mark.parametrize("name", ["results.html", "strategy.html", "v29.html"])
+    # strategy.html is now a THIN deep-link page (its cascade render IIFE was
+    # extracted into bx-strategy-panel.js) — it carries no inline scripts, so
+    # it drops from the inline-script parse and its JS is covered above.
+    @pytest.mark.parametrize("name", ["results.html", "v29.html"])
     def test_touched_template_inline_scripts_parse(self, name: str, tmp_path: Path) -> None:
         node = shutil.which("node")
         if node is None:
