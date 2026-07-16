@@ -80,6 +80,7 @@ from brutex.adapters.groww.client import GrowwClient
 from brutex.adapters.groww.contracts import resolve_contracts, resolve_expiries
 from brutex.adapters.groww.symbol_form_preference import SymbolFormPreference
 from brutex.dashboard.fno_underlying import (
+    BLANK_SYMBOL_SAMPLE_CAP,
     primary_fno_underlying,
     resolve_fno_index_aliases,
     resolve_fno_underlying_forms,
@@ -107,6 +108,7 @@ from brutex.orchestrator.universe_phases import (
 )
 
 if TYPE_CHECKING:
+    from brutex.adapters.protocol import DerivativeContract
     from brutex.dashboard.pull_controller import SessionRateController
     from brutex.models import Instrument
 
@@ -141,6 +143,17 @@ METADATA_CONTRACT_WRITE_DEFERRED_EVENT: Final[str] = "metadata.contract_job.writ
 #: Fail-safe: an unsettled cell re-pulls + rewrites next run; a previously-``complete``
 #: cell keeps a stale display count until recovery (honest envelope).
 METADATA_COUNTS_WRITE_DEFERRED_EVENT: Final[str] = "metadata.contract_counts.write_deferred"
+
+#: WARN — blank / whitespace-only ``symbol_name`` instrument rows were SKIPPED at the
+#: Phase-1 grid resolve (ONE aggregate event per grid build, ≤
+#: :data:`~brutex.dashboard.fno_underlying.BLANK_SYMBOL_SAMPLE_CAP`
+#: ``exch:security_id`` samples — the kind-map builder's isolation idiom,
+#: DEC-FNO-UNDERLYING-EMPTY-GUARD-001, REFUTER ROUND 1). Pre-skip, a blank row
+#: minted an ``(exch, "")`` grid pair with ZERO forms whose per-YEAR cells
+#: IndexError'd inside the per-form fetch and wrote DURABLE ``failed`` coverage
+#: rows keyed ``(exch, "")`` — re-failing every pull and gating the /universe
+#: mapping-integrity panel RED with an unnameable empty-string symbol.
+METADATA_BLANK_SYMBOL_SKIPPED_EVENT: Final[str] = "metadata.underlying_blank_symbol_skipped"
 
 #: Max underlyings inlined in the zero-expiry WARNING's sample list — the full count
 #: is always logged via ``count``; only the inlined ``sample`` is capped so a
@@ -384,12 +397,33 @@ def _resolve_underlying_forms(
     reproducible (CLAUDE.md §4) and two spot spellings that map to the same F&O
     primary underlying are enumerated once (the FIRST spot symbol's forms win the
     map — deterministic by grid order).
+
+    **Blank-row isolation (DEC-FNO-UNDERLYING-EMPTY-GUARD-001, REFUTER ROUND 1):**
+    a blank / whitespace-only ``symbol_name`` row (parser-retained in the universe)
+    is SKIPPED + counted here — ONE aggregate
+    :data:`METADATA_BLANK_SYMBOL_SKIPPED_EVENT` WARNING per grid build with ≤
+    :data:`~brutex.dashboard.fno_underlying.BLANK_SYMBOL_SAMPLE_CAP`
+    ``exch:security_id`` samples (the mirror of the kind-map builder's isolation) —
+    so it mints NO grid pair, issues ZERO vendor calls, and writes ZERO coverage
+    rows. Pre-skip, the ``(exch, "")`` pair's ZERO-form cells IndexError'd inside
+    the per-form fetch (captured per YEAR cell by the pool) and upserted DURABLE
+    ``failed`` coverage rows keyed ``(exch, "")`` — re-failing every pull and
+    gating the /universe mapping-integrity panel RED (the round-1 "inert key"
+    disclosure was falsified by execution; executed repro
+    ``attack1_metadata_blank.py``, now a fail-before regression).
     """
     aliases = resolve_fno_index_aliases()
     grid: list[tuple[str, str]] = []
     forms_by_key: dict[tuple[str, str], tuple[str, ...]] = {}
     seen: set[tuple[str, str]] = set()
+    skipped = 0
+    samples: list[str] = []
     for instrument in instruments:
+        if not instrument.symbol_name.strip():
+            skipped += 1
+            if len(samples) < BLANK_SYMBOL_SAMPLE_CAP:
+                samples.append(f"{instrument.exch_id.value}:{instrument.security_id}")
+            continue
         exchange = str(instrument.exch_id)
         forms = resolve_fno_underlying_forms(instrument.symbol_name)
         pair = (exchange, primary_fno_underlying(instrument.symbol_name, aliases=aliases))
@@ -397,6 +431,12 @@ def _resolve_underlying_forms(
             seen.add(pair)
             grid.append(pair)
             forms_by_key[pair] = forms
+    if skipped:
+        _LOG.warning(
+            METADATA_BLANK_SYMBOL_SKIPPED_EVENT,
+            skipped=skipped,
+            samples=samples,  # security-id refs — the symbol is blank, name what we can
+        )
     return grid, forms_by_key
 
 
@@ -405,6 +445,7 @@ def _first_nonempty_over_forms[T](
     fetch: Callable[[str], T],
     *,
     is_empty: Callable[[T], bool],
+    empty: T,
 ) -> T:
     """Try each underlying *form* in order; return the FIRST non-empty *fetch* result.
 
@@ -419,7 +460,17 @@ def _first_nonempty_over_forms[T](
     exactly ONE call for a canonical single-form symbol (NIFTY / BANKNIFTY / SENSEX —
     byte-unchanged), at most three for a stock needing the alias + normalized + spot
     bridge.
+
+    TOTAL for every ``forms`` tuple (DEC-FNO-UNDERLYING-EMPTY-GUARD-001, REFUTER
+    ROUND 1): an EMPTY tuple returns *empty* — the caller's honest no-data result —
+    with ZERO ``fetch`` calls. The round-1 body indexed ``forms[0]`` unguarded, so
+    the blank-symbol grid pair's ``()`` forms raised ``IndexError`` per YEAR cell
+    (captured by the pool → durable ``failed`` coverage rows keyed ``(exch, "")``).
+    Defense in depth: the grid resolve now SKIPS blank rows, so an empty tuple is
+    production-unreachable here — this arm guards any future forms producer.
     """
+    if not forms:
+        return empty
     result = fetch(forms[0])
     for form in forms[1:]:
         if not is_empty(result):
@@ -819,7 +870,7 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
             raise MarketHoursHalt()
         exchange, underlying, year = cell
         forms = forms_by_key.get((exchange, underlying), (underlying,))
-        expiries = _first_nonempty_over_forms(
+        expiries: list[date] = _first_nonempty_over_forms(
             forms,
             lambda form: resolve_expiries(
                 client,
@@ -830,6 +881,7 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
                 preference_key=underlying,
             ),
             is_empty=lambda r: not r,
+            empty=[],
         )
         # Persist HERE, in the fetcher — the exact Phase-2 shape (its fetcher
         # persists too) — as ONE deadline-guarded registry batch
@@ -954,7 +1006,7 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
         nonlocal contracts_persisted
         exchange, underlying, expiry = job
         forms = forms_by_key.get((exchange, underlying), (underlying,))
-        contracts = _first_nonempty_over_forms(
+        contracts: list[DerivativeContract] = _first_nonempty_over_forms(
             forms,
             lambda form: resolve_contracts(
                 client,
@@ -965,6 +1017,7 @@ PersistentSymbolFormPreference`; ``None`` (the default — every existing
                 preference_key=underlying,
             ),
             is_empty=lambda r: not r,
+            empty=[],
         )
         # ONE deadline-guarded write BATCH for the whole leg list (O(1) guard cost
         # per job, not per contract — DEC-STORE-WRITE-DEADLINE-001). NO catch here:

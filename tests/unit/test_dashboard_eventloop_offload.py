@@ -48,9 +48,10 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TypeVar
 
 import pytest
 
@@ -58,9 +59,12 @@ pytest.importorskip("fastapi", reason="dashboard routes need the [ui] extra")
 pytest.importorskip("httpx", reason="TestClient needs httpx")
 
 from brutex.dashboard.app import DashboardState, build_app
+from brutex.dashboard.lake_offload import LakeOffload
 from brutex.data.instrument_store import InstrumentStore
 from brutex.data.lake_invariants import LakeScanReport
 from fastapi.testclient import TestClient
+
+_T = TypeVar("_T")
 
 #: How long the stubbed walk blocks (upper bound; released early on pass).
 _WALK_HOLD_S: float = 5.0
@@ -422,3 +426,67 @@ def test_oneclick_routes_run_off_the_event_loop(
     assert status == 200
     assert isinstance(payload, dict)
     assert payload["fixture_root_active"] is False
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — pool-choice dispatch pins (#1757) ──
+
+
+class _CountingLakeOffload(LakeOffload):
+    """A LakeOffload that records every dispatched callable's qualname."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dispatched: list[str] = []
+
+    async def __call__(  # signature mirrors the parent exactly (pyright on tests)
+        self, func: Callable[..., _T], /, *args: object, **kwargs: object
+    ) -> _T:
+        self.dispatched.append(getattr(func, "__qualname__", repr(func)))
+        return await super().__call__(func, *args, **kwargs)
+
+
+class TestLakeLimiterRouteDispatch:
+    """Pool-choice pins via the ``build_app(lake_offload=)`` seam (#1757).
+
+    The wedged-lake realserver regression proves the LIMITER binds; these
+    pins prove WHICH pool each route's dispatch rides — the class the equity
+    route's bare ``run_in_threadpool`` regression (the #1665 merge-seam
+    straggler) was invisible to.
+    """
+
+    @pytest.fixture
+    def counting_client(
+        self, store: InstrumentStore
+    ) -> Generator[tuple[TestClient, _CountingLakeOffload]]:
+        counting = _CountingLakeOffload()
+        app = build_app(DashboardState(), instrument_store=store, lake_offload=counting)
+        with TestClient(app) as c:
+            yield c, counting
+
+    def test_oneclick_equity_dispatches_through_the_lake_limiter(
+        self, counting_client: tuple[TestClient, _CountingLakeOffload]
+    ) -> None:
+        """FAILS pre-fix: the equity dispatch was bare run_in_threadpool."""
+        client, counting = counting_client
+        resp = client.get("/api/v1/oneclick/equity?run_id=r-x&rank=1")
+        assert resp.status_code == 200  # empty-lake awaiting — the route executed
+        assert any("api_oneclick_equity.<locals>._resolve" in q for q in counting.dispatched), (
+            f"equity _resolve not on the lake limiter; saw {counting.dispatched}"
+        )
+
+    def test_pull_rate_stays_on_the_default_pool(
+        self, counting_client: tuple[TestClient, _CountingLakeOffload]
+    ) -> None:
+        """The deliberate-keep NEGATIVE twin (#1642 doctrine): the deadline-
+        guarded liveness memo must NOT consume a lake token — a lake outage
+        must never starve the route that reports on the lake outage."""
+        client, counting = counting_client
+        before = len(counting.dispatched)
+        assert client.get("/api/v1/pull/rate").status_code == 200
+        newly_dispatched = counting.dispatched[before:]
+        assert not any("api_pull_rate" in q or "RateBridgeCache" in q for q in newly_dispatched), (
+            f"/api/v1/pull/rate dispatched through the LAKE limiter "
+            f"({newly_dispatched}) — the deadline-guarded liveness memo must "
+            "stay on the default pool (DEC-DASHBOARD-LAKE-IO-LIMITER-001 "
+            "deliberate-keep set)"
+        )
