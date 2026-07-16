@@ -6603,7 +6603,10 @@ def cmd_pull_all_spot(
                 # failed pull); the tail's run_crossverify clears it at the
                 # day's completed material verdict. The day law mirrors the
                 # --auto gate's clock contract (IST wall clock; the injected
-                # `now` seam wins).
+                # `now` seam wins). HONEST (round-1 review MINOR-2): a run
+                # that crosses midnight leaves THIS launch_day's marker
+                # while the tail runs the NEW day — benign + convergent:
+                # the next run's D3 completes launch_day idempotently.
                 from brutex.calendars.nse import now_ist as _now_ist
                 from brutex.crossverify.owed import mark_owed_for_pull
 
