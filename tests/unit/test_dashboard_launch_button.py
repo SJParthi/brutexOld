@@ -12,7 +12,8 @@ real sweep. Skipped cleanly when the ``[ui]`` extra (FastAPI) is absent.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import shutil
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -396,3 +397,76 @@ class TestRealPidLifecycle:
         assert second.status_code == 200
         second_pid = second.json()["active"]["pid"]
         assert second_pid != pid or not os.path.exists(f"/proc/{pid}")
+
+
+# ── DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the run_lake= injection seam (#1757) ──
+
+
+def _recording_run_lake(calls: list[str]) -> Callable[..., Awaitable[Any]]:
+    """A run_lake fake with the LakeOffload/run_in_threadpool call contract."""
+
+    async def run_lake(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        calls.append(getattr(func, "__name__", repr(func)))
+        return func(*args, **kwargs)
+
+    return run_lake
+
+
+class TestLaunchOffloadDispatch:
+    """DEC-DASHBOARD-LAKE-IO-LIMITER-002 — the ``run_lake=`` injection seam.
+
+    Every /api/v1/launch/* closure stats/reads/writes under the lake root, so
+    ``build_app`` passes its 32-token ``_run_lake`` — these pins prove all
+    THREE offload sites dispatch through the seam (order-exact), and that a
+    direct caller WITHOUT the kwarg keeps today's default-pool behavior
+    byte-identically (the None-arm back-compat branch).
+    """
+
+    def _register(self, lake: Path, calls: list[str] | None) -> TestClient:
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        if calls is None:
+            lb.register_launch_routes(app, lake_root_resolver=lambda: lake)
+        else:
+            lb.register_launch_routes(
+                app,
+                lake_root_resolver=lambda: lake,
+                run_lake=_recording_run_lake(calls),
+            )
+        return TestClient(app)
+
+    def test_state_route_dispatches_build_launch_state_through_run_lake(self, lake: Path) -> None:
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        assert client.get("/api/v1/launch/state").status_code == 200
+        assert calls == ["build_launch_state"]
+
+    def test_sweep_route_dispatches_both_call_sites_through_run_lake(
+        self, lake: Path, fake_spawner: dict[str, Any]
+    ) -> None:
+        """Order-exact list: converting only ONE of the two _offload call
+        sites (the run_preconditions one or the launch_sweep one) FAILS."""
+        calls: list[str] = []
+        client = self._register(lake, calls)
+        resp = client.post("/api/v1/launch/sweep?card=spot")
+        assert resp.status_code == 200
+        assert calls == ["run_preconditions", "launch_sweep"]
+
+    def test_sweep_refusal_arm_dispatches_only_preconditions_through_run_lake(
+        self, lake: Path
+    ) -> None:
+        calls: list[str] = []
+        shutil.rmtree(lake / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute")
+        client = self._register(lake, calls)
+        assert client.post("/api/v1/launch/sweep?card=spot").status_code == 412
+        assert calls == ["run_preconditions"]
+
+    def test_register_without_run_lake_defaults_to_the_default_pool(self, lake: Path) -> None:
+        """The None-arm back-compat branch (discovery-gate coverage): behavior
+        byte-identical for direct callers — passes on the reverted tree too,
+        by design; the teeth live in the realserver + dispatch pins."""
+        client = self._register(lake, None)
+        resp = client.get("/api/v1/launch/state")
+        assert resp.status_code == 200
+        assert "cards" in resp.json()  # today's payload shape, unchanged
