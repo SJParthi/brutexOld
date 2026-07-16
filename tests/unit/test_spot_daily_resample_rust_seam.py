@@ -106,9 +106,7 @@ class TestSeamWiring:
         assert seen == [(before, False)]
         assert len(bars) == 1
 
-    def test_empty_input_never_touches_the_seam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_input_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:

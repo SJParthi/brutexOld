@@ -114,18 +114,14 @@ class TestSeamWiring:
         assert len(bars) == 1
         assert bars[0].open_interest == 1001
 
-    def test_empty_input_never_touches_the_seam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_input_never_touches_the_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
             raise AssertionError("seam must not be reached for empty input")
 
         monkeypatch.setattr(lrs, "daily_restamp_via_rust", _bomb)
-        assert (
-            fno_daily_resample.resample_1m_to_fno_daily(_df_1m().head(0), before=_SESSION) == []
-        )
+        assert fno_daily_resample.resample_1m_to_fno_daily(_df_1m().head(0), before=_SESSION) == []
 
 
 class TestRetainedLoopIdempotence:
@@ -148,9 +144,7 @@ class TestRetainedLoopIdempotence:
         # (the module's documented carry-last edge) — on BOTH shapes.
         from brutex.data.tf_resampler import resample_1m_to_tf
 
-        df = _df_1m().with_columns(
-            pl.Series("open_interest", [1000, None], dtype=pl.Int64)
-        )
+        df = _df_1m().with_columns(pl.Series("open_interest", [1000, None], dtype=pl.Int64))
         before = _SESSION + dt.timedelta(days=1)
         daily = resample_1m_to_tf(df, 375)
         restamped = fno_daily_resample._fno_daily_restamp_oracle(daily, before)

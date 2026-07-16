@@ -62,7 +62,7 @@ class TestDerivedTfTuple:
         # iterates the resample_all_21_tfs dict — the tuple must be that
         # iteration minus {1m base, 1d daily}, ORDER included.
         expected = tuple(m for m in ALL_TF_MINUTES if m not in (1, DAILY_TF_MINUTES))
-        assert spot_resample.DERIVED_INTRADAY_TF_MINUTES == expected
+        assert expected == spot_resample.DERIVED_INTRADAY_TF_MINUTES
         assert len(spot_resample.DERIVED_INTRADAY_TF_MINUTES) == 19
 
 
@@ -121,9 +121,7 @@ class TestSeamWiring:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
         seen: list[tuple[int, ...]] = []
 
-        def _spy(
-            df: pl.DataFrame, tfs: Sequence[int], *, oracle: Any
-        ) -> dict[int, pl.DataFrame]:
+        def _spy(df: pl.DataFrame, tfs: Sequence[int], *, oracle: Any) -> dict[int, pl.DataFrame]:
             seen.append(tuple(tfs))
             assert oracle is tf_resampler._resample_1m_to_tf_python
             return {tf: oracle(df, tf) for tf in tfs}

@@ -62,6 +62,17 @@ on:
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
       - "tests/integration/test_lake_rust_resample_parity.py"
+      # Resampler-sibling ports (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001).
+      - "brutex/data/spot_resample.py"
+      - "brutex/data/fno_resample.py"
+      - "brutex/data/spot_daily_resample.py"
+      - "brutex/data/fno_daily_resample.py"
+      - "tests/unit/test_lake_rust_resample_siblings.py"
+      - "tests/unit/test_spot_resample_rust_seam.py"
+      - "tests/unit/test_fno_resample_rust_seam.py"
+      - "tests/unit/test_spot_daily_resample_rust_seam.py"
+      - "tests/unit/test_fno_daily_resample_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_siblings_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   pull_request:
     paths:
@@ -77,6 +88,17 @@ on:
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
       - "tests/integration/test_lake_rust_resample_parity.py"
+      # Resampler-sibling ports (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001).
+      - "brutex/data/spot_resample.py"
+      - "brutex/data/fno_resample.py"
+      - "brutex/data/spot_daily_resample.py"
+      - "brutex/data/fno_daily_resample.py"
+      - "tests/unit/test_lake_rust_resample_siblings.py"
+      - "tests/unit/test_spot_resample_rust_seam.py"
+      - "tests/unit/test_fno_resample_rust_seam.py"
+      - "tests/unit/test_spot_daily_resample_rust_seam.py"
+      - "tests/unit/test_fno_daily_resample_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_siblings_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
   workflow_dispatch: {}
 
@@ -214,5 +236,11 @@ jobs:
             tests/unit/test_lake_rust_render.py \
             tests/unit/test_parquet_writer_rust_render.py \
             tests/unit/test_lake_rust_resample.py \
+            tests/unit/test_lake_rust_resample_siblings.py \
             tests/unit/test_tf_resampler_rust_seam.py \
-            tests/integration/test_lake_rust_resample_parity.py
+            tests/unit/test_spot_resample_rust_seam.py \
+            tests/unit/test_fno_resample_rust_seam.py \
+            tests/unit/test_spot_daily_resample_rust_seam.py \
+            tests/unit/test_fno_daily_resample_rust_seam.py \
+            tests/integration/test_lake_rust_resample_parity.py \
+            tests/integration/test_lake_rust_resample_siblings_parity.py

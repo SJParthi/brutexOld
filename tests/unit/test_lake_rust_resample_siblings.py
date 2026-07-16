@@ -237,9 +237,7 @@ class TestDeriveFramesViaRust:
         _assert_oracle_dict(out)
         assert oracle.calls == []
 
-    def test_crate_raise_degrades_the_whole_derive(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_crate_raise_degrades_the_whole_derive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_args: object) -> list[bytes]:
             raise ValueError("boom")
 
@@ -302,9 +300,7 @@ class TestDeriveFramesViaRust:
         assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
         assert any(log["event"] == "lake_rust_resample.autoreverted" for log in logs)
 
-    def test_raising_zstd_metadata_serves_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raising_zstd_metadata_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         crate = _fake_crate()
 
         def _boom() -> str:
@@ -355,9 +351,7 @@ class TestDailyRestampViaRust:
         _run_daily(monkeypatch, _fake_crate(daily=_daily), keep_oi=False)
         assert seen == [False]
 
-    def test_crate_raise_degrades_to_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_crate_raise_degrades_to_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_args: object) -> bytes:
             raise ValueError("boom")
 
@@ -367,21 +361,15 @@ class TestDailyRestampViaRust:
         assert oracle.calls == 1
         assert any(log.get("reason") == "daily_restamp_error" for log in logs)
 
-    def test_non_bytes_result_is_refuse_poison(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_bytes_result_is_refuse_poison(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
-            out, _oracle = _run_daily(
-                monkeypatch, _fake_crate(daily=lambda ipc, b, k: 12345)
-            )
+            out, _oracle = _run_daily(monkeypatch, _fake_crate(daily=lambda ipc, b, k: 12345))
         assert out.equals(_ORACLE_DF)
         assert any(log.get("reason") == "daily_restamp_result_refused" for log in logs)
 
     def test_undecodable_result_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
-            out, _oracle = _run_daily(
-                monkeypatch, _fake_crate(daily=lambda ipc, b, k: b"garbage")
-            )
+            out, _oracle = _run_daily(monkeypatch, _fake_crate(daily=lambda ipc, b, k: b"garbage"))
         assert out.equals(_ORACLE_DF)
         assert any(log.get("reason") == "result_decode_error" for log in logs)
 
@@ -396,9 +384,7 @@ class TestDailyRestampViaRust:
         assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
         assert any(log["event"] == "lake_rust_resample.autoreverted" for log in logs)
 
-    def test_raising_zstd_metadata_serves_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raising_zstd_metadata_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         crate = _fake_crate()
 
         def _boom() -> str:
@@ -438,9 +424,7 @@ class TestSessionCutoffViaRust:
         assert oracle.calls == 1
         assert seen == [(5, 560)]
 
-    def test_crate_raise_degrades_to_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_crate_raise_degrades_to_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*_args: object) -> bytes:
             raise ValueError("boom")
 
@@ -450,13 +434,9 @@ class TestSessionCutoffViaRust:
         assert oracle.calls == 1
         assert any(log.get("reason") == "session_cutoff_error" for log in logs)
 
-    def test_non_bytes_result_is_refuse_poison(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_bytes_result_is_refuse_poison(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
-            out, _oracle = _run_cutoff(
-                monkeypatch, _fake_crate(cutoff=lambda ipc, t, c: None)
-            )
+            out, _oracle = _run_cutoff(monkeypatch, _fake_crate(cutoff=lambda ipc, t, c: None))
         assert out.equals(_ORACLE_DF)
         assert any(log.get("reason") == "session_cutoff_result_refused" for log in logs)
 
@@ -479,9 +459,7 @@ class TestSessionCutoffViaRust:
         assert lrs._DISABLED_REASON[0] == "burn_in_frame_mismatch"
         assert any(log["event"] == "lake_rust_resample.autoreverted" for log in logs)
 
-    def test_raising_zstd_metadata_serves_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raising_zstd_metadata_serves_the_oracle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         crate = _fake_crate()
 
         def _boom() -> str:
@@ -528,4 +506,4 @@ class TestSiblingApiPins:
             assert f'"{name}"' in shim, name
 
     def test_epoch_date_is_the_unix_epoch(self) -> None:
-        assert lrs._EPOCH_DATE == dt.date(1970, 1, 1)
+        assert dt.date(1970, 1, 1) == lrs._EPOCH_DATE

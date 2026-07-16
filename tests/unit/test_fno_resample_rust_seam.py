@@ -107,9 +107,7 @@ class TestDeriveSeamWiring:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
         seen: list[tuple[int, ...]] = []
 
-        def _spy(
-            df: pl.DataFrame, tfs: Sequence[int], *, oracle: Any
-        ) -> dict[int, pl.DataFrame]:
+        def _spy(df: pl.DataFrame, tfs: Sequence[int], *, oracle: Any) -> dict[int, pl.DataFrame]:
             seen.append(tuple(tfs))
             assert oracle is tf_resampler._resample_1m_to_tf_python
             return {tf: oracle(df, tf) for tf in tfs}
@@ -121,9 +119,7 @@ class TestDeriveSeamWiring:
 
 
 class TestSessionCutoffSeamWiring:
-    def test_flag_off_never_touches_the_cutoff_seam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_flag_off_never_touches_the_cutoff_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(lrs.LAKE_RUST_RESAMPLE_ENV, raising=False)
 
         def _bomb(*_args: object, **_kwargs: object) -> pl.DataFrame:
@@ -166,15 +162,11 @@ class TestSessionCutoffSeamWiring:
         empty = _day_df().head(0)
         assert fno_resample.resample_session_to_tf(empty, 5, cutoff_min=560).is_empty()
 
-    def test_flag_on_routes_through_the_cutoff_seam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_flag_on_routes_through_the_cutoff_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "1")
         seen: list[tuple[int, int]] = []
 
-        def _spy(
-            resampled: pl.DataFrame, tf: int, cutoff: int, *, oracle: Any
-        ) -> pl.DataFrame:
+        def _spy(resampled: pl.DataFrame, tf: int, cutoff: int, *, oracle: Any) -> pl.DataFrame:
             seen.append((tf, cutoff))
             assert oracle is fno_resample._session_cutoff_python
             return oracle(resampled, tf, cutoff)
