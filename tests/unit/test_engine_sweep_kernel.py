@@ -47,7 +47,7 @@ from brutex.engine.sweep_run import (
     run_persisted_sweep,
 )
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import FibAnchorKind, PriceSource, Side
 from brutex.vocabulary import ProximityParams
 
 if TYPE_CHECKING:
@@ -215,6 +215,8 @@ class _FakeKernel:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> None:
@@ -222,6 +224,8 @@ class _FakeKernel:
         self.proximity = proximity
         self.prior_n = prior_n
         self.fib_anchor = fib_anchor
+        self.vwap_source = vwap_source
+        self.ema_source = ema_source
         self.roll_schedule = roll_schedule
         self.apply_1day_mask = apply_1day_mask
 
@@ -236,6 +240,8 @@ def _fake_builder() -> tuple[list[int], object]:
         proximity: object,
         prior_n: int,
         fib_anchor: object,
+        vwap_source: object = PriceSource.HLC3,
+        ema_source: object = PriceSource.CLOSE,
         roll_schedule: tuple[int, ...] | None = None,
         apply_1day_mask: bool = False,
     ) -> _FakeKernel:
@@ -245,6 +251,8 @@ def _fake_builder() -> tuple[list[int], object]:
             proximity=proximity,
             prior_n=prior_n,
             fib_anchor=fib_anchor,
+            vwap_source=vwap_source,
+            ema_source=ema_source,
             roll_schedule=roll_schedule,
             apply_1day_mask=apply_1day_mask,
         )
@@ -283,8 +291,13 @@ class TestResidentKernelCache:
             # bar_bits matrix is anchor-specific, so a different anchor must build
             # its own kernel, never reuse a stale one (R-1).
             {"fib_anchor": FibAnchorKind.ROLLING_WEEKLY},
-            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is the 6th
-            # key slot — a long-lived daemon re-launching over a changed lake
+            # DEC-NIFTY-PRICE-SOURCE-AXIS-001: the VWAP / EMA price source is part
+            # of the key — bar_bits bits 52-53 / 0-5 are source-specific, so a
+            # different source must build its own kernel, never reuse a stale one.
+            {"vwap_source": PriceSource.OPEN},
+            {"ema_source": PriceSource.HLC3},
+            # DEC-STAGE1A-ROLL-RESET-001: the ADR-0012 roll schedule is a key
+            # slot — a long-lived daemon re-launching over a changed lake
             # must never serve a stale-schedule kernel (roll twin of R-1).
             {"roll_schedule": (739428, 739463)},
         ],
@@ -429,3 +442,50 @@ class TestGridReuseBarBits:
         # 2 directions × 2 sl × 2 proximities = 8 tuples; all run (bars present).
         seen = self._run(reuse=True, root=tmp_path / "g")
         assert len(seen) == 8
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# kernel_columns — the W2 rider of DEC-STAGE1A-RUST-BATCH-001
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestKernelColumns:
+    def test_kernel_columns_derived_once_and_memoised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ONE derive_price_columns call per kernel lifetime (spy) — repeat
+        # property reads are the memo handoff.
+        from brutex.engine import sweep_kernel as sk_module
+        from brutex.engine.rust_trade_sim import PriceColumns, derive_price_columns
+
+        calls = [0]
+        real = derive_price_columns
+
+        def _counting(bars: object) -> PriceColumns:
+            calls[0] += 1
+            return real(bars)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sk_module, "derive_price_columns", _counting)
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        assert calls[0] == 0  # lazy: construction derives nothing
+        first = kernel.kernel_columns
+        second = kernel.kernel_columns
+        assert calls[0] == 1
+        assert first is second
+        # The columns equal a fresh module-level derivation (same seam).
+        assert first == real(bars)
+
+    def test_kernel_columns_feed_the_trade_sim_byte_identically(self) -> None:
+        from brutex.engine.rust_trade_sim import ResidentTradeSim
+
+        bars = _trending_bars(n_days=2, per_day=10)
+        kernel = ResidentSweepKernel(bars)
+        injected = ResidentTradeSim(
+            bars, kernel.bar_bits, tf_minutes=1, precomputed_columns=kernel.kernel_columns
+        )
+        derived = ResidentTradeSim(bars, kernel.bar_bits, tf_minutes=1)
+        assert (
+            injected._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+            == derived._derive_kernel_inputs()  # pyright: ignore[reportPrivateUsage]
+        )

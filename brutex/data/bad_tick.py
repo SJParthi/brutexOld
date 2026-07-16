@@ -64,6 +64,8 @@ import structlog
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from datetime import date
 
+    import polars as pl
+
 _LOG = structlog.get_logger(__name__)
 
 #: The conservative bounded multiple: a bar whose close is ``>= 4x`` OR ``<= 1/4x``
@@ -101,6 +103,37 @@ def bad_tick_screen_enabled(raw: str | None = None) -> bool:
     """
     value = os.environ.get(BAD_TICK_ENABLED_ENV) if raw is None else raw
     return not (value is not None and value.strip().lower() in _FALSY)
+
+
+def emit_bad_tick_warn(
+    *,
+    source: str | None,
+    session_iso: str | None,
+    skipped: int,
+    max_ratio: float,
+    first_prev_close: float,
+    first_close: float,
+    log: structlog.stdlib.BoundLogger | None = None,
+) -> None:
+    """Emit the ONE per-session :data:`BAD_TICK_SKIP_EVENT` WARN record.
+
+    The SINGLE emission seam shared by :meth:`BadTickScreen._flush` (the
+    Python oracle) and the Rust-kernel replay in
+    :mod:`brutex.feed.replay` (``DEC-FEED-RUST-CORE-001``), so the event
+    name + field names/values can never fork between the two arms
+    (CLAUDE.md §11 COMMON). Unconditional — the callers own the
+    "skipped >= 1" guard; *log* is the injectable test seam (``None`` uses
+    the module logger, exactly like :class:`BadTickScreen`).
+    """
+    (log if log is not None else _LOG).warning(
+        BAD_TICK_SKIP_EVENT,
+        source=source,
+        session=session_iso,
+        skipped=skipped,
+        max_ratio=max_ratio,
+        first_prev_close=first_prev_close,
+        first_close=first_close,
+    )
 
 
 def is_bad_tick(prev_close: float, close: float, *, max_ratio: float = BAD_TICK_MAX_RATIO) -> bool:
@@ -216,15 +249,106 @@ class BadTickScreen:
         """Emit exactly one WARN if the current session skipped ≥ 1 bad tick."""
         if self._skipped > 0 and self._first_offender is not None:
             prev_close, close = self._first_offender
-            self._log.warning(
-                BAD_TICK_SKIP_EVENT,
+            emit_bad_tick_warn(
                 source=self._source,
-                session=self._session.isoformat() if self._session is not None else None,
+                session_iso=self._session.isoformat() if self._session is not None else None,
                 skipped=self._skipped,
                 max_ratio=self._max_ratio,
                 first_prev_close=prev_close,
                 first_close=close,
+                log=self._log,
             )
+
+
+def screen_frame_bad_ticks(
+    frame: pl.DataFrame,
+    *,
+    ts_column: str = "ts_utc",
+    source: str | None = None,
+    max_ratio: float = BAD_TICK_MAX_RATIO,
+    log: structlog.stdlib.BoundLogger | None = None,
+) -> pl.DataFrame:
+    """Drop in-session bad-tick rows from a sorted 1-minute frame (frame form).
+
+    The frame twin of the engine read boundary's :class:`BadTickScreen`
+    (DEC-READ-GUARD-PARITY-001), for the derived-TF prebuild's 1m read seam
+    (:func:`brutex.data.timeframe_materialize.make_lake_read_1m`): a
+    self-consistent x10/÷10 scaled bar passes the price-sanity gate and would
+    otherwise poison every derived bucket HIGH/LOW + the ``1day`` anchor.
+
+    Two-phase (the clean path is one vectorized pass, zero-copy; a frame with
+    ANY candidate runs the sequential per-row Python arm over the WHOLE frame
+    — O(rows), bounded, paid by poisoned frames only):
+
+    1. Vectorized candidate trigger: the IST session key is the calendar date
+       of ``ts + 5h30m`` (the resampler's own fixed arithmetic —
+       ``tf_resampler`` idiom; correct for tz-aware-UTC AND the lake's
+       naive-treated-as-UTC convention, and equal to the replay boundary's
+       ``ts.astimezone(IST).date()``); the candidate mask mirrors
+       :func:`is_bad_tick` EXACTLY (multiplicative, ``>=``/``<=`` boundary —
+       never a division ratio, which is not ulp-identical at exactly-Rx) over
+       ``close.shift(1).over(session)``. Zero candidates ⇔ the sequential
+       screen keeps every row (induction: while nothing has been skipped the
+       sequential baseline IS the previous row's close; the FIRST adjacent
+       violation is therefore always a genuine first skip) — so a clean frame
+       returns the INPUT OBJECT unchanged.
+    2. Sequential arm (candidate-bearing frames only): the EXISTING
+       :class:`BadTickScreen` decides WHICH rows drop (baseline-hold: a
+       skipped spike never advances the baseline — deliberately NOT the naive
+       adjacent mask, which would also flag a spike's healthy successor) and
+       owns the WARN semantics — exactly one :data:`BAD_TICK_SKIP_EVENT` per
+       session with >= 1 skip, flushed at each session boundary and by
+       ``finish()`` for the final session — one WARN per (symbol, poisoned
+       session), UNCAPPED, deliberately the #1616 replay-boundary shape
+       (each WARN is actionable), not the capped-20 idiom.
+
+    Preconditions (documented, not re-checked): rows sorted ascending by
+    *ts_column*; ``close`` positive — run AFTER
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity`, mirroring
+    the replay boundary's positivity-first order. Requires only *ts_column* +
+    ``close``; every other column (incl. ``open_interest`` on the F&O
+    prebuild path) passes through the filter row-aligned and untouched.
+    The function is PURE and switch-free — the ``BRUTEX_BAD_TICK_SCREEN``
+    kill switch is the CALLER's contract (:func:`bad_tick_screen_enabled`
+    at the call site, the replay wiring's policy).
+
+    Parameters
+    ----------
+    frame
+        Sorted 1-minute frame (``ts_column`` + ``close`` required).
+    ts_column
+        Timestamp column name (UTC instants; naive = UTC by lake convention).
+    source
+        Human-readable origin woven into the WARN (the prebuild passes
+        ``"prebuild:{exchange}/{segment}/{symbol}/1minute"`` — boundary-
+        distinct from the engine read's unprefixed form), or ``None``.
+    max_ratio
+        The bounded multiple; defaults to :data:`BAD_TICK_MAX_RATIO`.
+    log
+        Injectable structlog logger (tests); ``None`` uses the module logger.
+
+    Returns
+    -------
+    pl.DataFrame
+        The input object itself when nothing is dropped; otherwise a filtered
+        frame with the bad-tick rows removed (never value-edited, never
+        fabricated — Golden Rule #1).
+    """
+    import polars as pl
+
+    if frame.height == 0:
+        return frame
+    ist_date = (pl.col(ts_column) + pl.duration(hours=5, minutes=30)).dt.date()
+    prev = pl.col("close").shift(1).over(ist_date)
+    candidate = (pl.col("close") >= prev * max_ratio) | (pl.col("close") * max_ratio <= prev)
+    if not bool(frame.select(candidate.fill_null(value=False).any()).item()):
+        return frame
+    screen = BadTickScreen(source=source, max_ratio=max_ratio, log=log)
+    dates = frame.select(ist_date.alias("d")).get_column("d").to_list()
+    closes = frame.get_column("close").to_list()
+    keep = [screen.keep(ist_date=d, close=c) for d, c in zip(dates, closes, strict=True)]
+    screen.finish()
+    return frame.filter(pl.Series("keep", keep, dtype=pl.Boolean))
 
 
 __all__ = [
@@ -233,5 +357,7 @@ __all__ = [
     "BAD_TICK_SKIP_EVENT",
     "BadTickScreen",
     "bad_tick_screen_enabled",
+    "emit_bad_tick_warn",
     "is_bad_tick",
+    "screen_frame_bad_ticks",
 ]

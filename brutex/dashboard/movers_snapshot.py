@@ -61,7 +61,9 @@ from brutex.dashboard.movers_underlying_class import (
     normalize_underlying_class,
     spot_kind_from_segment,
 )
+from brutex.data.bar_screen import screen_frame
 from brutex.data.derive_lock import derive_in_progress
+from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
 from brutex.data.spot_features import pct_change
@@ -804,6 +806,21 @@ def _row_to_bar(row: Mapping[str, Any]) -> CandleBar:
     )
 
 
+def _ist_minute_of_day_expr(ts_col: str) -> pl.Expr:
+    """IST minute-of-day expression for *ts_col* (the ONE copy — CLAUDE.md §11 COMMON).
+
+    Cast to Int32 BEFORE the arithmetic — ``dt.hour()``/``dt.minute()`` are narrow
+    signed ints (Int8), so ``hour * 60`` overflows (e.g. 15*60=900 wraps to a
+    negative Int8); the cast gives the true minute-of-day. Shared by the as-of cut
+    (:func:`filter_to_ist_minute`) and the stored-freshness guard's WARN-forensic
+    day-max reads (:func:`_max_ist_minute` — DEC-MOVERS-STORED-FRESHNESS-001).
+    """
+    import polars as pl
+
+    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
+    return ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
+
+
 def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -> pl.DataFrame:
     """Keep only *frame*'s rows whose IST minute-of-day is ``≤ cutoff_min``.
 
@@ -831,14 +848,7 @@ def filter_to_ist_minute(frame: pl.DataFrame, cutoff_min: int, *, ts_col: str) -
     ts_col
         The timestamp column name to convert + compare on.
     """
-    import polars as pl
-
-    ist = pl.col(ts_col).dt.convert_time_zone(_IST)
-    # Cast to Int32 BEFORE the arithmetic — `dt.hour()`/`dt.minute()` are
-    # narrow signed ints (Int8), so `hour * 60` overflows (e.g. 15*60=900
-    # wraps to a negative Int8); the cast gives the true minute-of-day.
-    minute_of_day = ist.dt.hour().cast(pl.Int32) * 60 + ist.dt.minute().cast(pl.Int32)
-    return frame.filter(minute_of_day <= cutoff_min)
+    return frame.filter(_ist_minute_of_day_expr(ts_col) <= cutoff_min)
 
 
 def _read_cut_1m_frame(
@@ -866,7 +876,8 @@ def _read_cut_1m_frame(
     back to the whole partition there to stay byte-equivalent (its full-day series
     can cross a UTC month boundary). The frame is renamed to the resampler's
     ``ts_utc`` shape (matching the COMMON
-    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns, §11).
+    :func:`~brutex.data.timeframe_materialize.make_lake_read_1m` columns AND
+    its price-sanity gate — DEC-READ-GUARD-PARITY-001, §11).
 
     **As-of cutoff (DEC-HARDENING-LEFTOVERS-001 — the unified raw-1m semantic):**
     the ``cutoff_min`` filter is applied to the RAW 1-minute frame via the COMMON
@@ -881,6 +892,7 @@ def _read_cut_1m_frame(
     import polars as pl
 
     from brutex.data.lake_day_glob import read_day_intraday_frame
+    from brutex.data.price_sanity import validate_frame_price_sanity
 
     base = lake_root / "bars" / exchange / segment / symbol / "1minute"
     month = read_day_intraday_frame(base, day, symbol=symbol)
@@ -895,8 +907,28 @@ def _read_cut_1m_frame(
     day_df = df.filter(ist_date == day).sort("ts_utc")
     if cutoff_min is not None:
         day_df = filter_to_ist_minute(day_df, cutoff_min, ts_col="ts_utc")
+    # Screen bad-tick + insane bars through the ONE COMMON engine-parity screen
+    # (DEC-DASHBOARD-READ-SCREEN-001): a scaled fat-finger spike the engine drops
+    # must not be SERVED here (it fabricated the Top-Value turnover + the %-move
+    # and poisoned the movers cache). Clean frames return the SAME object; the
+    # screen itself is an O(rows) Python pass per read (honest cost, not free).
+    # The frame is ascending-sorted + as-of-cut, so the causal screen is exact.
+    day_df = screen_frame(day_df, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/1minute")
     if day_df.is_empty():
         return None
+    # DEC-READ-GUARD-PARITY-001: mirror make_lake_read_1m's price-sanity gate
+    # on the SAME column shape (the docstring above already claims the column
+    # mirror — this closes the GATE mirror). An inverted / non-positive stored
+    # 1m row must be an honest skip+count (ResampleInputError is ALREADY in
+    # movers_read_skip_errors) — never a silently laundered resampled bucket,
+    # never a CandleBar ValueError 500 (movers_resilient deliberately keeps
+    # ValueError out of the skip set as the code-bug class). Validated on the
+    # POST-cut frame — exactly the rows served: a corrupt row strictly AFTER
+    # the as-of cutoff never blanks an earlier-cut view (correct-or-absent,
+    # the #1719 strictly-narrower-degrade law).
+    validate_frame_price_sanity(
+        day_df, ts_column="ts_utc", context=f"{exchange}/{segment}/{symbol}/1minute"
+    )
     return day_df
 
 
@@ -1018,6 +1050,145 @@ def _stored_serves_cutoff(minutes: int, cutoff_min: int | None) -> bool:
     return (cutoff_min - _SESSION_OPEN_MIN + 1) % minutes == 0
 
 
+def _max_ist_minute(frame: pl.DataFrame, ts_col: str = "ts_utc") -> int:
+    """Max IST minute-of-day in *frame* (non-empty by contract)."""
+    return int(frame.select(_ist_minute_of_day_expr(ts_col).max()).item())
+
+
+def _stored_day_is_fresh(
+    stored_day: pl.DataFrame, *, minutes: int, base_day: pl.DataFrame | None
+) -> bool:
+    """VERIFY-EQUALITY freshness: the stored day frame IS the resample of the base.
+
+    DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1 folded. Fresh ⇔ the stored
+    UNCUT day frame equals — value-exact, column-name+order-exact, row-for-row;
+    dtype-INSENSITIVE under polars ``.equals`` (REFUTER ROUND 7 H1-1: 1.42.1
+    compares Float64 ≡ Float32 / Int64 ≡ Int32 EQUAL when the values are equal,
+    so a hand-recast value-identical partition serves as fresh — behaviorally
+    safe because VALUE-exactness is the load-bearing property: any pun that
+    compares equal serves exactly the reference-resample values, precision loss
+    compares UNEQUAL ⇒ stale ⇒ fallback, and no real writer emits a drifted
+    schema; drift-pinned so a future polars ``.equals`` semantics change fails
+    loudly) — the in-memory
+    :func:`~brutex.data.tf_resampler.resample_1m_to_tf` of the UNCUT
+    1-minute *base_day* frame. That is the SAME resampler the fallback path
+    (:func:`_read_session_bars`) runs AND the same one the prebuild ran to WRITE
+    the stored partition (one implementation — Golden Rule #11), so a genuinely
+    fresh partition is byte-equal by the DEC-PIPELINE-AUTOPREBUILD-001 equality
+    contract and the float compare is EXACT (deterministic first/max/min/last/sum
+    arithmetic over the same Float64 source values; probed + pinned).
+
+    The round-1 day-max predicate (``stored_max_open_min + minutes >
+    base_day_max_min``) was REFUTED by execution: a TAIL check is structurally
+    blind to any stored/base divergence NOT at the day tail — the #1031
+    interior-hole-heal producer chain (holey 1m pull → prebuild → hole re-pull
+    with no re-prebuild) served a stale volume/LTP silently. Equality SUBSUMES it:
+    ANY divergence — interior hole, truncated first bucket, tail growth, PARTIAL
+    base truncation (the review R7-M2 reverse-staleness class — caught whenever
+    at least one base row survives; TOTAL day truncation leaves NO base rows and
+    rides the disclosed base-absent fail-open below, serving stored UNVERIFIED —
+    REFUTER ROUND 2 N2 wording), value drift, a planted future bucket — reads
+    STALE and the caller falls back to the byte-equality reference resample.
+
+    ``base_day is None`` (no 1-minute evidence) ⇒ ``True`` — the fail-open
+    serve-stored arm: falling back would return ``[]`` and DROP the row, strictly
+    worse on a TF-only lake (the ONE remaining UNVERIFIED serve, disclosed).
+
+    Cost: O(day) CPU — one in-memory resample of a ≤session-size frame (≤375
+    minutes; a session-exempt symbol ~1300) + one vectorized frame compare; NO
+    extra I/O beyond the base read the caller already performed.
+    """
+    if base_day is None:
+        return True
+    from brutex.data.tf_resampler import REQUIRED_COLUMNS, resample_1m_to_tf
+
+    expected = resample_1m_to_tf(base_day, minutes).sort("ts_utc").select(REQUIRED_COLUMNS)
+    return stored_day.sort("ts_utc").select(REQUIRED_COLUMNS).equals(expected)
+
+
+#: Hard cap on ``movers.stored_stale_fallback`` warnings per candidate build — a
+#: whole-lake stale prebuild (e.g. a crashed pipeline) must not flood the log with
+#: one WARN per instrument; past the cap ONE suppressed-summary event is emitted
+#: and the rest are counted. A SEPARATE state from the noncontiguous warner so
+#: neither warn family can starve the other's cap.
+_STORED_STALE_WARN_CAP: Final[int] = 20
+
+
+@dataclass(slots=True)
+class _StoredStaleWarnState:
+    """Per-candidate-build state for the capped stale-stored-fallback warner.
+
+    Function-local per ``compute_spot_candidates`` call (CLAUDE.md §4 — never
+    module-global); ``seen`` dedupes per ``(exchange, symbol, interval)`` — the
+    exchange member is REFUTER ROUND 1's defect 2 fold: the round-1
+    ``(symbol, interval)`` key silenced a dual-listed symbol's SECOND stale
+    exchange (the #1649a dual-listing precedent); :meth:`reset` is the test seam.
+    """
+
+    emitted: int = 0
+    seen: set[tuple[str, str, str]] = field(default_factory=set)
+    suppressed: int = 0
+
+    def reset(self) -> None:
+        """Reset the state (test seam — a fresh build constructs a fresh state)."""
+        self.emitted = 0
+        self.seen.clear()
+        self.suppressed = 0
+
+
+def warn_stored_stale_fallback(
+    state: _StoredStaleWarnState,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+    snapshot_day: date_cls,
+    stored_max_ist: str,
+    base_max_ist: str,
+) -> None:
+    """Emit ONE capped, deduped ``movers.stored_stale_fallback`` WARNING per build.
+
+    DEC-MOVERS-STORED-FRESHNESS-001. Deduped per ``(exchange, symbol, interval)``
+    within one build (REFUTER ROUND 1 defect 2: the round-1 ``(symbol, interval)``
+    key silenced the SECOND exchange of a dual-listed stale symbol — the #1649a
+    dual-listing precedent, so BOTH stale lake partitions are now named);
+    hard-capped at :data:`_STORED_STALE_WARN_CAP` per build — the first
+    past-cap event emits ONE ``movers.stored_stale_fallback_suppressed`` summary
+    (``cap=`` + ``snapshot_day=``), later ones only increment ``state.suppressed``.
+    WARNING level (the noncontiguous "data is suspect" tier): a stale partition is
+    an operator-actionable lake state — the served row itself is correct
+    post-fallback; for a genuinely STALE partition the prebuild remains the heal.
+    A session-EXEMPT symbol's prior-IST-date label artifact (see
+    :func:`_read_intraday_bars` — REFUTER ROUND 2 N1) is NOT healable by a
+    re-prebuild and re-warns once per build, bounded by this dedupe + cap.
+    """
+    key = (exchange, symbol, interval)
+    if key in state.seen:
+        return
+    state.seen.add(key)
+    if state.emitted >= _STORED_STALE_WARN_CAP:
+        state.suppressed += 1
+        if state.suppressed == 1:
+            _LOG.warning(
+                "movers.stored_stale_fallback_suppressed",
+                cap=_STORED_STALE_WARN_CAP,
+                snapshot_day=snapshot_day.isoformat(),
+            )
+        return
+    state.emitted += 1
+    _LOG.warning(
+        "movers.stored_stale_fallback",
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        interval=interval,
+        snapshot_day=snapshot_day.isoformat(),
+        stored_max_ist=stored_max_ist,
+        base_max_ist=base_max_ist,
+    )
+
+
 def _read_intraday_bars(
     lake_root: Path,
     *,
@@ -1029,6 +1200,7 @@ def _read_intraday_bars(
     minutes: int,
     cutoff_min: int | None,
     prefer_resample: bool = False,
+    stale_warn_state: _StoredStaleWarnState | None = None,
 ) -> tuple[list[CandleBar], bool]:
     """STORED-FIRST intraday day read → ``(bars, from_stored)``.
 
@@ -1077,6 +1249,52 @@ def _read_intraday_bars(
     in-process pipeline case is already gated by the process-local
     ``PrebuildGate``; this closes the cross-PROCESS half — the probe is a
     point-in-time signal, refreshed on every poll.
+
+    **Stored-freshness guard (DEC-MOVERS-STORED-FRESHNESS-001, REFUTER ROUND 1
+    folded):** the FOURTH member of the stored-branch decision family
+    (*prefer_resample* / :func:`_stored_serves_cutoff` / ``derive_in_progress`` /
+    this guard). A stored TF partition that diverges from the 1-minute base (a
+    CLI-only pull / quarantined / crashed / partial prebuild — including the #1031
+    interior-hole re-pull, the executed round-1 refutation of the original day-max
+    predicate) would serve a stale LTP/volume beside fresh 1m-sourced turnover —
+    so a stored day frame is served only when :func:`_stored_day_is_fresh` holds:
+    VERIFY-EQUALITY on the UNCUT day frames — the stored frame must EQUAL the
+    in-memory :func:`~brutex.data.tf_resampler.resample_1m_to_tf` of the 1-minute
+    base day frame (the SAME resampler the fallback runs; both sides whole-day,
+    never cut-vs-uncut), so every verified serve is byte-equal to the reference
+    path by construction. ``interval="1minute"`` is the identity arm — its stored
+    partition IS the base, so the guard pays ZERO extra reads; a missing base
+    fail-opens to serve-stored (falling back would drop the row — the ONE
+    remaining UNVERIFIED serve). STALE ⇒ the EXISTING :func:`_read_session_bars`
+    fallback below — the byte-equality REFERENCE path, so the served values are
+    correct by construction and only the provenance flips into ``resampled_reads``
+    (no new payload field — the derive-lock precedent), with ONE capped
+    ``movers.stored_stale_fallback`` WARNING per (exchange, symbol, interval) per
+    build via *stale_warn_state* (``None`` — the default for direct/test callers —
+    falls back silently). Guard cost per stored-served TF>1minute candidate: the
+    one month-bounded uncut 1-minute day read + an in-memory ≤session-size
+    resample + a vectorized frame compare. Honest disclosure (REFUTER ROUND 2
+    N1 — the round-1 "≥2hour" set was an executed UNDERCOUNT): a session-EXEMPT
+    symbol (GIFT ~21h) whose early bars misfile a bucket onto the prior IST
+    date reads stale and serves the base-derived resample + one WARN per build
+    instead of the stored day slice (the honest direction: the fallback IS what
+    a never-prebuilt lake serves; NOT healable by a re-prebuild — the label
+    sits on the prior IST date, outside this day read on BOTH sides). The
+    misfiling law: a bar at IST minute-of-day mm < (555 mod minutes) labels the
+    prior IST date, so any TF with 555 % minutes ≠ 0 is exposed — executed:
+    pre-00:15 bars already misfile 10minute/30minute/1hour buckets, pre-01:15
+    reaches 2hour/4hour (a PRE-EXISTING labeling artifact of the fixed
+    09:15-anchored grid; NSE/BSE session-filtered bars are all ≥ ~09:00 IST =
+    mm 540 ≥ every 555-mod rung, so they never misfile the IST date). The
+    NSE/BSE month-EDGE shape (REFUTER ROUND 2 defect B2) is separate and now
+    READ-COMPLETE: a stray 09:00 pre-open bar's 4hour label 05:15 IST shares
+    the IST date but maps to the prior UTC day, so on the 1st of an IST month
+    the prebuild files that bucket under the PRIOR UTC month's parquet —
+    :func:`~brutex.dashboard.movers_stored_read.read_stored_day_frame` probes
+    the prior month's file exactly then, so a genuinely fresh month-edge lake
+    serves its COMPLETE stored frame with zero warns (pre-fix: a permanent
+    false-stale WARN the prebuild could never heal, and — pre-guard, on main —
+    a silently bucket-dropped serve).
     """
     if (
         not prefer_resample
@@ -1092,15 +1310,58 @@ def _read_intraday_bars(
             day=day,
         )
         if stored is not None:
-            # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
-            # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
-            # bucket's last minute ≤ cutoff, by alignment).
-            res = (
-                stored
-                if cutoff_min is None
-                else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
-            )
-            return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+            if minutes == 1:
+                base_day: pl.DataFrame | None = None
+                stale = False  # identity: the stored 1minute partition IS the base.
+            else:
+                base_day = _read_cut_1m_frame(
+                    lake_root,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    day=day,
+                    cutoff_min=None,
+                )
+                stale = not _stored_day_is_fresh(stored, minutes=minutes, base_day=base_day)
+            if not stale:
+                # A bucket-final-aligned cutoff keeps exactly the fully-elapsed
+                # buckets when cut on the bucket-OPEN minute (open ≤ cutoff ⇒ the
+                # bucket's last minute ≤ cutoff, by alignment).
+                res = (
+                    stored
+                    if cutoff_min is None
+                    else filter_to_ist_minute(stored, cutoff_min, ts_col="ts_utc")
+                )
+                # Screen the STORED partition too (DEC-DASHBOARD-READ-SCREEN-001):
+                # the prebuild's make_lake_read_1m applies price_sanity but NOT the
+                # bad-tick screen, so a scaled spike can sit in a stored bucket
+                # unscreened — screen the stored read so it agrees with the
+                # 1m-resample path (and /db). The freshness-verified serve is
+                # spike-free by construction whenever the 1m base was screened (it
+                # EQUALS the resample of the SCREENED base), so this is the pinned
+                # same-object no-op there; the minutes==1 identity arm serves the
+                # RAW 1minute partition and is genuinely screened here. Clean
+                # partitions return the SAME object (O(rows) pass per read).
+                res = screen_frame(
+                    res, ts_col="ts_utc", source=f"{exchange}/{segment}/{symbol}/{interval}"
+                )
+                return [_row_to_bar(row) for row in res.iter_rows(named=True)], True
+            if stale_warn_state is not None and base_day is not None:
+                # `stale ⇒ base_day is not None` by construction (the fail-open arm
+                # never reads stale) — the second conjunct is the mypy narrow. The
+                # HH:MM day-max pair is forensic context only (an interior-hole /
+                # value-drift divergence can carry an IDENTICAL pair — the verdict
+                # itself is the frame-equality compare, never these maxima).
+                warn_stored_stale_fallback(
+                    stale_warn_state,
+                    exchange=exchange,
+                    segment=segment,
+                    symbol=symbol,
+                    interval=interval,
+                    snapshot_day=day,
+                    stored_max_ist=minute_to_hhmm(_max_ist_minute(stored)),
+                    base_max_ist=minute_to_hhmm(_max_ist_minute(base_day)),
+                )
     return (
         _read_session_bars(
             lake_root,
@@ -1169,7 +1430,17 @@ def _read_daily_bars(
     # The 1-day partition stores the lake instant in `timestamp`; the shared
     # `_row_to_bar` reads `ts_utc` — rename so the one converter serves both
     # the daily and the resampled-intraday readers (CLAUDE.md §11 COMMON).
-    return [_row_to_bar(row) for row in sel.rename({"timestamp": "ts_utc"}).iter_rows(named=True)]
+    # Screen the stored 1day bar(s) (DEC-DASHBOARD-READ-SCREEN-001): each daily
+    # bar is its own session (first-of-session exempt), so only the insane
+    # (positivity/ordering) arm can fire here — a corrupt derived 1day bar is
+    # dropped, never served raw. Clean partitions return the SAME object; the
+    # screen is an O(rows) Python pass per read (honest cost, not free).
+    screened = screen_frame(
+        sel.rename({"timestamp": "ts_utc"}),
+        ts_col="ts_utc",
+        source=f"{exchange}/{segment}/{symbol}/1day",
+    )
+    return [_row_to_bar(row) for row in screened.iter_rows(named=True)]
 
 
 #: Max calendar days to walk back searching for the prior trading day's last
@@ -1267,19 +1538,37 @@ def resolve_prev_close(
     DEC-MOVERS-PREVCLOSE-CONTIGUITY-001) — this resolver ADDS only the found
     session date. Pure lake read — provenance judgement (and any warning) stays
     at the candidate-loop level.
+
+    A CE/PE OPTION contract SKIPS the ``1day`` read entirely and goes straight
+    to the 1-minute walk-back (DEC-OPTIONS-PREBUILD-RETIRE-001 — the operator
+    ruling of 2026-07-15 as relayed via the coordinator, ADR-0021 RULING B,
+    draft PR #1555): the derived option ``1day`` is retired, so a stored one
+    is FROZEN at retirement eve — reading it first would serve a stale
+    prev-close (a wrong %CHNG) for weeks. The recovered 1-minute close is the
+    TRUE prior session's last bar; SPOT + FUT keep the 1day-first read
+    byte-identically (the gate is the COMMON
+    :func:`~brutex.data.fno_candle_lake.is_option_contract_coords`).
+
+    HONEST residual (DEC-DASHBOARD-READ-SCREEN-001): this baseline read is NOT
+    routed through the bad-tick/insane screen, so a prior-session last bar that is
+    itself a scaled spike would inflate ``prev_close`` and thus the %-move on the
+    BASELINE side (the live LTP/turnover side IS screened). Disclosed, not fixed
+    here — re-pulling / healing the poisoned prior session is the real remedy; the
+    screened live side already closes the fabricated Top-Value class.
     """
     import polars as pl
 
-    df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
-    if df is not None:
-        prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
-            "timestamp"
-        )
-        if not prior.is_empty():
-            last = prior.tail(1)
-            close = Decimal(str(last.get_column("close")[0]))
-            found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
-            return PrevDayBaseline(value=close, found_date=found)
+    if not is_option_contract_coords(segment, symbol):
+        df = _read_daily_partition(lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        if df is not None:
+            prior = df.filter(pl.col("timestamp").dt.convert_time_zone(_IST).dt.date() < day).sort(
+                "timestamp"
+            )
+            if not prior.is_empty():
+                last = prior.tail(1)
+                close = Decimal(str(last.get_column("close")[0]))
+                found = last.get_column("timestamp").dt.convert_time_zone(_IST).dt.date()[0]
+                return PrevDayBaseline(value=close, found_date=found)
     recovered = _prior_session_last_from_minute(
         lake_root, exchange=exchange, segment=segment, symbol=symbol, day=day
     )
@@ -1684,6 +1973,7 @@ def compute_spot_candidates(
     resampled_reads = 0
     skip_errors = movers_read_skip_errors()
     warn_state = _NoncontiguousWarnState()
+    stale_warn_state = _StoredStaleWarnState()
     expected_session_for = make_expected_session_resolver(day)
     for dataset in spot_datasets:
         try:
@@ -1709,6 +1999,7 @@ def compute_spot_candidates(
                     minutes=minutes,
                     cutoff_min=cutoff_min,
                     prefer_resample=prefer_resample,
+                    stale_warn_state=stale_warn_state,
                 )
             # Skip the prior-day 1-day read entirely when the symbol had no bars on
             # the selected day (no point computing a baseline for nothing).

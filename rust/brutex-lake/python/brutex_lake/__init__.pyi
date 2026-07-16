@@ -1,4 +1,4 @@
-# Typing surface for the brutex_lake PyO3 bridge (ADR-0019 PR-1).
+# Typing surface for the brutex_lake PyO3 bridge (ADR-0020 PR-1).
 # Mirrors rust/brutex-lake/src/lib.rs — keep in lockstep with the
 # `#[pymodule]` registration block there.
 

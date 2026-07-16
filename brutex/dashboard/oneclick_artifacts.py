@@ -124,6 +124,7 @@ __all__ = [
     "load_manifest",
     "load_preflight_fixture",
     "load_top100",
+    "newest_run_name",
     "probe_run_dir",
     "raise_chain_not_verified",
     "raise_no_cached_payload",
@@ -217,10 +218,12 @@ TOP100_ROW_REQUIRED_KEYS: Final[tuple[str, ...]] = (
 #: engine metric names; the display vocabulary (bx-screener.js COLUMNS /
 #: bx-oneclick.js / strategy.html) reads the short names. Applied ADDITIVELY
 #: in :func:`load_top100`: the display alias is added ONLY when absent, the
-#: engine key passes through verbatim, every unmapped key is untouched, and
-#: a metric the writer does not emit (``cpcv_pass_pct`` — no CPCV source in
-#: the artifact today) stays ABSENT so the client renders the honest "—",
-#: NEVER a fabricated 0.
+#: engine key passes through verbatim, every unmapped key is untouched.
+#: ``cpcv_pass_pct`` needs no map row: since
+#: DEC-RESULTS-CASCADE-VERDICT-JOIN-001 the writer emits it under the
+#: display name directly (``rate * 100.0``, only when the joined cascade
+#: verdict carries a measured rate) — on an OLD artifact the key is simply
+#: absent, so the client still renders the honest "—", NEVER a fabricated 0.
 TOP100_METRIC_KEY_MAP: Final[tuple[tuple[str, str], ...]] = (
     ("max_drawdown_paisa", "max_dd_paisa"),
     ("sharpe_ratio", "sharpe"),
@@ -612,6 +615,120 @@ def sibling_key_token(gate: OutageGate, *, coordinate: str, probe: ArtifactProbe
     return probe.token
 
 
+#: Reader-memo capacity: TWO entries hold BOTH sides of a two-run (or
+#: two-rank) page alternation — the exact thrash shape the previous
+#: single-entry memos paid a full re-parse per flip on.
+_REVISION_MEMO_CAPACITY: Final[int] = 2
+
+
+class _RevisionMemo[MemoValueT]:
+    """Bounded keyed revision memo with per-key single-flight (fix 4b).
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001: the ONE consolidation of this
+    module's previously THREE hand-rolled single-entry ``(path, revision)``
+    reader memos (fixture trades parse / top100 parse / equity series),
+    which duplicated the same subtle memo logic, had NO single-flight
+    (N concurrent cold pollers each paid the full O(file) parse,
+    last-write-wins), and thrashed on a two-run alternation (a page flip
+    between two runs/ranks evicted the single entry on EVERY flip).
+
+    Deliberately NOT the :func:`serve_revision_cached` chokepoint (the
+    honest fix-4b escape clause, ledgered): that chokepoint is ROUTE-payload
+    machinery — its :class:`PayloadCache` protocol is dict-typed and injected
+    by the app, and its :class:`OutageGate` doctrine distinguishes ABSENT
+    from probe OUTAGE — while the reader seam's pre-existing contract is
+    byte-pinned the other way (:func:`artifact_revision` maps ANY stat
+    failure to ``None`` ⇒ compute fresh, cache NOTHING) and the readers are
+    constructed WITHOUT any injected cache across the standalone suite
+    (leaf discipline: this module never imports the dashboard cache).
+    Changing either would move route payloads/semantics; this memo changes
+    neither — every payload stays byte-identical (parity-pinned).
+
+    Semantics: per-key single-flight (N concurrent misses of one key pay
+    exactly one *compute*; a raising *compute* caches nothing and releases
+    the flight — the next caller recomputes); LRU-bounded at
+    :data:`_REVISION_MEMO_CAPACITY` entries; a hit refreshes recency.
+    Thread-safe; the lock is held only for O(1) dict work, never across a
+    compute.
+    """
+
+    def __init__(self, *, capacity: int = _REVISION_MEMO_CAPACITY) -> None:
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, ...], MemoValueT] = OrderedDict()
+        self._inflight: dict[tuple[str, ...], threading.Event] = {}
+
+    def peek(self, key: tuple[str, ...]) -> MemoValueT | None:
+        """Return the memoised value for *key* WITHOUT computing (``None`` on a miss).
+
+        The serve-last-known outage arm (DEC-CACHE-SERVE-LAST-KNOWN-001,
+        merge-composed onto this memo) peeks the last healthily-served
+        revision key during a stat-probe outage — a hit refreshes LRU
+        recency (a long outage keeps its last-known entry resident), a miss
+        falls back to the caller's honest fresh uncached parse.
+        """
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def get_or_compute(self, key: tuple[str, ...], compute: Callable[[], MemoValueT]) -> MemoValueT:
+        """Return the memoised value for *key*, running *compute* on a miss.
+
+        Parameters
+        ----------
+        key
+            The revision-carrying memo key (e.g. ``(path, revision)`` —
+            callers fold the stat token in, so staleness is impossible by
+            construction; a ``None`` revision must NOT reach here).
+        compute
+            The zero-arg loader. Exceptions propagate raw (cached nothing);
+            per-key single-flight means concurrent misses pay one call.
+
+        Returns
+        -------
+        _MemoValueT
+            The cached or freshly computed value.
+        """
+        while True:
+            with self._lock:
+                if key in self._entries:
+                    self._entries.move_to_end(key)
+                    return self._entries[key]
+                event = self._inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    self._inflight[key] = event
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                # A peer is computing this exact key: wait, then re-check —
+                # either the entry landed (hit) or the peer raised/was
+                # evicted, in which case this thread takes ownership on the
+                # next loop pass.
+                event.wait()
+                continue
+            try:
+                value = compute()
+            except BaseException:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                event.set()
+                raise
+            with self._lock:
+                self._entries[key] = value
+                self._entries.move_to_end(key)
+                while len(self._entries) > self._capacity:
+                    self._entries.popitem(last=False)
+                self._inflight.pop(key, None)
+            event.set()
+            return value
+
+
 # ── Result types (split per artifact — the isinstance narrowing happens ONCE here) ──
 
 
@@ -660,6 +777,12 @@ class Top100Result:
         The artifact object root's ranking ``preset`` token (the R30 sort
         basis — surfaced so the pages can LABEL the ordering honestly);
         ``None`` when the artifact never parsed that far.
+    cascade_join
+        The artifact root's ADDITIVE ``cascade_join`` meta object
+        (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — ``{state, sweep_id,
+        n_input, n_survived}``), passed through when the writer emitted a
+        mapping; ``None`` on a pre-change artifact / a non-object value
+        (reader-OPTIONAL — never a reject).
     """
 
     status: ArtifactStatus
@@ -667,6 +790,7 @@ class Top100Result:
     detail: str
     revision: str | None
     preset: str | None = None
+    cascade_join: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1028,17 +1152,78 @@ def _probe_run_dir_known(run_dir: Path, dir_mtime_ns: int) -> RunInfo:
     )
 
 
+def _stamped_run_dirs(results_root: Path) -> list[tuple[int, str]]:
+    """Stat-stamp every run dir under the Ruling-4 tree, ``(mtime_ns, name)`` DESC.
+
+    The ONE newest-first selection core (§11 COMMON) shared by
+    :func:`discover_runs` (which pays the :class:`RunInfo` manifest probe per
+    SELECTED dir) and :func:`newest_run_name` (which pays NO manifest work at
+    all) — never a second selection law. An unreadable runs root folds into
+    the empty listing; an unreadable entry is SKIPPED with one
+    ``oneclick.run_skipped`` WARN, never a raise (the whole listing survives
+    one poisoned dir).
+    """
+    root = runs_root(results_root)
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    stamped: list[tuple[int, str]] = []
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            mtime_ns = entry.stat().st_mtime_ns
+        except OSError as exc:
+            _LOG.warning(
+                "oneclick.run_skipped",
+                run=entry.name,
+                error_type=type(exc).__name__,
+            )
+            continue
+        stamped.append((mtime_ns, entry.name))
+    stamped.sort(reverse=True)
+    return stamped
+
+
+def newest_run_name(results_root: Path) -> str | None:
+    """Return the NEWEST run dir's NAME on the ONE selection law — no manifest I/O.
+
+    DEC-RESULTS-CASCADE-VERDICT-JOIN-001 fix round 2 (refuter-confirmed
+    MINOR): the per-poll ``/results`` ``composite_index_revision`` probe needs
+    ONLY the newest run's directory name, yet reached it through
+    :func:`discover_runs`, whose per-selected-dir :class:`RunInfo` probe reads
+    + json-parses that run's ``manifest.json`` — an O(manifest) file read +
+    parse PER POLL whose parsed value (the ``suspect`` flag) the probe never
+    used. This name-only listing rides the SAME
+    :func:`_stamped_run_dirs` ``(mtime_ns, name)``-descending selection core
+    (never a second selection law) and performs ZERO manifest reads/parses
+    (bench-pinned beside the cascade one-stat pin).
+
+    Returns
+    -------
+    str | None
+        The newest run dir name, or ``None`` when no run directory exists /
+        the tree is unreadable — EXACTLY the cases :func:`discover_runs`
+        folds into its empty listing, so a name-only caller and a RunInfo
+        caller can never disagree about absence.
+    """
+    stamped = _stamped_run_dirs(results_root)
+    return stamped[0][1] if stamped else None
+
+
 def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]:
     """Discover run directories under the Ruling-4 ``sweep_runs/`` tree, newest first.
 
-    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first, the
-    newest-``limit`` selection happens on the (mtime_ns, name) stamps, and
-    only the SELECTED dirs pay the manifest PARSE — the pre-fix shape parsed
-    EVERY run's manifest and then truncated, so a churning history paid
-    O(all runs) parses per fresh listing. The stat sweep itself stays honest
-    O(run dirs) (and :func:`runs_revision` deliberately keeps its own
-    UNCAPPED manifest-token stat walk — the F5 ruling stands; this bounds
-    the PARSES, not the stats). Selection is identical to the pre-fix sort
+    F4 (DEC-ONECLICK-PERF-CLUB-001): the dir STAT sweep runs first (the
+    shared :func:`_stamped_run_dirs` core), the newest-``limit`` selection
+    happens on the (mtime_ns, name) stamps, and only the SELECTED dirs pay
+    the manifest PARSE — the pre-fix shape parsed EVERY run's manifest and
+    then truncated, so a churning history paid O(all runs) parses per fresh
+    listing. The stat sweep itself stays honest O(run dirs) (and
+    :func:`runs_revision` deliberately keeps its own UNCAPPED manifest-token
+    stat walk — the F5 ruling stands; this bounds the PARSES, not the
+    stats). Selection is identical to the pre-fix sort
     (``(dir_mtime_ns, run_id)`` descending): ``mtime_ns`` granularity means
     same-instant dirs tie-break on ``run_id``, exactly as before.
 
@@ -1058,26 +1243,8 @@ def discover_runs(results_root: Path, *, limit: int = 50) -> tuple[RunInfo, ...]
     tuple of RunInfo
         The discovered runs; empty when the tree is absent/unreadable.
     """
+    stamped = _stamped_run_dirs(results_root)
     root = runs_root(results_root)
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return ()
-    stamped: list[tuple[int, str]] = []
-    for entry in entries:
-        try:
-            if not entry.is_dir():
-                continue
-            mtime_ns = entry.stat().st_mtime_ns
-        except OSError as exc:
-            _LOG.warning(
-                "oneclick.run_skipped",
-                run=entry.name,
-                error_type=type(exc).__name__,
-            )
-            continue
-        stamped.append((mtime_ns, entry.name))
-    stamped.sort(reverse=True)
     return tuple(
         _probe_run_dir_known(root / name, mtime_ns) for mtime_ns, name in stamped[: max(0, limit)]
     )
@@ -1245,6 +1412,78 @@ def _bridge_top100_arm(row: dict[str, Any]) -> dict[str, Any]:
     return bridged
 
 
+#: The 4-token per-entry ``cascade.status`` wire vocabulary
+#: (DEC-RESULTS-CASCADE-VERDICT-JOIN-001 — the writer's law table).
+_CASCADE_STATUS_TOKENS: Final[frozenset[str]] = frozenset(
+    {"pass", "provisional_pass", "fail", "not_validated"}
+)
+
+
+def _cascade_object_defect(cascade: dict[str, Any]) -> str | None:
+    """The NAMED type defect of one entry's ``cascade`` object, or ``None``.
+
+    Per-field validation of the writer's §2.2 shape: an unknown status token
+    or any type violation names itself — the caller then DROPS the key for
+    that row (rendered "—") and counts it; the row itself is KEPT (the #1631
+    named-partial-degrade law, never a whole-artifact reject).
+    """
+    status = cascade.get("status")
+    if not isinstance(status, str) or status not in _CASCADE_STATUS_TOKENS:
+        return f"unknown cascade status {status!r}"
+    for key in ("reason", "rejected_at", "detail"):
+        value = cascade.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"cascade {key} is not a string"
+    provisional = cascade.get("provisional")
+    if provisional is not None and not isinstance(provisional, bool):
+        return "cascade provisional is not a bool"
+    for key in ("cascade_composite", "cpcv_pass_rate"):
+        value = cascade.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+            return f"cascade {key} is not a number"
+    rank = cascade.get("survivor_rank")
+    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int)):
+        return "cascade survivor_rank is not an integer"
+    return None
+
+
+def _bridge_cascade(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Validate + display-stamp one row's optional ``cascade`` object.
+
+    Returns ``(row, dropped)``: a row without the key passes through
+    untouched (a pre-change artifact — absence renders "—"); a VALID object
+    gains the server-built ``status_text`` via the ONE
+    :func:`brutex.dashboard.oneclick_view.cascade_status_text` builder (no
+    status prose is ever composed in JS); an invalid object is DROPPED from
+    the row + flagged ``True`` so the caller can count it into the named
+    partial degrade — never a fabricated verdict (Golden Rule #1).
+    """
+    if "cascade" not in row:
+        return row, False
+    cascade = row.get("cascade")
+    if not isinstance(cascade, dict) or _cascade_object_defect(cascade) is not None:
+        stripped = dict(row)
+        stripped.pop("cascade", None)
+        return stripped, True
+    # Function-local import — oneclick_view imports THIS module at top level
+    # (the builders consume the result types), so the reverse edge must stay
+    # call-time-lazy to avoid a cycle; the builder itself is pure.
+    from brutex.dashboard.oneclick_view import cascade_status_text
+
+    rejected_at = cascade.get("rejected_at")
+    reason = cascade.get("reason")
+    stamped = dict(cascade)
+    stamped["status_text"] = cascade_status_text(
+        str(cascade["status"]),
+        rejected_at=rejected_at if isinstance(rejected_at, str) else None,
+        provisional=cascade.get("provisional") is True,
+        reason=reason if isinstance(reason, str) else None,
+    )
+    bridged = dict(row)
+    bridged["cascade"] = stamped
+    return bridged, False
+
+
 def load_top100(run_dir: Path) -> Top100Result:
     """Load ``top100.json`` — the WRITER's object root, entries validated per row.
 
@@ -1269,7 +1508,12 @@ def load_top100(run_dir: Path) -> Top100Result:
     its display string via :func:`_bridge_top100_arm` (the raw dict rides
     along additively as ``arm_raw``) — the display sites ``String()`` the
     field, so an unbridged dict rendered ``"[object Object]"`` on every real
-    sweep card (hostile-round F1).
+    sweep card (hostile-round F1). Each row's OPTIONAL ``cascade`` object
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) is validated + display-stamped via
+    :func:`_bridge_cascade` (``status_text`` server-built; an invalid object
+    is DROPPED for that row + counted into a NAMED partial — the row itself
+    is kept, rendered "—"); the root ``cascade_join`` meta passes through
+    when a mapping (absent on a pre-change artifact → ``None``).
 
     Parameters
     ----------
@@ -1354,7 +1598,13 @@ def load_top100(run_dir: Path) -> Top100Result:
             f"≤{TOP100_ROW_CAP} contract; first {TOP100_ROW_CAP} kept, {over_cap} dropped"
         )
         entries_raw = entries_raw[:TOP100_ROW_CAP]
+    # ADDITIVE root passthrough (DEC-RESULTS-CASCADE-VERDICT-JOIN-001): the
+    # writer's cascade_join meta rides through when a mapping; a pre-change
+    # artifact lacks the key → None (reader-OPTIONAL, never a reject).
+    cascade_join_raw = obj.get("cascade_join")
+    cascade_join = cascade_join_raw if isinstance(cascade_join_raw, dict) else None
     rows: list[dict[str, Any]] = []
+    cascade_dropped = 0
     for idx, row in enumerate(entries_raw):
         if not isinstance(row, dict):
             return Top100Result(
@@ -1363,6 +1613,7 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} is not an object — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
         missing = [key for key in TOP100_ROW_REQUIRED_KEYS if key not in row]
         if missing:
@@ -1372,6 +1623,7 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} missing contract keys: {', '.join(missing)} — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
         defect = _top100_row_shape_defect(row)
         if defect is not None:
@@ -1381,11 +1633,31 @@ def load_top100(run_dir: Path) -> Top100Result:
                 f"row {idx} {defect} — rows kept up to it",
                 revision,
                 preset,
+                cascade_join,
             )
-        rows.append(_bridge_top100_arm(_map_top100_metrics(row)))
+        bridged, dropped = _bridge_cascade(_bridge_top100_arm(_map_top100_metrics(row)))
+        if dropped:
+            cascade_dropped += 1
+        rows.append(bridged)
+    if cascade_dropped:
+        _LOG.warning(
+            "oneclick.cascade_object_dropped",
+            path=str(path),
+            dropped=cascade_dropped,
+        )
     if cap_detail:
-        return Top100Result("partial", tuple(rows), cap_detail, revision, preset)
-    return Top100Result("ok", tuple(rows), "", revision, preset)
+        return Top100Result("partial", tuple(rows), cap_detail, revision, preset, cascade_join)
+    if cascade_dropped:
+        return Top100Result(
+            "partial",
+            tuple(rows),
+            f"{cascade_dropped} row(s) carried an invalid cascade object — "
+            "dropped (those rows render the honest '—')",
+            revision,
+            preset,
+            cascade_join,
+        )
+    return Top100Result("ok", tuple(rows), "", revision, preset, cascade_join)
 
 
 def load_preflight_fixture(run_dir: Path) -> ManifestResult:
@@ -1843,8 +2115,10 @@ class FixtureTradesReader:
     """FIXTURE-ONLY trades reader over the interim ``rank-%04d.json`` layout (§0.3).
 
     Activated ONLY when :func:`resolve_fixture_root` is non-``None``. Parses
-    the file ONCE per stat-token revision into a single-entry memo keyed by
-    ``(path, revision)``, so a repeat page click is an O(page) slice — the
+    the file ONCE per stat-token revision into the bounded single-flight
+    :class:`_RevisionMemo` keyed by ``(path, revision)`` (fix 4b,
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 — supersedes the hand-rolled
+    single-entry memo), so a repeat page click is an O(page) slice — the
     FIRST parse per revision is O(file), stated honestly.
 
     Attributes
@@ -1865,8 +2139,7 @@ class FixtureTradesReader:
             reader never leaves the fixture tree).
         """
         self._root = fixture_root
-        self._lock = threading.Lock()
-        self._memo: tuple[str, str, _ParsedTrades] | None = None
+        self._memo: _RevisionMemo[_ParsedTrades] = _RevisionMemo()
         self.parse_count: int = 0
 
     def page(self, run_id: str, rank: int, *, offset: int, limit: int) -> TradesResult:
@@ -1940,16 +2213,8 @@ class FixtureTradesReader:
         )
 
     def _parse_cached(self, path: Path, revision: str) -> _ParsedTrades:
-        """Serve the single-entry ``(path, revision)`` memo, parsing on a miss."""
-        key = str(path)
-        with self._lock:
-            memo = self._memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2]
-        parsed = self._parse(path)
-        with self._lock:
-            self._memo = (key, revision, parsed)
-        return parsed
+        """Serve the ``(path, revision)`` memo (single-flight, bounded), parsing on a miss."""
+        return self._memo.get_or_compute((str(path), revision), lambda: self._parse(path))
 
     def _parse(self, path: Path) -> _ParsedTrades:
         """Parse the whole interim trades file — O(file), once per revision."""
@@ -2115,9 +2380,11 @@ class TradeStoreReader:
             The sweep results root; runs resolve via :func:`runs_root`.
         """
         self._results_root = results_root
-        self._lock = threading.Lock()
-        self._top100_memo: tuple[str, str, Top100Result] | None = None
-        self._equity_memo: tuple[tuple[str, str, str], tuple[dict[str, Any], ...]] | None = None
+        # fix 4b (DEC-MEMORY-FOOTPRINT-HARDENING-001): both memos ride the
+        # ONE bounded single-flight _RevisionMemo — a two-run/two-rank page
+        # alternation no longer re-parses on every flip.
+        self._top100_memo: _RevisionMemo[Top100Result] = _RevisionMemo()
+        self._equity_memo: _RevisionMemo[tuple[dict[str, Any], ...]] = _RevisionMemo()
         #: Reader-owned once-per-outage WARN bookkeeping for the top100 stat
         #: probe (DEC-CACHE-SERVE-LAST-KNOWN-001, reconciled onto the ONE
         #: repo-wide :class:`OutageGate` mechanism — #1406's C-r2-5 gate;
@@ -2188,7 +2455,8 @@ class TradeStoreReader:
 
         HONEST envelope: the stamp carries NO equity span index (unlike the
         trades' ``trade_spans``), so the FIRST read per (file revision, combo)
-        is an O(equity-file) ``run_id`` filter; the single-entry memo makes
+        is an O(equity-file) ``run_id`` filter; the bounded single-flight memo
+        (:class:`_RevisionMemo`, fix 4b) makes
         every repeat page an O(page) slice. ``limit`` clamps to
         ``[1, 5000]`` (one row per session ≈ 250/year — one fetch charts ~20
         years) and the clamp is named in ``detail``.
@@ -2312,7 +2580,7 @@ class TradeStoreReader:
         return combo_run_id, paths, outage_note
 
     def _equity_cached(self, path: Path, combo_run_id: str) -> tuple[dict[str, Any], ...]:
-        """Serve the single-entry ``(path, revision, combo)`` equity memo.
+        """Serve the ``(path, revision, combo)`` equity memo (single-flight, bounded).
 
         A ``None`` revision (absent/unstattable) reads fresh and caches
         NOTHING (the ``lake_revision`` doctrine — no stale illusion).
@@ -2325,18 +2593,13 @@ class TradeStoreReader:
         revision = artifact_revision(path)
         if revision is None:
             return _load_equity_records(path, combo_run_id)
-        key = (str(path), revision, combo_run_id)
-        with self._lock:
-            memo = self._equity_memo
-        if memo is not None and memo[0] == key:
-            return memo[1]
-        series = _load_equity_records(path, combo_run_id)
-        with self._lock:
-            self._equity_memo = (key, series)
-        return series
+        return self._equity_memo.get_or_compute(
+            (str(path), revision, combo_run_id),
+            lambda: _load_equity_records(path, combo_run_id),
+        )
 
     def _top100_cached(self, run_dir: Path) -> tuple[Top100Result, bool]:
-        """Serve the single-entry ``(path, revision)`` top100 memo, parsing on a miss.
+        """Serve the ``(path, revision)`` top100 memo (single-flight, bounded), parsing on a miss.
 
         Returns ``(result, served_last_known)``. A ``None`` revision splits
         (DEC-CACHE-SERVE-LAST-KNOWN-001): a merely-ABSENT artifact computes
@@ -2356,23 +2619,25 @@ class TradeStoreReader:
         key = str(path)
         if probe.token is None:
             if probe.outage:
-                self._outages.outage_key(key)  # once-per-outage WARN latch
-                with self._lock:
-                    memo = self._top100_memo
-                if memo is not None and memo[0] == key:
-                    return memo[2], True
+                # once-per-outage WARN latch; the returned last-known revision
+                # keys the bounded _RevisionMemo peek (merge-compose: #1719's
+                # serve-last-known doctrine over #1721's fix-4b memo — a
+                # two-run alternation may have evicted the entry, in which
+                # case the honest fresh uncached parse below stands).
+                last = self._outages.outage_key(key)
+                if last is not None:
+                    memo = self._top100_memo.peek((key, last))
+                    if memo is not None:
+                        return memo, True
             else:
                 self._outages.absent(key)
             self.parse_count += 1
             return load_top100(run_dir), False
         revision = probe.token
         self._outages.healthy(key, revision)
-        with self._lock:
-            memo = self._top100_memo
-        if memo is not None and memo[0] == key and memo[1] == revision:
-            return memo[2], False
-        self.parse_count += 1
-        parsed = load_top100(run_dir)
-        with self._lock:
-            self._top100_memo = (key, revision, parsed)
-        return parsed, False
+
+        def _parse() -> Top100Result:
+            self.parse_count += 1
+            return load_top100(run_dir)
+
+        return self._top100_memo.get_or_compute((key, revision), _parse), False

@@ -247,15 +247,19 @@ class TestSpotBucketAsof:
 
     def test_bucket_end_clamps_to_session_close(self, tmp_path: Path) -> None:
         # 1hour @ 15:15 resolves through 15:29 (clamped), reading the 15:29 bar.
+        # Closes sit above _bar's -3.00 low offset so the fixture bars stay
+        # price-SANE — the read gate (DEC-READ-GUARD-PARITY-001) honestly
+        # refuses a fixture bar with a non-positive low, exactly like a
+        # corrupt stored row (the pre-fix closes 1.00/2.00 built low=-2.00).
         bars = [
-            _bar(hour=15, minute=15, close=Decimal("1.00")),
-            _bar(hour=15, minute=29, close=Decimal("2.00")),
+            _bar(hour=15, minute=15, close=Decimal("100.00")),
+            _bar(hour=15, minute=29, close=Decimal("200.00")),
         ]
         _write(tmp_path, "NIFTYIT", bars)
         cands = compute_spot_candidates(
             lake_root=tmp_path, interval="1hour", date=_DAY.isoformat(), time="15:15"
         )
-        assert cands.snapshots[0].ltp == Decimal("2.00")
+        assert cands.snapshots[0].ltp == Decimal("200.00")
 
     def test_day_ends_mid_bucket_clamps_to_latest_available(self, tmp_path: Path) -> None:
         # The day's data ENDS at 15:28 (no 15:29 bar). Picking 15:27 @ 3-minute

@@ -207,6 +207,7 @@ AGG_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
     ("exits_signal", _INT64),
     ("exits_forced_1520", _INT64),
     ("exits_end_of_data", _INT64),
+    ("exits_session_gap", _INT64),
     ("max_consecutive_losses", _INT64),
     ("max_consecutive_wins", _INT64),
     ("composite_score", _FLOAT64),
@@ -291,6 +292,11 @@ class TradeRowWire(TypedDict):
     honest ``None`` (NULL-by-design until P5, gap-register Ruling 18);
     ``mae``/``mfe`` are the 1-MINUTE values when the trade's minute path was
     fully covered (``path_1m_status == "ok"``) else the sweep-TF values.
+    ``exit_reason`` carries the walker's APPEND-ONLY string vocabulary
+    (``trade_sim.EXIT_REASONS``) — the contract KEYS are unchanged when that
+    VALUE vocabulary extends (``session_gap`` joined it,
+    DEC-TRADESIM-OPEN-SESSION-GUARD-001; the read side passes the string
+    through, never validating against a frozen set).
     Additive keys: ``trade_seq``, ``path_1m_status``, ``mae_granularity``
     (``"1m"`` | ``"tf"`` — says which granularity ``mae``/``mfe`` carry, so a
     consumer never guesses).

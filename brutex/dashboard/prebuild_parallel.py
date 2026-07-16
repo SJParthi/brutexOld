@@ -143,12 +143,13 @@ class PrebuildWorkItem:
 class PrebuildWorkResult:
     """The outcome of ONE :class:`PrebuildWorkItem`.
 
-    Exactly one of :attr:`result` / :attr:`error` is set:
+    Exactly one of :attr:`result` / :attr:`error` / :attr:`no_source` is set:
 
     * :attr:`result` is the
       :class:`~brutex.data.timeframe_materialize.MaterializeResult` on success
       (per-TF bar counts + the ``unchanged`` incremental flag +
-      ``opens_substituted``); ``None`` when the symbol was quarantined.
+      ``opens_substituted``); ``None`` when the symbol was quarantined or
+      classified no-source.
     * :attr:`error` is ``"<ErrorType>: <msg>"`` when the materialise raised a
       per-symbol DATA fault
       (:func:`~brutex.dashboard.gated_prebuild.per_symbol_data_errors`) — the
@@ -156,11 +157,19 @@ class PrebuildWorkResult:
       ``None`` on success. A pull-wide global-stop (``LakeWriteHalt`` / a genuine
       bug) is NOT captured here — it re-raises on the parent and tears the pool
       down (the route guard fires the CRITICAL halt alert).
+    * :attr:`no_source` is ``"<ErrorType>: <msg>"`` when a SPOT item's read
+      proved ZERO stored 1-minute bars
+      (:class:`~brutex.data.timeframe_materialize.NoStored1mBarsError` — the
+      vendor-empty / never-pulled shape, DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001):
+      NOT a failure, EXACTLY as the sequential spine classifies it; ``None``
+      otherwise. Kind-gated — a contract item's identical error stays a
+      failure (sequential parity).
     """
 
     symbol: str
     result: MaterializeResult | None
     error: str | None
+    no_source: str | None = None
 
 
 def materialize_work_item(item: PrebuildWorkItem) -> PrebuildWorkResult:
@@ -175,6 +184,13 @@ def materialize_work_item(item: PrebuildWorkItem) -> PrebuildWorkResult:
     parent re-raises it via ``future.result()`` and the route guard fires the
     halt alert — mirroring the sequential spine). ``materialize_lake_timeframes``
     is resolved via its module at call time so tests can monkeypatch it.
+
+    A SPOT item's whole-partition zero-stored-bars read
+    (:class:`~brutex.data.timeframe_materialize.NoStored1mBarsError`) is
+    classified :attr:`PrebuildWorkResult.no_source` instead of a failure
+    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — kind-GATED for sequential
+    parity: only the sequential spine's SPOT phase classifies no-source, so a
+    contract item's identical error must stay a quarantining failure here too.
     """
     from brutex.dashboard.gated_prebuild import per_symbol_data_errors
     from brutex.data import timeframe_materialize
@@ -193,6 +209,21 @@ def materialize_work_item(item: PrebuildWorkItem) -> PrebuildWorkResult:
             dense_symbol=item.dense_symbol,
         )
     except per_symbol_data_errors() as exc:
+        if (
+            isinstance(exc, timeframe_materialize.NoStored1mBarsError)
+            and item.kind is timeframe_materialize.PrebuildKind.SPOT
+        ):
+            _LOG.info(
+                "universe.prebuild.spot_no_source",
+                symbol=item.symbol,
+                detail=str(exc),
+            )
+            return PrebuildWorkResult(
+                symbol=item.symbol,
+                result=None,
+                error=None,
+                no_source=f"{type(exc).__name__}: {exc}",
+            )
         return PrebuildWorkResult(
             symbol=item.symbol,
             result=None,

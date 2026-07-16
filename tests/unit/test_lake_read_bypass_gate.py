@@ -116,6 +116,14 @@ ALLOWED_RAW_READ_FILES: Final[dict[str, str]] = {
         "/api/v1/oneclick/equity — engine artifacts, not lake bars; dedup "
         "identity does not apply (DEC-ONECLICK-WINNER-DETAIL-TRUTH-001)"
     ),
+    "brutex/dashboard/composite_join.py": (
+        "display-zone read of the results-depth AGGS sidecars under "
+        "sweep_runs/ ((run_id, composite_score) columns only — the "
+        "trade_store writer/reader pair's artifacts) for the /results "
+        "?preset=composite join — engine artifacts, not lake bars; the "
+        "lake_read dedup chokepoint governs lake bar reads only "
+        "(DEC-RESULTS-CASCADE-VERDICT-JOIN-001)"
+    ),
     "brutex/data/window_ledger_store.py": (
         "pq.read_table of the WINDOW-LEDGER sidecar (fetch-window rows), not the "
         "bar/options lake — dedup identity does not apply"

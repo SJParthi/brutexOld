@@ -204,13 +204,15 @@ class TestKeepawakeWatcher:
 
 
 class TestProbeFuturesAlias:
-    def test_refused_on_main_names_pr_1264(self) -> None:
+    def test_refused_spot_only_names_the_dec(self) -> None:
         verdict = lb.probe_futures_alias()
-        # On main the alias layer is NOT merged — the probe must say so
-        # honestly. (After PR #1264 merges this arm flips to available and
-        # the companion test below pins the available projection shape.)
-        if not verdict.available:
-            assert "PR #1264" in verdict.reason
+        # DEC-ENGINE-SPOT-ONLY-001: the alias is scope-refused — the probe
+        # must say so honestly, citing the DEC (were a future DEC to re-widen
+        # the scope law, this arm would flip available and the companion test
+        # below pins the available projection shape).
+        assert verdict.available is False
+        assert "DEC-ENGINE-SPOT-ONLY-001" in verdict.reason
+        assert "spot-only" in verdict.reason
 
     def test_available_when_classifier_allows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from brutex import universe
@@ -234,7 +236,7 @@ class TestProbeFuturesAlias:
         )
         verdict = lb.probe_futures_alias()
         assert verdict.available is False
-        assert "PR #1264" in verdict.reason
+        assert "DEC-ENGINE-SPOT-ONLY-001" in verdict.reason
         assert "nope" in verdict.reason
 
     def test_guarded_import_failure_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +248,7 @@ class TestProbeFuturesAlias:
         verdict = lb.probe_futures_alias()
         assert verdict.available is False
         assert "scope classifier unavailable" in verdict.reason
-        assert "PR #1264" in verdict.reason
+        assert "DEC-ENGINE-SPOT-ONLY-001" in verdict.reason
 
     def test_guarded_attribute_failure_degrades(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(lb.importlib, "import_module", lambda name: SimpleNamespace())
@@ -1012,12 +1014,13 @@ class TestBuildLaunchState:
         }
         futures_card = payload["cards"]["futures"]
         spot_card = payload["cards"]["spot"]
-        # On main the futures alias is refused → disabled with the PR #1264
-        # note; spot stays live. (Post-#1264 the probe flips dynamically —
+        # DEC-ENGINE-SPOT-ONLY-001: the futures alias is scope-refused →
+        # the card is disabled with the DEC-citing note; spot stays live.
+        # (The probe flips dynamically were the scope law re-widened —
         # pinned by TestProbeFuturesAlias.test_available_when_classifier_allows.)
-        if not payload["futures"]["available"]:
-            assert futures_card["enabled"] is False
-            assert "PR #1264" in futures_card["reason"]
+        assert payload["futures"]["available"] is False
+        assert futures_card["enabled"] is False
+        assert "DEC-ENGINE-SPOT-ONLY-001" in futures_card["reason"]
         assert spot_card["enabled"] is True
         # coordinator delta: the base display carries NO ack flag; the exact
         # token ships separately for the checkbox-conditional display.

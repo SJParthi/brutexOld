@@ -1,6 +1,6 @@
 """brutex_lake — BruteX data-lake Rust render seam (PyO3 bridge).
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726; the datalake
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891; the datalake
 conversion roadmap ADR). The
 compiled cdylib ships as the private submodule ``brutex_lake._brutex_lake``;
 this ``__init__.py`` re-exports its symbols (the fno-math DEC-P0-055 mixed

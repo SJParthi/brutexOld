@@ -1,6 +1,6 @@
 """Rust-vs-Python OPTIONS-DEFAULTS parquet byte-parity corpus (roadmap PR-2).
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Regenerates SIX of
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891). Regenerates SIX of
 the PR-2 probe's 7 cases (FEASIBLE-BY-LOCKSTEP 7/7 — retained as
 o1-o4/o9/o10; the probe's seventh, the mid-boundary 130k multi-RG case, is
 SUPERSEDED by the sharper exact-boundary pair below, its multi-RG coverage

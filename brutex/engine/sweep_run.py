@@ -103,8 +103,8 @@ from brutex.engine.combo_mask import (
     mask_to_entry_signals,
 )
 from brutex.engine.reference_wire import aggregate_trade_vix
-from brutex.engine.results_store import ResultRow, ResultsStore
-from brutex.engine.rust_trade_sim import ResidentTradeSim
+from brutex.engine.results_store import ResultRow, ResultsStore, ResultsStoreGateConflictError
+from brutex.engine.rust_trade_sim import PriceColumns, ResidentTradeSim
 from brutex.engine.stage1a import apply_1day_mask_for, build_bar_bits
 from brutex.engine.sweep_apriori import apriori_enabled
 from brutex.engine.sweep_driver import (
@@ -146,7 +146,12 @@ from brutex.models import BruteXError
 from brutex.money import round_money
 from brutex.ranking import MIN_TRADES, OverfitGateConfig, RankedCombo, rank_combos
 from brutex.strategies.combo import combo_hash
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    Side,
+    price_source_params_fragment,
+)
 from brutex.universe import NIFTY_FUTURES_SERIES_SYMBOL
 from brutex.vocabulary import ProximityParams, has_conflict
 
@@ -528,9 +533,17 @@ class SweepRunConfig:
         ranking term, DEC-RANKING-OVERFIT-001) inside :func:`brutex.ranking.rank_combos`.
         ``None`` (the default) keeps the legacy five-gate / seven-term ranking. The
         leaderboard's trial count ``N`` is this tuple's backtested-combo count —
-        the authoritative per-(instrument, TF) ``N`` — so the persisted store is, by
-        construction, the overfit-gated output (see the ``overfit`` module's honest
-        envelope: no statistically-valid post-store re-gate exists).
+        the authoritative per-(instrument, TF) ``N`` (see the ``overfit`` module's
+        honest envelope: no statistically-valid post-store re-gate exists). The
+        gate identity is now encoded in the store ADDRESS itself: the
+        active-only gate config folds into
+        :func:`~brutex.engine.sweep_orchestrator._tuple_digest`
+        (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001), so a gated vs an ungated run
+        over ONE results root map to DIFFERENT Parquet + completion-sentinel
+        addresses — an ungated store can never be served as a gated one via the
+        sentinel short-circuit, and a same-address collision differing only in
+        the nullable DSR metric is a tuple-scoped skip (C5), never a silent
+        overwrite.
 
     Raises
     ------
@@ -554,6 +567,15 @@ class SweepRunConfig:
     prior_n: int = 3
     proximity: ProximityParams | None = None
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP / EMA price-source axis (DEC-NIFTY-PRICE-SOURCE-AXIS-001) —
+    #: which per-bar scalar feeds the running VWAP (bits 52-53) / EMA (bits 0-5)
+    #: accumulators. Default ``(HLC3, CLOSE)`` reproduces today's hardcoded
+    #: reduction, so a legacy caller is byte-identical; the sources are folded
+    #: into the run-identity via :func:`canonical_trade_params` (DEFAULT-OMITTED,
+    #: Override 1) and into the Stage-1A build so a non-default source is a
+    #: distinct, reproducible combo (Golden Rule #4).
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
     start_equity_paisa: int = DEFAULT_START_EQUITY_PAISA
     max_combos: int = DEFAULT_MAX_COMBOS
     top_k: int | None = None
@@ -701,6 +723,8 @@ def canonical_trade_params(
     proximity: ProximityParams | None,
     start_equity_paisa: int,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
     roll_schedule: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     """Return the deterministic trade-sim params dict for the run-identity hash.
@@ -712,14 +736,24 @@ def canonical_trade_params(
     ``None`` when defaulted) so two configs with the same effective proximity
     hash identically.
 
-    The swept Fib anchor is folded in as ``"fib_anchor"`` (its string enum value —
-    DEC-NIFTY-FIB-AXIS-001): the anchor genuinely changes the Group-4 Fib levels a
-    combo evaluates against, so a run under a different anchor is a DIFFERENT
-    computation and MUST get a distinct run-identity (Golden Rule #4 / #7 — else
-    two anchors' results would collide in one store and one silently overwrite the
-    other). The key is emitted UNCONDITIONALLY (never omitted for the prev-day
-    default), so the honest run-identity carries the anchor for every family; there
-    is no production sweep tree yet, so this is a zero-cost identity choice.
+    Two params-emit classes ride this dict (both eval-affecting, both
+    params-carried, neither an ``indicator_version`` bump):
+
+    * **Unconditionally emitted** — ``{fib_anchor}``. The anchor genuinely
+      changes the Group-4 Fib levels a combo evaluates against, so a run under a
+      different anchor is a DIFFERENT computation and MUST get a distinct
+      run-identity (Golden Rule #4 / #7). It is emitted for EVERY family
+      (including prev-day) so the honest run-identity always carries it.
+    * **Optionally emitted when non-default** — ``{vwap_source, ema_source}``
+      (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1). The keys are OMITTED when
+      they equal the default ``(HLC3, CLOSE)`` and emitted only when a non-default
+      source is swept. RATIONALE: unconditional emit would re-key EVERY existing
+      run's identity (a hard back-compat break for the sibling Rust-core owner's
+      + product-audit's twin-baseline capture, which depend on existing run_ids
+      staying byte-identical). Default-omit has no canonicalisation ambiguity —
+      absent ALWAYS means the default, a clean bijection — and follows the repo's
+      optional-param convention. A default cell is byte-identical to the pre-axis
+      run-identity; a non-default cell gets a distinct one (no store collision).
 
     The ADR-0012 futures ``roll_schedule`` enters CONDITIONALLY
     (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): ``bar_bits`` are a function of
@@ -757,6 +791,9 @@ def canonical_trade_params(
         "fib_anchor": fib_anchor.value,
         "start_equity_paisa": start_equity_paisa,
     }
+    # DEFAULT-OMIT the price-source axis (Override 1) via the ONE COMMON fragment
+    # (CLAUDE.md §11): absent ⟺ the (HLC3, CLOSE) default, byte-identical identity.
+    params.update(price_source_params_fragment(vwap_source, ema_source))
     if roll_schedule is not None:  # presence ⟺ the futures alias (see above)
         params["roll_schedule"] = list(roll_schedule)  # ints — JSON-canonical
     return params
@@ -771,6 +808,8 @@ def _canonical_params(cfg: SweepRunConfig) -> dict[str, Any]:
         proximity=cfg.proximity,
         start_equity_paisa=cfg.start_equity_paisa,
         fib_anchor=cfg.fib_anchor,
+        vwap_source=cfg.vwap_source,
+        ema_source=cfg.ema_source,
         roll_schedule=cfg.roll_schedule,
     )
 
@@ -1020,6 +1059,7 @@ def _build_trade_sim(
     direction_label: str,
     *,
     reference_stamper: TradeReferenceStamper | None,
+    kernel_columns: PriceColumns | None = None,
 ) -> ResidentTradeSim:
     """Build the tuple's resident trade-sim; map a failure to the #904 tuple-skip contract.
 
@@ -1047,10 +1087,21 @@ def _build_trade_sim(
     ``reference_stamper`` is REQUIRED (no default) so every caller makes an
     EXPLICIT stamping decision for the trades this sim will emit — the
     one-kwarg revert lever the coordinator ruling demands.
+
+    ``kernel_columns`` (the W2 rider of DEC-STAGE1A-RUST-BATCH-001) threads a
+    :class:`~brutex.engine.sweep_kernel.ResidentSweepKernel`'s once-per-window
+    :class:`~brutex.engine.rust_trade_sim.PriceColumns` into the sim so a
+    kernel-reusing tuple skips the per-tuple 4×-Decimal-snap derivation;
+    ``None`` (the default — every kernel-less caller) derives locally,
+    byte-identical.
     """
     try:
         sim = ResidentTradeSim(
-            bars, bar_bits, tf_minutes=cfg.tf_minutes, reference_stamper=reference_stamper
+            bars,
+            bar_bits,
+            tf_minutes=cfg.tf_minutes,
+            reference_stamper=reference_stamper,
+            precomputed_columns=kernel_columns,
         )
     except MemoryError:
         # OOM is a GLOBAL stop (DEC-LAKE-WRITE-HALT-001), never a tuple skip.
@@ -1549,6 +1600,8 @@ def run_persisted_sweep(
             proximity=cfg.proximity,
             prior_n=cfg.prior_n,
             fib_anchor=cfg.fib_anchor,
+            vwap_source=cfg.vwap_source,
+            ema_source=cfg.ema_source,
             roll_schedule=cfg.roll_schedule,
             apply_1day_mask=apply_1day_mask_for(cfg.instrument, cfg.tf),
         )
@@ -1567,6 +1620,22 @@ def run_persisted_sweep(
                 f"run_persisted_sweep: kernel was built for Fib anchor "
                 f"{kernel.fib_anchor.value!r} but the tuple sweeps "
                 f"{cfg.fib_anchor.value!r} — the kernel must match this tuple's anchor"
+            )
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001 (MANDATORY): ``bar_bits`` bits 52-53
+        # (VWAP position) and 0-5 (EMA-vs-close) are price-source-SPECIFIC, so a
+        # kernel built for a different source would silently serve the WRONG bits.
+        # Fail-fast on a mismatch, exactly like the Fib-anchor guard above.
+        if kernel.vwap_source is not cfg.vwap_source:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for VWAP source "
+                f"{kernel.vwap_source.value!r} but the tuple sweeps "
+                f"{cfg.vwap_source.value!r} — the kernel must match this tuple's source"
+            )
+        if kernel.ema_source is not cfg.ema_source:
+            raise ValueError(
+                f"run_persisted_sweep: kernel was built for EMA source "
+                f"{kernel.ema_source.value!r} but the tuple sweeps "
+                f"{cfg.ema_source.value!r} — the kernel must match this tuple's source"
             )
         # ADR-0012 roll-schedule twin of the anchor guard: the ``bar_bits``
         # matrix is schedule-SPECIFIC (the per-contract hard resets), so a
@@ -1754,7 +1823,17 @@ def run_persisted_sweep(
         # projector's OWN re-simulation, never this stream — and
         # trade_sim_path logs vix_stamped=False so the unstamped stream is a
         # stated fact).
-        sim = _build_trade_sim(bars, bar_bits, cfg, direction_label, reference_stamper=None)
+        sim = _build_trade_sim(
+            bars,
+            bar_bits,
+            cfg,
+            direction_label,
+            reference_stamper=None,
+            # The W2 rider (DEC-STAGE1A-RUST-BATCH-001): a kernel-reusing
+            # tuple hands its once-per-window columns; the kernel=None arm
+            # derives locally (byte-identical).
+            kernel_columns=kernel.kernel_columns if kernel is not None else None,
+        )
         for mask, metrics in _iter_mask_metrics(
             sim, kept, bars, bar_bits, cfg, direction_label, run_id_of
         ):
@@ -1811,7 +1890,20 @@ def run_persisted_sweep(
             # lands here.
             reference_stamper=reference_stamper,
         )
-        store.append(row)
+        try:
+            store.append(row)
+        except ResultsStoreGateConflictError as exc:
+            # C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config re-run
+            # into the same store address surfaces here as an all-nullable-metric
+            # conflict. Convert AT THE SOURCE to a SweepComboError — a SIBLING of
+            # ResultsStoreError — so it sails PAST run_one_tuple's
+            # ``except ResultsStoreError`` (which, with store_quarantine=None,
+            # re-raises as a GLOBAL grid abort) and lands on the driver's
+            # ``except SweepComboError`` tuple-skip + TUPLE_FAILED-count ladder.
+            raise SweepComboError(
+                f"gate-config conflict persisting {cfg.instrument}/{cfg.tf}/"
+                f"{direction_label} k={cfg.k}: {exc}"
+            ) from exc
         persisted += 1
 
     flush = store.flush()

@@ -1868,7 +1868,7 @@ class ParquetWriter:
                 )
                 return bio.getvalue()
 
-            # ADR-0019 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
+            # ADR-0020 PR-1 (DEC-RUST-DATALAKE-IO-ROADMAP-001): the OPTIONAL
             # Rust render seam — default OFF; when BRUTEX_LAKE_RUST_RENDER is
             # truthy the frame crosses to the version-lockstepped brutex_lake
             # crate as uncompressed Arrow IPC, guarded by the facade's three

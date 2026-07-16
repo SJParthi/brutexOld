@@ -1,6 +1,6 @@
-"""Tests for ``brutex.data.lake_rust_render`` — the ADR-0019 PR-1 facade.
+"""Tests for ``brutex.data.lake_rust_render`` — the ADR-0020 PR-1 facade.
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). Crate-FREE by design:
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). Crate-FREE by design:
 every test drives the facade with a FAKE ``brutex_lake`` module injected into
 ``sys.modules`` (or a poisoned ``None`` entry for the import-guard arm), so
 the whole flag / import-guard / version-guard / burn-in / autorevert law is

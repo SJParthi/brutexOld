@@ -1,6 +1,6 @@
 """Wiring tests for the option-writer DEFAULTS Rust-render seam (roadmap PR-2).
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726) — the
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891) — the
 ``_atomic_write_parquet`` seam routed through the COMMON
 ``lake_rust_render`` facade under :data:`PROFILE_OPTIONS_DEFAULTS`.
 Crate-FREE by design: fake ``brutex_lake`` modules (the faithful one

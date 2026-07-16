@@ -207,7 +207,8 @@
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the four endpoint fetches run in
    PARALLEL (Promise.allSettled — one slow endpoint mid-pull no longer stalls
-   the other three), each through BXUI.fetchWithTimeout (12 s deadline) so a
+   the other three), each through the shared BXUI.fetchTextBounded (abort
+   armed THROUGH the body read — DEC-O1-GUARANTEE-HARDEN-001) so a
    hung endpoint always resolves; the pre-JS placeholders are skeleton shimmer
    bars that ALWAYS resolve (data / an honest "—" / an amber "… retrying" chip
    on the failing card — a 500 is no longer indistinguishable from a
@@ -263,22 +264,25 @@ function statError(statEl, kpis, msg) {
 }
 function failMsg(e) { return e && e.timeout ? "timed out · retrying" : "offline · retrying"; }
 
-/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
-   catch instead of pending forever. bx-ui.js is deferred, so only the very
-   first tick can fall back to bare fetch — every later 4 s tick is guarded. */
-function doFetch(url) {
-  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
+function fetchTextBounded(url, timeoutMs) {
+  if (window.BXUI && BXUI.fetchTextBounded) {
+    return BXUI.fetchTextBounded(url, timeoutMs);
+  }
+  return fetch(url).then(function (r) {
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
+  });
 }
 
-async function pollOptions() {
+async function pollOptions(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/options");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/options", timeoutMs);
+    if (!res.ok) {
       lastPayload.opt = null;
-      statError(cOpt, [ulEl, serEl], "error " + r.status + " · retrying");
+      statError(cOpt, [ulEl, serEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.opt) {
       lastPayload.opt = txt;
       const h = JSON.parse(txt).headline || {};
@@ -295,15 +299,15 @@ async function pollOptions() {
   }
 }
 
-async function pollSpot() {
+async function pollSpot(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/spot");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/spot", timeoutMs);
+    if (!res.ok) {
       lastPayload.spot = null;
-      statError(cSpot, [spotdsEl], "error " + r.status + " · retrying");
+      statError(cSpot, [spotdsEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.spot) {
       lastPayload.spot = txt;
       const body = JSON.parse(txt);
@@ -324,18 +328,18 @@ async function pollSpot() {
   }
 }
 
-async function pollWindows() {
+async function pollWindows(timeoutMs) {
   try {
     /* Counts-only (DEC-WINDOWS-COUNTS-ONLY-001): this card renders ONE integer
        (b.count) — ?limit=0 keeps the identical counts/meta while dropping the
        up-to-20k-row default row list (~5.9 MB/poll mid-pull) it never read. */
-    const r = await doFetch("/api/v1/coverage/windows?limit=0");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/windows?limit=0", timeoutMs);
+    if (!res.ok) {
       lastPayload.win = null;
-      statError(cWin, [wincEl], "error " + r.status + " · retrying");
+      statError(cWin, [wincEl], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.win) {
       lastPayload.win = txt;
       const b = JSON.parse(txt);
@@ -351,15 +355,15 @@ async function pollWindows() {
   }
 }
 
-async function pollCompleteness() {
+async function pollCompleteness(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/completeness/scoreboard");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/completeness/scoreboard", timeoutMs);
+    if (!res.ok) {
       lastPayload.cmp = null;
-      statError(cCmp, [], "error " + r.status + " · retrying");
+      statError(cCmp, [], "error " + res.status + " · retrying");
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     if (txt !== lastPayload.cmp) {
       lastPayload.cmp = txt;
       const b = JSON.parse(txt);
@@ -379,11 +383,12 @@ async function pollCompleteness() {
   }
 }
 
-async function poll() {
+async function poll(timeoutMs) {
   /* Parallel fan-out: one slow endpoint no longer stalls the other three
      (the old serial awaits froze the whole tick behind the slowest call). */
   const settled = await Promise.allSettled(
-    [pollOptions(), pollSpot(), pollWindows(), pollCompleteness()]);
+    [pollOptions(timeoutMs), pollSpot(timeoutMs),
+     pollWindows(timeoutMs), pollCompleteness(timeoutMs)]);
   let ok = 0;
   for (const s of settled) { if (s.status === "fulfilled" && s.value) ok++; }
   liveTxt.textContent =
@@ -411,8 +416,8 @@ function startPolling() {
     window.BXPoll.createPoller({
       url: "/api/v1/coverage/options", // informational — the tick owns its own 4 fetches
       pollMs: 4000,
-      fetchJson: function () {
-        return poll().then(function (ok) {
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
           if (!ok) { throw new Error("all four coverage surfaces failed"); }
           return { ok: true };
         });

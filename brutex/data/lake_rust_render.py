@@ -1,7 +1,7 @@
 """Flag-gated Rust parquet-render seam — the datalake-roadmap render facade.
 
-DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726; the conversion roadmap
-ADR at ``docs/adr/0019-datalake-rust-conversion-roadmap.md``). When — and ONLY
+DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1891; the conversion roadmap
+ADR at ``docs/adr/0020-datalake-rust-conversion-roadmap.md``). When — and ONLY
 when — ``BRUTEX_LAKE_RUST_RENDER`` is set truthy, the two lake writers route
 their frame → parquet-bytes renders through the ``brutex_lake`` crate (a
 Rust build of polars REV-pinned at the commit the installed Python wheel's
@@ -65,7 +65,7 @@ whenever the engine package is importable, so the two homes cannot drift
 silently. (The same wheel-boundary reasoning is why
 ``brutex/data/write_consumer.py`` carries its own truthy set.)
 
-## Three fail-closed layers (ADR-0019 §3 PR-1 gate set), all process-local
+## Three fail-closed layers (ADR-0020 §3 PR-1 gate set), all process-local
 
 1. **Import guard** — the crate is resolved lazily on first engaged render;
    an absent/broken ``brutex_lake`` install logs ONE
@@ -82,7 +82,7 @@ silently. (The same wheel-boundary reasoning is why
    crate's ``pinned_polars_version()``. Any difference logs ONE loud
    ``lake_rust_render.polars_version_mismatch`` WARN naming BOTH versions
    and latches OFF. Fail-closed: the repo range-pins ``polars>=1.0,<2.0``
-   with no lockfile (ADR-0019 F4), so a wheel bump past the crate must
+   with no lockfile (ADR-0020 F4), so a wheel bump past the crate must
    REFUSE — never silently different bytes (§7 hazard 1).
 3. **Burn-in self-check + autorevert** — the first :data:`BURN_IN_SAMPLES`
    engaged renders per process **per PROFILE** ALSO run the Python render
@@ -176,7 +176,7 @@ the guarded render block.
 ## Honest envelope (Golden Rule #10)
 
 * **Expected payoff ≈ 0 — the conversion is for uniformity, not speed**
-  (ADR-0019 §0): the crate links the SAME polars encoder the wheel already
+  (ADR-0020 §0): the crate links the SAME polars encoder the wheel already
   runs, and the engaged path additionally pays one uncompressed Arrow-IPC
   serialisation + one FFI crossing per render. MEASURED (2026-07-11
   sandbox, median of 15, 100k-row corpus shape — a spike-transcript

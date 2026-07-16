@@ -1,5 +1,5 @@
 # Maturin build configuration for the BruteX data-lake Rust render crate
-# (ADR-0019 PR-1, DEC-RUST-DATALAKE-IO-ROADMAP-001 — MIGRATION.md #1726).
+# (ADR-0020 PR-1, DEC-RUST-DATALAKE-IO-ROADMAP-001 — MIGRATION.md #1796).
 #
 # Pip installs this as a separate distribution alongside `brutex`, exactly
 # like the sibling kernels (`rust/fno-math`, `rust/trading-core`). It is
@@ -10,7 +10,7 @@
 # runs the byte-parity corpus.
 #
 # References:
-#   - docs/adr/0019-datalake-rust-conversion-roadmap.md (§3 PR-1)
+#   - docs/adr/0020-datalake-rust-conversion-roadmap.md (§3 PR-1)
 #   - docs/runbooks/lake-rust-render-lockstep.md (the bump ritual)
 #   - rust/fno-math/pyproject.toml (the layout template, DEC-P0-055)
 
@@ -21,7 +21,7 @@ build-backend = "maturin"
 [project]
 name = "brutex-lake"
 version = "0.1.0"
-description = "BruteX data-lake Rust render seam — polars-native parquet render, byte-locked to the installed Python wheel (ADR-0019 PR-1)."
+description = "BruteX data-lake Rust render seam — polars-native parquet render, byte-locked to the installed Python wheel (ADR-0020 PR-1)."
 readme = "README.md"
 license = { text = "Proprietary" }
 requires-python = ">=3.12"

@@ -1,13 +1,13 @@
-# brutex-lake — the data-lake Rust conversion crate (ADR-0019, PR-1).
+# brutex-lake — the data-lake Rust conversion crate (ADR-0020, PR-1).
 #
-# DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1726). PR-1 re-hosts the
+# DEC-RUST-DATALAKE-IO-ROADMAP-001 (MIGRATION.md #1796). PR-1 re-hosts the
 # ONE parquet render seam (`brutex/data/parquet_writer.py::_render_bytes`,
 # frame → parquet bytes) on a Rust build of polars pinned to the EXACT git
 # tag matching the installed Python wheel — the byte-identity-by-lockstep
 # design the 2026-07-11 feasibility spike proved (all 5 corpus cases
 # bit-identical at `py-1.42.1`).
 #
-# ## The ATOMIC pin (ADR-0019 §7 hazards 1 + 2 — read before touching)
+# ## The ATOMIC pin (ADR-0020 §7 hazards 1 + 2 — read before touching)
 #
 # Three pins move TOGETHER or the byte gate fails loud (flag stays OFF):
 #   1. Python wheel: `polars==1.42.1` (the installed wheel; the repo
@@ -37,7 +37,7 @@ edition = "2024"
 # The spike measured the floor: the polars graph at py-1.42.1 resolves
 # sysinfo 0.39.x whose MSRV is 1.95; built + parity-proven on stable 1.97.0.
 rust-version = "1.95"
-description = "BruteX data-lake Rust render seam — polars-native parquet render, byte-locked to the installed Python wheel (ADR-0019 PR-1)"
+description = "BruteX data-lake Rust render seam — polars-native parquet render, byte-locked to the installed Python wheel (ADR-0020 PR-1)"
 license = "Proprietary"
 repository = "https://github.com/SJParthi/bruteX"
 readme = "README.md"
@@ -70,7 +70,7 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
 # strings-gated IRFunctionExpr::StringExpr under a dtype-datetime cfg
 # (lower_expr.rs:1566 @ py-1.42.1), so the crate set does not build
 # without it. Feature-subset drift is a real hazard class on every
-# future version bump (spike report; ADR-0019 §1).
+# future version bump (spike report; ADR-0020 §1).
 polars = { git = "https://github.com/pola-rs/polars", rev = "0df0c25d4db895ec8cad773bedc4e98400e3135e", features = ["lazy", "parquet", "ipc", "timezones", "streaming", "strings"] }
 # SinkDestination / SinkTarget / FileWriteFormat / UnifiedSinkArgs
 polars-plan = { git = "https://github.com/pola-rs/polars", rev = "0df0c25d4db895ec8cad773bedc4e98400e3135e", features = ["parquet"] }

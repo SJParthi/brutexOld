@@ -216,7 +216,8 @@
 
    DEC-DASHBOARD-UX-ANIMATE-001 layer (state honesty + polish only — every
    rendered VALUE string is byte-identical): the fetch is deadline-guarded
-   (BXUI.fetchWithTimeout, 12 s) so a hung endpoint always resolves; the
+   (the shared BXUI.fetchTextBounded — abort armed THROUGH the body read,
+   DEC-O1-GUARANTEE-HARDEN-001) so a hung endpoint always resolves; the
    initial skeleton shimmer resolves to data / an honest empty state / an
    honest error card with Retry — the bare loading-literal terminal state is
    gone; an error AFTER data has rendered KEEPS the last real table and
@@ -395,11 +396,14 @@ function showFailure(o) {
   }
 }
 
-/* Deadline-guarded fetch: a dead/hung endpoint rejects into the caller's
-   catch instead of pending forever. bx-ui.js is deferred, so only the very
-   first tick can fall back to bare fetch — every later 4 s tick is guarded. */
-function doFetch(url) {
-  return window.BXUI ? BXUI.fetchWithTimeout(url, 12000) : fetch(url);
+/* Minimal guard onto the ONE shared BXUI.fetchTextBounded (§11 COMMON — the body-armed-abort rationale lives ON the helper in bx-ui.js; review round 1 shrank the 3 copy-pasted shims). No-BXUI arm = the legacy unbounded-body shape, never fetchless. */
+function fetchTextBounded(url, timeoutMs) {
+  if (window.BXUI && BXUI.fetchTextBounded) {
+    return BXUI.fetchTextBounded(url, timeoutMs);
+  }
+  return fetch(url).then(function (r) {
+    return r.text().then(function (txt) { return { ok: r.ok, status: r.status, text: txt }; });
+  });
 }
 
 /* ── Floor-stale badge (DEC-STALENESS-CACHE-TRUTH-001) ──
@@ -422,16 +426,16 @@ function renderStaleChip(body) {
   }
 }
 
-async function poll() {
+async function poll(timeoutMs) {
   try {
-    const r = await doFetch("/api/v1/coverage/spot");
-    if (!r.ok) {
+    const res = await fetchTextBounded("/api/v1/coverage/spot", timeoutMs);
+    if (!res.ok) {
       lastPayloadTxt = null;
-      liveTxt.textContent = "error " + r.status;
-      showFailure({ status: r.status, verdict: "error " + r.status });
+      liveTxt.textContent = "error " + res.status;
+      showFailure({ status: res.status, verdict: "error " + res.status });
       return false;
     }
-    const txt = await r.text();
+    const txt = res.text;
     setDot("ok");
     clearStale();
     if (txt === lastPayloadTxt) { liveTxt.textContent = lastLiveLine; return true; }
@@ -476,8 +480,8 @@ function startPolling() {
     poller = window.BXPoll.createPoller({
       url: "/api/v1/coverage/spot", // informational — the tick owns its own fetch
       pollMs: 4000,
-      fetchJson: function () {
-        return poll().then(function (ok) {
+      fetchJson: function (_url, timeoutMs) {
+        return poll(timeoutMs).then(function (ok) {
           if (!ok) { throw new Error("coverage/spot poll tick failed"); }
           return { ok: true };
         });

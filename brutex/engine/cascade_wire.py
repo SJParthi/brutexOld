@@ -101,6 +101,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import structlog
 
+from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.futures_series import is_futures_series_symbol
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS
 from brutex.metrics.lockbox import (
@@ -109,7 +110,11 @@ from brutex.metrics.lockbox import (
     resolve_lockbox_window,
 )
 from brutex.models import BruteXError
-from brutex.strategies.types import FibAnchorKind
+from brutex.strategies.types import (
+    FibAnchorKind,
+    PriceSource,
+    price_source_params_fragment,
+)
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
@@ -196,6 +201,13 @@ class CascadeTupleSpec:
         survivor against its OWN Fib levels, not the prev-day default. An
         additive field (default prev-day) so a pre-axis manifest round-trips
         byte-compatibly; the default keeps the prev-day path byte-identical.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source cell the tuple was evaluated against
+        (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Threaded into
+        :func:`candidates_for_spec`'s ``build_bar_bits`` so the Stage-4 cascade
+        re-scores a non-default survivor against ITS OWN source's bits (52-53 /
+        0-5). Additive fields (default ``(HLC3, CLOSE)``) — DEFAULT-OMITTED from
+        the manifest so a pre-axis manifest round-trips byte-compatibly.
 
     Raises
     ------
@@ -215,6 +227,8 @@ class CascadeTupleSpec:
     start_equity_paisa: int
     winners: tuple[tuple[str, int], ...]
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -332,6 +346,13 @@ class Stage3CellRecord:
     #: must round-trip so a non-prev-day refined cell's ``run_id`` re-derives on
     #: verification. Stored as the string enum value.
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
+    #: The swept VWAP / EMA price-source cell this refined cell was evaluated
+    #: against (DEC-NIFTY-PRICE-SOURCE-AXIS-001). Additive fields (default
+    #: ``(HLC3, CLOSE)``) so a pre-axis / baseline manifest parses byte-compatibly
+    #: (the ``fib_anchor`` precedent); they must round-trip so a non-default cell's
+    #: ``run_id`` re-derives on verification. Stored as the string enum values.
+    vwap_source: PriceSource = PriceSource.HLC3
+    ema_source: PriceSource = PriceSource.CLOSE
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -875,6 +896,8 @@ def candidates_for_spec(
         proximity=proximity,
         prior_n=spec.prior_n,
         fib_anchor=spec.fib_anchor,
+        vwap_source=spec.vwap_source,
+        ema_source=spec.ema_source,
         roll_schedule=roll_schedule,
         apply_1day_mask=apply_1day_mask_for(spec.instrument, spec.tf_label),
     )
@@ -1073,7 +1096,10 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
     filter #5 was skipped (see :class:`~brutex.metrics.cascade.CascadeReport`).
     The per-verdict ``provisional`` key (R2-SR-F4) is ADDITIVE at
     ``REPORT_VERSION`` 1 — the same precedent as ``pool_pbo``; a pre-change
-    report simply lacks the key.
+    report simply lacks the key. The per-verdict ``cpcv_pass_rate`` key
+    (DEC-RESULTS-CASCADE-VERDICT-JOIN-001) rides the SAME additive-at-1
+    precedent: the RAW full-precision stage-3 fraction or ``null`` (a
+    pre-change report simply lacks the key — readers None-fill).
     """
     return {
         "n_input": report.n_input,
@@ -1092,6 +1118,7 @@ def _report_to_dict(report: CascadeReport) -> dict[str, object]:
                 "detail": verdict.detail,
                 "composite_score": verdict.composite_score,
                 "provisional": verdict.provisional,
+                "cpcv_pass_rate": verdict.cpcv_pass_rate,
             }
             for verdict in report.verdicts
         ],
@@ -1361,6 +1388,10 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         "start_equity_paisa": spec.start_equity_paisa,
         "winners": [[run_id, mask] for run_id, mask in spec.winners],
         "fib_anchor": spec.fib_anchor.value,
+        # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via the ONE
+        # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
+        # when non-default, so a baseline manifest is byte-identical to a pre-axis one.
+        **price_source_params_fragment(spec.vwap_source, spec.ema_source),
     }
 
 
@@ -1394,6 +1425,18 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 if raw.get("fib_anchor") is None
                 else FibAnchorKind(str(raw["fib_anchor"]))
             ),
+            # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001): absent ⟺ the
+            # baseline (HLC3, CLOSE), the only source pre-axis / baseline sweeps ran.
+            vwap_source=(
+                PriceSource.HLC3
+                if raw.get("vwap_source") is None
+                else PriceSource(str(raw["vwap_source"]))
+            ),
+            ema_source=(
+                PriceSource.CLOSE
+                if raw.get("ema_source") is None
+                else PriceSource(str(raw["ema_source"]))
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
@@ -1415,6 +1458,10 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 "proximity_bps": None if cell.proximity_bps is None else list(cell.proximity_bps),
                 "rel_path": cell.rel_path,
                 "fib_anchor": cell.fib_anchor.value,
+                # DEFAULT-OMITTED (DEC-NIFTY-PRICE-SOURCE-AXIS-001, Override 1) via
+                # the ONE COMMON fragment: a baseline refined cell's manifest entry
+                # is byte-identical to a pre-axis one.
+                **price_source_params_fragment(cell.vwap_source, cell.ema_source),
             }
             for cell in record.refined_cells
         ],
@@ -1449,6 +1496,19 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                         FibAnchorKind.PREV_DAY
                         if cell.get("fib_anchor") is None
                         else FibAnchorKind(str(cell["fib_anchor"]))
+                    ),
+                    # Absent on pre-DEC-NIFTY-PRICE-SOURCE-AXIS-001 / baseline
+                    # manifests (additive parse): default to (HLC3, CLOSE), the only
+                    # source those sweeps ran.
+                    vwap_source=(
+                        PriceSource.HLC3
+                        if cell.get("vwap_source") is None
+                        else PriceSource(str(cell["vwap_source"]))
+                    ),
+                    ema_source=(
+                        PriceSource.CLOSE
+                        if cell.get("ema_source") is None
+                        else PriceSource(str(cell["ema_source"]))
                     ),
                 )
             )
@@ -1665,6 +1725,8 @@ def spec_from_store_rows(
     rows: Sequence[ResultRow],
     top_k: int | None = None,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    vwap_source: PriceSource = PriceSource.HLC3,
+    ema_source: PriceSource = PriceSource.CLOSE,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1685,6 +1747,11 @@ def spec_from_store_rows(
         (DEC-NIFTY-FIB-AXIS-001); carried onto the spec so the Stage-4 cascade
         re-scores against the tuple's OWN Fib levels. Default prev-day keeps the
         prev-day path byte-identical.
+    vwap_source, ema_source
+        The swept VWAP / EMA price-source cell the tuple was evaluated against
+        (DEC-NIFTY-PRICE-SOURCE-AXIS-001); carried onto the spec so the Stage-4
+        cascade re-scores against the tuple's OWN source bits. Default
+        ``(HLC3, CLOSE)`` keeps the baseline path byte-identical.
 
     Returns
     -------
@@ -1709,6 +1776,8 @@ def spec_from_store_rows(
         start_equity_paisa=start_equity_paisa,
         winners=winners,
         fib_anchor=fib_anchor,
+        vwap_source=vwap_source,
+        ema_source=ema_source,
     )
 
 
@@ -1779,6 +1848,8 @@ def build_stage2_cascade_specs(
             rows=ResultsStore.load(store_path).rows(),
             top_k=top_k,
             fib_anchor=sweep_tuple.fib_anchor,
+            vwap_source=sweep_tuple.price_source.vwap_source,
+            ema_source=sweep_tuple.price_source.ema_source,
         )
         if spec is not None:
             specs.append(spec)
@@ -1799,19 +1870,124 @@ def report_path(results_root: Path) -> Path:
 
 
 def write_manifest(results_root: Path, manifest: CascadeManifest) -> Path:
-    """Write *manifest* JSON under *results_root* and return its path."""
+    """Atomically write *manifest* JSON under *results_root* and return its path.
+
+    G7 (DEC-SWEEP-UNKILLABLE-CORE-001): tmp→fsync→``os.replace`` via the COMMON
+    :func:`~brutex.data.atomic_io.atomic_write_simple` — a crash mid-write can
+    never leave a torn manifest for the replay to consume (same bytes, atomic
+    rename only).
+    """
+    from brutex.data.atomic_io import atomic_write_simple
+
     path = manifest_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(manifest_to_json(manifest))
+    content = manifest_to_json(manifest)
+    atomic_write_simple(path, lambda tmp: tmp.write_bytes(content))
     return path
 
 
 def write_report(results_root: Path, report: CascadeWireReport) -> Path:
-    """Write the serialised *report* JSON under *results_root* and return its path."""
+    """Atomically write the serialised *report* JSON under *results_root*.
+
+    ATOMIC by TWO independent in-flight demands, converged at the 2026-07-11
+    merge-reconcile to the SAME mechanism — the guard-free
+    :func:`brutex.data.atomic_io.atomic_write_simple`
+    (tmp → fsync → ``os.replace``, the engine-sidecar precedent of
+    DEC-ATOMIC-WRITE-CONSOLIDATE-001):
+
+    - G7 (DEC-SWEEP-UNKILLABLE-CORE-001): the same atomic law as
+      :func:`write_manifest` — a crash mid-write can never leave a torn
+      report for the replay to consume.
+    - DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the ``/results`` poller now READS
+      this file concurrently — the previous bare ``write_bytes`` could be
+      torn-read mid-rewrite.
+
+    Bytes rendered are IDENTICAL (:func:`serialize_wire_report` — the
+    auto==manual golden re-runs unchanged); only durability changed. Raw
+    ``OSError`` propagates unchanged (the engine sidecar error contract).
+    """
     path = report_path(results_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(serialize_wire_report(report))
+    rendered = serialize_wire_report(report)
+    atomic_write_simple(path, lambda tmp: tmp.write_bytes(rendered))
     return path
+
+
+#: Stage labels bound into the two cascade artifact stamps (G7 / design §3).
+CASCADE_MANIFEST_STAGE: Final[str] = "cascade_manifest"
+CASCADE_REPORT_STAGE: Final[str] = "cascade_report"
+
+
+def manifest_snapshot_hash(
+    manifest: CascadeManifest, *, bars_for: Callable[[str, str], Sequence[CandleBar]]
+) -> str:
+    """Compute the data-snapshot hash over the manifest's OWN referenced slices.
+
+    The SAME shared derivation the sweep stamps its run identity with
+    (:func:`brutex.engine.stage3_wire.data_snapshot_hash`, CLAUDE.md §2 Rule 4),
+    computed over exactly the distinct ``(instrument, tf_label)`` pairs the
+    manifest's specs reference — so the stamp written at sweep time and the
+    hash recomputed at replay time compare equal IFF the underlying bars are
+    unchanged (G7). Honest envelope: O(referenced slices) bar loads via
+    *bars_for*, not O(1).
+
+    Parameters
+    ----------
+    manifest
+        The cascade manifest whose specs name the slices.
+    bars_for
+        ``(instrument, tf_label) -> bars`` loader.
+
+    Returns
+    -------
+    str
+        The 64-hex snapshot digest.
+    """
+    from brutex.engine.snapshot_hash import data_snapshot_hash
+
+    pairs = sorted({(spec.instrument, spec.tf_label) for spec in manifest.specs})
+    slices = {(instrument, tf): list(bars_for(instrument, tf)) for instrument, tf in pairs}
+    ctx = manifest.bars_context
+    return data_snapshot_hash(
+        exchange=ctx.exchange, segment=ctx.segment, start=ctx.start, end=ctx.end, slices=slices
+    )
+
+
+def stamp_cascade_artifacts(
+    results_root: Path,
+    manifest: CascadeManifest,
+    *,
+    bars_for: Callable[[str, str], Sequence[CandleBar]],
+) -> None:
+    """Stamp BOTH cascade artifacts (run-id + snapshot-hash bound) — G7 write side.
+
+    Each stamp carries the manifest's ``sweep_id`` as its ``run_id`` (D-1: the
+    sweep identity IS the run identity) plus the ``data_snapshot_hash`` extra
+    computed over the manifest's own referenced slices.
+
+    Raises
+    ------
+    brutex.observability.stage_stamp.StageStampError
+        If either artifact is missing or a stamp cannot be written — the
+        AUTOMATIC caller treats that as "artifact unstamped" (fail-soft WARN
+        at the call site, failure-matrix A14/F2; an unstamped artifact is
+        simply rebuilt, the safe direction).
+    """
+    from brutex.observability.stage_stamp import SNAPSHOT_EXTRA_KEY, write_stage_stamp
+
+    extra = {SNAPSHOT_EXTRA_KEY: manifest_snapshot_hash(manifest, bars_for=bars_for)}
+    write_stage_stamp(
+        manifest_path(results_root),
+        stage=CASCADE_MANIFEST_STAGE,
+        run_id=manifest.sweep_id,
+        extra=extra,
+    )
+    write_stage_stamp(
+        report_path(results_root),
+        stage=CASCADE_REPORT_STAGE,
+        run_id=manifest.sweep_id,
+        extra=extra,
+    )
 
 
 def load_manifest(results_root: Path) -> CascadeManifest:
@@ -1904,6 +2080,19 @@ def run_and_write_from_specs(
     )
     write_manifest(results_root, manifest)
     write_report(results_root, report)
+    # G7 write side (DEC-SWEEP-UNKILLABLE-CORE-001): stamp both artifacts after
+    # they are durably on disk (artifact first, stamp second — I-5). A stamp
+    # failure is fail-soft (A14/F2): the artifacts stand unstamped — the replay
+    # then proceeds on the documented legacy/unstamped path — never a lost run.
+    try:
+        stamp_cascade_artifacts(results_root, manifest, bars_for=bars_for)
+    except Exception as exc:  # fail-soft law (I-3) — stamping is observability
+        _LOG.warning(
+            "cascade_wire.stamp_failed",
+            results_root=str(results_root),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
     return report
 
 
@@ -1928,12 +2117,54 @@ def run_and_write_from_manifest(
     CascadeWireReport
         The aggregate cascade report (also written to disk).
 
+    G7 read side (DEC-SWEEP-UNKILLABLE-CORE-001): BEFORE consuming, the
+    manifest's stamp is validated (torn/foreign-run stamps REFUSE with the
+    exact verdict — rebuild this link via ``brutex sweep-all``, artifacts
+    1..N-1 untouched) and, when the stamp carries the ``data_snapshot_hash``
+    extra, the hash is recomputed over FRESHLY loaded bars — a changed lake
+    REFUSES naming both hashes instead of silently rewriting a
+    wrong-provenance "golden" report. A manifest with NO stamp (written before
+    this change, or by a direct :func:`write_manifest` call) proceeds with ONE
+    ``cascade_wire.replay_unstamped`` WARN — honest back-compat, never a
+    broken lake.
+
     Raises
     ------
     CascadeWireError
-        If no manifest exists under *results_root* or it is malformed.
+        If no manifest exists under *results_root*, it is malformed, its
+        stamp is torn/mismatched, or the lake bars drifted from the stamped
+        ``data_snapshot_hash``.
     """
+    from brutex.observability.stage_stamp import (
+        SNAPSHOT_EXTRA_KEY,
+        StampVerdict,
+        validate_stage_stamp,
+    )
+
     manifest = load_manifest(results_root)
+    verdict, stamp = validate_stage_stamp(
+        manifest_path(results_root),
+        expected_stage=CASCADE_MANIFEST_STAGE,
+        expected_run_id=manifest.sweep_id,
+    )
+    if verdict is StampVerdict.MISSING_STAMP:
+        _LOG.warning("cascade_wire.replay_unstamped", results_root=str(results_root))
+    elif verdict is not StampVerdict.OK:
+        raise CascadeWireError(
+            f"cascade manifest stamp verdict is {verdict.value!r} — refusing the replay "
+            f"(a torn/foreign manifest must be rebuilt, not consumed); re-run "
+            f"`brutex sweep-all` to rebuild this link (earlier artifacts are untouched)"
+        )
+    stamped_snapshot = stamp.extra.get(SNAPSHOT_EXTRA_KEY) if stamp is not None else None
+    if verdict is StampVerdict.OK and stamped_snapshot is not None:
+        fresh_snapshot = manifest_snapshot_hash(manifest, bars_for=bars_for)
+        if fresh_snapshot != stamped_snapshot:
+            raise CascadeWireError(
+                f"cascade replay REFUSED: the lake bars changed since this manifest was "
+                f"written — stamped data_snapshot_hash {stamped_snapshot} != freshly "
+                f"computed {fresh_snapshot}; re-run `brutex sweep-all` (the manifest's "
+                f"provenance no longer matches the lake)"
+            )
     report = run_cascade_over_specs(
         manifest.specs,
         bars_for=bars_for,
@@ -1948,6 +2179,18 @@ def run_and_write_from_manifest(
         roll_schedules=(None if manifest.roll_schedules is None else dict(manifest.roll_schedules)),
     )
     write_report(results_root, report)
+    if verdict is StampVerdict.OK:
+        # Re-stamp the just-rewritten report (byte-identical content given the
+        # verified-unchanged lake; the fresh stamp keeps I-5 sound). Fail-soft.
+        try:
+            stamp_cascade_artifacts(results_root, manifest, bars_for=bars_for)
+        except Exception as exc:  # fail-soft law (I-3)
+            _LOG.warning(
+                "cascade_wire.stamp_failed",
+                results_root=str(results_root),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
     return report
 
 
@@ -2161,6 +2404,8 @@ def load_bars_for_manifest(  # pragma: no cover - live DuckDB catalog + ReplayFe
 
 __all__ = [
     "CASCADE_DIRNAME",
+    "CASCADE_MANIFEST_STAGE",
+    "CASCADE_REPORT_STAGE",
     "MANIFEST_FILENAME",
     "MANIFEST_VERSION",
     "REPORT_FILENAME",
@@ -2184,6 +2429,7 @@ __all__ = [
     "load_manifest",
     "manifest_from_json",
     "manifest_path",
+    "manifest_snapshot_hash",
     "manifest_to_json",
     "report_path",
     "run_and_write_from_manifest",
@@ -2191,6 +2437,7 @@ __all__ = [
     "run_cascade_over_specs",
     "serialize_wire_report",
     "spec_from_store_rows",
+    "stamp_cascade_artifacts",
     "wire_report_to_dict",
     "write_manifest",
     "write_report",

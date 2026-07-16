@@ -1504,6 +1504,213 @@ fn py_greeks(
     ))
 }
 
+/// Pure VALUE-envelope guard pass for [`stage1a_bar_bits_batch`] —
+/// `Result<(), String>` (no `PyErr`) so the no-libpython `cargo test` covers
+/// every branch (DEC-STAGE1A-RUST-BATCH-001).
+///
+/// Reuses the EXISTING boundary guards **in place, verbatim** (zero
+/// relocation, zero duplicated constants — the §0.3 ruling):
+///
+/// * every day-table level rides [`bar_in_range`] (the same bound
+///   `evaluate_with_levels_impl` applies to its caller-supplied levels —
+///   including `pdc`, the one level the evaluator multiplies);
+/// * every bar rides [`check_evaluate_inputs`] — open/high/low/close + the
+///   optional EMAs + the three bps with the exact `close.checked_mul(bps)`
+///   product check. The running day extremes / open-of-day the batch core
+///   derives are max/min folds of these SAME bar values, so bounding the bar
+///   values bounds them; the bar's own high/low/open stand in for the
+///   day-extreme slots and the bar's day row supplies the REAL `pdc`;
+/// * every bar's VWAP operands ride [`vwap_update_guard`] (non-negative
+///   typical + `MAX_BAR_PAISA` magnitudes — the same i128-accumulator
+///   envelope the `VwapState` pyclass enforces).
+///
+/// Structure is validated FIRST (`stage1a_batch::validate_structure`) so the
+/// per-bar day-row indexing below can never go out of bounds; any `Err` maps
+/// to a clean `ValueError` at the pyfunction boundary and the Python seam
+/// falls back to the oracle (which raises today's exact error or computes —
+/// user-visible behaviour identical either way; the fallback law).
+fn check_stage1a_batch_values(
+    inp: &crate::stage1a_batch::Stage1aBatchInputs<'_>,
+) -> Result<(), String> {
+    let n = crate::stage1a_batch::validate_structure(inp)?;
+    for v in inp.day_pivot_levels.iter().chain(inp.day_fib_levels.iter()) {
+        if !bar_in_range(*v) {
+            return Err(format!(
+                "level magnitude {v} out of the overflow-safe range \
+                 [-{MAX_BAR_PAISA}, {MAX_BAR_PAISA}] paisa"
+            ));
+        }
+    }
+    for i in 0..n {
+        let du = inp.day_index[i] as usize;
+        // Operator-free row addressing (refuter RF-α round-4 F2): the former
+        // `du * PIVOT_ROW_LEN + 9` indexing left two arithmetic mutants in
+        // the cargo-mutants catalog (`+ → *` = an out-of-bounds SIGABRT
+        // class on any multi-day input; `* → /` = equivalent-but-gate-red —
+        // the levels loop above already bar_in_range-checked every element,
+        // so WHICH element the guard reads cannot move the verdict).
+        // `chunks_exact(...).nth(du)` carries no mutable arithmetic; the
+        // let-else Err keeps the never-panic totality (unreachable — the
+        // day_index law in `validate_structure` pins `du < D`).
+        let Some(day_row) = inp
+            .day_pivot_levels
+            .chunks_exact(crate::stage1a_batch::PIVOT_ROW_LEN)
+            .nth(du)
+        else {
+            return Err(format!(
+                "stage1a_batch: day_index {du} beyond the validated day table"
+            ));
+        };
+        let pdc = day_row[9];
+        // The day_high/day_low/open_of_day slots get the CURRENT bar's
+        // high/low/open — decision-equivalent to the OFF arm's per-bar
+        // running-extremes guard (a running extreme IS some earlier bar's
+        // already-guarded high/low/open, so a magnitude violation is
+        // rejected at the SAME bar either way; review-proven, INFO-4).
+        check_evaluate_inputs(
+            inp.open_paisa[i],
+            inp.high_paisa[i],
+            inp.low_paisa[i],
+            inp.close_paisa[i],
+            inp.ema20_paisa[i],
+            inp.ema200_paisa[i],
+            inp.high_paisa[i],
+            inp.low_paisa[i],
+            inp.open_paisa[i],
+            pdc,
+            inp.pivot_bps,
+            inp.pdh_pdl_bps,
+            inp.fib_bps,
+        )?;
+        vwap_update_guard(inp.typical_paisa[i], inp.volume[i])?;
+    }
+    Ok(())
+}
+
+/// Batch Stage-1A bar-bits — one call per `(instrument, tf)` build
+/// (DEC-STAGE1A-RUST-BATCH-001; the batch twin of the per-bar
+/// [`evaluate_with_levels`] + `VwapState.update` + `MarketStructureState.update`
+/// FFI chain `Stage1AMatrixBuilder.push` drives today).
+///
+/// The columns/tables are prepass-RESOLVED by
+/// `Stage1AMatrixBuilder.collect_batch_inputs` (Python keeps the calendar /
+/// roll / anchor decisions; see `stage1a_batch`'s module docs). Returns one
+/// `u128` condition mask per bar, input order — the probe-verified native
+/// `Vec<u128>` shape (the `ResidentSweepSimU128` precedent). Every structural
+/// or value-envelope violation raises a clean `ValueError` (never a panic →
+/// SIGABRT under `panic = "abort"`): the value guards are the EXISTING
+/// in-file boundary trio, reused verbatim ([`check_stage1a_batch_values`]).
+#[pyfunction]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat column ABI for the batch Stage-1A binding \
+              (precedent: evaluate_with_levels carries 22)"
+)]
+#[pyo3(signature = (
+    open_paisa, high_paisa, low_paisa, close_paisa, typical_paisa,
+    volume, tod_seconds, pre_open, session_key, session_day, contract_reset, day_index,
+    ema20_paisa, ema200_paisa, day_pivot_levels, day_fib_levels, day_has_pivot, day_has_fib,
+    pivot_bps, pdh_pdl_bps, fib_bps, prior_n,
+    anchor_dependent_mask, fib_dependent_mask, applies_to_1day_mask,
+    apply_1day_mask, fractal_k = 2,
+))]
+fn stage1a_bar_bits_batch(
+    open_paisa: Vec<i64>,
+    high_paisa: Vec<i64>,
+    low_paisa: Vec<i64>,
+    close_paisa: Vec<i64>,
+    typical_paisa: Vec<i64>,
+    volume: Vec<i64>,
+    tod_seconds: Vec<u32>,
+    pre_open: Vec<bool>,
+    session_key: Vec<u64>,
+    session_day: Vec<i64>,
+    contract_reset: Vec<bool>,
+    day_index: Vec<u32>,
+    ema20_paisa: Vec<Option<i64>>,
+    ema200_paisa: Vec<Option<i64>>,
+    day_pivot_levels: Vec<i64>,
+    day_fib_levels: Vec<i64>,
+    day_has_pivot: Vec<bool>,
+    day_has_fib: Vec<bool>,
+    pivot_bps: i64,
+    pdh_pdl_bps: i64,
+    fib_bps: i64,
+    prior_n: usize,
+    anchor_dependent_mask: u128,
+    fib_dependent_mask: u128,
+    applies_to_1day_mask: u128,
+    apply_1day_mask: bool,
+    fractal_k: usize,
+) -> PyResult<Vec<u128>> {
+    // Thin PyO3 wrapper: structure + value envelope validated by the pure
+    // guard pass (unit-tested without a libpython link), then the feature-free
+    // core computes. `Err(String)` → a clean, catchable `ValueError`.
+    let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+        open_paisa: &open_paisa,
+        high_paisa: &high_paisa,
+        low_paisa: &low_paisa,
+        close_paisa: &close_paisa,
+        typical_paisa: &typical_paisa,
+        volume: &volume,
+        tod_seconds: &tod_seconds,
+        pre_open: &pre_open,
+        session_key: &session_key,
+        session_day: &session_day,
+        contract_reset: &contract_reset,
+        day_index: &day_index,
+        ema20_paisa: &ema20_paisa,
+        ema200_paisa: &ema200_paisa,
+        day_pivot_levels: &day_pivot_levels,
+        day_fib_levels: &day_fib_levels,
+        day_has_pivot: &day_has_pivot,
+        day_has_fib: &day_has_fib,
+        pivot_bps,
+        pdh_pdl_bps,
+        fib_bps,
+        prior_n,
+        fractal_k,
+        apply_1day_mask,
+        anchor_dependent_mask,
+        fib_dependent_mask,
+        applies_to_1day_mask,
+    };
+    check_stage1a_batch_values(&inputs).map_err(PyValueError::new_err)?;
+    crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs).map_err(PyValueError::new_err)
+}
+// ── DEC-GREEKS-RUST-BATCH-001 additive block (greeks_batch) ──────────────
+/// Columnar batch face of [`py_greeks`]: N already-screened tuples through
+/// ONE call. Per-element outcomes are DATA — `(values, error)` with exactly
+/// one `Some`, the error string carrying the kernel's `invalid_input:` /
+/// `no_solution:` prefix VERBATIM — so one unsolvable strike never aborts
+/// its siblings; the ONLY whole-call error is a column-length mismatch →
+/// ValueError with the `invalid_input:` prefix. Deliberately NO GIL release:
+/// `Python::detach` does not link under the extension-module `cargo test`
+/// build (the fno-math precedent, `rust/fno-math/src/python.rs`), and the
+/// enrich workers are spawn PROCESSES, so releasing the GIL buys nothing.
+#[pyfunction]
+#[pyo3(
+    name = "greeks_batch",
+    signature = (price, sigma, forward, strike, t_years, rate, is_call)
+)]
+fn py_greeks_batch(
+    price: Vec<Option<f64>>,
+    sigma: Vec<Option<f64>>,
+    forward: Vec<f64>,
+    strike: Vec<f64>,
+    t_years: Vec<f64>,
+    rate: Vec<f64>,
+    is_call: Vec<bool>,
+) -> PyResult<Vec<crate::greeks::batch::GreeksBatchElem>> {
+    crate::greeks::batch::greeks_batch_impl(
+        &price, &sigma, &forward, &strike, &t_years, &rate, &is_call,
+    )
+    .map_err(PyValueError::new_err)
+}
+// registration: ONE `m.add_function(wrap_pyfunction!(py_greeks_batch, m)?)?;`
+// line inside `_trading_core` below, directly after the `py_greeks` line.
+// ── end DEC-GREEKS-RUST-BATCH-001 block ──────────────────────────────────
+
 /// The Python extension module `trading_core._trading_core`.
 #[pymodule]
 fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1541,6 +1748,9 @@ fn _trading_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_seconds_of_day, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_near_month, m)?)?;
     m.add_function(wrap_pyfunction!(py_greeks, m)?)?;
+    m.add_function(wrap_pyfunction!(stage1a_bar_bits_batch, m)?)?;
+    // DEC-GREEKS-RUST-BATCH-001 additive registration (fenced block above).
+    m.add_function(wrap_pyfunction!(py_greeks_batch, m)?)?;
     m.add_class::<PyVwapState>()?;
     m.add_class::<PyMarketStructureState>()?;
     Ok(())
@@ -2863,5 +3073,330 @@ mod tests {
             )
         );
         assert_eq!(broke, (true, false, false, false));
+    }
+
+    // ── stage1a_bar_bits_batch boundary (DEC-STAGE1A-RUST-BATCH-001) ───────
+
+    /// The frozen evaluator-ABI row widths and the batch day-table row widths
+    /// are the SAME constants — pinned so neither can drift alone.
+    #[test]
+    fn stage1a_batch_row_lengths_pin_the_frozen_evaluator_abi() {
+        assert_eq!(crate::stage1a_batch::PIVOT_ROW_LEN, PIVOT_LEVELS_LEN);
+        assert_eq!(crate::stage1a_batch::FIB_ROW_LEN, FIB_LEVELS_LEN);
+    }
+
+    /// One-bar batch inputs over an explicit day row (helper for the
+    /// differential + guard tests below). Returns owned columns.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test fixture mirror of the flat ABI"
+    )]
+    fn one_bar_batch_masks(
+        open: i64,
+        high: i64,
+        low: i64,
+        close: i64,
+        ema20: Option<i64>,
+        ema200: Option<i64>,
+        pivot_row: [i64; 12],
+        fib_row: [i64; 15],
+        tod: u32,
+        bps: (i64, i64, i64),
+    ) -> Result<Vec<u128>, String> {
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[open],
+            high_paisa: &[high],
+            low_paisa: &[low],
+            close_paisa: &[close],
+            typical_paisa: &[close.max(0)],
+            volume: &[0], // zero volume: VWAP stays None (the per-bar impl parity)
+            tod_seconds: &[tod],
+            pre_open: &[false],
+            session_key: &[0],
+            session_day: &[738_000],
+            contract_reset: &[false],
+            day_index: &[0],
+            ema20_paisa: &[ema20],
+            ema200_paisa: &[ema200],
+            day_pivot_levels: &pivot_row,
+            day_fib_levels: &fib_row,
+            day_has_pivot: &[true],
+            day_has_fib: &[true],
+            pivot_bps: bps.0,
+            pdh_pdl_bps: bps.1,
+            fib_bps: bps.2,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+        };
+        check_stage1a_batch_values(&inputs)?;
+        crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs)
+    }
+
+    /// Differential vs `evaluate_with_levels_impl`: a 1-bar batch over a
+    /// matching warm day row equals the per-bar evaluator (kills any
+    /// struct-literal zero-fill drift between the two assemblies). Both a
+    /// warm-anchor spread of proximity hits AND the degenerate flat bar.
+    #[test]
+    fn stage1a_batch_one_bar_differential_vs_evaluate_with_levels_impl() {
+        let pivot_row = [
+            1_000_000, 1_010_000, 1_020_000, 1_030_000, 990_000, 980_000, 970_000, 1_010_000,
+            990_000, 1_000_000, 1_050_000, 950_000,
+        ];
+        let fib_row = [
+            1_010_000, 1_005_300, 1_002_400, 1_000_000, 997_600, 994_300, 990_000, 1_015_400,
+            1_022_400, 1_030_000, 1_042_400, 984_600, 977_600, 970_000, 957_600,
+        ];
+        for (open, high, low, close, ema20, ema200, tod) in [
+            (
+                995_000i64,
+                1_012_000i64,
+                989_000i64,
+                1_009_990i64,
+                Some(1_000_000i64),
+                None,
+                34_000u32,
+            ),
+            (
+                1_000_000, 1_000_000, 1_000_000, 1_000_000, None, None, 40_000,
+            ),
+            (
+                990_000,
+                1_051_000,
+                949_000,
+                1_049_995,
+                Some(990_000),
+                Some(1_010_000),
+                50_000,
+            ),
+        ] {
+            // The bar's OWN extremes serve as the (single-bar) day extremes,
+            // exactly as the batch core seeds them at the day boundary.
+            let expected = evaluate_with_levels_impl(
+                tod,
+                open,
+                high,
+                low,
+                close,
+                ema20,
+                ema200,
+                None, // zero volume in the batch fixture ⇒ VWAP None
+                pivot_row.to_vec(),
+                fib_row.to_vec(),
+                high,
+                low,
+                open,
+                10,
+                10,
+                10,
+                3,
+                Vec::new(),
+                MarketStructureSignal::default(),
+            )
+            .unwrap();
+            let got = one_bar_batch_masks(
+                open,
+                high,
+                low,
+                close,
+                ema20,
+                ema200,
+                pivot_row,
+                fib_row,
+                tod,
+                (10, 10, 10),
+            )
+            .unwrap();
+            // A single fed bar confirms no market-structure swing (k=2 needs
+            // 2k+1 bars) — the core's signal is all-false, same as the
+            // default() handed to the per-bar impl above.
+            assert_eq!(got, vec![expected]);
+        }
+    }
+
+    // ── check_stage1a_batch_values guard arms ─────────────────────────────
+
+    #[test]
+    fn stage1a_batch_values_rejects_out_of_range_day_level() {
+        let mut pivot_row = [0i64; 12];
+        pivot_row[3] = MAX_BAR_PAISA + 1;
+        let err = one_bar_batch_masks(
+            10_000,
+            10_100,
+            9_900,
+            10_050,
+            None,
+            None,
+            pivot_row,
+            [0; 15],
+            34_000,
+            (10, 10, 10),
+        )
+        .unwrap_err();
+        assert!(err.contains("level magnitude"), "got: {err}");
+    }
+
+    #[test]
+    fn stage1a_batch_values_rejects_out_of_range_bar_price() {
+        let err = one_bar_batch_masks(
+            10_000,
+            MAX_BAR_PAISA + 1,
+            9_900,
+            10_050,
+            None,
+            None,
+            [0; 12],
+            [0; 15],
+            34_000,
+            (10, 10, 10),
+        )
+        .unwrap_err();
+        assert!(err.contains("bar price/level magnitude"), "got: {err}");
+    }
+
+    #[test]
+    fn stage1a_batch_values_rejects_bps_product_overflow() {
+        // A close near the bar ceiling with a bps near the cap overflows the
+        // exact `close * bps` product — the same checked_mul arm the per-bar
+        // boundary carries.
+        let err = one_bar_batch_masks(
+            MAX_BAR_PAISA,
+            MAX_BAR_PAISA,
+            MAX_BAR_PAISA,
+            MAX_BAR_PAISA,
+            None,
+            None,
+            [0; 12],
+            [0; 15],
+            34_000,
+            (MAX_BPS, 10, 10),
+        )
+        .unwrap_err();
+        assert!(err.contains("overflows i64"), "got: {err}");
+    }
+
+    #[test]
+    fn stage1a_batch_values_rejects_negative_typical_via_vwap_guard() {
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000],
+            high_paisa: &[10_100],
+            low_paisa: &[9_900],
+            close_paisa: &[10_050],
+            typical_paisa: &[-1],
+            volume: &[100],
+            tod_seconds: &[34_000],
+            pre_open: &[false],
+            session_key: &[0],
+            session_day: &[738_000],
+            contract_reset: &[false],
+            day_index: &[0],
+            ema20_paisa: &[None],
+            ema200_paisa: &[None],
+            day_pivot_levels: &[0; 12],
+            day_fib_levels: &[0; 15],
+            day_has_pivot: &[false],
+            day_has_fib: &[false],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+        };
+        let err = check_stage1a_batch_values(&inputs).unwrap_err();
+        assert!(err.contains("typical_paisa"), "got: {err}");
+    }
+
+    #[test]
+    fn stage1a_batch_values_propagates_structural_errors() {
+        // Structure runs FIRST — a day-index desync errs before any value
+        // guard could index out of bounds.
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000],
+            high_paisa: &[10_100],
+            low_paisa: &[9_900],
+            close_paisa: &[10_050],
+            typical_paisa: &[10_017],
+            volume: &[100],
+            tod_seconds: &[34_000],
+            pre_open: &[false],
+            session_key: &[0],
+            session_day: &[738_000],
+            contract_reset: &[false],
+            day_index: &[7],
+            ema20_paisa: &[None],
+            ema200_paisa: &[None],
+            day_pivot_levels: &[0; 12],
+            day_fib_levels: &[0; 15],
+            day_has_pivot: &[false],
+            day_has_fib: &[false],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+        };
+        let err = check_stage1a_batch_values(&inputs).unwrap_err();
+        assert!(err.contains("start at 0"), "got: {err}");
+    }
+
+    /// Refuter RF-α round-4 F2(b): the guard's per-bar day-row read walked
+    /// a `du == 0` fixture in EVERY committed cargo test, so the two pdc
+    /// index-arithmetic mutants were invisible (`+ → *` = an out-of-bounds
+    /// SIGABRT on any multi-day flag-ON build). A structurally-valid TWO-DAY
+    /// input exercising `du = 1` pins the multi-day guard path; the read is
+    /// now operator-free (`chunks_exact(...).nth(du)`) so the arithmetic
+    /// mutant class is structurally absent from the catalog as well.
+    #[test]
+    fn stage1a_batch_values_accepts_a_two_day_input() {
+        let two_day_pivots: Vec<i64> = (0..24).map(|i| 10_000 + i).collect();
+        let two_day_fibs: Vec<i64> = (0..30).map(|i| 20_000 + i).collect();
+        let inputs = crate::stage1a_batch::Stage1aBatchInputs {
+            open_paisa: &[10_000, 10_020],
+            high_paisa: &[10_100, 10_120],
+            low_paisa: &[9_900, 9_920],
+            close_paisa: &[10_050, 10_070],
+            typical_paisa: &[10_017, 10_037],
+            volume: &[100, 100],
+            tod_seconds: &[34_000, 34_000],
+            pre_open: &[false, false],
+            session_key: &[0, 0],
+            session_day: &[738_000, 738_001],
+            contract_reset: &[false, false],
+            day_index: &[0, 1],
+            ema20_paisa: &[None, None],
+            ema200_paisa: &[None, None],
+            day_pivot_levels: &two_day_pivots,
+            day_fib_levels: &two_day_fibs,
+            day_has_pivot: &[true, true],
+            day_has_fib: &[true, true],
+            pivot_bps: 10,
+            pdh_pdl_bps: 10,
+            fib_bps: 10,
+            prior_n: 3,
+            fractal_k: 2,
+            apply_1day_mask: false,
+            anchor_dependent_mask: 0,
+            fib_dependent_mask: 0,
+            applies_to_1day_mask: IMPLEMENTED_MASK,
+        };
+        assert!(check_stage1a_batch_values(&inputs).is_ok());
+        // …and the whole pipeline stays total over it.
+        assert_eq!(
+            crate::stage1a_batch::stage1a_bar_bits_batch_impl(&inputs)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

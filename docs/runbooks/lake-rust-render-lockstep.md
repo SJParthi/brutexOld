@@ -1,8 +1,8 @@
 # Runbook — the lake Rust-render version lockstep (roadmap PR-1 + PR-2)
 
-**Decision:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1726; the
+**Decision:** `DEC-RUST-DATALAKE-IO-ROADMAP-001` (MIGRATION.md #1891; the
 datalake conversion roadmap ADR,
-`docs/adr/0019-datalake-rust-conversion-roadmap.md`) ·
+`docs/adr/0020-datalake-rust-conversion-roadmap.md`) ·
 **Surfaces:** `rust/brutex-lake/` (crate) · `brutex/data/lake_rust_render.py`
 (facade — TWO render profiles since PR-2: `bars` = the spot writer's
 zstd-3/rg-100k/stats-OFF shape via
@@ -44,7 +44,7 @@ them as directional; each one DISCLOSES a cost, never a speedup.
 ## 1. The ATOMIC pin — three legs that move together
 
 1. **Python wheel**: the installed `polars` version (repo pyproject
-   range-pins `>=1.0,<2.0` with no lockfile — ADR-0019 F4 — so the installed
+   range-pins `>=1.0,<2.0` with no lockfile — ADR-0020 F4 — so the installed
    version is environment truth, not a manifest fact).
 2. **Crate rev**: every polars git dependency in
    `rust/brutex-lake/Cargo.toml` REV-pinned at the exact commit the
@@ -153,7 +153,7 @@ see §4). A healthy engagement logs exactly one
   wheel with a different bundled libzstd, a patched distro wheel, a
   transitive encode-path crate drifting past our lock) — it may require
   extending the pinned set, and it is exactly the hazard the priced
-  `DEC-LAKE-EXACT-PIN-001` fallback exists for (ADR-0019 §3 LAST-MILE).
+  `DEC-LAKE-EXACT-PIN-001` fallback exists for (ADR-0020 §3 LAST-MILE).
   Do NOT paper over it by regenerating expectations: the Python bytes are
   the contract.
 * **A wheel version with NO matching `py-*` tag** (yanked/renamed) → stay

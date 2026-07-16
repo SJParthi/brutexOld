@@ -47,7 +47,7 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, SweepComboError, SweepRunConfig
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
 from brutex.ranking import OverfitGateConfig
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -159,6 +159,45 @@ class TestSweepGridConfig:
         assert grid.instruments == ("NIFTY",)
         assert grid.timeframes == (Timeframe("1minute", 1),)
 
+    def test_vwap_variant_on_spot_index_warns_but_does_not_refuse(self) -> None:
+        # DEC-NIFTY-PRICE-SOURCE-AXIS-001 (MINOR-4): a VWAP-variant cell on a spot
+        # index (no traded volume) is a likely operator mistake — warned, NEVER
+        # refused. The default cell in the axis exercises the filter's False arm.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            grid = _grid(
+                instruments=["NIFTY"],
+                price_source_cells=[
+                    PriceSourceCell(),  # default HLC3:CLOSE — filtered out (False arm)
+                    PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE),  # VWAP-variant
+                ],
+            )
+        # Construction SUCCEEDS (non-blocking) and the advisory fired once, naming
+        # the offending source + spot symbol.
+        assert grid.instruments == ("NIFTY",)
+        warns = [e for e in logs if e.get("event") == "stage1a.vwap_source_on_spot"]
+        assert len(warns) == 1
+        assert warns[0]["vwap_variant_sources"] == ["open"]
+        assert warns[0]["spot_instruments"] == ["NIFTY"]
+
+    def test_vwap_variant_on_nifty_futures_does_not_warn(self) -> None:
+        # A VWAP-variant on NIFTY FUTURES (which DO carry volume) is legitimate —
+        # no advisory (the warn `if` False arm on the spot-instruments side).
+        # Post-DEC-ENGINE-SPOT-ONLY-001 the futures alias is out of engine scope,
+        # so the grid needs the loud research escape hatch to construct at all
+        # (the house pattern of the other out-of-scope tests in this file); the
+        # advisory's non-spot False arm is unchanged by the scope retirement.
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            _grid(
+                instruments=["NSE-NIFTY-FUT"],
+                unsafe_allow_out_of_scope_instruments=True,
+                price_source_cells=[PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE)],
+            )
+        assert not any(e.get("event") == "stage1a.vwap_source_on_spot" for e in logs)
+
     def test_axes_are_deduped_preserving_order(self) -> None:
         grid = _grid(
             instruments=["NIFTY", "BANKNIFTY", "NIFTY"],
@@ -205,12 +244,22 @@ class TestSweepGridConfig:
         grid = _grid(instruments=["INDIAVIX"], unsafe_allow_out_of_scope_instruments=True)
         assert list(grid.instruments) == ["INDIAVIX"]
 
-    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX", "NSE-NIFTY-FUT"])
+    @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "SENSEX"])
     def test_in_scope_instruments_construct_by_default(self, symbol: str) -> None:
-        # The futures track is addressed by the ONE pinned series alias
-        # (DEC-FUTURES-ADDRESSING-PIN-001) — the two pre-launch shapes moved to
-        # the retired-refusal test below.
+        # DEC-ENGINE-SPOT-ONLY-001: exactly the 3 spot indexes construct by
+        # default — the ADR-0012 series alias moved to the refusal test below.
         assert list(_grid(instruments=[symbol]).instruments) == [symbol]
+
+    def test_futures_series_alias_refused_at_construction_spot_only(self) -> None:
+        # FLIPPED by DEC-ENGINE-SPOT-ONLY-001 (was: allowed at Layer 1 per
+        # DEC-FUTURES-ADDRESSING-PIN-001): the engine is spot-only, so even
+        # PROGRAMMATIC construction refuses the alias with the law citation
+        # + the remediation — never a silent admit.
+        with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
+            _grid(instruments=["NSE-NIFTY-FUT"])
+        assert "DEC-ENGINE-SPOT-ONLY-001" in str(exc.value)
+        assert "spot-only" in str(exc.value)
+        assert "lake/REFERENCE_ONLY" in str(exc.value)
 
     @pytest.mark.parametrize("symbol", ["NIFTY-FUT-2026-07-30", "NSE-NIFTY-30Jul26-FUT"])
     def test_retired_futures_shapes_refused_naming_the_alias(self, symbol: str) -> None:
@@ -223,7 +272,7 @@ class TestSweepGridConfig:
         with pytest.raises(ValueError, match="outside the brute-force engine scope") as exc:
             _grid(instruments=[symbol])
         assert "NSE-NIFTY-FUT" in str(exc.value)
-        assert "DEC-FUTURES-ADDRESSING-PIN-001" in str(exc.value)
+        assert "DEC-ENGINE-SPOT-ONLY-001" in str(exc.value)
 
     def test_scope_flag_is_identity_safe(self) -> None:
         """Regression pin (DEC-ENGINE-SCOPE-GUARD-001): the new field enters NO identity.
@@ -413,7 +462,9 @@ class TestToRunConfig:
     def test_threads_roll_schedule_for_the_futures_alias(self) -> None:
         # ADR-0012 (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001): the per-tuple schedule
         # is argument-plumbed into the SweepRunConfig, never a grid field.
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: the futures machinery below the gate is
+        # RETAINED — exercised via the sanctioned research escape flag.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         t = _tuple(instrument="NSE-NIFTY-FUT")
         cfg = t.to_run_config(grid, roll_schedule=_FUT_SCHEDULE)
         assert cfg.roll_schedule == _FUT_SCHEDULE
@@ -543,6 +594,105 @@ class TestPaths:
         assert store.path == tuple_store_path(tmp_path, _tuple(), grid)
 
 
+# ────── _tuple_digest gate + selection identity (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001) ──────
+
+
+class TestTupleDigestGateSelectionIdentity:
+    """The store address folds the ACTIVE gate + non-default selection knobs.
+
+    C1 (overfit) / C2 (top_k/min_hits/max_combos) / stage3 re-key the store
+    Parquet + completion-sentinel address, while a DEFAULT (ungated,
+    default-selection) sweep stays BYTE-STABLE — no existing on-disk store
+    re-keys. The pre-fix default digest is the empirically-captured constant.
+    """
+
+    # The pre-fix default digest captured on 0f411437 (16-char _PATH_DIGEST_LEN).
+    _PRE_FIX_DEFAULT_DIGEST = "5b020e892247deac"
+
+    def test_default_digest_byte_stable(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        assert _tuple_digest(_tuple(), _grid()) == self._PRE_FIX_DEFAULT_DIGEST
+
+    def test_default_store_path_filename_unchanged(self, tmp_path: Path) -> None:
+        name = tuple_store_path(tmp_path, _tuple(), _grid()).name
+        assert name == f"BUY_k1_{self._PRE_FIX_DEFAULT_DIGEST}.parquet"
+
+    def test_selection_defaults_elide_byte_stable(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+        from brutex.ranking import MIN_TRADES
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        # Explicitly setting a knob to its canonical default must NOT re-key.
+        assert _tuple_digest(_tuple(), _grid(top_k=None)) == d0
+        assert _tuple_digest(_tuple(), _grid(min_hits=MIN_TRADES)) == d0
+        assert _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS)) == d0
+
+    def test_overfit_rekeys_and_is_value_sensitive(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d90 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.90)))
+        d80 = _tuple_digest(_tuple(), _grid(overfit=OverfitGateConfig(dsr_min=0.80)))
+        assert d90 != d0
+        assert d90 != d80  # a distinct KNOB value re-keys again, not just presence
+
+    def test_stage3_rekeys_but_disabled_knobs_inert(self) -> None:
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        assert _tuple_digest(_tuple(), _grid(stage3_enable=True)) != d0
+        # A disabled Stage-3 pass leaves its knobs INERT → no re-key.
+        assert _tuple_digest(_tuple(), _grid(stage3_top_k=999)) == d0
+
+    def test_non_default_selection_rekeys_pairwise_distinct(self) -> None:
+        from brutex.engine.sweep_driver import DEFAULT_MAX_COMBOS
+        from brutex.engine.sweep_orchestrator import _tuple_digest
+
+        d0 = _tuple_digest(_tuple(), _grid())
+        d_topk = _tuple_digest(_tuple(), _grid(top_k=50))
+        d_mh5 = _tuple_digest(_tuple(), _grid(min_hits=5))
+        d_mh0 = _tuple_digest(_tuple(), _grid(min_hits=0))  # filter disabled
+        d_mc = _tuple_digest(_tuple(), _grid(max_combos=DEFAULT_MAX_COMBOS - 1))
+        digests = {d0, d_topk, d_mh5, d_mh0, d_mc}
+        assert len(digests) == 5  # all pairwise-distinct incl. the default
+
+    def test_selection_identity_fragment_branches(self) -> None:
+        from brutex.engine.sweep_orchestrator import _selection_identity_fragment
+
+        assert _selection_identity_fragment(_grid()) is None
+        assert _selection_identity_fragment(_grid(top_k=50)) == {"top_k": 50}
+        assert _selection_identity_fragment(_grid(min_hits=5)) == {"min_hits": 5}
+        assert _selection_identity_fragment(_grid(max_combos=7)) == {"max_combos": 7}
+        assert _selection_identity_fragment(_grid(top_k=3, min_hits=5, max_combos=7)) == {
+            "top_k": 3,
+            "min_hits": 5,
+            "max_combos": 7,
+        }
+
+    def test_overfit_redo_targets_a_distinct_store_and_sentinel(self, tmp_path: Path) -> None:
+        """C1: a changed overfit config maps to a DIFFERENT store + sentinel path."""
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        t = _tuple()
+        light = _grid()
+        gated = _grid(overfit=OverfitGateConfig(dsr_min=0.90))
+        p_light = tuple_store_path(tmp_path, t, light)
+        p_gated = tuple_store_path(tmp_path, t, gated)
+        assert p_light != p_gated
+        assert completion_sentinel_path(p_light) != completion_sentinel_path(p_gated)
+
+    def test_selection_redo_targets_a_distinct_store(self, tmp_path: Path) -> None:
+        """C2: a changed top_k / min_hits each map to a fresh store path."""
+        t = _tuple()
+        base = _grid()
+        p_base = tuple_store_path(tmp_path, t, base)
+        p_topk = tuple_store_path(tmp_path, t, _grid(top_k=50))
+        p_mh = tuple_store_path(tmp_path, t, _grid(min_hits=5))
+        assert len({p_base, p_topk, p_mh}) == 3
+
+
 # ────── run_sweep_grid ──────
 
 
@@ -581,6 +731,48 @@ class TestRunSweepGrid:
         actions = [e.action for e in read_entries(audit_path)]
         assert actions[0] == "GRID_SWEEP_START"
         assert actions[-1] == "GRID_SWEEP_COMPLETE"
+
+    def test_grid_start_audit_emits_price_source_cells_only_when_non_default(
+        self, tmp_path: Path
+    ) -> None:
+        # MINOR-1: the GRID_SWEEP_START audit config line OMITS price_source_cells
+        # for a sole-baseline grid (byte-identical to pre-axis) and EMITS them for a
+        # non-default grid (intended observability). An EMA-variant keeps the run off
+        # the vwap-on-spot advisory path while still exercising the non-default emit.
+        pytest.importorskip("polars")
+        bars = _trending_bars()
+
+        def bars_for(_instrument: str, _tf: str) -> list[CandleBar]:
+            return bars
+
+        # Default grid → key ABSENT.
+        default_audit = tmp_path / "default.jsonl"
+        with AuditWriter.open(default_audit) as audit:
+            run_sweep_grid(
+                _grid(),
+                bars_for=bars_for,
+                store_for=make_store_for(tmp_path / "r-default", _grid()),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        default_start = next(
+            e for e in read_entries(default_audit) if e.action == "GRID_SWEEP_START"
+        )
+        assert "price_source_cells" not in default_start.payload
+
+        # Non-default (EMA-variant) grid → key PRESENT with the cells.
+        nd_grid = _grid(price_source_cells=[PriceSourceCell(PriceSource.HLC3, PriceSource.OPEN)])
+        nd_audit = tmp_path / "nd.jsonl"
+        with AuditWriter.open(nd_audit) as audit:
+            run_sweep_grid(
+                nd_grid,
+                bars_for=bars_for,
+                store_for=make_store_for(tmp_path / "r-nd", nd_grid),
+                dedup=_dedup(),
+                audit=audit,
+            )
+        nd_start = next(e for e in read_entries(nd_audit) if e.action == "GRID_SWEEP_START")
+        assert nd_start.payload["price_source_cells"] == [["hlc3", "open"]]
 
     def test_empty_bars_raises_when_skip_empty_false(self, tmp_path: Path) -> None:
         grid = _grid()
@@ -689,6 +881,55 @@ class TestRunSweepGridResilientSkip:
         complete = next(e for e in read_entries(audit_path) if e.action == "GRID_SWEEP_COMPLETE")
         assert complete.payload["tuples_failed"] == 1
         assert verify_chain(audit_path) > 0
+
+    def test_gate_conflict_at_persist_is_tuple_scoped_not_global_abort(
+        self, tmp_path: Path
+    ) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config conflict at the
+        finalist ``store.append`` is a TUPLE-scoped skip+count, never a grid abort.
+
+        The store raises the typed :class:`ResultsStoreGateConflictError`;
+        ``run_persisted_sweep`` converts it to a ``SweepComboError`` that sails
+        PAST ``run_one_tuple``'s ``except ResultsStoreError`` (store_quarantine
+        None) global-abort re-raise and lands on the driver's tuple-skip ladder —
+        so the grid FINISHES, ``tuples_failed`` counts it, a TUPLE_FAILED audit
+        line names the config cause, and no healthy store is quarantined.
+        """
+        pytest.importorskip("polars")
+        from brutex.engine.results_store import ResultsStoreGateConflictError
+        from brutex.engine.tuple_complete import completion_sentinel_path
+
+        bars = _trending_bars()
+        grid = _grid()  # single NIFTY tuple
+        results_root = tmp_path / "results"
+
+        class _GateConflictStore(ResultsStore):
+            def append(self, row: object) -> bool:  # type: ignore[override]
+                raise ResultsStoreGateConflictError(
+                    "the ONLY differing field(s) (deflated_sharpe) — a gate-config change "
+                    "(DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001)."
+                )
+
+        def _store_for(t: SweepTuple) -> ResultsStore:
+            return _GateConflictStore(path=tuple_store_path(results_root, t, grid))
+
+        audit_path = tmp_path / "grid.jsonl"
+        with AuditWriter.open(audit_path) as audit:
+            summary = run_sweep_grid(
+                grid,
+                bars_for=lambda _i, _t: bars,
+                store_for=_store_for,
+                dedup=_dedup(),
+                audit=audit,
+            )
+        # Tuple-scoped skip — the grid did NOT abort.
+        assert summary.tuples_failed == 1
+        assert summary.tuples_run == 0
+        failed = next(e for e in read_entries(audit_path) if e.action == "TUPLE_FAILED")
+        assert "gate-config conflict" in failed.payload["error"]
+        # No sentinel written for the failed tuple (redo next run).
+        store_path = tuple_store_path(results_root, next(iter_sweep_tuples(grid)), grid)
+        assert not completion_sentinel_path(store_path).exists()
 
     def test_real_raise_leaves_failed_store_unsentineled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -906,7 +1147,9 @@ class TestRunSweepGridRollSchedule:
     def test_futures_grid_threads_the_schedule_and_runs(self, tmp_path: Path) -> None:
         pytest.importorskip("polars")
         bars = _trending_bars(n_days=4)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        # DEC-ENGINE-SPOT-ONLY-001: below-the-gate futures machinery test —
+        # the research escape flag is the sanctioned construction path.
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         with AuditWriter.open(tmp_path / "a.jsonl") as audit:
             summary = run_sweep_grid(
                 grid,
@@ -924,7 +1167,7 @@ class TestRunSweepGridRollSchedule:
         # SweepRunConfig invariant propagates (a genuine wiring bug, never a
         # silent constant-key sweep).
         bars = _trending_bars(n_days=2)
-        grid = _grid(instruments=["NSE-NIFTY-FUT"])
+        grid = _grid(instruments=["NSE-NIFTY-FUT"], unsafe_allow_out_of_scope_instruments=True)
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="roll_schedule is required for"),

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import metrics_for_mask
@@ -146,6 +146,7 @@ def _forced_fallback_sim(
     *,
     tf_minutes: int,
     reference_stamper: object = None,
+    precomputed_columns: object = None,
 ) -> ResidentTradeSim:
     """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
@@ -153,13 +154,16 @@ def _forced_fallback_sim(
     bit-identical Python oracle (the wired-vs-unwired forcing seam — the same
     instance-level ``_rust = None`` mechanism the rust_trade_sim fallback tests
     use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
-    attribute the superclass ctor just built).
+    attribute the superclass ctor just built). ``precomputed_columns`` tracks
+    the additive W2-rider kwarg (DEC-STAGE1A-RUST-BATCH-001) so the factory's
+    signature stays call-compatible with the production seam.
     """
     sim = ResidentTradeSim(
         bars,
         bar_bits,
         tf_minutes=tf_minutes,
         reference_stamper=reference_stamper,  # type: ignore[arg-type]
+        precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
     )
     sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
     return sim
@@ -1520,6 +1524,37 @@ class TestRunPersistedSweep:
             mask=1, params=default_params, **_CTX
         )
 
+    def test_gate_conflict_at_persist_becomes_tuple_scoped_combo_error(
+        self, tmp_path: Path
+    ) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config conflict at the
+        finalist ``store.append`` is converted AT THE SOURCE into a SweepComboError.
+
+        The typed :class:`ResultsStoreGateConflictError` is a SIBLING of
+        ``ResultsStoreError`` — converting it here (not letting it propagate as a
+        ``ResultsStoreError``) makes it sail PAST ``run_one_tuple``'s
+        ``except ResultsStoreError`` global-abort re-raise and land on the grid
+        driver's ``except SweepComboError`` tuple-skip ladder, naming the config
+        cause. This covers the new persist-loop except branch.
+        """
+        from brutex.engine.results_store import ResultsStoreGateConflictError
+
+        bars = _trending_bars()
+
+        class _GateConflictStore(ResultsStore):
+            def append(self, row: ResultRow) -> bool:
+                raise ResultsStoreGateConflictError(
+                    "the ONLY differing field(s) (deflated_sharpe) are gate-derived DSR "
+                    "metric(s) (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001)."
+                )
+
+        store = _GateConflictStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:  # noqa: SIM117
+            with pytest.raises(SweepComboError, match="gate-config conflict persisting") as exc:
+                run_persisted_sweep(bars, _make_config(), store=store, dedup=_dedup(), audit=audit)
+        assert "NIFTY" in str(exc.value)
+        assert "DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001" in str(exc.value)
+
 
 # ────── SweepComboError — fail-loud-with-fingerprint (Resilient: skip+continue) ──────
 
@@ -2139,6 +2174,75 @@ class TestResidentKernelBarMismatch:
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="kernel was built for Fib anchor"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_built_for_other_vwap_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose VWAP source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 52-53 are VWAP-source
+        SPECIFIC, so a kernel built for a different source would silently score the
+        WRONG bits; ``run_persisted_sweep`` fails-fast, exactly like the anchor guard.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default VWAP source is HLC3
+        assert cfg.vwap_source is PriceSource.HLC3
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, vwap_source=PriceSource.OPEN
+        )
+        assert kernel.vwap_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for VWAP source"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_built_for_other_ema_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose EMA source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 0-5 are EMA-source
+        SPECIFIC; a mismatched kernel would silently score the WRONG bits. The VWAP
+        source is left at the default so the VWAP guard passes and the EMA guard trips.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default EMA source is CLOSE
+        assert cfg.ema_source is PriceSource.CLOSE
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            vwap_source=cfg.vwap_source,
+            ema_source=PriceSource.OPEN,
+        )
+        assert kernel.vwap_source is cfg.vwap_source
+        assert kernel.ema_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for EMA source"),
         ):
             run_persisted_sweep(
                 bars,

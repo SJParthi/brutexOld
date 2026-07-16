@@ -968,7 +968,7 @@ def _atomic_write_parquet(dest: Path, df: pl.DataFrame) -> None:
     :class:`~brutex.data.errors.LakeWriteHalt` pull-wide stop (DEC-LAKE-WRITE-HALT-001).
 
     THE PR-2 RENDER SEAM (DEC-RUST-DATALAKE-IO-ROADMAP-001; the datalake
-    conversion roadmap ADR, ``docs/adr/0019-datalake-rust-conversion-roadmap.md``):
+    conversion roadmap ADR, ``docs/adr/0020-datalake-rust-conversion-roadmap.md``):
     when — and ONLY when — ``BRUTEX_LAKE_RUST_RENDER`` is truthy, the render
     routes through the COMMON :mod:`brutex.data.lake_rust_render` facade
     under the :data:`~brutex.data.lake_rust_render.PROFILE_OPTIONS_DEFAULTS`
