@@ -754,7 +754,7 @@ jobs:
         # An unpinned `latest` could silently flip those mutants to MISSED and
         # red the gate with a mislabelled cause; version bumps are DELIBERATE
         # (mirrors the pinned RUST_VERSION above).
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (engine-critical scope, in-place, shard ${{ matrix.shard }}/6)
@@ -844,7 +844,7 @@ jobs:
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin (the 229-UNVIABLE python.rs
         # PyResult-alias measurement + shard budgets are 27.1.0-specific).
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (evaluator + run-identity scope, in-place, shard ${{ matrix.shard }}/7)
@@ -932,7 +932,7 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-mutants
         # Version PINNED — see the fno-math twin.
-        uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Run cargo-mutants (scan.rs decision core, in-place)
