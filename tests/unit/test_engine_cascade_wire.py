@@ -388,7 +388,7 @@ class TestCascadeConfig:
 
 
 class TestResolveMcPermutations:
-    """The MC permutation-budget knob (DEC-REHEARSAL-MC-BUDGET-001, #1795)."""
+    """The MC permutation-budget knob (DEC-REHEARSAL-MC-BUDGET-001, #1817)."""
 
     def test_env_name_is_the_documented_knob(self) -> None:
         assert cw.MC_PERMUTATIONS_ENV == "BRUTEX_SWEEP_MC_PERMUTATIONS"

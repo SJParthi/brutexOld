@@ -3530,6 +3530,23 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
         )
         return EXIT_USER_ERROR
 
+    # Rust front flag (Rust-uniformity Wave 1, roadmap PR-1): resolved EAGERLY
+    # so a junk BRUTEX_RUST_FRONT value refuses the start loudly BEFORE any
+    # heavy setup (the house env-law; default absent/off = byte-identical
+    # single-process behaviour, no brutexd process spawned). The mechanism
+    # lives in brutex/dashboard/rust_front.py (its own self-contained 100%
+    # line+branch gate); this function only threads the decision.
+    from brutex.dashboard.rust_front import (
+        RustFrontError,
+        resolve_rust_front,
+        run_with_rust_front,
+    )
+
+    try:
+        _rust_front_on = resolve_rust_front()
+    except RustFrontError as exc:
+        raise CliUserError(str(exc)) from exc
+
     # Persist logs to a rotating file (in addition to the console) so a
     # `make run` session has a viewable log trail — DEC-LOGS-VIEWER-001.
     # json_renderer=False keeps the console human-readable; the file sink is
@@ -3820,6 +3837,17 @@ def cmd_dashboard(lake_root: Path | None, host: str, port: int) -> int:
     # root handlers (console + rotating JSON file) instead of uvicorn's own
     # isolated stderr handlers — so the file (and the /api/v1/logs endpoint)
     # capture the full HTTP + startup trail (DEC-RUN-LOG-CAPTURE-001).
+    if _rust_front_on:
+        # Two-process topology (BRUTEX_RUST_FRONT=on): brutexd owns the
+        # operator port; uvicorn binds a private loopback port picked inside
+        # run_with_rust_front. A launch refusal (missing binary /
+        # non-loopback host) is a loud CliUserError exit 1, never a
+        # half-started topology.
+        try:
+            run_with_rust_front(app, host=host, port=port, uvicorn_run=uvicorn.run)
+        except RustFrontError as exc:
+            raise CliUserError(str(exc)) from exc
+        return EXIT_OK
     uvicorn.run(app, host=host, port=port, log_config=None)
     return EXIT_OK
 
@@ -6418,6 +6446,22 @@ def cmd_pull_all_spot(
                     log.warning("pull_all_spot.refused_contention", error=str(exc))
                     # --auto: cron must NOT storm-retry a legitimate overlap (B A6).
                     return EXIT_OK if auto else EXIT_USER_ERROR
+                # DEC-CROSSVERIFY-OWED-SENTINEL-001: the pull is COMMITTED
+                # (locks held, real run) — write the durable owed marker
+                # BEFORE the chain runs, so a death anywhere downstream
+                # (mid-pull / mid-prebuild / pre-tail) leaves the sentinel
+                # the next run's step-D3 owed catchup completes. Best-effort
+                # + kill-switch coherent (marks nothing under
+                # BRUTEX_CROSSVERIFY=off / junk env — one WARN, never a
+                # failed pull); the tail's run_crossverify clears it at the
+                # day's completed material verdict. The day law mirrors the
+                # --auto gate's clock contract (IST wall clock; the injected
+                # `now` seam wins).
+                from brutex.calendars.nse import now_ist as _now_ist
+                from brutex.crossverify.owed import mark_owed_for_pull
+
+                launch_day = (now() if now is not None else _now_ist()).date()
+                mark_owed_for_pull(resolved, launch_day, source="cli-pull-all-spot")
             try:
                 hp = builder(
                     lake_root=resolved,
@@ -7271,7 +7315,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
     try:
         tripwire_config = TripwireConfig.from_env()
         diffcheck_k = resolve_diffcheck_k()
-        # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): the optional
+        # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): the optional
         # Stage-4 Monte-Carlo permutation budget override — resolved EAGERLY
         # like the sibling knobs (junk = a clean pre-sweep user-config error);
         # None (env unset) threads NO override, so the production

@@ -172,14 +172,23 @@ def test_parallel_lake_is_byte_identical_to_sequential(tmp_path: Path) -> None:
         incremental=False,
     )
 
-    # Both built the 3 spot symbols + the FUT + the CE with identical totals
-    # (m-2: the OI-aware FUTURES/OPTIONS phases are byte-compared too).
-    assert seq_outcome.symbols_built == par_outcome.symbols_built == 5
+    # Both built the 3 spot symbols + the FUT with identical totals (m-2: the
+    # OI-aware FUTURES phase is byte-compared too). The seeded CE is NEVER
+    # materialised (DEC-OPTIONS-PREBUILD-RETIRE-001 — options 1-minute-native).
+    assert seq_outcome.symbols_built == par_outcome.symbols_built == 4
     assert seq_outcome.total_bars == par_outcome.total_bars > 0
     assert seq_outcome.ok and par_outcome.ok
 
     seq_files = _derived_parquets(seq_root)
     par_files = _derived_parquets(par_root)
+
+    # ABSENCE PIN (DEC-OPTIONS-PREBUILD-RETIRE-001, REAL lake, BOTH paths): a
+    # full pipeline prebuild writes ZERO derived option TF files — the CE
+    # contract partition holds ONLY its vendor 1minute dir.
+    for root in (seq_root, par_root):
+        ce_dir = root / "bars" / _EXCHANGE / "FNO" / _CE_SYMBOL
+        assert sorted(d.name for d in ce_dir.iterdir() if d.is_dir()) == ["1minute"]
+    assert not any(f"/{_CE_SYMBOL}/" in f"/{rel}" for rel in seq_files)
 
     # Same derived-partition file SET (paths), and BYTE-IDENTICAL contents.
     assert seq_files.keys() == par_files.keys()

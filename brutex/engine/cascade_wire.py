@@ -502,7 +502,7 @@ class CascadeWireReport:
 
 #: Env var overriding the Stage-4 Monte-Carlo permutation budget
 #: (``CascadeConfig.mc_n_permutations``) — DEC-REHEARSAL-MC-BUDGET-001,
-#: MIGRATION.md #1795. Unset/blank keeps the production default (1000)
+#: MIGRATION.md #1817. Unset/blank keeps the production default (1000)
 #: BYTE-IDENTICAL; an integer ``>= 1`` bounds filter #9's worst-case cost
 #: (each permutation re-runs a full pure-Python trade simulation, so an
 #: expensive seed draw can dominate a small CI rehearsal's wall clock —
@@ -515,7 +515,7 @@ MC_PERMUTATIONS_ENV: Final[str] = "BRUTEX_SWEEP_MC_PERMUTATIONS"
 def resolve_mc_permutations(env: Mapping[str, str] | None = None) -> int | None:
     """Resolve the optional MC permutation-budget override (fail-loud).
 
-    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): reads
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): reads
     :data:`MC_PERMUTATIONS_ENV`. Unset / blank ⇒ ``None`` — the caller passes
     NO override and :class:`~brutex.metrics.cascade.CascadeConfig` keeps its
     production ``mc_n_permutations`` default (1000) byte-identical (pinned).

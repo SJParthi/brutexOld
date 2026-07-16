@@ -24,7 +24,7 @@ production writers ingest uses) by driving the REAL ``cli.cmd_sweep_all`` shim,
 Runtime is measured and printed per leg (``rehearsal.<leg>.seconds`` lines in
 the pytest output) so the CI job's budget claim stays evidence-backed.
 
-Rehearsal-scoped budgets (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795):
+Rehearsal-scoped budgets (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817):
 run identity folds ``code_commit_sha``, so the Stage-3 CMA-ES seed and the
 Stage-4 cascade seed re-roll PER COMMIT — on an expensive draw, candidates
 survive into cascade filter #9 (``monte_carlo_permutation_test``,
@@ -118,7 +118,7 @@ _PER_DAY = 12
 #: The design's rehearsal-sized diffcheck budget (CI_K_SAMPLES, D-10/graft C).
 _CI_K_SAMPLES = 8
 #: Rehearsal-sized Stage-4 Monte-Carlo permutation budget
-#: (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1795 — the diffcheck-K idiom):
+#: (DEC-REHEARSAL-MC-BUDGET-001, MIGRATION.md #1817 — the diffcheck-K idiom):
 #: the SMALLEST budget at which filter #9 keeps teeth in BOTH directions at
 #: the production ``mc_alpha = 0.01`` — the permutation p-value law is
 #: ``(1 + n_beaten) / (n_permutations + 1)``, so 100 permutations put the
@@ -133,7 +133,7 @@ _CI_MC_PERMUTATIONS = 100
 def _rehearsal_env() -> Iterator[None]:
     """Bound one rehearsal chain run: CI budgets + the INFO log-volume guard.
 
-    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795). Three scoped bounds,
+    DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817). Three scoped bounds,
     all restored on exit so no other test in the process is affected:
 
     * ``BRUTEX_SWEEP_DIFFCHECK_K=8`` — the pre-existing R45 diffcheck budget;
@@ -390,7 +390,7 @@ def test_r38_cascade_genuinely_ran(rehearsal: _Rehearsal) -> None:
     assert report["sweep_id"] == rehearsal.run_id
     manifest = json.loads((rehearsal.results_root / "cascade" / "manifest.json").read_text())
     assert manifest["sweep_id"] == rehearsal.run_id
-    # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795): the env-resolved MC
+    # DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817): the env-resolved MC
     # budget travelled the cascade_config_for_sweep(overrides=…) seam into the
     # MANIFEST-STORED config — the manual `brutex cascade` replay reads only
     # this frozen value, so the replay stays exact under the override.

@@ -1,6 +1,6 @@
 """End-to-end proof of the ``BRUTEX_SWEEP_MC_PERMUTATIONS`` sweep-all wiring.
 
-DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1795). ``cmd_sweep_all`` is
+DEC-REHEARSAL-MC-BUDGET-001 (MIGRATION.md #1817). ``cmd_sweep_all`` is
 ``# pragma: no cover`` orchestration glue, so — exactly like
 ``test_cli_results_depth_wiring.py``, the precedent suite — this drives the
 REAL ``cli.cmd_sweep_all`` over a tiny production-writer lake and proves the

@@ -776,6 +776,95 @@ class TestPrevDayOi:
         )
 
 
+# ── resolve_prev_oi: the CE/PE 1-minute-native gate ─────────────────────────
+# DEC-OPTIONS-PREBUILD-RETIRE-001 (the operator ruling of 2026-07-15 as relayed
+# via the coordinator — ADR-0021 RULING B, draft PR #1555): a CE/PE contract's
+# derived ``1day`` is retired, so a stored one is frozen at retirement eve —
+# the OI baseline must skip the 1day read entirely and recover from the
+# bounded 1-minute prior-session walk-back. FUT stays 1day-first (pinned).
+
+
+class TestOptionPrevOiOneMinuteNative:
+    _CE: ClassVar[str] = "NSE-NIFTY-25Sep25-24000-CE"
+    _FUT: ClassVar[str] = "NSE-NIFTY-30Sep25-FUT"
+
+    @staticmethod
+    def _min_bar(*, day: date, close: str, oi: int) -> CandleBar:
+        """A 1-minute bar at 09:15 IST (03:45 UTC) on *day* carrying OI."""
+        c = Decimal(close)
+        return CandleBar(
+            timestamp=datetime(day.year, day.month, day.day, 3, 45, tzinfo=UTC),
+            open=c,
+            high=c,
+            low=c,
+            close=c,
+            volume=1,
+            open_interest=oi,
+        )
+
+    def _seed(self, tmp_path: Path, symbol: str) -> None:
+        """FROZEN stored 1day (OI 900) beside a FRESH 1-minute prior session (OI 1234)."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=tmp_path)
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="1day",
+            bars=[_day_bar(day=date(2025, 8, 29), close="100", oi=900)],
+        )
+        writer.write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=symbol,
+            interval="1minute",
+            bars=[self._min_bar(day=date(2025, 8, 29), close="101", oi=1234)],
+        )
+
+    def test_option_prev_oi_serves_true_minute_prior_session_not_frozen_1day(
+        self, tmp_path: Path
+    ) -> None:
+        """FAILS-BEFORE: pre-retirement the OI baseline read the frozen option
+        1day FIRST (OI 900); the gate must serve the TRUE 1-minute
+        prior-session OI 1234."""
+        self._seed(tmp_path, self._CE)
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._CE, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=1234, found_date=date(2025, 8, 29))
+
+    def test_option_prev_oi_never_opens_the_1day_partition(self, tmp_path: Path) -> None:
+        """Read spy: a CORRUPT stored option 1day is inert — the resolver never
+        opens it (pre-gate it raised out of the 1day read)."""
+        from brutex.data.parquet_writer import ParquetWriter
+
+        garbage = tmp_path / "bars" / "NSE" / "FNO" / self._CE / "1day" / "2025"
+        garbage.mkdir(parents=True)
+        (garbage / "08.parquet").write_bytes(b"this is not a parquet file")
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="FNO",
+            symbol=self._CE,
+            interval="1minute",
+            bars=[self._min_bar(day=date(2025, 8, 29), close="101", oi=1234)],
+        )
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._CE, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=1234, found_date=date(2025, 8, 29))
+
+    def test_fut_prev_oi_still_reads_1day_first(self, tmp_path: Path) -> None:
+        """FUT byte-identity pin: futures keep their daily prebuild, so the FUT
+        OI baseline still reads the stored 1day FIRST even when a diverging
+        1-minute prior session exists."""
+        self._seed(tmp_path, self._FUT)
+        got = resolve_prev_oi(
+            tmp_path, exchange="NSE", segment="FNO", symbol=self._FUT, day=date(2025, 9, 1)
+        )
+        assert got == PrevOiBaseline(value=900, found_date=date(2025, 8, 29))
+
+
 # ── compute_futures_candidates: per-exchange discovery filter ──────────────
 #
 # Standalone unit coverage of the per-exchange discovery ``continue`` branch
