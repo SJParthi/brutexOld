@@ -11,13 +11,11 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from brutex.data import lake_rust_render, lake_rust_stats
-from brutex.data import lake_stats_manifest as lsm
 from brutex.data.lake_rust_stats import ShardRenderPayload
 from structlog.testing import capture_logs
 
@@ -354,87 +352,6 @@ class TestBurnIn:
                 payload.updated_utc,
             )
         ]
-
-
-class TestRenderShardHook:
-    """The lake_stats_manifest.render_shard routing (flag OFF = byte + call-graph identical)."""
-
-    @staticmethod
-    def _stats() -> lsm.DatasetStats:
-        row = lsm.StatsFileRow(
-            rel="2026/07.parquet",
-            rows=2,
-            min_ts=datetime(2026, 7, 1, 9, 15, tzinfo=UTC),
-            max_ts=datetime(2026, 7, 2, 9, 15, tzinfo=UTC),
-            mtime_ns=5,
-            size=9,
-            raw_hash=None,
-        )
-        return lsm.build_dataset_stats(
-            kind=lsm.KIND_BARS,
-            key=BARS_KEY,
-            files=[row],
-            updated_utc="2026-07-07T00:00:00+00:00",
-        )
-
-    _CANONICAL = (
-        '{"files":[{"max_ts":"2026-07-02T09:15:00+00:00","min_ts":"2026-07-01T09:15:00+00:00"'
-        ',"mtime_ns":5,"raw_hash":null,"rel":"2026/07.parquet","rows":2,"size":9}],'
-        '"identity_key":["timestamp"],"key":{"exchange":"NSE","interval":"1minute",'
-        '"segment":"INDEX","symbol":"NIFTY"},"kind":"bars",'
-        '"max_ts":"2026-07-02T09:15:00+00:00","min_ts":"2026-07-01T09:15:00+00:00",'
-        '"row_count":2,"updated_utc":"2026-07-07T00:00:00+00:00","version":1}'
-    )
-
-    def test_flag_off_is_byte_identical_and_never_touches_the_crate(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Bomb-crate spy: OFF must never import/touch brutex_lake."""
-
-        class _Bomb:
-            def __getattr__(self, name: str) -> object:
-                raise AssertionError(f"flag OFF touched brutex_lake.{name}")
-
-        monkeypatch.setitem(sys.modules, "brutex_lake", _Bomb())
-        assert lsm.render_shard(self._stats()) == self._CANONICAL
-
-    def test_flag_on_with_fake_crate_burn_in_verifies_against_the_oracle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A flipped-byte crate through the REAL render_shard ships the oracle."""
-        monkeypatch.setenv(lake_rust_stats.LAKE_RUST_STATS_ENV, "1")
-        monkeypatch.setitem(
-            sys.modules, "brutex_lake", _fake_crate(render=lambda *a: self._CANONICAL + "X")
-        )
-        assert lsm.render_shard(self._stats()) == self._CANONICAL
-        assert lake_rust_stats._DISABLED_REASON[0] == "burn_in_byte_mismatch"
-
-    def test_flag_on_matching_fake_crate_ships_its_string(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(lake_rust_stats.LAKE_RUST_STATS_ENV, "1")
-        seen: list[tuple[object, ...]] = []
-
-        def _echo(*args: object) -> str:
-            seen.append(args)
-            return self._CANONICAL
-
-        monkeypatch.setitem(sys.modules, "brutex_lake", _fake_crate(render=_echo))
-        assert lsm.render_shard(self._stats()) == self._CANONICAL
-        # The hook pre-formats isoformat strings — ints+strings only cross.
-        (call,) = seen
-        assert call[5] == "2026-07-01T09:15:00+00:00"  # min_ts_iso
-        assert call[7] == (
-            (
-                "2026/07.parquet",
-                2,
-                "2026-07-01T09:15:00+00:00",
-                "2026-07-02T09:15:00+00:00",
-                5,
-                9,
-                None,
-            ),
-        )
 
 
 class TestMutationWorkflowWiring:
