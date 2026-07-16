@@ -19,6 +19,7 @@ coverage on `brutex.costs.*` (the per-module strict gate in
 
 from __future__ import annotations
 
+import importlib
 from datetime import date, datetime
 
 import pytest
@@ -1114,7 +1115,7 @@ def test_round_levy_rupee_ceils() -> None:
 
 def test_nearest_rounding_helpers_deleted() -> None:
     """Killed-token pin: the nearest half-up rounders are gone."""
-    import brutex.costs.calculator as mod
+    mod = importlib.import_module("brutex.costs.calculator")
 
     assert not hasattr(mod, "_round_to_paisa")
     assert not hasattr(mod, "_round_to_rupee")

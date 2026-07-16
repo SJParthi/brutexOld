@@ -9,6 +9,8 @@ included), and the killed-token pins proving the retired machinery
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 from brutex.execution.fill_mode import (
     FILL_MODE_ENV,
@@ -42,13 +44,13 @@ class TestVocabulary:
     def test_resolver_machinery_deleted(self) -> None:
         # Killed-token pins: the env resolver + production-default constant
         # are gone from the module surface (nothing resolves a mode any more).
-        import brutex.execution.fill_mode as mod
+        mod = importlib.import_module("brutex.execution.fill_mode")
 
         assert not hasattr(mod, "resolve_fill_mode")
         assert not hasattr(mod, "DEFAULT_FILL_MODE")
 
     def test_all_surface_pinned(self) -> None:
-        import brutex.execution.fill_mode as mod
+        mod = importlib.import_module("brutex.execution.fill_mode")
 
         assert mod.__all__ == [
             "FILL_MODE_ENV",

@@ -263,7 +263,8 @@ def test_worst_case_params_add_exactly_the_one_key() -> None:
     params = _canonical_params()
     assert params == _PARAMS  # the oracle dict INCLUDES the permanent key
     legacy = dict(params)
-    assert legacy.pop("fill_mode") == "worst_case"
+    popped = legacy.pop("fill_mode")
+    assert popped == "worst_case"
     assert "fill_mode" not in legacy
 
 

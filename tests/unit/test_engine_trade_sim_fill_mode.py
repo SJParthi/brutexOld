@@ -15,6 +15,7 @@ module's ``_bar`` helper (Golden Rule #11 COMMON).
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -80,7 +81,7 @@ class TestKnobsDeleted:
         # DEC-FILL-WORST-CASE-ONLY-001: no FillPolicy, no LevelFill (and its
         # NEXT_OPEN optimism member), no SameBarTie (and its TP_FIRST
         # optimism member), no DEFAULT_FILL_POLICY — the law is hardcoded.
-        import brutex.engine.trade_sim as mod
+        mod = importlib.import_module("brutex.engine.trade_sim")
 
         for token in ("FillPolicy", "LevelFill", "SameBarTie", "DEFAULT_FILL_POLICY"):
             assert not hasattr(mod, token), token
