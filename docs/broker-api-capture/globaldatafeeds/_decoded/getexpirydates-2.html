@@ -1,0 +1,57 @@
+SLUG: getexpirydates-2
+LINK: https://globaldatafeeds.in/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getexpirydates-2/
+TITLE: GetExpiryDates
+MODIFIED: 2026-05-04T17:21:52
+-----DECODED-----
+<h3>GetExpiryDates : Returns array of Expiry Dates (e.g. 25JUN2020, 30JUL2020, etc.)</h3>
+<div><b><span style="color: #dd3333;">Supported parameters</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><b>Exchange</b></td>
+<td><i>String value like MCX</i></td>
+<td>Name of supported exchange. How to get list of supported exchanges you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/function-getexchanges-2/">here</a></td>
+</tr>
+<tr>
+<td><b>InstrumentType</b></td>
+<td><i>String value like FUTIDX</i></td>
+<td>Optional parameter. Name of supported Instrument Type. How to get list of supported values you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getinstrumenttypes-2/">here</a></td>
+</tr>
+<tr>
+<td><b>Product</b></td>
+<td><i>String value like BANKNIFTY</i></td>
+<td>Optional parameter. Name of supported Product. How to get list of supported values you can find <a href="/global-datafeeds-apis/global-datafeeds-apis/websockets-api-documentation/getproducts-2/">here</a></td>
+</tr>
+</tbody>
+</table>
+<div><b><span style="color: #dd3333;">What is returned ?</span></b></div>
+<table>
+<tbody>
+<tr>
+<td><strong>ExpiryDates</strong></td>
+</tr>
+</tbody>
+</table>
+<div><b><span style="color: #dd3333;">Example send request(JavaScript)</span></b></div>
+<pre lang="javascript">{
+MessageType: "GetExpiryDates",
+Exchange: "NFO"
+};
+var message = JSON.stringify(request);
+websocket.send(message);
+</pre>
+<div><b><span style="color: #dd3333;">Example of returned data in JSON format</span></b></div>
+<pre lang="javascript">{
+"Request":{
+"Exchange":"NFO",
+"MessageType":"GetExpiryDates"
+},
+"Result":[
+{"Value":"05MAY2026"},
+{"Value":"12MAY2026"},
+{"Value":"19MAY2026"},
+{"Value":"26MAY2026"}
+],
+"MessageType":"ExpiryDatesResult"
+}
+</pre>
