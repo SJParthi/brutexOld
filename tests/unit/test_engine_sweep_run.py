@@ -2186,6 +2186,75 @@ class TestResidentKernelBarMismatch:
                 kernel=kernel,
             )
 
+    def test_kernel_built_for_other_vwap_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose VWAP source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 52-53 are VWAP-source
+        SPECIFIC, so a kernel built for a different source would silently score the
+        WRONG bits; ``run_persisted_sweep`` fails-fast, exactly like the anchor guard.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default VWAP source is HLC3
+        assert cfg.vwap_source is PriceSource.HLC3
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, vwap_source=PriceSource.OPEN
+        )
+        assert kernel.vwap_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for VWAP source"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_built_for_other_ema_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose EMA source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 0-5 are EMA-source
+        SPECIFIC; a mismatched kernel would silently score the WRONG bits. The VWAP
+        source is left at the default so the VWAP guard passes and the EMA guard trips.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default EMA source is CLOSE
+        assert cfg.ema_source is PriceSource.CLOSE
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            vwap_source=cfg.vwap_source,
+            ema_source=PriceSource.OPEN,
+        )
+        assert kernel.vwap_source is cfg.vwap_source
+        assert kernel.ema_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for EMA source"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
 
 class TestResidentKernelRollScheduleMismatch:
     """The ADR-0012 roll-schedule twin of the Fib-anchor kernel guard.

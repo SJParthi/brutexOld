@@ -422,6 +422,46 @@ class TestEventsRoute:
         assert payload["window_filtered"] is True
 
 
+class TestEventsCachePartition:
+    """Fix 4a (DEC-MEMORY-FOOTPRINT-HARDENING-001): the events-page family
+    rides its OWN capacity-capped cache instance, so client-typed events-key
+    churn can never LRU-evict the expensive runs/manifest/top100/verify/chain
+    payloads off the shared instance (finding H4 — verified FAILING on the
+    pre-partition shared-instance tree: the churn below evicted the cached
+    top100 payload and the poisoned re-parse fired).
+    """
+
+    def test_events_key_churn_cannot_evict_expensive_payloads(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _client(_lake_with_corpus(tmp_path))
+        top100_url = f"/api/v1/oneclick/top100?run_id={RUN_ID}"
+        first = client.get(top100_url).json()
+        assert first["status"] == "ok"
+
+        # From here on, a top100 RE-PARSE would mean the cached expensive
+        # payload was evicted by events churn — poison the fresh compute so
+        # eviction is loud, never silent.
+        def _boom(_run_dir: Path) -> oc.Top100Result:
+            raise AssertionError("top100 re-parsed — the expensive payload was evicted")
+
+        monkeypatch.setattr(oc, "load_top100", _boom)
+
+        # Churn: MORE distinct client-typed events-page keys than either the
+        # dedicated events capacity (128) or the shared instance's default
+        # 256-entry LRU — on the pre-partition SHARED cache this evicted the
+        # oc_top100 entry; on the partitioned tree it only churns the events
+        # family's own bounded instance.
+        for offset in range(300):
+            response = client.get(
+                f"/api/v1/oneclick/events?run_id={RUN_ID}&offset={offset}&limit=1"
+            )
+            assert response.status_code == 200
+
+        again = client.get(top100_url).json()
+        assert again == first  # still the cached hit — byte-identical
+
+
 # ── /api/v1/oneclick/trades ─────────────────────────────────────────────
 
 

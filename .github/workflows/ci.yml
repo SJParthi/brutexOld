@@ -242,6 +242,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: mypy --strict
         run: mypy --strict brutex
       - name: pyright
@@ -434,6 +451,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest with coverage gate
         run: |
           # Coverage floor at 100 (DEC-COV-APP-BACKFILL-001, 2026-06-12):
@@ -612,6 +646,21 @@ jobs:
               tests/golden/test_wheel_digest_golden.py
           else
             echo "(brutex.wheel_digest test file not present yet — gate inactive)"
+          fi
+          # brutex.feed_rust — DEC-FEED-RUST-CORE-001: the default-OFF
+          #       Rust feed-kernel leaf (flag + wheel resolve + the
+          #       refuse-poison validate_scan gate); 100% line+branch
+          #       STANDALONE on its dedicated unit suite. (Also gated at the
+          #       19-series site below — the doctor two-site precedent.)
+          if compgen -G "tests/unit/test_feed_rust.py" > /dev/null; then
+            pytest \
+              --cov=brutex.feed_rust \
+              --cov-branch \
+              --cov-report=term-missing \
+              --cov-fail-under=100 \
+              tests/unit/test_feed_rust.py
+          else
+            echo "(brutex.feed_rust test file not present yet — gate inactive)"
           fi
           # DEC-COV-001 step 2 (2026-05-24, MIGRATION.md entry #211):
           # ratchet `brutex.universe` into the strict per-module 100%
@@ -812,11 +861,15 @@ jobs:
           else
             echo "(brutex.options.risk_free test file not present yet — gate inactive)"
           fi
-          # 12d · brutex.options.greeks (37 stmts, 4 branches, 47 tests)
+          # 12d · brutex.options.greeks
           #       DEC-GREEKS-ENGINE-PR2-001: the thin wrapper over the shared
           #       Rust Black-76 Greeks + verified Jäckel-IV kernel in
           #       trading_core — Greeks Phase 2 (needs the trading_core wheel,
-          #       installed above in this job)
+          #       installed above in this job) — plus the columnar batch face
+          #       compute_greeks_batch (DEC-GREEKS-RUST-BATCH-001). The
+          #       --cov-fail-under=100 flag is the gate; stmt/branch/test
+          #       counts live in the coverage output, not this comment (the
+          #       old "(37 stmts, 4 branches, 47 tests)" literals rotted).
           if compgen -G "tests/unit/test_options_greeks.py" > /dev/null; then
             pytest --cov=brutex.options.greeks --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_options_greeks.py
           else
@@ -835,7 +888,9 @@ jobs:
               tests/integration/test_greeks_enrich_lake_roundtrip.py \
               tests/property/test_greeks_enrich_properties.py \
               tests/golden/test_greeks_enrich_golden.py \
-              tests/golden/test_greeks_enrich_parallel_golden.py
+              tests/golden/test_greeks_enrich_parallel_golden.py \
+              tests/unit/test_greeks_enrich_rust_batch.py \
+              tests/golden/test_greeks_enrich_rust_batch_golden.py
           else
             echo "(brutex.data.greeks_enrich test file not present yet — gate inactive)"
           fi
@@ -987,6 +1042,7 @@ jobs:
             pytest --cov=brutex.crossverify.gate_seam    --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_gate_seam.py
             pytest --cov=brutex.crossverify.day_export   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_day_export.py
             pytest --cov=brutex.crossverify.journal      --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_journal.py
+            pytest --cov=brutex.crossverify.owed         --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_owed.py
             pytest --cov=brutex.crossverify.s3_publish   --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_s3_publish.py
             pytest --cov=brutex.crossverify.pull_leg     --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_pull_leg.py
             pytest --cov=brutex.crossverify.prebuild_leg --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_crossverify_prebuild_leg.py
@@ -1254,6 +1310,14 @@ jobs:
             pytest --cov=brutex.doctor --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_doctor.py tests/unit/test_doctor_wheel_freshness.py tests/unit/test_doctor_wheel_source_digest.py
           else
             echo "(brutex.doctor test file not present yet — gate inactive)"
+          fi
+          # 19c2 · brutex.feed_rust (DEC-FEED-RUST-CORE-001) — the second gate
+          #        site (mirrors the DEC-COV-001 block above; the doctor
+          #        two-site precedent).
+          if compgen -G "tests/unit/test_feed_rust.py" > /dev/null; then
+            pytest --cov=brutex.feed_rust --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_rust.py
+          else
+            echo "(brutex.feed_rust test file not present yet — gate inactive)"
           fi
           # 19d · brutex.costs.types (113 stmts, 14 branches after the
           #       ChargeStack leaf-homing — the CodeQL py/cyclic-import fix,
@@ -2454,6 +2518,25 @@ jobs:
           else
             echo "(brutex.dashboard.oneclick_view test file not present yet — gate inactive)"
           fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the pure
+          # last-pull OUTCOME classifier — a HALTED pull (disk-full /
+          # market-hours / quota / …) must never render the clean-completion
+          # green. 100% line+branch on pull_outcome.py.
+          if compgen -G "tests/unit/test_pull_outcome.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.pull_outcome --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_pull_outcome.py
+          else
+            echo "(brutex.dashboard.pull_outcome test file not present yet — gate inactive)"
+          fi
+          # DEC-OPERATOR-HEALTH-TRUTH-001 (MIGRATION.md #1747): the unified
+          # health-hub fold (nightly · backup dead-man · doctor · mutation ·
+          # pull) — unwired lanes read the explicit "not wired", corrupt state
+          # files read NAMED degrades, never a 500 and never a fabricated
+          # green. 100% line+branch on health_hub.py.
+          if compgen -G "tests/unit/test_health_hub.py" > /dev/null; then
+            pytest --cov=brutex.dashboard.health_hub --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_health_hub.py
+          else
+            echo "(brutex.dashboard.health_hub test file not present yet — gate inactive)"
+          fi
           # DEC-SWEEP-UNKILLABLE-CORE-001 (design §8/D-19): the 16 Phase-2
           # unkillable-run-core modules ship at 100% line+branch STANDALONE —
           # observability core (flight recorder / manifest / stamps / bundle /
@@ -2786,7 +2869,7 @@ jobs:
         # Keyed on the RESOLVED installed playwright version (not the range
         # pin in pyproject) so a playwright upgrade invalidates the cache
         # exactly when the pinned Chromium build changes.
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: pw-chromium-${{ runner.os }}-${{ steps.pwver.outputs.version }}
@@ -2864,6 +2947,13 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      # DEC-FEED-RUST-CORE-001 round-1 review: NO brutex_feed wheel here —
+      # this job installs `.[dev]` only (no pyarrow), so the feed parity
+      # module (tests/property/test_feed_rust_parity.py) skips on its
+      # pyarrow guard regardless; installing the wheel was dead weight. The
+      # dual-arm parity gate's execution home is the `test:` job
+      # ([dev,data,ui] + the wheel), which runs tests/property in its
+      # coverage pass.
       - name: pytest property tests
         run: |
           if [ -d tests/property ]; then
@@ -2986,6 +3076,23 @@ jobs:
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
       - name: pytest benchmarks
         run: |
           if [ -d tests/bench ]; then
@@ -3068,6 +3175,23 @@ jobs:
               exit 1
             fi
             echo "pip install ./rust/trading-core failed (attempt $n) — retrying in 10s" >&2
+            sleep 10
+          done
+      - name: Install brutex_feed Rust extension (DEC-FEED-RUST-CORE-001)
+        # The default-OFF feed decision kernel: this job drives the flag-ON
+        # parity/degrade/golden suites, so the wheel must be importable
+        # (absent wheel = those tests skip loudly and the ON arm goes
+        # unproven). Belt-and-suspenders crates.io flake guard (see the
+        # fno-math step).
+        run: |
+          n=0
+          until pip install ./rust/brutex-feed; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "pip install ./rust/brutex-feed failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "pip install ./rust/brutex-feed failed (attempt $n) — retrying in 10s" >&2
             sleep 10
           done
       - name: pytest golden tests
@@ -3291,6 +3415,76 @@ jobs:
           done
           pip install dist/*.whl
           python ../../scripts/check_vocab_rust_parity.py
+
+  rust-brutex-feed:
+    name: Rust (brutex-feed build + clippy + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutex-feed
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: rust/brutex-feed -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      # DEC-FEED-RUST-CORE-001: the pure decision core's edge matrix (26
+      # cases) + proptest invariants + the source-digest twin parity. The
+      # Python-side bit-identity proof (frozen bxsnap2 goldens flag-ON +
+      # the hypothesis dual-arm gate) lives in the test (unit) + golden
+      # jobs, which install the wheel via `pip install ./rust/brutex-feed`
+      # (type + bench install it too; the PROPERTY job's install was pruned
+      # in review round 1 — no pyarrow there, the parity module skips).
+      - name: cargo test
+        run: cargo test --release
+      # Verify the optional PyO3 binding compiles standalone (the wheel
+      # itself is built by the Python jobs above).
+      - name: cargo check --features python (PyO3 binding compiles)
+        run: cargo check --features python
+
+  rust-brutexd:
+    name: Rust (brutexd build + clippy + test)
+    # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
+    # gates itself — fmt/check/clippy/test, mirroring the fno-math job
+    # pattern. The Python-side parity suite
+    # (tests/integration/test_sidecar_parity_static.py) additionally builds
+    # this crate inside the test job whenever cargo is present.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutexd
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutexd -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
 
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
@@ -4561,6 +4755,11 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
+      # DEC-FEED-RUST-CORE-001: the feed decision-kernel crate gate.
+      - rust-brutex-feed
+      # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
+      # that introduces a crate must gate that crate (roadmap PR-1).
+      - rust-brutexd
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -4673,6 +4872,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -4710,6 +4910,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \
