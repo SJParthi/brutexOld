@@ -501,6 +501,7 @@ jobs:
             "brutex/data/partition.py:tests/unit/test_data_partition.py:" \
             "brutex/data/parser.py:tests/unit/test_data_parser.py:" \
             "brutex/data/lake_stats_manifest.py:tests/unit/test_lake_stats_manifest.py:" \
+            "brutex/data/lake_rust_stats.py:tests/unit/test_lake_rust_stats.py:" \
             "brutex/data/today_completeness.py:tests/unit/test_today_completeness.py:" \
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
