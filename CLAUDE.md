@@ -18,7 +18,7 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832,
+_Last updated: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900,
 branch `claude/staged-sequencer-seams` — the STAGED SEQUENCER SEAMS
 (dual-vendor orchestration WS-B, per the frozen ADR-0021 design contract +
 the operator rulings relayed via the coordinator — not a direct-user approval
@@ -56,7 +56,7 @@ defaults BYTE-IDENTICAL (frozen-parity + origin/main A/B pinned); NO
 production caller binds the new seams — the binders are WS-C/WS-D. ENGINE
 UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.
 This header carries the pointer, never the story — the per-item record
-lives in the §1 Active-branch blurb + MIGRATION.md #1832.)
+lives in the §1 Active-branch blurb + MIGRATION.md #1900.)
 Earlier: 2026-07-10 (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 —
 a NEW `PriceSource` cell-coordinate sweep axis for the price source of VWAP +
 EMA20/EMA200 over {open,high,low,close,hlc3}, mirroring the `fib_anchor` axis;
@@ -2984,7 +2984,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832** —
+- **Active branch:** `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900** —
   the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
   AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
   (`docs/adr/0021-dual-vendor-pull-orchestration.md` @ 5e0bad43, draft
@@ -8688,7 +8688,7 @@ hostile-review pass._
 ## 3. Branching and Commits
 
 - **Active feature branch:** `claude/staged-sequencer-seams`
-  (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1832 — the staged sequencer
+  (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900 — the staged sequencer
   seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design
   contract + the coordinator-relayed operator rulings: additive staged
   callables on the ONE `run_full_pipeline` (canonical order SPOT-DAILY →
@@ -8706,7 +8706,7 @@ hostile-review pass._
   proposal documented). ALL-None defaults byte-identical (frozen parity +
   origin/main A/B); NO production caller binds the new seams — WS-C/WS-D;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch
-  line — see §1 + MIGRATION.md #1832 for the full blurb)
+  line — see §1 + MIGRATION.md #1900 for the full blurb)
   Earlier: `claude/vwap-ema-price-source-axis`
   (DEC-NIFTY-PRICE-SOURCE-AXIS-001, MIGRATION.md #1681 — a NEW `PriceSource`
   cell-coordinate sweep axis for the price source of VWAP + EMA20/EMA200 over
