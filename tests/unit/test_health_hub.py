@@ -293,9 +293,13 @@ class TestNightlyLane:
         cap + 1 read bytes — the ``read(cap)`` + ONE-byte over-probe idiom
         (#1614), never a whole-file ``read_bytes()``.  Counted through a
         read-counting handle wrapped around the REAL guarded opener
-        (DEC-LAKE-READ-INODE-GUARD-001 moved the open onto
-        ``open_regular_binary``), so a revert to the unbounded read fails
-        here."""
+        (DEC-LAKE-READ-INODE-GUARD-001 fix round MINOR-1 moved the whole
+        capped read onto ``guarded_read.read_capped_bytes_deadline`` — the
+        counting seam is now the guarded_read module-level
+        ``open_regular_binary`` its worker resolves at call time), so a
+        revert to an unbounded read fails here."""
+        from brutex.data import guarded_read
+
         monkeypatch.setattr(health_hub, "MAX_REPORT_BYTES", 256)
         big = tmp_path / "report.json"
         big.write_bytes(b"x" * (256 + 4096))
@@ -317,12 +321,12 @@ class TestNightlyLane:
                 bytes_read += len(data)
                 return data
 
-        real_open = health_hub.open_regular_binary
+        real_open = guarded_read.open_regular_binary
 
         def _counting_open(path: Path) -> _CountingHandle:
             return _CountingHandle(real_open(path))
 
-        monkeypatch.setattr(health_hub, "open_regular_binary", _counting_open)
+        monkeypatch.setattr(guarded_read, "open_regular_binary", _counting_open)
         verdict = _read_report_json(big)
         assert isinstance(verdict, str) and "oversized" in verdict
         assert bytes_read <= 256 + 1

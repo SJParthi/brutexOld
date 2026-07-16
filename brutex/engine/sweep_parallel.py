@@ -657,8 +657,10 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
 
     Missing file → the empty set (the common case). ANY other unreadable /
     corrupt / non-JSON / wrong-shape state — including the OSError SHAPES a
-    hostile filesystem can present (a DIRECTORY at the sidecar path →
-    ``IsADirectoryError``, a symlink self-loop → ``ELOOP``, unreadable →
+    hostile filesystem can present (a DIRECTORY / FIFO / device at the
+    sidecar path → ``NotRegularFileError``, a wedged volume →
+    ``ReadStallError`` (both DEC-LAKE-READ-INODE-GUARD-001 ``OSError``
+    subclasses), a symlink self-loop → ``ELOOP``, unreadable →
     ``PermissionError``) — → the empty set + ONE LOUD
     ``sweep.quarantine.sidecar_corrupt`` WARNING (advisory sidecar: the worst
     outcome of ignoring a bad file is a re-dispatch of a poison tuple, which
@@ -679,7 +681,8 @@ def load_quarantined_tuple_labels(root: Path, sweep_id: str) -> set[str]:
     except FileNotFoundError:
         return set()
     except OSError as exc:
-        # IsADirectoryError / PermissionError / ELOOP / … — the advisory
+        # NotRegularFileError (directory/FIFO/device) / ReadStallError /
+        # PermissionError / ELOOP / … — the advisory
         # contract: never a wedge, never a crash; LOUD + empty.
         _LOG.warning(
             "sweep.quarantine.sidecar_corrupt",

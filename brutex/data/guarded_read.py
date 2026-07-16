@@ -54,6 +54,7 @@ import and the CLI ``version`` polars-free fast path stays intact.
 
 from __future__ import annotations
 
+import threading
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -70,7 +71,7 @@ from brutex.data.sidecar_read import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only import (polars stays lazy)
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     import polars as pl
 
@@ -79,6 +80,7 @@ __all__ = [
     "NotRegularFileError",
     "ReadStallError",
     "open_regular_binary",
+    "read_capped_bytes_deadline",
     "read_parquet_glob_regular",
     "read_parquet_regular",
     "read_parquet_schema_regular",
@@ -198,6 +200,75 @@ def read_regular_text(path: Path | str, *, encoding: str = "utf-8") -> str:
     return read_regular_bytes(path).decode(encoding)
 
 
+#: Per-path stall gate (the DEC-LAKE-READ-INODE-GUARD-001 hostile-review
+#: MINOR-2 fold — the rate_bridge_cache non-blocking single-flight posture):
+#: when a deadline read of a path BLOWS its deadline, the path is registered
+#: here with the abandoned worker's completion event.  While that event is
+#: UNSET (the wedged read is still in flight on its abandoned daemon), every
+#: later ``*_deadline`` read of the SAME path refuses INSTANTLY with
+#: :class:`ReadStallError` instead of spawning ANOTHER abandoned daemon — a
+#: polled route on a persistently wedged volume previously leaked one daemon
+#: per poll, self-limited only by the OS thread ceiling.  A SET event
+#: self-heals lazily at the next gate consult (the late return arrived —
+#: normal reads resume).  Healthy reads never register, so regular-file
+#: behavior stays byte-identical (one dict probe under the lock per read).
+_STALL_GATE_LOCK = threading.Lock()
+_STALLED_READS: dict[str, threading.Event] = {}
+
+
+def _deadline_read[T](
+    path: Path | str,
+    read_fn: Callable[[], T],
+    *,
+    deadline_s: float,
+    what: str,
+) -> T:
+    """Run *read_fn* under the per-path stall gate + the COMMON freeze guard.
+
+    The ONE tier-1 deadline core every ``*_deadline`` reader delegates to:
+    (1) consult the stall gate — a path whose PRIOR deadline read is still
+    wedged on its abandoned daemon refuses instantly (no new thread); a
+    completed late return self-heals the entry; (2) run *read_fn* under
+    :func:`run_with_deadline`; (3) on expiry, register the path (skipped in
+    the completed-just-after-expiry race — the worker's ``finally`` set the
+    event first, so nothing is left to wait for; a
+    :class:`DeadlineSpawnError` spawned NO worker, so nothing registers) and
+    raise :class:`ReadStallError` with the cause chained.
+    """
+    key = str(path)
+    with _STALL_GATE_LOCK:
+        prior = _STALLED_READS.get(key)
+        if prior is not None:
+            if prior.is_set():
+                # The wedged daemon finally returned — self-heal the entry.
+                del _STALLED_READS[key]
+            else:
+                raise ReadStallError(
+                    f"{what} refused — a prior guarded read of this path is "
+                    f"still stalled (no new reader thread spawned): {path}"
+                )
+    done = threading.Event()
+
+    def _worker() -> T:
+        try:
+            return read_fn()
+        finally:
+            done.set()
+
+    try:
+        return run_with_deadline(
+            _worker,
+            deadline_s,
+            what=what,
+            thread_name="guarded-read",
+        )
+    except (DeadlineExceeded, DeadlineSpawnError) as exc:
+        if isinstance(exc, DeadlineExceeded) and not done.is_set():
+            with _STALL_GATE_LOCK:
+                _STALLED_READS[key] = done
+        raise ReadStallError(f"{what} stalled past {deadline_s:g}s: {path}") from exc
+
+
 def read_regular_bytes_deadline(
     path: Path | str,
     *,
@@ -212,17 +283,42 @@ def read_regular_bytes_deadline(
     worker and re-raises unchanged on the caller thread); a wedged REGULAR
     file raises :class:`ReadStallError` after *deadline_s*; every other
     fault raises its ordinary ``OSError``. Regular healthy files return
-    byte-identical content to ``Path.read_bytes()``.
+    byte-identical content to ``Path.read_bytes()``. Per-path single-flight:
+    while a prior stalled read of the SAME path is still abandoned-in-flight
+    the call refuses instantly with :class:`ReadStallError` — never a second
+    daemon per poll (see :data:`_STALLED_READS`).
     """
-    try:
-        return run_with_deadline(
-            lambda: read_regular_bytes(path),
-            deadline_s,
-            what=what,
-            thread_name="guarded-read",
-        )
-    except (DeadlineExceeded, DeadlineSpawnError) as exc:
-        raise ReadStallError(f"{what} stalled past {deadline_s:g}s: {path}") from exc
+    return _deadline_read(path, lambda: read_regular_bytes(path), deadline_s=deadline_s, what=what)
+
+
+def read_capped_bytes_deadline(
+    path: Path | str,
+    *,
+    cap: int,
+    deadline_s: float = READ_DEADLINE_S,
+    what: str = "guarded file read",
+) -> tuple[bytes, bool]:
+    """Capped bytes + the ONE-byte over-probe with BOTH defenses (tier-1).
+
+    The bounded-read twin of :func:`read_regular_bytes_deadline` for the
+    polled route sites that must never read an out-of-band multi-GB file
+    whole (the #1614 ``read(cap)`` + one-byte over-cap probe idiom — the
+    health_hub ``report.json`` read): opens *path* through
+    :func:`open_regular_binary` INSIDE the deadline worker, reads at most
+    ``cap + 1`` bytes, and returns ``(raw, over)`` where ``over`` is True
+    iff the file holds MORE than *cap* bytes (the caller's oversized
+    degrade). Error contract identical to the whole-file twin
+    (:class:`NotRegularFileError` / :class:`ReadStallError` / ordinary
+    ``OSError`` — all ``OSError``), same per-path single-flight law.
+    """
+
+    def _read() -> tuple[bytes, bool]:
+        with open_regular_binary(path) as handle:
+            raw = handle.read(cap)
+            over = handle.read(1)
+        return raw, bool(over)
+
+    return _deadline_read(path, _read, deadline_s=deadline_s, what=what)
 
 
 def read_regular_text_deadline(

@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from brutex.data.guarded_read import (
     NotRegularFileError,
     ReadStallError,
     open_regular_binary,
+    read_capped_bytes_deadline,
     read_parquet_regular,
     read_parquet_schema_regular,
     read_regular_bytes,
@@ -310,7 +312,9 @@ class TestDeadlineVariants:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The guard's OWN spawn failure (thread exhaustion) is the same
-        bytes-never-arrived class — folded into ``ReadStallError`` too."""
+        bytes-never-arrived class — folded into ``ReadStallError`` too, and
+        NEVER registered in the stall gate (no worker was spawned, so there
+        is nothing in flight to refuse against)."""
         target = tmp_path / "payload.json"
         target.write_bytes(b"{}")
 
@@ -321,6 +325,10 @@ class TestDeadlineVariants:
         with pytest.raises(ReadStallError) as excinfo:
             read_regular_bytes_deadline(target)
         assert isinstance(excinfo.value.__cause__, DeadlineSpawnError)
+        assert str(target) not in guarded_read._STALLED_READS
+        # The next read (guard restored) proceeds unhindered — never refused.
+        monkeypatch.undo()
+        assert read_regular_bytes_deadline(target) == b"{}"
 
     def test_text_decode_error_raises_on_caller_thread(self, tmp_path: Path) -> None:
         target = tmp_path / "junk.json"
@@ -331,6 +339,145 @@ class TestDeadlineVariants:
     def test_read_stall_error_is_oserror(self) -> None:
         assert issubclass(ReadStallError, OSError)
         assert any(issubclass(ReadStallError, member) for member in parquet_read_skip_errors())
+
+
+class TestReadCappedBytesDeadline:
+    """The bounded-read twin (the #1614 cap + one-byte over-probe idiom)."""
+
+    def test_under_cap_full_bytes_over_false(self, tmp_path: Path) -> None:
+        target = tmp_path / "report.json"
+        target.write_bytes(b'{"status": "ok"}')
+        raw, over = read_capped_bytes_deadline(target, cap=1024)
+        assert raw == target.read_bytes()
+        assert over is False
+
+    def test_exactly_at_cap_over_false(self, tmp_path: Path) -> None:
+        """Boundary law: a file of EXACTLY cap bytes is NOT oversized —
+        the one-byte over-probe returns empty."""
+        target = tmp_path / "report.json"
+        target.write_bytes(b"x" * 64)
+        raw, over = read_capped_bytes_deadline(target, cap=64)
+        assert raw == b"x" * 64
+        assert over is False
+
+    def test_over_cap_truncates_and_flags(self, tmp_path: Path) -> None:
+        target = tmp_path / "report.json"
+        target.write_bytes(b"y" * 65)
+        raw, over = read_capped_bytes_deadline(target, cap=64)
+        assert raw == b"y" * 64  # never reads the oversized body whole
+        assert over is True
+
+    def test_fifo_raises_not_regular_bounded(self, tmp_path: Path) -> None:
+        """Defense (a) through the deadline worker — the typed shape refusal
+        re-raises unchanged on the caller thread, never a hang."""
+        fifo = tmp_path / "report.json"
+        os.mkfifo(fifo)
+        with _hang_watchdog(), pytest.raises(NotRegularFileError):
+            read_capped_bytes_deadline(fifo, cap=64)
+
+    def test_stalled_open_raises_read_stall_error_in_bounded_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defense (b): a wedged open/read releases the caller within the
+        deadline as ``ReadStallError`` (the same OSError degrade-arm fold)."""
+        target = tmp_path / "report.json"
+        target.write_bytes(b"{}")
+        release = threading.Event()
+        real_open = guarded_read.open_regular_binary
+
+        def _wedged(path: Path | str) -> object:
+            release.wait(timeout=30.0)  # a hung volume: blocks, never raises
+            return real_open(path)  # pragma: no cover — released at teardown
+
+        monkeypatch.setattr(guarded_read, "open_regular_binary", _wedged)
+        started = time.monotonic()
+        try:
+            with pytest.raises(ReadStallError, match="stalled past") as excinfo:
+                read_capped_bytes_deadline(target, cap=64, deadline_s=0.2, what="capped read")
+        finally:
+            release.set()
+        assert time.monotonic() - started < 4.0  # bounded — never the pre-fix hang
+        assert isinstance(excinfo.value.__cause__, DeadlineExceeded)
+
+
+class TestStallSingleFlightGate:
+    """The per-path stall gate (the hostile-review MINOR-2 fold): a polled
+    site on a persistently wedged volume must never leak one abandoned
+    daemon PER POLL — later reads of a still-stalled path refuse instantly."""
+
+    def test_stalled_path_refuses_instantly_then_self_heals_on_late_return(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "payload.json"
+        target.write_bytes(b'{"a": 1}')
+        release = threading.Event()
+        real_read = guarded_read.read_regular_bytes
+        real_rwd = guarded_read.run_with_deadline
+        spawned: list[str] = []
+
+        def _wedged(path: Path | str) -> bytes:
+            release.wait(timeout=30.0)  # a hung volume: blocks, never raises
+            return real_read(path)
+
+        def _counting_rwd(
+            fn: Callable[[], bytes],
+            seconds: float,
+            *,
+            what: str = "guarded file read",
+            thread_name: str = "guarded-read",
+        ) -> bytes:
+            spawned.append(what)
+            return real_rwd(fn, seconds, what=what, thread_name=thread_name)
+
+        monkeypatch.setattr(guarded_read, "read_regular_bytes", _wedged)
+        monkeypatch.setattr(guarded_read, "run_with_deadline", _counting_rwd)
+        try:
+            # (1) The first poll blows its deadline and REGISTERS the path.
+            with pytest.raises(ReadStallError, match="stalled past"):
+                read_regular_bytes_deadline(target, deadline_s=0.2, what="first poll")
+            key = str(target)
+            assert key in guarded_read._STALLED_READS
+            # (2) Later polls of the SAME path refuse INSTANTLY — no new
+            #     reader daemon is spawned (the single-flight law), and the
+            #     refusal is the SAME OSError-subclass fold.
+            started = time.monotonic()
+            with pytest.raises(ReadStallError, match="refused"):
+                read_regular_bytes_deadline(target, deadline_s=30.0, what="second poll")
+            assert time.monotonic() - started < 1.0
+            # (3) The capped twin shares the SAME gate (one law, all readers).
+            with pytest.raises(ReadStallError, match="refused"):
+                read_capped_bytes_deadline(target, cap=64, deadline_s=30.0, what="capped poll")
+            assert spawned == ["first poll"]  # exactly ONE daemon ever spawned
+        finally:
+            release.set()
+        # (4) The abandoned worker finally returns — its ``finally`` sets the
+        #     done event; the gate SELF-HEALS lazily at the next consult.
+        done = guarded_read._STALLED_READS[str(target)]
+        assert done.wait(timeout=10.0), "the released worker never set its done event"
+        monkeypatch.undo()  # restore the real read + guard
+        assert read_regular_bytes_deadline(target) == b'{"a": 1}'
+        assert str(target) not in guarded_read._STALLED_READS  # entry deleted
+
+    def test_completed_just_after_expiry_never_registers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The completed-just-after-expiry race: the worker's ``finally`` set
+        the done event BEFORE the caller processed the expiry — nothing is
+        left in flight, so the path is NOT registered (the very next read
+        proceeds normally instead of a spurious refusal)."""
+        target = tmp_path / "payload.json"
+        target.write_bytes(b'{"a": 1}')
+
+        def _late_expiry(fn: Callable[[], bytes], *_args: object, **_kwargs: object) -> bytes:
+            fn()  # the worker COMPLETED (done set) ...
+            raise DeadlineExceeded("test read deadline exceeded (0.2s)")  # ... yet expired
+
+        monkeypatch.setattr(guarded_read, "run_with_deadline", _late_expiry)
+        with pytest.raises(ReadStallError, match="stalled past"):
+            read_regular_bytes_deadline(target, deadline_s=0.2, what="racy read")
+        assert str(target) not in guarded_read._STALLED_READS
+        monkeypatch.undo()
+        assert read_regular_bytes_deadline(target) == b'{"a": 1}'  # never refused
 
 
 def test_module_import_is_wheel_free() -> None:

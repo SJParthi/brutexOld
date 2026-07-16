@@ -2829,11 +2829,28 @@ hostile-review pass._
   the SIGALRM watchdog) + 7 primitive tests appended to
   `test_sidecar_read.py`; 7 existing-suite seam-drift repoints (monkeypatch
   targets moved from `Path.read_text`/`Path.read_bytes`/`builtins.open` to
-  the module-level guarded seams — each test's teeth preserved). GATES:
-  `guarded_read.py` 100.00% (41/8) + `sidecar_read.py` 100.00% (51/10) +
-  `movers_cache.py` 100.00% (455/174) on their ci.yml stanzas; the 139-file
-  unit battery 5729 passed / 0 failed; the 17-file integration batch 245
-  passed / 2 env-skips; ruff/ruff-format clean; `mypy --strict` 0 new (the
+  the module-level guarded seams — each test's teeth preserved).
+  HOSTILE-REVIEW FIX ROUND folded (same branch, pre-merge — coordinator SHIP
+  verdict; the per-finding record lives in MIGRATION.md #1832): (MINOR-1)
+  `health_hub._read_report_json` — the one polled-route read with defense (a)
+  only — gains the deadline via NEW COMMON
+  `guarded_read.read_capped_bytes_deadline` (the #1614 cap + one-byte
+  over-probe under BOTH defenses; a wedged report volume now degrades the
+  nightly lane to the honest `unknown` in bounded time); (MINOR-2) the
+  deadline tier gains a per-path NON-BLOCKING single-flight stall gate in
+  `_deadline_read` (the #1522 posture — a persistently wedged volume costs
+  AT MOST ONE abandoned daemon per path; later polls refuse instantly with
+  `ReadStallError`, the entry self-heals on the late return, spawn-failure +
+  completed-just-after-expiry never register — landed as a FIX, 100% reached
+  cleanly); (NIT-4) the stale `IsADirectoryError` comments in
+  `sweep_parallel.load_quarantined_tuple_labels` reworded; (NIT-3) the
+  glob-helper byte-identity docstring VERIFIED present. GATES (fix-round
+  re-measure): `guarded_read.py` 100.00% (68/14, 38 tests) +
+  `health_hub.py` 100.00% (176/38, 51 tests) + `sidecar_read.py` 100.00%
+  (51/10) + `movers_cache.py` 100.00% (455/174) on their ci.yml stanzas; the
+  139-file unit battery 5729 passed / 0 failed; the 17-file integration
+  batch 245 passed / 2 env-skips; the sweep_parallel trio 166 passed;
+  ruff/ruff-format clean; `mypy --strict` 0 new (the
   one `stage3_refine` cma import note is the pre-existing baseline,
   stash-verified); pyright 0 errors. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
