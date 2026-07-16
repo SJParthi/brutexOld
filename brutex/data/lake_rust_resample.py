@@ -437,9 +437,10 @@ def resample_frame_via_rust(
         # stale/foreign install.
         _warn_once("resample_result_refused", result_type=type(rust_bytes).__name__)
         return oracle(df_1m, target_tf_minutes)
+    decode_errors: tuple[type[Exception], ...] = (*_degrade_errors(), OSError)
     try:
         rust_df = pl.read_ipc(io.BytesIO(rust_bytes))
-    except (*_degrade_errors(), OSError) as exc:
+    except decode_errors as exc:
         # OSError joins the DECODE leg only (probed: polars' IPC reader
         # surfaces a truncated/corrupt in-memory payload as an OSError from
         # its seek) — a poisoned result payload degrades, never crashes.

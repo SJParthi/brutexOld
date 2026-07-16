@@ -9,6 +9,8 @@ section-for-section; the comparator here is FRAME-strength (dtype-exact —
 schema equality AND ``.equals``) instead of byte-strength.
 """
 
+# pyright: reportPrivateUsage=none
+
 from __future__ import annotations
 
 import io
@@ -18,12 +20,11 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pytest
-from structlog.testing import capture_logs
-
 from brutex.data import lake_rust_render as lrr
 from brutex.data import lake_rust_resample as lrs
 from brutex.data import tf_resampler
 from brutex.data.models import GREEKS_OVERLAY_FIELDS
+from structlog.testing import capture_logs
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -77,7 +78,7 @@ def _ipc(df: pl.DataFrame) -> bytes:
 
 def _fake_crate(
     *,
-    pinned: str = pl.__version__,
+    pinned: Any = pl.__version__,
     resample: Any = None,
     zstd: Any = None,
 ) -> types.ModuleType:
@@ -143,9 +144,7 @@ class TestFlagParsing:
             assert lrs.lake_rust_resample_enabled() is False
         assert logs == []
 
-    def test_whitespace_is_the_silent_default_off(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_whitespace_is_the_silent_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(lrs.LAKE_RUST_RESAMPLE_ENV, "   ")
         with capture_logs() as logs:
             assert lrs.lake_rust_resample_enabled() is False
@@ -231,7 +230,7 @@ class TestImportGuard:
         # A PR-1 era wheel imports fine but lacks resample_1m_ipc — the API
         # guard must latch crate_unavailable, never AttributeError mid-derive.
         module = _fake_crate()
-        del module.resample_all_ipc
+        delattr(module, "resample_all_ipc")
         out = _run(monkeypatch, module)
         assert out.equals(_ORACLE_DF)
         assert lrs._DISABLED_REASON[0] == "crate_unavailable"
@@ -250,9 +249,7 @@ class TestImportGuard:
 
 
 class TestVersionGuard:
-    def test_version_mismatch_latches_naming_both(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_version_mismatch_latches_naming_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
             out = _run(monkeypatch, _fake_crate(pinned="9.99.9"))
         assert out.equals(_ORACLE_DF)
@@ -279,9 +276,7 @@ class TestMetadataGuard:
         assert out.equals(_ORACLE_DF)
         assert lrs._DISABLED_REASON[0] == "crate_metadata_error"
 
-    def test_memoryerror_in_metadata_re_raises_raw(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_memoryerror_in_metadata_re_raises_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _oom() -> str:
             raise MemoryError
 
@@ -358,9 +353,7 @@ class TestBurnIn:
         assert out.equals(_ORACLE_DF)
         assert oracle.calls == 0
 
-    def test_engaged_info_fires_once_per_process(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_engaged_info_fires_once_per_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         zstd_calls = [0]
 
         def _zstd() -> str:
@@ -447,9 +440,7 @@ class TestDegradePaths:
         with pytest.raises(exc_type):
             lrs.resample_frame_via_rust(_df_1m(), 5, oracle=_CountingOracle())
 
-    def test_non_bytes_result_is_refuse_poison(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_bytes_result_is_refuse_poison(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with capture_logs() as logs:
             out = _run(monkeypatch, _fake_crate(resample=lambda i, t, o: 12345))
         assert out.equals(_ORACLE_DF)
@@ -522,16 +513,12 @@ class TestPanicBeltResolver:
         monkeypatch.setitem(sys.modules, "polars.exceptions", None)
         assert lrs._panic_belt_errors() == (Exception,)
 
-    def test_resolved_panic_class_joins_the_belt(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_resolved_panic_class_joins_the_belt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_panic_runtime(monkeypatch)
         monkeypatch.setitem(sys.modules, "polars.exceptions", None)
         assert lrs._panic_belt_errors() == (Exception, _FakePanicException)
 
-    def test_module_without_the_attr_is_skipped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_module_without_the_attr_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, "pyo3_runtime", types.ModuleType("pyo3_runtime"))
         monkeypatch.setitem(sys.modules, "polars.exceptions", None)
         assert lrs._panic_belt_errors() == (Exception,)
@@ -543,9 +530,7 @@ class TestPanicBeltResolver:
         monkeypatch.setitem(sys.modules, "polars.exceptions", None)
         assert lrs._panic_belt_errors() == (Exception,)
 
-    def test_duplicate_class_across_homes_folds_once(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_duplicate_class_across_homes_folds_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install_panic_runtime(monkeypatch)
         fake_pl = types.ModuleType("polars.exceptions")
         fake_pl.PanicException = _FakePanicException  # type: ignore[attr-defined]
@@ -655,6 +640,8 @@ class TestCrateSourceDriftPins:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        shim = (root / "rust" / "brutex-lake" / "python" / "brutex_lake" / "__init__.py").read_text()
+        shim = (
+            root / "rust" / "brutex-lake" / "python" / "brutex_lake" / "__init__.py"
+        ).read_text()
         for name in lrs._CRATE_API:
             assert name in shim, f"{name} missing from the brutex_lake shim re-exports"

@@ -100,7 +100,7 @@ def _frame(
     oi: list[int | None] | None = None,
     overlay: bool = False,
     naive: bool = False,
-) -> pl.DataFrame:
+) -> Any:
     n = len(instants)
     dtype = pl.Datetime("us") if naive else pl.Datetime("us", "UTC")
     ts = [i.replace(tzinfo=None) if naive else i for i in instants]
@@ -133,7 +133,7 @@ def _minutes(start: datetime, count: int) -> list[datetime]:
     return [start + timedelta(minutes=i) for i in range(count)]
 
 
-def _corpus() -> dict[str, pl.DataFrame]:
+def _corpus() -> dict[str, Any]:
     """The 9 committed corpus cases (a-i)."""
     regular = _frame(_minutes(_OPEN_UTC, 375))  # (a) full regular session
     muhurat = _frame(  # (b) 2025-10-21 evening Muhurat shape (18:15 IST on)
@@ -168,7 +168,7 @@ def _corpus() -> dict[str, pl.DataFrame]:
     }
 
 
-def _bomb_oracle(*_args: object, **_kwargs: object) -> pl.DataFrame:
+def _bomb_oracle(*_args: object, **_kwargs: object) -> Any:
     raise AssertionError(
         "the Python oracle was invoked on the engaged steady-state path — "
         "the crate degraded/refused instead of serving (parity run is vacuous)"
@@ -216,9 +216,7 @@ class TestResampleCorpusParity:
         assert lrs.rust_resample_disabled() is False
         assert lrs._BURN_IN_REMAINING[0] == before - 4
 
-    def test_identity_tf1_round_trips_the_frame(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_identity_tf1_round_trips_the_frame(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # (h) explicitly: the identity arm crosses the FFI and must come
         # back frame-equal (never byte-equal — a fresh IPC serialisation).
         df_1m = _corpus()["f_oi_greeks_overlay"]

@@ -234,9 +234,7 @@ def resample_1m_to_tf(df_1m, target_tf_minutes: int):  # type: ignore[no-untyped
         # verbatim Python body below as the LIVE parity oracle — every
         # guard/degrade/burn-in-mismatch path serves it, so resampled
         # values never depend on the wheel being present or correct.
-        return resample_frame_via_rust(
-            df_1m, target_tf_minutes, oracle=_resample_1m_to_tf_python
-        )
+        return resample_frame_via_rust(df_1m, target_tf_minutes, oracle=_resample_1m_to_tf_python)
     return _resample_1m_to_tf_python(df_1m, target_tf_minutes)
 
 
