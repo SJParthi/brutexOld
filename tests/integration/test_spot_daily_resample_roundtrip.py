@@ -332,3 +332,189 @@ def test_bounded_read_byte_identical_to_whole_tree(tmp_path: Path) -> None:
         new_bars = resample_1m_to_daily(bounded, before=before)
         old_bars = resample_1m_to_daily(_old_whole_tree(start, end), before=before)
         assert new_bars == old_bars, f"daily output diverged for [{start}, {end})"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Window-reader price-sanity gate (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
+# Phase-1 finding #12): make_lake_read_1m_window ran NEITHER price_sanity
+# NOR bad-tick pre-fix, so a corrupt bar yielded a CLEAN derived 1day via the
+# full prebuild but a POISONED 1day via the heal-recall / post-pull /
+# crossverify window path. The strengthened COMMON gate now runs here too.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _plant_nonfinite_window_1m(
+    lake_root: Path, *, column: str = "high", value: float, day: date = date(2025, 12, 31)
+) -> None:
+    """Raw-plant one non-finite *column* bar inside *day*'s 1-minute partition.
+
+    Raw pyarrow — the writer + the vendor parse (``to_price``) refuse
+    non-finite prices, so this shape is only ever planted/out-of-band
+    corrupt stored data (the #1067 raw-plant convention).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    open_utc = datetime(day.year, day.month, day.day, 3, 45, tzinfo=UTC)
+    dest = (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / _SEGMENT
+        / _SYMBOL
+        / "1minute"
+        / f"{open_utc.year:04d}"
+        / f"{open_utc.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = [open_utc + timedelta(minutes=i) for i in range(3)]
+    columns: dict[str, list[float]] = {
+        "open": [1400.0, 1401.0, 1402.0],
+        "high": [1410.0, 1411.0, 1412.0],
+        "low": [1395.0, 1396.0, 1397.0],
+        "close": [1402.0, 1403.0, 1404.0],
+    }
+    columns[column][0] = value  # bar 0 carries the non-finite poison
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array(columns["open"], type=pa.float64()),
+                "high": pa.array(columns["high"], type=pa.float64()),
+                "low": pa.array(columns["low"], type=pa.float64()),
+                "close": pa.array(columns["close"], type=pa.float64()),
+                "volume": pa.array([10, 10, 10], type=pa.int64()),
+                "open_interest": pa.array([None, None, None], type=pa.int64()),
+            }
+        ),
+        dest,
+    )
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+def test_window_reader_rejects_nonfinite_rows(tmp_path: Path, value: float) -> None:
+    """FAILS-BEFORE (finding #12): pre-fix the window reader RETURNED the
+    frame with ``high ∈ {inf, NaN}`` silently — no raise, no skip, no count —
+    and the daily max aggregation minted a poisoned derived ``1day``."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_nonfinite_window_1m(tmp_path, value=value)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    with pytest.raises(ResampleInputError, match="price-insane") as excinfo:
+        read()
+    assert f"{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute" in str(excinfo.value)
+
+
+def test_window_reader_misordered_bar_also_rejected(tmp_path: Path) -> None:
+    """The wired gate is the FULL price-sanity law (finiteness + positivity +
+    ordering), not a finiteness-only sliver: a ``high < low`` bar in the
+    window is refused too (pre-fix it laundered into the derived 1day)."""
+    from brutex.data.errors import ResampleInputError
+
+    # high below low: plant low above the constant highs.
+    _plant_nonfinite_window_1m(tmp_path, column="low", value=99999.0)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    with pytest.raises(ResampleInputError, match="price-insane"):
+        read()
+
+
+def test_window_reader_corrupt_row_outside_window_reads_clean(tmp_path: Path) -> None:
+    """VALIDATE-WHAT-YOU-RETURN (the DEC-READ-GUARD-PARITY-001 law): the gate
+    runs on the WINDOW-CUT frame only, so a corrupt bar strictly OUTSIDE
+    ``[start, end)`` never blanks an earlier window's read."""
+    _write_1m(tmp_path)  # clean 2025-12-31 + 2026-01-02 sessions
+    # Poison a LATER session (2026-01-05) the window below excludes.
+    _plant_nonfinite_window_1m(tmp_path, value=float("inf"), day=date(2026, 1, 5))
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    frame = read()
+    assert frame.height == 30  # the clean 2025-12-31 session, served intact
+    assert frame.get_column("high").is_finite().all()
+
+
+def test_window_reader_clean_lake_is_pure_pass_through(tmp_path: Path) -> None:
+    """HEALTHY-LAKE IDENTITY PIN (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): on
+    a clean lake the wired gate changes NOTHING — the window reader's frame
+    equals the raw parquet content under the same rename/filter/select/sort."""
+    import polars as pl
+
+    _write_1m(tmp_path)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 3),
+    )
+    frame = read()
+    raw = pl.read_parquet(
+        (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute").as_posix()
+        + "/**/*.parquet"
+    )
+    ist_date = (pl.col("ts_utc") + pl.duration(hours=5, minutes=30)).dt.date()
+    expected = (
+        raw.rename({"timestamp": "ts_utc"})
+        .with_columns(ist_date.alias("_ist_date"))
+        .filter(
+            (pl.col("_ist_date") >= date(2025, 12, 31)) & (pl.col("_ist_date") < date(2026, 1, 3))
+        )
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+    assert frame.equals(expected)
+
+
+def test_derive_daily_quarantines_nonfinite_target_no_crash(tmp_path: Path) -> None:
+    """END-TO-END (the heal-recall / crossverify shape): a poisoned window
+    target is counted ``errored`` by ``derive_daily_for_targets``'s
+    per-target quarantine — the pass completes, NO ``1day`` is written and
+    nothing crashes (pre-fix the poison silently derived a corrupt 1day)."""
+    from brutex.data.spot_daily_resample import DailyDeriveTarget, derive_daily_for_targets
+
+    _plant_nonfinite_window_1m(tmp_path, value=float("inf"))
+    target = DailyDeriveTarget(
+        exchange=_EXCHANGE,
+        segment=_SEGMENT,
+        symbol=_SYMBOL,
+        start=date(2025, 12, 31),
+        end=date(2026, 1, 1),
+    )
+    report = derive_daily_for_targets(
+        targets=[target],
+        build_read_1m=lambda t: make_lake_read_1m_window(
+            lake_root=tmp_path,
+            exchange=t.exchange,
+            segment=t.segment,
+            symbol=t.symbol,
+            start=t.start,
+            end=t.end,
+        ),
+        build_write_1day=lambda t: make_lake_write_1day(
+            lake_root=tmp_path, exchange=t.exchange, segment=t.segment, symbol=t.symbol
+        ),
+        before=date(2026, 6, 19),
+    )
+    assert report.errored == 1
+    assert report.derived == 0
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1day").exists()
