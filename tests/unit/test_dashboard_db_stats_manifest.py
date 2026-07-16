@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading as _threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -1852,6 +1853,269 @@ class TestProvenanceEvent:
         assert [e["kind"] for e in reads] == [lsm.KIND_OPTIONS, lsm.KIND_OPTIONS]
         assert [e["series"] for e in reads] == [_OPT_SERIES, _OPT_SERIES]
         assert [e["log_level"] for e in reads] == ["info", "info"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Consult stat deadline (DEC-DASHBOARD-COLD-IO-DEADLINE-001, BUG-2b)
+# ────────────────────────────────────────────────────────────────────────
+#
+# REVERSION-GATE DISCIPLINE (ci.yml validate_bugfix_reversion.py): no new name
+# is imported at module level (the timeout-shape helpers come off the already-
+# imported ``lsm``/``db_view`` module objects INSIDE the tests), so this file
+# still collects at the merge-base and W4 fails with its GENUINE
+# watchdog-caught HANG shape rather than a collection error.
+
+
+@contextmanager
+def _wedged_dataset_stat(
+    monkeypatch: pytest.MonkeyPatch, dataset_root: Path
+) -> Generator[_threading.Event, None, None]:
+    """Monkeypatch ``os.stat`` to BLOCK (on a test Event) for *dataset_root* files.
+
+    DuckDB's C-level parquet reads are UNAFFECTED by a Python-level ``os.stat``
+    patch, so the legacy scan the request degrades to completes normally —
+    only the manifest's Python-side metadata sweeps see the wedge. The real
+    ``os.stat`` is captured INSIDE this fixture (never module-level — the
+    bench stat-spy law); the Event is released in ``finally`` (zombie
+    hygiene + un-wedging the merge-base fails-before run after the watchdog).
+    """
+    release = _threading.Event()
+    real_stat = os.stat
+    prefix = str(dataset_root)
+
+    def _wedge(path: Any, *args: Any, **kwargs: Any) -> Any:
+        # File-scoped (the audited BUG-2 shape: the per-FILE stat sweeps):
+        # the dataset DIRECTORY's pre-existing early empty-partition guard
+        # stat (query_candles' ``base.is_dir()``) stays unwedged — it is
+        # OUTSIDE this pack's scope (the disclosed legacy-scan residue).
+        text = str(path)
+        if isinstance(path, (str, Path)) and text.startswith(prefix) and text.endswith(".parquet"):
+            release.wait(30.0)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", _wedge)
+    try:
+        yield release
+    finally:
+        release.set()
+
+
+class TestConsultDeadline:
+    def test_wedged_consult_serves_legacy_byte_equal_and_never_seeds(
+        self, conn: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W4 — a WEDGED consult degrades the /db click to legacy, bounded.
+
+        DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2b).
+        Fails-before shape: at the merge-base the wedged consult blocks the
+        request thread until ``_hang_watchdog(5)`` raises — a clean LOUD
+        failure. Pass-after: the request completes inside the watchdog with
+        page + total + span byte-EQUAL to the kill-switch legacy run,
+        ``page_source="live_scan"``, ONE NAMED ``consult_deadline`` fallback,
+        the SEED fully suppressed (``_seed_stats_manifest`` spy: ZERO calls)
+        AND no ``statseed|`` latch entry — so a later HEALTHY drift-shaped
+        fallback still seeds (the suppression is timeout-scoped).
+        """
+        root = tmp_path
+        _write_months(root)
+        _seed_by_reading(conn, root)
+        # The kill-switch LEGACY oracle payload (no manifest consult at all).
+        monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, lsm.STATS_MANIFEST_OFF)
+        legacy = _q(conn, root, use=True)
+        monkeypatch.delenv(lsm.STATS_MANIFEST_ENV)
+        monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+        seed_calls = {"n": 0}
+        real_seed = db_view._seed_stats_manifest
+
+        def _seed_spy(*args: Any, **kwargs: Any) -> bool:
+            seed_calls["n"] += 1
+            return real_seed(*args, **kwargs)
+
+        monkeypatch.setattr(db_view, "_seed_stats_manifest", _seed_spy)
+        cache = MoversSnapshotCache()
+        dataset_root = lsm.dataset_dir(root, lsm.KIND_BARS, _COORDS)
+        with _wedged_dataset_stat(monkeypatch, dataset_root) as release:
+            with capture_logs() as logs, _hang_watchdog(5):
+                wedged = _q(conn, root, use=True, count_cache=cache, generation=7)
+            release.set()
+        assert wedged == legacy  # byte-equal legacy degrade, never a 500/hang
+        clauses = [e["clause"] for e in logs if e["event"] == "lake.stats_manifest.fallback"]
+        # TWO consults on one intraday click (the page dataset + the %CHNG
+        # baseline pruner's _bars_file_windows — the SAME wedged lake), each
+        # naming the deadline clause per the per-consult clause convention.
+        assert clauses == ["consult_deadline", "consult_deadline"]
+        reads = [e for e in logs if e["event"] == "db.stats_manifest.read"]
+        assert len(reads) == 1
+        assert reads[0]["page_source"] == "live_scan"
+        assert reads[0]["validated"] is False
+        # SEED SUPPRESSION: zero attempts + no statseed| latch entry, so a
+        # later healthy absent-shard click STILL seeds (recovery unpoisoned).
+        assert seed_calls["n"] == 0
+        assert not any(str(k).startswith("statseed|") for k in cache._entries)
+        # Post-release, a healthy click with the shard DELETED (a plain
+        # drift-shaped fallback) seeds normally — timeout-scoped suppression.
+        deadline = datetime.now(UTC) + timedelta(seconds=5)
+        while lsm._SWEEP_GATE.wedged(str(root)) and datetime.now(UTC) < deadline:
+            pass
+        assert not lsm._SWEEP_GATE.wedged(str(root))
+        _shard_path(root).unlink()
+        healthy = _q(conn, root, use=True, count_cache=cache, generation=8)
+        assert healthy == legacy
+        assert seed_calls["n"] == 1  # the seed ran on the HEALTHY fallback
+
+    def test_wedged_toctou_restat_degrades_whole_request(
+        self, conn: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedge landing AFTER validation bounds the post-fetch re-stat.
+
+        The flag-armed shim wedges ONLY once the consult has validated (the
+        mid-request wedge shape): the TOCTOU re-stat times out → clause
+        ``restat_deadline`` (NOT ``stat_token_moved`` — a volume outage is
+        never misattributed as data drift) → the whole-request legacy rerun,
+        byte-equal.
+        """
+        root = tmp_path
+        _write_months(root)
+        _seed_by_reading(conn, root)
+        monkeypatch.setenv(lsm.STATS_MANIFEST_ENV, lsm.STATS_MANIFEST_OFF)
+        legacy = _q(conn, root, use=True)
+        monkeypatch.delenv(lsm.STATS_MANIFEST_ENV)
+        monkeypatch.setenv("BRUTEX_LAKE_STAT_DEADLINE_S", "0.05")
+        armed = _threading.Event()
+        release = _threading.Event()
+        real_stat = os.stat
+        dataset_prefix = str(lsm.dataset_dir(root, lsm.KIND_BARS, _COORDS))
+
+        def _wedge_when_armed(path: Any, *args: Any, **kwargs: Any) -> Any:
+            text = str(path)
+            if (
+                armed.is_set()
+                and isinstance(path, (str, Path))
+                and text.startswith(dataset_prefix)
+                and text.endswith(".parquet")
+            ):
+                release.wait(30.0)
+            return real_stat(path, *args, **kwargs)
+
+        real_guarded = lsm.load_valid_dataset_stats_guarded
+
+        def _arm_after_validation(*args: Any, **kwargs: Any) -> Any:
+            consult = real_guarded(*args, **kwargs)
+            armed.set()  # the wedge lands AFTER a clean validation
+            return consult
+
+        monkeypatch.setattr(os, "stat", _wedge_when_armed)
+        monkeypatch.setattr(db_view, "load_valid_dataset_stats_guarded", _arm_after_validation)
+        try:
+            with capture_logs() as logs, _hang_watchdog(5):
+                wedged = _q(conn, root, use=True)
+        finally:
+            release.set()
+        assert wedged == legacy
+        clauses = [e["clause"] for e in logs if e["event"] == "lake.stats_manifest.fallback"]
+        # The page request's restat breach, then the %CHNG baseline pruner's
+        # LATCHED consult on the same (now wedged) lake — never a moved-token
+        # misattribution.
+        assert clauses == ["restat_deadline", "consult_deadline"]
+        assert all(e["event"] != "stat_token_moved" for e in logs)
+        # The restat_deadline event carries NO rel key (never fabricated).
+        restat = [
+            e
+            for e in logs
+            if e["event"] == "lake.stats_manifest.fallback" and e["clause"] == "restat_deadline"
+        ]
+        assert "rel" not in restat[0]
+        reads = [e for e in logs if e["event"] == "db.stats_manifest.read"]
+        assert reads[0]["page_source"] == "live_scan"
+        deadline = datetime.now(UTC) + timedelta(seconds=5)
+        while lsm._SWEEP_GATE.wedged(str(root)) and datetime.now(UTC) < deadline:
+            pass
+        assert not lsm._SWEEP_GATE.wedged(str(root))
+
+
+class TestShouldSeedMatrix:
+    def test_timed_out_consult_never_seeds(self, conn: Any, tmp_path: Path) -> None:
+        """``consult_timed_out=True`` suppresses the seed; plain ``None`` stats seed."""
+        ctx_timed_out = _StatsReadContext(
+            conn=conn,
+            lake_root=tmp_path,
+            kind=lsm.KIND_BARS,
+            key=dict(_COORDS),
+            base=tmp_path,
+            identity=("timestamp",),
+            stats=None,
+            consult_timed_out=True,
+        )
+        assert ctx_timed_out.should_seed is False
+        ctx_plain_miss = _StatsReadContext(
+            conn=conn,
+            lake_root=tmp_path,
+            kind=lsm.KIND_BARS,
+            key=dict(_COORDS),
+            base=tmp_path,
+            identity=("timestamp",),
+            stats=None,
+        )
+        assert ctx_plain_miss.should_seed is True
+
+
+class TestBarsFileWindowsTimeout:
+    def test_timeout_returns_none_without_the_grammar_listing(
+        self, conn: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A timed-out consult must NOT fall into the O(files) ``rglob`` listing.
+
+        The D1 hole, closed: the grammar arm's ``base.rglob`` would run the
+        next O(files) metadata sweep against the SAME wedged volume. A
+        timeout returns ``None`` (the existing "cannot bound → legacy
+        whole-glob bind" contract) with the rglob spy proving the grammar
+        arm NEVER ran; a PLAIN failed consult (no timeout) still runs it.
+        """
+        root = tmp_path
+        _write_months(root)
+        base = lsm.dataset_dir(root, lsm.KIND_BARS, _COORDS)
+        rglob_calls = {"n": 0}
+        real_rglob = Path.rglob
+
+        def _rglob_spy(self: Path, pattern: str) -> Any:
+            rglob_calls["n"] += 1
+            return real_rglob(self, pattern)
+
+        monkeypatch.setattr(Path, "rglob", _rglob_spy)
+        monkeypatch.setattr(
+            db_view,
+            "load_valid_dataset_stats_guarded",
+            lambda *a, **k: lsm.StatsConsult(None, timed_out=True),
+        )
+        assert (
+            db_view._bars_file_windows(
+                root,
+                base,
+                exchange=_COORDS["exchange"],
+                segment=_COORDS["segment"],
+                symbol=_COORDS["symbol"],
+                interval=_COORDS["interval"],
+            )
+            is None
+        )
+        assert rglob_calls["n"] == 0  # the grammar arm never touched the volume
+        # A PLAIN miss (no shard, no timeout) DOES run the grammar listing.
+        monkeypatch.setattr(
+            db_view,
+            "load_valid_dataset_stats_guarded",
+            lambda *a, **k: lsm.StatsConsult(None),
+        )
+        windows = db_view._bars_file_windows(
+            root,
+            base,
+            exchange=_COORDS["exchange"],
+            segment=_COORDS["segment"],
+            symbol=_COORDS["symbol"],
+            interval=_COORDS["interval"],
+        )
+        assert windows is not None
+        assert rglob_calls["n"] == 1
+        assert len(windows) == 3
 
 
 class TestOPageClaimsRetired:

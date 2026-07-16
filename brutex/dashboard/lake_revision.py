@@ -105,9 +105,24 @@ from typing import Final, TypeVar, cast
 
 import structlog
 
+from brutex.data.stat_deadline import StatSweepGate, StatSweepTimeout
+
 _LOG = structlog.get_logger("brutex.dashboard.lake_revision")
 
 _T = TypeVar("_T")
+
+#: The composite generation probe's deadline gate
+#: (DEC-DASHBOARD-COLD-IO-DEADLINE-001, guarantee-audit BUG-2c) — ONE
+#: :func:`~brutex.config.deadline.run_with_deadline` daemon per
+#: :func:`lake_revision` call (never per component stat), keyed per
+#: ``str(lake_root)``; a breach latches the key so a wedged volume costs
+#: ZERO threads per later poll until the zombie probe returns. The
+#: single-component probes (:func:`rate_bridge_revision` et al.) stay
+#: unguarded here — their callers own their guards (the RateBridgeCache
+#: precedent) or serve-last-known on ``None``. This import keeps the
+#: module's lean-import law: :mod:`brutex.data.stat_deadline` is
+#: config-layer + structlog only.
+_PROBE_GATE: Final[StatSweepGate] = StatSweepGate(what="lake revision probe")
 
 #: Stable sentinel component for a lake whose window ledger / sweeps tree does
 #: not exist yet (a fresh/empty lake, or one populated before the ledger
@@ -653,6 +668,27 @@ def _greeks_backfill_revision(lake_root: Path) -> str | None:
     )
 
 
+def _lake_revision_probe(lake_root: Path) -> str | None:
+    """The composite probe body — extracted VERBATIM for the deadline gate.
+
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001: :func:`lake_revision` runs this whole
+    composite (≥4 stats + the O(dirs) sweeps scandir) under ONE
+    :data:`_PROBE_GATE` daemon, so the extraction keeps the pre-guard
+    behaviour byte-identical while the public function owns the timeout →
+    ``None`` mapping.
+    """
+    ledger = _ledger_revision(lake_root)
+    if ledger is None:
+        return None
+    sweeps = sweeps_revision(lake_root)
+    if sweeps is None:
+        return None
+    greeks = _greeks_backfill_revision(lake_root)
+    if greeks is None:
+        return None
+    return f"{ledger}|{sweeps}|{greeks}"
+
+
 def lake_revision(lake_root: Path) -> str | None:
     """Return the composite O(1)/O(dirs) content token for *lake_root*, or ``None``.
 
@@ -667,6 +703,20 @@ def lake_revision(lake_root: Path) -> str | None:
     that does not exist yet contributes the stable :data:`ABSENT_TOKEN`
     sentinel (its creation moves the composite exactly once).
 
+    DEC-DASHBOARD-COLD-IO-DEADLINE-001 (guarantee-audit BUG-2c): the whole
+    composite runs under the :data:`_PROBE_GATE` deadline
+    (``BRUTEX_LAKE_STAT_DEADLINE_S``, default 5 s) — a WEDGED volume's probe
+    times out to the module's EXACT existing ``None`` "unknown, no signal"
+    contract (never a fabricated token, never :data:`ABSENT_TOKEN` — a
+    fabricated flip would double-invalidate every generation-keyed cache and
+    storm the wedged volume), and while the zombie probe stays wedged every
+    later call returns ``None`` instantly with ZERO new threads (the
+    breach-armed latch). The gate's own WARN/recovered events carry the
+    outage story. Healthy-path cost: one short-lived daemon spawn/join per
+    probe call (~0.1 ms) on top of the existing stat+scandir composite —
+    every healthy probe still returns a real token (no memo, no
+    in-flight-``None``: concurrent healthy probes all proceed).
+
     Parameters
     ----------
     lake_root
@@ -678,20 +728,16 @@ def lake_revision(lake_root: Path) -> str | None:
     str | None
         The composite token, or ``None`` — "unknown, no signal" — when ANY
         component probe failed with a non-missing-file :class:`OSError`
-        (logged inside the component). ``None`` tells the caller to make NO
-        freshness decision (never a spurious invalidation, never a masked
-        error).
+        (logged inside the component) OR the whole probe blew the stat
+        deadline. ``None`` tells the caller to make NO freshness decision
+        (never a spurious invalidation, never a masked error).
     """
-    ledger = _ledger_revision(lake_root)
-    if ledger is None:
+    try:
+        return _PROBE_GATE.run(
+            str(lake_root), lambda: _lake_revision_probe(lake_root), op="lake_revision"
+        )
+    except StatSweepTimeout:
         return None
-    sweeps = sweeps_revision(lake_root)
-    if sweeps is None:
-        return None
-    greeks = _greeks_backfill_revision(lake_root)
-    if greeks is None:
-        return None
-    return f"{ledger}|{sweeps}|{greeks}"
 
 
 __all__ = [
