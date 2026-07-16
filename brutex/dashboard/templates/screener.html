@@ -157,9 +157,11 @@
 
   <div id="bxTip" hidden></div>
 
-<!-- The page wiring moved VERBATIM into the shared
+<!-- The page wiring was ported into the shared
      /static/bx-screener-panel.js (DEC-OPERATOR-PAGE-CONSOLIDATE-001):
-     it self-mounts on the data-bx-autopanel="screener" attribute above
+     the top100 load now rides the getTop100 promise memo (+ BXUI
+     skeleton/errorCard and a loadGen stale-response guard); it
+     self-mounts on the data-bx-autopanel="screener" attribute above
      (?run_id= wins, else the latest discovered run). -->
 </body>
 </html>
