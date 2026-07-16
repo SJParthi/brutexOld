@@ -136,9 +136,14 @@ class TestMixedArmMutualExclusion:
         finally:
             # Only close what was NOT consumed/closed above — a blind close
             # would double-close a released fd (fd-number reuse hazard).
-            for leftover in (rust_fd, py_fd, rust_fd2):
-                if leftover >= 0:
-                    os.close(leftover)
+            # Explicit per-fd statements (not a tuple loop) so static
+            # dataflow checkers can follow each fd to its close.
+            if rust_fd >= 0:
+                os.close(rust_fd)
+            if py_fd >= 0:
+                os.close(py_fd)
+            if rust_fd2 >= 0:
+                os.close(rust_fd2)
 
     def test_two_process_belt_python_holder_rust_waiter(self, tmp_path: Path) -> None:
         """The cross-PROCESS belt: a subprocess Python holder excludes this
