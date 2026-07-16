@@ -183,6 +183,66 @@ class TestListOwedDays:
         junk = _events(logs, "crossverify.owed_junk_entry")
         assert {entry["name"] for entry in junk} == {repr("notes.txt"), repr("not-a-date.json")}
 
+    def test_basic_iso_name_is_junk_not_owed(self, tmp_path: Path) -> None:
+        # Refuter round-3 MINOR-1: since Python 3.11 date.fromisoformat also
+        # accepts basic ISO ("20260714") — a superset of the canonical
+        # <YYYY-MM-DD> the write/clear path produces. A foreign-planted
+        # basic-ISO name must be JUNK (warned, never owed) — pre-fix it read
+        # owed FOREVER (clear_owed unlinks only the canonical name).
+        owed_dir(tmp_path).mkdir(parents=True)
+        (owed_dir(tmp_path) / "20260714.json").write_text("{}")
+        with structlog.testing.capture_logs() as logs:
+            assert list_owed_days(tmp_path) == []
+        (junk,) = _events(logs, "crossverify.owed_junk_entry")
+        assert junk["name"] == repr("20260714.json")
+
+    def test_week_date_name_is_junk_not_owed(self, tmp_path: Path) -> None:
+        # Refuter round-3 MINOR-1 twin: the ISO WEEK spelling ("2026-W28-1")
+        # also parses under fromisoformat — must be junk, never owed.
+        owed_dir(tmp_path).mkdir(parents=True)
+        (owed_dir(tmp_path) / "2026-W28-1.json").write_text("{}")
+        with structlog.testing.capture_logs() as logs:
+            assert list_owed_days(tmp_path) == []
+        (junk,) = _events(logs, "crossverify.owed_junk_entry")
+        assert junk["name"] == repr("2026-W28-1.json")
+
+    def test_canonical_plus_basic_pair_owed_exactly_once(self, tmp_path: Path) -> None:
+        # Refuter round-3 MINOR-1: a canonical + basic-ISO pair for the SAME
+        # day must list the date EXACTLY ONCE (pre-fix: twice ⇒ D3 ran the
+        # day twice per scan + a double panel entry) with the basic spelling
+        # junk-warned.
+        mark_owed(tmp_path, date(2026, 7, 14), source="s")
+        (owed_dir(tmp_path) / "20260714.json").write_text("{}")
+        with structlog.testing.capture_logs() as logs:
+            assert list_owed_days(tmp_path) == [date(2026, 7, 14)]
+        (junk,) = _events(logs, "crossverify.owed_junk_entry")
+        assert junk["name"] == repr("20260714.json")
+
+    def test_immortal_clear_repro_is_dead(self, tmp_path: Path) -> None:
+        # Refuter round-3 MINOR-1, the demonstrated repro pinned dead: plant
+        # the basic-ISO name, complete + clear the day — the day must NOT
+        # still read owed (pre-fix: clear_owed unlinked only the canonical
+        # name, so the planted spelling kept the day owed FOREVER — a
+        # perpetual in-window D3 rerun / permanent beyond-window WARN).
+        day = date(2026, 7, 14)
+        owed_dir(tmp_path).mkdir(parents=True)
+        (owed_dir(tmp_path) / "20260714.json").write_text("{}")
+        assert clear_owed(tmp_path, day) is True  # unlinks the canonical name only
+        with structlog.testing.capture_logs() as logs:
+            assert list_owed_days(tmp_path) == []  # the plant is junk, not owed
+        assert len(_events(logs, "crossverify.owed_junk_entry")) == 1
+
+    def test_atomic_write_temp_skipped_silently(self, tmp_path: Path) -> None:
+        # Refuter round-3 NIT-1: a scan racing an in-flight mark_owed sees
+        # the atomic-write temp (`.brutex-write-*`, atomic_io.py) —
+        # production-reachable (panel poll vs a pull's mark). It must be
+        # skipped SILENTLY: not owed, and NO spurious junk WARN.
+        mark_owed(tmp_path, _DAY, source="s")
+        (owed_dir(tmp_path) / ".brutex-write-abc123.parquet.tmp").write_text("{}")
+        with structlog.testing.capture_logs() as logs:
+            assert list_owed_days(tmp_path) == [_DAY]
+        assert _events(logs, "crossverify.owed_junk_entry") == []
+
     def test_planted_fifo_still_reads_owed_never_opened(self, tmp_path: Path) -> None:
         """The names-only law: a FIFO named as a valid day is OWED and the
         scan never opens it — a plain read would block FOREVER for a writer."""
