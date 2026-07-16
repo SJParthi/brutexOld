@@ -3236,6 +3236,38 @@ jobs:
           pip install dist/*.whl
           python ../../scripts/check_vocab_rust_parity.py
 
+  rust-brutexd:
+    name: Rust (brutexd build + clippy + test)
+    # Rust-uniformity Wave 1 (roadmap PR-1): the brutexd HTTP front crate
+    # gates itself — fmt/check/clippy/test, mirroring the fno-math job
+    # pattern. The Python-side parity suite
+    # (tests/integration/test_sidecar_parity_static.py) additionally builds
+    # this crate inside the test job whenever cargo is present.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/brutexd
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt,clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/brutexd -> target
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --release
+
   # ─────────────────────────────────────────────────────────────────
   # MAKE RUN SMOKE — cold-start direct-run path, the gate that catches
   # "100% green but the app won't start" bugs (DEC-RUN-SMOKE-GATE-001).
@@ -4505,6 +4537,9 @@ jobs:
       - licenses
       - rust
       - rust-trading-core
+      # Rust-uniformity Wave 1: the brutexd front crate's own gate — the PR
+      # that introduces a crate must gate that crate (roadmap PR-1).
+      - rust-brutexd
       # DEC-RUN-SMOKE-GATE-001: the cold-start boot gate (the `make run-raw`
       # dependency set — `make run` itself delegates to ./up.sh per
       # DEC-ONE-ENTRY-UNIFY-001) — the ONLY job that walks the real direct
@@ -4617,6 +4652,7 @@ jobs:
           echo "  licenses:      ${{ needs.licenses.result }}"
           echo "  rust:          ${{ needs.rust.result }}"
           echo "  rust-tcore:    ${{ needs.rust-trading-core.result }}"
+          echo "  rust-brutexd:  ${{ needs.rust-brutexd.result }}"
           echo "  run-smoke:     ${{ needs.run-smoke.result }}"
           echo "  banned:        ${{ needs.banned.result }}"
           echo "  no-dhan-guard: ${{ needs.no-dhan-guard.result }}"
@@ -4654,6 +4690,7 @@ jobs:
             "${{ needs.licenses.result }}" \
             "${{ needs.rust.result }}" \
             "${{ needs.rust-trading-core.result }}" \
+            "${{ needs.rust-brutexd.result }}" \
             "${{ needs.run-smoke.result }}" \
             "${{ needs.banned.result }}" \
             "${{ needs.no-dhan-guard.result }}" \

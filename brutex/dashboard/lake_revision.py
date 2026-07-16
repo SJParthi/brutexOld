@@ -391,6 +391,12 @@ def registry_revision(registry_path: Path) -> str | None:
     DEC-O1-GUARANTEE-HARDEN-001 (the H1 registry-pager count cache): the ``/db``
     registry pagers' FILTERED ``COUNT(*)`` totals are paging-invariant, so they
     are memoised per registry CONTENT — and this token is the content signal.
+    The SECOND consumer (DEC-MEMORY-FOOTPRINT-HARDENING-001, consolidated onto
+    this ONE probe at the merge-reconcile — the two in-flight twins collapsed
+    per Golden Rule #11 COMMON): the options expiry-calendar / strike-chain /
+    CANDIDATE cache keys fold it at the ``app.py`` key-build sites
+    (``_registry_key_component``), so a CROSS-PROCESS metadata pull — which
+    bumps NO write generation — re-keys them on the next poll.
     TWO stat probes folded into one token (O(1), never a table read):
 
     * the ``registry.duckdb`` file itself — a metadata pull's write session
