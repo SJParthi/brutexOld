@@ -102,9 +102,9 @@ def _derive_intraday_tfs_rust(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame]:
     """
     # Friend imports of the resampler's validation gate + pre-seam body (the
     # DEC-P0-017 convention — deliberate cross-module reuse, never a copy).
-    from brutex.data.tf_resampler import (  # pyright: ignore[reportPrivateUsage]
-        _resample_1m_to_tf_python,
-        _validate_input,
+    from brutex.data.tf_resampler import (
+        _resample_1m_to_tf_python,  # pyright: ignore[reportPrivateUsage]
+        _validate_input,  # pyright: ignore[reportPrivateUsage]
     )
 
     _validate_input(df_1m)

@@ -110,9 +110,9 @@ def _derive_fno_intraday_tfs_rust(df_1m: pl.DataFrame) -> dict[str, pl.DataFrame
     Greeks-overlay columns ride the crate's carry-last PRESENCE law, so an
     OI-less frame's output stays the OHLCV-6 verbatim on both arms.
     """
-    from brutex.data.tf_resampler import (  # pyright: ignore[reportPrivateUsage]
-        _resample_1m_to_tf_python,
-        _validate_input,
+    from brutex.data.tf_resampler import (
+        _resample_1m_to_tf_python,  # pyright: ignore[reportPrivateUsage]
+        _validate_input,  # pyright: ignore[reportPrivateUsage]
     )
 
     _validate_input(df_1m)

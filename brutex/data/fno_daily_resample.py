@@ -126,8 +126,8 @@ def _fno_daily_restamp_oracle(daily: pl.DataFrame, before: date) -> pl.DataFrame
     positional ``(frame, before)`` oracle signature.
     """
     # Friend import (DEC-P0-017 — deliberate cross-module reuse, never a copy).
-    from brutex.data.spot_daily_resample import (  # pyright: ignore[reportPrivateUsage]
-        _daily_restamp_frame_python,
+    from brutex.data.spot_daily_resample import (
+        _daily_restamp_frame_python,  # pyright: ignore[reportPrivateUsage]
     )
 
     return _daily_restamp_frame_python(daily, before, keep_oi=True)
