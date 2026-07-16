@@ -99,6 +99,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+// ADR-0020 Wave C row 4 (+ the row-5 rider): the canonical stats-shard JSON
+// render + the crate-internal partition twins — DEC-LAKE-RUST-STATS-MANIFEST-001
+// (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
+pub mod stats_shard;
+
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -325,6 +330,9 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
+    // Appended AFTER the PR-1 trio, never reordering them (§4.1 — the
+    // concurrent-sibling additive-registration merge law).
+    m.add_function(wrap_pyfunction!(stats_shard::render_stats_shard_json, m)?)?;
     Ok(())
 }
 

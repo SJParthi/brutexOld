@@ -29,6 +29,7 @@ from brutex_lake._brutex_lake import (
     linked_zstd_version,
     pinned_polars_version,
     render_parquet_from_ipc,
+    render_stats_shard_json,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "linked_zstd_version",
     "pinned_polars_version",
     "render_parquet_from_ipc",
+    "render_stats_shard_json",
 ]

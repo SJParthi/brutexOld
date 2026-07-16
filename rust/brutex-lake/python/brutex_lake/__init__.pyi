@@ -20,3 +20,24 @@ def pinned_polars_version() -> str:
 
 def linked_zstd_version() -> str:
     """The libzstd version linked into this build (runtime-probed, e.g. ``"1.5.7"``)."""
+
+def render_stats_shard_json(
+    version: int,
+    kind: str,
+    key: tuple[tuple[str, str], ...],
+    identity_key: tuple[str, ...],
+    row_count: int,
+    min_ts_iso: str,
+    max_ts_iso: str,
+    files: tuple[tuple[str, int, str, str, int, int, str | None], ...],
+    updated_utc: str,
+) -> str:
+    """Render the canonical stats-shard JSON (DEC-LAKE-RUST-STATS-MANIFEST-001).
+
+    Byte-identical to ``lake_stats_manifest.render_shard``'s
+    ``json.dumps(payload, sort_keys=True, separators=(",", ":"))`` for the
+    same pre-formatted payload (ints + isoformat strings only — no floats
+    ever cross this boundary). Raises ``TypeError``/``OverflowError``/
+    ``UnicodeEncodeError`` on extraction failures and ``RuntimeError`` if
+    the assembly panicked (caught at the FFI boundary).
+    """
