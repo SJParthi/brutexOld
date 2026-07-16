@@ -44,6 +44,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from brutex.data.fetch_coverage import WindowKey
+from brutex.data.window_ledger_rust import (
+    routed_classify_window_status,
+    routed_window_merge_key,
+)
 
 __all__ = [
     "EMPTY",
@@ -52,6 +56,7 @@ __all__ = [
     "WindowStatusLog",
     "WindowStatusRecord",
     "classify_window_status",
+    "window_key_python",
 ]
 
 #: The vendor returned bars — the window is stored (the ingest marks it complete).
@@ -94,12 +99,57 @@ def classify_window_status(raw_bars: int, error_type: str | None, *, degraded: b
     -------
     str
         One of :data:`SUCCESS`, :data:`EMPTY`, :data:`FAILED`.
+
+    Routing (DEC-LAKE-RUST-WINDOW-LEDGER-001, ADR-0020 Wave C-3 / G8): the
+    law is served by :func:`_classify_window_status_python` — the verbatim
+    Python body, the LIVE parity oracle — via the default-OFF
+    ``BRUTEX_LAKE_RUST_WINDOW_LEDGER`` facade
+    (:mod:`brutex.data.window_ledger_rust`). Flag OFF (the default) returns
+    the oracle's result directly, byte-identical to the pre-facade law.
+    """
+    return routed_classify_window_status(
+        raw_bars,
+        error_type,
+        degraded=degraded,
+        python_law=_classify_window_status_python,
+    )
+
+
+def _classify_window_status_python(
+    raw_bars: int, error_type: str | None, *, degraded: bool = False
+) -> str:
+    """The VERBATIM Python status law — the live parity oracle.
+
+    The body of :func:`classify_window_status` as it stood before the G8
+    routing (DEC-LAKE-RUST-WINDOW-LEDGER-001), moved token for token; the
+    Rust mirror is ``rust/brutex-lake/src/window_ledger.rs``. Semantics are
+    documented on the public function.
     """
     if error_type is not None:
         return FAILED
     if raw_bars > 0:
         return FAILED if degraded else SUCCESS
     return EMPTY
+
+
+def window_key_python(key: WindowKey) -> tuple[str, str, str, str, str]:
+    """The VERBATIM Python 5-tuple merge-key law — the live parity oracle.
+
+    ``(market, security_id, interval, start.isoformat(), end.isoformat())``
+    — the single window-identity law shared by :meth:`WindowStatusLog._key`
+    and ``WindowLedger._key`` (both delegate here through the G8 routing
+    facade, consolidating the two prior verbatim copies — §11 COMMON). The
+    Rust mirror renders only the two date strings
+    (``brutex_lake.date_isoformat``); the three identity strings never
+    cross the FFI (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+    """
+    return (
+        key.market,
+        key.security_id,
+        key.interval,
+        key.start.isoformat(),
+        key.end.isoformat(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,14 +193,13 @@ class WindowStatusLog:
 
     @staticmethod
     def _key(key: WindowKey) -> tuple[str, str, str, str, str]:
-        """The 5-tuple identity of a window (market, symbol, interval, start, end)."""
-        return (
-            key.market,
-            key.security_id,
-            key.interval,
-            key.start.isoformat(),
-            key.end.isoformat(),
-        )
+        """The 5-tuple identity of a window (market, symbol, interval, start, end).
+
+        Delegates through the G8 routing facade with
+        :func:`window_key_python` as the live parity oracle
+        (DEC-LAKE-RUST-WINDOW-LEDGER-001; flag OFF = the oracle verbatim).
+        """
+        return routed_window_merge_key(key, python_law=window_key_python)
 
     def record(
         self,

@@ -107,6 +107,7 @@ pub mod resample;
 // render + the crate-internal partition twins — DEC-LAKE-RUST-STATS-MANIFEST-001
 // (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
 pub mod stats_shard;
+pub mod window_ledger;
 
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -339,6 +340,13 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Appended AFTER the PR-1 trio, never reordering them (§4.1 — the
     // concurrent-sibling additive-registration merge law).
     m.add_function(wrap_pyfunction!(stats_shard::render_stats_shard_json, m)?)?;
+    // Wave C-3 (G8) — the window-ledger pure laws (window_ledger.rs; the
+    // facade `brutex/data/window_ledger_rust.py` engages them behind the
+    // default-OFF BRUTEX_LAKE_RUST_WINDOW_LEDGER via a SYMBOL handshake —
+    // these two names present + callable — never the polars version guard,
+    // which is irrelevant to a polars-free law).
+    m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
+    m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
     Ok(())
 }
 

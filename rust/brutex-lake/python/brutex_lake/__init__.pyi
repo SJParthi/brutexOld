@@ -55,4 +55,20 @@ def render_stats_shard_json(
     ever cross this boundary). Raises ``TypeError``/``OverflowError``/
     ``UnicodeEncodeError`` on extraction failures and ``RuntimeError`` if
     the assembly panicked (caught at the FFI boundary).
+def classify_window_status(raw_bars: int, error_type: str | None, degraded: bool) -> str:
+    """The window-ledger status law (ADR-0020 Wave C-3 / G8).
+
+    Mirrors ``brutex.data.window_status.classify_window_status`` token for
+    token: error present → ``"FAILED"``; ``raw_bars > 0`` → ``"FAILED"`` if
+    ``degraded`` else ``"SUCCESS"``; else ``"EMPTY"``. Pure + infallible over
+    the ``i64`` domain (an out-of-``i64`` int raises ``OverflowError`` at the
+    PyO3 conversion — the facade's degrade set).
+    """
+
+def date_isoformat(year: int, month: int, day: int) -> str:
+    """``datetime.date.isoformat()`` mirror — zero-padded ``YYYY-MM-DD``.
+
+    Raises ``ValueError`` on an out-of-range component (year 1..=9999,
+    month 1..=12, day 1..=31 — structure only; production-unreachable
+    through the facade, which passes real ``date`` fields).
     """

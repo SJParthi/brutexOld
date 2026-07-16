@@ -56,8 +56,14 @@ on:
       # Wave-B resample seam (DEC-LAKE-RUST-RESAMPLE-001, ledger #1913).
       - "brutex/data/lake_rust_resample.py"
       - "brutex/data/tf_resampler.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_window_ledger_rust.py"
       - "tests/golden/test_lake_rust_render_parity.py"
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
@@ -76,8 +82,14 @@ on:
       - "brutex/data/models.py"
       - "brutex/data/lake_rust_resample.py"
       - "brutex/data/tf_resampler.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
+      - "tests/unit/test_window_ledger_rust.py"
       - "tests/golden/test_lake_rust_render_parity.py"
       - "tests/unit/test_lake_rust_resample.py"
       - "tests/unit/test_tf_resampler_rust_seam.py"
@@ -226,4 +238,11 @@ jobs:
             tests/unit/test_parquet_writer_rust_render.py \
             tests/unit/test_lake_rust_resample.py \
             tests/unit/test_tf_resampler_rust_seam.py \
-            tests/integration/test_lake_rust_resample_parity.py
+            tests/integration/test_lake_rust_resample_parity.py \
+            tests/unit/test_window_ledger_rust.py
+          # G8 window-ledger differential + affected suites, flag-ON arm
+          # (the real wheel is installed + lockstep-aligned above).
+          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
+            tests/unit/test_window_ledger_rust.py \
+            tests/unit/test_window_status.py \
+            tests/unit/test_window_ledger.py

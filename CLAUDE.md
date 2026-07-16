@@ -2958,7 +2958,44 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-lake-stats-shard` (**DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914** —
+- **Active branch:** `claude/rust-lake-window-ledger-v2` (**DEC-LAKE-RUST-WINDOW-LEDGER-001, MIGRATION.md #1915** —
+  ADR-0020 Wave C-3 (slice G8) FIRST CUT: the TWO pure window-ledger laws — status classification
+  (`classify_window_status`) + the 5-tuple merge key (`WindowStatusLog._key`/`WindowLedger._key`) — routed
+  through `rust/brutex-lake` (NEW `window_ledger.rs`: `classify_window_status` + `date_isoformat`
+  pyfunctions, token-for-token law mirrors) behind the NEW default-OFF `BRUTEX_LAKE_RUST_WINDOW_LEDGER`
+  flag, with the VERBATIM Python law retained as the LIVE parity oracle (NEW public `window_key_python`
+  consolidates the two prior verbatim `_key` copies — §11 COMMON). The facade
+  `brutex/data/window_ledger_rust.py` (the PR-1 `lake_rust_render` template adapted): per-law 16-call
+  burn-in bit-compare + ship-the-ORACLE-value autorevert (`window_ledger_rust.autoreverted` ERROR); import
+  guard + SYMBOL handshake (`crate_unavailable`/`crate_stale` — the PR-1 polars VERSION guard is
+  DELIBERATELY unused, these laws are polars-free; a disclosed deviation); narrow degrade set
+  (ValueError/RuntimeError/TypeError/OverflowError/AttributeError) → oracle with one capped WARN per
+  reason; MemoryError/KeyboardInterrupt/SystemExit re-raise RAW above the imported panic belt; the
+  EXACT-TYPE date gate refuses a `datetime`-carrying key to the oracle (`datetime` IS a `date` subclass
+  whose isoformat DIFFERS — the real "isoformat trap" for THIS law; the WindowKey start/end are date-only,
+  so tz-aware/naive/microsecond datetime isoformat is a PAYLOAD-field concern, stated honestly). FFI
+  discipline (DEC-FEED-RUST-CORE-001 style): ONLY date ints cross IN, only the two rendered ASCII date
+  strings cross OUT — market/security_id/interval are the ORIGINAL Python objects (identity-pinned).
+  FIRST-CUT scope: `record()`'s streak/tombstone rules + the merge-on-save conflict law + optional-column
+  None back-compat stay PYTHON — the full #1548 pyclass single-source flip is the named follow-up
+  DEC-LAKE-RUST-WINDOW-LEDGER-002. Flag OFF (default) is byte-identical (OFF-never-imports-crate bomb-spy
+  pinned); crate stays 0.1.0, Cargo.toml/Cargo.lock byte-UNTOUCHED (deliberately NO Rust proptest — the
+  `--locked` lockstep protected; the Rust unit matrix + the Python hypothesis differential carry the
+  property load); window_ledger is NOT in run identity — no re-key concern. EVIDENCE (executed): the facade
+  suite 35 passed at 100.00% line+branch STANDALONE (131/42) incl. the hypothesis differential vs the REAL
+  built wheel (classify over the FULL i64 × {None, text} × bool domain ≡ oracle — the out-of-i64 `2**63`
+  OverflowError degrade pin scopes the claim honestly; merge key over dates(0001-01-01..9999-12-31) ≡
+  oracle); the ci.yml window_status gate 12 passed 100.00% + the window_ledger gate 172 passed 100.00%
+  (additive pin classes only — every pre-existing test byte-unmodified); all four affected suites flag-ON
+  against the real wheel 219 passed; cargo fmt --check / clippy --all-targets --locked -D warnings /
+  test --release --locked ALL green (18 tests incl. the 8 new); ruff check + ruff format --check clean;
+  `mypy --strict` clean on the three touched data modules; pyright 0 errors; lake-rust-parity.yml gains the
+  G8 paths (both lists) + the facade suite + the flag-ON differential arm. HONEST (the ADR-0020 banner
+  verbatim): expected payoff ≈ 0 — conversion is for uniformity, not speed; both laws are nanosecond-scale
+  in Python and the FFI hop is a small SLOWDOWN, acceptable because the seams run per window record on an
+  I/O-dominated vendor-fetch path and ship DEFAULT-OFF (a default flip needs its own DEC). ENGINE
+  UNCHANGED — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/rust-lake-stats-shard` (**DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914** —
   ADR-0020 Wave C row 4 (G6) + the row-5 rider (G7): the ONE pure serializer
   `lake_stats_manifest.render_shard` re-hosted on the `rust/brutex-lake` crate
   (NEW `src/stats_shard.rs` — the CPython `json.dumps(sort_keys=True,
@@ -8635,7 +8672,24 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-lake-stats-shard`
+- **Active feature branch:** `claude/rust-lake-window-ledger-v2`
+  (DEC-LAKE-RUST-WINDOW-LEDGER-001, MIGRATION.md #1915 — ADR-0020 Wave C-3
+  (slice G8) FIRST CUT: the TWO pure window-ledger laws — status
+  classification + the 5-tuple merge key — routed through `rust/brutex-lake`
+  (NEW `window_ledger.rs`) behind the NEW default-OFF
+  `BRUTEX_LAKE_RUST_WINDOW_LEDGER` flag via the NEW facade
+  `brutex/data/window_ledger_rust.py` (per-law 16-call burn-in + ship-oracle
+  autorevert; import guard + SYMBOL handshake — the polars version guard
+  deliberately unused, the laws are polars-free; exact-type date gate; only
+  date ints cross the FFI in, only the two ASCII date strings cross out),
+  with the verbatim Python law retained as the LIVE parity oracle
+  (`window_key_python` consolidates the two prior `_key` copies); record()
+  streak/tombstone + merge-on-save + None back-compat stay Python — the full
+  #1548 pyclass flip is the named follow-up DEC-LAKE-RUST-WINDOW-LEDGER-002;
+  flag OFF byte-identical (bomb-spy pinned); crate stays 0.1.0, Cargo.lock
+  untouched; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches §1's Active
+  branch line)
+  Earlier: `claude/rust-lake-stats-shard`
   (DEC-LAKE-RUST-STATS-MANIFEST-001, MIGRATION.md #1914 — ADR-0020 Wave C
   row 4 + the row-5 rider: the stats-manifest shard render on the
   `rust/brutex-lake` crate behind the default-OFF
