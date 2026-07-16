@@ -332,6 +332,8 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
     m.add_function(wrap_pyfunction!(resample::resample_1m_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(resample::resample_all_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::daily_restamp_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::session_cutoff_ipc, m)?)?;
     Ok(())
 }
 

@@ -87,6 +87,37 @@ fn ticks_per_second(unit: TimeUnit) -> i64 {
     }
 }
 
+/// Validate the `ts_utc` column contract every resample-family entry shares
+/// (Datetime dtype · UTC-or-naive timezone · zero nulls) and return its time
+/// unit. Errors — never panics — so a defect degrades to the Python oracle
+/// (the facade contract). Extracted from [`resample_frame`] verbatim when the
+/// sibling ports (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001) grew two more
+/// consumers — one validation law, three entry points (CLAUDE.md §11 COMMON).
+fn validate_ts_column(df: &DataFrame) -> PolarsResult<(TimeUnit, Option<TimeZone>)> {
+    let ts = df.column("ts_utc")?;
+    let (unit, tz) = match ts.dtype() {
+        DataType::Datetime(unit, tz) => (*unit, tz.clone()),
+        other => {
+            return Err(
+                polars_err!(ComputeError: "ts_utc must be a Datetime column, got {}", other),
+            );
+        }
+    };
+    if let Some(tz) = tz.as_ref()
+        && tz.as_str() != "UTC"
+    {
+        return Err(polars_err!(
+            ComputeError: "ts_utc timezone must be UTC or naive, got {}", tz.as_str()
+        ));
+    }
+    if ts.null_count() > 0 {
+        return Err(polars_err!(
+            ComputeError: "ts_utc contains {} null timestamp(s) — cannot bucket", ts.null_count()
+        ));
+    }
+    Ok((unit, tz))
+}
+
 /// Decode uncompressed Arrow IPC bytes to a DataFrame (empty payload refused).
 fn frame_from_ipc(ipc_bytes: &[u8]) -> PolarsResult<DataFrame> {
     if ipc_bytes.is_empty() {
@@ -124,27 +155,8 @@ pub fn resample_frame(
         return Ok(df.clone());
     }
 
+    let (unit, tz) = validate_ts_column(df)?;
     let ts = df.column("ts_utc")?;
-    let (unit, tz) = match ts.dtype() {
-        DataType::Datetime(unit, tz) => (*unit, tz.clone()),
-        other => {
-            return Err(
-                polars_err!(ComputeError: "ts_utc must be a Datetime column, got {}", other),
-            );
-        }
-    };
-    if let Some(tz) = tz.as_ref()
-        && tz.as_str() != "UTC"
-    {
-        return Err(polars_err!(
-            ComputeError: "ts_utc timezone must be UTC or naive, got {}", tz.as_str()
-        ));
-    }
-    if ts.null_count() > 0 {
-        return Err(polars_err!(
-            ComputeError: "ts_utc contains {} null timestamp(s) — cannot bucket", ts.null_count()
-        ));
-    }
 
     let per_second = ticks_per_second(unit);
     let per_minute = 60 * per_second;
@@ -239,6 +251,154 @@ pub fn resample_all_ipc_impl(
     Ok(out)
 }
 
+/// Fixed-unit MICROSECOND constants for the daily midnight-IST re-stamp
+/// (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001): the Python pipeline casts the IST
+/// calendar date to `Datetime("us")` REGARDLESS of the input frame's time
+/// unit (`spot_daily_resample._daily_restamp_frame_python` —
+/// `.cast(pl.Datetime("us")).dt.replace_time_zone("UTC") - ist_offset`), so
+/// the restamped column is ALWAYS `Datetime(us, "UTC")`.
+const US_PER_DAY: i64 = 86_400_000_000;
+const IST_OFFSET_US: i64 = 19_800_000_000; // +05:30
+
+/// The daily FILTER + midnight-IST RE-STAMP stage shared by the two daily
+/// resamplers (`spot_daily_resample.resample_1m_to_daily` /
+/// `fno_daily_resample.resample_1m_to_fno_daily`), ported LAW-FOR-LAW from
+/// the Python frame pipeline over an ALREADY-RESAMPLED daily (tf=375) frame:
+///
+/// ```text
+/// ist_date  = (ts_utc + 5h30m).dt.date()                # floor -> div_euclid
+/// keep      = ist_date < before                         # forming-session guard
+/// ts_utc    = ist_date @ 00:00, tagged UTC, - 5h30m     # midnight IST, us+UTC
+/// select    = ts,open,high,low,close,volume (+ OI when keep_oi & present)
+/// ```
+///
+/// `before_days` is the forming-session cutoff as DAYS SINCE THE UNIX EPOCH
+/// (the Python `date`'s physical value — computed facade-side). `keep_oi`
+/// splits the two callers: spot daily bars carry no OI (the column — and any
+/// Greeks-overlay column — is DROPPED by the select), F&O carries the
+/// resampler's carry-last `open_interest` through WHEN PRESENT. Errors —
+/// never panics — on a missing/`null`/non-datetime/non-UTC `ts_utc` or a
+/// missing OHLCV column (→ facade degrade to the Python oracle).
+pub fn daily_restamp_frame(
+    df: &DataFrame,
+    before_days: i64,
+    keep_oi: bool,
+) -> PolarsResult<DataFrame> {
+    let (unit, _tz) = validate_ts_column(df)?;
+    let per_second = ticks_per_second(unit);
+    let per_day = 86_400 * per_second;
+    let ist_offset = 19_800 * per_second; // +05:30
+
+    let ts = df.column("ts_utc")?;
+    let phys = ts.to_physical_repr();
+    let phys = phys.i64()?;
+
+    let mut keep: Vec<bool> = Vec::with_capacity(phys.len());
+    let mut kept_ts: Vec<i64> = Vec::new();
+    for value in phys.into_no_null_iter() {
+        // (ts + 05:30).dt.date() floors toward -inf -> div_euclid.
+        let ist_day = (value + ist_offset).div_euclid(per_day);
+        if ist_day < before_days {
+            keep.push(true);
+            // Midnight IST == 18:30 UTC of the prior calendar day, ALWAYS in
+            // microseconds (the Python `.cast(pl.Datetime("us"))` law above).
+            kept_ts.push(ist_day * US_PER_DAY - IST_OFFSET_US);
+        } else {
+            // Still-forming / incomplete session — never a final daily bar.
+            keep.push(false);
+        }
+    }
+    let mask = BooleanChunked::from_slice("_keep".into(), &keep);
+    let filtered = df.filter(&mask)?;
+
+    let stamped = Series::new("ts_utc".into(), kept_ts).cast(&DataType::Datetime(
+        TimeUnit::Microseconds,
+        Some(TimeZone::UTC),
+    ))?;
+
+    let mut out_cols: Vec<Column> = vec![Column::from(stamped)];
+    for name in ["open", "high", "low", "close", "volume"] {
+        out_cols.push(filtered.column(name)?.clone());
+    }
+    if keep_oi && df.schema().contains(OPEN_INTEREST_COLUMN) {
+        out_cols.push(filtered.column(OPEN_INTEREST_COLUMN)?.clone());
+    }
+    DataFrame::new_infer_height(out_cols)
+}
+
+/// The forming-bucket CUTOFF filter of
+/// `fno_resample.resample_session_to_tf` (DEC-FNO-TF-DERIVE-OI-001's
+/// corrected_point #1a — no look-ahead, no partial bar), ported LAW-FOR-LAW
+/// over an ALREADY-RESAMPLED frame: a bucket labelled at IST minute-of-day
+/// `s` closes at `s + tf`; keep it only when fully closed at/under the
+/// cutoff (`s + tf <= cutoff_min`). The Python composite this mirrors:
+///
+/// ```text
+/// ist              = ts_utc + 5h30m
+/// bucket_start_min = ist.dt.hour()*60 + ist.dt.minute()   # minute-of-day
+/// keep             = bucket_start_min + tf <= cutoff_min
+/// ```
+///
+/// `hour()*60 + minute()` is the FLOOR of the within-day minute — reproduced
+/// as `rem_euclid(per_day) / per_minute` (the remainder is non-negative, so
+/// integer division floors; sub-minute seconds truncate identically, and a
+/// pre-1970 physical value wraps into the same [0, 1440) window a Python
+/// `datetime`'s hour/minute fields report). The frame passes through
+/// OTHERWISE VERBATIM — every column, dtype, and the input time unit are
+/// preserved (a polars `filter` twin). Errors — never panics — on a
+/// missing/`null`/non-datetime/non-UTC `ts_utc` (→ facade degrade).
+pub fn session_cutoff_frame(
+    df: &DataFrame,
+    target_tf_minutes: u32,
+    cutoff_min: i64,
+) -> PolarsResult<DataFrame> {
+    let (unit, _tz) = validate_ts_column(df)?;
+    let per_second = ticks_per_second(unit);
+    let per_minute = 60 * per_second;
+    let per_day = 86_400 * per_second;
+    let ist_offset = 19_800 * per_second; // +05:30
+    let tf = i64::from(target_tf_minutes);
+
+    let ts = df.column("ts_utc")?;
+    let phys = ts.to_physical_repr();
+    let phys = phys.i64()?;
+    let keep: Vec<bool> = phys
+        .into_no_null_iter()
+        .map(|value| {
+            let minute_of_day = (value + ist_offset).rem_euclid(per_day) / per_minute;
+            minute_of_day + tf <= cutoff_min
+        })
+        .collect();
+    let mask = BooleanChunked::from_slice("_keep".into(), &keep);
+    df.filter(&mask)
+}
+
+/// Pure-Rust daily-restamp face: uncompressed Arrow IPC bytes → the
+/// filtered + midnight-IST-restamped frame's IPC bytes. Exercised directly
+/// by `cargo test`; the `#[pyfunction]` wrapper adds the panic boundary.
+pub fn daily_restamp_ipc_impl(
+    ipc_bytes: &[u8],
+    before_days: i64,
+    keep_oi: bool,
+) -> PolarsResult<Vec<u8>> {
+    let df = frame_from_ipc(ipc_bytes)?;
+    let mut out = daily_restamp_frame(&df, before_days, keep_oi)?;
+    frame_to_ipc(&mut out)
+}
+
+/// Pure-Rust session-cutoff face: uncompressed Arrow IPC bytes → the
+/// forming-bucket-filtered frame's IPC bytes. Exercised directly by
+/// `cargo test`; the `#[pyfunction]` wrapper adds the panic boundary.
+pub fn session_cutoff_ipc_impl(
+    ipc_bytes: &[u8],
+    target_tf_minutes: u32,
+    cutoff_min: i64,
+) -> PolarsResult<Vec<u8>> {
+    let df = frame_from_ipc(ipc_bytes)?;
+    let mut out = session_cutoff_frame(&df, target_tf_minutes, cutoff_min)?;
+    frame_to_ipc(&mut out)
+}
+
 /// Map a caught resample result into Python bytes under the render seam's
 /// exact FFI conventions (panic boundary both around the compute AND around
 /// the result-buffer construction — a panic never crosses the FFI raw).
@@ -326,6 +486,45 @@ pub(crate) fn resample_all_ipc(
             "brutex-lake resample result construction panicked (caught at the FFI boundary)",
         )
     })
+}
+
+/// Filter + midnight-IST-restamp an ALREADY-RESAMPLED daily (tf=375) frame
+/// (uncompressed Arrow IPC bytes in/out) — the frame stage of the two daily
+/// resamplers (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001). `before_days` is the
+/// forming-session cutoff as days since the Unix epoch; `keep_oi` carries
+/// the `open_interest` column through when present (the F&O arm). Same
+/// error/panic contract as [`resample_1m_ipc`].
+#[pyfunction]
+pub(crate) fn daily_restamp_ipc(
+    py: Python<'_>,
+    ipc_bytes: &[u8],
+    before_days: i64,
+    keep_oi: bool,
+) -> PyResult<Py<PyBytes>> {
+    let result = py.detach(|| {
+        std::panic::catch_unwind(|| daily_restamp_ipc_impl(ipc_bytes, before_days, keep_oi))
+    });
+    ipc_result_to_pybytes(py, result)
+}
+
+/// Drop the forming trailing bucket(s) of an ALREADY-RESAMPLED session frame
+/// (uncompressed Arrow IPC bytes in/out) — the `resample_session_to_tf`
+/// cutoff law (DEC-LAKE-RUST-RESAMPLE-SIBLINGS-001): keep a bucket only when
+/// `ist_minute_of_day(label) + target_tf_minutes <= cutoff_min`. Same
+/// error/panic contract as [`resample_1m_ipc`].
+#[pyfunction]
+pub(crate) fn session_cutoff_ipc(
+    py: Python<'_>,
+    ipc_bytes: &[u8],
+    target_tf_minutes: u32,
+    cutoff_min: i64,
+) -> PyResult<Py<PyBytes>> {
+    let result = py.detach(|| {
+        std::panic::catch_unwind(|| {
+            session_cutoff_ipc_impl(ipc_bytes, target_tf_minutes, cutoff_min)
+        })
+    });
+    ipc_result_to_pybytes(py, result)
 }
 
 #[cfg(test)]
@@ -598,6 +797,165 @@ mod tests {
                 "output keeps the input unit (unit={unit:?})"
             );
         }
+    }
+
+    /// Midnight IST of the OPEN_0915 bar's IST day (2024-01-01), in epoch
+    /// microseconds: day 19723 × 86 400 s − 19 800 s (the +05:30 shift).
+    const MIDNIGHT_IST_UTC_US: i64 = 1_704_047_400_000_000;
+    const DAY_US: i64 = 86_400_000_000;
+    /// 2024-01-01 as days since the Unix epoch (1_704_067_200 / 86_400).
+    const DAY_2024_01_01: i64 = 19_723;
+
+    #[test]
+    fn daily_restamp_filters_forming_sessions_and_stamps_midnight_ist() {
+        // Two IST days of daily (tf=375) bars labeled at their 09:15 opens;
+        // `before` = the second day, so only day one survives, restamped to
+        // ITS midnight IST (== 18:30 UTC of the prior calendar day).
+        let daily = frame(&[OPEN_0915_UTC_US, OPEN_0915_UTC_US + DAY_US], false, false);
+        let out = daily_restamp_frame(&daily, DAY_2024_01_01 + 1, false).unwrap();
+        assert_eq!(out.height(), 1);
+        assert_eq!(ts_us_of(&out, 0), MIDNIGHT_IST_UTC_US);
+        assert_eq!(
+            out.column("ts_utc").unwrap().dtype(),
+            &DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC)),
+        );
+        let open = out.column("open").unwrap().f64().unwrap().get(0).unwrap();
+        assert_eq!(open, 100.0, "value columns pass through the filter");
+        // `before` <= every IST day drops EVERYTHING (schema kept).
+        let none = daily_restamp_frame(&daily, DAY_2024_01_01, false).unwrap();
+        assert_eq!(none.height(), 0);
+        assert_eq!(
+            none.get_column_names(),
+            ["ts_utc", "open", "high", "low", "close", "volume"]
+        );
+        // A far-future `before` keeps both, each at its own midnight.
+        let both = daily_restamp_frame(&daily, DAY_2024_01_01 + 10, false).unwrap();
+        assert_eq!(both.height(), 2);
+        assert_eq!(ts_us_of(&both, 1), MIDNIGHT_IST_UTC_US + DAY_US);
+    }
+
+    #[test]
+    fn daily_restamp_keep_oi_carries_oi_and_drops_overlay_columns() {
+        let daily = frame(&[OPEN_0915_UTC_US], true, true);
+        let fno = daily_restamp_frame(&daily, DAY_2024_01_01 + 1, true).unwrap();
+        assert_eq!(
+            fno.get_column_names(),
+            [
+                "ts_utc",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "open_interest"
+            ],
+            "keep_oi carries OI; the Greeks overlay never survives the daily select"
+        );
+        let oi = fno
+            .column("open_interest")
+            .unwrap()
+            .i64()
+            .unwrap()
+            .get(0)
+            .unwrap();
+        assert_eq!(oi, 1_000);
+        // The spot arm (keep_oi=false) drops OI even when present.
+        let spot = daily_restamp_frame(&daily, DAY_2024_01_01 + 1, false).unwrap();
+        assert_eq!(
+            spot.get_column_names(),
+            ["ts_utc", "open", "high", "low", "close", "volume"]
+        );
+        // keep_oi=true over an OI-less frame stays the OHLCV-6 (defensive
+        // presence law — the F&O module's `has_oi` guard twin).
+        let no_oi = frame(&[OPEN_0915_UTC_US], false, false);
+        let out = daily_restamp_frame(&no_oi, DAY_2024_01_01 + 1, true).unwrap();
+        assert_eq!(
+            out.get_column_names(),
+            ["ts_utc", "open", "high", "low", "close", "volume"]
+        );
+    }
+
+    #[test]
+    fn daily_restamp_output_unit_is_always_microseconds() {
+        // A millisecond-unit daily frame restamps to Datetime(us, UTC) — the
+        // Python pipeline's unconditional `.cast(pl.Datetime("us"))` law.
+        let ts_ms = Series::new("ts_utc".into(), vec![OPEN_0915_UTC_US / 1_000])
+            .cast(&DataType::Datetime(
+                TimeUnit::Milliseconds,
+                Some(TimeZone::UTC),
+            ))
+            .unwrap();
+        let mut daily = frame(&[OPEN_0915_UTC_US], false, false);
+        daily.with_column(Column::from(ts_ms)).unwrap();
+        let out = daily_restamp_frame(&daily, DAY_2024_01_01 + 1, false).unwrap();
+        assert_eq!(
+            out.column("ts_utc").unwrap().dtype(),
+            &DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC)),
+        );
+        assert_eq!(ts_us_of(&out, 0), MIDNIGHT_IST_UTC_US);
+    }
+
+    #[test]
+    fn daily_restamp_missing_ohlcv_column_is_an_error_never_a_panic() {
+        let daily = frame(&[OPEN_0915_UTC_US], false, false);
+        let dropped = daily.drop("volume").unwrap();
+        assert!(daily_restamp_frame(&dropped, DAY_2024_01_01 + 1, false).is_err());
+        // The IPC face surfaces the same error (facade degrade leg).
+        let mut src = dropped.clone();
+        let ipc = frame_to_ipc(&mut src).unwrap();
+        assert!(daily_restamp_ipc_impl(&ipc, DAY_2024_01_01 + 1, false).is_err());
+    }
+
+    #[test]
+    fn session_cutoff_drops_the_forming_trailing_bucket_only() {
+        // Bucket labels 09:15 (minute 555) and 09:20 (minute 560) on a 5m
+        // grid: cutoff 560 keeps only the CLOSED 555 bucket (555+5 <= 560);
+        // cutoff 565 keeps both; cutoff 559 keeps none.
+        let df = frame(
+            &[OPEN_0915_UTC_US, OPEN_0915_UTC_US + 5 * MINUTE_US],
+            true,
+            false,
+        );
+        let closed = session_cutoff_frame(&df, 5, 560).unwrap();
+        assert_eq!(closed.height(), 1);
+        assert_eq!(ts_us_of(&closed, 0), OPEN_0915_UTC_US);
+        assert_eq!(
+            closed.get_column_names(),
+            df.get_column_names(),
+            "the frame passes through verbatim — every column survives"
+        );
+        assert_eq!(
+            closed.column("ts_utc").unwrap().dtype(),
+            df.column("ts_utc").unwrap().dtype(),
+            "input unit + tz preserved (no restamp on this path)"
+        );
+        assert_eq!(session_cutoff_frame(&df, 5, 565).unwrap().height(), 2);
+        assert_eq!(session_cutoff_frame(&df, 5, 559).unwrap().height(), 0);
+    }
+
+    #[test]
+    fn session_cutoff_floors_sub_minute_labels_like_hour_times_sixty_plus_minute() {
+        // A tf=1 identity frame can carry sub-minute raw timestamps: the
+        // Python law reads hour()*60 + minute() — 09:14:30 IST floors to
+        // minute 554, so 554+1 <= 555 keeps it at cutoff 555.
+        let sub_minute = OPEN_0915_UTC_US - 30_000_000; // 09:14:30 IST
+        let df = frame(&[sub_minute], false, false);
+        let kept = session_cutoff_frame(&df, 1, 555).unwrap();
+        assert_eq!(kept.height(), 1);
+        assert_eq!(session_cutoff_frame(&df, 1, 554).unwrap().height(), 0);
+    }
+
+    #[test]
+    fn session_cutoff_pre_epoch_value_wraps_into_the_same_day_window() {
+        // A pre-1970 physical value: Python's datetime hour/minute fields
+        // report the wallclock in [0, 1440) — rem_euclid mirrors that.
+        // 1969-12-31 09:15 IST == 1969-12-31 03:45 UTC == -72_900 s
+        // (20h15m before the epoch).
+        let pre_epoch_us = -72_900_000_000i64;
+        let df = frame(&[pre_epoch_us], false, false);
+        let kept = session_cutoff_frame(&df, 5, 560).unwrap();
+        assert_eq!(kept.height(), 1, "minute-of-day 555; 555+5 <= 560 keeps");
+        assert_eq!(session_cutoff_frame(&df, 5, 559).unwrap().height(), 0);
     }
 
     #[test]

@@ -26,18 +26,22 @@ from __future__ import annotations
 
 from brutex_lake._brutex_lake import (
     __version__,
+    daily_restamp_ipc,
     linked_zstd_version,
     pinned_polars_version,
     render_parquet_from_ipc,
     resample_1m_ipc,
     resample_all_ipc,
+    session_cutoff_ipc,
 )
 
 __all__ = [
     "__version__",
+    "daily_restamp_ipc",
     "linked_zstd_version",
     "pinned_polars_version",
     "render_parquet_from_ipc",
     "resample_1m_ipc",
     "resample_all_ipc",
+    "session_cutoff_ipc",
 ]
