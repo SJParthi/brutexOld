@@ -69,7 +69,13 @@ from brutex.engine.sweep_orchestrator import (
 from brutex.engine.sweep_run import ComboDedup, canonical_trade_params, mask_run_id
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS, lockbox_evaluation
 from brutex.orchestrator.audit import AuditWriter, read_entries, verify_chain
-from brutex.strategies.types import FibAnchorKind, Side
+from brutex.strategies.types import (
+    DEFAULT_PRICE_SOURCE_CELL,
+    FibAnchorKind,
+    PriceSource,
+    PriceSourceCell,
+    Side,
+)
 from brutex.vocabulary import ProximityParams
 from structlog.testing import capture_logs
 
@@ -397,6 +403,7 @@ def _run_id_for(
     tp: int | None,
     mask: int = 0,
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
+    price_source: PriceSourceCell = DEFAULT_PRICE_SOURCE_CELL,
 ) -> str:
     return mask_run_id(
         mask=mask,
@@ -411,6 +418,8 @@ def _run_id_for(
             proximity=None,
             start_equity_paisa=grid.start_equity_paisa,
             fib_anchor=fib_anchor,
+            vwap_source=price_source.vwap_source,
+            ema_source=price_source.ema_source,
         ),
         data_snapshot_hash=grid.data_snapshot_hash,
         indicator_version=grid.indicator_version,
@@ -422,13 +431,15 @@ class TestRecoverSurvivorCell:
     def test_recovers_a_non_first_cell_by_identity_match(self) -> None:
         grid = _grid(stop_losses=[80, 100], take_profits=[50, 120])
         run_id = _run_id_for(grid, sl=100, tp=120)
-        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001);
-        # the default prev-day grid recovers PREV_DAY.
+        # The recovered cell now includes the Fib anchor (DEC-NIFTY-FIB-AXIS-001)
+        # AND the price-source cell (DEC-NIFTY-PRICE-SOURCE-AXIS-001); the default
+        # prev-day / (HLC3, CLOSE) grid recovers PREV_DAY + the baseline cell.
         assert recover_survivor_cell(_row_for(run_id), grid) == (
             100,
             120,
             None,
             FibAnchorKind.PREV_DAY,
+            DEFAULT_PRICE_SOURCE_CELL,
         )
 
     def test_recovers_a_non_prev_day_anchor_cell(self) -> None:
@@ -441,10 +452,29 @@ class TestRecoverSurvivorCell:
             50,
             None,
             FibAnchorKind.ROLLING_WEEKLY,
+            DEFAULT_PRICE_SOURCE_CELL,
+        )
+
+    def test_recovers_a_non_default_price_source_cell(self) -> None:
+        # A survivor swept under a NON-default price-source cell recovers THAT cell —
+        # proving the source is part of the identity re-derivation (Golden Rule #4);
+        # the row's run_id ONLY reproduces at its ORIGINATING (vwap, ema) source.
+        non_default = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+        grid = _grid(price_source_cells=[DEFAULT_PRICE_SOURCE_CELL, non_default])
+        run_id = _run_id_for(grid, sl=80, tp=50, price_source=non_default)
+        assert recover_survivor_cell(_row_for(run_id), grid) == (
+            80,
+            50,
+            None,
+            FibAnchorKind.PREV_DAY,
+            non_default,
         )
 
     def test_unmatchable_row_raises(self) -> None:
-        with pytest.raises(Stage3WireError, match="no \\(sl × tp × proximity × fib_anchor\\) cell"):
+        with pytest.raises(
+            Stage3WireError,
+            match="no \\(sl × tp × proximity × fib_anchor × price_source\\) cell",
+        ):
             recover_survivor_cell(_row_for("ab" * 32), _grid())
 
     def test_matched_cell_with_disabled_sl_leg_raises(self) -> None:
@@ -686,6 +716,262 @@ class TestRunStage3PassFull:
         # Bracketing (F10): nothing STAGE_3 outside START..COMPLETE, and the
         # pass lines appear AFTER the sweep's grid lines (same single thread).
         assert actions.index(STAGE3_ACTION_PASS_START) > actions.index("GRID_SWEEP_COMPLETE")
+
+
+# ────── non-default price-source cell threading (DEC-NIFTY-PRICE-SOURCE-AXIS-001) ──────
+
+
+class TestStage3NonDefaultPriceSource:
+    """MAJOR-1 regression: a non-default price-source cell + Stage-3 COMPLETES.
+
+    Before the fix, ``recover_survivor_cell`` iterated ``sl × tp × proximity ×
+    fib_anchor`` only and always hashed the DEFAULT ``(HLC3, CLOSE)`` source, so a
+    survivor swept under e.g. ``open:close`` never matched its own ``run_id`` and
+    the whole staged use case aborted with ``Stage3WireError``. These tests pin
+    that the pass now completes AND refines against the ORIGINATING source bits.
+    """
+
+    _CELL = PriceSourceCell(vwap_source=PriceSource.OPEN, ema_source=PriceSource.CLOSE)
+
+    def test_full_pass_completes_and_refines_against_the_swept_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        # Would raise Stage3WireError pre-fix; now the pass runs end-to-end.
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        # Every refined cell carries the ORIGINATING non-default source (never a
+        # silent (HLC3, CLOSE) fallback).
+        for cell in report.cells:
+            assert cell.tuple_.price_source == self._CELL
+
+    def test_refined_row_identity_re_derives_with_the_non_default_source(
+        self, tmp_path: Path
+    ) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        assert report.train_snapshot_hash is not None
+        cell = report.cells[0]
+        row = ResultsStore.load(cell.path).rows()[0]
+        # The stored run_id ONLY reproduces when canonical_trade_params is fed the
+        # cell's OWN (vwap, ema) source — the correctness teeth for the thread.
+        expected = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+                vwap_source=self._CELL.vwap_source,
+                ema_source=self._CELL.ema_source,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id == expected
+        # And it does NOT reproduce at the default source (the false-green a
+        # missing thread would have produced).
+        wrong = mask_run_id(
+            mask=row.mask_bits,
+            direction=row.direction,
+            instrument=row.instrument,
+            tf=row.tf,
+            mode=row.mode,
+            params=canonical_trade_params(
+                sl_paisa=cell.tuple_.sl_paisa,
+                tp_paisa=cell.tuple_.tp_paisa,
+                prior_n=grid.prior_n,
+                proximity=cell.tuple_.proximity,
+                start_equity_paisa=grid.start_equity_paisa,
+            ),
+            data_snapshot_hash=report.train_snapshot_hash,
+            indicator_version=grid.indicator_version,
+            code_commit_sha=grid.code_commit_sha,
+        )
+        assert row.run_id != wrong
+
+    def test_manifest_record_and_cascade_specs_carry_the_source(self, tmp_path: Path) -> None:
+        grid = _grid(price_source_cells=[self._CELL])
+        report = _run_full(tmp_path, _trending_bars(_N_DAYS), grid)
+        record = stage3_manifest_record(report)
+        assert record.refined_cells
+        for rec in record.refined_cells:
+            assert rec.vwap_source is self._CELL.vwap_source
+            assert rec.ema_source is self._CELL.ema_source
+        specs = cascade_specs_for_refined_cells(report.cells, grid=grid)
+        assert specs
+        for spec in specs:
+            assert spec.vwap_source is self._CELL.vwap_source
+            assert spec.ema_source is self._CELL.ema_source
+
+    def test_ema_varying_cell_moves_refined_bar_bits_0_to_5(self, tmp_path: Path) -> None:
+        """GAP-2: an EMA-source-varying cell demonstrably changes REFINED bits 0-5.
+
+        The sibling acceptance test above sweeps ``(OPEN vwap, CLOSE ema)`` — on
+        this volume-flat spot fixture the swept VWAP source is INERT (bits 52-53
+        need traded volume to separate) and the only swept condition is bit 1 (an
+        EMA bit), so ``(OPEN, CLOSE)`` refines against bar_bits that differ from
+        the default at ZERO positions: it proved the identity-hash thread but NOT
+        that the source moves any refined bit. Here the cell varies ``ema_source``
+        (``hlc3:open``), which flips bits 0-5, and we assert the refined bar_bits
+        the pass built for the cell genuinely differ from the ``(HLC3, CLOSE)``
+        default on the SAME train slice + params — and that the change is CONFINED
+        to the EMA group 0-5 (the ``build_bar_bits`` source-locality contract).
+        """
+        ema_cell = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.OPEN)
+        grid = _grid(price_source_cells=[ema_cell])
+        bars = _trending_bars(_N_DAYS)
+        report = _run_full(tmp_path, bars, grid)
+        assert report.enabled is True
+        assert report.masks_refined >= 1
+        assert report.cells
+        for cell in report.cells:
+            assert cell.tuple_.price_source == ema_cell
+
+        # Reconstruct the exact train-slice bar_bits the pass used for this cell
+        # vs the (HLC3, CLOSE) default, same proximity=None / prior_n / anchor.
+        train = train_slice_bars(bars)
+        default_bits = build_bar_bits(train, prior_n=grid.prior_n)
+        ema_bits = build_bar_bits(train, prior_n=grid.prior_n, ema_source=PriceSource.OPEN)
+        moved = {
+            bit
+            for base, ema in zip(default_bits, ema_bits, strict=True)
+            for bit in range(128)
+            if ((base ^ ema) >> bit) & 1
+        }
+        # The refined bits genuinely MOVE (unlike the (OPEN, CLOSE) sibling) …
+        assert moved, "ema_source=open must flip at least one EMA bit vs the default"
+        # … and the movement is confined to the EMA group 0-5 (source locality).
+        assert moved <= set(range(6))
+        assert moved & set(range(6))
+
+
+# ────── the bar_bits memo MUST be price-source-keyed (GAP-1) ──────
+
+
+def _spiked_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
+    """Upward-drifting session with a large per-bar HIGH spike.
+
+    The +8.0 high spike lifts each bar's HLC3 well above its close, so the
+    ``EMA(HLC3)`` baseline sits far above the ``EMA(CLOSE)`` baseline: bit 1
+    (``close_below_ema20``, an EMA bit that fires WITHOUT traded volume — unlike
+    the inert VWAP bits 52-53 on this volume-flat fixture) fires on a much larger
+    bar set under ``ema_source=HLC3`` (~196 fires) than under ``ema_source=CLOSE``
+    (~83), yet is non-zero under BOTH — so the k=1 bit-1 mask trades AND ranks
+    under both cells, but on disjoint entry bars, refining to genuinely different
+    rows. The upward drift keeps the BUY TP leg winning so the masks survive.
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 0.6 if m % 3 else price - 0.3
+            open_ = price
+            hi = max(open_, close) + 8.0
+            lo = min(open_, close) - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(open_, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestStage3MemoIsPriceSourceKeyed:
+    """GAP-1 kill: the Stage-3 ``bits_memo`` key MUST include ``price_source``.
+
+    Dropping ``price_source`` from the memo key (``stage3_wire.py`` — the
+    ``memo_key = (instrument, tf, proximity, fib_anchor, price_source)`` line)
+    survived the whole prior suite: every earlier fixture's surviving masks were
+    source-INDEPENDENT (a k=0 enter-every-bar mask, or a bit the swept source
+    never moved), so the second-processed cell being served the first cell's bits
+    produced no observable difference.
+
+    Here TWO cells differ ONLY in ``ema_source`` and BOTH produce a surviving k=1
+    bit-1 (``close_below_ema20``) mask whose train-slice bar_bits genuinely differ
+    (measured 196 vs 83 fires). If the memo key drops the source, whichever cell
+    is processed SECOND is served the first cell's bar_bits and refines WRONG.
+
+    The order-independent oracle: each cell's refined rows in the 2-cell pass must
+    byte-match that SAME cell's refined rows in a SINGLE-cell pass (where no memo
+    collision is possible). Under the mutation the second-processed cell diverges
+    from its single-cell baseline (verified: applying the mutation flips one of
+    the two equalities to False), so asserting BOTH catches it regardless of the
+    intra-leaderboard processing order.
+    """
+
+    _A = DEFAULT_PRICE_SOURCE_CELL  # (HLC3, CLOSE)
+    _B = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.HLC3)
+
+    @staticmethod
+    def _rows_by_source(
+        report: Stage3PassReport,
+    ) -> dict[PriceSourceCell, list[tuple[object, ...]]]:
+        """Aggregate every refined-cell row, grouped by the recovered source cell."""
+        out: dict[PriceSourceCell, list[tuple[object, ...]]] = {}
+        for cell in report.cells:
+            rows = ResultsStore.load(cell.path).rows()
+            out.setdefault(cell.tuple_.price_source, []).extend(
+                (r.mask_bits, r.run_id, r.net_pnl_paisa, r.total_trades) for r in rows
+            )
+        return {src: sorted(v) for src, v in out.items()}
+
+    def test_each_cell_refines_against_its_own_source_bits(self, tmp_path: Path) -> None:
+        bars = _spiked_trending_bars(_N_DAYS)
+        # top_k / stage3_top_k widened so the merged (instrument, tf, mode)
+        # leaderboard keeps BOTH cells' masks (2 masks × 2 cells) — otherwise the
+        # bounding could drop a cell and mask the collision.
+        single_a = self._rows_by_source(
+            _run_full(
+                tmp_path / "a",
+                bars,
+                _grid(price_source_cells=[self._A], top_k=8, stage3_top_k=8),
+            )
+        )[self._A]
+        single_b = self._rows_by_source(
+            _run_full(
+                tmp_path / "b",
+                bars,
+                _grid(price_source_cells=[self._B], top_k=8, stage3_top_k=8),
+            )
+        )[self._B]
+        both = self._rows_by_source(
+            _run_full(
+                tmp_path / "ab",
+                bars,
+                _grid(price_source_cells=[self._A, self._B], top_k=8, stage3_top_k=8),
+            )
+        )
+
+        # Precondition (guards against a coinciding fixture silently tautologising
+        # the test): the two cells genuinely refine to DIFFERENT rows, and BOTH
+        # produced the ema-sensitive k=1 bit-1 (mask == 0b10) survivor.
+        assert single_a != single_b
+        assert any(mask == 0b10 for mask, *_ in single_a)
+        assert any(mask == 0b10 for mask, *_ in single_b)
+
+        # The kill: in the 2-cell pass each cell reproduces its OWN single-cell
+        # refinement (its own source bits), never the sibling's. Under the
+        # dropped-source memo mutation the second-processed cell diverges from its
+        # single-cell baseline, flipping one of these equalities to False.
+        assert both[self._A] == single_a
+        assert both[self._B] == single_b
 
 
 # ────── the A/B determinism oracle (review F11) + idempotent re-run ──────
