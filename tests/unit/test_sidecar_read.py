@@ -241,7 +241,6 @@ def test_open_regular_binary_not_regular_closes_fd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The refused fd is CLOSED on the not-regular arm (the owned-finally law)."""
-    import brutex.data.sidecar_read as sr_mod
     from brutex.data.sidecar_read import NotRegularFileError, open_regular_binary
 
     fifo = tmp_path / "pipe2"
@@ -253,7 +252,9 @@ def test_open_regular_binary_not_regular_closes_fd(
         closed.append(fd)
         real_close(fd)
 
-    monkeypatch.setattr(sr_mod.os, "close", _spy_close)
+    # String-target monkeypatch (the #1810 CodeQL convention) — resolves the
+    # SAME shared ``os`` module object sidecar_read binds at import time.
+    monkeypatch.setattr("brutex.data.sidecar_read.os.close", _spy_close)
     with _hang_watchdog(), pytest.raises(NotRegularFileError):
         open_regular_binary(fifo)
     assert len(closed) == 1  # exactly one close — never leaked, never doubled

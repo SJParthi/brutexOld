@@ -253,10 +253,9 @@ def test_load_unreadable_file_degrades_to_empty(
         raise OSError("disk gone")
 
     # DEC-LAKE-READ-INODE-GUARD-001: the shard read rides the module-level
-    # guarded seam (`ris.read_regular_text`), not Path.read_text.
-    import brutex.data.raw_integrity_store as ris
-
-    monkeypatch.setattr(ris, "read_regular_text", _boom)
+    # guarded seam, not Path.read_text — fault it there via the string-target
+    # monkeypatch (the #1810 CodeQL convention).
+    monkeypatch.setattr("brutex.data.raw_integrity_store.read_regular_text", _boom)
     assert load_records(tmp_path) == {}
 
 
@@ -440,17 +439,18 @@ def test_load_skips_one_unreadable_shard(tmp_path: Path, monkeypatch: pytest.Mon
     append_record(_record("NSE-GOOD"), tmp_path)
     append_record(_record("NSE-BAD"), tmp_path)
     bad_shard = shard_path(tmp_path, "NSE-BAD")
-    # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded seam the loader uses.
-    import brutex.data.raw_integrity_store as ris
-
-    real_read_text = ris.read_regular_text
+    # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded seam the loader uses via
+    # the string-target monkeypatch (the #1810 CodeQL convention). The delegate
+    # is guarded_read's identity-pinned object — the SAME function
+    # raw_integrity_store binds (`from brutex.data.guarded_read import ...`).
+    from brutex.data.guarded_read import read_regular_text as real_read_text
 
     def _selective_boom(path: Path, *a: object, **k: object) -> str:
         if Path(path) == bad_shard:
             raise OSError("disk gone")
         return real_read_text(path, *a, **k)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(ris, "read_regular_text", _selective_boom)
+    monkeypatch.setattr("brutex.data.raw_integrity_store.read_regular_text", _selective_boom)
     symbols = {r.groww_symbol for r in load_records(tmp_path).values()}
     assert symbols == {"NSE-GOOD"}  # the good shard survives the bad one
 

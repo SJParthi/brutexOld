@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from brutex.dashboard.movers_cache import (
     _DEEP_SIZE_FALLBACK_BYTES,
+    _NATIVE_FRAME_MAX_ITEMS,
     DEFAULT_ADAPTIVE_BASE_FLOOR_S,
     DEFAULT_MOVERS_CACHE_CAPACITY,
     MAX_ADAPTIVE_FLOOR_CAP_S,
@@ -1017,6 +1018,33 @@ class TestNativeFrameGuard:
 
         assert native_frame_in_payload(_RaisingItems(a=1)) is None
 
+    def test_probe_finds_a_frame_at_the_last_in_cap_item(self) -> None:
+        """The width-cap boundary's FOUND side: item index cap−1 is probed."""
+        import polars as pl
+
+        rows: list[object] = [(i, "x") for i in range(_NATIVE_FRAME_MAX_ITEMS - 1)]
+        rows.append(pl.DataFrame({"a": [1]}))  # index == cap − 1: the last probed item
+        found = native_frame_in_payload(rows)
+        assert found is not None and found.startswith("polars")
+
+    def test_probe_abstains_past_the_width_cap_on_both_container_kinds(self) -> None:
+        """The width cap is the fix-round bench catch made law: an UNCAPPED
+        probe walked a 200k-record ledger payload per watermarked insert
+        (``test_cold_serve_sizing_cost_bounded_at_scale`` measured 91 ms vs
+        its 50 ms ceiling — the O(rows) insert-path walk the #1721 M1 hint
+        removed, reintroduced). A frame buried past the first
+        ``_NATIVE_FRAME_MAX_ITEMS`` items of a WIDE container is a DOCUMENTED
+        abstain — a genuinely frame-carrying payload puts one at the top
+        level / in a narrow wrapper, never uniquely at item 10k."""
+        import polars as pl
+
+        wide_list: list[object] = [(i, "x") for i in range(_NATIVE_FRAME_MAX_ITEMS)]
+        wide_list.append(pl.DataFrame({"a": [1]}))  # index == cap: abstained
+        assert native_frame_in_payload(wide_list) is None
+        wide_dict: dict[object, object] = {f"k{i}": i for i in range(_NATIVE_FRAME_MAX_ITEMS)}
+        wide_dict["frame"] = pl.DataFrame({"a": [1]})  # the cap-th dict entry: abstained
+        assert native_frame_in_payload(wide_dict) is None
+
     def test_watermark_store_warns_once_per_instance_and_keeps_the_insert(self) -> None:
         import polars as pl
 
@@ -1040,6 +1068,47 @@ class TestNativeFrameGuard:
         with capture_logs() as logs:
             cache.get_or_compute("k", generation=0, compute=lambda: {"rows": [1, 2, 3]})
         assert not [e for e in logs if e["event"] == "movers_cache.native_frame_payload"]
+
+    def test_probe_fires_on_the_deep_size_fallback_arm_under_an_abstaining_hint(self) -> None:
+        """The fix-round reorder keeps the guard's teeth wherever the deep
+        walk runs: a ``size_of`` hint that ABSTAINS (``None`` — the
+        unrecognized-shape arm) falls back to :func:`deep_size_bytes`, and
+        the native-frame probe fires there."""
+        import polars as pl
+
+        frame = pl.DataFrame({"a": [1, 2]})
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=lambda _v: None)
+        with capture_logs() as logs:
+            got = cache.get_or_compute("k", generation=0, compute=lambda: {"df": frame})
+        assert isinstance(got, dict) and got["df"] is frame  # insert NEVER refused
+        warns = [e for e in logs if e["event"] == "movers_cache.native_frame_payload"]
+        assert len(warns) == 1
+        assert str(warns[0]["native_type"]).startswith("polars")
+
+    def test_hint_recognized_insert_skips_the_probe_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fix-round bench catch made law
+        (``test_cold_serve_sizing_cost_bounded_at_scale``): a hint-RECOGNIZED
+        insert pays ZERO probe work — the probe cannot ride the hinted path
+        back into an O(rows) insert. Spy-pinned: the probe function is never
+        called on a recognized insert (the documented trade-off — a
+        hint-recognized payload is by construction one of the caller's own
+        known shapes, never a native frame; the guard's coverage lives on the
+        deep-size fallback arm)."""
+        from brutex.dashboard import movers_cache as mod
+
+        calls: list[object] = []
+        real_probe = native_frame_in_payload
+
+        def _spy(value: object) -> str | None:
+            calls.append(value)
+            return real_probe(value)
+
+        monkeypatch.setattr(mod, "native_frame_in_payload", _spy)
+        cache = MoversSnapshotCache(capacity=4, max_bytes=1_000_000, size_of=lambda _v: 64)
+        cache.get_or_compute("k", generation=0, compute=lambda: {"rows": [1, 2]})
+        assert calls == []  # the O(1) hint answered — the probe never ran
 
     def test_default_no_watermark_never_probes_or_warns(self) -> None:
         """The #1721 zero-sizing-work default parity extends to the guard: with

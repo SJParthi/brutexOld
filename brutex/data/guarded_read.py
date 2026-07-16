@@ -57,7 +57,7 @@ from __future__ import annotations
 import threading
 from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from brutex.config.deadline import (
     DeadlineExceeded,
@@ -89,6 +89,14 @@ __all__ = [
     "read_regular_text",
     "read_regular_text_deadline",
 ]
+
+#: The deadline-core result type. A module-level ``TypeVar`` (NOT the PEP 695
+#: ``def _deadline_read[T](...)`` inline form) so the name is unconditionally
+#: bound at runtime — CodeQL modelled the inline type parameter referenced by
+#: the nested ``_worker() -> T`` annotation as a possibly-uninitialized local
+#: (code-scanning alert #1160; the zero-alert hygiene fix, semantics
+#: identical).
+_T = TypeVar("_T")
 
 #: The default wall-clock bound for the deadline-wrapped variants. Small JSON
 #: sidecars/artifacts read in well under a second on a healthy volume; 5 s is
@@ -216,13 +224,13 @@ _STALL_GATE_LOCK = threading.Lock()
 _STALLED_READS: dict[str, threading.Event] = {}
 
 
-def _deadline_read[T](
+def _deadline_read(  # noqa: UP047 — module-level TypeVar by design: CodeQL alert #1160
     path: Path | str,
-    read_fn: Callable[[], T],
+    read_fn: Callable[[], _T],
     *,
     deadline_s: float,
     what: str,
-) -> T:
+) -> _T:
     """Run *read_fn* under the per-path stall gate + the COMMON freeze guard.
 
     The ONE tier-1 deadline core every ``*_deadline`` reader delegates to:
@@ -249,7 +257,7 @@ def _deadline_read[T](
                 )
     done = threading.Event()
 
-    def _worker() -> T:
+    def _worker() -> _T:
         try:
             return read_fn()
         finally:

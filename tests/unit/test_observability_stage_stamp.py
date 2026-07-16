@@ -111,12 +111,12 @@ class TestWrite:
     ) -> None:
         """An OSError in the atomic write maps to StageStampError."""
         artifact = _artifact(tmp_path)
-        import brutex.observability.stage_stamp as mod
 
         def _boom(dest: Path, write_to: object) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(mod, "atomic_write_simple", _boom)
+        # String-target monkeypatch (the #1810 CodeQL convention).
+        monkeypatch.setattr("brutex.observability.stage_stamp.atomic_write_simple", _boom)
         with pytest.raises(StageStampError, match="failed to write stamp"):
             write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
 
@@ -268,16 +268,16 @@ class TestVerdictMatrix:
         """I-5: EVERY validation recomputes the streamed hash (spy-pinned)."""
         artifact = _artifact(tmp_path)
         write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
-        import brutex.observability.stage_stamp as mod
 
         calls: list[Path] = []
-        real = mod.content_hash_of
+        real = content_hash_of  # the top-level from-import — the real function
 
         def _spy(path: Path) -> str:
             calls.append(path)
             return real(path)
 
-        monkeypatch.setattr(mod, "content_hash_of", _spy)
+        # String-target monkeypatch (the #1810 CodeQL convention).
+        monkeypatch.setattr("brutex.observability.stage_stamp.content_hash_of", _spy)
         # Even a stamp that will fail on STAGE (a swapped stamp) is re-hashed.
         assert (
             validate_stage_stamp(artifact, expected_stage="other")[0] is StampVerdict.HASH_MISMATCH
@@ -293,19 +293,21 @@ class TestVerdictMatrix:
         injected (chmod is invisible to a root test runner)."""
         # DEC-LAKE-READ-INODE-GUARD-001: the hash now opens the artifact via
         # the guarded `open_regular_binary` seam (os.open based, never
-        # builtins.open) — fault it there so the loud-raise teeth stay real.
-        import brutex.observability.stage_stamp as ss_mod
+        # builtins.open) — fault it there so the loud-raise teeth stay real,
+        # via the string-target monkeypatch (the #1810 CodeQL convention).
+        # The delegate is guarded_read's identity-pinned object — the SAME
+        # function stage_stamp binds (`from brutex.data.guarded_read import`).
+        from brutex.data.guarded_read import open_regular_binary as real_open
 
         artifact = _artifact(tmp_path)
         write_stage_stamp(artifact, stage="s", run_id=_RUN_ID)
-        real_open = ss_mod.open_regular_binary
 
         def _boom(path: object, *args: object, **kwargs: object) -> object:
             if str(path) == str(artifact):
                 raise OSError("I/O error")
             return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(ss_mod, "open_regular_binary", _boom)
+        monkeypatch.setattr("brutex.observability.stage_stamp.open_regular_binary", _boom)
         with pytest.raises(StageStampError, match="cannot hash artifact"):
             validate_stage_stamp(artifact, expected_stage="s")
 

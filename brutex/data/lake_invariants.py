@@ -641,15 +641,28 @@ def _missing_columns_reason(path: Path, columns: Sequence[str]) -> str | None:
     """Classify a failed column read: missing-column reason, or ``None`` = not that class.
 
     Anomaly-only cost (DEC-ALIEN-SCHEMA-READ-HEAL-001): called ONLY after
-    :func:`_read_key_columns` already raised, it pays one
-    ``pl.read_parquet_schema`` footer probe to decide DETERMINISTICALLY —
-    message-string-free — whether the failure is the alien missing-column
-    class (→ a :class:`SchemaAlienFile` finding) or a genuinely unreadable
-    file (→ the caller keeps its plain ``scan_skip``). A file whose very
-    FOOTER is unreadable returns ``None`` (corrupt, not alien).
+    :func:`_read_key_columns` already raised, it pays one footer probe to
+    decide DETERMINISTICALLY — message-string-free — whether the failure is
+    the alien missing-column class (→ a :class:`SchemaAlienFile` finding) or
+    a genuinely unreadable file (→ the caller keeps its plain ``scan_skip``).
+    A file whose very FOOTER is unreadable returns ``None`` (corrupt, not
+    alien).
+
+    The probe rides the GUARDED ``read_parquet_schema_regular`` seam
+    (DEC-LAKE-READ-INODE-GUARD-001 fix round): this diagnostic RE-OPENS the
+    same inode the guarded ``_read_key_columns`` just refused, so a bare
+    ``pl.read_parquet_schema(path)`` here wedged forever in C-level
+    ``fifo_open`` on a planted FIFO — the guard on the PRIMARY read raised
+    fast, then this except-arm re-probe hung the whole scan (empirically
+    reproduced; not even SIGALRM-interruptible). ``NotRegularFileError`` is
+    an ``OSError`` member of ``parquet_read_skip_errors()``, so the FIFO
+    folds into the existing ``None`` arm — a counted scan-skip, never a
+    second hang.
     """
+    from brutex.data.guarded_read import read_parquet_schema_regular
+
     try:
-        schema = pl.read_parquet_schema(path)
+        schema = read_parquet_schema_regular(path)
     except parquet_read_skip_errors():
         return None
     missing = [c for c in columns if c not in schema]

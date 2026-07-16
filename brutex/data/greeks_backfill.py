@@ -188,7 +188,11 @@ from brutex.data.greeks_revision import (
     revision_marker_path,
     touch_greeks_revision_marker,
 )
-from brutex.data.guarded_read import read_parquet_regular, read_regular_text
+from brutex.data.guarded_read import (
+    read_parquet_regular,
+    read_parquet_schema_regular,
+    read_regular_text,
+)
 from brutex.data.lake_read import dedup_bars_frame
 from brutex.data.window_ledger_store import deltas_dir, ledger_path
 from brutex.engine.sweep_checkpoint import (
@@ -821,7 +825,14 @@ def _read_driver_frames(
     if with_stamp:
         needed.append("greeks_provenance_id")
     try:
-        schema = pl.read_parquet_schema(path)
+        # The footer probe rides the GUARDED seam (DEC-LAKE-READ-INODE-GUARD-001
+        # fix round — the diagnostic-arm class sweep): it opens the SAME inode
+        # the guarded read_parquet_regular below opens, and it runs FIRST, so a
+        # bare pl.read_parquet_schema(path) here would wedge in C-level
+        # fifo_open on a post-enumeration inode swap BEFORE the guard is ever
+        # reached. NotRegularFileError is an OSError → the existing fail-open
+        # None arm below absorbs it.
+        schema = read_parquet_schema_regular(path)
         if any(name not in schema for name in needed):
             return None
         has_timestamp = "timestamp" in schema

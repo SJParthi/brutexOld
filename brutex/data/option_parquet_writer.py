@@ -66,7 +66,7 @@ import structlog
 
 from brutex.data.atomic_io import atomic_write_via, lake_write_guard
 from brutex.data.errors import parquet_read_skip_errors
-from brutex.data.guarded_read import read_regular_bytes
+from brutex.data.guarded_read import read_parquet_regular, read_regular_bytes
 from brutex.data.lake_stats_manifest import (
     KIND_OPTIONS,
     partition_stats_tracked,
@@ -478,8 +478,22 @@ class OptionParquetWriter:
                     # reproduced through the default AUTO-ON healer's
                     # copy-forward leg AND the production ``write()`` path —
                     # no symlink/TOCTOU needed, so the containment rail
-                    # cannot see it). The literal read closes both.
-                    existing = pl.read_parquet(dest, glob=False)
+                    # cannot see it). The literal read closes both. Since the
+                    # DEC-LAKE-READ-INODE-GUARD-001 fix round the read rides
+                    # the GUARDED read_parquet_regular seam — polars receives
+                    # the fd-validated OPEN handle, so glob interpretation
+                    # stays structurally impossible (subsuming glob=False)
+                    # AND a FIFO swapped in as the copy-forward DESTINATION
+                    # month file (the heal reads the SOURCE through the
+                    # guarded scan seam, then re-opens the canonical dest
+                    # HERE) refuses with NotRegularFileError — an OSError
+                    # member of parquet_read_skip_errors(), folding into the
+                    # isolated OptionWriterError refusal below — instead of
+                    # wedging the default AUTO-ON heal batch forever in
+                    # C-level fifo_open. A symlink to a REGULAR file still
+                    # passes (open follows links; fstat sees S_ISREG), so the
+                    # R7-2 symlinked-options-root working-pull pin holds.
+                    existing = read_parquet_regular(dest)
                 except parquet_read_skip_errors() as exc:
                     raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc
                 # `added` is baselined on the UNIQUE stored key count, NEVER the raw
@@ -679,7 +693,14 @@ class OptionParquetWriter:
         ):
             self._assert_options_containment(dest)
             try:
-                existing_bytes = dest.read_bytes()
+                # GUARDED byte read (DEC-LAKE-READ-INODE-GUARD-001 fix round —
+                # the diagnostic/re-open class sweep): heal_partition RE-reads
+                # the flagged source under its OWN locks AFTER the healer's
+                # guarded consistent read (the round-13 wide swap window), so
+                # a bare dest.read_bytes() here wedged forever on a FIFO
+                # swapped in post-scan. NotRegularFileError is an OSError →
+                # the isolated OptionWriterError refusal below absorbs it.
+                existing_bytes = read_regular_bytes(dest)
                 existing = pl.read_parquet(io.BytesIO(existing_bytes))
             except parquet_read_skip_errors() as exc:
                 raise OptionWriterError(f"corrupt existing partition {dest}: {exc}") from exc

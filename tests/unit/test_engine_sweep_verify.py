@@ -1993,17 +1993,18 @@ class TestRecountVixDivergence:
         }
         counts: dict[str, int] = {}
         # DEC-LAKE-READ-INODE-GUARD-001: sweep_verify reads store bytes via
-        # the guarded module-level seam, not Path.read_bytes — count there.
-        import brutex.engine.sweep_verify as sv_mod
-
-        real_read_bytes = sv_mod.read_regular_bytes
+        # the guarded module-level seam, not Path.read_bytes — count there via
+        # the string-target monkeypatch (the #1810 CodeQL convention). The
+        # delegate is guarded_read's identity-pinned object — the SAME function
+        # sweep_verify binds (`from brutex.data.guarded_read import ...`).
+        from brutex.data.guarded_read import read_regular_bytes as real_read_bytes
 
         def counting_read_bytes(path: Path) -> bytes:
             if str(path) in store_strs:
                 counts[str(path)] = counts.get(str(path), 0) + 1
             return real_read_bytes(path)
 
-        monkeypatch.setattr(sv_mod, "read_regular_bytes", counting_read_bytes)
+        monkeypatch.setattr("brutex.engine.sweep_verify.read_regular_bytes", counting_read_bytes)
         plan = plan_expected_stores(original, grid)
         report = compare_recount(original, scratch, plan, context_match=True)
         assert _codes(report) == {"recount_vix_divergence"}  # attribution unchanged

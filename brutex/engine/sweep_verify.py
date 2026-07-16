@@ -58,7 +58,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from brutex.data.guarded_read import read_regular_bytes
+from brutex.data.guarded_read import read_parquet_schema_regular, read_regular_bytes
 from brutex.engine.results_store import VIX_FIELDS, ResultsStore, ResultsStoreError
 from brutex.engine.sweep_orchestrator import (
     SweepGridConfig,
@@ -1597,8 +1597,14 @@ def _is_pre_vix_schema_migration(original: Path, scratch: Path) -> bool:
     import polars as pl  # deferred exactly like ResultsStore.load (the data extra)
 
     try:
-        original_schema = list(pl.read_parquet_schema(original).items())
-        scratch_schema = list(pl.read_parquet_schema(scratch).items())
+        # GUARDED footer probes (DEC-LAKE-READ-INODE-GUARD-001 fix round — the
+        # diagnostic-arm class sweep): both stores' BYTE reads above ride the
+        # guarded read_regular_bytes, so this attribution probe re-opening the
+        # SAME paths must not be the one raw-path open that wedges on a
+        # post-read inode swap. NotRegularFileError is an OSError → the
+        # existing abstain arm below absorbs it (never VIX-attributable).
+        original_schema = list(read_parquet_schema_regular(original).items())
+        scratch_schema = list(read_parquet_schema_regular(scratch).items())
     except (pl.exceptions.PolarsError, OSError):
         return False  # an unreadable footer is never VIX-attributable
     original_names = {name for name, _ in original_schema}

@@ -2852,7 +2852,33 @@ hostile-review pass._
   batch 245 passed / 2 env-skips; the sweep_parallel trio 166 passed;
   ruff/ruff-format clean; `mypy --strict` 0 new (the
   one `stage3_refine` cma import note is the pre-existing baseline,
-  stash-verified); pyright 0 errors. ENGINE UNCHANGED —
+  stash-verified); pyright 0 errors. FIX ROUND 2 folded (same branch,
+  pre-merge — the coordinator's three-directive round; per-item record in
+  MIGRATION.md #1832): (R2-1) the CONFIRMED residual hang — the
+  `lake_invariants._missing_columns_reason` diagnostic arm RE-OPENED the
+  same inode with a bare `pl.read_parquet_schema(path)` (reachable from the
+  scan loop's except arms after the guarded primary read raised — a planted
+  FIFO wedged the whole scan in C-level fifo_open) — fixed via
+  `read_parquet_schema_regular`, and the WHOLE diff swept for the
+  diagnostic-arm re-open class: 4 more sites found + fixed the same way
+  (greeks_backfill driver-frame schema probe · sweep_verify's two footer
+  probes · option_parquet_writer's merge-dest read [glob=False now holds
+  structurally — handle-fed] + quarantine before-image read); NEW
+  bars+options `TestPlantedFifoScanSurvival` SIGALRM-watchdog scan-level
+  regressions (they would have caught the residual); the flock-held merge
+  pin's spy retargeted onto the guarded seam (teeth preserved). (R2-2) the
+  bench fixes — the greeks stamp-projection spy repointed onto the guarded
+  seam; the #1721 native-frame probe gains the `_NATIVE_FRAME_MAX_ITEMS=32`
+  width cap AND moves to the deep-size fallback arm only (bench-caught
+  91 ms vs the 50 ms ceiling at 200k records, both benches re-run green).
+  (R2-3) CodeQL — the alert-#1160 ERROR fixed via the module-level `_T`
+  TypeVar + documented noqa; the 9 import-style NOTES normalized across 7
+  test files onto string-target monkeypatch + identity-pinned delegates
+  (every seam tooth preserved, suites green). Round-2 gate re-measure:
+  guarded_read 69/14 · lake_invariants 630/228 (180) · sweep_verify
+  528/224 (156) · greeks_backfill 494/150 (172) · option_parquet_writer
+  192/42 (78) · movers_cache trio 460/178 (121) — ALL 100.00%; ruff/mypy
+  --strict/pyright clean. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `integration/club-q-dashboard` (**CLUB Q merge vehicle** —

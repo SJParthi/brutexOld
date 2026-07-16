@@ -694,17 +694,18 @@ class TestCorruptExistingPartition:
         writer.write(bars=[_bar(0, open_="100", high="110", low="90", close="105")], **coords)
 
         # DEC-LAKE-READ-INODE-GUARD-001: the partition byte read rides the
-        # guarded reader now — fault THAT seam (Path.read_bytes is unused).
-        import brutex.data.parquet_writer as pw_mod
-
-        original_read_bytes = pw_mod.read_regular_bytes
+        # guarded reader now — fault THAT seam (Path.read_bytes is unused) via
+        # the string-target monkeypatch (the #1810 CodeQL convention). The
+        # delegate is guarded_read's identity-pinned object — the SAME function
+        # parquet_writer binds (`from brutex.data.guarded_read import ...`).
+        from brutex.data.guarded_read import read_regular_bytes as original_read_bytes
 
         def _io_fault(target: _Path) -> bytes:
             if target.suffix == ".parquet":
                 raise OSError("simulated read I/O fault")
             return original_read_bytes(target)
 
-        monkeypatch.setattr(pw_mod, "read_regular_bytes", _io_fault)
+        monkeypatch.setattr("brutex.data.parquet_writer.read_regular_bytes", _io_fault)
         with pytest.raises(WriterError, match="unreadable existing partition"):
             writer.write(bars=[_bar(1, open_="101", high="111", low="91", close="106")], **coords)
 
@@ -773,13 +774,12 @@ class TestNoOpReusesExistingBytes:
         bar = _bar(0, open_="100", high="110", low="90", close="105")
         writer.write(bars=[bar], **coords)
 
-        # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded reader seam.
-        import brutex.data.parquet_writer as pw_mod
-
+        # DEC-LAKE-READ-INODE-GUARD-001: fault the guarded reader seam via the
+        # string-target monkeypatch (the #1810 CodeQL convention).
         def _oom_read_bytes(target: _Path) -> bytes:
             raise MemoryError("partition byte read OOM")
 
-        monkeypatch.setattr(pw_mod, "read_regular_bytes", _oom_read_bytes)
+        monkeypatch.setattr("brutex.data.parquet_writer.read_regular_bytes", _oom_read_bytes)
         with pytest.raises(LakeWriteHalt) as exc_info:
             writer.write(bars=[bar], **coords)
         assert exc_info.value.reason == "out_of_memory"
