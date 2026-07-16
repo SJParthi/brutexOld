@@ -1,0 +1,39 @@
+SLUG: function-getlastquotearray-2
+LINK: https:\/\/globaldatafeeds.in\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/function-getlastquotearray-2\/
+TITLE: GetLastQuoteArray
+MODIFIED: 2026-05-04T16:49:39
+-----RAW-----
+\n
+<h3 class=\"wp-block-heading\">GetLastQuoteArray : Returns LastTradePrice of multiple Symbols \u2013 max 25 in single call (detailed)<\/h3>\n
+\n
+\n
+\n
+<div><b><span style=\"color: #dd3333;\">Supported parameters<\/span><\/b><\/div>\n
+\n
+\n
+\n
+<figure class=\"wp-block-table\"><table class=\"has-fixed-layout\"><tbody><tr><td><b>Exchange<\/b><\/td><td><i>String value like MCX<\/i><\/td><td>Name of supported exchange. How to get list of supported exchanges you can find <a href=\"\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/function-getexchanges-2\/\">here<\/a><\/td><\/tr><tr><td><b>InstrumentIdentifiers<\/b><\/td><td><i>Value of instrument identifiers &#8211; max 25<\/i><\/td><td>How to get list of available instruments and identifiers you can find <a href=\"\/global-datafeeds-apis\/global-datafeeds-apis\/websockets-api-documentation\/getinstruments\/\">here<\/a><\/td><\/tr><tr><td><b>isShortIdentifiers<\/b><\/td><td><i>[true]\/[false], default = [false]<\/i><\/td><td>Optional parameter. By default function will use long instrument identifier format. Functions will use short instrument identifier format if set as [true]. Example of ShortIdentifiers are NIFTY25MAR21FUT, RELIANCE25MAR21FUT, NIFTY25MAR2115000CE, etc.<\/td><\/tr><\/tbody><\/table><\/figure>\n
+\n
+\n
+\n
+<div><b><span style=\"color: #dd3333;\">What is returned ?<\/span><\/b><\/div>\n
+\n
+\n
+\n
+<figure class=\"wp-block-table\"><table class=\"has-fixed-layout\"><tbody><tr><td><strong>Exchange, InstrumentIdentifier<\/strong> (Symbol), <strong>LastTradeTime, ServerTime, AverageTradedPrice<\/strong> (VWAP), <strong>Close<\/strong> (previous Day\u2019s Close), <strong>Open, High, Low, LastTradePrice, LastTradeQty, TotalQtyTraded, BuyPrice<\/strong> (Bid), <strong>BuyQty<\/strong> (Bid Size), <strong>SellPrice<\/strong> (Ask), <strong>SellQty<\/strong> (Sell Size), <strong>OpenInterest, QuotationLot<\/strong> (Lot Size), <strong>Value<\/strong> (Turnover), <strong>PreOpen<\/strong> (if PreOpen), <strong>PriceChange<\/strong> (Change in Price compared to previous trading day\u2019s Close), <strong>PriceChangePercentage<\/strong> (Percentage Change in Price compared to previous trading day\u2019s Close), <strong>OpenInterestChange<\/strong> (Change in Open Interest compared to previous trading day\u2019s Close),<strong>TotalBuyQty<\/strong>,<strong>TotalSellQty<\/strong><\/td><\/tr><tr><td>LastTradeTime, ServerTime : These values are expressed as no. of seconds since Epoch time (i.e. 1st January 1970). Also known as Unix Time. Please Visit <a href=\"https:\/\/www.epochconverter.com\/\" target=\"_blank\" rel=\"noopener noreferrer\">https:\/\/www.epochconverter.com\/<\/a> to get formulae to convert human readable time to Epoch and vice versa (scroll to end of their home page)<\/td><\/tr><\/tbody><\/table><\/figure>\n
+\n
+\n
+\n
+<div><b><span style=\"color: #dd3333;\">Sample request(JavaScript)<\/span><\/b><\/div>\n
+\n
+\n
+\n
+<pre class=\"wp-block-preformatted\">            {<br>                MessageType: \"GetLastQuoteArray\",<br>                Exchange: \"NFO\",<br>\t\t\t\tisShortIdentifiers: \"false\",<br>                InstrumentIdentifiers: [{Value:\"NIFTY-I\"}, {Value:\"-I\"}, {Value:\"RELIANCE-I\"}]<br>            };<br>     doSend(request);<br><\/pre>\n
+\n
+\n
+\n
+<div><b><span style=\"color: #dd3333;\">Example of returned data in JSON format<\/span><\/b><\/div>\n
+\n
+\n
+\n
+<pre class=\"wp-block-preformatted\"><br> {\"Result\":[{<br>\"Exchange\":\"NFO\",<br>\"InstrumentIdentifier\":\"NIFTY-I\",<br>\"LastTradeTime\":1777888801,<br>\"ServerTime\":1777888802,<br>\"AverageTradedPrice\":24244.1,<br>\"BuyPrice\":24190.0,<br>\"BuyQty\":65,<br>\"Close\":24098.2,<br>\"High\":24381.3,<br>\"Low\":24072.0,<br>\"LastTradePrice\":24199.0,<br>\"LastTradeQty\":325,<br>\"Open\":24221.0,<br>\"OpenInterest\":15774785,<br>\"QuotationLot\":65.0,<br>\"SellPrice\":24200.0,<br>\"SellQty\":455,<br>\"TotalQtyTraded\":4780815,<br>\"Value\":115906556941.5,<br>\"PreOpen\":false,<br>\"PriceChange\":100.8,<br>\"PriceChangePercentage\":0.42,<br>\"OpenInterestChange\":545025,<br>\"TotalBuyQty\":0.0,<br>\"TotalSellQty\":0.0,<br>\"MessageType\":\"LastQuoteResult\"},<br>{\"Exchange\":\"NFO\",<br>\"InstrumentIdentifier\":\"SBIN-I\",<br>\"LastTradeTime\":1777888800,<br>\"ServerTime\":1777888801,<br>\"AverageTradedPrice\":1069.14,<br>\"BuyPrice\":1059.6,<br>\"BuyQty\":24750,<br>\"Close\":1064.1,<br>\"High\":1082.0,<br>\"Low\":1058.0,<br>\"LastTradePrice\":1059.8,<br>\"LastTradeQty\":0,<br>\"Open\":1062.4,<br>\"OpenInterest\":74043000,<br>\"QuotationLot\":750.0,<br>\"SellPrice\":1060.5,<br>\"SellQty\":2250,<br>\"TotalQtyTraded\":10833750,<br>\"Value\":11582795475.0,<br>\"PreOpen\":false,<br>\"PriceChange\":-4.3,<br>\"PriceChangePercentage\":-0.4,<br>\"OpenInterestChange\":3663000,<br>\"TotalBuyQty\":0.0,<br>\"TotalSellQty\":0.0,<br>\"MessageType\":\"LastQuoteResult\"},<br>{\"Exchange\":\"NFO\",<br>\"InstrumentIdentifier\":\"RELIANCE-I\",<br>\"LastTradeTime\":1777888799,<br>\"ServerTime\":1777888801,<br>\"AverageTradedPrice\":1457.18,<br>\"BuyPrice\":1469.7,<br>\"BuyQty\":1000,<br>\"Close\":1435.2,<br>\"High\":1470.4,<br>\"Low\":1438.8<br>LastTradePrice\":1469.7,<br>\"LastTradeQty\":500,<br>\"Open\":1438.8,<br>\"OpenInterest\":84666500,<br>\"QuotationLot\":500.0,<br>\"SellPrice\":1469.8,<br>\"SellQty\":1000,<br>\"TotalQtyTraded\":16491500,<br>\"Value\":24031083970.0,<br>\"PreOpen\":false,<br>\"PriceChange\":34.5,<br>\"PriceChangePercentage\":2.4,<br>\"OpenInterestChange\":2401500,<br>\"TotalBuyQty\":0.0,<br>\"TotalSellQty\":0.0,<br>\"MessageType\":\"LastQuoteResult\"}],<br>\"MessageType\":\"LastQuoteArrayResult\"}<\/pre>\n
