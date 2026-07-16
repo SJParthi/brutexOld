@@ -2959,7 +2959,7 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/rust-metrics-compute-fold`
+- **Active branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
   (**DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
   allocate via queue-master** — the Rust mirror of `compute.py`'s Slice-0
   FOLD layer: NEW `rust/fno-math/src/metrics_fold.rs`
@@ -8603,7 +8603,7 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/rust-metrics-compute-fold`
+- **Active feature branch:** `claude/rust-metrics-compute-fold-r2` (the replacement-PR remedy — the #1580 precedent: the original `claude/rust-metrics-compute-fold` carried one `+`-scoped docs commit title, illegal in a conventional-commit scope with history rewrite forbidden)
   (DEC-METRICS-RUST-COMPUTE-FOLD-001, MIGRATION.md #NNNN — placeholder,
   allocate via queue-master — the Rust mirror of `compute.py`'s Slice-0
   FOLD layer (`fno_math.metrics_fold_trades` + the seam
