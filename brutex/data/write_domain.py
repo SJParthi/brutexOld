@@ -173,9 +173,11 @@ The WS-B "NO writer consults it yet" envelope is CLOSED:
 its ONE minted-dest chokepoint (``write()``, before any directory/lock/byte
 is touched) — a domain-carrying writer runs :func:`assert_write_domain`, a
 profile-FREE writer runs the :func:`assert_profile_free_dest` masquerade pin
-— and the two live production pull sink builders
+— and the three live production pull sink builders
 (``pull_controller._build_live_spot_adapter`` +
-``historical_pull._build_live_client``) bind :func:`primary_write_domain`.
+``historical_pull._build_live_client`` + ``cli._build_live_groww_spot``,
+the last bound at the hostile-review MINOR-2 fold) bind
+:func:`primary_write_domain`.
 The binding landed under DIRECT in-session user approval (2026-07-16 — the
 operator's "accepted" on the explicit authorization request; the WS-B/WS-C
 relayed-authority deferral is thereby resolved). The Pin D1-3 read-side twin

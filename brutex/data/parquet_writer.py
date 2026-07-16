@@ -554,8 +554,12 @@ class ParquetWriter:
         — a domain-less writer must never silently write under ``feeds/``;
         nothing legitimate writes there today, so the default path is
         byte-identical in practice, pinned). Cost either way: one guarded
-        ``Path.resolve`` + one ``lstat`` per write — noise next to the
-        render/fsync/replace the write itself performs.
+        ``Path.resolve`` + one ``lstat`` per write — MEASURED at a median
+        114.5 µs/write against a 3539.5 µs total fresh-partition write
+        (~3.2%; 2026-07-16 sandbox medians), arms indistinguishable
+        (masquerade 3568.8 vs domain 3577.3 µs/write, 1.002×) and O(1) in
+        lake size — bench-pinned by
+        ``tests/bench/test_write_domain_pin_cost.py``.
     """
 
     def __init__(

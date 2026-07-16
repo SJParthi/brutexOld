@@ -4134,6 +4134,7 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     from brutex.data.parquet_writer import ParquetWriter
     from brutex.data.raw_integrity_store import make_capture_hook_factory
     from brutex.data.sink import ParquetBarSink
+    from brutex.data.write_domain import primary_write_domain
 
     aws_creds = resolve_groww_aws_credentials()
     creds = GrowwCredentials(api_key=aws_creds.api_key, totp_secret=aws_creds.totp_secret)
@@ -4145,7 +4146,17 @@ def _build_live_groww_spot(  # pragma: no cover — live Groww TOTP token + SDK 
     adapter = GrowwMarketAdapter(
         client=client, index=index, capture_hook_factory=make_capture_hook_factory(lake_root)
     )
-    sink = ParquetBarSink(writer=ParquetWriter(lake_root=lake_root), catalog=catalog)
+    # Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001, review
+    # fold): the CLI live spot pull writes under the PRIMARY (Groww-exclusive)
+    # write domain, exactly like its two dashboard siblings — a mis-rooted
+    # dest (e.g. under `feeds/<vendor>/`) refuses typed BEFORE any byte is
+    # touched; every legitimate primary dest passes silently (the A/B
+    # byte-identity pinned through the real writer path). Wiring pinned by
+    # tests/unit/test_write_domain_binding_pin.py.
+    sink = ParquetBarSink(
+        writer=ParquetWriter(lake_root=lake_root, write_domain=primary_write_domain(lake_root)),
+        catalog=catalog,
+    )
     return adapter, sink
 
 

@@ -1,6 +1,6 @@
 """AST wiring pin for the Pin D1-1 caller binding (DEC-WRITE-DOMAIN-CALLER-BINDING-001).
 
-The two LIVE production pull sink builders are ``# pragma: no cover``
+The three LIVE production pull sink builders are ``# pragma: no cover``
 (real TOTP credentials + network — absent in CI), so their new
 ``write_domain=primary_write_domain(lake_root)`` binding cannot be pinned by
 an executing unit test. Per the house dormant-binding-trap convention
@@ -14,7 +14,7 @@ loudly.
 HONEST ENVELOPE (Golden Rule #10): a STATIC source pin — the binding's
 BEHAVIOR (refusal + A/B byte-identity) is proven by
 ``tests/unit/test_parquet_writer_write_domain.py`` through the real writer
-path; this pin owns only the never-silently-unbound invariant on the two
+path; this pin owns only the never-silently-unbound invariant on the three
 live builders.
 """
 
@@ -24,13 +24,18 @@ import ast
 import inspect
 from typing import Final
 
+from brutex import cli
 from brutex.dashboard import historical_pull, pull_controller
 
-#: (module, builder function name) — the two live production pull sink
-#: builders the binding commit arms (the #1833 deferral-register item (a)).
+#: (module, builder function name) — the three live production pull sink
+#: builders the binding arms: the two dashboard builders (the #1833
+#: deferral-register item (a), the binding commit) + the CLI ``brutex fetch``
+#: live spot builder (the hostile-review MINOR-2 fold — previously
+#: profile-free/masquerade-covered, now domain-bound like its siblings).
 _BOUND_BUILDERS: Final = (
     (pull_controller, "_build_live_spot_adapter"),
     (historical_pull, "_build_live_client"),
+    (cli, "_build_live_groww_spot"),
 )
 
 
