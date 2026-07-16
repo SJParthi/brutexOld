@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # flip_soak.sh — the parameterized flip-soak TWIN-LEG orchestrator.
 #
-# DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation). ONE
+# DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894). ONE
 # flag-agnostic generalization of PR #1479's rust_enum_twin_run.sh: OFF arm
 # then ON arm through the flag's registered twin command into two scratch
 # results roots, relative-path sha256 manifests over the flag's artifact

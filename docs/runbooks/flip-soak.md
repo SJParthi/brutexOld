@@ -1,6 +1,6 @@
 # Runbook — the M4-Pro flip-soak harness (default-ON flip evidence)
 
-> DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation).
+> DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894).
 > ONE parameterized harness qualifies EVERY Rust-conversion default-ON flip:
 > a flag's flip ADR may open only after this harness produces — and the
 > operator commits — the standard evidence bundle (twin identity · proven

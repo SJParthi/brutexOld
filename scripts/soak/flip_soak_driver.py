@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """flip_soak_driver.py — the flip-soak IN-PROCESS drift leg.
 
-DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation). Repeated
+DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894). Repeated
 ON-arm runs for the dispatched wall-clock budget, each run (or synthetic
 window) fed to the pure :class:`brutex.observability.soak_drift.SoakDriftMonitor`
 — the DEC-SOAK-REAL-TIER-001 gate law inherited VERBATIM:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """flag_registry.py — the ONE per-flag table for the flip-soak harness (data, not code).
 
-DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation). Every
+DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894). Every
 Rust-conversion default-ON flip ADR is gated on the standard five-part
 evidence bundle (grid-scale twin identity · PROVEN engagement · soak-drift
 cleanliness · honest wall-clock A/B · a committed schema-validated PASS

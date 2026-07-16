@@ -1,4 +1,4 @@
-"""Tests for the flip-soak harness (DEC-FLIP-SOAK-HARNESS-001 — number pending).
+"""Tests for the flip-soak harness (DEC-FLIP-SOAK-HARNESS-001 — MIGRATION.md #1894).
 
 Four surfaces, all runnable in shared CI (no M4-Pro, no real lake):
 

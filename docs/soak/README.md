@@ -1,6 +1,6 @@
 # docs/soak/ — the flip-soak COMMITTED EVIDENCE home
 
-> DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation).
+> DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894).
 > This directory ships **EMPTY of evidence by design** — no PASS file is
 > ever fabricated by a build session. Evidence lands ONLY via an operator
 > evidence PR after a real run on the §8 M4-Pro box (the

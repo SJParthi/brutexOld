@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """emit_pass.py — assemble + schema-validate the flip-soak PASS.json artifact.
 
-DEC-FLIP-SOAK-HARNESS-001 (number pending coordinator reservation). The
+DEC-FLIP-SOAK-HARNESS-001 (MIGRATION.md #1894). The
 durable evidence home for a flip-qualifying soak is a COMMITTED transcript
 at ``docs/soak/<FLAG>/<YYYY-MM-DD>-PASS.json`` (the
 ``tests/bench/baselines/<hardware_key>.json`` + ``docs/groww/probe/
