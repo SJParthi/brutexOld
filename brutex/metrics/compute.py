@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
+from brutex.metrics import compute_rust
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
@@ -905,6 +906,30 @@ def combine_metrics_from_folds(
     )
 
 
+def _resolve_folds(trades: Sequence[ClosedTrade], start_equity_paisa: int) -> TradeFolds:
+    """Serve the FOLD half from the flag-gated Rust kernel or the Python arm.
+
+    The ONE dispatch chokepoint of DEC-METRICS-RUST-COMPUTE-FOLD-001: with
+    ``BRUTEX_METRICS_RUST_FOLD`` OFF (the default) this is exactly the
+    verbatim :func:`_fold_trades` call the pre-seam composition made —
+    byte-identical by construction (the never-routes bomb-kernel spy pins
+    it). With the flag ON, :func:`brutex.metrics.compute_rust.
+    fold_trades_via_kernel` serves a bit-identical :class:`TradeFolds`
+    (burn-in self-checked, autorevert-latched) and ANY kernel fault —
+    missing/stale wheel, kernel raise, structurally invalid result, the
+    autorevert latch — degrades fail-closed to the SAME Python arm
+    (``MemoryError`` re-raises raw). The COMBINE tail is Python on both
+    arms, so the split's bit-parity is the fold's alone (the seam module
+    docstring carries the exactness argument).
+    """
+    if not compute_rust.metrics_rust_fold_enabled():
+        return _fold_trades(trades, start_equity_paisa)
+    folds = compute_rust.fold_trades_via_kernel(trades, start_equity_paisa)
+    if folds is None:
+        return _fold_trades(trades, start_equity_paisa)
+    return folds
+
+
 def _compute_metrics_impl(
     trades: Sequence[ClosedTrade],
     total_bars: int,
@@ -923,7 +948,11 @@ def _compute_metrics_impl(
     sweep-core conversion) expressed as the pure composition
     ``combine_metrics_from_folds(_fold_trades(...))`` over the SAME
     expressions, still a pure parameterisation with no behaviour change
-    (the golden + byte-parity suites pin it). Callers validate their own
+    (the golden + byte-parity suites pin it) — the fold half served
+    through the :func:`_resolve_folds` dispatch since
+    DEC-METRICS-RUST-COMPUTE-FOLD-001 (flag OFF ⇒ the verbatim
+    ``_fold_trades`` call; flag ON ⇒ the bit-identical Rust fold with a
+    fail-closed degrade to the same arm). Callers validate their own
     boundary; this body assumes ``total_bars >= 1`` and a valid scalar
     set. The zero-trade row stays this composition root's own arm
     (:func:`_empty_metrics`), mirroring the sweep core's ``zero_trade``
@@ -932,7 +961,7 @@ def _compute_metrics_impl(
     if not trades:
         return _empty_metrics(drawdown)
     return combine_metrics_from_folds(
-        _fold_trades(trades, start_equity_paisa),
+        _resolve_folds(trades, start_equity_paisa),
         total_bars=total_bars,
         benchmark_return_pct=benchmark_return_pct,
         start_equity_paisa=start_equity_paisa,

@@ -31,6 +31,7 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "metrics_fold_trades",
     "popcount_bytes",
 ]
 
@@ -124,6 +125,33 @@ def sweep_drawdown_stats(
     `brutex.metrics.compute._drawdown_stats` returns them (percentages ×100),
     bit-identical inside the `start + Σ|pnl| ≤ 2**52` exactness envelope the
     Python wrapper pre-guards. Raises `ValueError` outside the envelope.
+    """
+    ...
+
+def metrics_fold_trades(
+    pnl_paisa: list[int],
+    mfe_paisa: list[int],
+    mae_paisa: list[int],
+    holding_bars: list[int],
+    returns: list[float],
+) -> tuple[
+    tuple[int, int, int, int, int, int, int],
+    tuple[int, int, int, int, int, int],
+    tuple[int, float, float, float, float],
+    tuple[float, float, float],
+]:
+    """Per-trade metrics FOLD (DEC-METRICS-RUST-COMPUTE-FOLD-001).
+
+    The Rust mirror of `brutex.metrics.compute._fold_trades` over five
+    parallel per-trade columns; `returns` is the Python-computed
+    `pnl_paisa / start_equity_paisa` column (bit-identity by construction).
+    Returns four nested tuples the seam reassembles into `TradeFolds`:
+    `(n_trades, winners, losers, max_holding_bars, largest_loss_paisa,
+    max_consecutive_losses, max_consecutive_wins)` · `(net_pnl_paisa,
+    gross_profit_paisa, gross_loss_abs_paisa, sum_mfe_paisa, sum_mae_paisa,
+    sum_holding_bars)` · the `(n, mean, m2, m3, m4)` moments · the
+    `(downside_sum_sq, p95, p5)` floats. Raises `ValueError` on any input
+    outside the validated envelope; the seam degrades to the Python oracle.
     """
     ...
 
