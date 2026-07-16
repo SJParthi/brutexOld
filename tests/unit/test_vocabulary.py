@@ -480,14 +480,25 @@ class TestConflicts:
         # 24 original − 2 buggy (bullish/bearish-doji, removed in
         # DEC-STAGE1B-CONFLICT-FIX-001) + 4 verified candle conflicts +
         # 3 CPR partition pairs (the 60→66 reshape — bits 60/61/62 are an
-        # exact partition, evaluator.rs:422-431) = 29.
-        assert len(CONFLICT_PAIRS) == 29
+        # exact partition, evaluator.rs:422-431) + the Group-15 gap-midpoint
+        # above/below pair (DEC-GAP-MIDPOINT-CONDITIONS-001) = 30.
+        assert len(CONFLICT_PAIRS) == 30
 
     def test_cpr_partition_pairs_present(self) -> None:
         # The three CPR position bits are pairwise mutually exclusive.
         assert (B.BIT_ABOVE_CPR_TC, B.BIT_BELOW_CPR_BC) in CONFLICT_PAIRS
         assert (B.BIT_ABOVE_CPR_TC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
         assert (B.BIT_BELOW_CPR_BC, B.BIT_INSIDE_CPR) in CONFLICT_PAIRS
+
+    def test_gap_mid_above_below_is_a_registered_conflict(self) -> None:
+        # DEC-GAP-MIDPOINT-CONDITIONS-001: strictly-above and strictly-below
+        # the gap-midpoint level cannot co-fire; near_gap_mid is deliberately
+        # NOT conflicting with either (the PDH/PDL co-fire convention).
+        assert (B.BIT_CLOSE_ABOVE_GAP_MID, B.BIT_CLOSE_BELOW_GAP_MID) in CONFLICT_PAIRS
+        mask = (1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_CLOSE_BELOW_GAP_MID)
+        assert has_conflict(mask)
+        assert not has_conflict((1 << B.BIT_CLOSE_ABOVE_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
+        assert not has_conflict((1 << B.BIT_CLOSE_BELOW_GAP_MID) | (1 << B.BIT_NEAR_GAP_MID))
 
 
 # ────── Look-ahead invariant ──────

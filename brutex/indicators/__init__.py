@@ -18,6 +18,9 @@ Modules:
 - `weekly_anchors` — Rolling-weekly + weekly-static Fib anchors (PR-2).
 - `pivots`         — Standard Pivot Points (P, R1-R5, S1-S5 — R5/S5 added PR-2).
 - `ema`            — EMA (alpha=2/(N+1), SMA-seed at bar N-1).
+- `gap_mid`        — Session-edge gap-midpoint level (Group 13, bits 60-62 —
+  DEC-GAP-MIDPOINT-CONDITIONS-001; the math lives in the shared Rust
+  `trading_core` crate, this is the thin delegator).
 - `market_structure` — the resolved BOS/CHoCH signal container (the stateful
   detector lives in the shared Rust `trading_core` crate, the single source
   since DEC-INDICATOR-TWINS-RUST-SINGLE-SOURCE-001; the sibling VWAP state
@@ -45,6 +48,7 @@ from brutex.indicators.fib_levels import (
     FibLevels,
     compute_fib_levels,
 )
+from brutex.indicators.gap_mid import compute_gap_mid
 from brutex.indicators.market_structure import MarketStructureSignal
 from brutex.indicators.pivots import PivotLevels, compute_pivot_levels
 from brutex.indicators.prev_day_ohlc import (
@@ -79,6 +83,7 @@ __all__ = [
     "compute_day_extremes",
     "compute_ema",
     "compute_fib_levels",
+    "compute_gap_mid",
     "compute_pivot_levels",
     "find_prev_trading_day",
     "latest_ema",

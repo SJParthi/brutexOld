@@ -55,7 +55,15 @@ _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "futures_roll_golden.json"
 # G-COMBIN-03): old digest
 # 1210f918e909090190ffde9231879dbb3111aa539077cdbc6113c9e4baa458f4 (v1,
 # 52 masks, both days anchor-cold, VWAP bits still live).
-_EXPECTED_SHA256 = "e4accd47db6fde1c478ec0b3924812fb9168e8a233d148f483751100cb2e0621"
+# AUDITED RE-LOCK (DEC-GAP-MIDPOINT-CONDITIONS-001, the zero-count-new-key
+# audit pattern): the delta vs the reshape fixture
+# (e4accd47db6fde1c478ec0b3924812fb9168e8a233d148f483751100cb2e0621) is
+# CONFINED to the gap-midpoint bits 66/67 on bars 27-51 — the WARM pre-roll
+# day 2's non-first bars (bar 26, the day's first, stays dark per the
+# arm-from-bar-2 law; the anchor-cold post-roll day 52-77 carries NO gap
+# bit — the D11 reset) — with every pre-existing bit byte-identical
+# (XOR-audited over all 78 masks: bit 67 on 18 bars, bit 66 on 7).
+_EXPECTED_SHA256 = "9c12a2b7b35c4f4bc87398997a8880a488f700f514953eb5df4e4e1252f0cba0"
 
 #: The pre-roll contract's TWO IST days (day 2 = the vendor June-2025
 #: monthly expiry — owned by the EXPIRING contract per the ``>=`` law; day 1
@@ -124,7 +132,7 @@ _CPR_POSITION_MASK = (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_BELOW_CPR_BC) | (1 
 
 #: LITERAL boundary masks — the last pre-roll bar (index 25) and the first
 #: post-roll bar (index 26). Re-pin via ``--update``.
-_EXPECTED_LAST_PRE_ROLL_MASK = 1225564335183544321
+_EXPECTED_LAST_PRE_ROLL_MASK = 75012540630021750785
 _EXPECTED_FIRST_POST_ROLL_MASK = 21474836480
 
 

@@ -39,7 +39,14 @@ wider than the 10 bps ``near`` tolerance and the 0.5 % gap threshold, so:
   The 60→66 reshape adds the CPR pair: a FLAT prior day makes
   ``P = BC = TC =`` that single price (width 0), so today's higher close is
   strictly above TC ⇒ ``ABOVE_CPR_TC`` (60), and the zero width is trivially
-  ≤ 30 bps of P ⇒ ``NARROW_CPR_DAY`` (63).
+  ≤ 30 bps of P ⇒ ``NARROW_CPR_DAY`` (63);
+* **gap-midpoint** (``DEC-GAP-MIDPOINT-CONDITIONS-001``, hand-derived): on
+  day ``k ≥ 1`` X1 = the prior flat day's last bar = ``P_{k-1}``, X2 = today's
+  first flat bar = ``P_k``, gap-UP (``open P_k > pdc P_{k-1}``) ⇒ level =
+  ``(P_{k-1} + P_k) / 2 = P_k − ₹500`` — today's close ``P_k`` is strictly
+  ABOVE it ⇒ ``CLOSE_ABOVE_GAP_MID`` (66) on every bar EXCEPT the day's first
+  (the arm-from-bar-2 law leaves band 0 dark); ₹500 ≫ the 10 bps ``near``
+  tolerance (~₹51) ⇒ no ``NEAR_GAP_MID``.
 
 So bar ``i`` (day ``i // 4``, band ``i % 4``) is the closed form in
 :func:`_expected_mask`, asserted bar-for-bar AND pinned by SHA-256.
@@ -80,9 +87,17 @@ _BARS_PER_DAY = len(_BANDS)
 
 #: SHA-256 of the frozen 16-mask matrix (the README "SHA-256 manifest" guard).
 # DELIBERATE RE-LOCK (the 60→66 reshape — days 2-4 gain the hand-derived
-# CPR bits 60+63; see the closed form). Old digest:
-# c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c.
-_EXPECTED_SHA256 = "a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3"
+# CPR bits 60+63; digest at that reshape:
+# a925eb6be4a0dc8beac67ab435db0a87eb9e9d65a3c88ad03f73289a295183c3; the
+# pre-reshape digest was
+# c5d1c3c2523c519a13d7c36f0be62539c80182cf44ba69a965897c0a2a63da5c).
+#: Audited re-lock (DEC-GAP-MIDPOINT-CONDITIONS-001, the zero-count-new-key
+#: audit pattern): the delta vs the reshape pin is EXACTLY bit 66 on bars
+#: {5, 6, 7, 9, 10, 11, 13, 14, 15} — the non-first bars of days 2-4 — with
+#: every pre-existing bit (incl. the reshape's CPR 60+63) byte-identical
+#: (audited by XOR over all 16 masks; the closed form below carries the
+#: hand-derivation).
+_EXPECTED_SHA256 = "2d48d09cdd1a6f7917cc3b35e21f544a971936e9d4007465b7e2d3a8b11d3cdc"
 
 
 def _price(day_index: int) -> Decimal:
@@ -114,7 +129,7 @@ def _feed() -> list[CandleBar]:
 
 
 def _expected_mask(i: int) -> int:
-    """Closed-form expected ``u64`` for bar ``i`` (see module docstring)."""
+    """Closed-form expected ``u128`` for bar ``i`` (see module docstring)."""
     day_index, band = divmod(i, _BARS_PER_DAY)
     mask = (1 << B.BIT_CLOSE_AT_DAY_HIGH) | (1 << B.BIT_CLOSE_AT_DAY_LOW)
     mask |= 1 << _BANDS[band][2]
@@ -127,6 +142,12 @@ def _expected_mask(i: int) -> int:
         # prev price ⇒ close (1000 pts higher) is strictly above TC (60),
         # and width 0 ≤ 30 bps of P ⇒ narrow (63) — the 60→66 reshape.
         mask |= (1 << B.BIT_ABOVE_CPR_TC) | (1 << B.BIT_NARROW_CPR_DAY)
+        if band >= 1:
+            # DEC-GAP-MIDPOINT-CONDITIONS-001: the gap-mid level is the flat
+            # midpoint P_k − ₹500 (see module docstring); the close P_k is
+            # strictly above it from the SECOND bar of the day onward (the
+            # arm-from-bar-2 law keeps the day's first bar dark).
+            mask |= 1 << B.BIT_CLOSE_ABOVE_GAP_MID
     return mask
 
 

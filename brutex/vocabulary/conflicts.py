@@ -34,12 +34,14 @@ from brutex.vocabulary.bits import (
     BIT_BELOW_CPR_BC,
     BIT_CLOSE_ABOVE_EMA20,
     BIT_CLOSE_ABOVE_EMA200,
+    BIT_CLOSE_ABOVE_GAP_MID,
     BIT_CLOSE_ABOVE_PDH,
     BIT_CLOSE_ABOVE_PDL,
     BIT_CLOSE_AT_DAY_HIGH,
     BIT_CLOSE_AT_DAY_LOW,
     BIT_CLOSE_BELOW_EMA20,
     BIT_CLOSE_BELOW_EMA200,
+    BIT_CLOSE_BELOW_GAP_MID,
     BIT_CLOSE_BELOW_PDH,
     BIT_CLOSE_BELOW_PDL,
     BIT_CLOSE_IN_LOWER_THIRD,
@@ -123,6 +125,13 @@ CONFLICT_PAIRS: Final[frozenset[tuple[int, int]]] = frozenset(
         (BIT_ABOVE_CPR_TC, BIT_BELOW_CPR_BC),
         (BIT_ABOVE_CPR_TC, BIT_INSIDE_CPR),
         (BIT_BELOW_CPR_BC, BIT_INSIDE_CPR),
+        # Group 15: Gap-midpoint direct opposition (DEC-GAP-MIDPOINT-CONDITIONS-001,
+        # the (GAP_UP_DAY, GAP_DOWN_DAY) precedent above). Strictly-above and
+        # strictly-below the level cannot co-fire; `near_gap_mid` is deliberately
+        # NOT conflicting with either — a close can be strictly above AND within
+        # the near band (the same convention as the PDH/PDL family, where
+        # close_above_pdh and near_pdh co-fire legally).
+        (BIT_CLOSE_ABOVE_GAP_MID, BIT_CLOSE_BELOW_GAP_MID),
     }
 )
 
@@ -131,7 +140,7 @@ def has_conflict(mask: int) -> bool:
     """Return True if `mask` contains any conflict pair.
 
     Args:
-        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 66 declared bits).
+        mask: u128 strategy mask (``TOTAL_CONDITIONS`` = 69 declared bits).
 
     Returns:
         True if mask has any conflict pair (i.e., the strategy is
