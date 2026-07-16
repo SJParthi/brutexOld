@@ -343,7 +343,9 @@ class TestZeroManifestIo:
 import json  # noqa: E402
 
 
-def _write_top100_doc(results_root: Path, entries: list[dict[str, Any]], *, run_id: str = _RUN) -> None:
+def _write_top100_doc(
+    results_root: Path, entries: list[dict[str, Any]], *, run_id: str = _RUN
+) -> None:
     """One display-reader-valid top100.json object root under sweep_runs/<run_id>."""
     run_dir = results_root.parent / "sweep_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)

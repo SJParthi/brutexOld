@@ -71,7 +71,6 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 import structlog
 
 from brutex.engine.top100_artifact import TOP100_SCHEMA_VERSION
-from brutex.ranking.tiers import TIER_LABELS
 from brutex.engine.trade_store import (
     RESULTS_DEPTH_DIRNAME,
     SWEEP_RUNS_DIRNAME,
@@ -80,6 +79,7 @@ from brutex.engine.trade_store import (
     read_trade_page,
 )
 from brutex.money import format_inr
+from brutex.ranking.tiers import TIER_LABELS
 
 _LOG = structlog.get_logger(__name__)
 

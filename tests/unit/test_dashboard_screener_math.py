@@ -558,7 +558,11 @@ class TestTierFilter:
     def test_tier_status_text_sorts_with_nulls_last(self) -> None:
         rows = [
             {"rank": 1, "metrics": {}},  # absent → sorts LAST
-            {"rank": 2, "tier": {"status_text": "S+ — exceptional (all axes passed)"}, "metrics": {}},
+            {
+                "rank": 2,
+                "tier": {"status_text": "S+ — exceptional (all axes passed)"},
+                "metrics": {},
+            },
             {"rank": 3, "tier": {"status_text": "A — blocked from S: min_trades"}, "metrics": {}},
         ]
         out = _node_call(

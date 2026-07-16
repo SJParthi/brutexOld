@@ -18,7 +18,28 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-15 (CLUB Q merge vehicle, branch
+_Last updated: 2026-07-16 (DEC-RANKING-SPLUS-TIER-001, MIGRATION.md #1832,
+branch `claude/splus-tier-classifier` — the S+ / S / A strategy tier
+classifier: an ANNOTATION-ONLY "how exceptional?" label on EXISTING metrics
+(NEW `brutex/ranking/tiers.py`, the operator-approved 9-axis threshold
+table, fail-closed on non-finite input, honest `missing_input:*` degrades),
+stamped per-entry by the top-100 writer strictly AFTER ranking (additive
+`tier` object + self-describing `tier_config` root meta; NEVER in
+`ENTRY_REQUIRED_KEYS`, NEVER a rank change — R13 pinned), bridged at the ONE
+display reader with the SERVER-built `tier_status_text`, joined onto
+/results rows via the newest-run composite index (EMIT-ON-PRESENT keys; a
+no-artifact lake's payload byte-identical, pinned), and rendered on /results
+· /screener (column + exact-match filter under the absent-key law) ·
+/strategy (`stTier` + the "tier on gross signal P&L; worst-case-fill re-sim
+deferred" honesty chip) · the operator rank-1 card (`r1_tier` badge).
+Composes with — never bypasses — the 5 hard gates + the Stage-4 cascade
+(the joined cascade status IS axis 9); H = ₹10/round-trip is the UNVERIFIED
+v1 haircut surrogate (follow-up DEC-TIER-PESSIMISTIC-FILL-002). ENGINE
+UNCHANGED — NIFTY/BANKNIFTY/SENSEX; run identity untouched; no
+lake/schema/scope/vocab/rate change. This header carries the pointer, never
+the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1832.)
+Earlier: 2026-07-15 (CLUB Q merge vehicle, branch
 `integration/club-q-dashboard` — the file-disjoint fold of THREE PRs as ONE
 merge event off main tip d6ac9f85: #1434 memory/cache + RAM-residency
 hardening pack (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) ·
@@ -2753,7 +2774,53 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
+- **Active branch:** `claude/splus-tier-classifier`
+  (**DEC-RANKING-SPLUS-TIER-001, MIGRATION.md #1832** — the S+ / S / A
+  strategy tier classifier, an ANNOTATION-ONLY label on EXISTING metrics.
+  NEW `brutex/ranking/tiers.py`: `classify_tier` evaluates the
+  operator-approved threshold table (2026-07-16) S+ → S → A, every axis
+  must pass — trades ≥ 500/200/30 (lockbox floor / hard-gate MIN_TRADES,
+  cross-pinned) · win ≥ 0.65/0.55/0.40 · payoff ≥ 1.0/0.8/0.6 (None WLR
+  from zero losers PASSES) · PF ≥ 2.0/1.6/1.2 (zero gross loss PASSES —
+  the ResultRow 0.0-sentinel keys on `gross_loss_paisa == 0`) · expectancy
+  ≥ 2×H / ≥ H / > 0 (H = 1000 paisa, the UNVERIFIED v1 adverse-fill
+  haircut surrogate) · stop present + width ≤ 10/20 bps of entry + MAE₁ₘ ≤
+  1.5×/2.0×sl (S+/S only; absent minute path = the honest
+  `missing_input:mae_1m`, A unaffected) · DD ≤ 5/10/30% + minute-path DD ≤
+  7.5/15% · streak ≤ 6/8/10 (6 ≈ the ln(500)/ln(1/0.35) expected-max-run
+  bound) · cascade == pass / ∈ {pass, provisional_pass} / != fail; a
+  present NaN/±inf reads the single fail-closed `non_finite_input`;
+  `blocked_next` names the next-tier-up blockers in the stable
+  `TIER_REASON_ORDER`. WIRED as the #1749 cascade precedent verbatim: the
+  writer stamps every entry AFTER ranking (additive `tier` object + the
+  self-describing `tier_config` root meta; golden RE-LOCKED additive-only;
+  annotation-never-reranks pinned classifier-active-vs-stub); the display
+  reader bridges + stamps the ONE server-built `tier_status_text`
+  (`oneclick_view.tier_status_text` — no tier prose in JS; invalid objects
+  dropped per row into the NAMED partial); /results joins the tier map off
+  the SAME newest-run `CompositeIndex` (the revision probe folds ONE
+  top100-STAMP stat so a mid-depth-pass poll can never freeze a tier-less
+  index) and emits EMIT-ON-PRESENT `tier`/`tier_blocked_next`/
+  `tier_status_text` row keys — a no-artifact lake's payload is
+  BYTE-IDENTICAL (json-equality-pinned, view + route); /screener gains the
+  `tier.status_text` column + the exact-match label filter under the
+  instrument absent-key law (options harvested only from rows carrying a
+  non-null label); /strategy + the v29 drawer gain `stTier`
+  (hook-parity-fenced both copies) and the operator card gains `r1_tier`
+  (green `.oc-tier-good` for S+/S, neutral A) — each beside the persistent
+  honesty chip constant `TIER_GROSS_NOTE` ("tier on gross signal P&L;
+  worst-case-fill re-sim deferred", template-pinned). HONEST: gross
+  signal-only P&L — NO metric is computed under a literal worst-case fill
+  today (trade_sim is the signal-only simulator; the futures executor's
+  worst leg is structurally absent); the named follow-up is
+  DEC-TIER-PESSIMISTIC-FILL-002 (the true bar-extreme adverse-fill re-sim
+  leg in results_depth_pass, O(finalists)). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; run identity untouched; ResultRow untouched;
+  `tiers.py` 100.00% line+branch standalone (181/80) on its NEW numpy-safe
+  ci.yml stanza; all six touched gated modules re-measured 100.00%;
+  ruff/ruff-format clean; `mypy --strict` clean; pyright 0 new;
+  `node --check` clean.)
+  Earlier: `integration/club-q-dashboard` (**CLUB Q merge vehicle** —
   the file-disjoint fold of THREE PRs as ONE merge event off main tip d6ac9f85,
   in fold order: **#1434** memory/cache + RAM-residency hardening pack
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · **#1433** the
@@ -7797,7 +7864,23 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `integration/club-q-dashboard`
+- **Active feature branch:** `claude/splus-tier-classifier`
+  (DEC-RANKING-SPLUS-TIER-001, MIGRATION.md #1832 — the S+ / S / A strategy
+  tier classifier: the annotation-only tier label on EXISTING metrics (NEW
+  `brutex/ranking/tiers.py`, operator-approved 9-axis thresholds; H = ₹10
+  UNVERIFIED v1 haircut surrogate — follow-up DEC-TIER-PESSIMISTIC-FILL-002),
+  stamped per-entry by the top-100 writer strictly after ranking (additive
+  `tier` object + `tier_config` root meta; never in ENTRY_REQUIRED_KEYS,
+  never a rank change), bridged with the ONE server-built
+  `tier_status_text`, joined onto /results via the newest-run composite
+  index (emit-on-present keys; no-artifact payload byte-identical, pinned)
+  and rendered on /results · /screener (column + exact-match filter,
+  absent-key law) · /strategy (`stTier` + the gross-P&L honesty chip) · the
+  operator card (`r1_tier` badge); composes with — never bypasses — the 5
+  hard gates + the Stage-4 cascade; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1832 for the full blurb)
+  Earlier: `integration/club-q-dashboard`
   (CLUB Q merge vehicle — the file-disjoint fold of THREE PRs as ONE merge
   event off main tip d6ac9f85: #1434 memory/cache + RAM-residency hardening
   (DEC-MEMORY-FOOTPRINT-HARDENING-001, MIGRATION.md #1721) · #1433 the brutexd

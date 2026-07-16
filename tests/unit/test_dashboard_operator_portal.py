@@ -480,8 +480,16 @@ class TestHarvestFilterOptions:
         against rows that cannot say."""
         rows = [
             {"tf": "5m", "direction": "long", "tier": {"label": "S+", "blocked_next": []}},
-            {"tf": "5m", "direction": "long", "tier": {"label": "A", "blocked_next": ["min_trades"]}},
-            {"tf": "5m", "direction": "long", "tier": {"label": None, "blocked_next": ["win_rate"]}},
+            {
+                "tf": "5m",
+                "direction": "long",
+                "tier": {"label": "A", "blocked_next": ["min_trades"]},
+            },
+            {
+                "tf": "5m",
+                "direction": "long",
+                "tier": {"label": None, "blocked_next": ["win_rate"]},
+            },
             {"tf": "5m", "direction": "long"},  # pre-tier row: no option
         ]
         out = _node_call("SP.bxHarvestFilterOptions(ARGS[0])", json.dumps(rows))

@@ -15,7 +15,6 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-
 from brutex.metrics.lockbox import LOCKBOX_DEFAULT_MIN_TRADES
 from brutex.ranking import MIN_TRADES
 from brutex.ranking.tiers import (
@@ -44,7 +43,6 @@ from brutex.ranking.tiers import (
     TIER_WIN_RATE,
     TierConfig,
     TierInputs,
-    TierThresholds,
     TierVerdict,
     classify_tier,
     tier_config_payload,
@@ -492,7 +490,19 @@ class TestThresholdCrossPins:
             S_THRESHOLDS.max_minute_dd_pct,
             S_THRESHOLDS.max_consecutive_losses,
             S_THRESHOLDS.cascade_allowed,
-        ) == (200, 0.55, 0.8, 1.6, 1.0, 20.0, 2.0, 10.0, 15.0, 8, frozenset({"pass", "provisional_pass"}))
+        ) == (
+            200,
+            0.55,
+            0.8,
+            1.6,
+            1.0,
+            20.0,
+            2.0,
+            10.0,
+            15.0,
+            8,
+            frozenset({"pass", "provisional_pass"}),
+        )
         assert (
             A_THRESHOLDS.min_trades,
             A_THRESHOLDS.min_win_rate,

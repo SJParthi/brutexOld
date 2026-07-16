@@ -706,6 +706,4 @@ class TestTierStatusText:
     def test_gross_note_is_the_one_pinned_constant(self) -> None:
         # The persistent honesty chip: templates render THIS constant
         # verbatim (as its &amp; entity form) beside the tier.
-        assert ov.TIER_GROSS_NOTE == (
-            "tier on gross signal P&L; worst-case-fill re-sim deferred"
-        )
+        assert ov.TIER_GROSS_NOTE == ("tier on gross signal P&L; worst-case-fill re-sim deferred")
