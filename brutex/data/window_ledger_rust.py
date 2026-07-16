@@ -141,6 +141,7 @@ class ClassifyLaw(Protocol):
 
     def __call__(self, raw_bars: int, error_type: str | None, *, degraded: bool = False) -> str:
         """Classify a window outcome — SUCCESS / EMPTY / FAILED."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 class MergeKeyLaw(Protocol):
@@ -148,6 +149,7 @@ class MergeKeyLaw(Protocol):
 
     def __call__(self, key: WindowKey) -> tuple[str, str, str, str, str]:
         """Render *key*'s 5-tuple window identity."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def window_ledger_rust_enabled() -> bool:
