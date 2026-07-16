@@ -316,8 +316,10 @@ def _run_body(ctx: AcceptanceContext, *, plan: Any, contracts: list[str]) -> Che
         },
         limits=[
             "exact OHLCV value equality after keep-first dedup — no tolerance",
-            "the freshness seam reads full stored history (seam-owned; --months "
-            "bounds the 1day compare only)",
+            (
+                "the freshness seam reads full stored history (seam-owned; --months "
+                "bounds the 1day compare only)"
+            ),
         ],
         repro=_repro(ctx),
     )
@@ -368,11 +370,15 @@ def _run_body(ctx: AcceptanceContext, *, plan: Any, contracts: list[str]) -> Che
         abstain_reason=daily_reason,
         limits=[
             "forming sessions excluded from BOTH sides (cutoff law)",
-            "Muhurat sessions skipped PER-DAY on both sides (one count per "
-            "distinct IST date — never a whole-history abstain)",
-            "stored 1day bars on Muhurat session dates are NOT verified — a "
-            "corrupt or fabricated Muhurat-date daily bar is invisible to this "
-            "check (the skipped dates are named in muhurat_days_unverified)",
+            (
+                "Muhurat sessions skipped PER-DAY on both sides (one count per "
+                "distinct IST date — never a whole-history abstain)"
+            ),
+            (
+                "stored 1day bars on Muhurat session dates are NOT verified — a "
+                "corrupt or fabricated Muhurat-date daily bar is invisible to this "
+                "check (the skipped dates are named in muhurat_days_unverified)"
+            ),
             f"1day compare bounded to the last {ctx.months} months (--full lifts)",
         ],
         repro=_repro(ctx),

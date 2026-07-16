@@ -277,39 +277,39 @@ class TestPullActiveProbe:
         ctx = _ctx(tmp_path)
         assert ctx.pull_active() is False
         # flip the underlying state; the memo must hold for the run
-        from brutex.observability.pull_journal import record_pull_start
+        import brutex.observability.pull_journal as pj
 
-        record_pull_start(tmp_path, pull_id="p1", dry_run=False)
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False)
         assert ctx.pull_active() is False
 
     def test_live_journal_run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from brutex.observability.pull_journal import record_pull_start
+        import brutex.observability.pull_journal as pj
 
-        record_pull_start(tmp_path, pull_id="p1", dry_run=False)
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False)
         ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True
 
     def test_finished_journal_run_idle(self, tmp_path: Path) -> None:
-        from brutex.observability.pull_journal import record_pull_finish, record_pull_start
+        import brutex.observability.pull_journal as pj
 
-        record_pull_start(tmp_path, pull_id="p1", dry_run=False)
-        record_pull_finish(tmp_path, pull_id="p1", verdict="ok")
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False)
+        pj.record_pull_finish(tmp_path, pull_id="p1", verdict="ok")
         ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is False
 
     def test_stale_unfinished_run_idle(self, tmp_path: Path) -> None:
-        from brutex.observability.pull_journal import record_pull_start
+        import brutex.observability.pull_journal as pj
 
-        record_pull_start(tmp_path, pull_id="p1", dry_run=False)
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False)
         later = datetime.now(UTC) + timedelta(seconds=PULL_ACTIVE_STALE_S + 60)
         ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: later)
         assert ctx.pull_active() is False
 
     def test_heartbeat_extends_liveness(self, tmp_path: Path) -> None:
-        from brutex.observability.pull_journal import record_pull_heartbeat, record_pull_start
+        import brutex.observability.pull_journal as pj
 
-        record_pull_start(tmp_path, pull_id="p1", dry_run=False)
-        record_pull_heartbeat(tmp_path, pull_id="p1")
+        pj.record_pull_start(tmp_path, pull_id="p1", dry_run=False)
+        pj.record_pull_heartbeat(tmp_path, pull_id="p1")
         ctx = AcceptanceContext(lake_root=tmp_path, seed="s", now_utc=lambda: datetime.now(UTC))
         assert ctx.pull_active() is True
 
