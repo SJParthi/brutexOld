@@ -88,6 +88,20 @@
   .plain-eng { display:none; }
   body.share-mode .jargon { display:none; }
   body.share-mode .plain-eng { display:inline; }
+  /* Batch B+C design-system adoption (DEC-DASHBOARD-UX-ANIMATE-001 vocabulary):
+     - the frozen identity column (rank #) rides .bx-col-frozen (bx-design C4) —
+       CSS position:sticky left ONLY, no scroll JS; the corner header cell sits
+       above both sticky axes, and a hovered row keeps its tint under the
+       frozen cell so the row never reads torn.
+     - a null/partial VIX band cell keeps the HONEST verbatim text
+       ("not stamped" — bxVixBandCellText) but renders muted, so the honest
+       null reads intentional, never like a bug.
+     - the clear-filters affordance is a .bx-chip-styled <button> (chips do not
+       carry cursor/font on a button element). */
+  thead th.bx-col-frozen { z-index: 2; }
+  tbody tr:hover td.bx-col-frozen { background: var(--surface-2); }
+  td.vix-null { color: var(--muted); font-style: italic; }
+  #scClearFilters { cursor: pointer; font: inherit; }
 </style>
 <link rel="stylesheet" href="/static/bx-theme.css">
 <link rel="stylesheet" href="/static/bx-design.css">
@@ -147,15 +161,28 @@
   </div>
 
   <div class="count" id="scCount">no rows loaded yet — awaiting real run artifact</div>
+  <!-- Clear-filters affordance (Batch B+C): shown ONLY while a filter is
+       active; sits beside the count line, where the honest null-VIX
+       "clear the filter to see it/them" note appears (bxNullVixNote) — the
+       note now points at a real one-click affordance. The button resets the
+       EXISTING filter inputs and re-runs the page's own render() wiring —
+       no new filtering path. -->
+  <div class="count" id="scFilterBar" hidden>
+    <button id="scClearFilters" class="bx-chip muted" type="button"
+            aria-label="Clear every screener filter and show all loaded rows">✕ clear filters</button>
+  </div>
   <!-- [11] sort-basis honesty label (DEC-ONECLICK-TOP100-OBJECT-ROOT-001):
        the artifact order is its R30 preset (default min_dd_first), which
        deliberately DIFFERS from /results (Rank-by metric, descending);
        loadRows fills the live preset via textContent — no sort is changed. -->
   <div class="count" id="scSortBasis">sort basis: artifact preset (default min_dd_first — smallest max-drawdown first) — differs from /results (Rank-by metric, descending); column clicks re-sort this page only</div>
+  <!-- Legend (design-system depth law): every marker/suffix THIS page renders,
+       explained in one static muted line — honesty surfaces stay verbatim. -->
+  <div class="count" id="scLegend">legend: "—" = value absent from the run artifact (never fabricated) · "not stamped" = the run carries no VIX band (honest NULL, R31) · "×" joins a strategy's conditions · "↕" = sortable column, "▲/▼" = the active sort · hover a money cell for the exact integer paisa</div>
 
   <div id="scPanel"></div>
-  <div class="tablewrap">
-    <table id="scTable">
+  <div class="tablewrap bx-tablewrap">
+    <table id="scTable" class="bx-table">
       <thead><tr id="scHead"></tr></thead>
       <tbody id="scRows"></tbody>
     </table>
@@ -223,11 +250,24 @@
     var cols = window.BXScreener.COLUMNS;
     for (var i = 0; i < cols.length; i++) {
       var th = document.createElement('th');
+      var active = state.sort.field === cols[i].key;
+      // Design-system C5 sort affordance: EVERY sortable column carries a
+      // neutral ↕ glyph; the active column keeps its ▲/▼ direction glyph and
+      // the .sorted highlight. Column 0 (rank #) is the frozen identity
+      // column (C4 — CSS position:sticky left only, no scroll JS).
+      th.className = 'bx-th-sort' + (active ? ' sorted' : '') + (i === 0 ? ' bx-col-frozen' : '');
       th.setAttribute('data-field', cols[i].key);
       th.setAttribute('data-type', cols[i].type);
       th.setAttribute('data-explain', cols[i].explain);
-      var arrow = state.sort.field === cols[i].key ? (state.sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
-      th.textContent = cols[i].label + arrow;
+      if (active) {
+        th.setAttribute('aria-sort', state.sort.dir === 'asc' ? 'ascending' : 'descending');
+      }
+      th.textContent = cols[i].label;
+      var glyph = document.createElement('span');
+      glyph.className = 'bx-sort-glyph';
+      glyph.setAttribute('aria-hidden', 'true');
+      glyph.textContent = active ? (state.sort.dir === 'asc' ? ' ▲' : ' ▼') : ' ↕';
+      th.appendChild(glyph);
       head.appendChild(th);
     }
   }
@@ -259,7 +299,12 @@
 
   function render() {
     buildHead();
-    var applied = window.BXScreener.applyFilters(state.rows, currentFilters());
+    var filters = currentFilters();
+    // The clear-filters chip shows ONLY while a filter is active (the page's
+    // own currentFilters() emits keys only for non-blank inputs).
+    var filterBar = byId('scFilterBar');
+    if (filterBar) { filterBar.hidden = Object.keys(filters).length === 0; }
+    var applied = window.BXScreener.applyFilters(state.rows, filters);
     var sorted = window.BXScreener.sortRows(
       applied.rows, state.sort.field, state.sort.type, state.sort.dir
     );
@@ -274,9 +319,29 @@
       for (var c = 0; c < cols.length; c++) {
         var tdEl = document.createElement('td');
         var text = cellText(row, cols[c]);
+        var raw = window.BXScreener.fieldValue(row, cols[c].key);
+        if (c === 0) {
+          // Frozen identity column (C4) — sticky-left via CSS only.
+          tdEl.className = 'bx-col-frozen';
+        }
         if (cols[c].money) {
-          var raw = window.BXScreener.fieldValue(row, cols[c].key);
-          if (typeof raw === 'number') { tdEl.className = raw < 0 ? 'neg' : 'pos'; }
+          if (typeof raw === 'number') {
+            tdEl.className = raw < 0 ? 'neg' : 'pos';
+            // Depth (TradingView-inspection law): the cell DISPLAYS 2dp
+            // rupees; the title carries the exact integer paisa from the
+            // already-served top100 payload — verified numeric here, never a
+            // repeat of the visible string, bounded well under 500 chars.
+            var exact = String(raw);
+            if (exact.length > 480) { exact = exact.slice(0, 480) + '…'; }
+            tdEl.title = exact + ' paisa — exact integer from the top100 artifact';
+          }
+        }
+        if (cols[c].type === 'vix') {
+          // Muted styling for the honest null/partial band cell — the
+          // verbatim "not stamped" wording (bxVixBandCellText) is untouched.
+          var bandKnown = !!raw && typeof raw === 'object' &&
+            typeof raw.lo === 'number' && typeof raw.hi === 'number';
+          if (!bandKnown) { tdEl.className = 'vix-null'; }
         }
         tdEl.setAttribute('data-explain', cols[c].explain);
         tdEl.textContent = text;
@@ -414,6 +479,15 @@
     });
     byId('scShowAll').addEventListener('click', function () {
       state.showAll = true;
+      render();
+    });
+    // Clear filters: reset the EXISTING eight filter inputs and re-run the
+    // page's own render() wiring (currentFilters() re-reads the inputs) —
+    // no new filtering path, no new fetch.
+    byId('scClearFilters').addEventListener('click', function () {
+      ['scTf', 'scDir', 'scInstrument', 'scMinWin', 'scMinPf', 'scMaxDd', 'scVixLo', 'scVixHi'].forEach(function (id) {
+        byId(id).value = '';
+      });
       render();
     });
     var tip = byId('bxTip');
