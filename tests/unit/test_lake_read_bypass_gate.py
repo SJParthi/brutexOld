@@ -43,7 +43,7 @@ from typing import Final
 #: read spelling the repo's stack exposes (see the module-docstring envelope).
 _RAW_READ_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:read_parquet_glob_regular|read_parquet_regular|read_parquet"
-    r"|scan_parquet|parquet_scan|read_table|ParquetFile)\s*\("
+    r"|scan_parquet_regular|scan_parquet|parquet_scan|read_table|ParquetFile)\s*\("
 )
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -194,10 +194,12 @@ class TestLakeReadBypassGate:
         # pyarrow — the reviewer-proved bypass spellings (hostile-review F1)
         assert _RAW_READ_RE.search("pq.read_table(bars_path)")
         assert _RAW_READ_RE.search("pq.ParquetFile(dest)")
-        # the fd-guarded seam spellings (DEC-LAKE-READ-INODE-GUARD-001) — a
-        # caller routing its raw read through guarded_read stays in-gate
+        # the fd-guarded seam spellings (DEC-LAKE-READ-INODE-GUARD-001 /
+        # DEC-LAKE-READ-INODE-GUARD-002) — a caller routing its raw read
+        # through guarded_read stays in-gate
         assert _RAW_READ_RE.search("read_parquet_regular(path, columns=cols)")
         assert _RAW_READ_RE.search('read_parquet_glob_regular(base + "/**/*.parquet")')
+        assert _RAW_READ_RE.search('scan_parquet_regular(files, missing_columns="insert")')
         # the SCHEMA-ONLY probes stay OUTSIDE the gate (metadata, no bar rows
         # served — the pre-existing pl.read_parquet_schema envelope)
         assert not _RAW_READ_RE.search("pl.read_parquet_schema(path)")

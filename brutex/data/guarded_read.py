@@ -57,7 +57,7 @@ from __future__ import annotations
 import threading
 from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from brutex.config.deadline import (
     DeadlineExceeded,
@@ -88,6 +88,7 @@ __all__ = [
     "read_regular_bytes_deadline",
     "read_regular_text",
     "read_regular_text_deadline",
+    "scan_parquet_regular",
 ]
 
 #: The deadline-core result type. A module-level ``TypeVar`` (NOT the PEP 695
@@ -178,6 +179,65 @@ def read_parquet_glob_regular(
         if columns is None:
             return pl.read_parquet(handles)
         return pl.read_parquet(handles, columns=list(columns))
+
+
+def scan_parquet_regular(
+    source: str | Path | Sequence[str | Path],
+    *,
+    missing_columns: Literal["insert", "raise"] = "raise",
+    extra_columns: Literal["ignore", "raise"] = "raise",
+) -> pl.LazyFrame:
+    """``pl.scan_parquet`` with an EAGER per-file fd probe — defense (a) for LAZY scans.
+
+    The lazy twin of :func:`read_parquet_glob_regular`
+    (DEC-LAKE-READ-INODE-GUARD-002 — the verifier-identified residual):
+    ``pl.scan_parquet`` defers every file OPEN to ``.collect()``, so a planted
+    FIFO among the partition files hangs the COLLECT deep in C-level
+    ``fifo_open`` where no Python guard can fire. This helper fd-probes every
+    candidate file EAGERLY at scan-build time (``os.open(O_RDONLY|O_NONBLOCK)``
+    → ``S_ISREG`` on the fd → close — the probe itself can never hang: a
+    writer-less FIFO open is immediate under ``O_NONBLOCK``), THEN returns
+    polars' OWN lazy scan — lazy semantics, projection/predicate pushdown and
+    polars' own glob expansion/order are all preserved BYTE-IDENTICALLY for
+    regular files (a path/glob source is handed to polars UNTOUCHED; an
+    explicit sequence is handed over as the normalized ``list[str]`` in the
+    caller's exact order — an identity for the production ``list[str]`` call
+    sites, order + membership preserved).
+
+    *source* shapes: an explicit file list (each entry probed directly — the
+    ``ist_span_partition_files`` / ``month_partition_files`` sites) or a
+    single path/glob string (candidates enumerated with Python's recursive
+    glob — measured identical to polars 1.42's own expansion on the lake's
+    ``<yyyy>/<mm>.parquet`` layout; a ZERO-match pattern probes nothing and
+    delegates to polars' genuine empty-expansion behavior, error contract
+    byte-identical). A non-regular inode raises :class:`NotRegularFileError`
+    — an ``OSError``, a ``parquet_read_skip_errors()`` member — EAGERLY at
+    scan-build (matching the guarded eager readers' error timing; a vanished
+    list entry likewise raises its ``OSError`` eagerly). HONEST TOCTOU
+    envelope: the collect re-opens by PATH, so an inode swapped in the
+    probe→collect window is out of this gate's reach — the same disclosed
+    residual class as every path-level guard in this module; the probe closes
+    the PLANTED-inode class (the shape that exists before the read starts).
+    """
+    import glob as _glob
+
+    import polars as pl
+
+    if isinstance(source, str | Path):
+        # Path/glob-string arm: probe the expanded candidates, then hand polars
+        # the ORIGINAL source so its own glob expansion/order laws apply.
+        for name in sorted(_glob.glob(str(source), recursive=True)):
+            with open_regular_binary(name):
+                pass
+        return pl.scan_parquet(source, missing_columns=missing_columns, extra_columns=extra_columns)
+    # Explicit-list arm: probe each entry, then hand polars the normalized
+    # `list[str]` in the CALLER's order (str(entry) is an identity for the
+    # production `list[str]` call sites — order + membership preserved).
+    candidates: list[str] = [str(entry) for entry in source]
+    for name in candidates:
+        with open_regular_binary(name):
+            pass
+    return pl.scan_parquet(candidates, missing_columns=missing_columns, extra_columns=extra_columns)
 
 
 def read_parquet_schema_regular(path: Path | str) -> dict[str, Any]:

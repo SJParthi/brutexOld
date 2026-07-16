@@ -36,6 +36,7 @@ from brutex.data.guarded_read import (
     read_regular_bytes,
     read_regular_bytes_deadline,
     read_regular_text_deadline,
+    scan_parquet_regular,
 )
 
 
@@ -260,6 +261,109 @@ class TestReadParquetGlobRegular:
         (tmp_path / "2024-02.parquet").write_bytes(b"not parquet at all")
         with pytest.raises(pl.exceptions.PolarsError):
             guarded_read.read_parquet_glob_regular(str(tmp_path / "*.parquet"))
+
+
+class TestScanParquetRegular:
+    """The LAZY-scan twin (DEC-LAKE-READ-INODE-GUARD-002): the eager per-file
+    fd probe at scan-BUILD time closes the collect-time FIFO hang the eager
+    helpers cannot cover, while regular files collect byte-identical frames
+    with lazy pushdown preserved."""
+
+    def test_list_source_collect_identical_to_plain_scan(self, tmp_path: Path) -> None:
+        """Explicit-list parity: the guarded lazy scan over a ``list[str]``
+        (the ist_span_partition_files / month_partition_files site shape)
+        collects the SAME frame as polars' own lazy scan."""
+        _write_parquet(tmp_path / "2024-01.parquet")
+        frame_b = pl.DataFrame({"timestamp": [4, 5], "close": [12.0, 12.5], "volume": [3, 4]})
+        frame_b.write_parquet(tmp_path / "2024-02.parquet")
+        files = [str(tmp_path / "2024-01.parquet"), str(tmp_path / "2024-02.parquet")]
+        got = scan_parquet_regular(files).collect()
+        plain = pl.scan_parquet(files).collect()
+        assert got.equals(plain)
+
+    def test_glob_source_collect_identical_to_plain_scan(self, tmp_path: Path) -> None:
+        """Glob-string parity: the ORIGINAL pattern is handed to polars, so
+        its own expansion/order laws apply — frames byte-identical (the
+        timeframe_materialize whole-tree ``**/*.parquet`` site shape)."""
+        part = tmp_path / "1minute" / "2024"
+        part.mkdir(parents=True)
+        _write_parquet(part / "01.parquet")
+        frame_b = pl.DataFrame({"timestamp": [4, 5], "close": [12.0, 12.5], "volume": [3, 4]})
+        frame_b.write_parquet(part / "02.parquet")
+        pattern = str(tmp_path / "1minute") + "/**/*.parquet"
+        got = scan_parquet_regular(pattern).collect()
+        plain = pl.scan_parquet(pattern).collect()
+        assert got.equals(plain)
+
+    def test_schema_tolerant_kwargs_pass_through(self, tmp_path: Path) -> None:
+        """The mixed 7-col/17-col tree shape (DEC-GREEKS-ENGINE-PR2B-001): the
+        ``missing_columns='insert'`` / ``extra_columns='ignore'`` kwargs reach
+        polars unchanged — parity with the plain schema-tolerant scan."""
+        _write_parquet(tmp_path / "2024-01.parquet")
+        enriched = pl.DataFrame(
+            {
+                "timestamp": [7],
+                "close": [13.0],
+                "volume": [9],
+                "iv": [0.21],
+            }
+        )
+        enriched.write_parquet(tmp_path / "2024-02.parquet")
+        files = [str(tmp_path / "2024-01.parquet"), str(tmp_path / "2024-02.parquet")]
+        got = scan_parquet_regular(
+            files, missing_columns="insert", extra_columns="ignore"
+        ).collect()
+        plain = pl.scan_parquet(files, missing_columns="insert", extra_columns="ignore").collect()
+        assert got.equals(plain)
+
+    def test_projection_pushdown_survives_the_guard(self, tmp_path: Path) -> None:
+        """Lazy semantics preserved: a ``.select(...)`` on the guarded scan
+        projects identically to the plain scan (the spot_join site shape)."""
+        _write_parquet(tmp_path / "2024-01.parquet")
+        files = [str(tmp_path / "2024-01.parquet")]
+        got = scan_parquet_regular(files).select("timestamp", "close").collect()
+        plain = pl.scan_parquet(files).select("timestamp", "close").collect()
+        assert got.equals(plain)
+        assert got.columns == ["timestamp", "close"]
+
+    def test_fifo_in_list_raises_eagerly_at_scan_build(self, tmp_path: Path) -> None:
+        """THE residual this helper exists for: a planted FIFO among the month
+        files raises typed at scan-BUILD (before any collect) — pre-fix the
+        bare ``pl.scan_parquet(files).collect()`` hung in C-level fifo_open
+        where no Python guard can fire."""
+        _write_parquet(tmp_path / "2024-01.parquet")
+        os.mkfifo(tmp_path / "2024-02.parquet")
+        files = [str(tmp_path / "2024-01.parquet"), str(tmp_path / "2024-02.parquet")]
+        with _hang_watchdog(), pytest.raises(NotRegularFileError):
+            scan_parquet_regular(files)
+
+    def test_fifo_under_glob_raises_eagerly_at_scan_build(self, tmp_path: Path) -> None:
+        _write_parquet(tmp_path / "2024-01.parquet")
+        os.mkfifo(tmp_path / "2024-02.parquet")
+        with _hang_watchdog(), pytest.raises(NotRegularFileError):
+            scan_parquet_regular(str(tmp_path / "*.parquet"))
+
+    def test_vanished_list_entry_raises_oserror_eagerly(self, tmp_path: Path) -> None:
+        """A list entry that no longer exists raises its ordinary ``OSError``
+        at scan-build (matching the guarded eager readers' error timing)."""
+        with pytest.raises(FileNotFoundError):
+            scan_parquet_regular([str(tmp_path / "gone.parquet")])
+
+    def test_zero_match_glob_probes_nothing_and_keeps_polars_error_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """A no-match pattern probes zero files; the error contract at collect
+        is polars' own empty-expansion behavior, byte-identical to the plain
+        scan (same exception type)."""
+        pattern = str(tmp_path / "absent" / "*.parquet")
+        # pytest.raises binds ``plain_type`` unconditionally (the plain scan
+        # raising on empty expansion IS the premise — a non-raise fails here),
+        # so the name can never be read unbound (CodeQL alert #1169 class).
+        with pytest.raises((pl.exceptions.PolarsError, OSError)) as plain_exc:
+            pl.scan_parquet(pattern).collect()
+        plain_type = type(plain_exc.value)
+        with pytest.raises(plain_type):
+            scan_parquet_regular(pattern).collect()
 
 
 class TestDeadlineVariants:
