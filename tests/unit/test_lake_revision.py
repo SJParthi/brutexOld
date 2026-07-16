@@ -321,6 +321,29 @@ class TestSweepResultsRevisionNoSignal:
     this module's stem-matched suite must prove them on its own).
     """
 
+    def test_happy_composite_joins_dirs_and_chain(self, tmp_path: Path) -> None:
+        """The happy path: ``<dirs digest>|<chain stat>`` — and an audit append moves it.
+
+        The standalone twin of the token behaviour proven in
+        ``test_dashboard_results_revision_key.py`` (this module's stem-matched
+        suite must reach the composite return on its own — the discovery-gate
+        contract; the line was previously covered only by the sibling file).
+        """
+        _write_store_file(tmp_path, "NIFTY", "5m", "bull_k1_" + "a" * 16 + ".parquet")
+        chain = tmp_path / "sweeps" / "audit" / "sweep-all.jsonl"
+        chain.parent.mkdir(parents=True, exist_ok=True)
+        chain.write_bytes(b'{"action":"SWEEP_START"}\n')
+        first = sweep_results_revision(tmp_path)
+        assert first is not None and "|" in first
+        dirs = sweeps_revision(tmp_path)
+        st = os.stat(chain)
+        assert first == f"{dirs}|{st.st_mtime_ns}:{st.st_size}"
+        # An audit APPEND (no directory mtime moves) still moves the composite.
+        with chain.open("ab") as handle:
+            handle.write(b'{"action":"SWEEP_START"}\n')
+        second = sweep_results_revision(tmp_path)
+        assert second is not None and second != first
+
     def test_dirs_probe_failure_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -646,6 +669,44 @@ class TestRegistryRevision:
         with capture_logs() as logs:
             assert probe_mod.registry_revision(path) is None
         assert [e for e in logs if e["event"] == "lake_revision.registry_stat_failed"]
+
+    def test_wal_checkpoint_removal_moves_the_token_again(self, tmp_path: Path) -> None:
+        """The checkpoint that REMOVES the wal moves the token too — correctly.
+
+        Carried from the DEC-MEMORY-FOOTPRINT-HARDENING-001 twin at the
+        merge-reconcile consolidation (the two in-flight `registry_revision`
+        implementations collapsed onto this ONE probe): a held-open commit
+        creates/grows the wal (visible), and the close's checkpoint that
+        unlinks it must move the composite AGAIN — a write happened — back to
+        the ``|absent``-shaped composite.
+        """
+        from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
+
+        path = tmp_path / "registry.duckdb"
+        path.write_bytes(b"main-checkpointed")
+        wal = tmp_path / "registry.duckdb.wal"
+        wal.write_bytes(b"wal-commit-1")
+        with_wal = registry_revision(path)
+        assert with_wal is not None and not with_wal.endswith(f"|{ABSENT_TOKEN}")
+        wal.unlink()
+        after_checkpoint = registry_revision(path)
+        st = os.stat(path)
+        assert after_checkpoint == f"{st.st_mtime_ns}:{st.st_size}|{ABSENT_TOKEN}"
+        assert after_checkpoint != with_wal
+
+    def test_wal_beside_absent_main_still_composes(self, tmp_path: Path) -> None:
+        """A wal with no main file (a mid-creation race shape) composes visibly.
+
+        Carried from the merge-reconcile consolidation: the write in flight is
+        visible — never the plain double-absent composite.
+        """
+        from brutex.dashboard.lake_revision import ABSENT_TOKEN, registry_revision
+
+        (tmp_path / "registry.duckdb.wal").write_bytes(b"creation-ddl")
+        token = registry_revision(tmp_path / "registry.duckdb")
+        assert token is not None
+        assert token.startswith(f"{ABSENT_TOKEN}|")
+        assert token != f"{ABSENT_TOKEN}|{ABSENT_TOKEN}"
 
 
 class TestResolveRevisionProbeTtl:
