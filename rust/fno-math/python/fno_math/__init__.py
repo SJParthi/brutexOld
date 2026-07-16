@@ -72,6 +72,7 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "metrics_fold_trades",
     "popcount_bytes",
     "sweep_drawdown_stats",
 )
@@ -120,6 +121,7 @@ from ._fno_math import (  # noqa: E402
     count_supermask_u64s,
     count_supermasks_u64s,
     count_supermasks_u64s_nthreads,
+    metrics_fold_trades,
     popcount_bytes,
     sweep_drawdown_stats,
 )
@@ -151,6 +153,7 @@ __all__ = [
     "count_supermask_u64s",
     "count_supermasks_u64s",
     "count_supermasks_u64s_nthreads",
+    "metrics_fold_trades",
     "popcount_bytes",
     "sweep_drawdown_stats",
 ]
