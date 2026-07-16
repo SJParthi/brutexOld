@@ -44,7 +44,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
-from brutex.metrics import compute_rust
 from brutex.metrics.deflated_sharpe import GAUSSIAN_KURTOSIS, deflated_sharpe_ratio
 from brutex.metrics.pbo import pbo_probability
 from brutex.metrics.types import ClosedTrade, EquityCurve
@@ -922,6 +921,14 @@ def _resolve_folds(trades: Sequence[ClosedTrade], start_equity_paisa: int) -> Tr
     arms, so the split's bit-parity is the fold's alone (the seam module
     docstring carries the exactness argument).
     """
+    # LAZY import (CodeQL py/cyclic-import — the #1533 lake_revision
+    # precedent): the seam leaf's TYPE_CHECKING annotations reference THIS
+    # module, so a module-level compute → compute_rust edge would close a
+    # module-level cycle. Function-local resolution is a sys.modules dict
+    # hit after the first call — the same per-call order as the env read
+    # the seam already performs.
+    from brutex.metrics import compute_rust
+
     if not compute_rust.metrics_rust_fold_enabled():
         return _fold_trades(trades, start_equity_paisa)
     folds = compute_rust.fold_trades_via_kernel(trades, start_equity_paisa)

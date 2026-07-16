@@ -27,10 +27,14 @@ SAFE to OFF with one warn-once ``flag_unrecognised`` event. OFF keeps the
 caller on the verbatim Python ``_fold_trades`` path — byte-identical by
 construction (the never-routes bomb-kernel spy pins it).
 
-LEAF DISCIPLINE (verified import direction): ``brutex.metrics.compute``
-imports this module at module scope, and ``brutex.engine`` (whose
-``__init__`` pulls ``sweep_driver`` → ``brutex.metrics.compute``) must stay
-importable — so this module must NOT import ``env_flag_tristate`` from
+LEAF DISCIPLINE (verified import direction — CodeQL py/cyclic-import
+clean, the #1533 lake_revision precedent): ``brutex.metrics.compute``
+imports this module LAZILY inside its ``_resolve_folds`` dispatch (NEVER at
+module scope — this module's TYPE_CHECKING annotations reference
+``compute``, so a module-level edge in either direction would close a
+module-level cycle), and ``brutex.engine`` (whose ``__init__`` pulls
+``sweep_driver`` → ``brutex.metrics.compute``) must stay importable — so
+this module must NOT import ``env_flag_tristate`` from
 ``brutex.engine.sweep_lookahead`` (a metrics→engine edge would both close an
 import cycle and make a plain metrics import transitively hard-require the
 ``fno_math`` wheel via ``brutex/engine/__init__``). It carries its own
@@ -38,8 +42,7 @@ inline ``_TRUTHY`` / ``_FALSY`` vocabulary — the ``brutex.feed_rust`` leaf
 precedent — mirror-pinned against ``sweep_lookahead``'s sets by a test. The
 ``brutex.metrics.compute`` internals it needs at runtime (``TradeFolds`` /
 ``Moments`` / ``_fold_trades``) are imported LAZILY inside the function
-bodies (``compute`` is fully initialised by any call time; a module-scope
-import would be the actual cycle).
+bodies (``compute`` is fully initialised by any call time).
 
 ## Bit-exactness (Golden Rule #4) — why the RETURNS column is computed HERE
 
@@ -392,8 +395,9 @@ def fold_trades_via_kernel(
     kernel = _resolve_kernel()
     if kernel is None:
         return None
-    # Lazy import — `compute` imports THIS module at module scope, so the
-    # reverse edge must be function-local (fully initialised by call time).
+    # Lazy import — NEITHER direction of the compute ↔ compute_rust pair
+    # carries a module-level runtime edge (CodeQL py/cyclic-import clean);
+    # `compute` is fully initialised by any call time.
     from brutex.metrics.compute import (
         Moments,
         TradeFolds,
@@ -432,7 +436,7 @@ def fold_trades_via_kernel(
             )
         return None
     # The structural gate above proves the shape; narrow for the type-checkers.
-    wire = cast("tuple[Any, ...]", result)
+    wire = cast(tuple[Any, ...], result)
     counts, sums, moments_wire, floats = wire
     folds = TradeFolds(
         n_trades=counts[0],
