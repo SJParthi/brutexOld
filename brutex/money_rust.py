@@ -5,8 +5,9 @@ are :mod:`brutex.money`'s public functions — when ``BRUTEX_CORE_RUST_MONEY``
 is ON they delegate to the ``brutex_core`` crate
 (``rust/brutex-core/src/money.rs``, exact decimal-STRING arithmetic)
 through this facade; the flag-OFF default is the verbatim CPython
-``Decimal`` oracle, byte-identical AND crate-untouched (bomb-crate
-spy-pinned).
+``Decimal`` oracle, output byte-identical (behavior-identical; see the
+r1 wording correction in MIGRATION #1943) AND crate-untouched
+(bomb-crate spy-pinned).
 
 Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
 conversion is for uniformity, not speed. Every one of these laws is a

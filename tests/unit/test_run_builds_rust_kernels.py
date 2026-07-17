@@ -139,6 +139,25 @@ OPTIONAL_KERNELS: dict[str, tuple[str, str]] = {
         "brutex/data/lake_rust_render.py",
         ".github/workflows/lake-rust-parity.yml",
     ),
+    # DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943 / slice T35):
+    # brutex_core is the default-OFF config-leaf crate (money / hwenv /
+    # paths / dotenv / backupenv laws). It is consumed ONLY through FIVE
+    # default-OFF import-guarded facades that resolve it lazily via
+    # `importlib.import_module("brutex_core")` — brutex/money_rust.py's
+    # own guard, brutex/config/hardware_envelope_rust.py's, and the
+    # shared brutex/config/seam_core.py ConfigRustSeam guard serving
+    # paths_rust/dotenv_rust/backup_env_rust (an absent or broken
+    # install latches `crate_unavailable` with one loud WARN and the
+    # Python oracle serves, behavior-identical). It is deliberately NOT
+    # a build prerequisite: never module-top imported, in NO cargo
+    # workspace, built ONLY by its own CI lane
+    # (.github/workflows/core-rust-parity.yml). A module-top
+    # `import brutex_core` anywhere in brutex/ would make a clean clone
+    # crash-prone again — the inverse pin below forbids exactly that.
+    "brutex_core": (
+        "brutex/money_rust.py",
+        ".github/workflows/core-rust-parity.yml",
+    ),
 }
 
 REQUIRED_KERNELS = {
@@ -151,6 +170,7 @@ def test_known_kernels_are_discovered() -> None:
     assert "fno_math" in REQUIRED_KERNELS, KERNELS
     assert "trading_core" in REQUIRED_KERNELS, KERNELS
     assert "brutex_lake" in KERNELS, KERNELS
+    assert "brutex_core" in KERNELS, KERNELS
 
 
 @pytest.mark.parametrize("import_name", sorted(REQUIRED_KERNELS))

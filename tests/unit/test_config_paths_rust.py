@@ -179,10 +179,43 @@ class TestEligibility:
         assert eligible_override(None) is True
         assert eligible_override("/ok") is True
         assert eligible_override("~nope") is False
+        # r2 M1: "~" ANYWHERE routes to the oracle, not just a prefix.
+        assert eligible_override("./~nope") is False
+        assert eligible_override("a/~b") is False
+        assert eligible_override("/a/b~c") is False
         assert eligible_override(123) is False
         eligible_path = paths_rust._eligible_path_obj  # pyright: ignore[reportPrivateUsage]
         assert eligible_path(Path("/ok")) is True
         assert eligible_path("/ok") is False  # a str is not a Path
+
+    def test_normalized_tilde_override_raise_parity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The r2 M1 fails-before regression: a ``./~user`` override.
+
+        ``PurePosixPath`` normalization drops the ``"."`` component, so
+        ``Path("./~zzz").expanduser()`` acts on the ``~zzz`` FIRST
+        component and RAISES ``RuntimeError`` for a nonexistent user —
+        flag-ON steady state must route to the oracle and raise
+        IDENTICALLY. Pre-fix the prefix-only gate crossed the value and
+        the crate served the normalized ``~zzz…`` string as a VALUE
+        (burn-in structurally cannot catch raise-vs-value).
+        """
+        env = {"BRUTEX_LAKE_ROOT": "./~brutex_no_such_user_zzz"}
+        # The flag-OFF oracle law: expanduser raises for the ghost user.
+        with pytest.raises(RuntimeError):
+            paths.resolve_lake_root(dict(env))
+        # (a) A crate mimicking the REAL normalization law: pre-fix this
+        # ADOPTED "~brutex_no_such_user_zzz" as a value — no raise (the
+        # fails-before shape, verified via stash on the pre-fix tree).
+        _arm(monkeypatch, _fake_crate())
+        paths_rust.reset_paths_rust_for_tests(remaining=0)  # steady state
+        with pytest.raises(RuntimeError):
+            paths.resolve_lake_root(dict(env))
+        # (b) Post-fix the gate routes BEFORE the crate is ever touched.
+        _arm(monkeypatch, _bomb_crate())
+        paths_rust.reset_paths_rust_for_tests(remaining=0)
+        with pytest.raises(RuntimeError):
+            paths.resolve_lake_root(dict(env))
+        assert paths_rust.paths_rust_disabled() is False
 
     def test_override_arm_never_resolves_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The oracle's laziness law: with an override set, Path.home()
@@ -386,7 +419,28 @@ class TestRealCrateParity:
 
         monkeypatch.setenv(paths_rust.PATHS_RUST_ENV, "1")
 
-        token = st.sampled_from(["a", "b", "Volumes", "lake", ".", "..", "...", "", " ", "T7"])
+        token = st.sampled_from(
+            # The `~`-bearing tokens (r2 M1) exercise the tilde gate:
+            # tilde-bearing OVERRIDES route to the oracle (skipped below
+            # — the oracle may legitimately RAISE for a nonexistent
+            # user); tilde-bearing HOMES run the differential for real.
+            [
+                "a",
+                "b",
+                "Volumes",
+                "lake",
+                ".",
+                "..",
+                "...",
+                "",
+                " ",
+                "T7",
+                "~",
+                "~x",
+                "./~x",
+                "a/~b",
+            ]
+        )
         raw_path = st.builds(
             lambda lead, parts: "/" * lead + "/".join(parts),
             st.integers(min_value=0, max_value=3),
@@ -396,7 +450,11 @@ class TestRealCrateParity:
         @settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
         @given(override=st.one_of(st.none(), raw_path), home=raw_path)
         def _differential(override: str | None, home: str) -> None:
-            if override is not None and override.startswith("~"):
+            if override is not None and "~" in override:
+                # The r2 M1 gate rule verbatim ("~" ANYWHERE — not a
+                # prefix check): these route to the oracle, whose
+                # expanduser may raise for a nonexistent ~user; the
+                # dedicated raise-parity regression covers that arm.
                 return
             paths_rust.reset_paths_rust_for_tests(remaining=0)
             env = {} if override is None else {"BRUTEX_LAKE_ROOT": override}

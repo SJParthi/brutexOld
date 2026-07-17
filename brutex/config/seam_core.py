@@ -35,7 +35,10 @@ differentials are the drift teeth.
 
 SECRET SAFETY (the dotenv seam's law): a seam constructed with
 ``redact_values=True`` NEVER places a crossed/returned VALUE in a log —
-burn-in mismatches and refuse-poison warns carry types/counts only.
+burn-in mismatches and refuse-poison warns carry types/counts only, and
+(r2 m4) the degrade/panic arms carry the exception TYPE only (an
+exception repr can embed a crossed value — e.g. a PyO3 conversion
+TypeError echoing its argument), making the contract structural.
 ``.env`` values can be operator secrets (Telegram tokens, S3 keys); the
 dotenv module's own "never log values" law extends through its seam.
 
@@ -164,7 +167,7 @@ class ConfigRustSeam:
         if stripped in _TRUTHY:
             return True
         if stripped and stripped not in _FALSY:
-            self._warn_once("flag_unrecognised", value=stripped)
+            self._warn_once("flag_unrecognised", value=repr(stripped))
         return False
 
     def disabled(self) -> bool:
@@ -283,7 +286,14 @@ class ConfigRustSeam:
         try:
             rust_value: object = getattr(crate, crate_name)(*arguments)
         except _DEGRADE_ERRORS as exc:
-            self._warn_once(f"{law}_error", error_detail=repr(exc))
+            # r2 m4: on a secret-bearing seam the exception repr may
+            # embed a crossed VALUE (a PyO3 conversion TypeError echoes
+            # its argument) — log the TYPE only there, making the
+            # "no crossed VALUE in logs" contract structural.
+            if self.redact_values:
+                self._warn_once(f"{law}_error", error_type=type(exc).__name__)
+            else:
+                self._warn_once(f"{law}_error", error_detail=repr(exc))
             return None
         except (KeyboardInterrupt, SystemExit, MemoryError):
             # The escape set (the errors.py doctrine): operator interrupt
@@ -295,8 +305,12 @@ class ConfigRustSeam:
             # A panic escaping the crate's catch_unwind boundary (or any
             # out-of-degrade-set Exception) marks a broken FFI contract —
             # latch OFF and serve the oracle, never a new crash class
-            # into a config-resolution path.
-            self._disable("crate_panic", error_detail=repr(exc))
+            # into a config-resolution path. Value-redacting seams log
+            # the exception TYPE only (r2 m4 — the m4 contract above).
+            if self.redact_values:
+                self._disable("crate_panic", error_type=type(exc).__name__)
+            else:
+                self._disable("crate_panic", error_detail=repr(exc))
             return None
         if not validate(rust_value):
             # Refuse-poison gate: a wrong-typed or shape-law-violating
@@ -327,8 +341,8 @@ class ConfigRustSeam:
                     self._disable(
                         f"burn_in_mismatch_{law}",
                         error=True,
-                        rust_value=rust_value,
-                        python_value=oracle_value,
+                        rust_value=repr(rust_value),
+                        python_value=repr(oracle_value),
                     )
                 return None
             self._burn_in[law] -= 1

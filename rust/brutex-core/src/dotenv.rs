@@ -106,6 +106,11 @@ pub fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
         );
     }
     let mut out: Vec<(String, String)> = Vec::new();
+    // r2 m5: an insertion-order index over the Vec replaces the O(n²)
+    // linear-scan dedup — CPython's dict dedup is O(n) and the output
+    // ORDER (first-insertion position, last value) is unchanged
+    // (naive-parity cargo-pinned below).
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for raw in py_splitlines(text) {
         let mut line = py_strip(raw);
         if line.is_empty() || line.starts_with('#') {
@@ -126,9 +131,10 @@ pub fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
         if vb.len() >= 2 && vb[0] == vb[vb.len() - 1] && (vb[0] == b'\'' || vb[0] == b'"') {
             value = &value[1..value.len() - 1];
         }
-        if let Some(slot) = out.iter_mut().find(|(k, _)| k == key) {
-            slot.1 = value.to_string();
+        if let Some(&slot) = index.get(key) {
+            out[slot].1 = value.to_string();
         } else {
+            index.insert(key.to_string(), out.len());
             out.push((key.to_string(), value.to_string()));
         }
     }
@@ -221,6 +227,39 @@ mod tests {
         );
         // "a\n\rb" is TWO breaks (probed) — the middle empty line skips.
         assert_eq!(pairs("A=1\n\rB=2"), vec![pair("A", "1"), pair("B", "2")]);
+    }
+
+    #[test]
+    fn dedup_index_matches_naive_scan_on_moderate_corpus() {
+        // r2 m5: the HashMap insertion-order index must render EXACTLY
+        // the pairs the naive linear-scan dedup renders (the CPython
+        // dict law: first-insertion position, last value) over a
+        // moderate corpus of many distinct keys + interleaved dups.
+        let mut text = String::new();
+        for i in 0..500 {
+            text.push_str(&format!("K{i}=v{i}\n"));
+        }
+        for i in (0..500).step_by(3) {
+            text.push_str(&format!("K{i}=w{i}\n"));
+        }
+        // The naive approach, applied to the same raw pair stream.
+        let raw: Vec<(String, String)> = (0..500)
+            .map(|i| (format!("K{i}"), format!("v{i}")))
+            .chain(
+                (0..500)
+                    .step_by(3)
+                    .map(|i| (format!("K{i}"), format!("w{i}"))),
+            )
+            .collect();
+        let mut expected: Vec<(String, String)> = Vec::new();
+        for (k, v) in raw {
+            if let Some(slot) = expected.iter_mut().find(|(ek, _)| *ek == k) {
+                slot.1 = v;
+            } else {
+                expected.push((k, v));
+            }
+        }
+        assert_eq!(pairs(&text), expected);
     }
 
     #[test]

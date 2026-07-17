@@ -19,7 +19,12 @@ conversion is for uniformity, not speed. Both laws are sub-microsecond
 path ops; flag-ON ADDS an env read, an eligibility gate and an FFI hop
 per call — a small slowdown, shipped INERT (a default flip needs its own
 DEC). These laws run at config-resolution frequency (process start / a
-handful per pull), never per bar.
+handful per pull), never per bar. Flag-OFF cost disclosure (the
+money_rust/hardware_envelope_rust mirror): the DEFAULT (flag-OFF) path
+pays a per-call env probe — ``os.environ.get`` on a miss is ~700 ns/call
+on the build box — which is DELIBERATE (spawn workers must read their
+own inherited environment; caching the resolve would break that
+contract) and immaterial at config-resolution call frequency.
 
 ## THE SEAM SPLIT (the honest convertible core — recorded here)
 
@@ -27,10 +32,12 @@ CONVERTED: exactly the two PURE string-derivation laws above.
 
 DELIBERATELY STAYS PYTHON (each with its reason): the ``os.environ`` /
 injected-mapping lookup (env access); ``Path.home()`` resolution (env +
-OS); ``Path.expanduser()`` (the OS user database — ``~``-prefixed
+OS); ``Path.expanduser()`` (the OS user database — ``~``-BEARING
 overrides are eligibility-gated to the oracle wholesale, which also
 preserves the exact ``RuntimeError`` a nonexistent ``~user`` raises
-today); the ``ismount``/``stat`` probes and the `exists` check in
+today; r2 M1 — ``expanduser`` acts on the NORMALIZED first component,
+so ``"./~user"`` expands too and a prefix-only gate under-routed); the
+``ismount``/``stat`` probes and the `exists` check in
 ``lake_root_identity`` (filesystem I/O); the frozen ``LakeRootIdentity``
 construction (only strings cross the FFI).
 
@@ -40,7 +47,9 @@ Only values whose oracle outcome is provably reproduced by the crate's
 ASCII string arithmetic may cross (anything else → oracle, crate
 untouched, spy-pinned): overrides must be exact-type :class:`str`,
 ASCII-only (a lone-surrogate ``os.environ`` value cannot even convert at
-the PyO3 boundary), ``<=`` 4096 bytes and NOT ``~``-prefixed; crossing
+the PyO3 boundary), ``<=`` 4096 bytes and carrying NO ``~`` anywhere
+(r2 M1 — a prefix-only gate missed the normalized-``~``-first-component
+class, e.g. ``"./~user"``); crossing
 ``Path`` objects must be exact-type ``PosixPath`` (a subclass's
 overridden ``__str__``/``__truediv__`` must reach the oracle) with an
 ASCII, length-bounded ``str()`` render. The override arm never resolves
@@ -112,12 +121,22 @@ def _eligible_text(text: object) -> bool:
 
 
 def _eligible_override(override: object) -> bool:
-    """The override gate: ``None`` or an ASCII non-``~`` str (gate law)."""
+    """The override gate: ``None`` or an ASCII str with NO ``~`` (gate law).
+
+    The r2 M1 correction: ``Path(override).expanduser()`` acts on the
+    NORMALIZED first component, so a prefix-only ``startswith("~")``
+    check under-routed — ``"./~user"`` normalizes to a ``~user``-first
+    path the oracle EXPANDS (raising ``RuntimeError`` for a nonexistent
+    user) while the crate would have served the normalized string as a
+    VALUE (burn-in structurally cannot catch raise-vs-value). ALL
+    ``~``-bearing overrides now take the oracle; non-triggering forms
+    (a mid-component ``~``) return identical values there anyway.
+    """
     if override is None:
         return True
     if type(override) is not str:
         return False
-    return _eligible_text(override) and not override.startswith("~")
+    return _eligible_text(override) and "~" not in override
 
 
 def _eligible_path_obj(path: object) -> bool:

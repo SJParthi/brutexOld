@@ -286,6 +286,46 @@ class TestAdopt:
         assert [reason for _event, reason in warns] == ["law_a_error"]
         assert seam.disabled() is False  # degrade ≠ latch
 
+    def test_degrade_error_detail_repr_on_plain_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A non-redacting seam keeps the full repr detail (r2 m4 twin).
+        warns: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warns.append({"event": event, **kw}),
+        )
+
+        def _boom(_s: str) -> str:
+            raise ValueError("detail SECRET-ARG-abc")
+
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(_boom))
+        assert _adopt(_make_seam()) is None
+        assert warns[0]["error_detail"] == repr(ValueError("detail SECRET-ARG-abc"))
+        assert "error_type" not in warns[0]
+
+    def test_degrade_error_redacted_on_secret_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # r2 m4: a redacting seam logs the exception TYPE only — an
+        # exception repr can embed a crossed VALUE (e.g. a PyO3
+        # conversion TypeError echoing its argument).
+        warns: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warns.append({"event": event, **kw}),
+        )
+
+        def _boom(_s: str) -> str:
+            raise TypeError("argument 'SECRET-VALUE-xyz': incompatible")
+
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(_boom))
+        seam = _make_seam(redact_values=True)
+        assert _adopt(seam) is None
+        assert warns[0]["reason"] == "law_a_error"
+        assert warns[0]["error_type"] == "TypeError"
+        assert "error_detail" not in warns[0]
+        assert all("SECRET-VALUE-xyz" not in str(v) for v in warns[0].values())
+        assert seam.disabled() is False  # degrade ≠ latch
+
     @pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
     def test_escape_set_propagates_bare(
         self, monkeypatch: pytest.MonkeyPatch, exc_type: type[BaseException]
@@ -307,6 +347,46 @@ class TestAdopt:
         seam = _make_seam()
         assert _adopt(seam) is None
         assert seam.disabled_reason == "crate_panic"
+
+    def test_crate_panic_detail_repr_on_plain_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A non-redacting seam's panic latch keeps the repr detail.
+        warns: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warns.append({"event": event, **kw}),
+        )
+
+        def _boom(_s: str) -> str:
+            raise ZeroDivisionError("broken boundary SECRET-ARG-abc")
+
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(_boom))
+        seam = _make_seam()
+        assert _adopt(seam) is None
+        assert seam.disabled_reason == "crate_panic"
+        assert warns[0]["error_detail"] == repr(ZeroDivisionError("broken boundary SECRET-ARG-abc"))
+        assert "error_type" not in warns[0]
+
+    def test_crate_panic_redacted_on_secret_seam(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # r2 m4: the panic latch on a redacting seam logs the exception
+        # TYPE only — no crossed VALUE can reach a log record.
+        warns: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            seam_core._LOG,  # pyright: ignore[reportPrivateUsage]
+            "warning",
+            lambda event, **kw: warns.append({"event": event, **kw}),
+        )
+
+        def _boom(_s: str) -> str:
+            raise ZeroDivisionError("broken boundary SECRET-VALUE-xyz")
+
+        monkeypatch.setitem(sys.modules, "brutex_core", _fake_crate(_boom))
+        seam = _make_seam(redact_values=True)
+        assert _adopt(seam) is None
+        assert seam.disabled_reason == "crate_panic"
+        assert warns[0]["error_type"] == "ZeroDivisionError"
+        assert "error_detail" not in warns[0]
+        assert all("SECRET-VALUE-xyz" not in str(v) for v in warns[0].values())
 
     def test_panic_exception_class_latches_via_the_belt(
         self, monkeypatch: pytest.MonkeyPatch
@@ -388,8 +468,9 @@ class TestAdopt:
         seam = _make_seam()
         assert _adopt(seam) is None
         assert seam.disabled_reason == "burn_in_mismatch_law_a"
-        assert errors[0]["rust_value"] == "wrong"
-        assert errors[0]["python_value"] == "oracle"
+        # The #907 repr convention (r2 n8): log fields carry repr()s.
+        assert errors[0]["rust_value"] == repr("wrong")
+        assert errors[0]["python_value"] == repr("oracle")
 
     def test_burn_in_mismatch_redacted_on_secret_seam(
         self, monkeypatch: pytest.MonkeyPatch

@@ -11,7 +11,12 @@ Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
 conversion is for uniformity, not speed. The parse runs once per process
 bootstrap over a tiny file; flag-ON ADDS an env read, an eligibility
 gate and an FFI hop — a small slowdown, shipped INERT (a default flip
-needs its own DEC).
+needs its own DEC). Flag-OFF cost disclosure (the
+money_rust/hardware_envelope_rust mirror): the DEFAULT (flag-OFF) path
+pays a per-call env probe — ``os.environ.get`` on a miss is ~700 ns/call
+on the build box — which is DELIBERATE (spawn workers must read their
+own inherited environment; caching the resolve would break that
+contract) and immaterial at config-resolution call frequency.
 
 ## THE SEAM SPLIT (the honest convertible core — recorded here)
 

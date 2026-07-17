@@ -4,8 +4,9 @@ DEC-CONFIG-RUST-LEAVES-001 (MIGRATION.md #1943), milestone 2. The FOUR
 routed surfaces are :mod:`brutex.config.hardware_envelope`'s pure
 derivation laws — when ``BRUTEX_CORE_RUST_HWENV`` is ON they delegate to
 the ``brutex_core`` crate (``rust/brutex-core/src/hwenv.rs``) through this
-facade; the flag-OFF default is the verbatim CPython oracle,
-byte-identical AND crate-untouched (bomb-crate spy-pinned):
+facade; the flag-OFF default is the verbatim CPython oracle, output
+byte-identical (behavior-identical; see the r1 wording correction in
+MIGRATION #1943) AND crate-untouched (bomb-crate spy-pinned):
 
 * ``cpu_pool_workers``' derivation arm (base selection + reserve clamp +
   cap — DEC-HARDWARE-ENVELOPE-001);

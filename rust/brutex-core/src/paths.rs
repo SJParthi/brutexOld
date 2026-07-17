@@ -5,9 +5,11 @@
 //!
 //! * [`lake_root`] — the `resolve_lake_root` DECISION law: a truthy
 //!   (non-empty) `BRUTEX_LAKE_ROOT` override wins verbatim, else
-//!   `<home>/.brutex/lake`. The Python facade gates `~`-prefixed
+//!   `<home>/.brutex/lake`. The Python facade gates `~`-BEARING
 //!   overrides to the oracle (`Path.expanduser()` needs the OS user
-//!   database — never ported), so on every crossing input
+//!   database — never ported; r2 M1: `expanduser` acts on the
+//!   NORMALIZED first component, so `./~user` expands too — hence
+//!   tilde-ANYWHERE, not tilde-prefix), so on every crossing input
 //!   `Path(x).expanduser()` is the identity and the whole law reduces to
 //!   `str(PurePosixPath(...))` normalization (probed 2026-07-17, pinned
 //!   below).
@@ -91,11 +93,14 @@ pub fn lake_root(override_value: Option<&str>, home: &str) -> Result<String, Str
     if let Some(value) = override_value {
         check_input("lake_root override", value)?;
         if !value.is_empty() {
-            if value.starts_with('~') {
-                // The facade gates these to the oracle (expanduser needs
-                // the OS user db); a crossing one is a contract breach.
+            if value.contains('~') {
+                // The facade gates ALL '~'-bearing overrides to the
+                // oracle (r2 M1: CPython `expanduser` acts on the
+                // NORMALIZED first component, so "./~user" expands too —
+                // a prefix-only check under-refused); a crossing one is
+                // a contract breach. Defense-in-depth: refuse ANY '~'.
                 return Err(
-                    "lake_root: '~'-prefixed override must take the Python oracle".to_string(),
+                    "lake_root: '~'-bearing override must take the Python oracle".to_string(),
                 );
             }
             return Ok(normalize_posix(value));
@@ -199,6 +204,12 @@ mod tests {
     fn lake_root_refuses_tilde_and_oversize_and_non_ascii() {
         assert!(lake_root(Some("~/lake"), "/h").is_err());
         assert!(lake_root(Some("~user/lake"), "/h").is_err());
+        // r2 M1: tilde ANYWHERE is refused (the normalized-first-
+        // component class "./~user" + the defense-in-depth interior).
+        assert!(lake_root(Some("~"), "/h").is_err());
+        assert!(lake_root(Some("./~user/lake"), "/h").is_err());
+        assert!(lake_root(Some("a/~b"), "/h").is_err());
+        assert!(lake_root(Some("/a/b~c"), "/h").is_err());
         assert!(lake_root(Some("/ok"), "/h\u{e9}").is_ok()); // override arm never reads home
         assert!(lake_root(None, "/h\u{e9}").is_err());
         assert!(lake_root(Some("caf\u{e9}"), "/h").is_err());

@@ -12,6 +12,12 @@ Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
 conversion is for uniformity, not speed. The law runs once per backup
 config resolve; flag-ON ADDS an env read, an eligibility gate and an FFI
 hop — a small slowdown, shipped INERT (a default flip needs its own DEC).
+Flag-OFF cost disclosure (the money_rust/hardware_envelope_rust mirror):
+the DEFAULT (flag-OFF) path pays a per-call env probe —
+``os.environ.get`` on a miss is ~700 ns/call on the build box — which is
+DELIBERATE (spawn workers must read their own inherited environment;
+caching the resolve would break that contract) and immaterial at
+config-resolution call frequency.
 
 ## THE SEAM SPLIT (the honest convertible core — recorded here)
 
@@ -33,8 +39,8 @@ Only exact-type :class:`str` values, ASCII-only and ``<=`` 4096 bytes
 may cross (the Python regexes are ASCII-strict so a non-ASCII value is
 False on both sides, but the gate keeps the crate's proven domain
 closed); anything else → oracle, crate untouched (spy-pinned). The crate
-returns exactly a :class:`bool` (refuse-poison shape law — note
-``type(value) is bool``, so an ``int`` 0/1 pun is refused).
+returns exactly a :class:`bool` (refuse-poison shape law,
+exact-type-checked).
 
 Fail-closed layers 3-6 live in the shared
 :class:`brutex.config.seam_core.ConfigRustSeam` (one instance per seam —

@@ -75,17 +75,40 @@ def _cargo_toml_deps(text: str) -> list[str]:
 
 
 def _imported_roots_and_modules(source: str) -> tuple[set[str], set[str]]:
-    """EVERY import in *source* (module scope AND function-local)."""
+    """EVERY import in *source* (module scope AND function-local).
+
+    r2 M2 hardening — two evasion forms now detected: (a) the
+    ``ImportFrom`` arm ALSO records ``<module>.<alias>`` per alias, so
+    ``from brutex.config import credentials_aws`` matches the banned
+    MODULE set (the bare ``node.module`` is only ``brutex.config``);
+    (b) string constants passed to ``importlib.import_module(...)`` /
+    ``import_module(...)`` / ``__import__(...)`` calls are recorded as
+    module names, so a dynamic import cannot slip past the scan.
+    """
     roots: set[str] = set()
     modules: set[str] = set()
+
+    def _record(name: str) -> None:
+        modules.add(name)
+        roots.add(name.split(".", maxsplit=1)[0])
+
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                modules.add(alias.name)
-                roots.add(alias.name.split(".")[0])
+                _record(alias.name)
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.add(node.module)
-            roots.add(node.module.split(".")[0])
+            _record(node.module)
+            for alias in node.names:
+                _record(f"{node.module}.{alias.name}")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            dynamic = (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
+                isinstance(func, ast.Name) and func.id in {"import_module", "__import__"}
+            )
+            if dynamic and node.args:
+                head = node.args[0]
+                if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                    _record(head.value)
     return roots, modules
 
 
@@ -170,6 +193,30 @@ class TestFacadesNeverImportAwsSurfaces:
         roots, modules = _imported_roots_and_modules(source)
         assert "boto3" in roots
         assert "brutex.config.credentials_aws" in modules
+
+    def test_import_detector_sees_from_pkg_alias_form(self) -> None:
+        # r2 M2 teeth (a): the from-package alias form must be DETECTED
+        # — pre-hardening `from brutex.config import credentials_aws`
+        # recorded only "brutex.config" and evaded the banned set.
+        roots, modules = _imported_roots_and_modules("from brutex.config import credentials_aws\n")
+        assert "brutex.config.credentials_aws" in modules
+        assert modules & _BANNED_PY_MODULES == {"brutex.config.credentials_aws"}
+        assert "brutex" in roots
+
+    def test_import_detector_sees_dynamic_import_strings(self) -> None:
+        # r2 M2 teeth (b): importlib.import_module / bare import_module /
+        # __import__ string constants must all be DETECTED.
+        source = (
+            "import importlib\n"
+            "from importlib import import_module\n"
+            'x = importlib.import_module("brutex.config.credentials_aws")\n'
+            'y = __import__("boto3")\n'
+            'z = import_module("botocore")\n'
+        )
+        roots, modules = _imported_roots_and_modules(source)
+        assert "brutex.config.credentials_aws" in modules
+        assert modules & _BANNED_PY_MODULES == {"brutex.config.credentials_aws"}
+        assert roots & _BANNED_PY_IMPORTS == {"boto3", "botocore"}
 
 
 class TestCredentialsBoundary:

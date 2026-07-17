@@ -19,12 +19,14 @@
 > adaptation/protocol coupling exists.
 
 _Last updated: 2026-07-17 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943 —
-slice T35 root-leaf Rust conversion, milestones 1+2: the NEW `rust/brutex-core`
-crate + TWO default-OFF seams — `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001
+slice T35 root-leaf Rust conversion, milestones 1-3: the NEW `rust/brutex-core`
+crate (0.3.0 as shipped) + FIVE default-OFF seams — `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001
 money laws as exact decimal-string HALF_UP arithmetic; STORED-BYTES critical —
 frozen literal-corpus rounding goldens + the brutex-lake `_snap_price_expr`
 twin-impl coordination pins) and `BRUTEX_CORE_RUST_HWENV` (the
-hardware-envelope DERIVATION laws only — detection stays Python). Flag OFF
+hardware-envelope DERIVATION laws only — detection stays Python) plus the
+milestone-3 trio `BRUTEX_CORE_RUST_PATHS`/`_DOTENV`/`_BACKUPENV` over the ONE
+shared `brutex/config/seam_core.py` engaged-call core. Flag OFF
 (default) is behavior-identical + crate-untouched; "expected payoff ≈ 0 —
 conversion is for uniformity, not speed" (the ADR-0020 banner verbatim);
 ships INERT — a default flip needs its own DEC. ENGINE UNCHANGED —
@@ -3180,8 +3182,9 @@ hostile-review pass._
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
 - **Active branch:** `claude/rust-slice-t35-leaves-v2` (**DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943** —
-  slice T35 root-leaf Rust conversion, milestones 1+2: NEW standalone crate `rust/brutex-core` (0.2.0 —
-  bumped 0.1.0→0.2.0 at the review-r1 fold so a stale money-only wheel cannot masquerade; pyo3 0.29
+  slice T35 root-leaf Rust conversion, milestones 1-3: NEW standalone crate `rust/brutex-core` (0.3.0
+  as shipped — 0.1.0→0.2.0 at the review-r1 fold so a stale money-only wheel cannot masquerade,
+  0.2.0→0.3.0 at the milestone-3 fold; pyo3 0.29
   abi3-py312, maturin mixed layout, committed pyo3-only Cargo.lock `--locked` everywhere, catch_unwind
   panic belt — the brutex-lake conventions, deliberately in NO workspace) + TWO default-OFF seams.
   (1) **`BRUTEX_CORE_RUST_MONEY`** (`brutex/money_rust.py` — the lake_rust_stats facade template:
@@ -3218,6 +3221,17 @@ hostile-review pass._
   verified killed; hostile review r1 SHIP with all four findings folded (flag-resolve fast path ·
   OFF-arm wording · corpus docstring · crate 0.2.0). CI: the parity lane + the ci.yml money mutmut
   runner extension + BOTH mutation.yml proven pairs. Ships INERT — a default flip needs its own DEC.
+  MILESTONE 3 (same branch): THREE more default-OFF seams over the ONE shared engaged-call core
+  `brutex/config/seam_core.py` (the milestone-1/2 facade machinery hoisted ONCE — §11 COMMON) —
+  `BRUTEX_CORE_RUST_PATHS` (`paths_rust.py` — the lake-root decision + volume-parent laws; `~`-bearing
+  overrides oracle-gated wholesale, the r2 normalized-first-component correction) ·
+  `BRUTEX_CORE_RUST_DOTENV` (`dotenv_rust.py` — the value-REDACTING `.env` line-parse law) ·
+  `BRUTEX_CORE_RUST_BACKUPENV` (`backup_env_rust.py` — the restic verify-subset shape law); the
+  NO-SEAM verdicts recorded for `ports.py` (no convertible law) + `credentials.py` (secret-bearing
+  trivial; pinned seam-free) and the mechanical AWS boundary pin
+  (`tests/unit/test_brutex_core_boundary_pin.py` — crate dep graph AWS-free, no facade touches
+  credentials_aws/boto at any scope incl. dynamic-import strings). The full milestone-3 record +
+  the r2 review fold live in MIGRATION.md #1943.
   T35 HOLDS recorded in #1943: `universe.py` + feed_scope/scope_filter until #1934 ·
   `credentials_aws` → T36 · `deadline.py` → the concurrency-primitives row · `runtime.py` slice-9 ·
   `universe_constituents` HELD-DORMANT per the coordinator ruling. ENGINE UNCHANGED —
@@ -9637,7 +9651,7 @@ hostile-review pass._
 
 - **Active feature branch:** `claude/rust-slice-t35-leaves-v2`
   (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943 — slice T35 root-leaf Rust
-  conversion, milestones 1+2: the NEW `rust/brutex-core` crate (0.2.0, pyo3-only
+  conversion, milestones 1-3: the NEW `rust/brutex-core` crate (0.3.0 as shipped, pyo3-only
   Cargo.lock, the brutex-lake conventions) + the two default-OFF seams
   `BRUTEX_CORE_RUST_MONEY` (the DEC-MONEY-2DP-001 money laws as hand-rolled
   exact decimal-string HALF_UP arithmetic — STORED-BYTES critical; frozen
@@ -9645,7 +9659,9 @@ hostile-review pass._
   twin-impl coordination pins + the HALF_UP-vs-round_half_even negative pin)
   and `BRUTEX_CORE_RUST_HWENV` (the hardware-envelope DERIVATION laws only —
   detection stays Python; parity bar BEHAVIORAL, sizing-only, no run-identity
-  exposure); flag OFF (default) is behavior-identical + crate-untouched
+  exposure) + the milestone-3 trio `BRUTEX_CORE_RUST_PATHS`/`_DOTENV`/`_BACKUPENV`
+  over the shared `seam_core` (NO-SEAM verdicts for ports/credentials; the
+  mechanical AWS boundary pin); flag OFF (default) is behavior-identical + crate-untouched
   (bomb-spy-pinned); "expected payoff ≈ 0 — conversion is for uniformity, not
   speed" (the ADR-0020 banner verbatim); ships INERT — a default flip needs its
   own DEC; the T35 HOLDS recorded in #1943; ENGINE UNCHANGED —
