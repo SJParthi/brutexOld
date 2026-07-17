@@ -305,11 +305,17 @@ mod tests {
 
     /// Cross-crate consistency pin (audit-session addendum): the SAME
     /// literal corpus `tests/golden/test_writer_vectorized_snap_parity.py`
-    /// pins for the polars-columnar `_snap_price_expr` twin (its
-    /// `_EDGE_CASES` floats, rendered through Python `str(float)` — the
-    /// seed the legacy `Decimal(str(op))` parsed). Any change to the ONE
-    /// half-up law must move this crate, that expression AND the Python
-    /// oracle together (module docs).
+    /// pins for the polars-columnar `_snap_price_expr` twin. TWO entry
+    /// kinds (review-r1 precision): most entries are its `_EDGE_CASES`
+    /// floats rendered through Python `str(float)` — the seed the legacy
+    /// `Decimal(str(op))` parsed; the `"99999.99499999999"` entry is the
+    /// RAW pre-collapse decimal string (`str(float("99999.99499999999"))`
+    /// COLLAPSES to `"99999.995"`, pinned separately above and rounding
+    /// UP, while the raw string's third fractional digit 4 rounds DOWN —
+    /// the collapse divergence itself is pinned in
+    /// `tests/golden/test_money_rounding_golden.py`). Any change to the
+    /// ONE half-up law must move this crate, that expression AND the
+    /// Python oracle together (module docs).
     #[test]
     fn cross_crate_snap_corpus_consistency_pin() {
         let cases: &[(&str, &str)] = &[

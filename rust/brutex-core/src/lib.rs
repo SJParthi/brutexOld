@@ -199,7 +199,12 @@ mod tests {
 
     #[test]
     fn version_matches_manifest() {
-        assert_eq!(VERSION, "0.1.0");
+        // 0.2.0: the wheel API grew (money-only -> money + hwenv) — a
+        // stale 0.1.0 wheel must not masquerade as the grown surface
+        // (review-r1 stale-wheel hazard; the facades' handshakes check
+        // callables, not versions, so the bump is the human-visible
+        // provenance marker).
+        assert_eq!(VERSION, "0.2.0");
     }
 
     #[test]

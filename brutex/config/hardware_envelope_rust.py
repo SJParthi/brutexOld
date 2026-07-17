@@ -29,6 +29,17 @@ audit), so the parity bar is BEHAVIORAL (same derived numbers/keys on the
 same box), enforced by the burn-in + the parity lane, never a stored-bytes
 claim.
 
+Flag-OFF cost disclosure (review r1, measured 2026-07-17 — the money_rust
+mirror): the DEFAULT (flag-OFF) path pays a per-call env probe —
+``os.environ.get`` on a miss is ~700 ns/call on the build box (an
+exception-mediated ``_Environ`` lookup); the unset-fast-path in
+:func:`hwenv_rust_enabled` shaves the strip/lower/set-lookup tail
+(~65 ns) but the probe itself is DELIBERATE — spawn workers must read
+their own inherited environment (the PR-1 posture; caching the resolve
+would break that contract). These laws run at pool-build / budget-resolve
+frequency (once per stage start, never per bar), so the probe is
+aggregate-negligible; no hot path is affected.
+
 ## THE SEAM SPLIT (the honest convertible core — recorded here)
 
 CONVERTED (this facade + ``src/hwenv.rs``): exactly the four PURE
@@ -236,8 +247,18 @@ def hwenv_rust_enabled() -> bool:
     resolve their own inherited environment (the PR-1 posture). The seam
     flag deliberately reads :data:`os.environ` — the callers' injectable
     ``env`` mappings scope their WORKER-COUNT overrides, not the seam.
+
+    ABSENT fast path (review r1, MINOR — the money_rust mirror): an UNSET
+    flag — the production default — returns ``False`` off the raw
+    ``environ`` probe alone, skipping the strip/lower/set-lookup
+    normalization. Semantically identical (unset → OFF silently IS the
+    tristate law); any SET value takes the full tristate handling
+    byte-identically.
     """
-    stripped = os.environ.get(HWENV_RUST_ENV, "").strip().lower()
+    raw = os.environ.get(HWENV_RUST_ENV)
+    if raw is None:
+        return False
+    stripped = raw.strip().lower()
     if stripped in _TRUTHY:
         return True
     if stripped and stripped not in _FALSY:

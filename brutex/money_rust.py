@@ -17,6 +17,18 @@ OHLC value at the lake-write boundary (run-identity / stored-bytes
 critical — the audit-session addendum), which is exactly why the seam is
 burn-in-checked, refuse-poison-gated and default-OFF.
 
+Flag-OFF cost disclosure (review r1, measured 2026-07-17): the DEFAULT
+(flag-OFF) path pays a per-call env probe — ``os.environ.get`` on a miss
+is ~700 ns/call on the build box (an exception-mediated ``_Environ``
+lookup), putting the OFF-path ``round_money`` at ~1.1 µs/call vs the
+~225 ns pre-seam body; the unset-fast-path in :func:`money_rust_enabled`
+shaves the strip/lower/set-lookup tail (~65 ns) but the probe itself is
+DELIBERATE — spawn workers must read their own inherited environment
+(the PR-1 posture; caching the resolve would break that contract). The
+lake-write HOT path is unaffected: the vectorized ``_snap_price_expr``
+never calls scalar ``round_money`` — the scalar surfaces run O(bars) at
+ingest / O(finalists) at run-end, aggregate ~seconds.
+
 The :mod:`brutex.data.lake_rust_stats` facade pattern, with TWO deliberate
 structural differences, both documented:
 
@@ -197,8 +209,17 @@ def money_rust_enabled() -> bool:
     ``False`` with one ``money_rust.fallback`` WARN (reason
     ``flag_unrecognised``) per process. Read per call so spawn workers
     resolve their own inherited environment (the PR-1 posture).
+
+    ABSENT fast path (review r1, MINOR): an UNSET flag — the production
+    default — returns ``False`` off the raw ``environ`` probe alone,
+    skipping the strip/lower/set-lookup normalization. Semantically
+    identical (unset → OFF silently IS the tristate law); any SET value
+    takes the full tristate handling byte-identically.
     """
-    stripped = os.environ.get(MONEY_RUST_ENV, "").strip().lower()
+    raw = os.environ.get(MONEY_RUST_ENV)
+    if raw is None:
+        return False
+    stripped = raw.strip().lower()
     if stripped in _TRUTHY:
         return True
     if stripped and stripped not in _FALSY:
