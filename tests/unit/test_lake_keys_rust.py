@@ -1094,3 +1094,23 @@ class TestProtocolStubs:
             )
             is None
         )
+
+
+class TestMutationWorkflowWiring:
+    """Pin this module INTO ``mutation.yml``'s per-module zero-survivor loop.
+
+    The ``TestBenchWorkflowWiring`` precedent (#1797 pattern; the #1914
+    ``lake_rust_stats`` shape mirrored by the PR-1 ``fno_symbol_rust`` pin):
+    the module:suite pair sits in the workflow's per-module ``mutmut`` loop
+    with the EMPTY third (timeout) field — this deterministic pin fails if
+    the pair is ever dropped. HONEST: it pins the WIRING only; the weekly
+    run executes on its own schedule.
+    """
+
+    _WORKFLOW = REPO_ROOT / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/data/lake_keys_rust.py:tests/unit/test_lake_keys_rust.py:"' in text, (
+            "lake_keys_rust.py is not wired into mutation.yml's per-module mutmut loop"
+        )
