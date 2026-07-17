@@ -56,6 +56,13 @@ pub mod compat;
 /// solvers). Currently empty — populated when MG-043 needs it.
 pub mod math;
 
+/// DEC-ENUM-KERNEL-U128-001 (hoist prerequisite): the width-generic
+/// `MaskWord` trait — HOISTED verbatim from `trade_sim` (where
+/// DEC-TRADE-SIM-U128-KERNEL-001 introduced it module-internal) so the
+/// Stage-2 enum/count kernels and the trade-sim walk genericize over the
+/// SAME shared core (CLAUDE.md §11 COMMON). Crate-internal (`pub(crate)`).
+pub(crate) mod mask_word;
+
 /// DEC-P0-050 (PR-K): PyO3 bridge to Python. Future Stage 1B
 /// AND-mask kernel, combo_hash blake3 migration, and other
 /// performance-critical Rust functions get registered here.
