@@ -910,7 +910,12 @@ commit itself — PR-1 has since SHIPPED on the same branch (the `rust/brutex-la
 crate + the default-OFF `BRUTEX_LAKE_RUST_RENDER` render seam with import/version
 guards + burn-in autorevert; the byte-parity corpus green locally, and the 5-lens
 adversarial-review fix round folded pre-merge — the §1
-Active-branch blurb + the MIGRATION.md #1891 PR-1 segment carry the record).)
+Active-branch blurb + the MIGRATION.md #1891 PR-1 segment carry the record), and
+PR-2 (the option-writer ALL-DEFAULTS render seam — its OWN steward-assigned row
+DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, MIGRATION.md #1771, the render-PROFILE
+registry on the ONE facade, the 12-case options corpus 12/12 byte-MATCH) has
+since shipped on the STACKED `claude/rust-datalake-io-slice8-pr2` branch — the
+§1 Active-branch blurb + MIGRATION.md #1771 carry that record.)
 Earlier: 2026-07-09 (T1 SWEEP-CORE integration train, branch `integration/t1-sweep-core` —
 ONE coordinator-confirmed fold of five member PRs in binding order: **#1330
 DEC-SWEEP-UNKILLABLE-CORE-001** (MIGRATION.md #1712 / ADR-0019 — the UNKILLABLE sweep run
@@ -3443,6 +3448,140 @@ hostile-review pass._
   UNCHANGED on clean/healthy lakes — NIFTY/BANKNIFTY/SENSEX; F&O lake
   REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
   no new env vars.)
+  Earlier: `claude/rust-lake-locks-atomic` (**DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912 —
+  allocator-final** — ADR-0020 PR-4: the lake lock/atomic-replace primitives gain a default-OFF Rust routing
+  behind `BRUTEX_LAKE_RUST_LOCKS` — NEW `rust/brutex-lake/src/locks.rs` (`lock_try_exclusive` ·
+  `lock_release` · `atomic_commit_replace`, ONE direct `libc` dep for flock — already transitive in the
+  committed Cargo.lock) + the NEW facade leaf `brutex/data/lake_rust_locks.py` (the PR-1 pattern MINUS the
+  polars version guard [locks are polars-free] and MINUS the byte burn-in [behavioral parity proofs
+  instead — both deviations documented in the DEC]). ROUTING is attempt/commit-GRAINED: the handoff's
+  loop-in-Rust primary FFI shape was REJECTED for its sanctioned alternative because a Rust-side retry loop
+  would drop the per-retry watchdog liveness beats (DEC-PULL-CONTENTION-ANTISTALL-001 GAP #15) —
+  `partition_lock._acquire_bounded` keeps the loop/deadline/beat/`PartitionLockTimeout` law and routes ONE
+  flock attempt per iteration; `partition_write_lock`'s finally routes the release; `atomic_io._atomic_write_core`
+  routes the extracted chmod→fsync→`os.replace` commit tail (`_python_commit_replace` — the verbatim oracle);
+  temp CREATION stays `tempfile.mkstemp` on BOTH arms (the `.brutex-write-` prefix + mkstemp-ENOSPC guard laws
+  byte-identical) and the error-path cleanup stays the core's `finally`. ERROR LAW: the crate raises ONLY real
+  `OSError(errno)` (two-tuple constructor — errno-subclass mapping intact) / `RuntimeError` on a caught panic —
+  the EXISTING `lake_write_guard` taxonomy stays the single error authority, `PartitionLockTimeout` decided
+  Python-side with today's message bytes, NEVER a new exception class. STAYS PYTHON: `BoundedLockRegistry`
+  (the ADR law — the registry threading.Lock remains the OUTER layer, so the #1785 G10 same-process
+  self-conflict class cannot re-enter), the sha256 sidecar path law (Python opens the fd; the crate sees ONLY
+  ints — path drift through Rust structurally impossible, spy-pinned), every consumer signature. PROOF
+  (executed): 17 cargo tests (two-open-file-description mutex pin, errno mapping, commit laws) under
+  `--locked` + clippy `-D warnings`; 59 fake-crate unit tests — leaf 100.00% line+branch, `atomic_io.py` +
+  `partition_lock.py` 100.00%, OFF-arm bomb-crate spies, ON-arm facade-seam fault injection
+  (crate-ENOSPC → `LakeWriteHalt("disk_full")` via `atomic_write_via` / raw via `atomic_write_simple`, OOM →
+  `out_of_memory`, zero `.brutex-write-*` residue on every error path, mid-loop degrade converges with the
+  flock genuinely held); 12 REAL-crate integration proofs (mixed-arm mutex both directions + the
+  2-subprocess cross-process belt both directions + real-FS errno parity + the flag-ON end-to-end seams);
+  existing `test_partition_lock.py` (35) + `test_atomic_io.py` (15) pass UNMODIFIED on the default OFF arm —
+  under flag ON with the real wheel partition_lock is 35/35 and atomic_io 14/15, the ONE failure being the
+  `os.replace`-monkeypatch fault-injection test (the handoff-named Python-arm-only seam, its ON-arm twin
+  shipped in the new unit file — disclosed, never papered over). Wired: the mutation.yml zero-survivor pair +
+  in-suite pin; no static ci.yml stanza (the discovery gate + whole-package floor cover the stem-matched
+  leaf — the PR-1 precedent); no EXPECTED_BUILD.json (verified: that handshake belongs to trading-core/
+  fno-math, brutex-lake has none). HONEST: a uniformity conversion (ADR-0020 banner — expected payoff ≈ 0,
+  same syscalls, no speedup claimed); ships INERT (OFF = byte- and call-graph-identical); a wedged fsync is
+  equally unkillable from either arm (the #999 zombie envelope — the write-deadline daemon above stays the
+  containment). ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change; run
+  identity untouched.)
+  Earlier: `claude/rust-lake-merge-dedup` (**DEC-LAKE-RUST-MERGE-DEDUP-001,
+  MIGRATION.md #1911 — allocator-final** — ADR-0020 PR-3: the bars-writer merge/dedup
+  DECISION kernel in Rust, default-OFF behind `BRUTEX_LAKE_RUST_MERGE` (the
+  DEC-FEED-RUST-CORE-001 decision-kernel shape — Rust decides, Python materializes):
+  NEW `rust/brutex-lake/src/merge.rs` `merge_decision_from_ipc` takes the stored +
+  batch bars as two ALWAYS-17-column Arrow-IPC decision frames
+  (`parquet_writer._decision_frame`; prices arrive 2dp-snapped, never re-rounded)
+  and returns ONE action code per batch row (`0=skip · 1=insert · 2=overwrite ·
+  3=conflict`) mirroring the `_merge_write` fold law token-for-token
+  (`_bar_values_equal` · the `_overlay_equal` silent-keep-first law · within-batch
+  statefulness · the R7-1 keep-first physical-copy law); the verbatim fold is
+  EXTRACTED to `ParquetWriter._merge_fold` (flag OFF runs it in place —
+  byte-identical, never-routes spy-pinned) and the NEW facade
+  `brutex/data/lake_rust_merge.py` routes the ON path INSIDE the existing
+  `lake_write_guard` (OOM → `LakeWriteHalt("out_of_memory")`, ENOSPC →
+  `"disk_full"` — both pinned flag-ON) with the PR-1 fail-closed layers: its OWN
+  crate-surface check (a pre-PR-3 wheel latches HERE, the render seam untouched —
+  a disclosed handoff deviation), the polars version guard kept deliberately,
+  16-merge burn-in + shape gate bit-comparing winner-object IDENTITY against the
+  verbatim Python fold with ship-the-Python-result autorevert, and a NEW
+  refuse-poison gate (law-contradicting actions refused wholesale on a work COPY —
+  a poisoned crate can only degrade, never corrupt). Shared helpers IMPORTED from
+  `lake_rust_render` (which gains public `degrade_errors`/`panic_belt_errors`
+  aliases). PROOF executed: the 6-case golden parity corpus green against the
+  COMPILED crate through the REAL `write()` in steady-state mode with the
+  crate-engagement witness (bytes sha256+raw + every WriteResult field + conflicts
+  equal ON-vs-OFF; the `file_rewritten` #1614 stats-keying law pinned; EMPTY merge
+  zero renders; dup-poisoned dest heals at bars_added==0); the #1023 snap goldens +
+  the PR-1 render corpus pass UNMODIFIED with the new wheel; 27 cargo tests incl. a
+  400-case differential fuzz vs a naive reference (inline generator — Cargo.lock
+  byte-untouched); facade 100.00% line+branch (55 tests) + `parquet_writer.py`
+  re-measured 100.00% over its discovered suite; five hand-applied mutants
+  EXECUTED killed (mutation.yml has no lake wiring — the #1892 hand-kill
+  precedent, disclosed). ci.yml deliberately untouched (the per-module gate rides
+  `coverage_gate_discovery`); the corpus legs join the NON-required
+  `lake-rust-parity.yml` lane. HONEST: payoff ≈ 0 — uniformity, not speed; ships
+  INERT (a default flip needs its own DEC). ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no lake/schema/scope/vocab/rate
+  change; run identity untouched.)
+  Earlier: `claude/rust-datalake-io-slice8-pr2` (**DEC-RUST-DATALAKE-IO-SLICE8-PR2-001,
+  MIGRATION.md #1771 (its own steward-assigned ledger row; parent roadmap
+  DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891)** —
+  PR-2 of the datalake Rust conversion roadmap (the roadmap ADR at
+  `docs/adr/0020-datalake-rust-conversion-roadmap.md` §3/§10), STACKED on the PR-1
+  branch's head 283247ed (the PR opens only after the PR-1 PR merges — the
+  #1621/#1711 stacking precedent): the option writer's ALL-DEFAULTS render seam —
+  the ENTIRE `option_parquet_writer.py` diff is `_atomic_write_parquet`'s body +
+  the `_defaults_python_render` oracle helper (flag-OFF = the LITERAL legacy
+  `atomic_write_via(dest, df.write_parquet)`, never-routes spy-pinned;
+  `lake_heal.py` + `atomic_io.py` ZERO diff) — routed through the ONE
+  `lake_rust_render` facade under the NEW render-PROFILE registry
+  (`PROFILE_BARS` default = PR-1 back-compat; `PROFILE_OPTIONS_DEFAULTS` = the
+  zero-kwarg `df.write_parquet(path)` byte shape: stats min/max/null_count ON,
+  Zstd(None), rg=None → the 122,880-row streaming split); ONE flag
+  (`BRUTEX_LAKE_RUST_RENDER`, default OFF), ONE shared fail-closed latch (either
+  writer's trip disables BOTH — disclosed), per-PROFILE 16-render burn-in,
+  profile-prefixed shape tokens + the 64-entry seen-set cap (the honest correction
+  of PR-1's "two writer shapes" bound — the heal path re-renders arbitrary stored
+  schemas; saturation = compare-always), `_CRATE_API` grown to 4 all-or-nothing
+  (a stale PR-1 crate latches BOTH surfaces), `ipc_handoff_bytes` hoisted COMMON;
+  crate: ONE shared parameterized render core (bars tests UNMODIFIED — the
+  frozen-behavior gate) + `render_parquet_defaults_from_ipc` over the factored FFI
+  shell + the defaults-mapping / 122,880-split / Dyn≡File (the P2 standing pin,
+  judge-probed PASS 7/7) cargo pins. GATES EXECUTED locally (venv312, wheel==pin):
+  the 12-case options corpus (6 probe-origin — the probe's seventh, the 130k
+  mid-boundary multi-RG case, superseded by the exact-boundary pair — + 6 new:
+  all-null-nullables / single-side / the exact 122,880+122,881 boundary pair /
+  long-string truncation sentinel / NaN+inf heal) 12/12 sha256+raw-bytes MATCH through the REAL seam with the per-profile
+  vacuous-green guard + whole-path write/heal_partition/merge_partition_frame/
+  heal_findings ON/OFF twins + statistics pins (a)–(e) — pin (d) records the
+  EMPIRICAL correction: the pinned rev truncates binary stats at 64 bytes with
+  max-increment even under `binary_statistics_truncate_length=None` (both engines
+  share the policy — parity unaffected; the probe report's "untruncated" reading
+  corrected); rails R1–R14 + the P1 BytesIO≡path standing pin (crate-free, main
+  CI); the ci-exact option-writer gate (now + the new unit file) and the facade
+  gate 100.00% line+branch, verified in crate-present AND crate-absent envs; heal
+  suites flag-OFF VERBATIM green; the parity lane gains the flag-ON heal twin
+  step, the morsel-env assert-unset step (R14), BOTH corpora + new path triggers,
+  timeout 45→60. HONEST: payoff ≈ 0 — conversion is for uniformity, not speed
+  (heal-/option-pull-driven O(month-file) glue; the engaged path stays the
+  PR-1-measured small-slowdown class at smaller absolute deltas — no new
+  measurement minted); statistics WIDEN the version-bump blast radius (the options
+  corpus will trip on bumps the bars corpus survives — the apparatus working); the
+  crate's defaults are a frozen SNAPSHOT (new bump-ritual step re-derives them);
+  NO per-write runtime witness on the options path (`raw_hash=None` by design —
+  scope lock); mutation coverage NOT claimed (neither module in mutation.yml's
+  mutmut paths). ADVERSARIAL-REVIEW FIX ROUND folded (2026-07-11, same branch,
+  pre-merge — 5 hostile lenses, all SHIP; the per-item record lives in
+  MIGRATION.md #1771): the two PR-2 thread-fuzz concurrency arms
+  (two-profile shared latch · past-cap novel shapes) + the narrowed facade
+  docstring claim, the crate doc-comments' "untruncated" statistics gloss
+  corrected to the observed 64-byte truncation default (the crate no longer
+  contradicts golden pin (d)), the golden module's sentinel nickname
+  reconciled, the lane's deliberately-excluded heal-trigger note, and the
+  morsel-env guard tightened to SET-ness. ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no scope/vocab/rate change.)
   Earlier: `claude/rust-lake-ledgerstore-spike-r2` (**DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917** — allocator-final;
   the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE. VERDICT:
   byte-identity NOT FOUND — 14 polars-native (Rust encoder,
@@ -9515,6 +9654,49 @@ hostile-review pass._
   the frozen engine goldens pinned UNMODIFIED; ENGINE UNCHANGED on clean
   feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
   + MIGRATION.md #1919 for the full blurb)
+  Earlier: `claude/rust-lake-locks-atomic`
+  (DEC-LAKE-RUST-LOCKS-ATOMIC-001, MIGRATION.md #1912 — allocator-final; ADR-0020
+  PR-4: the lake lock/atomic-replace primitives gain the default-OFF
+  `BRUTEX_LAKE_RUST_LOCKS` Rust routing — `rust/brutex-lake/src/locks.rs`
+  (flock attempt/release + the chmod→fsync→rename atomic commit) behind the NEW
+  `brutex/data/lake_rust_locks.py` facade; attempt/commit-grained seams inside
+  `partition_lock._acquire_bounded` / `partition_write_lock` /
+  `atomic_io._atomic_write_core` — the loop/deadline/beat law, the sha256
+  sidecar path law, `BoundedLockRegistry` and the `lake_write_guard` error
+  taxonomy ALL STAY PYTHON; OSError-with-errno crosses the FFI intact, never a
+  new exception class; OFF (default) = byte- and call-graph-identical
+  (bomb-spy-pinned); mixed-arm mutual-exclusion + 2-subprocess belts +
+  errno-parity proofs EXECUTED over the real wheel; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1912 for the full blurb)
+  Earlier: `claude/rust-lake-merge-dedup`
+  (DEC-LAKE-RUST-MERGE-DEDUP-001, MIGRATION.md #1911 — allocator-final —
+  ADR-0020 PR-3: the bars-writer merge/dedup DECISION kernel in Rust behind the
+  default-OFF `BRUTEX_LAKE_RUST_MERGE`; `merge_decision_from_ipc` returns one
+  action code per batch row over two 17-column Arrow-IPC decision frames and
+  Python materializes the fold (bytes identical by construction); the verbatim
+  fold extracted to `ParquetWriter._merge_fold` (flag OFF byte-identical,
+  spy-pinned); PR-1 guard pattern + burn-in identity bit-compare +
+  ship-the-Python-result autorevert + the refuse-poison gate; the 6-case golden
+  parity corpus EXECUTED green against the compiled crate; LakeWriteHalt
+  taxonomy pinned both arms; ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; matches
+  §1's Active branch line — see §1 + MIGRATION.md #1911 for the full blurb)
+  Earlier: `claude/rust-datalake-io-slice8-pr2`
+  (DEC-RUST-DATALAKE-IO-SLICE8-PR2-001, MIGRATION.md #1771 — its own
+  steward-assigned ledger row; parent roadmap
+  DEC-RUST-DATALAKE-IO-ROADMAP-001, MIGRATION.md #1891; PR-2 of the datalake
+  Rust conversion roadmap, STACKED on the PR-1 branch's head 283247ed —
+  the PR opens only after the PR-1 PR merges: the option writer's
+  ALL-DEFAULTS render seam (`_atomic_write_parquet` → the ONE
+  `lake_rust_render` facade under the NEW `PROFILE_OPTIONS_DEFAULTS`
+  render profile; flag-OFF is the literal legacy call, never-routes
+  spy-pinned; `lake_heal.py` + `atomic_io.py` ZERO diff), the crate's
+  `render_parquet_defaults_from_ipc` over ONE shared parameterized core
+  (bars tests UNMODIFIED), the 12-case options byte-parity corpus 12/12
+  MATCH + whole-path write/heal/merge/heal_findings ON/OFF twins + rails
+  R1–R14; payoff ≈ 0 banner verbatim; ENGINE UNCHANGED —
+  NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1 +
+  MIGRATION.md #1771 for the full blurb)
   Earlier: `claude/rust-lake-ledgerstore-spike-r2`
   (DEC-LAKE-RUST-LEDGERSTORE-SPIKE-001, MIGRATION.md #1917 — allocator-final;
   the ADR-0020 slice-G10 `window_ledger_store` byte-parity SPIKE: VERDICT

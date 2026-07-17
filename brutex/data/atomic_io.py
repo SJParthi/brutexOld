@@ -43,6 +43,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from brutex.data.errors import LakeWriteHalt
+from brutex.data.lake_rust_locks import rust_atomic_commit
 
 __all__ = ["atomic_write_simple", "atomic_write_via", "lake_write_guard"]
 
@@ -118,14 +119,12 @@ def _atomic_write_core(
         os.close(fd)
         tmp = Path(tmp_name)
         write_to(tmp)
-        if chmod is not None:
-            os.chmod(tmp, chmod)
-        flush_fd = os.open(tmp, os.O_RDONLY)
-        try:
-            os.fsync(flush_fd)
-        finally:
-            os.close(flush_fd)
-        os.replace(tmp, dest)
+        # The chmod→fsync→replace COMMIT — routed through the Rust twin when
+        # ``BRUTEX_LAKE_RUST_LOCKS`` is ON (DEC-LAKE-RUST-LOCKS-ATOMIC-001);
+        # OFF (the default) runs :func:`_python_commit_replace`, the verbatim
+        # pre-PR-4 inline sequence. Temp creation (above) and cleanup (below)
+        # stay Python on BOTH arms.
+        rust_atomic_commit(tmp, dest, chmod, python_commit=_python_commit_replace)
     finally:
         # `tmp is None` → `mkstemp` itself failed (nothing to clean). Otherwise: on
         # success `os.replace` consumed tmp (no-op), on any error path remove the
@@ -134,6 +133,27 @@ def _atomic_write_core(
         if tmp is not None:
             with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
+
+
+def _python_commit_replace(tmp: Path, dest: Path, chmod: int | None) -> None:
+    """The chmod→``fsync``→``os.replace`` commit tail — the Python oracle arm.
+
+    The verbatim pre-PR-4 inline sequence, extracted so
+    :func:`_atomic_write_core` can route the commit through the Rust twin
+    (DEC-LAKE-RUST-LOCKS-ATOMIC-001) while THIS stays the oracle both the
+    default-OFF arm and every degrade path serve: optional ``chmod`` FIRST
+    (dest lands at that mode, never briefly world-readable), the temp's data
+    ``fsync``-ed to stable storage, then the atomic ``os.replace``. EVERY
+    error propagates unchanged (the core's no-mapping law).
+    """
+    if chmod is not None:
+        os.chmod(tmp, chmod)
+    flush_fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(flush_fd)
+    finally:
+        os.close(flush_fd)
+    os.replace(tmp, dest)
 
 
 def atomic_write_via(dest: Path, write_to: Callable[[Path], object]) -> None:

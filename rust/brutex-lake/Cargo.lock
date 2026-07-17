@@ -253,6 +253,7 @@ dependencies = [
 name = "brutex-lake"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "polars",
  "polars-config",
  "polars-io",
