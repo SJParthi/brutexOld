@@ -42,6 +42,7 @@ use pyo3::prelude::*;
 pub mod backupenv;
 pub mod dotenv;
 pub mod hwenv;
+pub mod models;
 pub mod money;
 pub mod paths;
 
@@ -206,6 +207,18 @@ fn backupenv_verify_subset_valid(value: &str) -> PyResult<bool> {
     })
 }
 
+/// `normalise_tick_size` decision twin (T35 PR-2 — the models seam,
+/// `src/models.rs`; the Python-type dispatch + the `TickSizeFormatError`
+/// message bytes stay Python — a `tick_refuse:*` `ValueError` is a LAW
+/// refusal the facade maps to the oracle's raise, any other error a
+/// degrade-member fault).
+#[pyfunction]
+fn models_normalise_tick_size_str(kind: &str, payload: &str) -> PyResult<String> {
+    core_ffi_shell("models_normalise_tick_size_str", || {
+        models::normalise_tick_size(kind, payload)
+    })
+}
+
 // `#[pymodule]` registers the `_brutex_core` Python submodule. Maturin
 // produces a cdylib whose extern "C" `PyInit__brutex_core` symbol matches
 // this function name; under the mixed layout it installs at
@@ -235,6 +248,9 @@ fn _brutex_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(paths_volume_parent_str, m)?)?;
     m.add_function(wrap_pyfunction!(dotenv_parse_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(backupenv_verify_subset_valid, m)?)?;
+    // T35 PR-2 — the models seam (BRUTEX_CORE_RUST_MODELS): the
+    // normalise_tick_size decision law (src/models.rs).
+    m.add_function(wrap_pyfunction!(models_normalise_tick_size_str, m)?)?;
     Ok(())
 }
 
@@ -244,12 +260,13 @@ mod tests {
 
     #[test]
     fn version_matches_manifest() {
-        // 0.3.0: the wheel API grew again (money + hwenv -> + the
-        // milestone-3 paths/dotenv/backupenv laws) — a stale wheel must
-        // not masquerade as the grown surface (review-r1 stale-wheel
-        // hazard; the facades' handshakes check callables, not versions,
-        // so the bump is the human-visible provenance marker).
-        assert_eq!(VERSION, "0.3.0");
+        // 0.4.0: the wheel API grew again (money + hwenv + the
+        // milestone-3 config laws -> + the T35 PR-2 models tick-size
+        // law) — a stale wheel must not masquerade as the grown surface
+        // (review-r1 stale-wheel hazard; the facades' handshakes check
+        // callables, not versions, so the bump is the human-visible
+        // provenance marker).
+        assert_eq!(VERSION, "0.4.0");
     }
 
     #[test]
