@@ -38,6 +38,8 @@ pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
+from brutex.config.feed_scope import resolve_read_scope, scope_revision
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_options import (
     _discover_options,
@@ -193,8 +195,9 @@ class TestDiscoverOptions:
             interval="1minute",
             bars=[_min_bar(hour=9, minute=15, close="20100", volume=1, oi=5)],
         )
-        found = {row[0] for row in _discover_options(tmp_path)}
-        assert found == {_CE, _PE}
+        contracts, scope_excluded = _discover_options(tmp_path)
+        assert {row[0] for row in contracts} == {_CE, _PE}
+        assert scope_excluded == 0  # scope=None — the §2.4 unfiltered default
 
     def test_skips_unparseable_option_symbol(self, tmp_path: Path) -> None:
         # Ends -CE but the expiry token is malformed → parse None → dropped.
@@ -205,7 +208,7 @@ class TestDiscoverOptions:
             interval="1minute",
             bars=[_min_bar(hour=9, minute=15, close="10", volume=1, oi=5)],
         )
-        assert _discover_options(tmp_path) == []
+        assert _discover_options(tmp_path) == ([], 0)
 
 
 # ── run_options_snapshot (direct, every branch) ───────────────────────────
@@ -2195,7 +2198,10 @@ class TestOptionsPcr:
             # …PLUS the registry.duckdb content token (the DEC-MEMORY-FOOTPRINT-
             # HARDENING-001 fold — warm/route key parity; this lake has no
             # registry, so the component is the stable "absent" sentinel).
-            + f"|m={count}:{latest}|r={app_module._registry_key_component(tmp_path)}",
+            # …PLUS the read-scope revision token (DEC-UNIVERSE-INDEX-ONLY-001
+            # design §3 R1 — warm/route key parity under the scope fold).
+            + f"|m={count}:{latest}|r={app_module._registry_key_component(tmp_path)}"
+            + f"|s={scope_revision()}",
             generation=summary_cache.generation,
             compute=lambda: compute_options_candidates(
                 lake_root=tmp_path,
@@ -2206,6 +2212,7 @@ class TestOptionsPcr:
                 expiry_track=track,
                 exchange=exchange,
                 underlying_kinds=kinds,
+                scope=resolve_read_scope(),
             ),
         )
 
@@ -2308,6 +2315,12 @@ class TestOptionsPcr:
         # never cross-contaminated.
         from brutex.dashboard import app as app_module
 
+        # DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): the
+        # mixed-exchange fold NEEDS a BSE-NIFTY listing, which the shipped
+        # index4 default excludes (admits_fno_underlying is pair-exact) — no
+        # in-scope symbol reproduces the class, so the machinery keeps its
+        # net under the widened scope, never index-rewritten.
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         # NSE (whole-day: CE oi 1200 / vol 175 · PE oi 1080 / vol 290)…
         _seed_pcr_lake(tmp_path)
         # …plus a BSE listing of the SAME underlying on the SAME expiry.
@@ -2361,8 +2374,11 @@ class TestOptionsPcr:
         assert calls["n"] == 2
 
     def test_mixed_exchange_differing_tier_expiries_keep_only_the_tier_legs(
-        self, store: InstrumentStore, tmp_path: Path
+        self, store: InstrumentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm) — see the
+        # mixed-exchange fold test above.
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
         # Edge 20 sub-permutation (round-8 fold): when the two exchanges list
         # DIFFERENT near expiries for one underlying, the tier filter keeps
         # ONLY the tier-expiry legs — the off-expiry exchange's legs are

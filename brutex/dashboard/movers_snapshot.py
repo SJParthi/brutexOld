@@ -66,6 +66,11 @@ from brutex.data.derive_lock import derive_in_progress
 from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.models import CandleBar
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.scope_filter import (
+    scope_admits_dataset,
+    scope_excluded_echo,
+    scope_note_suffix,
+)
 from brutex.data.session import SESSION_CLOSE, SESSION_OPEN
 from brutex.data.spot_features import pct_change
 from brutex.data.timeframes import LAKE_INTERVAL_LABELS
@@ -73,6 +78,8 @@ from brutex.money import format_inr, round_money, rupees_to_paisa
 
 if TYPE_CHECKING:
     import polars as pl
+
+    from brutex.config.feed_scope import FeedScope
 
 __all__ = [
     "DEFAULT_INTERVAL",
@@ -554,6 +561,7 @@ def build_snapshot_payload(
     latest_time: str | None = None,
     underlying_class: str | None = None,
     resolved_through: str | None = None,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Assemble the markets-screen-style ``/api/v1/movers`` JSON from computed snapshots.
 
@@ -614,6 +622,9 @@ def build_snapshot_payload(
         for category, rank_fn in _SPOT_CATEGORIES.items()
     }
     class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    # DEC-UNIVERSE-INDEX-ONLY-001: the honest EMIT-ON-NONZERO scope note — an
+    # index-only lake (zero exclusions) keeps every note byte-identical.
+    scope_note = scope_note_suffix(scope_excluded)
     instrument_count = len(ranked_snapshots) + skipped
     # The "empty lake" message keys on the UNFILTERED population so a class filter
     # that legitimately empties the ranked set never mis-reads as "no spot pulled"
@@ -622,13 +633,14 @@ def build_snapshot_payload(
     if lake_population == 0:
         note = (
             "No spot data in the lake yet — pull spot first on the Coverage page, "
-            "then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
+            "then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note + scope_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} instrument(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
             + class_note
+            + scope_note
         )
     else:
         note = (
@@ -641,6 +653,7 @@ def build_snapshot_payload(
             )
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
             + class_note
+            + scope_note
         )
     return {
         "interval": interval,
@@ -656,6 +669,7 @@ def build_snapshot_payload(
         "asof_through": resolved_through,
         "note": note,
         **class_echo(wanted_class, excluded_unclassified),
+        **scope_excluded_echo(scope_excluded),
         **ranked,
     }
 
@@ -2027,6 +2041,11 @@ class SpotCandidates:
     date: str
     stored_reads: int = 0
     resampled_reads: int = 0
+    #: Stored-only dataset symbols dropped by the read-scope filter at
+    #: DISCOVERY (DEC-UNIVERSE-INDEX-ONLY-001, design §3 R1) — zero I/O paid,
+    #: surfaced EMIT-ON-NONZERO on the payload note. Defaulted LAST so every
+    #: existing constructor call site stays valid.
+    scope_excluded: int = 0
 
 
 def resolve_candle_datasets(
@@ -2059,6 +2078,7 @@ def compute_spot_candidates(
     names: Mapping[str, str] | None = None,
     datasets: list[dict[str, str]] | None = None,
     prefer_resample: bool = False,
+    scope: FeedScope | None = None,
 ) -> SpotCandidates:
     """Scan the lake → the spot :class:`SpotCandidates` for one snapshot coordinate.
 
@@ -2160,8 +2180,22 @@ def compute_spot_candidates(
         and d["segment"] in SPOT_PROBE_SEGMENTS
         and (exchange is None or d["exchange"] == exchange)
     ]
+    # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the read-scope filter runs at
+    # DISCOVERY — before ANY per-symbol read — through the ONE predicate
+    # `scope_admits_dataset` (drift recovery BEFORE scope: a legacy drifted
+    # "NSE-NIFTY" INDEX dir is recovered-then-admitted, never dropped). `None`
+    # (a direct caller — the §2.4 read-default law) is byte-identical legacy.
+    scope_excluded = 0
+    if scope is not None:
+        admitted = [
+            d
+            for d in spot_datasets
+            if scope_admits_dataset(d["exchange"], d["segment"], d["symbol"], scope)
+        ]
+        scope_excluded = len(spot_datasets) - len(admitted)
+        spot_datasets = admitted
     if not spot_datasets:
-        return SpotCandidates(snapshots=(), skipped=0, date=date_str)
+        return SpotCandidates(snapshots=(), skipped=0, date=date_str, scope_excluded=scope_excluded)
 
     snapshots: list[MoverSnapshot] = []
     skipped = 0
@@ -2312,6 +2346,7 @@ def compute_spot_candidates(
         date=date_str,
         stored_reads=stored_reads,
         resampled_reads=resampled_reads,
+        scope_excluded=scope_excluded,
     )
 
 
@@ -2324,6 +2359,7 @@ def run_movers_snapshot(
     top_n: int,
     exchange: str | None = None,
     names: Mapping[str, str] | None = None,
+    scope: FeedScope | None = None,
 ) -> dict[str, Any]:
     """Compute the spot movers snapshot over the lake → the ``/api/v1/movers`` payload.
 
@@ -2351,6 +2387,7 @@ def run_movers_snapshot(
         time=time,
         exchange=exchange,
         names=names,
+        scope=scope,
     )
     return build_snapshot_payload(
         candidates.snapshots,
@@ -2361,4 +2398,5 @@ def run_movers_snapshot(
         skipped=candidates.skipped,
         stored_reads=candidates.stored_reads,
         resampled_reads=candidates.resampled_reads,
+        scope_excluded=candidates.scope_excluded,
     )

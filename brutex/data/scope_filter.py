@@ -190,11 +190,50 @@ def window_scope_admit(
     return _admit
 
 
+def scope_note_suffix(excluded: int) -> str:
+    """Return the honest read-surface note fragment for scope exclusions.
+
+    The ONE wording law of the R1 movers filter (design §3 R1 — CLAUDE.md §11
+    COMMON, so the three tabs can never drift): ``""`` when *excluded* is zero
+    (EMIT-ON-NONZERO — an index-only lake's note stays byte-identical), else a
+    leading-space fragment naming the count + the DEC, e.g.
+    ``" 3 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."``.
+
+    Parameters
+    ----------
+    excluded
+        The count of stored-only dataset symbols the scope filter dropped at
+        DISCOVERY (before any per-symbol read).
+
+    Returns
+    -------
+    str
+        The note suffix (empty for zero).
+    """
+    if excluded <= 0:
+        return ""
+    return f" {excluded:,} stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+
+
+def scope_excluded_echo(excluded: int) -> dict[str, int]:
+    """The EMIT-ON-NONZERO ``scope_excluded`` payload echo (the ``class_echo`` idiom).
+
+    ``{}`` when *excluded* is zero — a defaulted / index-only-lake payload is
+    BYTE-IDENTICAL to the pre-#1934 wire (design §3 R1's pinned law); else the
+    one additive key ``{"scope_excluded": excluded}``.
+    """
+    if excluded <= 0:
+        return {}
+    return {"scope_excluded": excluded}
+
+
 __all__ = [
     "WINDOW_ADMITTED",
     "WINDOW_EXCLUDED",
     "WINDOW_LEGACY_UNRESOLVED",
     "classify_window_row",
     "scope_admits_dataset",
+    "scope_excluded_echo",
+    "scope_note_suffix",
     "window_scope_admit",
 ]

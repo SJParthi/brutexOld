@@ -64,7 +64,14 @@ from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.nse import IST as _IST_TZ
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
-from brutex.config.feed_scope import DEFAULT_FEED, FeedScope, FeedScopeError, resolve_feed_scope
+from brutex.config.feed_scope import (
+    DEFAULT_FEED,
+    FeedScope,
+    FeedScopeError,
+    resolve_feed_scope,
+    resolve_read_scope,
+    scope_revision,
+)
 from brutex.config.hardware_envelope import memory_budget_bytes
 from brutex.config.paths import resolve_lake_root
 from brutex.dashboard import oneclick_artifacts, oneclick_view
@@ -4931,6 +4938,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # ONE memoised discovery walk shared by every job in this warm
                 # run + the /movers route (DEC-MOVERS-WARM-UNBLOCK-001 fix 1).
                 warm_datasets = _warm_datasets(gen)
+                # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the post-pull warm
+                # grid is the SECOND named read chokepoint — thread the SAME
+                # read-union scope + fold the SAME `scope_revision()` token the
+                # route folds, so a warmed entry is actually HIT by the route's
+                # composite key (key parity, CLAUDE.md §11 COMMON).
+                read_scope = resolve_read_scope()
+                scope_token = scope_revision()
 
                 def _make_spot_job(exch: str | None) -> Callable[[], int]:
                     def _spot_job() -> int:
@@ -4941,7 +4955,8 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 interval=DEFAULT_INTERVAL,
                                 date=warm_date,
                                 time=None,
-                            ),
+                            )
+                            + f"|s={scope_token}",
                             generation=gen,
                             compute=lambda: compute_spot_candidates(
                                 lake_root=lake_root,
@@ -4950,6 +4965,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 time=None,
                                 exchange=exch,
                                 datasets=warm_datasets,
+                                scope=read_scope,
                             ),
                             # force_fresh (DEC-LATENCY-HONESTY-BATCH-001 review
                             # fold): now that the production movers cache is
@@ -4998,6 +5014,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # EMPTY rows) and (b) is actually HIT by the route's composite key
                 # (key parity, CLAUDE.md §11 COMMON).
                 underlying_kinds, kinds_token = _underlying_kinds_cached(_require_store())
+                # DEC-UNIVERSE-INDEX-ONLY-001: warm ≡ route (scope + key fold) —
+                # see the spot warm job.
+                read_scope = resolve_read_scope()
+                scope_token = scope_revision()
 
                 def _make_fut_job(exch: str | None, raw_tier: str | None) -> Callable[[], int]:
                     tier = normalize_futures_tier(raw_tier)
@@ -5012,7 +5032,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 time=None,
                                 expiry_tier=tier,
                             )
-                            + f"|m={kinds_token}",
+                            + f"|m={kinds_token}|s={scope_token}",
                             generation=gen,
                             compute=lambda: compute_futures_candidates(
                                 lake_root=lake_root,
@@ -5023,6 +5043,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 expiry_tier=tier,
                                 datasets=warm_datasets,
                                 underlying_kinds=underlying_kinds,
+                                scope=read_scope,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -5068,6 +5089,10 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # (key parity, CLAUDE.md §11 COMMON) and a cross-process registry
                 # write re-keys them (DEC-MEMORY-FOOTPRINT-HARDENING-001).
                 warm_registry_token = _registry_key_component(lake_root)
+                # DEC-UNIVERSE-INDEX-ONLY-001: warm ≡ route (scope + key fold) —
+                # see the spot warm job.
+                read_scope = resolve_read_scope()
+                scope_token = scope_revision()
 
                 def _make_opt_job(
                     exch: str | None, raw_tier: str | None, raw_track: str | None
@@ -5101,7 +5126,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 expiry_tier=tier,
                                 expiry_track=trk,
                             )
-                            + f"|m={kinds_token}|r={warm_registry_token}",
+                            + f"|m={kinds_token}|r={warm_registry_token}|s={scope_token}",
                             generation=gen,
                             compute=lambda: compute_options_candidates(
                                 lake_root=lake_root,
@@ -5115,6 +5140,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                                 calendar_expiries=calendar_expiries,
                                 registry_chain_for=registry_chain_for,
                                 underlying_kinds=underlying_kinds,
+                                scope=read_scope,
                             ),
                             # force_fresh — the warm re-seed must never be served
                             # its own pull-active floor's stale pre-pull entry
@@ -7735,6 +7761,13 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                 # resolved forward to (`None` for daily / latest / TF-1minute / non-anchor,
                 # keeping the payload byte-identical). O(1) pure; shared by all three tabs.
                 resolved_through = asof_through_label(interval, time)
+                # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the /movers route is a
+                # NAMED read chokepoint — thread the READ-union scope into every
+                # candidate discovery, and fold `scope_revision()` into the candidate
+                # keys (the #1650 master_revision-fold idiom) so a registration
+                # widening re-keys a primed cache with NO generation bump.
+                read_scope = resolve_read_scope()
+                scope_token = scope_revision()
                 # Memoise the lake DISCOVERY once per write-generation (the proven
                 # `/db` #896 pattern), shared across spot/futures/options, so a tab /
                 # section / exchange / expiry switch within one generation REUSES a
@@ -7820,7 +7853,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                             expiry_tier=tier,
                             expiry_track=trk,
                         )
-                        + f"|m={kinds_token}|r={registry_token}"
+                        + f"|m={kinds_token}|r={registry_token}|s={scope_token}"
                     )
                     opt_cands = _movers_cache.get_or_compute(
                         key,
@@ -7837,6 +7870,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                             calendar_expiries=calendar_expiries,
                             registry_chain_for=registry_chain_for,
                             underlying_kinds=underlying_kinds,
+                            scope=read_scope,
                         ),
                     )
                     return build_options_payload(
@@ -7854,6 +7888,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         latest_time=latest_time,
                         underlying_class=underlying_class,
                         resolved_through=resolved_through,
+                        scope_excluded=opt_cands.scope_excluded,
                     )
                 if asset == "futures":
                     # Futures carries the Near/Next/Far serial-expiry tier (the
@@ -7878,7 +7913,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                             time=time,
                             expiry_tier=fut_tier,
                         )
-                        + f"|m={kinds_token}"
+                        + f"|m={kinds_token}|s={scope_token}"
                     )
                     fut_cands = _movers_cache.get_or_compute(
                         key,
@@ -7892,6 +7927,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                             datasets=movers_datasets,
                             expiry_tier=fut_tier,
                             underlying_kinds=underlying_kinds,
+                            scope=read_scope,
                         ),
                     )
                     return build_futures_payload(
@@ -7906,13 +7942,17 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         latest_time=latest_time,
                         underlying_class=underlying_class,
                         resolved_through=resolved_through,
+                        scope_excluded=fut_cands.scope_excluded,
                     )
-                key = candidate_key(
-                    asset="spot",
-                    exchange=exch,
-                    interval=interval,
-                    date=date_str,
-                    time=time,
+                key = (
+                    candidate_key(
+                        asset="spot",
+                        exchange=exch,
+                        interval=interval,
+                        date=date_str,
+                        time=time,
+                    )
+                    + f"|s={scope_token}"
                 )
                 spot_cands = _movers_cache.get_or_compute(
                     key,
@@ -7933,6 +7973,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                         exchange=exch,
                         datasets=movers_datasets,
                         prefer_resample=_pull_live(),
+                        scope=read_scope,
                     ),
                 )
                 return build_snapshot_payload(
@@ -7948,6 +7989,7 @@ classify_retained_pull_outcome`; tests inject a deterministic probe (or a
                     latest_time=latest_time,
                     underlying_class=underlying_class,
                     resolved_through=resolved_through,
+                    scope_excluded=spot_cands.scope_excluded,
                 )
 
             payload = await _run_lake(_resolve)

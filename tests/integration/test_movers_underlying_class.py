@@ -34,6 +34,7 @@ pytest.importorskip("duckdb")
 pytest.importorskip("polars")
 pytest.importorskip("pyarrow")
 
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_cache import MoversSnapshotCache
 from brutex.data.instrument_store import InstrumentStore
@@ -167,6 +168,15 @@ def _seed_spot(tmp_path: Path) -> None:
 
 
 class TestSpotUnderlyingClass:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): these #1650
+        route pins assert STOCK rows served — a class no in-scope symbol can
+        reproduce under the shipped index4 default, so the machinery keeps its
+        net under the widened scope (never index-rewritten, never deleted).
+        The shipped-default guard is TestIndex4DefaultScope below."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     def test_default_omits_class_keys(self, store: InstrumentStore, tmp_path: Path) -> None:
         _seed_spot(tmp_path)
         client = TestClient(_client(store))
@@ -226,6 +236,15 @@ def _seed_futures(tmp_path: Path) -> None:
 
 
 class TestFuturesUnderlyingClass:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): these #1650
+        route pins assert STOCK rows served — a class no in-scope symbol can
+        reproduce under the shipped index4 default, so the machinery keeps its
+        net under the widened scope (never index-rewritten, never deleted).
+        The shipped-default guard is TestIndex4DefaultScope below."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     def test_default_ranks_all_three(self, store: InstrumentStore, tmp_path: Path) -> None:
         _seed_futures(tmp_path)
         client = TestClient(_client(store))
@@ -284,6 +303,15 @@ def _seed_options(tmp_path: Path) -> None:
 
 
 class TestOptionsUnderlyingClass:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): these #1650
+        route pins assert STOCK rows served — a class no in-scope symbol can
+        reproduce under the shipped index4 default, so the machinery keeps its
+        net under the widened scope (never index-rewritten, never deleted).
+        The shipped-default guard is TestIndex4DefaultScope below."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     def test_default_omits_class_keys(self, store: InstrumentStore, tmp_path: Path) -> None:
         _seed_options(tmp_path)
         client = TestClient(_client(store))
@@ -309,6 +337,15 @@ class TestOptionsUnderlyingClass:
 
 
 class TestHyphenatedUnderlyingClass:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): these #1650
+        route pins assert STOCK rows served — a class no in-scope symbol can
+        reproduce under the shipped index4 default, so the machinery keeps its
+        net under the widened scope (never index-rewritten, never deleted).
+        The shipped-default guard is TestIndex4DefaultScope below."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     """A hyphenated F&O underlying classifies as ``stocks`` — never ``unknown``.
 
     Review round 1 (the MAJOR): the kind map keys the ``primary_fno_underlying``
@@ -376,6 +413,15 @@ class TestHyphenatedUnderlyingClass:
 
 
 class TestKindMapMasterRevisionFreshness:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DEC-UNIVERSE-INDEX-ONLY-001 §6 Law 2 (explicit FULL arm): these #1650
+        route pins assert STOCK rows served — a class no in-scope symbol can
+        reproduce under the shipped index4 default, so the machinery keeps its
+        net under the widened scope (never index-rewritten, never deleted).
+        The shipped-default guard is TestIndex4DefaultScope below."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     """The kind map + the stamped candidates track the MASTER content revision.
 
     Review round 1 (the memo-key staleness class): the map cache — and the F&O

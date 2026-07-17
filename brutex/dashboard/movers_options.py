@@ -108,7 +108,7 @@ from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -154,8 +154,16 @@ from brutex.data.moneyness import (
     resolve_strike_step,
 )
 from brutex.data.registry_store import RegistryError, RegistryStore
+from brutex.data.scope_filter import (
+    scope_admits_dataset,
+    scope_excluded_echo,
+    scope_note_suffix,
+)
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
+
+if TYPE_CHECKING:
+    from brutex.config.feed_scope import FeedScope
 
 _LOG = structlog.get_logger(__name__)
 
@@ -192,6 +200,11 @@ DEFAULT_OPTIONS_TOP_N: Final[int] = 100
 #: the lake (``bars/<exch>/FNO/<contract>/<interval>/...``). Mirrors the
 #: instrument-master backtesting segment (CLAUDE.md §6).
 _FNO_SEGMENT: Final[str] = "FNO"
+#: The CE/PE contract-dir suffixes the options tab discovers — the shape
+#: pre-screen for the DEC-UNIVERSE-INDEX-ONLY-001 scope gate (a ``-FUT``
+#: dataset is the Futures tab's population and must never be counted into
+#: the OPTIONS tab's exclusions).
+_OPTION_SUFFIXES: Final[tuple[str, str]] = ("-CE", "-PE")
 
 #: The honest "no strike grid" resolution (DEC-MONEYNESS-REGISTRY-STEP-001) — the
 #: defensive default for the per-contract step lookup (no step, nothing to qualify).
@@ -690,6 +703,7 @@ def build_options_payload(
     latest_time: str | None = None,
     underlying_class: str | None = None,
     resolved_through: str | None = None,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Options ``/api/v1/movers`` JSON from computed movers.
 
@@ -777,6 +791,9 @@ def build_options_payload(
         for category, rank_fn in _OPTIONS_CATEGORIES.items()
     }
     class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    # DEC-UNIVERSE-INDEX-ONLY-001: the honest EMIT-ON-NONZERO scope note — an
+    # index-only lake (zero exclusions) keeps every note byte-identical.
+    scope_note = scope_note_suffix(scope_excluded)
     # The tier label, with the cadence track appended (``Near Monthly``) unless the
     # default ``all`` track (then just ``Near`` — the prior wording is preserved).
     track_suffix = "" if expiry_track == "all" else f" {expiry_track.capitalize()}"
@@ -800,13 +817,15 @@ def build_options_payload(
         note = (
             f"The {tier_label} expiry is on the vendor calendar for {date}, but NO option "
             "contract candles have been pulled for it yet — pull the F&O options for this "
-            "expiry on the Coverage page. (Reference-only lake view, CLAUDE.md §3.)" + class_note
+            "expiry on the Coverage page. (Reference-only lake view, CLAUDE.md §3.)"
+            + class_note
+            + scope_note
         )
     elif lake_population == 0:
         note = (
             f"No {tier_label}-expiry option contracts in the lake for {date} — pull the F&O "
             "options first on the Coverage page, or pick another expiry/date. "
-            "(Reference-only lake view, CLAUDE.md §3.)" + class_note
+            "(Reference-only lake view, CLAUDE.md §3.)" + class_note + scope_note
         )
     elif not any(ranked.values()):
         note = (
@@ -814,6 +833,7 @@ def build_options_payload(
             f"had a bar at {date} {time or '(daily)'} on {interval} — pick another time/day."
             + floor_note
             + class_note
+            + scope_note
         )
     else:
         note = (
@@ -825,6 +845,7 @@ def build_options_payload(
             + bucket_note
             + floor_note
             + class_note
+            + scope_note
         )
     return {
         "interval": interval,
@@ -839,6 +860,7 @@ def build_options_payload(
         "note": note,
         "pcr": [pcr_row_json(row) for row in pcr],
         **class_echo(wanted_class, excluded_unclassified),
+        **scope_excluded_echo(scope_excluded),
         **ranked,
     }
 
@@ -853,7 +875,8 @@ def _discover_options(
     *,
     exchange: str | None = None,
     datasets: list[dict[str, str]] | None = None,
-) -> list[tuple[str, str, str, date_cls, Decimal, str]]:
+    scope: FeedScope | None = None,
+) -> tuple[list[tuple[str, str, str, date_cls, Decimal, str]], int]:
     """List the lake's option contracts as ``(symbol, exchange, underlying, expiry, strike, type)``.
 
     Walks :func:`~brutex.dashboard.db_view.list_candle_datasets`, keeps ONLY the
@@ -879,21 +902,35 @@ def _discover_options(
     -------
     list[tuple[str, str, str, datetime.date, decimal.Decimal, str]]
         ``(contract_symbol, exchange, underlying, expiry, strike, opt_type)`` per
-        option contract found in the lake.
+        option contract found in the lake, plus the DEC-UNIVERSE-INDEX-ONLY-001
+        exclusion count: with a non-``None`` *scope* (design §3 R1) every
+        CE/PE-shaped dataset is judged by the ONE
+        :func:`~brutex.data.scope_filter.scope_admits_dataset` predicate at
+        DISCOVERY — an out-of-scope (or undecodable-under-a-bounded-scope)
+        contract is counted + never read; ``scope=None`` (the §2.4
+        read-default law) is byte-identical legacy with a ``0`` count.
     """
     contracts: list[tuple[str, str, str, date_cls, Decimal, str]] = []
+    scope_excluded = 0
     for dataset in resolve_candle_datasets(lake_root, datasets):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
             continue
         if exchange is not None and dataset["exchange"] != exchange:
             continue
         symbol = dataset["symbol"]
+        if (
+            scope is not None
+            and symbol.endswith(_OPTION_SUFFIXES)
+            and not scope_admits_dataset(dataset["exchange"], dataset["segment"], symbol, scope)
+        ):
+            scope_excluded += 1
+            continue
         parsed = parse_option_symbol(symbol)
         if parsed is None:
             continue
         underlying, expiry, strike, opt_type = parsed
         contracts.append((symbol, dataset["exchange"], underlying, expiry, strike, opt_type))
-    return contracts
+    return contracts, scope_excluded
 
 
 def load_registry_expiries(
@@ -1167,6 +1204,10 @@ class OptionsCandidates:
     expiry_track: str
     calendar_only_expiry: bool = False
     pcr: tuple[UnderlyingPcr, ...] = ()
+    #: Stored-only CE/PE contract symbols dropped by the read-scope filter at
+    #: DISCOVERY (DEC-UNIVERSE-INDEX-ONLY-001, design §3 R1) — zero I/O paid,
+    #: surfaced EMIT-ON-NONZERO on the payload note. Defaulted LAST.
+    scope_excluded: int = 0
 
 
 def compute_options_candidates(
@@ -1183,6 +1224,7 @@ def compute_options_candidates(
     calendar_expiries: Mapping[str, set[date_cls]] | None = None,
     registry_chain_for: Callable[[str, date_cls], Sequence[Decimal] | None] | None = None,
     underlying_kinds: dict[str, str] | None = None,
+    scope: FeedScope | None = None,
 ) -> OptionsCandidates:
     """Scan the lake → the :class:`OptionsCandidates` for one snapshot coordinate.
 
@@ -1260,7 +1302,9 @@ def compute_options_candidates(
     cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
     tier, track = normalize_options_selectors(expiry_tier, expiry_track)
-    contracts = _discover_options(lake_root, exchange=exchange, datasets=datasets)
+    contracts, scope_excluded = _discover_options(
+        lake_root, exchange=exchange, datasets=datasets, scope=scope
+    )
     # Keep ONLY the contracts on the selected Near/Next/Far expiry — resolved per
     # underlying as-of the snapshot day over the AUTHORITATIVE vendor calendar (when
     # supplied) WITHIN the chosen cadence track; an underlying without that serial
@@ -1284,6 +1328,7 @@ def compute_options_candidates(
             expiry_tier=tier,
             expiry_track=track,
             calendar_only_expiry=calendar_only_expiry,
+            scope_excluded=scope_excluded,
         )
 
     # PCR harvest maps (DEC-MOVERS-OPTIONS-PCR-001), built BEFORE any read can
@@ -1492,6 +1537,7 @@ def compute_options_candidates(
             target_expiry=pcr_expiry,
             display_names=pcr_display,
         ),
+        scope_excluded=scope_excluded,
     )
 
 

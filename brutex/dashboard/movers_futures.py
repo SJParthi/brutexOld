@@ -62,7 +62,7 @@ from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -101,7 +101,15 @@ from brutex.data.fno_candle_lake import is_option_contract_coords
 from brutex.data.fno_symbol import FUTURE_TYPE, parse_fno_symbol
 from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.scope_filter import (
+    scope_admits_dataset,
+    scope_excluded_echo,
+    scope_note_suffix,
+)
 from brutex.data.spot_drift import load_stock_drift_map
+
+if TYPE_CHECKING:
+    from brutex.config.feed_scope import FeedScope
 from brutex.data.spot_features import pct_change
 from brutex.money import format_inr, round_money, rupees_to_paisa
 
@@ -689,6 +697,7 @@ def build_futures_payload(
     latest_time: str | None = None,
     underlying_class: str | None = None,
     resolved_through: str | None = None,
+    scope_excluded: int = 0,
 ) -> dict[str, Any]:
     """Assemble the markets-screen Futures ``/api/v1/movers`` JSON from computed movers.
 
@@ -761,18 +770,24 @@ def build_futures_payload(
         for category, rank_fn in _FUTURES_CATEGORIES.items()
     }
     class_note = class_note_suffix(wanted_class, excluded_unclassified)
+    # DEC-UNIVERSE-INDEX-ONLY-001: the honest EMIT-ON-NONZERO scope note — an
+    # index-only lake (zero exclusions) keeps every note byte-identical.
+    scope_note = scope_note_suffix(scope_excluded)
     instrument_count = len(ranked_movers) + skipped
     lake_population = len(movers) + skipped
     if lake_population == 0:
         note = (
             "No futures in the lake yet — pull the F&O futures first on the Coverage "
-            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)" + class_note
+            "page, then refresh. (Reference-only lake view, CLAUDE.md §3.)"
+            + class_note
+            + scope_note
         )
     elif not any(ranked.values()):
         note = (
             f"{instrument_count} future(s) in the lake, but none had a bar at "
             f"{date} {time or '(daily)'} on {interval} — pick another time/day, or pull more."
             + class_note
+            + scope_note
         )
     else:
         note = (
@@ -785,6 +800,7 @@ def build_futures_payload(
             )
             + (f" Min volume ≥ {floor:,}." if floor > 0 else "")
             + class_note
+            + scope_note
         )
     return {
         "interval": interval,
@@ -799,6 +815,7 @@ def build_futures_payload(
         "asof_through": resolved_through,
         "note": note,
         **class_echo(wanted_class, excluded_unclassified),
+        **scope_excluded_echo(scope_excluded),
         **ranked,
     }
 
@@ -1217,7 +1234,8 @@ def _discover_futures(
     *,
     exchange: str | None = None,
     datasets: list[dict[str, str]] | None = None,
-) -> dict[str, list[tuple[str, str, date_cls]]]:
+    scope: FeedScope | None = None,
+) -> tuple[dict[str, list[tuple[str, str, date_cls]]], int]:
     """Group the lake's FUT datasets by underlying → ``[(symbol, exchange, expiry)]``.
 
     Walks the lake's candle datasets (the memoised list when the route threads one
@@ -1227,9 +1245,16 @@ def _discover_futures(
     (options share the FNO segment but carry a strike + ``-CE`` / ``-PE`` suffix),
     parses each into ``(underlying, expiry)`` (a non-parsing symbol is skipped), and
     buckets by underlying. When *exchange* is given only that exchange's contracts
-    are kept (an exact per-exchange ranking). Returns ``{}`` when no futures present.
+    are kept (an exact per-exchange ranking). Returns ``({}, 0)`` when no futures
+    present. The second element is the DEC-UNIVERSE-INDEX-ONLY-001 exclusion
+    count: with a non-``None`` *scope* (design §3 R1) every ``-FUT``-shaped
+    dataset is judged by the ONE :func:`scope_admits_dataset` predicate at
+    DISCOVERY — an out-of-scope (or undecodable-under-a-bounded-scope) contract
+    is counted + never read; ``scope=None`` (the §2.4 read-default law) is
+    byte-identical legacy with a ``0`` count.
     """
     by_underlying: dict[str, list[tuple[str, str, date_cls]]] = {}
+    scope_excluded = 0
     for dataset in resolve_candle_datasets(lake_root, datasets):
         if dataset["segment"] != _FNO_SEGMENT or dataset["interval"] != "1minute":
             continue
@@ -1238,12 +1263,17 @@ def _discover_futures(
         symbol = dataset["symbol"]
         if not symbol.endswith(_FUT_SUFFIX):
             continue
+        if scope is not None and not scope_admits_dataset(
+            dataset["exchange"], dataset["segment"], symbol, scope
+        ):
+            scope_excluded += 1
+            continue
         parsed = parse_future_symbol(symbol)
         if parsed is None:
             continue
         underlying, expiry = parsed
         by_underlying.setdefault(underlying, []).append((symbol, dataset["exchange"], expiry))
-    return by_underlying
+    return by_underlying, scope_excluded
 
 
 @dataclass(frozen=True, slots=True)
@@ -1277,6 +1307,10 @@ class FuturesCandidates:
     skipped: int
     date: str
     expiry_tier: str = _DEFAULT_TIER
+    #: Stored-only FUT contract symbols dropped by the read-scope filter at
+    #: DISCOVERY (DEC-UNIVERSE-INDEX-ONLY-001, design §3 R1) — zero I/O paid,
+    #: surfaced EMIT-ON-NONZERO on the payload note. Defaulted LAST.
+    scope_excluded: int = 0
 
 
 def compute_futures_candidates(
@@ -1290,6 +1324,7 @@ def compute_futures_candidates(
     datasets: list[dict[str, str]] | None = None,
     expiry_tier: str = _DEFAULT_TIER,
     underlying_kinds: dict[str, str] | None = None,
+    scope: FeedScope | None = None,
 ) -> FuturesCandidates:
     """Scan the lake → the :class:`FuturesCandidates` for one snapshot coordinate.
 
@@ -1345,9 +1380,13 @@ def compute_futures_candidates(
     # candle); daily/blank whole-day + TF=1minute identity are byte-unchanged.
     cutoff_min = resolve_asof_cutoff(interval, time)
     resolved_names = names or {}
-    by_underlying = _discover_futures(lake_root, exchange=exchange, datasets=datasets)
+    by_underlying, scope_excluded = _discover_futures(
+        lake_root, exchange=exchange, datasets=datasets, scope=scope
+    )
     if minutes is None or not by_underlying:
-        return FuturesCandidates(movers=(), skipped=0, date=date_str, expiry_tier=tier)
+        return FuturesCandidates(
+            movers=(), skipped=0, date=date_str, expiry_tier=tier, scope_excluded=scope_excluded
+        )
 
     movers: list[FuturesMover] = []
     skipped = 0
@@ -1491,7 +1530,13 @@ def compute_futures_candidates(
             )
         movers.append(mover)
 
-    return FuturesCandidates(movers=tuple(movers), skipped=skipped, date=date_str, expiry_tier=tier)
+    return FuturesCandidates(
+        movers=tuple(movers),
+        skipped=skipped,
+        date=date_str,
+        expiry_tier=tier,
+        scope_excluded=scope_excluded,
+    )
 
 
 def run_futures_snapshot(
