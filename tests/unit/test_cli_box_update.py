@@ -380,3 +380,95 @@ class TestNightlyThreading:
         (nightly_dir / "report.json").write_text(json.dumps(report), encoding="utf-8")
         lane = nightly_lane(results, now=1_800_000_100.0)
         assert lane.verdict == "ok"
+
+
+class TestFlockReleaseBeforeExec:
+    """§10 test 11a — the flock release-before-exec law, probed cross-process."""
+
+    def test_second_process_acquires_flock_during_pre_exec_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A GENUINELY DIFFERENT process takes LOCK_EX|LOCK_NB on the nightly
+        # single-flight lock file INSIDE the monkeypatched os.execv — i.e.
+        # DURING the pre-exec window — proving the leg's flock was FULLY
+        # released (LOCK_UN + fd close EXECUTED) strictly before the exec
+        # point, so the re-exec'd child can never self-deadlock on the lock
+        # its parent still held (the §6 step-3 explicit-release invariant).
+        import subprocess
+        import sys as _sys
+
+        from brutex.adapters.groww.pull_singleflight import nightly_singleflight_lock_path
+
+        lake = _mini_lake(tmp_path)
+        results = lake / "sweeps"
+        captured: dict[str, Any] = {}
+
+        def fake_run_nightly(plan: Any, *, seams: Any = None) -> Any:
+            captured["plan"] = plan
+            return _green_report(results)
+
+        monkeypatch.setattr("brutex.nightly.run.run_nightly", fake_run_nightly)
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        lock_path = nightly_singleflight_lock_path(lake)
+        probe_code = (
+            "import fcntl, sys\n"
+            "fh = open(sys.argv[1], 'a+')\n"
+            "try:\n"
+            "    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "except OSError:\n"
+            "    sys.exit(3)\n"
+            "fcntl.flock(fh.fileno(), fcntl.LOCK_UN)\n"
+            "sys.exit(0)\n"
+        )
+        probe_rcs: list[int] = []
+
+        def _fake_execv(prog: str, argv: list[str]) -> None:
+            completed = subprocess.run(
+                [_sys.executable, "-c", probe_code, str(lock_path)],
+                timeout=30,
+                check=False,
+            )
+            probe_rcs.append(completed.returncode)
+            # execv never returns in production; the test lets the flow
+            # continue so the run completes deterministically.
+
+        monkeypatch.setattr(bu.os, "execv", _fake_execv)
+        with mock.patch.object(
+            bu, "run_box_update", return_value=_outcome(BoxUpdateStatus.UPDATED)
+        ):
+            rc = cli.main(["nightly", "run", "--lake-root", str(lake)])
+        assert rc == 0
+        # The second-process probe acquired cleanly IN the pre-exec window —
+        # rc 3 here would mean the parent still held the flock at exec time.
+        assert probe_rcs == [0]
+        import os
+
+        assert BOX_UPDATE_STATE_ENV in os.environ  # the exec sentinel was stamped
+        os.environ.pop(BOX_UPDATE_STATE_ENV, None)
+
+    def test_contention_at_leg_start_skips_into_standard_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # §10 test 11a competitor arm — a sibling holding the lock when the
+        # nightly mouth starts: the leg is SKIPPED (never run, never a hang)
+        # and the REAL run_nightly takes its standard COLLISION refusal
+        # moments later; the refusal report carries the honest box_update
+        # null (the leg never ran under contention).
+        from brutex.adapters.groww.pull_singleflight import nightly_singleflight_lock
+
+        lake = _mini_lake(tmp_path)
+        monkeypatch.setenv("BRUTEX_BOX_UPDATE", "1")
+        monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_LAKE_BYTES", "0")
+        monkeypatch.setenv("BRUTEX_NIGHTLY_MIN_FREE_BACKUP_BYTES", "0")
+        with (
+            nightly_singleflight_lock(lake, holder_note="nightly:peer"),
+            mock.patch.object(bu, "run_box_update") as leg,
+        ):
+            rc = cli.main(["nightly", "run", "--lake-root", str(lake)])
+        assert rc == 1  # run_nightly's own COLLISION refusal exit law
+        assert leg.call_count == 0  # the leg was skipped, never nested/blocked
+        reports = sorted((lake / "sweeps" / "nightly").glob("*/report.json"))
+        assert len(reports) == 1
+        payload = json.loads(reports[0].read_text(encoding="utf-8"))
+        assert payload["blocker"] == "collision"
+        assert payload["box_update"] is None  # honest absence — never a fake block

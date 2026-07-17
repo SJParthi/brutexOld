@@ -2176,3 +2176,274 @@ class TestResidualArms:
         assert out.status is BoxUpdateStatus.ROLLED_BACK
         assert len(runner.maturin_calls()) >= len(WHEEL_SET)  # the self-heal rebuild ran
         assert runner.git_calls("checkout", "-B") == []  # vacuous
+
+
+# ── partial-install sibling twins (§10 tests 23(c)/(f)) ──────────────────
+def _digest_check_name(crate: str) -> str:
+    """The doctor source-digest check name for *crate* (§4.6 coherence law)."""
+    return "wheel_source_digest" if crate == "trading_core" else "wheel_source_digest_fno_math"
+
+
+def _torn_checks(torn: str) -> list[list[str]]:
+    """A coherence-check payload WARNing exactly *torn*'s source digest."""
+    return [
+        ["wheel_freshness", "PASS", "ok"],
+        ["wheel_freshness_fno_math", "PASS", "ok"],
+        [
+            "wheel_source_digest",
+            "WARN" if torn == "trading_core" else "PASS",
+            "digest mismatch" if torn == "trading_core" else "ok",
+        ],
+        [
+            "wheel_source_digest_fno_math",
+            "WARN" if torn == "fno_math" else "PASS",
+            "digest mismatch" if torn == "fno_math" else "ok",
+        ],
+    ]
+
+
+class TestPartialInstallSiblingTwins:
+    """§10 tests 23(c)/(f) — the torn-sibling fall-through, both role orders.
+
+    Crate A ends UNLOADABLE (install truncated) or never-installed (build
+    timeout); sibling B sits INSTALLED at ``to_sha`` (the torn version).  The
+    rollback path must ALWAYS digest-check the loadable venv and repair the
+    torn sibling — ``repair="rebuilt"`` when the sibling rebuild lands,
+    ``repair="failed_stale"`` (WARN-class, never CRITICAL) when it fails.
+    """
+
+    @pytest.mark.parametrize("sibling_repair_ok", [True, False])
+    def test_build_timeout_leaves_torn_sibling_digest_checked(
+        self, tmp_path: Path, sibling_repair_ok: bool
+    ) -> None:
+        # §10 test 23(c) — fno_math builds + installs OK (to_sha), then the
+        # trading_core BUILD times out ⇒ rollback ⇒ smoke LOADABLE (the old
+        # trading_core wheel is intact) ⇒ the coherence check catches the
+        # to_sha-built fno_math ⇒ the mismatch repair fires for exactly it
+        # (the row-10 door into row 10c).  The role order is FIXED by the
+        # bootstrap build order: fno_math builds FIRST, so only the
+        # first-succeeds/second-fails shape can leave a torn sibling on the
+        # build-failure door (the short-circuit law); the gate-door twin
+        # below parametrizes BOTH role orders.
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
+        tc_dir = repo / "rust/trading-core"
+        builds = {"n": 0}
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            builds["n"] += 1
+            if runner.calls[-1]["cwd"] == tc_dir and builds["n"] <= len(WHEEL_SET):
+                return (124, "", "")  # the forward trading_core build times out
+            if not sibling_repair_ok and builds["n"] > len(WHEEL_SET):
+                return (1, "", "repair boom")  # the sibling repair fails
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        runner.state["doctor"] = 0
+
+        def _doctor(_a: list[str]) -> tuple[int, str, str]:
+            runner.state["doctor"] += 1
+            # call 1 = coherence (fno_math torn); call 2 = the post-repair
+            # re-check (PASS on the ok arm, still WARN on the failed arm).
+            if runner.state["doctor"] == 1 or not sibling_repair_ok:
+                return (0, _gate_stdout(_torn_checks("fno_math")), "")
+            return (0, _gate_stdout(), "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _doctor,
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.gate == "skipped"  # the build-failure door — the gate never ran
+        assert out.repair == ("rebuilt" if sibling_repair_ok else "failed_stale")
+        by_name = {w.name: w for w in out.wheels}
+        assert by_name["trading_core"].result == "timeout"
+        assert by_name["fno_math"].result == "ok"
+        assert by_name["fno_math"].digest_ok is sibling_repair_ok
+        # The mismatch repair rebuilt EXACTLY the torn sibling (never the
+        # timed-out crate — its old wheel matches from_sha and reads PASS).
+        forward = [c["cwd"] for c in runner.maturin_calls()[:2]]
+        repairs = [c["cwd"] for c in runner.maturin_calls()[2:]]
+        assert forward == [repo / "rust/fno-math", tc_dir]
+        assert repairs == [repo / "rust/fno-math"]
+        # Order pin: the coherence check runs strictly AFTER the checkout -B.
+        argvs = runner.argvs()
+        checkout_i = next(
+            i for i, a in enumerate(argvs) if a[:4] == ["git", "checkout", "-B", "main"]
+        )
+        coherence_i = runner.calls.index(runner.coherence_calls()[0])
+        assert checkout_i < coherence_i
+        events = {e["event"]: e for e in logs}
+        if sibling_repair_ok:
+            assert "box_update.repair_failed_stale" not in events
+        else:
+            assert events["box_update.repair_failed_stale"]["log_level"] == "warning"
+        assert "box_update.required_wheel_unloadable" not in events  # never the CRITICAL arm
+
+    @pytest.mark.parametrize(
+        ("unloadable", "torn"),
+        [("trading_core", "fno_math"), ("fno_math", "trading_core")],
+    )
+    @pytest.mark.parametrize("sibling_repair_ok", [True, False])
+    def test_install_truncation_sibling_fall_through(
+        self, tmp_path: Path, unloadable: str, torn: str, sibling_repair_ok: bool
+    ) -> None:
+        # §10 test 23(f) — every forward build reports rc 0 but crate A's
+        # INSTALL is torn (unloadable .so) ⇒ the gate reads import_failed ⇒
+        # rollback ⇒ smoke rc≠0 ⇒ the 10b repair rebuilds A; the re-smoke is
+        # loadable ⇒ the coherence check STILL runs (the fall-through pin —
+        # the fails-before-round-7 shape terminated at repair="rebuilt" with
+        # ZERO check argv, leaving sibling B silently torn at to_sha) ⇒ the
+        # check WARNs on B ⇒ the mismatch repair rebuilds exactly B — TWO
+        # repair builds total, one per crate (the per-crate at-most-once
+        # pin).  Parametrized over BOTH role orders + the sibling-repair
+        # outcome (rebuilt / failed_stale).
+        repo = _mk_repo(tmp_path)
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        crate_dir = {s.name: repo / s.crate_dir for s in WHEEL_SET}
+        builds = {"n": 0}
+
+        def _maturin(_a: list[str]) -> tuple[int, str, str]:
+            builds["n"] += 1
+            if (
+                not sibling_repair_ok
+                and builds["n"] > len(WHEEL_SET)
+                and runner.calls[-1]["cwd"] == crate_dir[torn]
+            ):
+                return (1, "", "sibling repair boom")
+            return (0, "", "")
+
+        runner.on(lambda a: a[0].endswith("maturin"), _maturin)
+        runner.state["combined_smokes"] = 0
+
+        def _smoke(a: list[str]) -> tuple[int, str, str]:
+            if a[2] == "import trading_core, fno_math":
+                runner.state["combined_smokes"] += 1
+                # Smoke #1 (pre-repair): the truncated .so fails the import;
+                # every later combined smoke is loadable (A was repaired).
+                if runner.state["combined_smokes"] == 1:
+                    return (1, "", "truncated .so")
+                return (0, "", "")
+            if a[2] == f"import {unloadable}":
+                return (1, "", "truncated .so")
+            return (0, "", "")
+
+        runner.on(
+            lambda a: (
+                a[0] == sys.executable
+                and a[1] == "-c"
+                and a[2].startswith("import ")
+                and "brutex.doctor" not in a[2]
+            ),
+            _smoke,
+        )
+        runner.state["doctor"] = 0
+
+        def _doctor(a: list[str]) -> tuple[int, str, str]:
+            if bu.GATE_SMOKE_IMPORTS in a[2]:
+                # The §4.5 gate child dies on the truncated import — rc≠0
+                # BEFORE the import marker ⇒ gate="import_failed".
+                return (1, "", "ImportError: truncated .so")
+            runner.state["doctor"] += 1
+            # Coherence #1: sibling B torn; #2 (post-repair re-check): PASS
+            # on the ok arm, still WARN on the failed arm.
+            if runner.state["doctor"] == 1 or not sibling_repair_ok:
+                return (0, _gate_stdout(_torn_checks(torn)), "")
+            return (0, _gate_stdout(), "")
+
+        runner.on(
+            lambda a: a[0] == sys.executable and a[1] == "-c" and "brutex.doctor" in a[2],
+            _doctor,
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner)
+        assert out.status is BoxUpdateStatus.ROLLED_BACK
+        assert out.gate == "import_failed"
+        assert out.repair == ("rebuilt" if sibling_repair_ok else "failed_stale")
+        # TWO repair builds total, one per crate, unloadable A FIRST then the
+        # torn sibling B — a second build of EITHER crate FAILS this pin.
+        repairs = [c["cwd"] for c in runner.maturin_calls()[len(WHEEL_SET) :]]
+        assert repairs == [crate_dir[unloadable], crate_dir[torn]]
+        # The fall-through pin: the FIRST coherence check runs strictly AFTER
+        # the loadable re-smoke (never terminated at the 10b repair alone).
+        re_smoke_i = runner.calls.index(runner.smoke_calls()[1])
+        coherence_i = runner.calls.index(runner.coherence_calls()[0])
+        assert re_smoke_i < coherence_i
+        by_name = {w.name: w for w in out.wheels}
+        assert by_name[torn].digest_ok is sibling_repair_ok
+        events = [e for e in logs if e["event"] == "box_update.repair_failed_stale"]
+        if sibling_repair_ok:
+            assert events == []
+        else:
+            assert len(events) == 1 and events[0]["log_level"] == "warning"
+        # Loadability was restored — never the CRITICAL CLI-down arm.
+        assert not any(e["event"] == "box_update.required_wheel_unloadable" for e in logs)
+
+
+# ── alarm demotion log-text arm (§10 test 19(b) — the CRITICAL-class fold) ─
+class TestAlarmDemotionLogText:
+    def _hard_fail(self, repo: Path, state: Path) -> tuple[BoxUpdateOutcome, list[dict[str, Any]]]:
+        """One repair=failed night: required build fails + every smoke fails."""
+        runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
+        fno_dir = repo / "rust/fno-math"
+        runner.on(
+            lambda a: a[0].endswith("maturin"),
+            lambda a: (1, "", "boom") if runner.calls[-1]["cwd"] == fno_dir else (0, "", ""),
+        )
+        runner.on(
+            lambda a: (
+                a[0] == sys.executable
+                and a[1] == "-c"
+                and a[2].startswith("import ")
+                and "brutex.doctor" not in a[2]
+            ),
+            (1, "", "still broken"),
+        )
+        with capture_logs() as logs:
+            out = _run(repo, runner, state_dir=state)
+        return out, list(logs)
+
+    def test_repeat_night_demotes_critical_class_to_warn(self, tmp_path: Path) -> None:
+        # Night 1: the CRITICAL-class event at FULL severity, no repeat field.
+        repo = _mk_repo(tmp_path)
+        state = tmp_path / "state"
+        out1, logs1 = self._hard_fail(repo, state)
+        assert out1.status is BoxUpdateStatus.ERROR
+        assert out1.repair == "failed"
+        crit1 = [e for e in logs1 if e["event"] == "box_update.required_wheel_unloadable"]
+        assert len(crit1) == 1 and crit1[0]["log_level"] == "critical"
+        assert "repeat" not in crit1[0]
+        # Night 2, SAME signature: the CRITICAL-class event DEMOTED to WARN,
+        # the log integer is the TOTAL-nights count (repeat=2 = nights) and
+        # the remediation text survives the demotion (the log-text arm).
+        out2, logs2 = self._hard_fail(repo, state)
+        assert out2.alarm_signature == out1.alarm_signature
+        assert out2.alarm_repeats == 1
+        crit2 = [e for e in logs2 if e["event"] == "box_update.required_wheel_unloadable"]
+        assert len(crit2) == 1 and crit2[0]["log_level"] == "warning"  # demoted
+        assert crit2[0]["repeat"] == 2
+        assert crit2[0]["repeat"] == out2.alarm_repeats + 1  # the two-integer law
+        assert crit2[0]["signature"] == out2.alarm_signature
+        assert "maturin develop --release" in crit2[0]["detail"]
+        assert "HARD CLI-DOWN" in crit2[0]["detail"]
+
+
+# ── mutation-workflow wiring pin (§10 CI gating — the #1614/#1832 precedent) ─
+class TestMutationWorkflowWiring:
+    """Pin ``box_update.py`` INTO ``mutation.yml``'s zero-survivor mutmut loop.
+
+    The pair rides the historical runner (empty third field — the 3-field
+    ``module:testfile:timeout`` grammar of DEC-MUTATION-RUNTIME-003); this
+    deterministic pin fails if the pair is ever dropped.  HONEST: it pins
+    the WIRING only — the weekly run executes on its own schedule.
+    """
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert '"brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:"' in text, (
+            "box_update.py is not wired into mutation.yml's per-module mutmut loop"
+        )

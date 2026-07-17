@@ -148,3 +148,16 @@ class TestScan:
         out = EnvPreflightOutcome(flagged=(), dotenv_errors=())
         assert out.to_dict() == {"flagged": [], "dotenv_errors": []}
         assert list(out.to_dict()) == ["flagged", "dotenv_errors"]
+
+
+class TestMutationWorkflowWiring:
+    """Pin ``env_preflight.py`` INTO ``mutation.yml``'s zero-survivor mutmut
+    loop (the #1614/#1832 precedent; the historical empty-third-field runner)."""
+
+    _WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "mutation.yml"
+
+    def test_module_paired_with_this_suite_in_the_mutmut_loop(self) -> None:
+        text = self._WORKFLOW.read_text(encoding="utf-8")
+        assert (
+            '"brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:"' in text
+        ), "env_preflight.py is not wired into mutation.yml's per-module mutmut loop"

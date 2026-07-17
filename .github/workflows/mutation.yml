@@ -514,6 +514,8 @@ jobs:
             "brutex/data/stat_deadline.py:tests/unit/test_stat_deadline.py:" \
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
+            "brutex/nightly/box_update.py:tests/unit/test_nightly_box_update.py:" \
+            "brutex/nightly/env_preflight.py:tests/unit/test_nightly_env_preflight.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
