@@ -39,6 +39,57 @@ is the cross-language byte pin (cargo AND pytest, executed). READ-accelerator
 only — ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX. The per-item record lives in
 the §1 Active-branch blurb + MIGRATION.md #1914 — this header carries the
 pointer, never the story.)
+Earlier: 2026-07-15 (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 /
+ADR-0023, branch `claude/fill-worst-case-only` — WORST-CASE IS THE ONLY FILL
+MODEL by operator directive: the interim PRECISE opt-out idea is DEAD —
+the absorbed PR #1522 FillMode-mode design never shipped; the mode axis is gone
+(`FillMode.PRECISE` · `FillPolicy`/`LevelFill`/`SameBarTie` · `--fill-mode` ·
+the `BRUTEX_FILL_MODE` knob — a SET knob now refuses loudly); the adverse-max
+law is HARDCODED (entry at the fill bar's adverse extreme, SL/TP at the
+with-the-level clamp, forced/EOD/session-gap at the decided bar's adverse
+extreme, same-bar tie always SL-first); `canonical_trade_params` emits
+`{"fill_mode": "worst_case"}` UNCONDITIONALLY (anti-aliasing vs the frozen
+precise-era run_ids — the re-locked `_GOLDEN_RUN_ID` is stable across the
+absorption); precise-era manifests/store generations
+refuse loudly naming the DEC ("re-run the sweep"); volume-0 bars reject
+UNIFORMLY on both translation executors (the futures R15 fill-by-default
+clause consciously superseded — survivorship tilt recorded); the
+adverse-levy CEIL rounding is now PERMANENT (COSTS_VERIFIED §5 regenerated);
+every golden re-locked with in-file hand-derivations, the vocab fixture
+byte-untouched (empty diff pinned). INTERIM HONESTY: until PR-B's 1-minute
+execution grid lands (its OWN DEC+ADR), the adverse extreme is the
+DECISION-TF bar's — strictly MORE pessimistic than the operator's
+next-1m-bar target law, never optimistic. ENGINE SEMANTICS CHANGED BY
+OPERATOR DIRECTIVE (the ONE sanctioned exception to the standing posture) —
+scope/vocab/rate/lake-schema UNCHANGED; NIFTY/BANKNIFTY/SENSEX; this header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1825.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
+MIGRATION.md #1897, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
+non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries:
+`arrow_table_to_bars` gains the explicit finiteness gate (an inf-HIGH bar
+previously served `Decimal('Infinity')` into the engine SILENTLY — the
+positivity + ordering checks pass vacuously on inf) + the
+`(ValueError, ArithmeticError)` re-wrap belt (a NaN price's raw
+`decimal.InvalidOperation` previously escaped `except ValueError` and
+aborted the whole read); the vectorized `price_violation_expr` gains the
+per-column `~is_finite` arm (the `high ∈ {+inf, NaN}` blind spot) with the
+scalar twin widened `isnan` → `not isfinite` — scalar == vector over the
+FULL float plane, CLOSING the DEC-DASHBOARD-READ-SCREEN-001 round-2 named
+ENGINE-side follow-up; `make_lake_read_1m_window` (the heal-recall /
+post-pull / crossverify `1day` window reader) runs the strengthened gate
+for the FIRST time (Phase-1 finding #12) on the window-cut frame;
+`ArithmeticError` joins the prebuild per-symbol quarantine set (a NaN
+partition quarantines the SYMBOL, never a run abort). Both defects are
+PRE-EXISTING, executed-repro'd by the assurance session on planted/corrupt
+STORED data (the vendor parse rejects non-finite via `to_price` — verified);
+fails-before proven at merge-base 6b9947d9; healthy-lake byte-identity
+pinned + the frozen engine goldens pass UNMODIFIED. READ-boundary hardening
+only — ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. Named follow-up:
+DEC-DAILY-WINDOW-BADTICK-001 (bad-tick on the window reader). This header
+carries the pointer, never the story — the full record lives in the §1
+Active-branch blurb + MIGRATION.md #1897.)
 Earlier: 2026-07-15 (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900,
 branch `claude/staged-sequencer-seams` — the STAGED SEQUENCER SEAMS
 (dual-vendor orchestration WS-B, per the frozen ADR-0021 design contract +
@@ -3177,6 +3228,128 @@ hostile-review pass._
   on both its gate shapes (the ci.yml 21c stanza extended with the NEW stem-matched
   `test_tf_resampler_rust_seam.py`); ruff/ruff-format/`mypy --strict` clean, pyright 0 errors on touched files;
   ENGINE UNCHANGED — NIFTY/BANKNIFTY/SENSEX; no lake/schema/scope/vocab/rate change.)
+  Earlier: `claude/fill-worst-case-only` (**DEC-FILL-WORST-CASE-ONLY-001,
+  MIGRATION.md #1825 / ADR-0023** — WORST-CASE IS THE ONLY FILL MODEL, PR-A of the
+  worst-case-fills-only track (worktree base = PR #1522's head 95ee9ce5; the entry
+  number is coordinator-assigned from the track's granted bands #1825–#1829 +
+  #1870–#1874 — renumber-at-landing law stands). By OPERATOR DIRECTIVE the product moves
+  from precise open-anchored fills to the one worst-case law in a single hop
+  (absorbs the #1522 FillMode-mode design; the PRECISE opt-out never shipped):
+  the whole mode axis is gone — `FillMode.PRECISE`, `FillPolicy`/`LevelFill`/`SameBarTie`,
+  the `--fill-mode` CLI flag and every fill-policy threading param are GONE
+  (`FillMode` survives as the single-member `WORST_CASE` vocabulary token), and a
+  SET `BRUTEX_FILL_MODE` — ANY value, even the literal `worst_case` — refuses
+  loudly at every launch (`require_fill_mode_env_unset`; fail-loud beats silent
+  tolerance). THE ONE LAW, hardcoded in the Python walker + the Rust u64/u128
+  kernels + both translation executors: fill-bar TIMING unchanged (signal at bar
+  N → fill bar N+1; forced 15:20; same-bar tie ALWAYS SL-first), fill PRICE = the
+  worst the decided bar printed — entry at the entry bar's adverse extreme (BUY
+  @HIGH / SELL @LOW); SL/TP at the with-the-level clamp (`min(level, low)` BUY
+  exit / `max(level, high)` SELL exit); open-anchored (forced 15:20, Mode-B
+  signal) + `end_of_data`/`session_gap` events at the decided bar's adverse
+  extreme. IDENTITY: `canonical_trade_params` emits `{"fill_mode": "worst_case"}`
+  UNCONDITIONALLY with the param removed from every config surface
+  (SweepRunConfig/SweepGridConfig/CascadeTupleSpec) — eliding the key would alias
+  worst-case run_ids with the frozen precise-era goldens (proof: the re-locked
+  sweep-run `_GOLDEN_RUN_ID` 715212…62fc9 is stable across the absorption;
+  the precise-era id f58819…d5921a is negative-pinned as
+  `_PRECISE_ERA_RUN_ID`). REFUSALS: a precise-era cascade manifest (absent key or
+  non-worst_case token) refuses at `cascade_wire._spec_from_dict`; a store
+  generation whose recorded params lack the token refuses at sweep_verify
+  fact-derivation ("precise-era sweep tree refused (DEC-FILL-WORST-CASE-ONLY-001)
+  … Re-run the sweep"); the futures launch context line records the token always.
+  VOLUME-0 UNIFORM REJECT: the `reject_stale_bars` knob is DELETED on both
+  executors — options stays always-reject, futures FLIPS from fill-by-default to
+  always-reject (the DEC-FUTURES-EXEC-TRANSLATION-001 R15 "printed bar is REAL +
+  TRADABLE" clause consciously SUPERSEDED; the survivorship tilt is the recorded
+  honest cost — rejections counted per-trade as STALE_BAR, never silent).
+  ADVERSE-LEVY ROUNDING PERMANENT: the absorbed design's fix-round-2 CEIL law
+  loses its mode conditionality — COSTS_VERIFIED §5 regenerated (Ex1 ₹65.10→₹67.12 · Ex2
+  ₹136.47→₹137.51 · Ex3 ₹51.18→₹53.21 · Ex4 ₹51.17→₹53.20, every figure
+  hand-re-derived); `TradeInput`/`FuturesTradeInput` REQUIRE the four fill-bar
+  extremes (anchor-less input refuses naming the DEC). GOLDEN RE-LOCKS (each
+  hand-derived in-file, MIGRATION.md #1825 carries the audit): trade-sim Fixture
+  A −20 TP/−45 SL/−20 forced; rust corpus absolute pins −1500/0/1800 +
+  session-gap −175/100/200; capture/aggregate digests at net −85; SENSEX corpus
+  −20/10/25 + EOD −60/10/60; paisa Σ = −240; futures 636,750/150,375/749,625 +
+  options Fixture W net 64,206 locked as THE goldens; the absorbed design's
+  toothless worst-case `_WORST_CASE_GOLDEN_*` twin pair (EMPTY store,
+  ranked==persisted==0) fixed by adoption over a genuinely non-empty
+  5-finalist store (stream teeth 203 trades = 181×+50 + 22×−115 =
+  +6,520); `tests/golden/fixtures/vocab_golden_vectors.json` BYTE-UNTOUCHED vs
+  base (empty diff — vocabulary out of scope by decree). ASSURANCE:
+  [FILL-WORSTCASE-SIDE-SIGN] folded (exact-equality side teeth + the
+  worst≤open-anchored floor property; the high/low-swap mutant applied +
+  verified killed); [FILL-SESSION-END-NO-NEXT-1M] folded (last-bar zero-trades +
+  forced-exit-in-session pins); [FILL-SAME-BAR-TIME-ORDER-PHANTOM-LOSS]
+  WAIVED-ACCEPTED (verbatim rationale in ADR-0023); the remaining register
+  entries defer to PR-B. INTERIM HONESTY (coordinator ruling): until PR-B's
+  1-minute execution grid lands (dual-feed, run-identity re-key, SL/TP on the 1m
+  grid — its OWN DEC+ADR), the adverse extreme is the DECISION-TF bar's — a
+  5-minute entry takes the whole 5-minute range's adverse depth, strictly MORE
+  pessimistic than the operator's next-1m-bar target law, never optimistic.
+  ENGINE SEMANTICS CHANGED BY OPERATOR DIRECTIVE (the ONE sanctioned exception
+  to the standing ENGINE-UNCHANGED posture) — scope/vocab/rate/lake-schema UNCHANGED — NIFTY/BANKNIFTY/SENSEX.
+  GATES: fill_mode 15/2 · costs 483/92 · options executor 235/64 · futures
+  executor 296/88 · reference_sim 59/18 · whole-engine 10,361/2,922 ALL 100.00%
+  line+branch; golden suite 541 passed; ruff/ruff-format clean; `mypy --strict`
+  clean (456 files); pyright 52 errors vs the 53-error base measurement — one
+  FEWER, 0 new.)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
+  (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897** —
+  renumbered #1832 → #1897 at the 2026-07-16 merge-reconcile per the
+  steward ledger map (#1832 taken on main by
+  DEC-DASHBOARD-COLD-IO-DEADLINE-001; DEC-IDs are the stable handles per
+  DEC-LEDGER-RENUMBER-001) —
+  non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries,
+  closing two PRE-EXISTING latent defects the assurance session
+  executed-repro'd on live main (base 6b9947d9) with planted/corrupt STORED
+  data (hostile/out-of-band input — no production writer emits a non-finite
+  price; the vendor parse rejects it via `candle_fields.to_price`, verified):
+  (#2, silent wrong-value corruption) `high ∈ {+inf, NaN}` passed the
+  positivity + ordering checks VACUOUSLY at both boundaries —
+  `arrow_table_to_bars` served `CandleBar(high=Decimal('Infinity'))` into
+  the engine feed and `make_lake_read_1m` returned the frame silently, the
+  5-minute max aggregation minting a poisoned derived bucket `high = inf`;
+  (#3, uncaught crash) a NaN price raised a raw `decimal.InvalidOperation`
+  (an ArithmeticError, NOT ValueError) escaping `arrow_table_to_bars`'
+  `except ValueError` AND the prebuild quarantine set — the whole
+  `Catalog.get_bars` read / prebuild aborted instead of quarantining the
+  symbol. THE FIX (four seams, one law): the engine boundary's explicit
+  `math.isfinite` gate over all four OHLC fields (the corrupt-bar ValueError
+  idiom, partition + bar ts named) + the `(ValueError, ArithmeticError)`
+  re-wrap; the per-column `~is_finite` arm in `price_violation_expr` + the
+  scalar twin widened `isnan` → `not isfinite` (scalar == vector over the
+  FULL float plane — the parity property consciously widened; CLOSES the
+  DEC-DASHBOARD-READ-SCREEN-001 round-2 "DELIBERATE NaN ASYMMETRY" named
+  ENGINE-side follow-up recorded in price_sanity's own docstring);
+  `make_lake_read_1m_window` runs the strengthened gate on the WINDOW-CUT
+  frame (Phase-1 finding #12 — pre-fix the heal-recall/post-pull/crossverify
+  `1day` window path ran NO screen at all; validate-what-you-return, a
+  corrupt row outside the window never blanks the read); `ArithmeticError`
+  joins `gated_prebuild._per_symbol_data_errors` (per-symbol boundaries
+  ONLY — the #1594 round-18 escape-error discipline, breadth disclosed).
+  Fails-before PROVEN at merge base (20 new tests fail on pre-fix source);
+  positive-evidence guardrails pin the already-refused shapes unchanged;
+  HEALTHY-LAKE byte-identity pinned (clean-table bars field-for-field,
+  both readers frame-equal to the raw parquet transform, the frozen
+  sweep/vocab/snapshot goldens pass UNMODIFIED). Consciously flipped pins:
+  the wheel-free quarantine-tuple equality + the parity strategy + the
+  "non-finite or non-positive" message wording. Named follow-up:
+  DEC-DAILY-WINDOW-BADTICK-001 (the bad-tick screen on the window reader —
+  deliberately not folded). READ-boundary hardening only — ENGINE UNCHANGED
+  on clean/healthy feeds — NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY;
+  no lake/schema/scope/vocab/rate change; no new routes, no new env vars;
+  all six touched modules 100.00% line+branch on their ci.yml gates;
+  ruff/ruff-format clean, `mypy --strict` clean, pyright 0 errors on
+  touched files. Shipped via the REPLACEMENT-PR remedy (the #1580
+  `+`-in-scope conventional-commit lesson — the original PR #1581 branch's
+  pushed `fix(data+feed)`/`docs(migration+claude)` subjects are
+  charset-illegal and pushed commits are never rewritten; tree rebuilt
+  verbatim under comma-form subjects, identity-proven); the independent
+  hostile review verdict is SHIP with its two honesty NITs folded
+  (transitive-consumer disclosure + the pre-existing null-price TypeError
+  limit — both recorded in MIGRATION.md #1897).)
   Earlier: `claude/staged-sequencer-seams` (**DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900** —
   the STAGED SEQUENCER SEAMS, WS-B of the dual-vendor orchestration track.
   AUTHORITY recorded honestly: per the frozen ADR-0021 design contract
@@ -8706,9 +8879,9 @@ hostile-review pass._
    single-bar difference re-keys the identity; supersedes the sampled
    count+endpoints fingerprint). (Was `sha256(...)` pre-DEC-CALIBRATE-001;
    corrected 2026-05-24 to match the spec's run-identity formula — now at
-   `TRACK1_BACKTEST_SPEC.md:770` after spec growth moved it from :760
-   (earlier :743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
-   :760→:770 with the DEC-ENGINE-SPOT-ONLY-001 scope-retirement note) — which has used blake3 since
+   `TRACK1_BACKTEST_SPEC.md:785` after spec growth moved it from :770
+   (earlier :760/:743/:654; DEC-CLAUDEMD-SPEC-LINE-RECONCILE-001 precedent;
+   :770→:785 with the DEC-FILL-WORST-CASE-ONLY-001 fill-rules rewrite) — which has used blake3 since
    the v2 spec lock 2026-05-16. See MIGRATION.md entry #204.)
 5. **O(1) discipline.** Bar lookup, indicator value lookup, combo dedup
    (Bloom + LMDB), strategy mask evaluation (u64 AND), and result
@@ -8948,6 +9121,41 @@ hostile-review pass._
   flag OFF byte-identical (bomb-spy-pinned); honesty banner verbatim —
   expected payoff ≈ 0, uniformity not speed; ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line)
+  Earlier: `claude/fill-worst-case-only`
+  (DEC-FILL-WORST-CASE-ONLY-001, MIGRATION.md #1825 / ADR-0023 — WORST-CASE
+  IS THE ONLY FILL MODEL: the product moves from precise
+  open-anchored fills to the one worst-case law in a single hop by operator
+  directive (absorbs the #1522 FillMode-mode design; the PRECISE opt-out
+  never shipped); the
+  adverse-max law hardcoded across the spot engine + the Rust u64/u128
+  kernels + both translation executors; `canonical_trade_params` emits
+  `{"fill_mode": "worst_case"}` unconditionally (anti-aliasing vs the frozen
+  precise-era run_ids); precise-era artifacts + a SET `BRUTEX_FILL_MODE`
+  refuse loudly naming the DEC; volume-0 bars reject uniformly on both
+  executors (the futures R15 clause consciously superseded — survivorship
+  tilt recorded); the adverse-levy CEIL rounding is permanent (COSTS_VERIFIED
+  §5 regenerated); every golden re-locked with in-file hand-derivations, the
+  vocab fixture byte-untouched; INTERIM: worst-case prices come from the
+  DECISION-TF bar until PR-B's 1-minute grid — conservative, never
+  optimistic; matches §1's Active branch line — see §1 + MIGRATION.md #1825
+  for the full blurb)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
+  (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897 — renumbered
+  #1832 → #1897 at the 2026-07-16 merge-reconcile per the steward ledger
+  map — non-finite
+  OHLC (inf/-inf/NaN) rejected at BOTH lake-read boundaries: the engine read
+  boundary's explicit finiteness gate + the `(ValueError, ArithmeticError)`
+  re-wrap (a NaN's raw `decimal.InvalidOperation` no longer escapes), the
+  per-column `~is_finite` arm in the vectorized price-sanity mask (the
+  `high ∈ {+inf, NaN}` blind spot) with the scalar twin widened to match,
+  the window `1day` reader (`make_lake_read_1m_window`) running the
+  strengthened gate for the first time (finding #12), and `ArithmeticError`
+  in the prebuild per-symbol quarantine set; two pre-existing latent
+  defects, executed-repro'd on planted/corrupt STORED data, fails-before
+  proven at merge-base 6b9947d9, healthy-lake byte-identity + frozen engine
+  goldens pinned UNMODIFIED; named follow-up DEC-DAILY-WINDOW-BADTICK-001;
+  ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's
+  Active branch line — see §1 + MIGRATION.md #1897 for the full blurb)
   Earlier: `claude/staged-sequencer-seams`
   (DEC-STAGED-SEQUENCER-SEAMS-001, MIGRATION.md #1900 — the staged sequencer
   seams, dual-vendor orchestration WS-B per the frozen ADR-0021 design

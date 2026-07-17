@@ -53,6 +53,9 @@ def _golden_grid() -> SweepGridConfig:
         data_snapshot_hash="snap0001",
         indicator_version="ind-v1",
         code_commit_sha="deadbeef",
+        # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law — the
+        # golden pair was RE-LOCKED on the rankable gap-up fixture (see the
+        # source module's re-lock note); the grid carries no mode field.
     )
 
 

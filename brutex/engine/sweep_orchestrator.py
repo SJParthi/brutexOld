@@ -96,6 +96,7 @@ from brutex.engine.sweep_run import (
     SweepRunSummary,
     run_persisted_sweep,
 )
+from brutex.execution.fill_mode import FillMode
 from brutex.ranking import MIN_TRADES, OverfitGateConfig
 from brutex.strategies.types import (
     DEFAULT_PRICE_SOURCE_CELL,
@@ -868,6 +869,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
     gate_config = _gate_config_fragment(grid)
     if gate_config is not None:
         descriptor["gate_config"] = gate_config
+    # DEC-FILL-WORST-CASE-ONLY-001: the store address carries the
+    # UNCONDITIONAL "fill_mode": "worst_case" key — the exact mirror of
+    # canonical_trade_params' unconditional emit. Eliding it would alias
+    # worst-case store addresses with the frozen precise-era addresses, so a
+    # resume could silently adopt precise-priced tuple stores.
+    descriptor["fill_mode"] = FillMode.WORST_CASE.value
     # allow_nan=False is byte-neutral for finite inputs (json emits identical
     # bytes for finite numbers) and converts a hypothetical non-finite gate
     # float from a silent invalid-JSON filename into a loud raise (F5).

@@ -864,6 +864,11 @@ class RunCoreHandles:
         from brutex.metrics.types import ClosedTrade
         from brutex.strategies.types import Side
 
+        # DEC-FILL-WORST-CASE-ONLY-001: the ONE hardcoded worst-case fill law
+        # prices BOTH legs — the production trade sim here and the naive
+        # reference's independently re-stated worst-case arm — so the R45
+        # differential is always a same-law compare with no mode plumbing.
+
         def _production_simulate(
             bars: Sequence[Any],
             entry_signals: Sequence[bool],
