@@ -1,12 +1,13 @@
 """detectors_rust — the default-OFF Rust routing facade for the T24 detector laws.
 
-DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 PR-1; MIGRATION.md #1948).
-Routes THREE cold data-integrity detector pure laws through the
-``rust/brutex-lake`` crate behind three default-OFF flags, with the verbatim
-Python law retained as the LIVE parity oracle (the ADR-0020
-``lake_rust_render`` / G8 template, in the G6 ``render_shard`` integration
-shape — the TARGET module gates its own flag and hands this facade zero-arg
-factories, so no verdict dataclass ever has to import back into this module):
+DEC-DATA-RUST-INTEGRITY-DETECTORS-001 (SLICE T24 — PR-1 laws 1-3,
+MIGRATION.md #1948; PR-2 adds law 4). Routes FOUR cold data-integrity
+detector pure laws through the ``rust/brutex-lake`` crate behind four
+default-OFF flags, with the verbatim Python law retained as the LIVE parity
+oracle (the ADR-0020 ``lake_rust_render`` / G8 template, in the G6
+``render_shard`` integration shape — the TARGET module gates its own flag
+and hands this facade zero-arg factories, so no verdict dataclass ever has
+to import back into this module):
 
 1. **Raw-integrity digest** (``BRUTEX_LAKE_RUST_RAW_INTEGRITY``) — the
    ``hashlib.blake2b(canonical, digest_size=32).hexdigest()`` leg of
@@ -27,24 +28,41 @@ factories, so no verdict dataclass ever has to import back into this module):
    callback. A session walk stepping OFF the grid ABSTAINS (the
    DEC-FEED-RUST-CORE-001 envelope contract) — one WARN per process, the
    oracle serves.
+4. **Pre-settle TODAY minute-completeness verdict**
+   (``BRUTEX_LAKE_RUST_TODAY_COMPLETENESS``, SLICE T24 PR-2) — the
+   per-class criteria decision tree of
+   :func:`brutex.data.today_completeness.classify_today_completeness`
+   (DEC-PULL-TODAY-COMPLETENESS-GATE-001 #1774). The three inert arms
+   (not-covering / coverage abstain / non-trading) and every calendar
+   consult (``get_session`` / ``is_holiday_data_available`` /
+   ``session_last_bar_complete``) stay Python — the target routes only the
+   count/shape criteria table over per-bar IST minute ordinals + bool
+   masks; the verdict reason crosses back as an INDEX into
+   :data:`_TODAY_REASONS`. LOAD-BEARING degrade discipline: the
+   crossverify producer binds ``classify_today_completeness`` DIRECTLY as
+   a fail-closed publish gate (``brutex/crossverify/gate_seam.py``), so a
+   crate fault under the flag must ALWAYS resolve to the oracle verdict —
+   never a new exception class out of the classifier (pinned).
 
 ## The fail-closed layers (the PR-1 template, adapted)
 
-* **Flags** — three per-module flags, each default OFF (truthy → ON, falsy →
+* **Flags** — four per-module flags, each default OFF (truthy → ON, falsy →
   OFF, junk → loud-OFF once; the §11 COMMON :func:`env_flag_tristate`
   imported from the sibling facade). The flag gate lives in the TARGET
   modules (the G6 shape) so flag OFF is the literal verbatim oracle call —
   the crate is never imported (bomb-crate spy-pinned).
-* **ONE shared latch** — the three laws share one process-local OFF latch
+* **ONE shared latch** — the four laws share one process-local OFF latch
   (the PR-2 lake_rust_render precedent: either profile's trip disables
-  both — DISCLOSED): any law's crate-absent / crate-stale / panic /
-  burn-in-mismatch latch serves the oracle for ALL detector laws for the
-  remainder of the process. Per-law burn-in budgets stay independent.
+  both — DISCLOSED, and re-disclosed at each ``_CRATE_API`` growth): any
+  law's crate-absent / crate-stale / panic / burn-in-mismatch latch serves
+  the oracle for ALL detector laws for the remainder of the process.
+  Per-law burn-in budgets stay independent.
 * **Import guard / SYMBOL handshake** — polars-free laws, so the PR-1
   polars VERSION guard is meaningless here (the G8 disclosed deviation):
   an absent wheel latches ``crate_unavailable``; a wheel missing ANY of the
-  three law callables is a pre-T24 (or foreign/broken) install and latches
-  ``crate_stale``.
+  four law callables is a pre-PR-2 (or foreign/broken) install and latches
+  ``crate_stale`` for ALL laws (the all-or-nothing consequence, disclosed:
+  a PR-1-era wheel serves the oracle for the PR-1 laws too until rebuilt).
 * **Degrade set** — ``ValueError``/``RuntimeError`` (the crate's declared
   FFI error surface — NOTE: a Rust panic the crate's own ``catch_unwind``
   boundary CATCHES surfaces as ``PyRuntimeError`` and lands in THIS arm,
@@ -110,6 +128,8 @@ LAKE_RUST_RAW_INTEGRITY_ENV: Final[str] = "BRUTEX_LAKE_RUST_RAW_INTEGRITY"
 LAKE_RUST_INTERIOR_GAP_ENV: Final[str] = "BRUTEX_LAKE_RUST_INTERIOR_GAP"
 #: The partial-window verdict opt-in flag.
 LAKE_RUST_PARTIAL_WINDOW_ENV: Final[str] = "BRUTEX_LAKE_RUST_PARTIAL_WINDOW"
+#: The TODAY minute-completeness verdict opt-in flag (SLICE T24 PR-2).
+LAKE_RUST_TODAY_COMPLETENESS_ENV: Final[str] = "BRUTEX_LAKE_RUST_TODAY_COMPLETENESS"
 
 #: Engaged calls PER LAW that are bit-compared against the live Python
 #: oracle before Rust values ship uncompared (the #1531/#1532 pattern).
@@ -121,8 +141,10 @@ _LAW_HASH: Final[str] = "hash"
 _LAW_INTERIOR_RUNS: Final[str] = "interior_runs"
 #: The partial-window-law burn-in budget key.
 _LAW_PARTIAL_WINDOW: Final[str] = "partial_window"
+#: The today-completeness-law burn-in budget key (PR-2).
+_LAW_TODAY_COMPLETENESS: Final[str] = "today_completeness"
 
-#: Process-local OFF latch — ONE latch shared by all three laws (module
+#: Process-local OFF latch — ONE latch shared by all four laws (module
 #: docstring; the PR-2 shared-latch precedent, disclosed).
 _DISABLED_REASON: Final[list[str | None]] = [None]
 
@@ -131,15 +153,17 @@ _BURN_IN_REMAINING: Final[dict[str, int]] = {
     _LAW_HASH: BURN_IN_SAMPLES,
     _LAW_INTERIOR_RUNS: BURN_IN_SAMPLES,
     _LAW_PARTIAL_WINDOW: BURN_IN_SAMPLES,
+    _LAW_TODAY_COMPLETENESS: BURN_IN_SAMPLES,
 }
 
-#: The crate callables ALL three laws need — the all-or-nothing SYMBOL
-#: handshake surface. A wheel missing any is a pre-T24 install
-#: (``crate_stale``).
+#: The crate callables ALL four laws need — the all-or-nothing SYMBOL
+#: handshake surface. A wheel missing any is a pre-PR-2 install
+#: (``crate_stale`` — latching every law, the disclosed #1771 precedent).
 _CRATE_API: Final[tuple[str, ...]] = (
     "raw_integrity_blake2b_hex",
     "interior_barless_runs",
     "classify_partial_window_verdict",
+    "classify_today_completeness_verdict",
 )
 
 #: Once-per-process-per-reason log memo.
@@ -215,6 +239,30 @@ class PartialWindowPayload:
     trading_flags: tuple[bool, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TodayCompletenessPayload:
+    """The ints/bools-only FFI payload for the today-completeness verdict.
+
+    Built by the target's payload factory (PR-2): ``minute_ordinals`` are
+    per-bar ABSOLUTE IST minute ordinals
+    (``ist_date.toordinal() * 1440 + hour * 60 + minute`` — date-preserving,
+    so distinct ordinals ≡ the oracle's distinct IST minute-floor datetimes
+    over EVERY input, no single-date precondition); ``zero_volume`` /
+    ``oi_null`` the parallel per-bar shape flags; ``last_bar_complete`` the
+    Python-computed :func:`~brutex.calendars.nse.session_last_bar_complete`
+    close-edge law (the calendar stays Python — never re-implemented in
+    Rust). ``instrument_class_code`` maps the target's ``InstrumentClass``
+    onto the crate's 0..3 codes.
+    """
+
+    instrument_class_code: int
+    expected_minutes: int
+    minute_ordinals: tuple[int, ...]
+    zero_volume: tuple[bool, ...]
+    oi_null: tuple[bool, ...]
+    last_bar_complete: bool
+
+
 def raw_integrity_rust_enabled() -> bool:
     """Resolve ``BRUTEX_LAKE_RUST_RAW_INTEGRITY`` (default OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_RAW_INTEGRITY_ENV)
@@ -228,6 +276,11 @@ def interior_gap_rust_enabled() -> bool:
 def partial_window_rust_enabled() -> bool:
     """Resolve ``BRUTEX_LAKE_RUST_PARTIAL_WINDOW`` (default OFF, junk loud-OFF)."""
     return _flag_enabled(LAKE_RUST_PARTIAL_WINDOW_ENV)
+
+
+def today_completeness_rust_enabled() -> bool:
+    """Resolve ``BRUTEX_LAKE_RUST_TODAY_COMPLETENESS`` (default OFF, junk loud-OFF)."""
+    return _flag_enabled(LAKE_RUST_TODAY_COMPLETENESS_ENV)
 
 
 def rust_detectors_disabled() -> bool:
@@ -247,6 +300,7 @@ def reset_detectors_rust_for_tests(*, remaining: int = BURN_IN_SAMPLES) -> None:
     _BURN_IN_REMAINING[_LAW_HASH] = remaining
     _BURN_IN_REMAINING[_LAW_INTERIOR_RUNS] = remaining
     _BURN_IN_REMAINING[_LAW_PARTIAL_WINDOW] = remaining
+    _BURN_IN_REMAINING[_LAW_TODAY_COMPLETENESS] = remaining
     _OBSERVABILITY_MEMO.clear()
 
 
@@ -517,6 +571,117 @@ def routed_classify_partial_window[VerdictT](
     return _burn_in_check(_LAW_PARTIAL_WINDOW, verdict, python_law)
 
 
+#: The today-completeness reason vocabulary, INDEXED — the crate returns a
+#: ``reason_idx`` into THIS tuple (the same order as the crate's
+#: ``TODAY_REASON_*`` constants). SOURCE: the ``REASON_*`` constants of
+#: :mod:`brutex.data.today_completeness` (importing that module here would
+#: be the verdict-dataclass import cycle the G6 routing shape exists to
+#: avoid), so the tuple is defined beside its gate and MIRROR-PINNED
+#: against the oracle's own constants by ``tests/unit/test_detectors_rust.py``.
+#: Only the ROUTED arms appear — the three inert reasons (not_covering /
+#: abstain_coverage / non_trading) are decided Python-side pre-route.
+_TODAY_REASONS: Final[tuple[str, ...]] = (
+    "complete",
+    "no_today_bars",
+    "count_short",
+    "count_excess",
+    "last_bar_incomplete",
+    "oi_null_settling",
+    "volume_all_zero",
+)
+
+#: The crate today-verdict fields arity —
+#: ``(incomplete, reason_idx, distinct, oi_null_count, zero_volume_count,
+#: count_short_observed)``.
+_TODAY_FIELDS_ARITY: Final[int] = 6
+
+
+def _today_fields_well_formed(fields: object) -> bool:
+    """The refuse-poison shape gate for the today-completeness fields.
+
+    Arity 6; ``incomplete`` / ``count_short_observed`` exact ``bool``;
+    ``reason_idx`` a non-bool ``int`` inside :data:`_TODAY_REASONS`; the
+    three counts non-bool non-negative ``int``. Anything else is a
+    stale/foreign crate speaking a different verdict vocabulary — refused
+    to the oracle with one WARN (degrade, never a latch).
+    """
+    if not (isinstance(fields, tuple) and len(fields) == _TODAY_FIELDS_ARITY):
+        return False
+    incomplete, reason_idx, distinct, oi_null_count, zero_volume_count, count_short = fields
+    if not (isinstance(incomplete, bool) and isinstance(count_short, bool)):
+        return False
+    if isinstance(reason_idx, bool) or not isinstance(reason_idx, int):
+        return False
+    if not 0 <= reason_idx < len(_TODAY_REASONS):
+        return False
+    for count in (distinct, oi_null_count, zero_volume_count):
+        if isinstance(count, bool) or not isinstance(count, int):
+            return False
+        if count < 0:
+            return False
+    return True
+
+
+def routed_classify_today_completeness[VerdictT](
+    *,
+    payload_factory: Callable[[], TodayCompletenessPayload],
+    python_law: Callable[[], VerdictT],
+    materialize: Callable[[str, bool, int, int, int, bool], VerdictT],
+) -> VerdictT:
+    """The routed today-completeness verdict — called ONLY when the flag is ON.
+
+    *payload_factory* builds the ints/bools-only
+    :class:`TodayCompletenessPayload` (the target's IST conversions +
+    the Python-computed close-edge law); *python_law* is the zero-arg
+    verbatim criteria-table oracle; *materialize* turns
+    ``(reason_token, incomplete, distinct, oi_null_count,
+    zero_volume_count, count_short_observed)`` into the target's verdict
+    object (defined target-side so this facade never imports the verdict
+    dataclass — no import cycle). EVERY path returns a verdict object:
+    latched / guarded / degraded / refused calls return ``python_law()``,
+    a burn-in mismatch returns the ORACLE verdict + autoreverts — the
+    crossverify fail-closed gate seam depends on exactly this
+    never-a-new-exception-class discipline (module docstring, pinned).
+    """
+    if rust_detectors_disabled():
+        return python_law()
+    crate = _resolve_crate()
+    if crate is None:
+        return python_law()
+    try:
+        payload = payload_factory()
+        fields = crate.classify_today_completeness_verdict(
+            payload.instrument_class_code,
+            payload.expected_minutes,
+            payload.minute_ordinals,
+            payload.zero_volume,
+            payload.oi_null,
+            payload.last_bar_complete,
+        )
+    except _DEGRADE_ERRORS as exc:
+        _warn_once("today_completeness_error", error_detail=repr(exc))
+        return python_law()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except _panic_belt_errors() as exc:
+        _disable("crate_panic", error_detail=repr(exc))
+        return python_law()
+    if not _today_fields_well_formed(fields):
+        _warn_once("today_completeness_result_refused", result_type=type(fields).__name__)
+        return python_law()
+    incomplete, reason_idx, distinct, oi_null_count, zero_volume_count, count_short = fields
+    verdict = materialize(
+        _TODAY_REASONS[reason_idx],
+        incomplete,
+        distinct,
+        oi_null_count,
+        zero_volume_count,
+        count_short,
+    )
+    _log_engaged_once(crate)
+    return _burn_in_check(_LAW_TODAY_COMPLETENESS, verdict, python_law)
+
+
 #: The KNOWN partial-window reason-token vocabulary — the refuse-poison
 #: MEMBERSHIP set for the crate-returned ``reason`` field (the round-1
 #: review hardening). SOURCE: the inline ``reason="…"`` literals of
@@ -568,14 +733,18 @@ __all__ = [
     "LAKE_RUST_INTERIOR_GAP_ENV",
     "LAKE_RUST_PARTIAL_WINDOW_ENV",
     "LAKE_RUST_RAW_INTEGRITY_ENV",
+    "LAKE_RUST_TODAY_COMPLETENESS_ENV",
     "InteriorRunsPayload",
     "PartialWindowPayload",
+    "TodayCompletenessPayload",
     "interior_gap_rust_enabled",
     "partial_window_rust_enabled",
     "raw_integrity_rust_enabled",
     "reset_detectors_rust_for_tests",
     "routed_classify_partial_window",
+    "routed_classify_today_completeness",
     "routed_hash_payload_hex",
     "routed_interior_barless_runs",
     "rust_detectors_disabled",
+    "today_completeness_rust_enabled",
 ]

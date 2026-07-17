@@ -329,6 +329,19 @@ def screen_frame_bad_ticks(
     log
         Injectable structlog logger (tests); ``None`` uses the module logger.
 
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-2): the
+    SEQUENTIAL arm is served by :func:`_screen_frame_sequential_python` —
+    the verbatim ``BadTickScreen`` walk, the LIVE parity oracle — via the
+    default-OFF ``BRUTEX_FEED_RUST_FRAME`` facade
+    (:mod:`brutex.data.bad_tick_rust`), which REUSES the compiled
+    ``brutex_feed`` decision kernel at the WHEEL boundary (the whole state
+    machine is already Rust under DEC-FEED-RUST-CORE-001 — zero new Rust,
+    both crates byte-untouched). Phase 1 stays Python polars on BOTH arms,
+    so a clean frame never consults the flag, never imports the facade's
+    kernel, and returns the INPUT OBJECT byte- and cost-identically
+    flag-ON. Flag OFF (the default) runs the literal verbatim sequential
+    arm — ``brutex_feed`` is never imported from this seam (spy-pinned).
+
     Returns
     -------
     pl.DataFrame
@@ -345,6 +358,49 @@ def screen_frame_bad_ticks(
     candidate = (pl.col("close") >= prev * max_ratio) | (pl.col("close") * max_ratio <= prev)
     if not bool(frame.select(candidate.fill_null(value=False).any()).item()):
         return frame
+
+    def _python_law() -> pl.DataFrame:
+        return _screen_frame_sequential_python(
+            frame, ist_date=ist_date, source=source, max_ratio=max_ratio, log=log
+        )
+
+    # Lazy facade import (the function's existing lazy-`import polars`
+    # style): the module import surface stays unchanged — bad_tick.py is a
+    # leaf on the engine read path (`feed/replay.py` imports it at module
+    # scope) and only candidate-BEARING frames ever reach this branch.
+    from brutex.data.bad_tick_rust import frame_screen_rust_enabled, routed_screen_frame
+
+    if not frame_screen_rust_enabled():
+        return _python_law()
+    return routed_screen_frame(
+        frame,
+        ts_column=ts_column,
+        source=source,
+        max_ratio=max_ratio,
+        log=log,
+        python_law=_python_law,
+    )
+
+
+def _screen_frame_sequential_python(
+    frame: pl.DataFrame,
+    *,
+    ist_date: pl.Expr,
+    source: str | None,
+    max_ratio: float,
+    log: structlog.stdlib.BoundLogger | None,
+) -> pl.DataFrame:
+    """The verbatim sequential arm — the LIVE parity oracle (SLICE T24 PR-2).
+
+    The pre-routing phase-2 body of :func:`screen_frame_bad_ticks`, moved
+    token-for-token (the Slice-0 extraction discipline): the EXISTING
+    :class:`BadTickScreen` decides WHICH rows drop and owns the WARN
+    semantics; *ist_date* is the caller's already-built phase-1 session-key
+    expression. Both arms of the routed screen serve or burn-in-compare
+    against exactly this body.
+    """
+    import polars as pl
+
     screen = BadTickScreen(source=source, max_ratio=max_ratio, log=log)
     dates = frame.select(ist_date.alias("d")).get_column("d").to_list()
     closes = frame.get_column("close").to_list()

@@ -115,11 +115,19 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from brutex.calendars.nse import get_session, is_holiday_data_available, session_last_bar_complete
+from brutex.data.detectors_rust import (
+    TodayCompletenessPayload,
+    routed_classify_today_completeness,
+    today_completeness_rust_enabled,
+)
 from brutex.data.models import CandleBar
 from brutex.data.session import IST
+
+if TYPE_CHECKING:  # pragma: no cover — typing-only import
+    from brutex.calendars.nse import TradingSession
 
 __all__ = [
     "TODAY_COMPLETENESS_GATE_ENV",
@@ -332,6 +340,20 @@ def _inert_verdict(reason: str, *, covers_today: bool) -> TodayCompletenessVerdi
     )
 
 
+#: Minutes per civil day — the absolute IST minute-ordinal radix of the
+#: routed payload (``ist_date.toordinal() * 1440 + hour * 60 + minute``).
+_MINUTES_PER_DAY: Final[int] = 1440
+
+#: ``InstrumentClass`` → the crate's class code (SLICE T24 PR-2; the
+#: ``TODAY_CLASS_*`` constants in ``rust/brutex-lake/src/detectors.rs``).
+_TODAY_CLASS_CODES: Final[dict[InstrumentClass, int]] = {
+    InstrumentClass.INDEX_SPOT: 0,
+    InstrumentClass.CASH_SPOT: 1,
+    InstrumentClass.FUT: 2,
+    InstrumentClass.OPTION: 3,
+}
+
+
 def classify_today_completeness(
     *,
     bars_today: Sequence[CandleBar],
@@ -350,6 +372,22 @@ def classify_today_completeness(
     hand-rolled ``>= close`` (the +1-minute half-open law: a complete regular
     session's last stored bar is labelled 15:29). *bars_today* is the caller's
     already-split TODAY set (:func:`split_today_bars`). No I/O, no clock read.
+
+    Routing (DEC-DATA-RUST-INTEGRITY-DETECTORS-001, SLICE T24 PR-2): the
+    per-class CRITERIA TABLE is served by
+    :func:`_classify_today_completeness_python` — the verbatim body, the
+    LIVE parity oracle — via the default-OFF
+    ``BRUTEX_LAKE_RUST_TODAY_COMPLETENESS`` facade
+    (:mod:`brutex.data.detectors_rust`). The three inert arms above and
+    every calendar consult (``is_holiday_data_available`` / ``get_session``
+    / ``session_last_bar_complete``) stay PYTHON on both arms — the routed
+    payload carries only per-bar IST minute ordinals + shape bools + the
+    Python-computed close-edge flag; the crate is never consulted on an
+    inert arm (pinned). Flag OFF (the default) returns the oracle directly
+    — the crate is never imported, byte-identical to the pre-facade law.
+    Every crate fault under the flag resolves to the ORACLE verdict — never
+    a new exception class out of this classifier (the crossverify
+    fail-closed gate seam binds it directly; pinned).
     """
     if window_end != clamp_today + timedelta(days=1):
         return _inert_verdict(REASON_NOT_COVERING, covers_today=False)
@@ -364,6 +402,85 @@ def classify_today_completeness(
         # Weekend / holiday covers-today window expects ZERO session bars —
         # vacuous pass (the session filter already dropped any leak).
         return _inert_verdict(REASON_NON_TRADING, covers_today=True)
+
+    def _oracle() -> TodayCompletenessVerdict:
+        return _classify_today_completeness_python(
+            bars_today=bars_today, instrument_class=instrument_class, session=session
+        )
+
+    if not today_completeness_rust_enabled():
+        return _oracle()
+
+    # The routed arm (the G6 shape): Python computes every calendar/IST fact
+    # ONCE — the close-edge law + the verdict's display fields — and the
+    # crate folds only the count/shape criteria table over plain ints/bools.
+    expected = session.duration_minutes
+    last_dt_ist: datetime | None = None
+    if bars_today:
+        last_dt_ist = max(b.timestamp for b in bars_today).astimezone(IST)
+    last_bar_ist = last_dt_ist.strftime("%H:%M") if last_dt_ist is not None else None
+    last_bar_complete = (
+        session_last_bar_complete(session, last_dt_ist) if last_dt_ist is not None else True
+    )
+
+    def _payload() -> TodayCompletenessPayload:
+        minute_ordinals: list[int] = []
+        zero_volume: list[bool] = []
+        oi_null: list[bool] = []
+        for bar in bars_today:
+            ist_dt = bar.timestamp.astimezone(IST)
+            minute_ordinals.append(
+                ist_dt.date().toordinal() * _MINUTES_PER_DAY + ist_dt.hour * 60 + ist_dt.minute
+            )
+            zero_volume.append(bar.volume == 0)
+            oi_null.append(bar.open_interest is None)
+        return TodayCompletenessPayload(
+            instrument_class_code=_TODAY_CLASS_CODES[instrument_class],
+            expected_minutes=expected,
+            minute_ordinals=tuple(minute_ordinals),
+            zero_volume=tuple(zero_volume),
+            oi_null=tuple(oi_null),
+            last_bar_complete=last_bar_complete,
+        )
+
+    def _materialize(
+        reason: str,
+        incomplete: bool,
+        distinct: int,
+        oi_null_count: int,
+        zero_volume_count: int,
+        count_short_observed: bool,
+    ) -> TodayCompletenessVerdict:
+        return TodayCompletenessVerdict(
+            covers_today=True,
+            incomplete=incomplete,
+            reason=reason,
+            expected_minutes=expected,
+            distinct_minutes=distinct,
+            last_bar_ist=last_bar_ist,
+            oi_null_count=oi_null_count,
+            zero_volume_count=zero_volume_count,
+            count_short_observed=count_short_observed,
+        )
+
+    return routed_classify_today_completeness(
+        payload_factory=_payload, python_law=_oracle, materialize=_materialize
+    )
+
+
+def _classify_today_completeness_python(
+    *,
+    bars_today: Sequence[CandleBar],
+    instrument_class: InstrumentClass,
+    session: TradingSession,
+) -> TodayCompletenessVerdict:
+    """The verbatim per-class criteria body — the LIVE parity oracle (T24 PR-2).
+
+    The pre-routing tail of :func:`classify_today_completeness` after the
+    three inert arms resolved a real *session* — moved token-for-token (the
+    Slice-0 extraction discipline); both arms of the routed classifier serve
+    or burn-in-compare against exactly this body.
+    """
     expected = session.duration_minutes
     distinct = len(
         {b.timestamp.astimezone(IST).replace(second=0, microsecond=0) for b in bars_today}
