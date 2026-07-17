@@ -4,7 +4,8 @@ DEC-STAGE1A-RUST-BATCH-001 — 100% line + branch coverage of the flag /
 burn-in / autorevert / observability leaf PLUS the `build_bar_bits` dispatch
 and the `collect_batch_inputs` prepass glue:
 
-* the flag tristate matrix (truthy / falsy / unset→OFF / junk→OFF + one
+* the flag tristate matrix (truthy / falsy / unset→ON — the flipped
+  DEC-STAGE1A-RUST-DEFAULT-ON-001 default — / junk→OFF + one
   ``flag_unrecognised`` warn + the reset seam);
 * wheel-missing / stale-symbol → ``None`` + warn-once (the oracle serves);
 * the burn-in whole-series compare — counter decrement, a fabricated FFI
@@ -122,10 +123,12 @@ def test_flag_falsy_values_disable(monkeypatch: pytest.MonkeyPatch, raw: str) ->
     assert stage1a_rust_enabled() is False
 
 
-def test_flag_unset_falls_to_the_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flag_unset_falls_to_the_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001: the one-constant flip — unset now ARMS
+    # the batch kernel (consciously flipped from the inert-ship False pin).
     monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
-    assert STAGE1A_RUST_DEFAULT is False  # the inert-ship constant
-    assert stage1a_rust_enabled() is False
+    assert STAGE1A_RUST_DEFAULT is True  # the flipped constant IS the revert lever
+    assert stage1a_rust_enabled() is True
 
 
 def test_flag_whitespace_empty_falls_to_the_default_without_warning(
@@ -133,7 +136,7 @@ def test_flag_whitespace_empty_falls_to_the_default_without_warning(
 ) -> None:
     monkeypatch.setenv(STAGE1A_RUST_ENV, "   ")
     with capture_logs() as logs:
-        assert stage1a_rust_enabled() is False
+        assert stage1a_rust_enabled() is True  # the default-ON arm, no warn
     assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
 
 
@@ -401,7 +404,10 @@ def test_post_burn_in_success_never_runs_the_oracle() -> None:
 
 
 def test_flag_off_never_touches_the_rust_arm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001: the OFF arm is now the EXPLICIT "0"
+    # kill switch (unset falls to the flipped default-ON constant — the
+    # prior delenv arm was consciously flipped to the setenv form).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     monkeypatch.setattr(
         rust_stage1a,
         "rust_bar_bits_or_none",
@@ -412,6 +418,49 @@ def test_flag_off_never_touches_the_rust_arm(monkeypatch: pytest.MonkeyPatch) ->
     # under the flag branch) and still yields the identical matrix.
     got = build_bar_bits(bar for bar in bars)
     assert got == _oracle_for(bars)
+
+
+def test_default_arm_dispatch_engages_the_rust_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001: with NO env set, `build_bar_bits`
+    # genuinely dispatches into the Rust seam (engaged event — the
+    # anti-vacuous-gate teeth) and returns the oracle-identical matrix.
+    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    bars = _two_day_feed()
+    with capture_logs() as logs:
+        got = build_bar_bits(bars)
+    assert got == _oracle_for(bars)
+    engaged = [e for e in logs if e.get("event") == "rust_stage1a.engaged"]
+    assert len(engaged) == 1
+    assert not [e for e in logs if e.get("event") == "rust_stage1a.kernel_autoreverted"]
+
+
+def test_default_arm_poisoned_kernel_ships_oracle_and_autoreverts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001: the default-ON safety net — with NO
+    # env set, a poisoned kernel is caught by the burn-in whole-series
+    # compare THROUGH the dispatch: the ORACLE matrix ships, exactly one
+    # kernel_autoreverted ERROR fires, and the latch holds for the process.
+    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    bars = _two_day_feed()
+    real = trading_core.stage1a_bar_bits_batch
+
+    def _flipped(*args: Any, **kwargs: Any) -> list[int]:
+        out: list[int] = real(*args, **kwargs)
+        out[0] ^= 1  # flip one bit — the fabricated kernel bug
+        return out
+
+    monkeypatch.setattr(trading_core, "stage1a_bar_bits_batch", _flipped)
+    expected = _oracle_for(bars)
+    with capture_logs() as logs:
+        got = build_bar_bits(bars)
+    assert got == expected  # the ORACLE list ships — never the poisoned one
+    reverted = [e for e in logs if e.get("event") == "rust_stage1a.kernel_autoreverted"]
+    assert len(reverted) == 1
+    assert reverted[0]["reason"] == "mask_mismatch"
+    assert kernel_disabled() is True  # latched for the rest of the process
 
 
 def test_flag_on_returns_the_identical_list(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,11 +503,13 @@ def test_beyond_schedule_bar_raises_identical_message_both_arms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # G-7: the ONE copied f-string in the prepass glue is message-pinned.
+    # Since DEC-STAGE1A-RUST-DEFAULT-ON-001 the OFF reference arm is the
+    # explicit "0" kill switch and the DEFAULT (no-env) arm IS the ON arm.
     bars = _two_day_feed()
     schedule = (date(2024, 1, 2).toordinal(),)  # day 2 is beyond the last expiry
-    off = _arm_error(monkeypatch, bars, flag=None, roll_schedule=schedule)
+    off = _arm_error(monkeypatch, bars, flag="0", roll_schedule=schedule)
     reset_self_check_for_tests()
-    on = _arm_error(monkeypatch, bars, flag="1", roll_schedule=schedule)
+    on = _arm_error(monkeypatch, bars, flag=None, roll_schedule=schedule)
     assert type(off) is type(on) is ValueError
     assert str(off) == str(on)
     assert "beyond the last roll_schedule expiry" in str(off)
@@ -469,18 +520,20 @@ def test_out_of_envelope_price_raises_identical_error_both_arms(
 ) -> None:
     # G-6: ₹2·10¹² = 2·10¹⁴ paisa exceeds the kernel's MAX_BAR_PAISA — the ON
     # arm's boundary refuses, falls back, and the ORACLE raises the same
-    # per-bar evaluate ValueError the OFF arm raises.
+    # per-bar evaluate ValueError the OFF arm raises. Since
+    # DEC-STAGE1A-RUST-DEFAULT-ON-001 the OFF reference arm is the explicit
+    # "0" kill switch and the DEFAULT (no-env) arm IS the ON arm.
     bars = [
         _minute_bar(date(2024, 1, 2), 0, "100", "110", "90", "105"),
         _minute_bar(
             date(2024, 1, 2), 1, "2000000000000", "2000000000000", "2000000000000", "2000000000000"
         ),
     ]
-    off = _arm_error(monkeypatch, bars, flag=None)
+    off = _arm_error(monkeypatch, bars, flag="0")
     reset_self_check_for_tests()
     reset_observability_memo_for_tests()
     with capture_logs() as logs:
-        on = _arm_error(monkeypatch, bars, flag="1")
+        on = _arm_error(monkeypatch, bars, flag=None)
     assert type(off) is type(on)
     assert str(off) == str(on)
     assert "overflow-safe range" in str(off)
@@ -625,7 +678,9 @@ def test_muhurat_warn_double_emission_during_burn_in_is_bounded(
         on = build_bar_bits(bars, roll_schedule=schedule)
     warns = [e for e in logs if e.get("event") == "stage1a.muhurat_prev_day_anchor_skip"]
     assert len(warns) == 2  # prepass + burn-in oracle
-    monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+    # The Python reference arm is the explicit "0" kill switch (the prior
+    # delenv arm now falls to the flipped default-ON constant).
+    monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
     assert on == build_bar_bits(bars, roll_schedule=schedule)
 
 
@@ -670,17 +725,18 @@ def test_unset_env_serves_the_default_with_no_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Survivor 18 (`os.environ.get(..., "")` default junked): the unset arm
-    # must serve STAGE1A_RUST_DEFAULT with ZERO fallback events — and must
-    # KEEP serving the default once it flips ON (the one-constant
-    # DEC-STAGE1A-RUST-DEFAULT-ON-001 lever; a junked get-default would turn
-    # unset into the flag_unrecognised path and pin the arm to False).
+    # must serve STAGE1A_RUST_DEFAULT with ZERO fallback events — under the
+    # flipped default-ON constant (DEC-STAGE1A-RUST-DEFAULT-ON-001) a junked
+    # get-default would turn unset into the flag_unrecognised path and pin
+    # the arm to False (≠ True), so the first arm now catches it directly;
+    # the revert lever (default back to False) must ALSO serve silently.
     monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
     with capture_logs() as logs:
         assert stage1a_rust_enabled() is STAGE1A_RUST_DEFAULT
     assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
-    monkeypatch.setattr(rust_stage1a, "STAGE1A_RUST_DEFAULT", True)
+    monkeypatch.setattr(rust_stage1a, "STAGE1A_RUST_DEFAULT", False)
     with capture_logs() as logs:
-        assert rust_stage1a.stage1a_rust_enabled() is True
+        assert rust_stage1a.stage1a_rust_enabled() is False
     assert not [e for e in logs if e.get("event") == "rust_stage1a.fallback"]
 
 

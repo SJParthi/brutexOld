@@ -110,16 +110,19 @@ def test_ab_on_vs_off_wall_clock_measured(monkeypatch: pytest.MonkeyPatch) -> No
     """MEASURE (never gate) the ON-vs-OFF wall clock for the PR-body table.
 
     Golden Rule #10: the printed figures are the MEASURED evidence for any
-    per-build speedup claim; no floor is asserted here (shared-CI noise +
-    the flag ships default-OFF — the real-tier calibration is the flip DEC's
-    burden). The one hard assertion is CORRECTNESS: both arms produced the
+    per-build speedup claim; no floor is asserted here (shared-CI noise —
+    and DEC-STAGE1A-RUST-DEFAULT-ON-001 flipped the default on the golden
+    byte-identity licence, UNIFORMITY not speed: no speedup is claimed).
+    The one hard assertion is CORRECTNESS: both arms produced the
     identical matrix.
     """
     bars = _make_bars(_N_BIG)
     reset_self_check_for_tests(remaining=0)
     reset_observability_memo_for_tests()
     try:
-        monkeypatch.delenv(STAGE1A_RUST_ENV, raising=False)
+        # The OFF arm is the explicit "0" kill switch — since
+        # DEC-STAGE1A-RUST-DEFAULT-ON-001 an unset env IS the Rust arm.
+        monkeypatch.setenv(STAGE1A_RUST_ENV, "0")
         build_bar_bits(bars)  # warm
         t0 = time.perf_counter()
         off = build_bar_bits(bars)

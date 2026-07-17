@@ -162,7 +162,9 @@ def _dual_arm(bars: list[CandleBar], **kwargs: Any) -> tuple[list[int], list[int
 
     prior_env = os.environ.get(STAGE1A_RUST_ENV)
     try:
-        os.environ.pop(STAGE1A_RUST_ENV, None)
+        # The OFF arm is the explicit "0" kill switch — since
+        # DEC-STAGE1A-RUST-DEFAULT-ON-001 an unset env IS the Rust arm.
+        os.environ[STAGE1A_RUST_ENV] = "0"
         off = build_bar_bits(bars, **kwargs)
         trading_core.stage1a_bar_bits_batch = _spy  # type: ignore[attr-defined]
         os.environ[STAGE1A_RUST_ENV] = "1"
@@ -325,7 +327,9 @@ def _arm_exception(bars: list[CandleBar], *, flag: bool, **kwargs: Any) -> BaseE
         if flag:
             os.environ[STAGE1A_RUST_ENV] = "1"
         else:
-            os.environ.pop(STAGE1A_RUST_ENV, None)
+            # The explicit "0" kill switch — unset now falls to default-ON
+            # (DEC-STAGE1A-RUST-DEFAULT-ON-001).
+            os.environ[STAGE1A_RUST_ENV] = "0"
         with pytest.raises((ValueError, OverflowError)) as excinfo:
             build_bar_bits(bars, **kwargs)
         return excinfo.value
