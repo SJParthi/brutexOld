@@ -3226,7 +3226,7 @@ hostile-review pass._
   (ADR-EXEMPT oracle, #1492 G3). PROOF (executed, real maturin wheel):
   cargo fmt/clippy(-D warnings)/test --release --locked 81 passed (14 new:
   5 session + 9 daily; crate stays 0.1.0, Cargo.lock byte-untouched); the
-  real-wheel parity suite 26 passed — daily ON-vs-OFF at CandleBar strength
+  real-wheel parity suite 30 passed — daily ON-vs-OFF at CandleBar strength
   INCLUDING Decimal reprs, session-cutoff parity, batch 21-TF parity + the
   one-crossing count pin, whole-prebuild sha256 A/B
   (`materialize_lake_timeframes(include_daily=True)` — derived + 1day bytes
@@ -9682,7 +9682,7 @@ hostile-review pass._
   forming-bucket fold via the new crate session face +
   `tf_resampler.resample_all_21_tfs` ONE-crossing batch face) ride the
   EXISTING `BRUTEX_LAKE_RUST_RESAMPLE` flag; both flags OFF (default)
-  BYTE-IDENTICAL (bomb-spy-pinned); real-wheel parity 26 passed at
+  BYTE-IDENTICAL (bomb-spy-pinned); real-wheel parity 30 passed at
   CandleBar+Decimal-repr strength + whole-prebuild sha256 A/B (daily-ON
   and both-ON); cargo 81 passed, crate stays 0.1.0, Cargo.lock untouched;
   honesty banner verbatim — payoff ≈ 0, uniformity not speed; ENGINE
