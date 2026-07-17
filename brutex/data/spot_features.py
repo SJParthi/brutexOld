@@ -23,10 +23,12 @@ from decimal import Decimal
 from typing import Final
 
 from brutex.data.models import CandleBar
-from brutex.data.session import IST
+from brutex.data.session import IST, SESSION_OPEN
 
 #: Session open instant (IST) — the bar whose open is the 09:15 gap anchor.
-_SESSION_OPEN: Final[time] = time(9, 15)
+#: DERIVED from the ONE COMMON :data:`brutex.data.session.SESSION_OPEN` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001 — the former ``time(9, 15)`` mirror).
+_SESSION_OPEN: Final[time] = SESSION_OPEN
 
 _HUNDRED: Final[Decimal] = Decimal(100)
 

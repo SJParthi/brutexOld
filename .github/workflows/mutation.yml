@@ -371,6 +371,13 @@ jobs:
           #    fails the unit suite if this pair is ever dropped. Rides the
           #    historical runner (empty third field — no spin constructs; the
           #    module's only loops are bounded bar folds).
+          #    metrics/rust_stats.py (the slice-6 flag-gated Rust-statistics
+          #    seam, DEC-METRICS-RUST-STATS-001 — a silent mutant here could
+          #    adopt a domain-invalid kernel result, defeat the per-function
+          #    autorevert latch, or invert the default-OFF flag) joined with
+          #    its dedicated unit file (runs in ~1 s — the same
+          #    focused-runner subset argument); its own
+          #    TestMutationWorkflowWiring pins the pair.
           #
           # Pass 2: per-module focused runners (DEC-MUTATION-RUNTIME-001).
           # rate_common added by DEC-MUTATION-RUNTIME-003 (MIGRATION.md #1597) with a
@@ -517,6 +524,7 @@ jobs:
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
             "brutex/engine/rust_stage1a.py:tests/unit/test_engine_rust_stage1a.py:" \
             "brutex/strategies/spec.py:tests/unit/test_strategies_spec.py:" \
+            "brutex/metrics/rust_stats.py:tests/unit/test_rust_stats.py:" \
             "brutex/adapters/rate_common.py:tests/unit/test_rate_common.py:30"; do
             # feed/replay.py pair (DEC-FEED-RUST-CORE-001, MIGRATION #1797
             # REFUTER ROUND 6): the seam module previously had ZERO mutation
