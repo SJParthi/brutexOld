@@ -366,8 +366,7 @@ class TestIstOffsetDuration:
         # The frame-level (+05:30).date() idiom agrees with the ZoneInfo-family
         # astimezone(IST).date() conversion on the same instants.
         import polars as pl
-
-        from brutex.data.session import IST as _ist
+        from brutex.data.session import IST as SESSION_IST
 
         ts = [
             datetime(2024, 1, 2, 3, 45, tzinfo=UTC),
@@ -375,7 +374,9 @@ class TestIstOffsetDuration:
             datetime(2024, 12, 31, 18, 30, tzinfo=UTC),  # 00:00 IST NEXT day
         ]
         frame = pl.DataFrame({"ts_utc": ts})
-        got = frame.select(
-            (pl.col("ts_utc") + ist_offset_duration()).dt.date().alias("d")
-        ).get_column("d").to_list()
-        assert got == [t.astimezone(_ist).date() for t in ts]
+        got = (
+            frame.select((pl.col("ts_utc") + ist_offset_duration()).dt.date().alias("d"))
+            .get_column("d")
+            .to_list()
+        )
+        assert got == [t.astimezone(SESSION_IST).date() for t in ts]

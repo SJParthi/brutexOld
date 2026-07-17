@@ -67,16 +67,16 @@ class TestRootLaws:
         assert IST.key == IST_TZ_NAME
 
     def test_ist_utc_offset_literal(self) -> None:
-        assert IST_UTC_OFFSET == timedelta(hours=5, minutes=30)
+        assert timedelta(hours=5, minutes=30) == IST_UTC_OFFSET
 
     def test_ist_offset_minutes_derives_exactly(self) -> None:
         assert IST_OFFSET_MINUTES == 330
-        assert IST_OFFSET_MINUTES == int(IST_UTC_OFFSET.total_seconds()) // 60
+        assert int(IST_UTC_OFFSET.total_seconds()) // 60 == IST_OFFSET_MINUTES
         # the offset is a whole number of minutes (the // 60 loses nothing)
-        assert IST_UTC_OFFSET == timedelta(minutes=IST_OFFSET_MINUTES)
+        assert timedelta(minutes=IST_OFFSET_MINUTES) == IST_UTC_OFFSET
 
     def test_fixed_offset_family_root(self) -> None:
-        assert IST_FIXED_OFFSET == timezone(timedelta(hours=5, minutes=30))
+        assert timezone(timedelta(hours=5, minutes=30)) == IST_FIXED_OFFSET
         assert IST_FIXED_OFFSET.utcoffset(None) == IST_UTC_OFFSET
         # the unnamed fixed-offset representation (data/parser keeps its own
         # named derivation — see TestPerSwapEquality)
@@ -90,9 +90,7 @@ class TestRootLaws:
             datetime(2026, 12, 31, 18, 30, tzinfo=UTC),
         ],
     )
-    def test_zoneinfo_and_fixed_offset_families_agree_on_utcoffset(
-        self, instant: datetime
-    ) -> None:
+    def test_zoneinfo_and_fixed_offset_families_agree_on_utcoffset(self, instant: datetime) -> None:
         # The cross-FAMILY equality law: Asia/Kolkata is a constant +05:30 zone
         # (no DST since 1945), so for every covered instant the ZoneInfo root's
         # utcoffset equals the fixed-offset root's — the two representations
@@ -109,8 +107,8 @@ class TestRootLaws:
         assert datetime(2024, 1, 2, 9, 15, tzinfo=IST_FIXED_OFFSET).tzname() == "UTC+05:30"
 
     def test_session_roots(self) -> None:
-        assert SESSION_OPEN_IST == time(9, 15)
-        assert SESSION_CLOSE_IST == time(15, 30)
+        assert time(9, 15) == SESSION_OPEN_IST
+        assert time(15, 30) == SESSION_CLOSE_IST
         # the pre-open auction END is the session OPEN — derived, same object
         assert PRE_OPEN_END_IST is SESSION_OPEN_IST
 
@@ -131,33 +129,33 @@ class TestPerSwapEquality:
         assert session.IST is IST
         assert session.SESSION_OPEN is SESSION_OPEN_IST
         assert session.SESSION_CLOSE is SESSION_CLOSE_IST
-        assert session.SESSION_OPEN == time(9, 15)
-        assert session.SESSION_CLOSE == time(15, 30)
+        assert time(9, 15) == session.SESSION_OPEN
+        assert time(15, 30) == session.SESSION_CLOSE
 
     def test_zoneinfo_family_consumers_bind_the_root(self) -> None:
         from brutex.crossverify import config as cv_config
         from brutex.dashboard import db_view
         from brutex.orchestrator import quota_tracker
 
-        assert quota_tracker._IST is IST  # noqa: SLF001
-        assert cv_config._IST is IST  # noqa: SLF001
-        assert db_view._IST is IST  # noqa: SLF001
+        assert quota_tracker._IST is IST
+        assert cv_config._IST is IST
+        assert db_view._IST is IST
 
     def test_ingest_common_binds_the_roots(self) -> None:
         from brutex.adapters import ingest_common
 
-        assert ingest_common._IST_ZONE is IST  # noqa: SLF001
-        assert ingest_common._IST is IST  # noqa: SLF001
-        assert ingest_common._MARKET_CLOSE_IST is SESSION_CLOSE_IST  # noqa: SLF001
-        assert ingest_common._SESSION_OPEN is SESSION_OPEN_IST  # noqa: SLF001
-        assert ingest_common._SYNTHETIC_CAPABILITIES.native_timezone == IST_TZ_NAME  # noqa: SLF001
+        assert ingest_common._IST_ZONE is IST
+        assert ingest_common._IST is IST
+        assert ingest_common._MARKET_CLOSE_IST is SESSION_CLOSE_IST
+        assert ingest_common._SESSION_OPEN is SESSION_OPEN_IST
+        assert ingest_common._SYNTHETIC_CAPABILITIES.native_timezone == IST_TZ_NAME
 
     def test_string_family_consumers_bind_the_root(self) -> None:
         from brutex.dashboard import movers_stored_read
         from brutex.data import bar_screen
 
-        assert movers_stored_read._IST == IST_TZ_NAME  # noqa: SLF001
-        assert bar_screen._IST_TZ == IST_TZ_NAME  # noqa: SLF001
+        assert movers_stored_read._IST == IST_TZ_NAME
+        assert bar_screen._IST_TZ == IST_TZ_NAME
 
     def test_fixed_offset_family_consumers_bind_the_root(self) -> None:
         from brutex.adapters.groww import epoch_verdict
@@ -165,34 +163,34 @@ class TestPerSwapEquality:
         from brutex.backup import run as backup_run
         from brutex.data import greeks_backfill, greeks_enrich, lake_heal, spot_daily_resample
 
-        assert groww_parser._IST is IST_FIXED_OFFSET  # noqa: SLF001
-        assert epoch_verdict._IST_OFFSET is IST_UTC_OFFSET  # noqa: SLF001
-        assert greeks_enrich._IST is IST_FIXED_OFFSET  # noqa: SLF001
-        assert greeks_backfill._IST is IST_FIXED_OFFSET  # noqa: SLF001
-        assert lake_heal._IST is IST_FIXED_OFFSET  # noqa: SLF001
-        assert spot_daily_resample._IST is IST_FIXED_OFFSET  # noqa: SLF001
-        assert backup_run._IST is IST_FIXED_OFFSET  # noqa: SLF001
+        assert groww_parser._IST is IST_FIXED_OFFSET
+        assert epoch_verdict._IST_OFFSET is IST_UTC_OFFSET
+        assert greeks_enrich._IST is IST_FIXED_OFFSET
+        assert greeks_backfill._IST is IST_FIXED_OFFSET
+        assert lake_heal._IST is IST_FIXED_OFFSET
+        assert spot_daily_resample._IST is IST_FIXED_OFFSET
+        assert backup_run._IST is IST_FIXED_OFFSET
 
     def test_data_parser_keeps_its_named_tzname_derived_offset(self) -> None:
         # data/parser's tz keeps its pre-existing name="IST" representation
         # detail (byte-identical tzname) while its OFFSET derives from the root.
         from brutex.data import parser as data_parser
 
-        assert data_parser._IST.utcoffset(None) == IST_UTC_OFFSET  # noqa: SLF001
-        assert data_parser._IST.tzname(None) == "IST"  # noqa: SLF001
+        assert data_parser._IST.utcoffset(None) == IST_UTC_OFFSET
+        assert data_parser._IST.tzname(None) == "IST"
 
     def test_session_open_mirrors_bind_the_root(self) -> None:
         from brutex.dashboard import db_view
         from brutex.data import spot_features
 
-        assert db_view._SESSION_OPEN_IST is SESSION_OPEN_IST  # noqa: SLF001
-        assert spot_features._SESSION_OPEN is SESSION_OPEN_IST  # noqa: SLF001
+        assert db_view._SESSION_OPEN_IST is SESSION_OPEN_IST
+        assert spot_features._SESSION_OPEN is SESSION_OPEN_IST
 
     def test_sweep_scheduler_offset_seconds_derives(self) -> None:
         from brutex.engine.sweep_scheduler import IST_OFFSET_SECONDS
 
         assert IST_OFFSET_SECONDS == 19_800
-        assert IST_OFFSET_SECONDS == int(IST_UTC_OFFSET.total_seconds())
+        assert int(IST_UTC_OFFSET.total_seconds()) == IST_OFFSET_SECONDS
 
     def test_groww_vendor_native_timezone_fact_equals_the_root(self) -> None:
         # The §6 verified-vendor-fact constant stays a literal in
@@ -211,15 +209,15 @@ class TestPerSwapEquality:
         # MIGRATION.md #1929). This pin records the equality without coupling.
         from brutex.data.greeks_enrich import EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST
 
-        assert (EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST) == (
+        assert (
             SESSION_CLOSE_IST.hour,
             SESSION_CLOSE_IST.minute,
-        )
+        ) == (EXPIRY_HOUR_IST, EXPIRY_MINUTE_IST)
 
     def test_db_view_sql_interval_interpolates_the_root(self) -> None:
         # BYTE-IDENTITY: the interpolated SQL fragment equals the historical
         # literal text exactly.
-        from brutex.dashboard.db_view import _IST_TS_EXPR  # noqa: PLC2701
+        from brutex.dashboard.db_view import _IST_TS_EXPR
 
         assert _IST_TS_EXPR == "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')"
         assert f"INTERVAL '{IST_OFFSET_MINUTES} minutes'" in _IST_TS_EXPR
@@ -268,9 +266,9 @@ class TestCrossLanguageDriftPins:
 
     def test_bx_movers_time_js_session_minute_literals(self) -> None:
         src = _source("brutex/dashboard/static/bx-movers-time.js")
-        open_expr = f"var BX_SESSION_OPEN_MIN = {SESSION_OPEN_IST.hour} * 60 + {SESSION_OPEN_IST.minute};"
-        close_expr = (
-            f"var BX_SESSION_CLOSE_MIN = {SESSION_CLOSE_IST.hour} * 60 + {SESSION_CLOSE_IST.minute};"
+        open_expr = (
+            f"var BX_SESSION_OPEN_MIN = {SESSION_OPEN_IST.hour} * 60 + {SESSION_OPEN_IST.minute};"
         )
+        close_expr = f"var BX_SESSION_CLOSE_MIN = {SESSION_CLOSE_IST.hour} * 60 + {SESSION_CLOSE_IST.minute};"
         assert open_expr in src
         assert close_expr in src

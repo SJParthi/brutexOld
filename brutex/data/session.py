@@ -116,6 +116,7 @@ def ist_offset_duration() -> pl.Expr:
     hours, minutes = divmod(IST_OFFSET_MINUTES, 60)
     return pl.duration(hours=hours, minutes=minutes)
 
+
 #: Trading symbols EXEMPT from the 09:15–15:30 IST session filter. **GIFT Nifty**
 #: trades on NSE IX (GIFT City) for ~21 hours, far outside the NSE regular
 #: session, so applying the NSE window would drop almost all of its bars. Its
