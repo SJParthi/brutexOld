@@ -7,9 +7,11 @@ the ASCII pre-gate, the crate-absent / crate-stale latches, the LOCALE-GUARD
 battery (real es_ES/de_DE arm with honest skip + the always-on synthesized
 probe arm + the English-locale MUST-ENGAGE control — the vacuous-pin-OFF
 killer), every degrade arm, the escape-set re-raise, the burn-in mismatch
-autorevert + steady state, EVERY refuse-poison gate row, the strike-reject
-slice-identity arm, the reset seam, the §11 ``env_flag_tristate`` identity
-pin, the single-call-site grep pin, and the mutation-workflow wiring pin.
+autorevert + steady state, EVERY refuse-poison gate row, the BURN-IN-POLICED
+strike-reject arm (matching-None no-latch + the poisoned-span autorevert
+killing test + the post-burn-in envelope twin — the round-1 review-fix fold),
+the reset seam, the §11 ``env_flag_tristate`` identity pin, the
+single-call-site grep pin, and the mutation-workflow wiring pin.
 """
 
 from __future__ import annotations
@@ -550,15 +552,76 @@ class TestRoutedFlow:
     def test_strike_reject_returns_none_by_slice_identity(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The disclosed pre-burn-in return: junk strike token — the crate
-        # reports the span, the SHARED strike law rejects, facade None ⟺
-        # oracle None by slice identity.
+        # Junk strike token — the crate reports the CORRECT span, the SHARED
+        # strike law rejects, facade None ⟺ oracle None by slice identity.
+        # Since the round-1 review-fix fold this arm falls THROUGH to the
+        # burn-in compare (None vs None → equal), so it must NOT autorevert.
         _flag_on(monkeypatch)
         _english_probe(monkeypatch)
         sym = "NSE-NIFTY-30Sep25-abc-CE"
         _install_crate(monkeypatch, _fake_crate(coords=(1, 3, 4, 9, 2025, 9, 30, 18, 21)))
         assert _routed(sym) is None
         assert _parse_fno_symbol_python(sym) is None
+        assert fsr.data_rust_disabled() is False  # a matching None never latches
+
+    def test_strike_reject_poisoned_span_autoreverts_during_burn_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # THE round-1 review-fix killing test (MINOR): a drifted/poisoned
+        # wheel returns a STRUCTURALLY-valid 9-tuple whose strike span points
+        # at the in-bounds non-numeric EXPIRY token ("30Sep25") for a CE
+        # symbol the ORACLE ACCEPTS. Pre-fix the strike-reject arm returned
+        # None BEFORE the burn-in compare — an uncaught FALSE-REJECT with no
+        # autorevert. Post-fix the arm burn-in-compares like every decision:
+        # the ORACLE value ships, the autorevert latch trips, ONE
+        # `fno_symbol_rust.autoreverted` ERROR is logged.
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        # CE_SYM spans: expiry token = [10:17] ("30Sep25") — non-numeric,
+        # in-bounds, non-empty ⇒ passes the structural gate; strike_law → None.
+        poisoned = (1, 3, 4, 9, 2025, 9, 30, 10, 17)
+        _install_crate(monkeypatch, _fake_crate(coords=poisoned))
+        oracle_value = _parse_fno_symbol_python(CE_SYM)
+        assert oracle_value is not None  # the oracle ACCEPTS this symbol
+        with capture_logs() as logs:
+            result = _routed(CE_SYM)
+        assert result == oracle_value  # the ORACLE value ships, never None
+        assert fsr.data_rust_disabled() is True
+        assert fsr._DISABLED_REASON[0] == "burn_in_mismatch_parse"
+        errors = [e for e in logs if e["event"] == "fno_symbol_rust.autoreverted"]
+        assert len(errors) == 1
+        assert errors[0]["rust_result"] == repr(None)
+
+    def test_strike_reject_post_burn_in_ships_within_burned_in_envelope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The post-burn-in twin documenting the STANDARD burned-in envelope:
+        # a healthy crate can never produce this shape (its strike span IS
+        # parts[-2], and burn-in would have caught the drift inside the
+        # window), so the shape is forced via the fake-crate seam with
+        # `remaining=0` — modelling a wheel that drifted AFTER burn-in
+        # completed. Post-burn-in NO decision is oracle-compared (the
+        # steady-state contract every burned-in arm shares), so the arm
+        # ships None uncompared with the oracle provably OUT of the path —
+        # the same residual as every other burned-in decision, no
+        # special-case disclaimer.
+        _flag_on(monkeypatch)
+        _english_probe(monkeypatch)
+        poisoned = (1, 3, 4, 9, 2025, 9, 30, 10, 17)
+        _install_crate(monkeypatch, _fake_crate(coords=poisoned))
+        fsr.reset_fno_symbol_rust_for_tests(remaining=0)
+
+        def _law_bomb(symbol: str) -> FnoSymbolParts | None:
+            raise AssertionError("steady state must not call the oracle")
+
+        result = fsr.routed_parse_fno_symbol(
+            CE_SYM,
+            python_law=_law_bomb,
+            strike_law=parse_strike_token,
+            build_parts=FnoSymbolParts,
+        )
+        assert result is None
+        assert fsr.data_rust_disabled() is False  # no compare ⇒ no latch
 
     def test_burn_in_mismatch_ships_oracle_and_autoreverts(
         self, monkeypatch: pytest.MonkeyPatch

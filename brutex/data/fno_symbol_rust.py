@@ -94,12 +94,18 @@ constructor. The facade never imports ``fno_symbol`` at runtime (no cycle
   span-law drift — exactly what burn-in must catch). ANY difference ships
   the ORACLE value and autoreverts for the process (ERROR log — the
   #1531/#1532 pattern). ``None`` results burn-in-compare too (a Rust
-  false-reject is as wrong as a false-accept). ONE disclosed exception:
-  the option strike-reject arm (the injected ``strike_law`` returning
-  ``None``) returns BEFORE the compare — harmless by SLICE-IDENTITY (the
-  Rust-located strike token IS ``parts[-2]``, both arms feed the SAME
-  token to the SAME injected law, so facade-``None`` ⟺ oracle-``None``
-  and the arm can only ever return ``None``, never a wrong value).
+  false-reject is as wrong as a false-accept) — INCLUDING the option
+  strike-reject arm (the injected ``strike_law`` returning ``None`` on
+  the Rust-located token): during the burn-in window that ``None`` is
+  compared against the live oracle exactly like every other decision, so
+  a drifted/poisoned wheel that points the strike span at an in-bounds
+  NON-numeric token for an option the oracle ACCEPTS trips the autorevert
+  (the oracle value ships) instead of shipping a silent false-reject —
+  the round-1 review-fix fold. Post-burn-in the arm ships inside the SAME
+  burned-in envelope as every other decision (a healthy burned-in crate's
+  strike token IS ``parts[-2]``, so facade-``None`` ⟺ oracle-``None`` by
+  slice identity; no special-case disclaimer beyond the standard burn-in
+  residual applies).
 
 ## Honesty (ADR-0020 banner; CLAUDE.md Golden Rule #10)
 
@@ -554,22 +560,29 @@ def routed_parse_fno_symbol(
             return python_law(symbol)
         instrument_type, option_type = _TYPE_TABLE[type_code]
         strike: Decimal | None = None
+        strike_rejected = False
         if type_code != 0:
             strike = strike_law(symbol[s_start:s_end])
-            if strike is None:
-                # SLICE-IDENTITY (module docstring): the Rust-located token
-                # IS parts[-2]; both arms call the SAME injected law, so
-                # facade-None ⟺ oracle-None — ships without a burn-in
-                # compare (disclosed; the arm can only ever return None).
-                return None
-        rust_result = build_parts(
-            exchange=symbol[:exchange_end],
-            underlying=symbol[u_start:u_end],
-            expiry=expiry,
-            instrument_type=instrument_type,
-            strike=strike,
-            option_type=option_type,
-        )
+            strike_rejected = strike is None
+        if strike_rejected:
+            # Option strike-token reject: the Rust-located span materialized
+            # to a token the SHARED injected law refuses. Falls THROUGH to
+            # the burn-in compare like every other decision (the round-1
+            # review-fix fold — module docstring): a drifted/poisoned wheel
+            # pointing the strike span at an in-bounds non-numeric token for
+            # an oracle-ACCEPTED option is a false-reject the burn-in window
+            # catches (autorevert + ship the oracle); post-burn-in the arm
+            # ships within the same burned-in envelope as every decision.
+            rust_result = None
+        else:
+            rust_result = build_parts(
+                exchange=symbol[:exchange_end],
+                underlying=symbol[u_start:u_end],
+                expiry=expiry,
+                instrument_type=instrument_type,
+                strike=strike,
+                option_type=option_type,
+            )
 
     _log_engaged_once(crate)
     if _BURN_IN_REMAINING[_LAW_PARSE] > 0:
