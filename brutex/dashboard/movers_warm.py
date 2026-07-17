@@ -11,11 +11,14 @@ cold lake scan.
 ## No illusion (Golden Rule #1)
 
 The warm targets the **latest day that actually has data** (``latest_movers_date`` — the
-MAX spot ``1day`` bar's IST date), NEVER "today": the just-finished historical pull fills
-the lake only to the PREVIOUS trading day, so warming today's coordinate would cache
-EMPTY snapshots (`compute_spot_candidates` reads the exact requested date — no fallback).
-If the lake has no spot ``1day`` data yet (`latest_movers_date` is ``None``), nothing is
-warmed and ``0`` is returned — an honest "warmed nothing", never a fabricated snapshot.
+MAX spot IST date over the **1-minute base** ∪ the derived ``1day`` partitions;
+DEC-MOVERS-DAILY-FRESHNESS-001 repointed it at the 1-minute source of truth so a
+post-prebuild 1-minute append moves the default date), NEVER "today": the just-finished
+historical pull fills the lake only to the PREVIOUS trading day, so warming today's
+coordinate would cache EMPTY snapshots (`compute_spot_candidates` reads the exact
+requested date — no fallback). If the lake has no spot data yet in EITHER source
+(`latest_movers_date` is ``None``), nothing is warmed and ``0`` is returned — an honest
+"warmed nothing", never a fabricated snapshot.
 
 ## Best-effort (the pull's success is never compromised)
 
@@ -49,6 +52,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -131,6 +135,11 @@ _DAILY_INTERVAL = "1day"
 #: Groww serves — DEC-1MINUTE-ONLY-DERIVE-1DAY-001; the derived TFs never carry a
 #: finer minute than their 1-minute base).
 _MINUTE_INTERVAL = "1minute"
+#: The writer's canonical zero-padded month-partition name parts
+#: (`<yyyy>/<mm>.parquet` — the lake layout law), ASCII-anchored so a
+#: Unicode-digit dir name can never parse (the #1614 round-3 lesson).
+_CANONICAL_YEAR_RE: Final = re.compile(r"\d{4}", re.ASCII)
+_CANONICAL_MONTH_RE: Final = re.compile(r"\d{2}", re.ASCII)
 
 #: The exchange scopes the post-pull warmer pre-warms (DEC-MOVERS-WARM-GRID-001): the
 #: all-exchange population (``None``) PLUS the two per-exchange scopes the operator can
@@ -192,17 +201,106 @@ def options_warm_grid() -> list[dict[str, str | None]]:
     ]
 
 
-def latest_movers_date(lake_root: Path) -> str | None:
-    """Return the IST date (ISO ``YYYY-MM-DD``) of the most recent spot ``1day`` bar, or ``None``.
+def _max_ist_date_over_globs(globs: list[str], *, event: str) -> str | None:
+    """``MAX(IST date)`` over the parquet *globs*, or ``None`` (empty/unreadable).
 
-    Scans the spot ``1day`` partitions (INDEX + CASH) for ``MAX("timestamp")`` and converts
-    that instant to its IST calendar date — the latest day the movers default snapshot can
-    show WITH DATA. ``None`` when the lake has no spot ``1day`` files yet (so the caller
-    warms nothing rather than an empty "today" snapshot). Opens its own short-lived DuckDB
+    The ONE guarded DuckDB reduction the two :func:`latest_movers_date` sources
+    share (CLAUDE.md §11 COMMON — the 1-day scan and the 1-minute latest-month
+    scan differ only in WHICH files they bind). Opens its own short-lived
     connection (self-contained, like the ``compute_*_candidates`` readers).
 
-    The read is bounded to the ``1day`` partitions (intrinsically tiny — one row per trading
-    day per symbol), never the multi-year 1-minute lake.
+    GAP #4 (resilience): a single corrupt / unreadable Parquet under a glob makes
+    DuckDB raise a `duckdb.Error` (an `InvalidInputException` — "No magic bytes …")
+    or an `OSError` fault; this read backs the DEFAULT `/movers` poll, so an
+    unguarded raise would 500 the whole page on every open. Treat an unreadable
+    lake the same as an empty one — return ``None`` so the route degrades to an
+    honest empty/today payload instead of crashing (Golden Rule #1 / #10).
+    NARROW: a code bug still propagates. *event* names the WARN per source.
+    """
+    import duckdb
+
+    if not globs:
+        return None
+    try:
+        with duckdb.connect() as conn:
+            # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
+            # thread pool (DuckDB defaults to ALL logical cores per connection).
+            # Honest tradeoff: an ISOLATED run on an idle box now scans at
+            # physical//2 — accepted, because the warm fires right after a
+            # pull (prebuild/writer activity) and the bound reads are small
+            # (the tiny spot 1day partitions / ONE month of spot 1-minute).
+            apply_duckdb_thread_bound(conn)
+            row = conn.execute(
+                "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
+                "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter
+                [globs],
+            ).fetchone()
+    except (duckdb.Error, OSError) as exc:
+        _LOG.warning(event, error=str(exc))
+        return None
+    return str(row[0]) if row is not None and row[0] is not None else None
+
+
+def _latest_spot_month(lake_root: Path) -> tuple[int, int] | None:
+    """The lexicographically-latest ``(year, month)`` spot 1-minute partition, or ``None``.
+
+    A NAMES-ONLY filesystem enumeration of the spot ``1minute`` month files
+    (``…/1minute/<yyyy>/<mm>.parquet`` — the lake layout law): the latest
+    1-minute bar necessarily lives in the max ``(year, month)`` UTC partition,
+    so the DuckDB date reduction afterwards binds ONLY that one month's files
+    (the :func:`latest_movers_minute` month-prune idiom) instead of the whole
+    multi-year 1-minute lake. Non-canonical names (non-ASCII-digit year/month
+    dirs — the #1614 Unicode-digit lesson) are skipped, never crashed on.
+    Honest cost (Golden Rule #10): O(spot 1-minute files) directory-entry
+    names per call — no parquet is opened here; the route memoises the caller
+    per write generation.
+    """
+    latest: tuple[int, int] | None = None
+    bars = lake_root / "bars"
+    if not bars.is_dir():
+        return None
+    for seg in _SPOT_SEGMENTS:
+        for path in bars.glob(f"*/{seg}/*/{_MINUTE_INTERVAL}/*/*.parquet"):
+            year_text, month_text = path.parent.name, path.stem
+            # Only the writer's CANONICAL zero-padded `<yyyy>/<mm>.parquet`
+            # stem parses (the #1558 round-5/8 law; ASCII-anchored per the
+            # #1614 round-3 Unicode-digit lesson): a junk `2024/6.parquet`
+            # would bind a `06.parquet` glob that misses itself — skip it
+            # here so the month key and the glob always agree.
+            if not (
+                _CANONICAL_YEAR_RE.fullmatch(year_text)
+                and _CANONICAL_MONTH_RE.fullmatch(month_text)
+            ):
+                continue
+            key = (int(year_text), int(month_text))
+            if latest is None or key > latest:
+                latest = key
+    return latest
+
+
+def latest_movers_date(lake_root: Path) -> str | None:
+    """Return the IST date (ISO ``YYYY-MM-DD``) of the most recent spot bar, or ``None``.
+
+    DEC-MOVERS-DAILY-FRESHNESS-001: the latest day the movers default snapshot
+    can show WITH DATA — resolved from the **1-minute base** (the ONLY fetched
+    granularity, the source of truth — DEC-1MINUTE-ONLY-DERIVE-1DAY-001) so a
+    post-prebuild 1-minute append MOVES the default date to the new day instead
+    of freezing it at the last prebuilt ``1day`` bar (the pre-fix read scanned
+    ONLY the derived ``1day`` partitions, which the pipeline's final prebuild
+    alone rewrites — a stale default day beside fresh 1-minute data). The
+    derived ``1day`` scan is KEPT as the second source and the answer is the
+    MAX of the two, so a 1day-only / legacy lake keeps its "latest AVAILABLE
+    day, never an empty today" honesty (``None`` only when BOTH sources are
+    empty — the caller then warms nothing rather than an empty "today"
+    snapshot).
+
+    The 1-minute source is month-pruned (:func:`_latest_spot_month` — a
+    names-only enumeration finds the max ``(year, month)`` partition, then ONE
+    DuckDB ``MAX`` binds only that month's spot files, the
+    :func:`latest_movers_minute` idiom); the ``1day`` source stays bounded to
+    the intrinsically tiny daily partitions. Each source is guarded
+    independently (corrupt/unreadable ⇒ that source reads ``None`` + one WARN,
+    never a 500 — :func:`_max_ist_date_over_globs`).
 
     Parameters
     ----------
@@ -212,48 +310,35 @@ def latest_movers_date(lake_root: Path) -> str | None:
     Returns
     -------
     str | None
-        The latest spot ``1day`` IST date as ``YYYY-MM-DD``, or ``None`` if absent.
+        The latest spot IST date as ``YYYY-MM-DD`` over the 1-minute base ∪
+        the derived ``1day`` partitions, or ``None`` if both are absent.
     """
-    import duckdb
-
     # Only query the segments that actually have at least one file — read_parquet raises
     # "No files found" on an empty glob, which we treat as "no data" (None), not an error.
-    present = [
+    daily_globs = [
         (lake_root / "bars" / "*" / seg / "*" / _DAILY_INTERVAL).as_posix() + "/**/*.parquet"
         for seg in _SPOT_SEGMENTS
         if (lake_root / "bars").is_dir()
         and any((lake_root / "bars").glob(f"*/{seg}/*/{_DAILY_INTERVAL}/**/*.parquet"))
     ]
-    if not present:
-        return None
-    # MAX over the present spot 1day globs → the latest instant; convert to its IST date.
-    # `present` is non-empty so the aggregate has rows; the None-guard is a single-line
-    # ternary (a defensive narrow for the type checker, never a partial-branch miss).
-    #
-    # GAP #4 (resilience): a single corrupt / unreadable 1day Parquet under the glob makes
-    # DuckDB raise a `duckdb.Error` (an `InvalidInputException` — "No magic bytes …") or an
-    # `OSError` fault; this read backs the DEFAULT `/movers` poll, so an unguarded raise
-    # would 500 the whole page on every open. Treat an unreadable lake the same as an empty
-    # one — return `None` so the route degrades to an honest empty/today payload instead of
-    # crashing (Golden Rule #1 / #10). NARROW: a code bug still propagates.
-    try:
-        with duckdb.connect() as conn:
-            # DEC-THREAD-BUDGET-BOUNDS-001 — bound this ephemeral connection's
-            # thread pool (DuckDB defaults to ALL logical cores per connection).
-            # Honest tradeoff: an ISOLATED run on an idle box now scans at
-            # physical//2 — accepted, because the warm fires right after a
-            # pull (prebuild/writer activity) and reads only the tiny spot
-            # 1day partitions.
-            apply_duckdb_thread_bound(conn)
-            row = conn.execute(
-                "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
-                "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter
-                [present],
-            ).fetchone()
-    except (duckdb.Error, OSError) as exc:
-        _LOG.warning("movers.latest_date.unreadable_lake", error=str(exc))
-        return None
-    return str(row[0]) if row is not None and row[0] is not None else None
+    daily_latest = _max_ist_date_over_globs(daily_globs, event="movers.latest_date.unreadable_lake")
+    minute_latest: str | None = None
+    latest_month = _latest_spot_month(lake_root)
+    if latest_month is not None:
+        year, month = latest_month
+        month_glob = f"{_MINUTE_INTERVAL}/{year:04d}/{month:02d}.parquet"
+        minute_globs = [
+            (lake_root / "bars" / "*" / seg / "*" / month_glob).as_posix()
+            for seg in _SPOT_SEGMENTS
+            if any((lake_root / "bars").glob(f"*/{seg}/*/{month_glob}"))
+        ]
+        minute_latest = _max_ist_date_over_globs(
+            minute_globs, event="movers.latest_minute_date.unreadable_lake"
+        )
+    # ISO dates compare lexicographically in calendar order — MAX of the two
+    # sources is the honest "latest available day" whichever holds it.
+    candidates = [d for d in (daily_latest, minute_latest) if d is not None]
+    return max(candidates) if candidates else None
 
 
 def latest_movers_minute(lake_root: Path, day: date_cls) -> str | None:

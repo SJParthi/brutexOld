@@ -67,6 +67,7 @@ the module stays importable wheel-free).
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import TYPE_CHECKING, Final
 
 from brutex.data.errors import ResampleInputError
@@ -76,6 +77,33 @@ if TYPE_CHECKING:
 
 #: The four OHLC price columns every stored bar frame carries.
 PRICE_SANITY_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
+
+#: Exact epoch offsets (microseconds) of ``datetime.min`` / ``datetime.max`` —
+#: the Python-representable datetime range every stored ``Datetime`` value must
+#: convert into. Pure integer ``timedelta`` arithmetic (never float seconds), so
+#: both bounds are EXACT (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001).
+_EPOCH_NAIVE: Final[datetime] = datetime(1970, 1, 1)
+
+
+def _epoch_offset_us(instant: datetime) -> int:
+    """*instant*'s exact epoch offset in whole microseconds (naive wall-clock)."""
+    delta = instant - _EPOCH_NAIVE
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+_DATETIME_MIN_US: Final[int] = _epoch_offset_us(datetime.min)
+_DATETIME_MAX_US: Final[int] = _epoch_offset_us(datetime.max)
+
+#: Per-``polars.Datetime`` time-unit physical (i64 epoch-offset) bounds of the
+#: Python-representable datetime range. ``ms`` floors ``datetime.max`` to the
+#: last whole millisecond (any ms value ≤ it round-trips; ``datetime.min`` is a
+#: whole day, so its floor division is exact); ``ns`` bounds exceed i64 — every
+#: storable ns value is representable, the check is vacuously true there.
+_TS_UNIT_BOUNDS: Final[dict[str, tuple[int, int]]] = {
+    "us": (_DATETIME_MIN_US, _DATETIME_MAX_US),
+    "ms": (_DATETIME_MIN_US // 1_000, _DATETIME_MAX_US // 1_000),
+    "ns": (_DATETIME_MIN_US * 1_000, _DATETIME_MAX_US * 1_000),
+}
 
 
 def price_violation_expr() -> pl.Expr:
@@ -258,10 +286,96 @@ def validate_frame_price_sanity(
     )
 
 
+def validate_frame_ts_datetime_range(
+    df: pl.DataFrame, *, ts_column: str = "ts_utc", context: str = ""
+) -> None:
+    """Raise LOUDLY when *df*'s timestamp column holds an out-of-``datetime``-range value.
+
+    The read-boundary TIMESTAMP twin of :func:`validate_frame_price_sanity`
+    (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, porting the #1594 round-18
+    out-of-range law to the SPOT derive readers): a stored ``Datetime`` column
+    can physically hold an i64 value no Python ``datetime`` can represent
+    (e.g. a hand-planted ``2**62``-microsecond stamp — ~year 148108, far past
+    ``datetime.max``). Such a value survives the vectorized resample
+    (``group_by_dynamic`` never converts to Python) and then PANICS the
+    Rust→Python conversion at ``Series.to_list()`` /
+    ``Series.__getitem__`` as ``pyo3_runtime.PanicException`` — a
+    **BaseException** that sails past every ``except Exception`` per-symbol
+    quarantine (executed-repro'd: ONE poisoned symbol aborted the WHOLE
+    crossverify prebuild leg, every later symbol skipped). This gate refuses
+    the frame FIRST, deterministically, with the typed quarantining
+    :class:`~brutex.data.errors.ResampleInputError`.
+
+    Mechanism (one vectorized pass, no exception-shape dependence — the
+    integer-bounds arm of the two #1594 round-18 idioms):
+    ``Series.to_physical()`` views the column as raw i64 epoch offsets (never
+    a Python ``datetime`` conversion, so the probe itself can NEVER panic) and
+    compares its min/max against the EXACT Python-representable bounds for the
+    column's time unit (:data:`_TS_UNIT_BOUNDS`). Nulls are skipped
+    (min/max ignore them — the resampler's own null guard owns that class);
+    an absent *ts_column*, an all-null column, or a non-``Datetime`` dtype
+    (out-of-band shapes no lake writer produces) return without raising —
+    downstream typed handling owns those. Boundary-EXACT: a stored
+    ``datetime.max`` / ``datetime.min`` passes (both convert cleanly).
+
+    Callers run this BEFORE :func:`validate_frame_price_sanity` — the price
+    gate's first-offender message indexes the timestamp column
+    (``violations[ts_column][0]``), which would itself panic on an
+    out-of-range value.
+
+    Parameters
+    ----------
+    df
+        The frame to validate (any frame carrying a ``Datetime`` *ts_column*).
+    ts_column
+        The frame's timestamp column name (the lake readers use ``ts_utc``).
+    context
+        Human-readable origin (e.g. ``"NSE/INDEX/NIFTY/1minute"``) woven into
+        the error message.
+
+    Raises
+    ------
+    ResampleInputError
+        When at least one timestamp lies outside the Python-representable
+        datetime range for the column's unit.
+    """
+    import polars as pl
+
+    if df.height == 0 or ts_column not in df.columns:
+        return
+    dtype = df.schema[ts_column]
+    if not isinstance(dtype, pl.Datetime):
+        return
+    low, high = _TS_UNIT_BOUNDS[dtype.time_unit]
+    physical = df.get_column(ts_column).to_physical()
+    ts_min = physical.min()
+    ts_max = physical.max()
+    if not isinstance(ts_min, int) or not isinstance(ts_max, int):
+        # All-null timestamps (min/max read None) — the resampler's own null
+        # guard owns that class. The isinstance narrowing is also the typing
+        # truth: an Int64 physical view's min/max is a Python int or None.
+        return
+    if low <= ts_min and ts_max <= high:
+        return
+    offenders = physical.filter((physical < low) | (physical > high))
+    origin = f" in {context}" if context else ""
+    raise ResampleInputError(
+        f"stored bars{origin} carry {offenders.len()} timestamp(s) outside the "
+        f"representable datetime range; first offender physical value "
+        f"{offenders[0]} ({dtype.time_unit!r} since epoch). Refusing to derive "
+        f"timeframes from corrupt input — an out-of-range stored timestamp "
+        f"panics the Rust→Python datetime conversion (pyo3 PanicException, a "
+        f"BaseException no `except Exception` guard stops) "
+        f"(DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001). Heal or re-pull the "
+        f"symbol's 1-minute partition."
+    )
+
+
 __all__ = [
     "PRICE_SANITY_COLUMNS",
     "count_price_violations",
     "price_row_insane",
     "price_violation_expr",
     "validate_frame_price_sanity",
+    "validate_frame_ts_datetime_range",
 ]
