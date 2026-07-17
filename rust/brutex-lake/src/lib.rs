@@ -99,6 +99,16 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+// Wave-B resample core (ADR-0020 slice G5, DEC-LAKE-RUST-RESAMPLE-001) —
+// own module file; registration lines only in this file (sibling Wave
+// slices extend the same crate additively).
+pub mod resample;
+// ADR-0020 Wave C row 4 (+ the row-5 rider): the canonical stats-shard JSON
+// render + the crate-internal partition twins — DEC-LAKE-RUST-STATS-MANIFEST-001
+// (MIGRATION.md #1914). ADDITIVE registration (§4.1 sibling merge law).
+pub mod stats_shard;
+pub mod window_ledger;
+
 /// Crate version (semver). Bumped on any breaking change.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -325,6 +335,18 @@ fn _brutex_lake(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_parquet_from_ipc, m)?)?;
     m.add_function(wrap_pyfunction!(pinned_polars_version, m)?)?;
     m.add_function(wrap_pyfunction!(linked_zstd_version, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::resample_1m_ipc, m)?)?;
+    m.add_function(wrap_pyfunction!(resample::resample_all_ipc, m)?)?;
+    // Appended AFTER the PR-1 trio, never reordering them (§4.1 — the
+    // concurrent-sibling additive-registration merge law).
+    m.add_function(wrap_pyfunction!(stats_shard::render_stats_shard_json, m)?)?;
+    // Wave C-3 (G8) — the window-ledger pure laws (window_ledger.rs; the
+    // facade `brutex/data/window_ledger_rust.py` engages them behind the
+    // default-OFF BRUTEX_LAKE_RUST_WINDOW_LEDGER via a SYMBOL handshake —
+    // these two names present + callable — never the polars version guard,
+    // which is irrelevant to a polars-free law).
+    m.add_function(wrap_pyfunction!(window_ledger::classify_window_status, m)?)?;
+    m.add_function(wrap_pyfunction!(window_ledger::date_isoformat, m)?)?;
     Ok(())
 }
 
