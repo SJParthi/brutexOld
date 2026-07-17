@@ -674,7 +674,27 @@ class TestConftestBelt:
         conftest = Path(__file__).resolve().parents[1] / "conftest.py"
         source = conftest.read_text(encoding="utf-8")
         assert 'os.environ.setdefault(STRATEGIES_RUST_COMBO_ENV, "0")' in source
-        assert "from brutex.strategies.combo_rust import STRATEGIES_RUST_COMBO_ENV" in source
+        assert "from brutex.strategies import combo_rust as _combo_rust" in source
+
+    def test_wheel_less_fallback_literal_matches_the_constant(self) -> None:
+        # WHEEL-FREE DISCIPLINE drift pin: conftest.py must stay importable
+        # in the wheel-LESS lanes (lake-rust-parity installs only the
+        # brutex-lake wheel; redteam-nightly installs only ``.[dev]``) —
+        # importing ``brutex.strategies.combo_rust`` there raises
+        # ``ModuleNotFoundError: No module named 'fno_math'`` via the
+        # package __init__ (reproduced red: actions run 29599656943,
+        # 2026-07-17). The belt therefore guards the import and falls back
+        # to a literal; THIS pin (running in the wheel-PRESENT lanes) is
+        # what keeps the fallback literal equal to the real constant.
+        conftest = Path(__file__).resolve().parents[1] / "conftest.py"
+        source = conftest.read_text(encoding="utf-8")
+        assert "except ModuleNotFoundError:" in source
+        assert "if _combo_rust is None" in source
+        # The quoted fallback literal (the belt comment uses backticks, so the
+        # double-quoted form appears ONLY in the fallback expression).
+        assert f'"{cr.STRATEGIES_RUST_COMBO_ENV}"' in source, (
+            "conftest's wheel-less fallback literal drifted from the combo_rust constant"
+        )
 
 
 class TestMutationWorkflowWiring:
