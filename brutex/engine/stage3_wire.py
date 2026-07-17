@@ -108,7 +108,7 @@ from brutex.metrics.lockbox import LOCKBOX_DEFAULT_WINDOW_DAYS
 from brutex.models import BruteXError
 from brutex.ranking import RankedCombo
 from brutex.strategies.types import FibAnchorKind, PriceSourceCell, Side
-from brutex.vocabulary import ProximityParams
+from brutex.vocabulary import DEFAULT_SWING_PROXIMITY_BPS, ProximityParams
 
 if TYPE_CHECKING:
     # Annotation-only — keeps brutex.orchestrator.audit (and anything it pulls)
@@ -503,16 +503,25 @@ class Stage3PassReport:
     cells_conflicted: int = 0
 
 
-def _cell_sort_key(cell: SweepTuple) -> tuple[str, str, str, int, int, int, tuple[int, int, int]]:
-    """Deterministic ordering key for refined-cell writes (Golden Rule #4)."""
+def _cell_sort_key(
+    cell: SweepTuple,
+) -> tuple[str, str, str, int, int, int, tuple[int, int, int, int]]:
+    """Deterministic ordering key for refined-cell writes (Golden Rule #4).
+
+    The proximity leg carries FOUR members since DEC-FIB-TEMPLATE-EXPRESS-001
+    (the swing band appended last) so two cells differing only by
+    ``swing_proximity_bps`` order deterministically; at the default the fourth
+    member is constant, leaving the pre-axis order byte-identical.
+    """
     proximity = cell.proximity
     prox_key = (
-        (-1, -1, -1)
+        (-1, -1, -1, -1)
         if proximity is None
         else (
             proximity.pivot_proximity_bps,
             proximity.pdh_pdl_proximity_bps,
             proximity.fib_proximity_bps,
+            proximity.swing_proximity_bps,
         )
     )
     return (
@@ -953,6 +962,11 @@ def cascade_specs_for_refined_cells(
                 proximity.fib_proximity_bps,
             )
         )
+        swing_bps = (
+            DEFAULT_SWING_PROXIMITY_BPS
+            if proximity is None
+            else proximity.swing_proximity_bps
+        )
         spec = spec_from_store_rows(
             instrument=tuple_.instrument,
             tf_label=tuple_.tf.label,
@@ -968,6 +982,7 @@ def cascade_specs_for_refined_cells(
             fib_anchor=tuple_.fib_anchor,
             vwap_source=tuple_.price_source.vwap_source,
             ema_source=tuple_.price_source.ema_source,
+            swing_proximity_bps=swing_bps,
         )
         if spec is not None:
             specs.append(spec)
@@ -1048,6 +1063,11 @@ def stage3_manifest_record(
                 fib_anchor=tuple_.fib_anchor,
                 vwap_source=tuple_.price_source.vwap_source,
                 ema_source=tuple_.price_source.ema_source,
+                swing_proximity_bps=(
+                    DEFAULT_SWING_PROXIMITY_BPS
+                    if proximity is None
+                    else proximity.swing_proximity_bps
+                ),
             )
         )
     return Stage3ManifestRecord(

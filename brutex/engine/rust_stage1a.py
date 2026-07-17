@@ -132,7 +132,7 @@ class Stage1ABatchInputs:
     Filled by ``Stage1AMatrixBuilder.collect_batch_inputs`` (the prepass that
     drives the builder's OWN roll/day/anchor machinery) and consumed 1:1 by
     ``trading_core.stage1a_bar_bits_batch``. Per-bar columns share one length
-    ``N``; the day tables carry ``12·D`` / ``15·D`` flattened evaluator-ABI
+    ``N``; the day tables carry ``12·D`` / ``19·D`` flattened evaluator-ABI
     rows plus per-day warm flags. The three ``*_mask`` fields are the POSITIVE
     Python constants (``stage1a.ANCHOR_DEPENDENT_MASK`` /
     ``stage1a.FIB_DEPENDENT_MASK`` / ``bits.APPLIES_TO_1DAY_MASK``) — Rust
@@ -156,6 +156,9 @@ class Stage1ABatchInputs:
     pivot_bps: int
     pdh_pdl_bps: int
     fib_bps: int
+    #: Swing-proximity band for the near-swing bits 72/73
+    #: (DEC-FIB-TEMPLATE-EXPRESS-001) — beside the sibling bps scalars.
+    swing_bps: int
     prior_n: int
     fractal_k: int
     apply_1day_mask: bool
@@ -347,6 +350,7 @@ def rust_bar_bits_or_none(
             inputs.pivot_bps,
             inputs.pdh_pdl_bps,
             inputs.fib_bps,
+            inputs.swing_bps,
             inputs.prior_n,
             inputs.anchor_dependent_mask,
             inputs.fib_dependent_mask,

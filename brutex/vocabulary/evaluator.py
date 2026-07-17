@@ -1,15 +1,16 @@
-"""The 66-condition evaluator — a thin marshalling shim over the shared Rust core.
+"""The 74-condition evaluator — a thin marshalling shim over the shared Rust core.
 
 Takes an `IndicatorSnapshot` (all per-bar indicator values) plus proximity
 parameters and prior-bar history, and returns a u128 bitmask where bit `i` is set
-iff condition `i` is true. The vocabulary currently declares bits 0..65 (66
-conditions — 62 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones and the
-SuperTrend bits 64/65 are declared layout-only, `implemented=false`), with
-headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
+iff condition `i` is true. The vocabulary currently declares bits 0..73 (74
+conditions — 67 ACTIVE: the VWAP bits 52/53 are RETIRED tombstones, the
+SuperTrend bits 64/65 are declared layout-only `implemented=false`, and bits
+66-68 are the reserved DEC-GAP-MIDPOINT-CONDITIONS-001 placeholders dropped at
+re-stack), with headroom to bit 127 (DEC-VOCAB-U128-CODEGEN-001).
 
 Per `docs/TRACK1_VOCABULARY.md` definitions. As of `DEC-SHARED-CORE-001`
-Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then, 60,
-now 66 — DEC-VOCAB-U128-CODEGEN-001 grew the vocabulary) lives ONCE, in
+Phase 2b (`docs/MIGRATION.md` #441) the condition logic itself (52 then 60,
+then 66, now 74 — DEC-FIB-TEMPLATE-EXPRESS-001 grew it last) lives ONCE, in
 the Rust `trading-core` crate (`rust/trading-core/`), and is consumed by BOTH
 BruteX (this repo, via the PyO3 `trading_core` wheel) AND TickVault (native
 Rust). This module no longer reimplements the conditions — it marshals the
@@ -84,6 +85,22 @@ class IndicatorSnapshot:
     # keeps working unchanged (the Group-12 bits then simply do not fire).
     market_structure: MarketStructureSignal = field(default_factory=MarketStructureSignal)
 
+    # The last k-confirmed swing HIGH/LOW levels (int64 paisa) for the
+    # Swing-Proximity bits 72/73 (DEC-FIB-TEMPLATE-EXPRESS-001), read from the
+    # SAME look-ahead-clean ``trading_core.MarketStructureState`` AFTER its
+    # per-bar ``update`` (a swing is confirmed only k bars later, all at index
+    # <= N). Defaulted ``None`` — every pre-existing snapshot caller keeps
+    # working and the two bits simply do not fire (never fabricated); a
+    # contract-roll hard reset returns them to ``None`` automatically.
+    last_swing_high_paisa: int | None = None
+    last_swing_low_paisa: int | None = None
+
+
+#: The production default for :attr:`ProximityParams.swing_proximity_bps`
+#: (10 bps — the sibling knobs' default). The ONE constant every default-omit
+#: emission site compares against (CLAUDE.md §11 COMMON).
+DEFAULT_SWING_PROXIMITY_BPS = 10
+
 
 @dataclass(frozen=True)
 class ProximityParams:
@@ -97,6 +114,12 @@ class ProximityParams:
     pivot_proximity_bps: int = 10
     pdh_pdl_proximity_bps: int = 10
     fib_proximity_bps: int = 10
+    #: Swing-proximity band for the near-swing bits 72/73
+    #: (DEC-FIB-TEMPLATE-EXPRESS-001) — appended-last with the sibling default
+    #: so every pre-existing construction keeps working; DEFAULT-OMITTED from
+    #: every run-identity/digest emission (absent ⟺ 10, the clean bijection —
+    #: see :func:`swing_params_fragment`).
+    swing_proximity_bps: int = DEFAULT_SWING_PROXIMITY_BPS
 
 
 @dataclass
@@ -121,7 +144,7 @@ class PriorBarHistory:
             self.flags = self.flags[-self.prior_n :]
 
 
-# ────── The 66-condition evaluator (delegates to the shared Rust core) ──────
+# ────── The 74-condition evaluator (delegates to the shared Rust core) ──────
 
 
 def pivot_levels_list(pivots: PivotLevels) -> list[int]:
@@ -161,14 +184,18 @@ def pivot_levels_list(pivots: PivotLevels) -> list[int]:
 
 
 def fib_levels_list(fib: FibLevels) -> list[int]:
-    """The FROZEN 15-int ``evaluate_with_levels`` fib ABI order (``FIB_LEVELS_LEN``).
+    """The 19-int ``evaluate_with_levels`` fib ABI order (``FIB_LEVELS_LEN``).
 
     ``[retrace@pdh, r23, r38, r50, r62, r78, retrace@pdl, up127, up162, up200,
-    up262, dn127, dn162, dn200, dn262]`` — deliberately DISTINCT from the
-    19-entry ``FIB_COMPUTE_LIST_LEN`` compute projection (the evaluator never
-    reads the bullish-retrace tail; DEC-FIB-BULLISH-RETRACE-001). Extracted
-    from :func:`evaluate_atoms`'s inline build — see :func:`pivot_levels_list`
-    for the one-source rationale (DEC-STAGE1A-RUST-BATCH-001).
+    up262, dn127, dn162, dn200, dn262, bull23, bull78, up424, dn424]`` — the
+    original 15 slots byte-identical, the four DEC-FIB-TEMPLATE-EXPRESS-001
+    slots APPENDED in the PINNED order (bits 69-71 read them). Deliberately
+    DISTINCT from the ``FIB_COMPUTE_LIST_LEN`` compute projection: the two are
+    numerically equal AGAIN (both 19) yet remain two different lists with
+    different slot orders (this one carries NO bull_38/62) — never merge.
+    Extracted from :func:`evaluate_atoms`'s inline build — see
+    :func:`pivot_levels_list` for the one-source rationale
+    (DEC-STAGE1A-RUST-BATCH-001).
 
     Parameters
     ----------
@@ -178,7 +205,7 @@ def fib_levels_list(fib: FibLevels) -> list[int]:
     Returns
     -------
     list[int]
-        The 15 fib levels (int64 paisa) in the frozen evaluator ABI order.
+        The 19 fib levels (int64 paisa) in the evaluator ABI order.
     """
     return [
         fib.retrace_level_at_pdh_paisa,
@@ -196,6 +223,10 @@ def fib_levels_list(fib: FibLevels) -> list[int]:
         fib.ext_down_162_paisa,
         fib.ext_down_200_paisa,
         fib.ext_down_262_paisa,
+        fib.retrace_bull_23_paisa,
+        fib.retrace_bull_78_paisa,
+        fib.ext_up_424_paisa,
+        fib.ext_down_424_paisa,
     ]
 
 
@@ -204,7 +235,7 @@ def evaluate_atoms(
     proximity: ProximityParams,
     prior_history: PriorBarHistory,
 ) -> int:
-    """Evaluate the 62 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
+    """Evaluate the 67 ACTIVE atomic conditions on one bar via the Rust `trading-core`.
 
     Marshals the pre-built indicator levels into the flat primitive ABI and
     delegates to `trading_core.evaluate_with_levels`. The pivot/fib levels are
@@ -220,12 +251,16 @@ def evaluate_atoms(
         prior_history: Rolling N-bar bullish/bearish flags for Group 6.
 
     Returns:
-        u128 bitmask over the 66-bit layout. The 62 IMPLEMENTED bits (0-51,
-        54-63) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
+        u128 bitmask over the 74-bit layout. The 67 IMPLEMENTED bits (0-51,
+        54-63, 69-73) are set per condition (PR-2 added pivot R5/S5 bits 54-55;
         DEC-NIFTY-BOS-CHOCH-001 added the BOS/CHoCH bits 56-59, resolved from
         ``snapshot.market_structure``; the CPR bits 60-63 are computed in-core
-        from the snapshot's pivot levels). The RETIRED VWAP tombstones (52/53)
-        and the declared-only SuperTrend bits (64/65) are never set.
+        from the snapshot's pivot levels; DEC-FIB-TEMPLATE-EXPRESS-001 added
+        the Fibonacci-Extended bits 69-71 — bullish 23.6/78.6 + the 424
+        extension, off the grown 19-slot fib list — and the Swing-Proximity
+        bits 72-73 off the snapshot's resolved swing levels). The RETIRED VWAP
+        tombstones (52/53), the declared-only SuperTrend bits (64/65) and the
+        reserved gap placeholders (66-68) are never set.
 
     O(1) per bar: one cache-resident Rust call, no allocations beyond the two
     small fixed-length level lists, no I/O.
@@ -266,5 +301,37 @@ def evaluate_atoms(
         snapshot.market_structure.bos_bearish,
         snapshot.market_structure.choch_bullish,
         snapshot.market_structure.choch_bearish,
+        snapshot.last_swing_high_paisa,
+        snapshot.last_swing_low_paisa,
+        proximity.swing_proximity_bps,
     )
     return mask
+
+
+def swing_params_fragment(proximity: ProximityParams | None) -> dict[str, int]:
+    """The DEFAULT-OMIT run-identity fragment for the swept swing band.
+
+    The ONE emission law every params/digest re-derivation site shares
+    (CLAUDE.md §11 COMMON; the ``price_source_params_fragment`` template —
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001 Override 1): the ``swing_proximity_bps``
+    key is emitted **iff** *proximity* is present AND its swing band differs
+    from :data:`DEFAULT_SWING_PROXIMITY_BPS`. Absent ⟺ the default 10 (a clean
+    bijection — ``proximity=None`` means every band is defaulted, so no key),
+    keeping every pre-DEC-FIB-TEMPLATE-EXPRESS-001 identity byte-stable while
+    a swept swing cell re-keys. The pre-existing ``proximity_bps`` 3-list
+    layout is FROZEN — it never grows to 4 (growing it would re-key every
+    existing non-``None``-proximity run).
+
+    Parameters
+    ----------
+    proximity
+        The tuple's proximity params, or ``None`` (all-default).
+
+    Returns
+    -------
+    dict[str, int]
+        ``{}`` at the default, else ``{"swing_proximity_bps": <bps>}``.
+    """
+    if proximity is not None and proximity.swing_proximity_bps != DEFAULT_SWING_PROXIMITY_BPS:
+        return {"swing_proximity_bps": proximity.swing_proximity_bps}
+    return {}

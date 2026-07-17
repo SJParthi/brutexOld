@@ -23,6 +23,7 @@ fn fixture_spec() -> StrategySpec {
             pivot_proximity_bps: 50,
             pdh_pdl_proximity_bps: 10,
             fib_proximity_bps: 25,
+            swing_proximity_bps: 10,
         },
         3,
         1,
@@ -67,6 +68,7 @@ fn each_field_perturbation_moves_the_encode() {
         pivot_proximity_bps: 50,
         pdh_pdl_proximity_bps: 10,
         fib_proximity_bps: 25,
+        swing_proximity_bps: 10,
     };
     let variants = [
         StrategySpec::new(0x1e, Direction::Long, prox, 3, 1).unwrap(),
@@ -113,4 +115,28 @@ fn each_field_perturbation_moves_the_encode() {
         assert_ne!(hex, base, "variant {i} must move the encode");
         assert_eq!(&hex[..8], "01000000", "variant {i} keeps the v1 prefix");
     }
+}
+
+#[test]
+fn swing_proximity_bps_is_not_in_the_frozen_encode() {
+    // DEC-FIB-TEMPLATE-EXPRESS-001: `ProximityParams` gained
+    // `swing_proximity_bps`, but the spec axis carries NO swing knob — the
+    // FROZEN 57-byte v1 canonical encode deliberately does NOT serialize the
+    // field (a spec-axis swing sweep would need its own DEC + a
+    // SPEC_SCHEMA_VERSION bump). Pinned: a non-default swing value leaves the
+    // encode byte-identical to the frozen literal.
+    let swung = StrategySpec::new(
+        0x1f,
+        Direction::Long,
+        ProximityParams {
+            pivot_proximity_bps: 50,
+            pdh_pdl_proximity_bps: 10,
+            fib_proximity_bps: 25,
+            swing_proximity_bps: 25,
+        },
+        3,
+        1,
+    )
+    .expect("valid spec");
+    assert_eq!(to_hex(&swung.canonical_bytes()), FIXTURE_CANONICAL_HEX);
 }

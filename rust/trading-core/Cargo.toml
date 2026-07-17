@@ -12,7 +12,14 @@
 
 [package]
 name = "trading-core"
-# 0.3.2 → 0.4.0: the 66-bit vocabulary reshape — VWAP bits 52-53 TOMBSTONED
+# 0.4.0 → 0.4.1: DEC-FIB-TEMPLATE-EXPRESS-001 — the fib-template express bits
+# 69-73 (bullish 23.6/78.6 + the 424 extension + near-swing-high/low), the fib
+# evaluator ABI 15 → 19 (appended-last), the two Option swing-snapshot fields,
+# `ProximityParams.swing_proximity_bps`, and the +3 appended-last evaluate
+# args. The bump moves `_indicator_version()` and re-keys every new run_id
+# (the sanctioned new-bit lever). NOTE: this branch is stacked on PR #1574 —
+# the FINAL version is re-derived at re-stack (predecessors may take 0.5.x).
+# Earlier, 0.3.2 → 0.4.0: the 66-bit vocabulary reshape — VWAP bits 52-53 TOMBSTONED
 # (the VwapState math + the vwap_paisa/batch VWAP columns DELETED — an ABI
 # narrowing across all four evaluate pyfunctions), Central Pivot Range bits
 # 60-63 implemented, Supertrend bits 64-65 declared layout-only. The bump
@@ -22,7 +29,7 @@ name = "trading-core"
 # bar-bits kernel (`stage1a_batch` + the `stage1a_bar_bits_batch` pyfunction).
 # The bump moves `_indicator_version()` and re-keys every new run_id (the
 # sanctioned #1548 precedent — bump on ANY change, even with no math delta).
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.93.1"
 description = "Shared indicator + 52-condition vocabulary kernel (BruteX backtest + TickVault live)"

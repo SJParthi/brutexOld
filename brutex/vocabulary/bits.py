@@ -8,7 +8,7 @@ truth — by ``scripts/codegen_vocab.py`` (DEC-VOCAB-U128-CODEGEN-001). The Rust
 twin ``rust/trading-core/src/bits.rs`` is generated from the same manifest, so
 BruteX (PyO3) and TickVault (native) share an identical bit layout.
 
-The strategy mask is a u128 (ADR-0012 D4); bits 0..65
+The strategy mask is a u128 (ADR-0012 D4); bits 0..73
 are the live conditions. Never renumber a bit (grow-only, DEC-PLUGIN-001):
 new conditions append at the next free bit. LAYOUT-ONLY bits
 (``implemented=false``, ``reserved=false``) declare a position but the
@@ -70,11 +70,14 @@ __all__ = [
     "BIT_NEAR_FIB_200",
     "BIT_NEAR_FIB_236",
     "BIT_NEAR_FIB_382",
+    "BIT_NEAR_FIB_424",
     "BIT_NEAR_FIB_618",
     "BIT_NEAR_FIB_786",
     "BIT_NEAR_FIB_1272",
     "BIT_NEAR_FIB_1618",
     "BIT_NEAR_FIB_2618",
+    "BIT_NEAR_FIB_BULL_236",
+    "BIT_NEAR_FIB_BULL_786",
     "BIT_NEAR_PDH",
     "BIT_NEAR_PDL",
     "BIT_NEAR_PIVOT_P",
@@ -86,7 +89,12 @@ __all__ = [
     "BIT_NEAR_PIVOT_S2",
     "BIT_NEAR_PIVOT_S3",
     "BIT_NEAR_PIVOT_S5",
+    "BIT_NEAR_SWING_HIGH",
+    "BIT_NEAR_SWING_LOW",
     "BIT_OUTSIDE_DAY",
+    "BIT_PLACEHOLDER_GAP_66",
+    "BIT_PLACEHOLDER_GAP_67",
+    "BIT_PLACEHOLDER_GAP_68",
     "BIT_PRIOR_ALTERNATING",
     "BIT_PRIOR_N_BEARISH",
     "BIT_PRIOR_N_BULLISH",
@@ -179,9 +187,20 @@ BIT_NARROW_CPR_DAY: Final[int] = 63
 # ────── Supertrend ──────
 BIT_CLOSE_ABOVE_SUPERTREND: Final[int] = 64
 BIT_CLOSE_BELOW_SUPERTREND: Final[int] = 65
+# ────── Gap Placeholder ──────
+BIT_PLACEHOLDER_GAP_66: Final[int] = 66
+BIT_PLACEHOLDER_GAP_67: Final[int] = 67
+BIT_PLACEHOLDER_GAP_68: Final[int] = 68
+# ────── Fibonacci Extended ──────
+BIT_NEAR_FIB_BULL_236: Final[int] = 69
+BIT_NEAR_FIB_BULL_786: Final[int] = 70
+BIT_NEAR_FIB_424: Final[int] = 71
+# ────── Swing Proximity ──────
+BIT_NEAR_SWING_HIGH: Final[int] = 72
+BIT_NEAR_SWING_LOW: Final[int] = 73
 
 # ────── Metadata ──────
-TOTAL_CONDITIONS: Final[int] = 66
+TOTAL_CONDITIONS: Final[int] = 74
 #: The strategy-mask width in bits (u128 — ADR-0012 D4).
 MASK_WIDTH: Final[int] = 128
 
@@ -191,7 +210,10 @@ MASK_WIDTH: Final[int] = 128
 #: RETIRED (tombstone, never gets math): bit 53 ``BIT_CLOSE_BELOW_VWAP``.
 #: LAYOUT-ONLY (math in a later PR): bit 64 ``BIT_CLOSE_ABOVE_SUPERTREND``.
 #: LAYOUT-ONLY (math in a later PR): bit 65 ``BIT_CLOSE_BELOW_SUPERTREND``.
-IMPLEMENTED_MASK: Final[int] = 18433233274827440127
+#: RETIRED (tombstone, never gets math): bit 66 ``BIT_PLACEHOLDER_GAP_66``.
+#: RETIRED (tombstone, never gets math): bit 67 ``BIT_PLACEHOLDER_GAP_67``.
+#: RETIRED (tombstone, never gets math): bit 68 ``BIT_PLACEHOLDER_GAP_68``.
+IMPLEMENTED_MASK: Final[int] = 18317603354394702643199
 
 #: Bitmask of the RETIRED tombstone bits (``reserved = true`` in the manifest).
 #: Positions held forever (grow-only law), evaluator emits 0, NO later PR ever
@@ -199,7 +221,7 @@ IMPLEMENTED_MASK: Final[int] = 18433233274827440127
 #: unimplemented remainder (``implemented = false``, ``reserved = false``) is
 #: LAYOUT-ONLY, not retired. Python-only export (no Rust consumer exists yet;
 #: the manifest stays the single source — TOMB-01 renderer support).
-RETIRED_MASK: Final[int] = 13510798882111488
+RETIRED_MASK: Final[int] = 516522344862749556736
 
 #: Bitmask of conditions valid on the 1day timeframe (ADR-0012 D12). Relative
 #: to the FULL declared layout it clears the 6 intraday-only bit(s)
@@ -211,7 +233,7 @@ RETIRED_MASK: Final[int] = 13510798882111488
 #:   bit 52 ``BIT_CLOSE_ABOVE_VWAP``
 #:   bit 53 ``BIT_CLOSE_BELOW_VWAP``
 #: Test-pinned exactly in ``tests/unit/test_vocabulary.py``.
-APPLIES_TO_1DAY_MASK: Final[int] = 73773201613165428735
+APPLIES_TO_1DAY_MASK: Final[int] = 18889452156796908077055
 
 NAME_TO_BIT: Final[dict[str, int]] = {
     "close_above_ema20": BIT_CLOSE_ABOVE_EMA20,
@@ -280,6 +302,14 @@ NAME_TO_BIT: Final[dict[str, int]] = {
     "narrow_cpr_day": BIT_NARROW_CPR_DAY,
     "close_above_supertrend": BIT_CLOSE_ABOVE_SUPERTREND,
     "close_below_supertrend": BIT_CLOSE_BELOW_SUPERTREND,
+    "placeholder_gap_66": BIT_PLACEHOLDER_GAP_66,
+    "placeholder_gap_67": BIT_PLACEHOLDER_GAP_67,
+    "placeholder_gap_68": BIT_PLACEHOLDER_GAP_68,
+    "near_fib_bull_236": BIT_NEAR_FIB_BULL_236,
+    "near_fib_bull_786": BIT_NEAR_FIB_BULL_786,
+    "near_fib_424": BIT_NEAR_FIB_424,
+    "near_swing_high": BIT_NEAR_SWING_HIGH,
+    "near_swing_low": BIT_NEAR_SWING_LOW,
 }
 
 BIT_TO_NAME: Final[dict[int, str]] = {v: k for k, v in NAME_TO_BIT.items()}
@@ -304,6 +334,9 @@ GROUP_RANGES: Final[tuple[tuple[str, range], ...]] = (
     ("Market Structure", range(56, 60)),
     ("Central Pivot Range", range(60, 64)),
     ("Supertrend", range(64, 66)),
+    ("Gap Placeholder", range(66, 69)),
+    ("Fibonacci Extended", range(69, 72)),
+    ("Swing Proximity", range(72, 74)),
 )
 
 

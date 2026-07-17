@@ -116,6 +116,7 @@ from brutex.strategies.types import (
     price_source_params_fragment,
 )
 from brutex.vocabulary.bits import TOTAL_CONDITIONS
+from brutex.vocabulary.evaluator import DEFAULT_SWING_PROXIMITY_BPS
 
 if TYPE_CHECKING:  # pragma: no cover - import only for static typing
     from collections.abc import Callable, Mapping, Sequence
@@ -229,6 +230,14 @@ class CascadeTupleSpec:
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY
     vwap_source: PriceSource = PriceSource.HLC3
     ema_source: PriceSource = PriceSource.CLOSE
+    #: The swept swing band the tuple was evaluated against
+    #: (DEC-FIB-TEMPLATE-EXPRESS-001, bits 72-73). Additive field (default 10)
+    #: so a pre-axis manifest parses byte-compatibly; it must round-trip so a
+    #: non-default cell's ``run_id`` re-derives on verification. Serialized
+    #: DEFAULT-OMITTED (the ``vwap_source`` precedent); a ``None``
+    #: ``proximity_bps`` always carries the default (a ``None`` proximity has
+    #: no swing knob to sweep).
+    swing_proximity_bps: int = DEFAULT_SWING_PROXIMITY_BPS
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label", "direction_label"):
@@ -256,6 +265,17 @@ class CascadeTupleSpec:
         if self.proximity_bps is not None and len(self.proximity_bps) != _PROXIMITY_LEN:
             raise CascadeWireError(
                 f"CascadeTupleSpec.proximity_bps must be a 3-tuple or None, got {self.proximity_bps!r}"
+            )
+        if self.swing_proximity_bps < 0:
+            raise CascadeWireError(
+                f"CascadeTupleSpec.swing_proximity_bps must be >= 0, "
+                f"got {self.swing_proximity_bps}"
+            )
+        if self.proximity_bps is None and self.swing_proximity_bps != DEFAULT_SWING_PROXIMITY_BPS:
+            raise CascadeWireError(
+                "CascadeTupleSpec.swing_proximity_bps must be the default "
+                f"({DEFAULT_SWING_PROXIMITY_BPS}) when proximity_bps is None — a None "
+                "proximity has no swing knob to sweep (DEC-FIB-TEMPLATE-EXPRESS-001)"
             )
         for run_id, mask in self.winners:
             if len(run_id) != _RUN_ID_LEN or run_id != run_id.lower():
@@ -353,6 +373,9 @@ class Stage3CellRecord:
     #: ``run_id`` re-derives on verification. Stored as the string enum values.
     vwap_source: PriceSource = PriceSource.HLC3
     ema_source: PriceSource = PriceSource.CLOSE
+    #: The swept swing band (DEC-FIB-TEMPLATE-EXPRESS-001) — additive default
+    #: (the ``vwap_source`` precedent), DEFAULT-OMITTED in the manifest.
+    swing_proximity_bps: int = DEFAULT_SWING_PROXIMITY_BPS
 
     def __post_init__(self) -> None:
         for name in ("instrument", "tf_label"):
@@ -374,6 +397,11 @@ class Stage3CellRecord:
             raise CascadeWireError(
                 f"Stage3CellRecord.proximity_bps must be a 3-tuple or None, "
                 f"got {self.proximity_bps!r}"
+            )
+        if self.swing_proximity_bps < 0:
+            raise CascadeWireError(
+                f"Stage3CellRecord.swing_proximity_bps must be >= 0, "
+                f"got {self.swing_proximity_bps}"
             )
         if self.rel_path is not None and (
             not self.rel_path or PurePosixPath(self.rel_path).is_absolute()
@@ -906,6 +934,10 @@ def candidates_for_spec(
             pivot_proximity_bps=spec.proximity_bps[0],
             pdh_pdl_proximity_bps=spec.proximity_bps[1],
             fib_proximity_bps=spec.proximity_bps[2],
+            # DEC-FIB-TEMPLATE-EXPRESS-001: an absent manifest key reconstructs
+            # the default-10 fourth field (the spec's additive default); a
+            # None proximity is all-default by the __post_init__ law.
+            swing_proximity_bps=spec.swing_proximity_bps,
         )
     )
     bar_bits = build_bar_bits(
@@ -1417,6 +1449,13 @@ def _spec_to_dict(spec: CascadeTupleSpec) -> dict[str, object]:
         # COMMON fragment (CLAUDE.md §11): the price-source keys are written only
         # when non-default, so a baseline manifest is byte-identical to a pre-axis one.
         **price_source_params_fragment(spec.vwap_source, spec.ema_source),
+        # DEFAULT-OMITTED (DEC-FIB-TEMPLATE-EXPRESS-001): the swing key is
+        # written only when non-default — a baseline manifest is byte-identical.
+        **(
+            {"swing_proximity_bps": spec.swing_proximity_bps}
+            if spec.swing_proximity_bps != DEFAULT_SWING_PROXIMITY_BPS
+            else {}
+        ),
     }
 
 
@@ -1475,6 +1514,13 @@ def _spec_from_dict(data: dict[str, object]) -> CascadeTupleSpec:
                 if raw.get("ema_source") is None
                 else PriceSource(str(raw["ema_source"]))
             ),
+            # DEFAULT-OMITTED (DEC-FIB-TEMPLATE-EXPRESS-001): absent ⟺ the
+            # default 10 — the only band pre-axis sweeps ran.
+            swing_proximity_bps=(
+                DEFAULT_SWING_PROXIMITY_BPS
+                if raw.get("swing_proximity_bps") is None
+                else int(raw["swing_proximity_bps"])
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise CascadeWireError(f"invalid cascade tuple spec in manifest: {exc}") from exc
@@ -1500,6 +1546,12 @@ def _stage3_to_dict(record: Stage3ManifestRecord) -> dict[str, object]:
                 # the ONE COMMON fragment: a baseline refined cell's manifest entry
                 # is byte-identical to a pre-axis one.
                 **price_source_params_fragment(cell.vwap_source, cell.ema_source),
+                # DEFAULT-OMITTED (DEC-FIB-TEMPLATE-EXPRESS-001).
+                **(
+                    {"swing_proximity_bps": cell.swing_proximity_bps}
+                    if cell.swing_proximity_bps != DEFAULT_SWING_PROXIMITY_BPS
+                    else {}
+                ),
             }
             for cell in record.refined_cells
         ],
@@ -1542,6 +1594,13 @@ def _stage3_from_dict(data: dict[str, object]) -> Stage3ManifestRecord:
                         PriceSource.HLC3
                         if cell.get("vwap_source") is None
                         else PriceSource(str(cell["vwap_source"]))
+                    ),
+                    # Absent on pre-DEC-FIB-TEMPLATE-EXPRESS-001 manifests
+                    # (additive parse): default 10, the only band those sweeps ran.
+                    swing_proximity_bps=(
+                        DEFAULT_SWING_PROXIMITY_BPS
+                        if cell.get("swing_proximity_bps") is None
+                        else int(cell["swing_proximity_bps"])
                     ),
                     ema_source=(
                         PriceSource.CLOSE
@@ -1779,6 +1838,7 @@ def spec_from_store_rows(
     fib_anchor: FibAnchorKind = FibAnchorKind.PREV_DAY,
     vwap_source: PriceSource = PriceSource.HLC3,
     ema_source: PriceSource = PriceSource.CLOSE,
+    swing_proximity_bps: int = DEFAULT_SWING_PROXIMITY_BPS,
 ) -> CascadeTupleSpec | None:
     """Build a :class:`CascadeTupleSpec` from one tuple's persisted finalists.
 
@@ -1804,6 +1864,11 @@ def spec_from_store_rows(
         (DEC-NIFTY-PRICE-SOURCE-AXIS-001); carried onto the spec so the Stage-4
         cascade re-scores against the tuple's OWN source bits. Default
         ``(HLC3, CLOSE)`` keeps the baseline path byte-identical.
+    swing_proximity_bps
+        The swept swing band the tuple was evaluated against
+        (DEC-FIB-TEMPLATE-EXPRESS-001, bits 72-73); carried onto the spec so
+        the cascade re-scores against the tuple's OWN band. Default 10 keeps
+        the baseline path byte-identical.
 
     Returns
     -------
@@ -1830,6 +1895,7 @@ def spec_from_store_rows(
         fib_anchor=fib_anchor,
         vwap_source=vwap_source,
         ema_source=ema_source,
+        swing_proximity_bps=swing_proximity_bps,
     )
 
 
@@ -1887,6 +1953,11 @@ def build_stage2_cascade_specs(
                 sweep_tuple.proximity.fib_proximity_bps,
             )
         )
+        swing_bps = (
+            DEFAULT_SWING_PROXIMITY_BPS
+            if sweep_tuple.proximity is None
+            else sweep_tuple.proximity.swing_proximity_bps
+        )
         spec = spec_from_store_rows(
             instrument=sweep_tuple.instrument,
             tf_label=sweep_tuple.tf.label,
@@ -1902,6 +1973,7 @@ def build_stage2_cascade_specs(
             fib_anchor=sweep_tuple.fib_anchor,
             vwap_source=sweep_tuple.price_source.vwap_source,
             ema_source=sweep_tuple.price_source.ema_source,
+            swing_proximity_bps=swing_bps,
         )
         if spec is not None:
             specs.append(spec)

@@ -55,10 +55,12 @@ use crate::indicators::pivots::PivotLevels;
 /// two constants equal): `[p, r1, r2, r3, s1, s2, s3, pdh, pdl, pdc, r5, s5]`.
 pub const PIVOT_ROW_LEN: usize = 12;
 
-/// Entries per day-table fib row — mirrors the FROZEN `evaluate_with_levels`
-/// fib ABI (`python.rs::FIB_LEVELS_LEN`): `[retrace@pdh, r23, r38, r50, r62,
-/// r78, retrace@pdl, up127, up162, up200, up262, dn127, dn162, dn200, dn262]`.
-pub const FIB_ROW_LEN: usize = 15;
+/// Entries per day-table fib row — mirrors the `evaluate_with_levels`
+/// fib ABI (`python.rs::FIB_LEVELS_LEN`, 15 → 19 under
+/// DEC-FIB-TEMPLATE-EXPRESS-001): `[retrace@pdh, r23, r38, r50, r62,
+/// r78, retrace@pdl, up127, up162, up200, up262, dn127, dn162, dn200, dn262,
+/// bull23, bull78, up424, dn424]` (the four new slots APPENDED last).
+pub const FIB_ROW_LEN: usize = 19;
 
 /// The valid `prior_n` domain (Group-6 look-back ∈ {1, 2, 3, 4} — the same
 /// domain `Stage1AMatrixBuilder` sweeps; `docs/TRACK1_VOCABULARY.md` Group 6).
@@ -131,6 +133,10 @@ pub struct Stage1aBatchInputs<'a> {
     pub pdh_pdl_bps: i64,
     /// Group-4 fib proximity tolerance (bps).
     pub fib_bps: i64,
+    /// Swing proximity tolerance for the near-swing bits 72/73 (bps —
+    /// DEC-FIB-TEMPLATE-EXPRESS-001; domain-checked by the SAME reused
+    /// `check_evaluate_inputs` boundary guard in `python.rs`).
+    pub swing_bps: i64,
     /// Group-6 prior-bar look-back (∈ `MIN_PRIOR_N..=MAX_PRIOR_N`).
     pub prior_n: usize,
     /// Fractal half-window for [`MarketStructureState`] (`>= 1`; the pyclass
@@ -283,8 +289,10 @@ fn pivots_from_row(row: &[i64]) -> PivotLevels {
 }
 
 /// Assemble one day row's [`FibLevels`] exactly like
-/// `evaluate_with_levels_impl` does (pdh/pdl/range/424s/bull tail zero-filled
-/// — the conditions never read them; pinned by the differential test).
+/// `evaluate_with_levels_impl` does (pdh/pdl/range/bull_38/bull_62
+/// zero-filled — the conditions never read them; pinned by the differential
+/// test). Slots 15..=18 carry the DEC-FIB-TEMPLATE-EXPRESS-001 appended ABI
+/// tail (`bull23, bull78, up424, dn424` — bits 69-71 read these).
 fn fib_from_row(row: &[i64]) -> FibLevels {
     FibLevels {
         retrace_level_at_pdh_paisa: row[0],
@@ -302,15 +310,15 @@ fn fib_from_row(row: &[i64]) -> FibLevels {
         ext_down_162_paisa: row[12],
         ext_down_200_paisa: row[13],
         ext_down_262_paisa: row[14],
+        retrace_bull_23_paisa: row[15],
+        retrace_bull_78_paisa: row[16],
+        ext_up_424_paisa: row[17],
+        ext_down_424_paisa: row[18],
         pdh_paisa: 0,
         pdl_paisa: 0,
         range_paisa: 0,
-        ext_up_424_paisa: 0,
-        ext_down_424_paisa: 0,
-        retrace_bull_23_paisa: 0,
         retrace_bull_38_paisa: 0,
         retrace_bull_62_paisa: 0,
-        retrace_bull_78_paisa: 0,
     }
 }
 
@@ -347,6 +355,7 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
         pivot_proximity_bps: inp.pivot_bps,
         pdh_pdl_proximity_bps: inp.pdh_pdl_bps,
         fib_proximity_bps: inp.fib_bps,
+        swing_proximity_bps: inp.swing_bps,
     };
     let mut structure = MarketStructureState::new(inp.fractal_k);
     let mut prior = PriorBarHistory {
@@ -414,6 +423,12 @@ pub fn stage1a_bar_bits_batch_impl(inp: &Stage1aBatchInputs<'_>) -> Result<Vec<u
             day_low_paisa: day_low,
             open_of_day_paisa: open_of_day,
             market_structure,
+            // Read strictly POST-update from the kernel's OWN state — the
+            // exact bits-56-59 seam discipline (a swing is confirmed only k
+            // bars later, all at index <= i; the D11 reset above returns the
+            // fields to None across a roll — DEC-FIB-TEMPLATE-EXPRESS-001).
+            last_swing_high_paisa: structure.last_swing_high(),
+            last_swing_low_paisa: structure.last_swing_low(),
         };
         let mut mask = evaluate_atoms(&snapshot, &proximity, &prior);
         let du = d as usize;
@@ -497,6 +512,7 @@ mod tests {
             pivot_bps: 10,
             pdh_pdl_bps: 10,
             fib_bps: 10,
+            swing_bps: 10,
             prior_n: 3,
             fractal_k: 2,
             apply_1day_mask: false,

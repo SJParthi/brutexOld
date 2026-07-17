@@ -106,7 +106,7 @@ from brutex.strategies.types import (
     price_source_params_fragment,
 )
 from brutex.universe import is_engine_spot_symbol, is_engine_sweep_symbol
-from brutex.vocabulary import ProximityParams
+from brutex.vocabulary import ProximityParams, swing_params_fragment
 
 if TYPE_CHECKING:
     # Annotation-only — keep the `fastbloom_rs` PyO3 wheel (pulled transitively
@@ -857,6 +857,12 @@ def _tuple_digest(tuple_: SweepTuple, grid: SweepGridConfig) -> str:
             tuple_.price_source.vwap_source, tuple_.price_source.ema_source
         )
     )
+    # The swept swing band distinguishes the store address
+    # (DEC-FIB-TEMPLATE-EXPRESS-001): two tuples differing ONLY by
+    # ``swing_proximity_bps`` evaluate DIFFERENT bits 72-73, so they MUST map
+    # to different Parquet files. DEFAULT-OMITTED via the ONE COMMON fragment
+    # (the frozen 3-list ``proximity_bps`` above never grows to 4).
+    descriptor.update(swing_params_fragment(tuple_.proximity))
     # DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001: fold the non-default SELECTION
     # knobs + the ACTIVE gate config into the store address, each as a nested
     # object mirroring the supervisor's #1330 ``gate_config`` style. Both are

@@ -6,7 +6,7 @@
 //!
 //! A bit-for-bit twin of `brutex/vocabulary/bits.py` (both generated from
 //! `conditions.toml`). The strategy mask is a u128 (DEC-VOCAB-U128-CODEGEN-001
-//! / ADR-0012 D4); bits 0..=65 are the live
+//! / ADR-0012 D4); bits 0..=73 are the live
 //! conditions, the rest are reserved. Never renumber a bit (grow-only,
 //! DEC-PLUGIN-001).
 
@@ -156,9 +156,28 @@ pub const BIT_NARROW_CPR_DAY: u32 = 63;
 pub const BIT_CLOSE_ABOVE_SUPERTREND: u32 = 64;
 /// declared, not yet implemented: close strictly below the Supertrend line (math lands in a later PR)  (LAYOUT ONLY — implemented=false, math lands in a later PR)
 pub const BIT_CLOSE_BELOW_SUPERTREND: u32 = 65;
+// Gap Placeholder
+/// PLACEHOLDER for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — dropped at re-stack onto the gap branch; NEVER implement here  (RETIRED — reserved=true, position held forever, never gets math)
+pub const BIT_PLACEHOLDER_GAP_66: u32 = 66;
+/// PLACEHOLDER for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — dropped at re-stack onto the gap branch; NEVER implement here  (RETIRED — reserved=true, position held forever, never gets math)
+pub const BIT_PLACEHOLDER_GAP_67: u32 = 67;
+/// PLACEHOLDER for DEC-GAP-MIDPOINT-CONDITIONS-001 (#1901) — dropped at re-stack onto the gap branch; NEVER implement here  (RETIRED — reserved=true, position held forever, never gets math)
+pub const BIT_PLACEHOLDER_GAP_68: u32 = 68;
+// Fibonacci Extended
+/// close within tolerance of the bullish 23.6% retracement (PDL-anchored)
+pub const BIT_NEAR_FIB_BULL_236: u32 = 69;
+/// close within tolerance of the bullish 78.6% retracement (PDL-anchored)
+pub const BIT_NEAR_FIB_BULL_786: u32 = 70;
+/// close within tolerance of the 424% extension (up or down variant)
+pub const BIT_NEAR_FIB_424: u32 = 71;
+// Swing Proximity
+/// close within tolerance of the last confirmed swing high
+pub const BIT_NEAR_SWING_HIGH: u32 = 72;
+/// close within tolerance of the last confirmed swing low
+pub const BIT_NEAR_SWING_LOW: u32 = 73;
 
 /// The number of atomic conditions (dense bits 0..=TOTAL-1).
-pub const TOTAL_CONDITIONS: u32 = 66;
+pub const TOTAL_CONDITIONS: u32 = 74;
 
 /// The strategy-mask width in bits (u128 — ADR-0012 D4).
 pub const MASK_WIDTH: u32 = 128;
@@ -172,14 +191,17 @@ pub const MASK_WIDTH: u32 = 128;
 /// RETIRED: bit 53 `BIT_CLOSE_BELOW_VWAP`.
 /// LAYOUT-ONLY: bit 64 `BIT_CLOSE_ABOVE_SUPERTREND`.
 /// LAYOUT-ONLY: bit 65 `BIT_CLOSE_BELOW_SUPERTREND`.
-pub const IMPLEMENTED_MASK: u128 = 18433233274827440127;
+/// RETIRED: bit 66 `BIT_PLACEHOLDER_GAP_66`.
+/// RETIRED: bit 67 `BIT_PLACEHOLDER_GAP_67`.
+/// RETIRED: bit 68 `BIT_PLACEHOLDER_GAP_68`.
+pub const IMPLEMENTED_MASK: u128 = 18317603354394702643199;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The 66 bit positions must form a dense
-    /// 0..=65 range, no gaps, no dupes.
+    /// The 74 bit positions must form a dense
+    /// 0..=73 range, no gaps, no dupes.
     #[test]
     fn bit_positions_are_dense() {
         let all = [
@@ -249,6 +271,14 @@ mod tests {
             BIT_NARROW_CPR_DAY,
             BIT_CLOSE_ABOVE_SUPERTREND,
             BIT_CLOSE_BELOW_SUPERTREND,
+            BIT_PLACEHOLDER_GAP_66,
+            BIT_PLACEHOLDER_GAP_67,
+            BIT_PLACEHOLDER_GAP_68,
+            BIT_NEAR_FIB_BULL_236,
+            BIT_NEAR_FIB_BULL_786,
+            BIT_NEAR_FIB_424,
+            BIT_NEAR_SWING_HIGH,
+            BIT_NEAR_SWING_LOW,
         ];
         assert_eq!(all.len(), TOTAL_CONDITIONS as usize);
         let mut sorted = all;
