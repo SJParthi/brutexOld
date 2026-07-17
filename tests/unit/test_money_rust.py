@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import Iterator
-from decimal import Decimal, Inexact, Rounded, localcontext
+from decimal import Context, Decimal, Inexact, Rounded, localcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -49,6 +49,33 @@ def _fake_crate(**overrides: object) -> types.ModuleType:
     for name, value in overrides.items():
         setattr(crate, name, value)
     return crate
+
+
+def _context_free_crate() -> types.ModuleType:
+    """A law-faithful fake modeling the REAL crate's context-INDEPENDENT
+    string arithmetic.
+
+    The identity-echo defaults of :func:`_fake_crate` compute through the
+    Python oracles, which SHARE the ambient decimal context — useless for
+    the r2 narrowed-context repros, where the whole point is that the
+    Rust crate does NOT (its digit arithmetic ignores ``getcontext()``
+    entirely). Each law here runs its oracle under a fresh DEFAULT
+    ``Context()``, so it returns a VALUE exactly where the real crate
+    would, even while the caller's ambient context would make the oracle
+    raise.
+    """
+
+    def _free(fn: Callable[[str], str]) -> Callable[[str], str]:
+        def inner(s: str) -> str:
+            with localcontext(Context()):
+                return fn(s)
+
+        return inner
+
+    base = _fake_crate()
+    return _fake_crate(
+        **{name: _free(getattr(base, name)) for name in money_rust._CRATE_API}  # pyright: ignore[reportPrivateUsage]
+    )
 
 
 def _bomb_crate() -> types.ModuleType:
@@ -343,6 +370,111 @@ class TestEligibilityGate:
     def test_eligible_paisa_and_rupees_true_paths(self) -> None:
         assert money_rust._eligible_rupees(Decimal("1.005")) is True  # pyright: ignore[reportPrivateUsage]
         assert money_rust._eligible_paisa(123456) is True  # pyright: ignore[reportPrivateUsage]
+
+
+class TestNarrowedContextGate:
+    """The r2 MINOR fold: narrowed ambient ``Emax``/``Emin`` route to the oracle.
+
+    Executed repro (pre-fix): under ``localcontext(Emax=1)``, steady state
+    (``remaining=0``), flag ON with a context-INDEPENDENT crate, all four
+    laws returned a VALUE (e.g. ``round_money(Decimal("100")) → 100.00``)
+    where flag-OFF RAISES (``InvalidOperation``/``Overflow``) — a
+    raise-vs-value divergence the burn-in structurally cannot catch once
+    exhausted. Post-fix the exponent-window conjunct in
+    ``_context_hazard`` routes such contexts to the oracle wholesale.
+    """
+
+    def test_narrowed_emax_all_four_laws_raise_identically_to_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The law-faithful context-free fake is the fails-before tooth:
+        # pre-fix it was CONSULTED and its value ADOPTED (no raise); the
+        # identity-echo fake would itself raise under the narrowed
+        # context and mask the divergence behind a crate_panic latch.
+        _arm(monkeypatch, _context_free_crate())
+        money_rust.reset_money_rust_for_tests(remaining=0)  # steady state — no oracle cushion
+        laws: list[tuple[str, Callable[[], object], Callable[[], object]]] = [
+            (
+                "round_money",
+                lambda: money.round_money(Decimal("100")),
+                lambda: money._round_money_python(Decimal("100")),  # pyright: ignore[reportPrivateUsage]
+            ),
+            (
+                "rupees_to_paisa",
+                lambda: money.rupees_to_paisa(Decimal("100")),
+                lambda: money._rupees_to_paisa_python(Decimal("100")),  # pyright: ignore[reportPrivateUsage]
+            ),
+            (
+                "paisa_to_rupees",
+                lambda: money.paisa_to_rupees(12345),
+                lambda: money._paisa_to_rupees_python(12345),  # pyright: ignore[reportPrivateUsage]
+            ),
+            (
+                "format_inr",
+                lambda: money.format_inr(12345),
+                lambda: money._format_inr_python(12345),  # pyright: ignore[reportPrivateUsage]
+            ),
+        ]
+        with localcontext() as ctx:
+            ctx.Emax = 1
+            for law, routed, oracle in laws:
+                with pytest.raises(ArithmeticError) as off_exc:
+                    oracle()  # flag-OFF behavior: the oracle RAISES
+                with pytest.raises(type(off_exc.value)):
+                    routed()  # flag-ON must raise IDENTICALLY, not serve
+                assert off_exc.type.__name__ in {"InvalidOperation", "Overflow"}, law
+        # The gate (not a degrade/latch) did the routing — crate untouched.
+        assert money_rust.money_rust_disabled() is False
+        assert not money_rust._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
+
+    def test_narrowed_emin_with_shrunken_prec_routes_to_oracle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The Emin arm needs a JOINTLY-narrowed prec: Etiny = Emin − prec
+        # + 1, so (prec=2, Emin=0) puts Etiny = −1 ABOVE the 2dp quantize
+        # target (exponent −2) and the oracle raises InvalidOperation on
+        # an otherwise-eligible tiny input — Decimal("0.001") has
+        # adjusted −3, and the prec-headroom conjunct −3 + 5 = 2 <= 2
+        # PASSES, so pre-fix the input crossed and the context-free
+        # crate's "0.00" was adopted.
+        _arm(monkeypatch, _context_free_crate())
+        money_rust.reset_money_rust_for_tests(remaining=0)
+        with localcontext() as ctx:
+            ctx.prec = 2
+            ctx.Emin = 0
+            with pytest.raises(ArithmeticError) as off_exc:
+                money._round_money_python(Decimal("0.001"))  # pyright: ignore[reportPrivateUsage]
+            with pytest.raises(type(off_exc.value)):
+                money.round_money(Decimal("0.001"))
+        assert money_rust.money_rust_disabled() is False
+        assert not money_rust._OBSERVABILITY_MEMO  # pyright: ignore[reportPrivateUsage]
+
+    def test_safe_boundary_window_stays_eligible(self) -> None:
+        # Emax=25 / Emin=-65 are the SAFE bounds — exactly at them the
+        # gate must NOT over-route (the envelope ceiling stays eligible;
+        # probed: max result adjusted is 23, min operand exponent −62).
+        with localcontext() as ctx:
+            ctx.Emax = money_rust._MIN_SAFE_EMAX  # pyright: ignore[reportPrivateUsage]
+            ctx.Emin = money_rust._MAX_SAFE_EMIN  # pyright: ignore[reportPrivateUsage]
+            assert money_rust._eligible_rupees(Decimal("1.005")) is True  # pyright: ignore[reportPrivateUsage]
+            assert money_rust._eligible_paisa(123456) is True  # pyright: ignore[reportPrivateUsage]
+            # And the whole-envelope ceiling input survives the ORACLE at
+            # these bounds (the derivation's safety claim, executed).
+            ceiling = Decimal("9" * 21 + ".995")  # adjusted == 20
+            # rounds to 10**21 rupees; × 100 → 10**23 paisa (adjusted 23).
+            assert money._rupees_to_paisa_python(ceiling) == 10**23  # pyright: ignore[reportPrivateUsage]
+            assert str(money._round_money_python(Decimal("1E-60"))) == "0.00"  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.parametrize(
+        ("emax", "emin"),
+        [(24, -999999), (1, -999999), (999999, -64), (999999, 0), (24, -64)],
+    )
+    def test_past_boundary_windows_are_ineligible(self, emax: int, emin: int) -> None:
+        with localcontext() as ctx:
+            ctx.Emax = emax
+            ctx.Emin = emin
+            assert money_rust._eligible_rupees(Decimal("1.005")) is False  # pyright: ignore[reportPrivateUsage]
+            assert money_rust._eligible_paisa(123456) is False  # pyright: ignore[reportPrivateUsage]
 
 
 # ── Degrade paths + escape set + panic belt ─────────────────────────────────
@@ -749,6 +881,62 @@ class TestRealCrateParity:
             assert money.format_inr(paisa) == off_inr
             assert money_rust.money_rust_disabled() is False, (
                 "a burn-in/latch trip inside the differential marks a real divergence"
+            )
+
+        _differential()
+
+    def test_hypothesis_differential_narrowed_contexts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # r2 MINOR fold: OUTCOME parity (value OR exception type) between
+        # the flag-ON public laws and the flag-OFF oracles under sampled
+        # narrowed exponent windows — straddling the safe bounds
+        # (Emax 25 / Emin −65) both sides, so the gate's routing and the
+        # wide-window crate path are both exercised.
+        from hypothesis import HealthCheck, given, settings
+        from hypothesis import strategies as st
+
+        monkeypatch.setenv(money_rust.MONEY_RUST_ENV, "1")
+
+        def _outcome(fn: Callable[[], object]) -> tuple[str, str]:
+            try:
+                return ("value", str(fn()))
+            except ArithmeticError as exc:
+                return ("raise", type(exc).__name__)
+
+        decimals = st.builds(
+            lambda sign, digits, exp: Decimal((sign, tuple(digits), exp)),
+            st.integers(min_value=0, max_value=1),
+            st.lists(st.integers(min_value=0, max_value=9), min_size=1, max_size=24),
+            st.integers(min_value=-40, max_value=8),
+        )
+        paisas = st.integers(min_value=-(2**64), max_value=2**64)
+        emaxes = st.sampled_from([1, 5, 24, 25, 100, 999999])
+        emins = st.sampled_from([0, -5, -64, -65, -100, -999999])
+
+        @settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+        @given(rupees=decimals, paisa=paisas, emax=emaxes, emin=emins)
+        def _differential(rupees: Decimal, paisa: int, emax: int, emin: int) -> None:
+            money_rust.reset_money_rust_for_tests(remaining=0)
+            with localcontext() as ctx:
+                ctx.Emax = emax
+                ctx.Emin = emin
+                off = [
+                    _outcome(lambda: money._round_money_python(rupees)),  # pyright: ignore[reportPrivateUsage]
+                    _outcome(lambda: money._rupees_to_paisa_python(rupees)),  # pyright: ignore[reportPrivateUsage]
+                    _outcome(lambda: money._paisa_to_rupees_python(paisa)),  # pyright: ignore[reportPrivateUsage]
+                    _outcome(lambda: money._format_inr_python(paisa)),  # pyright: ignore[reportPrivateUsage]
+                ]
+                on = [
+                    _outcome(lambda: money.round_money(rupees)),
+                    _outcome(lambda: money.rupees_to_paisa(rupees)),
+                    _outcome(lambda: money.paisa_to_rupees(paisa)),
+                    _outcome(lambda: money.format_inr(paisa)),
+                ]
+            assert on == off
+            assert money_rust.money_rust_disabled() is False, (
+                "a latch trip under a narrowed context marks a gate hole — the crate "
+                "must never be consulted where the oracle could raise"
             )
 
         _differential()

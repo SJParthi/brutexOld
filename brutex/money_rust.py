@@ -98,17 +98,25 @@ spy-pinned):
   getcontext().prec`` (the quantize/×100 headroom law: a 2dp quantize
   needs ``adjusted+3`` result digits and the ``× 100`` shift two more —
   past that the oracle raises ``InvalidOperation`` at default traps, so
-  those inputs must take the oracle), and NO ``Inexact``/``Rounded``
+  those inputs must take the oracle), NO ``Inexact``/``Rounded``
   trap armed (a caller that traps them makes the oracle RAISE on any
   rounding — raise-vs-value divergence, so trapped contexts take the
-  oracle wholesale);
+  oracle wholesale), and an ambient EXPONENT WINDOW covering the laws'
+  whole result envelope — ``Emax >= 25`` AND ``Emin <= -65`` (the r2
+  fold: under a narrower window the oracle can raise
+  ``Overflow``/``InvalidOperation`` — the quantize range check vs
+  ``Emax`` and ``Etiny = Emin − prec + 1`` — where the
+  context-INDEPENDENT crate returns a value; executed repro:
+  ``localcontext(Emax=1)`` → ``round_money(Decimal("100"))`` flag-ON
+  served ``100.00`` where flag-OFF raises ``InvalidOperation``. Bound
+  derivation on the constants below);
 * paisa ``int``s: exact type :class:`int` (``bool`` is an ``int``
   subclass whose ``str()`` is not a digit string — oracle), ``|paisa| <
   2**63`` (the milestone gate law; the crossing is a string either way —
   this bounds the crate's worst case), digit-count headroom
   ``len(str(abs(paisa))) + 2 <= getcontext().prec`` (the ``/ 100`` +
   quantize exactness law under a shrunken ambient precision), and the
-  same trap conjunct.
+  same trap + exponent-window conjuncts.
 """
 
 from __future__ import annotations
@@ -190,6 +198,30 @@ _MAX_ADJUSTED: Final[int] = 20
 _MIN_EXPONENT: Final[int] = -60
 _PREC_HEADROOM: Final[int] = 5
 _MAX_PAISA: Final[int] = 2**63
+
+#: Ambient exponent-window safe bounds (the r2 context-narrowing gate).
+#: DERIVATION from the gate's own envelope: eligible rupee inputs carry
+#: ``adjusted() <= 20`` / ``exponent >= -60`` (paisa ints: <= 19 digits,
+#: exponent 0). Result envelope: a 2dp quantize can CARRY one digit
+#: (``9.99… → 10.00``, adjusted +1) and the ``× 100`` shift in
+#: ``rupees_to_paisa`` adds two more, so result adjusted reaches 23
+#: EXACTLY (probed 2026-07-17: ``Emax=22`` overflows the ceiling input,
+#: ``Emax=23`` is clean); the ``/ 100`` in ``paisa_to_rupees`` subtracts
+#: 2 and the rupee quantize target is exponent −2, so no operand or
+#: result exponent sits below −62 (only the raw INPUT carries −60).
+#: ``Emax >= 25`` / ``Emin <= -65`` therefore cover the whole envelope
+#: with ≥ 2 exponent-positions of headroom on each side (``Etiny =
+#: Emin − prec + 1 <= Emin <= -65 < -62``, so the quantize-vs-Etiny
+#: range check can never fire either). Under a NARROWER window the
+#: oracle can raise ``Overflow``/``InvalidOperation`` where the
+#: context-independent crate returns a value (executed repro:
+#: ``localcontext(Emax=1)`` → ``round_money(Decimal("100"))`` ON
+#: ``100.00`` vs OFF ``InvalidOperation``; the ``Emin`` arm needs a
+#: jointly-narrowed prec — ``(prec=2, Emin=0)`` puts ``Etiny=-1`` above
+#: the −2 quantize target), so such contexts route to the oracle
+#: WHOLESALE (the armed-trap posture).
+_MIN_SAFE_EMAX: Final[int] = 25
+_MAX_SAFE_EMIN: Final[int] = -65
 
 #: ASCII-strict digit set for the refuse-poison shape checks (``int()`` /
 #: ``Decimal()`` would happily parse Unicode digits and ``int()`` even
@@ -337,9 +369,16 @@ def _log_engaged_once(crate: ModuleType) -> None:
 
 
 def _context_hazard() -> bool:
-    """``True`` iff the ambient context makes oracle rounding RAISE (gate law)."""
-    traps = getcontext().traps
-    return bool(traps[Inexact] or traps[Rounded])
+    """``True`` iff the ambient context could make the oracle RAISE where
+    the context-independent crate returns a value (gate law): an armed
+    ``Inexact``/``Rounded`` trap, or an exponent window narrower than the
+    laws' whole result envelope (``Emax < 25`` / ``Emin > -65`` — the r2
+    fold; derivation on :data:`_MIN_SAFE_EMAX`/:data:`_MAX_SAFE_EMIN`).
+    """
+    ctx = getcontext()
+    if ctx.traps[Inexact] or ctx.traps[Rounded]:
+        return True
+    return ctx.Emax < _MIN_SAFE_EMAX or ctx.Emin > _MAX_SAFE_EMIN
 
 
 def _eligible_rupees(rupees: object) -> bool:

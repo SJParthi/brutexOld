@@ -42,6 +42,13 @@ _AWS_CRATE_RE = re.compile(r"^(aws[-_].*|rusoto.*|aws)$", re.IGNORECASE)
 _BANNED_PY_IMPORTS = frozenset({"boto3", "botocore"})
 _BANNED_PY_MODULES = frozenset({"brutex.config.credentials_aws", "brutex.config.credentials"})
 
+#: Leaf name → banned module, for the RELATIVE-import belt (r2 NIT): a
+#: pure source scan cannot resolve ``from . import credentials_aws`` /
+#: ``from .credentials_aws import x`` to an absolute package, so any
+#: relative import whose module component or alias matches a banned
+#: module's LEAF is CONSERVATIVELY recorded as that banned module.
+_BANNED_PY_LEAVES = {m.rsplit(".", maxsplit=1)[-1]: m for m in _BANNED_PY_MODULES}
+
 #: AWS/credential-related tokens banned from any facade's crate-API
 #: handshake (the "routes ONLY parse/shape/derivation laws" law).
 _BANNED_API_TOKEN_RE = re.compile(
@@ -84,6 +91,21 @@ def _imported_roots_and_modules(source: str) -> tuple[set[str], set[str]]:
     (b) string constants passed to ``importlib.import_module(...)`` /
     ``import_module(...)`` / ``__import__(...)`` calls are recorded as
     module names, so a dynamic import cannot slip past the scan.
+
+    r2 NIT hardening — (c) RELATIVE imports (``node.level > 0``: ``from
+    . import credentials_aws`` / ``from .credentials_aws import x``,
+    where ``node.module`` is ``None`` or package-relative): the absolute
+    package is unknowable from source alone, so any module component or
+    alias whose LEAF matches a banned module's leaf is CONSERVATIVELY
+    recorded as that banned module (:data:`_BANNED_PY_LEAVES`).
+
+    HONEST RESIDUAL (documented, not claimed closed): string-built module
+    names (``"boto" + "3"``, f-strings, variables) and ``getattr``-chain
+    dynamic forms are STATICALLY UNDETECTABLE by any AST scan — this pin
+    is defense-in-depth over the behavioral guarantee (each facade
+    family's own AST import pins keep its import surface to stdlib +
+    structlog + its own seam leaves — none of which touch the AWS reader
+    chain), never the sole boundary.
     """
     roots: set[str] = set()
     modules: set[str] = set()
@@ -96,10 +118,20 @@ def _imported_roots_and_modules(source: str) -> tuple[set[str], set[str]]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 _record(alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            _record(node.module)
-            for alias in node.names:
-                _record(f"{node.module}.{alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None:
+                _record(node.module)
+                for alias in node.names:
+                    _record(f"{node.module}.{alias.name}")
+            if node.level > 0:
+                leaves: set[str] = set()
+                if node.module is not None:
+                    leaves.update(node.module.split("."))
+                leaves.update(alias.name for alias in node.names)
+                for leaf in leaves:
+                    banned_full = _BANNED_PY_LEAVES.get(leaf)
+                    if banned_full is not None:
+                        _record(banned_full)
         elif isinstance(node, ast.Call):
             func = node.func
             dynamic = (isinstance(func, ast.Attribute) and func.attr == "import_module") or (
@@ -202,6 +234,37 @@ class TestFacadesNeverImportAwsSurfaces:
         assert "brutex.config.credentials_aws" in modules
         assert modules & _BANNED_PY_MODULES == {"brutex.config.credentials_aws"}
         assert "brutex" in roots
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "from . import credentials_aws\n",
+            "from .credentials_aws import load_groww_aws_credentials\n",
+            "from .. import credentials_aws\n",
+            "from ..config.credentials_aws import load_groww_aws_credentials\n",
+            "def sneaky():\n    from . import credentials_aws\n",
+        ],
+        ids=[
+            "from-dot-import-leaf",
+            "from-dot-leaf-import-name",
+            "from-dotdot-import-leaf",
+            "from-dotdot-pkg-leaf",
+            "function-local-relative",
+        ],
+    )
+    def test_import_detector_sees_relative_forms(self, source: str) -> None:
+        # r2 NIT teeth (c): relative forms must be CONSERVATIVELY flagged
+        # — pre-hardening `from . import credentials_aws` recorded
+        # NOTHING (node.module is None) and evaded the banned set.
+        _roots, modules = _imported_roots_and_modules(source)
+        assert "brutex.config.credentials_aws" in modules
+        assert modules & _BANNED_PY_MODULES, "relative form must map into the banned set"
+
+    def test_relative_detector_ignores_unbanned_leaves(self) -> None:
+        # The conservative belt must not false-positive on ordinary
+        # relative imports whose leaves are not banned.
+        _roots, modules = _imported_roots_and_modules("from . import seam_core\n")
+        assert not (modules & _BANNED_PY_MODULES)
 
     def test_import_detector_sees_dynamic_import_strings(self) -> None:
         # r2 M2 teeth (b): importlib.import_module / bare import_module /
