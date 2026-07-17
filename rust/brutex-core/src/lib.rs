@@ -39,6 +39,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+pub mod hwenv;
 pub mod money;
 
 /// Crate version — surfaced as `brutex_core.__version__`.
@@ -85,6 +86,88 @@ fn format_inr_str(paisa: &str) -> PyResult<String> {
     money_ffi_shell("format_inr_str", paisa, money::format_inr)
 }
 
+/// The generic FFI boundary shell for the hwenv derivation laws (milestone
+/// 2): run the pure core under `catch_unwind`, map `Err` → `ValueError`
+/// and a panic → `RuntimeError` (both facade degrade members). The money
+/// shell above stays untouched — its `fn(&str)` shape is milestone-1
+/// surface; this generic twin serves the mixed int/f64/string signatures.
+fn hwenv_ffi_shell<T>(name: &str, f: impl FnOnce() -> Result<T, String>) -> PyResult<T> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(msg)) => Err(PyValueError::new_err(msg)),
+        Err(_) => Err(PyRuntimeError::new_err(format!(
+            "brutex-core panic in {name} (caught at the FFI boundary)"
+        ))),
+    }
+}
+
+/// `cpu_pool_workers` derivation twin (milestone 2 — env override + the
+/// envelope detection stay Python; see `src/hwenv.rs`).
+#[pyfunction]
+#[pyo3(signature = (performance_cores, logical_cores, prefer_performance, reserve, cap))]
+fn hwenv_pool_workers(
+    performance_cores: i64,
+    logical_cores: i64,
+    prefer_performance: bool,
+    reserve: i64,
+    cap: Option<i64>,
+) -> PyResult<i64> {
+    hwenv_ffi_shell("hwenv_pool_workers", || {
+        hwenv::pool_workers(
+            performance_cores,
+            logical_cores,
+            prefer_performance,
+            reserve,
+            cap,
+        )
+    })
+}
+
+/// `library_thread_budget` derivation twin.
+#[pyfunction]
+fn hwenv_library_thread_budget(physical_cores: i64, workers: i64) -> PyResult<i64> {
+    hwenv_ffi_shell("hwenv_library_thread_budget", || {
+        hwenv::library_thread_budget(physical_cores, workers)
+    })
+}
+
+/// `memory_budget_bytes` post-override twin (sentinel + derived arms).
+/// The `fraction` f64 crosses bit-exact via PyO3 (the ONE non-int/str
+/// crossing — see the facade module docstring's documented deviation).
+#[pyfunction]
+fn hwenv_memory_budget(
+    detected_ram_bytes: i64,
+    fraction: f64,
+    floor_bytes: i64,
+    workers: i64,
+) -> PyResult<i64> {
+    hwenv_ffi_shell("hwenv_memory_budget", || {
+        hwenv::memory_budget(detected_ram_bytes, fraction, floor_bytes, workers)
+    })
+}
+
+/// `format_hardware_key` render twin (DEC-BENCH-ABS-BASELINE-001 law).
+#[pyfunction]
+fn hwenv_hardware_key(
+    model_slug: &str,
+    physical_cores: i64,
+    performance_cores: i64,
+    efficiency_cores: i64,
+    total_ram_gib: i64,
+    arch: &str,
+) -> PyResult<String> {
+    hwenv_ffi_shell("hwenv_hardware_key", || {
+        hwenv::hardware_key_render(
+            model_slug,
+            physical_cores,
+            performance_cores,
+            efficiency_cores,
+            total_ram_gib,
+            arch,
+        )
+    })
+}
+
 // `#[pymodule]` registers the `_brutex_core` Python submodule. Maturin
 // produces a cdylib whose extern "C" `PyInit__brutex_core` symbol matches
 // this function name; under the mixed layout it installs at
@@ -101,6 +184,12 @@ fn _brutex_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rupees_to_paisa_str, m)?)?;
     m.add_function(wrap_pyfunction!(paisa_to_rupees_str, m)?)?;
     m.add_function(wrap_pyfunction!(format_inr_str, m)?)?;
+    // Milestone 2 — the hardware-envelope derivation seam
+    // (BRUTEX_CORE_RUST_HWENV; DEC-CONFIG-RUST-LEAVES-001).
+    m.add_function(wrap_pyfunction!(hwenv_pool_workers, m)?)?;
+    m.add_function(wrap_pyfunction!(hwenv_library_thread_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(hwenv_memory_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(hwenv_hardware_key, m)?)?;
     Ok(())
 }
 

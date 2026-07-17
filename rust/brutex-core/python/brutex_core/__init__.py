@@ -6,14 +6,19 @@ re-exports its symbols (the fno-math DEC-P0-055 mixed layout, via
 rust/brutex-lake) so callers write ``import brutex_core;
 brutex_core.round_money_str(...)``.
 
-The ONE consumer is the default-OFF facade ``brutex/money_rust.py``
-(``BRUTEX_CORE_RUST_MONEY``) — milestone 1's money seam over
-``brutex/money.py`` (DEC-MONEY-2DP-001): 2dp half-away-from-zero rounding,
-the exact ×100 / ÷100 paisa shifts and the ``₹``-grouped display render,
-strings-only across the FFI. Nothing else in ``brutex/`` imports this
-package, and the facade treats an absent/stale install as "stay on the
-Decimal oracle" (one loud WARN), so a missing wheel can never change a
-money value.
+The consumers are the default-OFF facades: milestone 1's
+``brutex/money_rust.py`` (``BRUTEX_CORE_RUST_MONEY``) — the money seam
+over ``brutex/money.py`` (DEC-MONEY-2DP-001): 2dp half-away-from-zero
+rounding, the exact ×100 / ÷100 paisa shifts and the ``₹``-grouped display
+render, strings-only across the FFI — and milestone 2's
+``brutex/config/hardware_envelope_rust.py`` (``BRUTEX_CORE_RUST_HWENV``)
+— the hardware-envelope DERIVATION seam over
+``brutex/config/hardware_envelope.py`` (pool-worker / library-thread /
+RAM-budget arithmetic + the hardware-key render; detection stays Python —
+the honest seam split recorded in that facade's docstring). Nothing else
+in ``brutex/`` imports this package, and each facade treats an
+absent/stale install as "stay on the Python oracle" (one loud WARN), so a
+missing wheel can never change a served value.
 
 Honesty banner (ADR-0020, mandatory verbatim): expected payoff ≈ 0 —
 conversion is for uniformity, not speed.
@@ -24,6 +29,10 @@ from __future__ import annotations
 from brutex_core._brutex_core import (
     __version__,
     format_inr_str,
+    hwenv_hardware_key,
+    hwenv_library_thread_budget,
+    hwenv_memory_budget,
+    hwenv_pool_workers,
     paisa_to_rupees_str,
     round_money_str,
     rupees_to_paisa_str,
@@ -32,6 +41,10 @@ from brutex_core._brutex_core import (
 __all__ = [
     "__version__",
     "format_inr_str",
+    "hwenv_hardware_key",
+    "hwenv_library_thread_budget",
+    "hwenv_memory_budget",
+    "hwenv_pool_workers",
     "paisa_to_rupees_str",
     "round_money_str",
     "rupees_to_paisa_str",
