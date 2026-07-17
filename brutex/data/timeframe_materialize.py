@@ -1005,6 +1005,18 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     NAMED and its derived TFs are NOT written — rows are never silently
     dropped or "fixed".
 
+    Timestamp-range gate (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): BEFORE the
+    price gate the collected frame's ``ts_utc`` is validated by the COMMON
+    :func:`~brutex.data.price_sanity.validate_frame_ts_datetime_range` — a
+    stored out-of-``datetime``-range timestamp (e.g. a planted ``2**62``-us
+    stamp) survives the vectorized resample and then PANICS the Rust→Python
+    conversion (``pyo3_runtime.PanicException``, a BaseException) at
+    ``frame_to_candle_bars``'s ``to_list()``, past every ``except Exception``
+    per-symbol quarantine (executed-repro'd: ONE poisoned symbol aborted the
+    WHOLE crossverify prebuild leg). The gate raises the SAME quarantining
+    :class:`~brutex.data.errors.ResampleInputError` deterministically at the
+    read boundary instead; clean frames pay one vectorized i64 min/max pass.
+
     Bad-tick screen (DEC-READ-GUARD-PARITY-001): after the sanity gate the
     frame is screened by :func:`~brutex.data.bad_tick.screen_frame_bad_ticks`
     (the engine read boundary's screen, frame form — same 4.0x threshold, same
@@ -1017,7 +1029,10 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     import polars as pl
 
     from brutex.data.bad_tick import bad_tick_screen_enabled, screen_frame_bad_ticks
-    from brutex.data.price_sanity import validate_frame_price_sanity
+    from brutex.data.price_sanity import (
+        validate_frame_price_sanity,
+        validate_frame_ts_datetime_range,
+    )
 
     columns: tuple[str, ...] = ("ts_utc", "open", "high", "low", "close", "volume")
     if with_open_interest:
@@ -1066,9 +1081,23 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
             source,
             missing_columns="insert",
             extra_columns="ignore",
+            # LITERAL month-file lists never glob (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law on the bars tree):
+            # a symbol dir named `NSE-X[12]` beside real `NSE-X1`/`NSE-X2`
+            # siblings otherwise glob-reads the SIBLINGS' bars into this
+            # symbol. The whole-tree branch is deliberate `**` discovery and
+            # keeps glob; the writer additionally refuses to mint such dirs
+            # (partition._FORBIDDEN_SYMBOL_CHARS gains `[`/`]`).
+            glob=isinstance(source, str),
         ).collect()
         frame = df.rename({"timestamp": "ts_utc"}).select(*columns).sort("ts_utc")
         context = f"{exchange}/{segment}/{symbol}/1minute"
+        # DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001: refuse an out-of-datetime-
+        # range stored timestamp FIRST (a 2**62-us stamp panics the Rust→Python
+        # conversion downstream — a BaseException past every except Exception;
+        # the price gate's own first-offender message indexes ts too). Raises
+        # the quarantining ResampleInputError.
+        validate_frame_ts_datetime_range(frame, ts_column="ts_utc", context=context)
         # DEC-STORED-DATA-VALIDATION-001: refuse to feed a price-insane 1m
         # frame to the resamplers (raises the quarantining ResampleInputError).
         validate_frame_price_sanity(frame, ts_column="ts_utc", context=context)

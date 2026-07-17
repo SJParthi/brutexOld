@@ -825,7 +825,10 @@ def _read_driver_frames(
             return None
         has_timestamp = "timestamp" in schema
         columns = ["timestamp", *needed] if has_timestamp else needed
-        frame = pl.read_parquet(path, columns=columns)
+        # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
+        # HARDENING-001, the #1594 round-15 metachar law) — a `[`-carrying
+        # contract dir must never glob-read a sibling's rows into this probe.
+        frame = pl.read_parquet(path, columns=columns, glob=False)
         view = _driver_row_view(frame, path) if has_timestamp else frame
     except (pl.exceptions.PolarsError, OSError):
         return None
@@ -1131,7 +1134,12 @@ def _probe_contract_staleness(
         emit_progress_beat()
         files_probed += 1
         try:
-            series = pl.read_parquet(path, columns=["greeks_provenance_id"])["greeks_provenance_id"]
+            # glob=False: ONE concrete month file (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001) — the #1594 round-15 metachar law; see
+            # _read_driver_frames' twin comment.
+            series = pl.read_parquet(path, columns=["greeks_provenance_id"], glob=False)[
+                "greeks_provenance_id"
+            ]
         except pl.exceptions.ColumnNotFoundError:
             # A legacy 7-column partition — every bar is unstamped; the
             # driver-actionability gate decides (fix round 7).

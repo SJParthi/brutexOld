@@ -249,3 +249,168 @@ class TestRealComposition:
         assert (tmp_path / "bars/NSE/INDEX/NIFTY/1day/2026/07.parquet").exists()
         # …and NO derive stamp was written (a partial derive must never stamp).
         assert not (tmp_path / ".derive_stamps").exists()
+
+
+class TestConversionPanicQuarantine:
+    """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — the #1594 round-18 guard idiom.
+
+    FAILS-BEFORE: ``pyo3_runtime.PanicException`` (a BaseException — polars'
+    out-of-datetime-range Rust→Python conversion panic) sailed past the bare
+    ``except Exception`` per-symbol quarantine and aborted the WHOLE leg
+    (executed repro: every symbol after the poisoned one was skipped).
+    """
+
+    def test_panic_exception_is_quarantined_per_symbol(self) -> None:
+        pl = pytest.importorskip("polars")
+        spies = _Spies()
+        poisoned = _identity("INDEX", "NIFTY")
+        healthy = _identity("CASH", "RELIANCE")
+
+        def _materialize(**kwargs: Any) -> object:
+            if kwargs["symbol"] == "NIFTY":
+                raise pl.exceptions.PanicException(
+                    "called `Result::unwrap()` on an `Err` value: OverflowError"
+                )
+            return spies.materialize(**kwargs)
+
+        outcome = run_prebuild_leg(
+            lake_root=_LAKE,
+            day=_DAY,
+            coordinates=[poisoned, healthy],
+            now_ist=_NOW_IST,
+            materialize=_materialize,
+            derive_daily=spies.derive_daily,
+            read_window_factory=spies.read_window_factory,
+            write_daily_factory=spies.write_factory,
+        )
+        # The ONE symbol is counted; the leg COMPLETES; the later symbol runs.
+        assert outcome.derived == 1
+        assert outcome.failed == 1
+        assert outcome.failed_names == ("NIFTY",)
+        assert spies.materialize_calls[0]["symbol"] == "RELIANCE"
+
+    def test_keyboard_interrupt_still_propagates(self) -> None:
+        """The guard is Exception + the two conversion escapes — NEVER a
+        blanket BaseException: an operator Ctrl-C must stop the leg."""
+
+        def _materialize(**kwargs: Any) -> object:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            run_prebuild_leg(
+                lake_root=_LAKE,
+                day=_DAY,
+                coordinates=[_identity()],
+                now_ist=_NOW_IST,
+                materialize=_materialize,
+                derive_daily=lambda **kw: None,
+                read_window_factory=lambda **kw: lambda: None,
+                write_daily_factory=lambda **kw: lambda bars: 0,
+            )
+
+    def test_guard_members_pin(self) -> None:
+        pl = pytest.importorskip("polars")
+
+        from brutex.crossverify.prebuild_leg import (
+            _quarantine_guard_errors,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        members = _quarantine_guard_errors()
+        assert Exception in members
+        assert OverflowError in members
+        assert pl.exceptions.PanicException in members
+        assert not issubclass(KeyboardInterrupt, members)
+        assert not issubclass(SystemExit, members)
+
+    def test_guard_wheel_free_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With polars ABSENT the guard falls back to (Exception,) — nothing
+        lost: no polars ⇒ no conversion panic can ever be raised (the
+        gated-prebuild fallback posture)."""
+        import sys
+
+        from brutex.crossverify.prebuild_leg import (
+            _quarantine_guard_errors,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        monkeypatch.setitem(sys.modules, "polars", None)  # import polars → ModuleNotFoundError
+        assert _quarantine_guard_errors() == (Exception,)
+
+
+class TestRealCompositionOutOfRangeTs:
+    """The executed repro as a permanent regression — a REAL lake, the REAL
+    primitives, ONE planted out-of-datetime-range stored timestamp.
+
+    FAILS-BEFORE (executed at merge base ecb37cc4): ``pyo3_runtime.
+    PanicException`` escaped the leg — the WHOLE leg aborted, the healthy
+    later coordinate was never processed. NOW: the read-boundary ts gate
+    refuses the poisoned frame as the quarantining ``ResampleInputError``,
+    the ONE symbol is counted, the leg completes, the healthy coordinate
+    derives (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001).
+    """
+
+    def _seed(self, lake: Path, identity: CanonicalIdentity) -> Path:
+        from brutex.data.models import CandleBar
+        from brutex.data.parquet_writer import ParquetWriter
+        from brutex.data.sink import ParquetBarSink
+
+        base = datetime(2026, 7, 10, 3, 45, tzinfo=UTC)  # 09:15 IST
+        bars = [
+            CandleBar(
+                timestamp=base + timedelta(minutes=i),
+                open=Decimal("100.00"),
+                high=Decimal("101.00"),
+                low=Decimal("99.00"),
+                close=Decimal("100.50"),
+                volume=10 + i,
+                open_interest=None,
+            )
+            for i in range(5)
+        ]
+        ParquetBarSink(writer=ParquetWriter(lake_root=lake)).append(
+            exchange=identity.exchange,
+            segment=identity.lake_segment,
+            symbol=identity.lake_symbol,
+            interval="1minute",
+            bars=bars,
+        )
+        return (
+            lake
+            / "bars"
+            / identity.exchange
+            / identity.lake_segment
+            / identity.lake_symbol
+            / "1minute"
+            / "2026"
+            / "07.parquet"
+        )
+
+    def test_poisoned_ts_quarantines_one_symbol_leg_completes(self, tmp_path: Path) -> None:
+        pl = pytest.importorskip("polars")
+        poisoned = _identity("INDEX", "NIFTY")
+        healthy = _identity("CASH", "RELIANCE")
+        month_file = self._seed(tmp_path, poisoned)
+        self._seed(tmp_path, healthy)
+        # Append ONE raw row whose stored timestamp physical value is 2**62 us
+        # (~year 148108 — within i64, far past datetime.max). No production
+        # writer can mint it (a CandleBar timestamp is a Python datetime).
+        df = pl.read_parquet(month_file)
+        poisoned_row = df.tail(1).with_columns(
+            pl.lit(2**62)
+            .cast(pl.Int64)
+            .cast(pl.Datetime(time_unit="us", time_zone="UTC"))
+            .alias("timestamp")
+        )
+        pl.concat([df, poisoned_row]).write_parquet(month_file)
+
+        outcome = run_prebuild_leg(
+            lake_root=tmp_path,
+            day=_DAY,
+            coordinates=[poisoned, healthy],
+            now_ist=_NOW_IST,
+        )
+        assert outcome == DeriveOutcome(derived=1, failed=1, failed_names=("NIFTY",))
+        # The healthy LATER coordinate was processed (fails-before: never
+        # reached — the panic aborted the leg first)…
+        assert (tmp_path / "bars/NSE/CASH/RELIANCE/2minute/2026/07.parquet").exists()
+        # …and the poisoned symbol wrote NO derived TF (correct-or-absent).
+        assert not (tmp_path / "bars/NSE/INDEX/NIFTY/2minute").exists()
