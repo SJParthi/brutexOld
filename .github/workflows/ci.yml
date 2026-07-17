@@ -3814,7 +3814,10 @@ jobs:
           LOG_OPTS="-1 HEAD"
           if [ "$EVENT_NAME" = "pull_request" ]; then
             # Diff-bounded: only the PR's own commits vs its base.
-            LOG_OPTS="--no-merges origin/${PR_BASE_REF}..HEAD"
+            # PR_BASE_REF defaults to main (the pull_request trigger is
+            # branches:[main]) so `set -u` cannot abort on an unset var —
+            # behavior-preserving: on-main PRs expand to origin/main..HEAD.
+            LOG_OPTS="--no-merges origin/${PR_BASE_REF:-main}..HEAD"
           elif [ "$EVENT_NAME" = "push" ]; then
             # Diff-bounded: only the pushed commits. A new branch / forced
             # push reports an all-zero or unknown 'before' — fall back to
@@ -3825,11 +3828,28 @@ jobs:
               LOG_OPTS="--no-merges ${BEFORE_SHA}..${AFTER_SHA}"
             fi
           elif [ "$EVENT_NAME" = "merge_group" ]; then
-            # Diff-bounded: only the merge candidate's commits. Fall back to
-            # the tip commit if the queue base is unavailable.
+            # Diff-bounded: only the merge candidate's commits.
+            #
+            # merge_group is a REQUIRED merge gate, so gitleaks must NEVER
+            # run against an empty / zero-patch range and exit green. On a
+            # merge_group event HEAD is the SPECULATIVE MERGE commit, so the
+            # old `-1 HEAD` fallback emitted ZERO patch lines (a merge commit
+            # has no diff under `git log -p`) → fail-open on a required gate.
             if [ -n "${MG_BASE_SHA:-}" ] \
               && git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null; then
+              # Primary: the queue base..head range (the PR's incoming commits).
               LOG_OPTS="--no-merges ${MG_BASE_SHA}..${MG_HEAD_SHA}"
+            elif git rev-parse -q --verify "HEAD^1^{commit}" >/dev/null 2>&1 \
+              && git rev-parse -q --verify "HEAD^2^{commit}" >/dev/null 2>&1; then
+              # Fallback: the queue base env var is missing/unfetched, but
+              # HEAD is a merge commit — derive a NON-EMPTY range from its own
+              # parents (HEAD^1 = queue tip, HEAD^2 = the PR's incoming commits).
+              LOG_OPTS="--no-merges HEAD^1..HEAD^2"
+            else
+              # Fail closed: cannot resolve a diff range. Refuse rather than
+              # scan a speculative merge commit that would scan nothing.
+              echo "::error::merge_group: cannot resolve a diff range; refusing to scan a speculative merge commit that would scan nothing" >&2
+              exit 1
             fi
           fi
           echo "gitleaks detect --log-opts=\"${LOG_OPTS}\""
