@@ -22,10 +22,12 @@ matrix pins (design doc §6.3, T10 PR-2 step B):
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +144,26 @@ def _isolated_facade(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _enable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRUTEX_DATA_RUST", "1")
+
+
+@contextlib.contextmanager
+def _refuse_gate(monkeypatch: pytest.MonkeyPatch, crate: object, reason: str) -> Iterator[None]:
+    """Install *crate*, force STEADY-STATE (remaining=0), assert the refuse warn.
+
+    The r1-MAJOR fix: at the default burn-in budget the burn-in COMPARE
+    (not the refuse gate) ships the oracle, so a dropped refuse gate
+    survived every negative test.  Steady-state means the ONLY thing
+    standing between the poison value and the caller is the refuse gate
+    itself; the exit assert (belt + braces) pins the specific
+    ``result_refused_<law>`` warn-once fallback reason.
+    """
+    _install_crate(monkeypatch, crate)
+    lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
+    with structlog.testing.capture_logs() as logs:
+        yield
+    assert any(
+        e["event"] == "lake_keys_rust.fallback" and e.get("reason") == reason for e in logs
+    ), logs
 
 
 _ALIAS_PAIRS: tuple[tuple[str, str], ...] = (("NIFTYJR", "NIFTYNXT50"),)
@@ -452,95 +474,127 @@ class TestDegradeArms:
 class TestRefusePoisonGates:
     def test_fold_non_str_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(fold=lambda s: 42))
-        assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
+        with _refuse_gate(monkeypatch, _FakeCrate(fold=lambda s: 42), "result_refused_fold"):
+            assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
 
     def test_fold_non_ascii_result_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(fold=lambda s: "NIFTY₹"))
-        assert lake_keys.stock_drift_fold("NIFTY") == "NIFTY"
+        with _refuse_gate(monkeypatch, _FakeCrate(fold=lambda s: "NIFTY₹"), "result_refused_fold"):
+            assert lake_keys.stock_drift_fold("NIFTY") == "NIFTY"
 
     def test_candidates_non_list_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: "NSE-NIFTY"))
-        assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
-            lake_keys._spot_key_candidates_python("NIFTY", "NSE")
-        )
+        with _refuse_gate(
+            monkeypatch,
+            _FakeCrate(candidates=lambda s, e: "NSE-NIFTY"),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
 
     def test_candidates_non_str_entry_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: ["NIFTY", 7]))
-        assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
-            lake_keys._spot_key_candidates_python("NIFTY", "NSE")
-        )
+        with _refuse_gate(
+            monkeypatch,
+            _FakeCrate(candidates=lambda s, e: ["NIFTY", 7]),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
 
     def test_candidates_empty_entry_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: ["NIFTY", ""]))
-        assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
-            lake_keys._spot_key_candidates_python("NIFTY", "NSE")
-        )
+        with _refuse_gate(
+            monkeypatch,
+            _FakeCrate(candidates=lambda s, e: ["NIFTY", ""]),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
 
     def test_candidates_identity_echo_refused_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        # First entry must be the RAW symbol verbatim; a stripped echo is a
-        # law violation (the RAW-identity law).
-        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: [s.strip(), "OTHER"]))
+        # An entry ``==`` the RAW symbol param is the identity echo — refused.
+        with _refuse_gate(
+            monkeypatch,
+            _FakeCrate(candidates=lambda s, e: [s, "OTHER"]),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
+
+    def test_candidates_stripped_form_legal_ships(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The RAW direction: the STRIPPED form is rung 1's LEGAL value — ships."""
+        _enable(monkeypatch)
+        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: [s.strip()]))
+        lake_keys_rust.reset_lake_keys_rust_for_tests(remaining=0)
         raw = " NIFTY "
         got = lake_keys_rust.routed_spot_key_candidates(
             raw, "NSE", python_law=lake_keys._spot_key_candidates_python
         )
-        assert got == lake_keys._spot_key_candidates_python(raw, "NSE")
+        assert got == ("NIFTY",) == lake_keys._spot_key_candidates_python(raw, "NSE")
 
     def test_candidates_length_ceiling_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(
+        with _refuse_gate(
             monkeypatch,
-            _FakeCrate(candidates=lambda s, e: [s] + [f"X{i}" for i in range(64)]),
-        )
-        assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
-            lake_keys._spot_key_candidates_python("NIFTY", "NSE")
-        )
+            # Deliberately NO identity/dup/empty poison — the LENGTH gate
+            # must be the ONLY refusing clause (mutant isolation).
+            _FakeCrate(candidates=lambda s, e: [f"X{i}" for i in range(65)]),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
 
     def test_recovery_non_list_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(recovery=lambda *a: None))
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(recovery=lambda *a: None), "result_refused_recovery"
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
     def test_recovery_non_str_entry_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(recovery=lambda *a: ["OK", 3]))
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(recovery=lambda *a: ["OK", 3]), "result_refused_recovery"
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
     def test_recovery_length_ceiling_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
         ceiling = 2 * len(_ALIAS_PAIRS) + 3 + len(_BUCKET)
-        _install_crate(
+        with _refuse_gate(
             monkeypatch,
             _FakeCrate(recovery=lambda *a: [f"C{i}" for i in range(ceiling + 1)]),
-        )
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+            "result_refused_recovery",
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
     def test_recovery_empty_entry_legal_ships(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """EMPTY recovery entries are NOT refused (design §3.2)."""
@@ -1004,59 +1058,74 @@ class TestMemoRepeats:
 class TestRemainingRefuseRows:
     def test_fold_space_or_hyphen_result_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(fold=lambda s: "BAJAJ AUTO"))
-        assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
-        lake_keys_rust.reset_lake_keys_rust_for_tests()
-        _install_crate(monkeypatch, _FakeCrate(fold=lambda s: "BAJAJ-AUTO"))
-        assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(fold=lambda s: "BAJAJ AUTO"), "result_refused_fold"
+        ):
+            assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(fold=lambda s: "BAJAJ-AUTO"), "result_refused_fold"
+        ):
+            assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
 
     def test_fold_lowercase_result_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(fold=lambda s: "bajajauto"))
-        assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(fold=lambda s: "bajajauto"), "result_refused_fold"
+        ):
+            assert lake_keys.stock_drift_fold("bajaj-auto") == "BAJAJAUTO"
 
     def test_candidates_duplicate_entries_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(candidates=lambda s, e: ["DUP", "DUP"]))
-        assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
-            lake_keys._spot_key_candidates_python("NIFTY", "NSE")
-        )
+        with _refuse_gate(
+            monkeypatch,
+            _FakeCrate(candidates=lambda s, e: ["DUP", "DUP"]),
+            "result_refused_candidates",
+        ):
+            assert lake_keys.spot_key_candidates("NIFTY", "NSE") == (
+                lake_keys._spot_key_candidates_python("NIFTY", "NSE")
+            )
 
     def test_recovery_duplicate_entries_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(recovery=lambda *a: ["DUP", "DUP"]))
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(recovery=lambda *a: ["DUP", "DUP"]), "result_refused_recovery"
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
     def test_recovery_non_ascii_entry_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(recovery=lambda *a: ["NIFTY\u20b9"]))
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(recovery=lambda *a: ["NIFTY\u20b9"]), "result_refused_recovery"
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
     def test_recovery_raw_identity_echo_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable(monkeypatch)
-        _install_crate(monkeypatch, _FakeCrate(recovery=lambda u, e, p, b: [u]))
-        got = lake_keys_rust.routed_spot_recovery_candidates(
-            "NIFTY",
-            "NSE",
-            alias_pairs=_ALIAS_PAIRS,
-            drift_bucket=_BUCKET,
-            python_law=lake_keys._spot_recovery_candidates_python,
-        )
-        assert got == _oracle_recovery("NIFTY", "NSE")
+        with _refuse_gate(
+            monkeypatch, _FakeCrate(recovery=lambda u, e, p, b: [u]), "result_refused_recovery"
+        ):
+            got = lake_keys_rust.routed_spot_recovery_candidates(
+                "NIFTY",
+                "NSE",
+                alias_pairs=_ALIAS_PAIRS,
+                drift_bucket=_BUCKET,
+                python_law=lake_keys._spot_recovery_candidates_python,
+            )
+            assert got == _oracle_recovery("NIFTY", "NSE")
 
 
 class TestRecoveryBurnInPass:
