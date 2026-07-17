@@ -33,6 +33,7 @@ from brutex.nightly.box_update import (
     run_box_update,
 )
 from structlog.testing import capture_logs
+from structlog.typing import EventDict
 
 FROM_SHA = "a" * 40
 TO_SHA = "b" * 40
@@ -191,6 +192,32 @@ def _std_runner(
         (0, "", ""),
     )
     return r
+
+
+# Captured at import time (BEFORE the autouse patch below) so the real body
+# keeps its own executing test — the 100% line-coverage law.
+_REAL_VENV_BIN = bu._venv_bin
+
+
+@pytest.fixture(autouse=True)
+def deterministic_venv_bin(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Pin the §4.5 maturin probe DETERMINISTIC across test hosts.
+
+    ``_venv_bin()`` reads the REAL ``Path(sys.executable).parent`` — the
+    operator box's venv carries a ``maturin`` binary (bootstrap) while CI's
+    unit-job environment does NOT (the rust wheels install via PEP-517 build
+    isolation, never leaving a venv ``maturin``), so every whole-run
+    pip-call-count assertion would flip per host. The autouse patch points
+    the probe at a tmp bin dir that ALWAYS carries ``maturin`` (the
+    ``_ensure_maturin`` short-circuit baseline); the explicit
+    ``_ensure_maturin`` arm tests re-patch to an EMPTY dir themselves.
+    """
+    bin_dir = tmp_path_factory.mktemp("venv-bin")
+    (bin_dir / "maturin").touch()
+    monkeypatch.setattr(bu, "_venv_bin", lambda: bin_dir)
+    return bin_dir
 
 
 def _run(
@@ -564,7 +591,9 @@ class TestWheelBuilds:
         assert len(runner.gate_calls()) == 1  # the lockstep-hole closer (§4.5)
         assert out.gate == "ok"
 
-    def test_rust_delta_builds_wheel_set_in_bootstrap_order(self, tmp_path: Path) -> None:
+    def test_rust_delta_builds_wheel_set_in_bootstrap_order(
+        self, tmp_path: Path, deterministic_venv_bin: Path
+    ) -> None:
         repo = _mk_repo(tmp_path)
         runner = _std_runner(repo, diff_paths=("rust/trading-core/src/lib.rs",))
         out = _run(repo, runner)
@@ -577,7 +606,7 @@ class TestWheelBuilds:
             assert "--locked" not in call["argv"]
             env = call["env"]
             assert env is not None
-            assert env["VIRTUAL_ENV"] == str(Path(sys.executable).parent.parent)
+            assert env["VIRTUAL_ENV"] == str(deterministic_venv_bin.parent)
             assert str(Path.home() / ".cargo" / "bin") in env["PATH"]
         assert runner.pip_calls() == []
         assert [w.result for w in out.wheels] == ["ok", "ok", "ok"]
@@ -1453,7 +1482,7 @@ class TestRollbackRepairCoherence:
 class TestAlarmDedupe:
     def _fail_once(
         self, repo: Path, state: Path, *, stderr: str = "boom"
-    ) -> tuple[BoxUpdateOutcome, list[dict[str, Any]]]:
+    ) -> tuple[BoxUpdateOutcome, list[EventDict]]:
         runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
         fno_dir = repo / "rust/fno-math"
         runner.on(
@@ -2036,7 +2065,10 @@ class TestDegradeArms:
         assert any(e["event"] == "box_update.required_wheel_unloadable" for e in logs)
 
     def test_adopt_state_shape_errors_fold_to_row_15(self) -> None:
-        base = {
+        # dict[str, object]: the wheels value is REASSIGNED below to a
+        # list-of-dicts shape (pyright would otherwise infer the narrow
+        # union from the literals and refuse the reassignment).
+        base: dict[str, object] = {
             "status": "updated",
             "from_sha": FROM_SHA,
             "to_sha": TO_SHA,
@@ -2087,9 +2119,18 @@ class TestResidualArms:
             pip_timeout=1.0,
         )
 
-    def test_command_runner_protocol_stub(self) -> None:
-        # The Protocol stub body is executable (returns None unbound).
-        assert bu.CommandRunner.__call__(default_command_runner, ["true"], timeout_s=1.0) is None
+    def test_venv_bin_real_body_is_sys_executable_parent(self) -> None:
+        # The import-time-captured ORIGINAL (the autouse fixture patches the
+        # module attribute; the real body keeps its executing test here).
+        assert _REAL_VENV_BIN() == Path(sys.executable).parent
+
+    def test_default_repo_root_is_this_checkout(self) -> None:
+        # The ONE shared repo-root derivation (CodeQL import-and-import-from
+        # fix): parents[2] of box_update.py = the checkout root holding the
+        # brutex package + this very module.
+        root = bu.default_repo_root()
+        assert (root / "brutex" / "nightly" / "box_update.py").is_file()
+        assert (root / "pyproject.toml").is_file()
 
     def test_sidecar_write_state_dir_none_is_false(self, tmp_path: Path) -> None:
         ctx = self._ctx(_mk_repo(tmp_path), None)
@@ -2450,7 +2491,7 @@ class TestPartialInstallSiblingTwins:
 
 # ── alarm demotion log-text arm (§10 test 19(b) — the CRITICAL-class fold) ─
 class TestAlarmDemotionLogText:
-    def _hard_fail(self, repo: Path, state: Path) -> tuple[BoxUpdateOutcome, list[dict[str, Any]]]:
+    def _hard_fail(self, repo: Path, state: Path) -> tuple[BoxUpdateOutcome, list[EventDict]]:
         """One repair=failed night: required build fails + every smoke fails."""
         runner = _std_runner(repo, diff_paths=("rust/fno-math/src/lib.rs",))
         fno_dir = repo / "rust/fno-math"

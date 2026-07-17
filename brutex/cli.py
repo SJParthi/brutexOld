@@ -5915,6 +5915,7 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
     from brutex.nightly.box_update import (
         adopt_state,
         default_command_runner,
+        default_repo_root,
         maybe_reexec,
         resolve_box_update_enabled,
         run_box_update,
@@ -5954,10 +5955,9 @@ def cmd_nightly_run(args: argparse.Namespace) -> int:
     # FAIL-OPEN outside the chain break law — it never blocks the nightly.
     # A --dry-run nightly runs NEITHER (the zero-mutation tree-oracle
     # contract outranks; the report block is honestly absent).
-    import brutex as _brutex_pkg
     from brutex.config.dotenv import candidate_dotenv_paths
 
-    repo_root = Path(_brutex_pkg.__file__).resolve().parents[1]
+    repo_root = default_repo_root()
     box_outcome = None if args.dry_run else adopt_state(os.environ)
     if box_outcome is None and not args.dry_run:
         # THE DEFENSIVE LEG WRAP (§25 deviation 12 — supersedes the traceback
@@ -6071,6 +6071,7 @@ def cmd_box_update(args: argparse.Namespace) -> int:
         BoxUpdateEnvError,
         BoxUpdateStatus,
         default_command_runner,
+        default_repo_root,
         resolve_box_update_enabled,
         run_box_update,
     )
@@ -6082,9 +6083,7 @@ def cmd_box_update(args: argparse.Namespace) -> int:
         return EXIT_USER_ERROR
     resolved = _resolve_lake_root(args.lake_root)
     _require_lake_dir(resolved, command="box-update")
-    import brutex as _brutex_pkg
-
-    repo_root = Path(_brutex_pkg.__file__).resolve().parents[1]
+    repo_root = default_repo_root()
     from brutex.adapters.groww.pull_singleflight import (
         NightlyAlreadyRunningError,
         nightly_singleflight_lock,

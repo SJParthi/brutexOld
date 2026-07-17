@@ -66,6 +66,7 @@ __all__ = [
     "adopt_state",
     "classify_delta",
     "default_command_runner",
+    "default_repo_root",
     "guard_skip_reason",
     "maybe_reexec",
     "resolve_box_update_enabled",
@@ -215,7 +216,9 @@ class CommandRunner(Protocol):
         cwd: Path | None = None,
         timeout_s: float,
         env: Mapping[str, str] | None = None,
-    ) -> tuple[int, str, str]: ...
+    ) -> tuple[int, str, str]:
+        """Run *argv* and return ``(rc, stdout, stderr)``."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
 def default_command_runner(
@@ -245,6 +248,17 @@ def default_command_runner(
     except OSError as exc:
         return (127, "", str(exc))
     return (completed.returncode, completed.stdout, completed.stderr)
+
+
+def default_repo_root() -> Path:
+    """The checkout root this module was imported from.
+
+    ``…/<repo>/brutex/nightly/box_update.py`` → ``parents[2]`` = ``<repo>``.
+    The ONE repo-root derivation both CLI call sites share (CLAUDE.md §11
+    COMMON — avoids a per-site ``import brutex`` beside the top-level
+    ``from brutex import __version__``, the CodeQL import-and-import-from
+    class)."""
+    return Path(__file__).resolve().parents[2]
 
 
 # ── wheel set (§1 — the canonical box build set, Makefile-mirrored) ──────
