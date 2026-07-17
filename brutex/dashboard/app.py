@@ -48,7 +48,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, TypeVar
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo
 
 import structlog
 
@@ -62,6 +61,7 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.calendars.auto_pull_gate import compose_market_closed
 from brutex.calendars.market_hours import resolve_market_closed
+from brutex.calendars.nse import IST as _IST_TZ
 from brutex.calendars.nse import now_ist
 from brutex.config.credentials import groww_credentials_error
 from brutex.config.hardware_envelope import memory_budget_bytes
@@ -10562,7 +10562,8 @@ def _fill_default_dates(html: str) -> str:
     # (DEC-UNIVERSE-SELECTION-PRECISE-001); the browser now refuses it. The
     # settled-data clamp (DEC-DAILY-CANDLE-CLAMP-001) still governs what a
     # today-inclusive range actually fetches.
-    max_iso = datetime.now(tz=ZoneInfo("Asia/Kolkata")).date().isoformat()
+    # The ONE canonical IST root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+    max_iso = datetime.now(tz=_IST_TZ).date().isoformat()
     return (
         html.replace("__BRUTEX_DATE_FROM__", from_iso)
         .replace("__BRUTEX_DATE_TO__", to_iso)

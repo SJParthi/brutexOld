@@ -171,6 +171,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from brutex.calendars.nse import IST_FIXED_OFFSET
 from brutex.data.fno_candle_lake import FNO_CANDLE_LAKE_SEGMENT
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.greeks_enrich import (
@@ -276,8 +277,10 @@ CHECKPOINT_FILE_NAME: Final[str] = "checkpoint.json"
 #: TFs never carry the overlay and are deliberately never scanned.
 _MINUTE_INTERVAL: Final[str] = "1minute"
 
-#: Fixed +05:30 IST (no DST) — the expiry-comparison calendar.
-_IST: Final[timezone] = timezone(timedelta(hours=5, minutes=30))
+#: Fixed +05:30 IST (no DST) — the expiry-comparison calendar; the ONE
+#: canonical :data:`brutex.calendars.nse.IST_FIXED_OFFSET` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[timezone] = IST_FIXED_OFFSET
 
 #: December — the year-wrap month for the contract-window derivation and the
 #: upper bound of the valid month-file range (one COMMON constant, ruff PLR2004).

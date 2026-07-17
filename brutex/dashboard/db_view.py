@@ -62,7 +62,12 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+from brutex.calendars.nse import (
+    IST,
+    IST_OFFSET_MINUTES,
+    MUHURAT_SESSIONS,
+    previous_trading_session,
+)
 from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
@@ -385,8 +390,10 @@ def clamp_limit(n: int) -> int:
 #: IST — the market wall-clock the candle viewer renders bar times in. The
 #: lake stores bar time as a UTC ``TIMESTAMPTZ``; we display the Indian-market
 #: local time explicitly (not the ambient DuckDB session ``TimeZone``) so the
-#: rendered string is deterministic regardless of where the server runs.
-_IST: Final[ZoneInfo] = ZoneInfo("Asia/Kolkata")
+#: rendered string is deterministic regardless of where the server runs. The
+#: ONE canonical :data:`brutex.calendars.nse.IST` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+_IST: Final[ZoneInfo] = IST
 
 #: The daily-bar partition interval — its bars render DATE-ONLY (no noise
 #: ``00:00:00`` suffix) in the candle viewer (DEC-DB-CANDLE-DERIVED-001).
@@ -395,10 +402,15 @@ _DAILY_INTERVAL: Final[str] = "1day"
 #: The SQL fragment for a bar's **IST wall-clock instant** (a naive TIMESTAMP on
 #: the Indian-market clock). Adds the fixed +05:30 IST offset (330 minutes; India
 #: has no DST — CLAUDE.md §6) to the UTC wall-clock, so it is independent of the
-#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The ONE
-#: place the 330-minute offset lives — :data:`_IST_DATE_EXPR` derives from it so
-#: no second literal can drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
-_IST_TS_EXPR: Final[str] = "((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '330 minutes')"
+#: ambient DuckDB session ``TimeZone`` (the operator runs Asia/Kolkata). The
+#: minute count is INTERPOLATED from the ONE canonical
+#: :data:`brutex.calendars.nse.IST_OFFSET_MINUTES` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001; SQL text byte-identical) —
+#: :data:`_IST_DATE_EXPR` derives from this fragment so no second literal can
+#: drift (DEC-DAILY-OPEN-SUBSTITUTION-HONESTY-001).
+_IST_TS_EXPR: Final[str] = (
+    f"((\"timestamp\" AT TIME ZONE 'UTC') + INTERVAL '{IST_OFFSET_MINUTES} minutes')"
+)
 
 #: The SQL fragment for a bar's **IST calendar date** — the market wall-clock day
 #: the candle grid renders (:func:`_format_candle_timestamp`). Derived from
@@ -440,8 +452,10 @@ _INTRADAY_BASE_INTERVAL: Final[str] = "1minute"
 
 #: 09:15:00 IST — the regular NSE/BSE session open. The overnight ``open_gap_pct``
 #: derived column (DEC-DB-CANDLE-DERIVED-001) is computed ONLY for the bar at
-#: this instant; mirrors ``brutex.data.spot_features._SESSION_OPEN`` (§11 COMMON).
-_SESSION_OPEN_IST: Final[time] = time(9, 15)
+#: this instant; DERIVED from the ONE COMMON
+#: :data:`brutex.data.session.SESSION_OPEN` root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001 — the former ``time(9, 15)`` mirror).
+_SESSION_OPEN_IST: Final[time] = SESSION_OPEN
 
 #: The canonical session open as minutes-past-midnight-IST (555), DERIVED from the
 #: ONE COMMON :data:`brutex.data.session.SESSION_OPEN` constant — never a fourth

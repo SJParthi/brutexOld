@@ -59,6 +59,7 @@ from typing import Final
 import structlog
 
 from brutex.adapters.groww.deadline import DeadlineExceeded, run_with_deadline
+from brutex.calendars.nse import IST_TZ_NAME
 from brutex.config.hardware_envelope import apply_duckdb_thread_bound
 from brutex.observability.progress_beat import emit_progress_beat
 
@@ -246,8 +247,10 @@ def latest_movers_date(lake_root: Path) -> str | None:
             # 1day partitions.
             apply_duckdb_thread_bound(conn)
             row = conn.execute(
-                "SELECT MAX((\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE) "
-                "FROM read_parquet(?, union_by_name=true)",  # nosec B608 - bound glob-list parameter
+                # The tz literal interpolates the ONE canonical IST_TZ_NAME
+                # root (DEC-TIMESTAMP-IST-SINGLESOURCE-001; SQL byte-identical).
+                f"SELECT MAX((\"timestamp\" AT TIME ZONE '{IST_TZ_NAME}')::DATE) "  # noqa: S608  # nosec B608 - static hardcoded tz constant; glob list is parameter-bound
+                "FROM read_parquet(?, union_by_name=true)",
                 [present],
             ).fetchone()
     except (duckdb.Error, OSError) as exc:
@@ -320,12 +323,14 @@ def latest_movers_minute(lake_root: Path, day: date_cls) -> str | None:
             # thread pool (mirror `latest_movers_date`).
             apply_duckdb_thread_bound(conn)
             row = conn.execute(
-                "SELECT MAX("
-                "  EXTRACT(HOUR FROM (\"timestamp\" AT TIME ZONE 'Asia/Kolkata')) * 60 "
-                "  + EXTRACT(MINUTE FROM (\"timestamp\" AT TIME ZONE 'Asia/Kolkata'))"
+                # The tz literals interpolate the ONE canonical IST_TZ_NAME
+                # root (DEC-TIMESTAMP-IST-SINGLESOURCE-001; SQL byte-identical).
+                "SELECT MAX("  # noqa: S608  # nosec B608 - static hardcoded tz constant; glob list + day are parameter-bound
+                f"  EXTRACT(HOUR FROM (\"timestamp\" AT TIME ZONE '{IST_TZ_NAME}')) * 60 "
+                f"  + EXTRACT(MINUTE FROM (\"timestamp\" AT TIME ZONE '{IST_TZ_NAME}'))"
                 ") "
-                "FROM read_parquet(?, union_by_name=true) "  # nosec B608 - bound glob-list parameter
-                "WHERE (\"timestamp\" AT TIME ZONE 'Asia/Kolkata')::DATE = ?",
+                "FROM read_parquet(?, union_by_name=true) "
+                f"WHERE (\"timestamp\" AT TIME ZONE '{IST_TZ_NAME}')::DATE = ?",
                 [present, day],
             ).fetchone()
     except (duckdb.Error, OSError) as exc:
