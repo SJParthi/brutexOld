@@ -1,10 +1,16 @@
 //! SuperTrend — the ATR-band trailing-stop line (bits 64-65).
 //!
 //! The stateful indicator the Group-14 `close_above_supertrend` /
-//! `close_below_supertrend` conditions consume. A bit-for-bit integer port of
-//! TradingView Pine v6 `ta.supertrend(factor, atrPeriod)` with the LOCKED
-//! parameters ATR period **10** and factor **3** ([`SUPERTREND_ATR_PERIOD`] /
-//! [`SUPERTREND_FACTOR`]), source **hl2** — NOT close.
+//! `close_below_supertrend` conditions consume. A DETERMINISTIC integer port
+//! of the TradingView Pine v6 `ta.supertrend(factor, atrPeriod)` ALGORITHM
+//! with the LOCKED parameters ATR period **10** and factor **3**
+//! ([`SUPERTREND_ATR_PERIOD`] / [`SUPERTREND_FACTOR`]), source **hl2** — NOT
+//! close. It is **NOT bit-equal to TradingView's float series**: TV computes
+//! in floats, this state in ×2-scaled integers, and the ×2 integer truncation
+//! IS the definition (measured by review against a float reference: the line
+//! value drifts by sub-paisa truncation residue on ~57% of bars, and 1
+//! direction divergence was observed in 52,382 bars, sitting exactly on a
+//! flip boundary the two roundings resolve differently).
 //!
 //! ## The ×2-scaled integer domain (the half-paisa hazard)
 //!

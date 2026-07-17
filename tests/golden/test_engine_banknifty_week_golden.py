@@ -43,6 +43,50 @@ wider than the 10 bps ``near`` tolerance and the 0.5 % gap threshold, so:
 
 So bar ``i`` (day ``i // 4``, band ``i % 4``) is the closed form in
 :func:`_expected_mask`, asserted bar-for-bar AND pinned by SHA-256.
+
+SuperTrend ×2-domain audit (bits 64/65) — the in-file hand-derivation walk
+---------------------------------------------------------------------------
+The 16-bar feed warms the ATR-10 SuperTrend at 0-based bar 9, so the Group-14
+bits fire on bars 9-15 (the futures_roll golden's audit style). Everything
+below is in the **×2-scaled paisa domain** (one unit = half a paisa;
+``rust/trading-core/src/indicators/supertrend.rs``): a flat doji at ``P``
+rupees has ``hl2_x2 = close_x2 = 2 · P · 100`` paisa, so the four day prices
+50,000 / 51,000 / 52,000 / 53,000 give ``close_x2`` = 10,000,000 /
+10,200,000 / 10,400,000 / 10,600,000.
+
+TR (paisa; first bar ``H−L``, then ``max(H−L, |H−C_prev|, |L−C_prev|)``) is
+0 on every flat bar EXCEPT each day's first bar after a gap: bars 4, 8 and 12
+carry ``TR = 100,000`` (the 1,000-rupee day gap), so ``tr_x2 = 200,000``
+there and 0 elsewhere.
+
+* **bar 9** — ATR seed = SMA(10) of ``tr_x2[0..=9]`` =
+  ``(200,000 + 200,000) / 10`` = **40,000** (truncating). basicUpper =
+  ``10,400,000 + 3·40,000`` = **10,520,000**; ``atr[1]`` is still na so the
+  direction seeds +1 (DOWN) and the line sits on the upper band.
+  ``close_x2`` 10,400,000 < 10,520,000 ⇒ **bit 65**.
+* **bar 10** — Wilder: atr = ``(40,000·9 + 0)/10`` = 36,000; basicUpper =
+  ``10,400,000 + 108,000`` = **10,508,000** < prevFinalUpper 10,520,000 ⇒
+  the band ratchets down; close 10,400,000 ≯ it ⇒ stays DOWN ⇒ bit 65.
+* **bar 11** — atr = ``(36,000·9)/10`` = 32,400; basicUpper =
+  ``10,400,000 + 97,200`` = **10,497,200** (ratchets again); bit 65.
+* **bar 12** — the day-4 gap (``close_x2`` 10,600,000; ``tr_x2`` 200,000):
+  atr = ``(32,400·9 + 200,000)/10`` = ``491,600/10`` = 49,160. finalUpper
+  HOLDS at 10,497,200 (basicUpper 10,747,480 is looser and ``close[1]``
+  10,400,000 never closed above the band); close 10,600,000 > 10,497,200 ⇒
+  **FLIP** to −1 (UP) ⇒ line = finalLower = basicLower =
+  ``10,600,000 − 147,480`` = **10,452,520** (> prevFinalLower 10,302,800,
+  so the basic band IS the final band); close > line ⇒ **bit 64**.
+* **bar 13** — atr = ``(49,160·9)/10`` = 44,244; basicLower =
+  ``10,600,000 − 132,732`` = **10,467,268** (ratchets up); bit 64.
+* **bar 14** — atr = ``(44,244·9)/10`` = 39,819 (truncating 39,819.6);
+  basicLower = ``10,600,000 − 119,457`` = **10,480,543**; bit 64.
+* **bar 15** — atr = ``(39,819·9)/10`` = 35,837 (truncating 35,837.1);
+  basicLower = ``10,600,000 − 107,511`` = **10,492,489**; bit 64.
+
+Every line value above is reproduced EXACTLY by the installed
+``trading_core`` 0.5.0 kernel (re-derived from this fixture's bars,
+2026-07-17), giving the closed form in :func:`_expected_mask`: bars 9-11
+carry bit 65 (close below the upper-band line), bars 12-15 bit 64.
 """
 
 from __future__ import annotations
