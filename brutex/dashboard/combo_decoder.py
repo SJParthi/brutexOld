@@ -125,15 +125,15 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
     "below_cpr_bc": ("close<CPR-BC", "below the pivot-range floor"),
     "inside_cpr": ("inside CPR", "inside the pivot range"),
     "narrow_cpr_day": ("narrow CPR day", "tight coil day (narrow pivot range)"),
-    # ── Supertrend (declared layout-only — bits 64/65 never fire today;
-    # labels kept so the exact-keys coverage law holds) ──
+    # ── Supertrend (bits 64/65 — IMPLEMENTED since the vocab-66 SuperTrend
+    # flip, crate 0.5.0: ATR-10 Wilder, factor 3, hl2 source) ──
     "close_above_supertrend": (
-        "close>SuperTrend (inactive)",
-        "price above the SuperTrend line (not yet active)",
+        "close>SuperTrend",
+        "price above the SuperTrend line (up-trend hold)",
     ),
     "close_below_supertrend": (
-        "close<SuperTrend (inactive)",
-        "price below the SuperTrend line (not yet active)",
+        "close<SuperTrend",
+        "price below the SuperTrend line (down-trend hold)",
     ),
 }
 

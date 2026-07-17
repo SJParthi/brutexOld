@@ -91,9 +91,10 @@ def condition_display_name(bit: int) -> str:
     true`` tombstones whose math was deleted, e.g. the VWAP bits 52/53) reads
     ``"<name> (retired)"`` so a pre-reshape persisted mask never presents a
     dead condition as live; every other declared bit — implemented AND
-    LAYOUT-ONLY (declared-but-unimplemented, e.g. the SuperTrend bits 64/65,
-    which no persisted mask can carry: :class:`~brutex.strategies.spec.StrategySpec`
-    refuses them) — reads its plain name.
+    LAYOUT-ONLY (declared-but-unimplemented, which no persisted mask can
+    carry: :class:`~brutex.strategies.spec.StrategySpec` refuses them; none
+    exist on today's layout — the SuperTrend bits 64/65 left that class at
+    the vocab-66 implemented-flip, crate 0.5.0) — reads its plain name.
 
     Parameters
     ----------

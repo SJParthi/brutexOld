@@ -187,9 +187,9 @@ def default_condition_bits() -> list[int]:
     is deliberately HONEST: a LAYOUT-ONLY or RETIRED bit (``implemented=false``
     in ``conditions.toml``, whose evaluator emits a constant 0) is EXCLUDED, so
     the default never sweeps a dead condition that could never fire. On the
-    66-condition layout that is the 62 ACTIVE bits ``[0..51, 54..63]`` — the
-    RETIRED VWAP tombstones (52/53) and the declared-only SuperTrend bits
-    (64/65) are excluded.
+    66-condition layout that is the 64 ACTIVE bits ``[0..51, 54..65]`` — only
+    the RETIRED VWAP tombstones (52/53) are excluded (the SuperTrend bits
+    64/65 joined the default at the vocab-66 implemented-flip, crate 0.5.0).
 
     Returns
     -------
@@ -229,7 +229,7 @@ def parse_condition_ids(raw: str) -> list[int]:
     ``sweep-verify``), replacing three inline copies. Valid input parses
     byte-identically to the old inline expression. Each id is a 0-indexed bit
     position that must be IMPLEMENTED
-    (:data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` — the 62 active bits on
+    (:data:`~brutex.vocabulary.bits.IMPLEMENTED_MASK` — the 64 active bits on
     the 66-condition layout): a bit whose evaluator emits a constant 0 can
     NEVER fire, so sweeping it is hours of silent dead compute — the results
     store ADMITS every declared bit (``MASK_BITS_MAX`` spans the full layout),
@@ -239,7 +239,8 @@ def parse_condition_ids(raw: str) -> list[int]:
     RETIRED (a ``reserved = true`` tombstone — e.g. the VWAP bits 52/53 after
     the spot-only volume wipe, DEC-ENGINE-SPOT-ONLY-001; a saved pre-reshape
     script must drop them) vs declared-but-NOT-YET-implemented (a LAYOUT-ONLY
-    bit awaiting its math — e.g. the SuperTrend bits 64/65,
+    bit awaiting its math — none on today's layout: the SuperTrend bits 64/65
+    left that class at the vocab-66 implemented-flip, crate 0.5.0;
     DEC-VOCAB-U128-CODEGEN-001 grow-only territory). Bits outside the declared
     layout (``>= TOTAL_CONDITIONS``) stay the plain out-of-range refusal —
     deliberately NOT the engine's forward-compat ``[0, 128)`` u128 ceiling.
