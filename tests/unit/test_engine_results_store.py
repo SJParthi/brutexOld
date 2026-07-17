@@ -236,7 +236,11 @@ class TestReadableMask:
         # rejected list to the accepted boundary set.
         assert _row(mask_bits=mask).mask_bits == mask
 
-    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 66])
+    # 1 << 66 moved INTO the declared range at DEC-FIB-TEMPLATE-EXPRESS-001
+    # (TOTAL_CONDITIONS 66 -> 74; bit 66 is a reserved gap placeholder — declared,
+    # so mask-range-legal for a stored row); the out-of-range probe moves to the
+    # new first-undeclared bit, 1 << 74.
+    @pytest.mark.parametrize("bad", [-1, MASK_BITS_MAX + 1, 1 << 74])
     def test_mask_bits_out_of_range_rejected(self, bad: int) -> None:
         with pytest.raises(ResultsStoreError, match="mask_bits"):
             _row(mask_bits=bad)

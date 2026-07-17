@@ -46,7 +46,8 @@ def test_dual_label_dict_covers_every_one_of_the_60_names() -> None:
     without a Pro+Simple label, this test FAILS — no silent gaps.
     """
     assert set(CONDITION_LABELS.keys()) == set(NAME_TO_BIT.keys())
-    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 66
+    # 66 -> 74 at DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935).
+    assert len(CONDITION_LABELS) == TOTAL_CONDITIONS == 74
 
 
 def test_every_label_is_a_nonempty_pro_and_simple_pair() -> None:

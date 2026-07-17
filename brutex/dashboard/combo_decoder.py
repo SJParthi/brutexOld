@@ -135,6 +135,29 @@ _CONDITION_LABELS: Final[dict[str, tuple[str, str]]] = {
         "close<SuperTrend (inactive)",
         "price below the SuperTrend line (not yet active)",
     ),
+    # ── Reserved gap placeholders (DEC-FIB-TEMPLATE-EXPRESS-001 — bits 66-68
+    # hold the DEC-GAP-MIDPOINT-CONDITIONS-001 positions; declared,
+    # implemented=false, rendered retired — labels kept so the exact-keys
+    # coverage law holds; dropped verbatim at the gap re-stack) ──
+    "placeholder_gap_66": (
+        "gap-66 (reserved)",
+        "reserved placeholder 66 (never fires)",
+    ),
+    "placeholder_gap_67": (
+        "gap-67 (reserved)",
+        "reserved placeholder 67 (never fires)",
+    ),
+    "placeholder_gap_68": (
+        "gap-68 (reserved)",
+        "reserved placeholder 68 (never fires)",
+    ),
+    # ── Fibonacci Extended + Swing Proximity (DEC-FIB-TEMPLATE-EXPRESS-001,
+    # bits 69-73) ──
+    "near_fib_bull_236": ("bull Fib 23.6%", "at the bullish 23.6% pullback zone"),
+    "near_fib_bull_786": ("bull Fib 78.6%", "at the bullish 78.6% pullback zone"),
+    "near_fib_424": ("Fib 424% ext", "at the far 424% breakout target"),
+    "near_swing_high": ("near swing high", "retesting the last swing high"),
+    "near_swing_low": ("near swing low", "retesting the last swing low"),
 }
 
 #: Readable grouping order for composing a sentence: trend → level →
@@ -187,6 +210,17 @@ _LEVEL_NAMES: Final[frozenset[str]] = frozenset(
         "below_cpr_bc",
         "inside_cpr",
         "narrow_cpr_day",
+        # DEC-FIB-TEMPLATE-EXPRESS-001: the gap placeholders (66-68 — the
+        # briefed gap-MIDPOINT conditions are level-family) + the express
+        # fib/swing proximity bits (69-73) are all level conditions.
+        "placeholder_gap_66",
+        "placeholder_gap_67",
+        "placeholder_gap_68",
+        "near_fib_bull_236",
+        "near_fib_bull_786",
+        "near_fib_424",
+        "near_swing_high",
+        "near_swing_low",
     }
 )
 _STRUCTURE_NAMES: Final[frozenset[str]] = frozenset(

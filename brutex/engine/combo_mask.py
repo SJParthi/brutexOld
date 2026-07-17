@@ -91,10 +91,12 @@ __all__ = [
 # Constants
 # ─────────────────────────────────────────────────────────────────
 
-VOCAB_BITS: int = 66
+VOCAB_BITS: int = 74
 """Current condition vocabulary size (the dense bit count from
 ``rust/trading-core/conditions.toml`` / ``brutex.vocabulary.bits.TOTAL_CONDITIONS``).
-DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only)."""
+DEC-PLUGIN-001 / DEC-PLUGIN-002 govern add/remove (grow-only). 66 -> 74 at
+DEC-FIB-TEMPLATE-EXPRESS-001 (MIGRATION.md #1935): the five express bits 69-73
+plus the reserved gap placeholders 66-68 (declared, unimplemented)."""
 
 MAX_VOCAB_BITS: int = 128
 """u128 ceiling. The u64→u128 widening is ADR-gated by ADR-0012
@@ -541,7 +543,7 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     k : int
         Number of required bits. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 74).
 
     Returns
     -------
@@ -553,11 +555,11 @@ def count_combos(k: int, n: int = VOCAB_BITS) -> int:
     >>> count_combos(0)
     1
     >>> count_combos(1)
-    66
+    74
     >>> count_combos(2)
-    2145
+    2701
     >>> count_combos(3)
-    45760
+    64824
     >>> count_combos(0, n=5)
     1
     >>> count_combos(3, n=5)
@@ -602,7 +604,7 @@ def iter_masks_k_of_n(k: int, n: int = VOCAB_BITS) -> Iterator[int]:
     k : int
         Number of bits to set in each yielded mask. ``0 <= k <= n``.
     n : int
-        Vocabulary size. Default ``VOCAB_BITS`` (= 66).
+        Vocabulary size. Default ``VOCAB_BITS`` (= 74).
 
     Yields
     ------

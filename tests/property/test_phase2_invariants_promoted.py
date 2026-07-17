@@ -260,7 +260,8 @@ def test_p_24_supermask_count_order_and_partition_invariant(
 def test_p_25_vocabulary_has_no_vix_bit() -> None:
     """P-25: India-VIX is REFERENCE-ONLY (CLAUDE.md §2 Rule 3) — no atomic
     condition references it, so a generated pattern mask cannot leak VIX."""
-    assert TOTAL_CONDITIONS == 66  # grow-only: 52 + 8 (ADR-0012 D4) + 6 (the 60→66 reshape)
+    # grow-only: 52 + 8 (ADR-0012 D4) + 6 (60→66) + 8 (66→74, DEC-FIB-TEMPLATE-EXPRESS-001)
+    assert TOTAL_CONDITIONS == 74
     assert len(ALL_CONDITION_NAMES) == TOTAL_CONDITIONS
     assert set(NAME_TO_BIT) == set(ALL_CONDITION_NAMES)
     # The bit map is a dense 0..TOTAL-1 bijection.
