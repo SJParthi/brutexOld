@@ -1,0 +1,5 @@
+crossverify/groww/2026-07-10/IDX_I/NIFTY.csv
+crossverify/groww/2026-07-10/IDX_I/SENSEX.csv
+crossverify/groww/2026-07-10/NSE_EQ/BAJAJ-AUTO.csv
+crossverify/groww/2026-07-10/NSE_EQ/M&M.csv
+crossverify/groww/2026-07-10/NSE_EQ/RELIANCE.csv

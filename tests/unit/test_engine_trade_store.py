@@ -155,6 +155,7 @@ def _agg_record(run_id: str, **overrides: object) -> dict[str, object]:
         "exits_signal": 0,
         "exits_forced_1520": 0,
         "exits_end_of_data": 0,
+        "exits_session_gap": 0,
         "max_consecutive_losses": 1,
         "max_consecutive_wins": 1,
         "composite_score": 1.234567890123,
@@ -308,6 +309,24 @@ class TestWriteAndStamp:
         with pytest.raises(
             TradeStoreError, match=r"missing=\['fingerprint'\].*extra=\['surprise'\]"
         ):
+            write_tuple_sidecars(paths, [], [record], store_content_hash=_STORE_HASH)
+
+    def test_rejects_agg_extra_key_alone(self, paths: SidecarPaths) -> None:
+        """The strict agg key-set EQUALITY check refuses a pure-extra-key record.
+
+        Pins a PRE-EXISTING strictness law adjacent to the AGG_COLUMNS
+        extension (refuter round 5 MS4 — in-scope hardening beside the
+        `exits_session_gap` row, not a drive-by): a record carrying ALL 50
+        pinned columns PLUS one unknown extra key must refuse with
+        ``missing=[]`` under the STRICT ``keys != _AGG_COLUMN_NAMES`` compare.
+        A superset-weakening mutant (``not keys >= _AGG_COLUMN_NAMES``)
+        silently ACCEPTS this shape — the extra key dropped at columnarise —
+        while the rename-shaped sibling above (missing + extra
+        simultaneously) still raises under it, so only this shape kills it.
+        """
+        record = _agg_record(_RUN_A)
+        record["surprise"] = 1
+        with pytest.raises(TradeStoreError, match=r"missing=\[\].*extra=\['surprise'\]"):
             write_tuple_sidecars(paths, [], [record], store_content_hash=_STORE_HASH)
 
     def test_rejects_agg_bad_run_id(self, paths: SidecarPaths) -> None:
@@ -588,9 +607,15 @@ class TestValidatorEdges:
 
 
 def test_agg_columns_cover_the_b2_schema() -> None:
-    """The B2 schema authority: 49 pinned columns, run_id first."""
+    """The B2 schema authority: 50 pinned columns, run_id first.
+
+    49 → 50: ``exits_session_gap`` joined the per-reason counter block
+    (DEC-TRADESIM-OPEN-SESSION-GUARD-001 — the exit-reason vocabulary is
+    append-only, and the agg schema tracks it in lockstep).
+    """
     names = [name for name, _ in AGG_COLUMNS]
     assert names[0] == "run_id"
-    assert len(names) == len(set(names)) == 49
+    assert len(names) == len(set(names)) == 50
+    assert "exits_session_gap" in names
     assert "fingerprint" in names
     assert "composite_score" in names

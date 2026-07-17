@@ -97,9 +97,17 @@ SPOT_PROBE_SEGMENTS: Final[tuple[str, ...]] = ("INDEX", "CASH")
 
 
 #: Characters that would break filesystem paths on Linux / macOS /
-#: Windows. A symbol containing any of these is rejected.
+#: Windows, PLUS the glob metachars `[`/`]` (DEC-SPOT-DERIVE-TS-RANGE-
+#: HARDENING-001, completing the #1594 round-15 metachar law write-side): a
+#: symbol dir named ``NSE-X[12]`` beside real ``NSE-X1``/``NSE-X2`` siblings
+#: makes any glob-interpreting read pull the SIBLINGS' bars into the wrong
+#: symbol (executed-repro'd on the engine feed mouth ``Catalog.get_bars``).
+#: `*`/`?` were already members; no legitimate vendor symbol carries a
+#: bracket (NSE trading symbols are alphanumeric plus ``&``/``-``/``.`` —
+#: verified against the real instrument-master fixtures). A symbol containing
+#: any of these is rejected.
 _FORBIDDEN_SYMBOL_CHARS: Final[frozenset[str]] = frozenset(
-    {"/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0"}
+    {"/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0", "[", "]"}
 )
 
 
@@ -314,3 +322,19 @@ def partition_for_timestamp(ts: datetime) -> tuple[int, int]:
         )
     utc = ts.astimezone(tz=UTC)
     return (utc.year, utc.month)
+
+
+def option_partition_stem(year: int, month: int) -> str:
+    """The canonical zero-padded stem of one expired-options month partition.
+
+    THE one source of the ``options/<series>/<YYYY>-<MM>.parquet`` stem format
+    (CLAUDE.md §11 COMMON — a hostile-review NIT found the f-string duplicated
+    at four load-bearing sites: ``OptionParquetWriter.write``'s destination,
+    ``lake_invariants._option_file_month``'s canonical-stem check,
+    ``lake_invariants._canonical_option_keys``'s sibling path and
+    ``lake_heal._heal_option_foreign``'s reassignment destination — a drift in
+    any one would desynchronise routing from addressing). Pure formatting; the
+    inverse parse (+ its canonical-form/bounds gates) lives in
+    ``lake_invariants._option_file_month``.
+    """
+    return f"{year:04d}-{month:02d}"

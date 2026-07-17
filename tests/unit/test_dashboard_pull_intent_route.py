@@ -253,6 +253,29 @@ def test_real_pull_writes_intent_and_clears_it_on_success(
     _wait_for(lambda: not intent_store.path.exists())
 
 
+def test_click_over_corrupt_intent_file_recovers_never_500(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[F/B — refuter round 6 N-1 inherited note] a bit-rotted (invalid UTF-8)
+    ``.pull_intent.json`` + a REAL /pull-pipeline click: the launcher's
+    held-mutex ``prior_intent = store.load()`` snapshot reads the corrupt
+    file as absent (deleted best-effort) and the click proceeds CLEAN.
+    Executed pre-fix at the round-5 head: the same click was a 500
+    (``UnicodeDecodeError`` out of the snapshot load)."""
+    _pin_creds_present(monkeypatch)
+    monkeypatch.setattr(app_module, "pull_all_spot", _fake_spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    intent_store.path.write_bytes(b'\xff{"version": 1}')
+    resp = client.post("/api/v1/universe/pull-pipeline", params={"symbols": "NIFTY"})
+    assert resp.status_code == 200
+    assert resp.json()["started"] is True
+    assert _wait_for_job(client)["state"] == "done"
+    # The completed pull's on_finally clear leaves no intent — the corrupt
+    # bytes are gone for good (never re-tripping a later boot).
+    _wait_for(lambda: not intent_store.path.exists())
+
+
 def test_failed_pull_still_clears_the_intent(
     client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -510,3 +533,64 @@ def test_resume_credential_refusal_keeps_intent_for_next_boot(
     banner = intent_store.banner.snapshot()
     assert banner is not None
     assert banner["level"] == "critical"
+
+
+# ── the app.state.brutex_resume_legacy seam (DEC-AUTO-RESUME-INPROCESS-001) ──
+
+
+def test_legacy_seam_absent_without_intent_store(
+    store: InstrumentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(ENV_CREDENTIALS_FILE, str(tmp_path / "credentials.json"))
+    app = build_app(DashboardState(), instrument_store=store)
+    assert not hasattr(app.state, "brutex_resume_legacy")
+
+
+def test_legacy_seam_fires_whole_universe_pull_and_clears_on_completion(
+    client: TestClient, intent_store: PullIntentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process legacy resume (the deleted DOA child's replacement) runs the
+    REAL /pull-pipeline launcher whole-universe and the job's on_finally clears
+    the synthesized intent — the full inherited lifecycle, end to end."""
+    _pin_creds_present(monkeypatch)
+    spot_calls: list[dict[str, Any]] = []
+
+    def _spot(*args: Any, **kwargs: Any) -> BulkSpotReport:
+        spot_calls.append(dict(kwargs))
+        return _fake_spot(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "pull_all_spot", _spot)
+    monkeypatch.setattr(app_module, "pull_expiries_contracts", _fake_metadata)
+    monkeypatch.setattr(app_module, "pull_historical_for_underlyings", _fake_historical)
+    assert not intent_store.path.exists(), "the legacy seam starts from a bare lake"
+    client.app.state.brutex_resume_legacy()  # type: ignore[attr-defined]
+    assert _wait_for_job(client)["state"] == "done"
+    # The whole-universe defaults reached the spot phase (no fabricated dates).
+    assert spot_calls[0]["from_date"] is None
+    assert spot_calls[0]["to_date"] is None
+    assert spot_calls[0]["dry_run"] is False
+    # The resumed run's completion cleared the synthesized intent (on_finally).
+    _wait_for(lambda: not intent_store.path.exists())
+    assert intent_store.banner.snapshot() is None
+
+
+def test_legacy_seam_peer_held_flock_skips_quietly(
+    client: TestClient,
+    store: InstrumentStore,
+    intent_store: PullIntentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live peer's held job-root flock ⇒ the legacy resume skips without
+    launching, failing progress, or leaving a banner — the inherited
+    PEER_ACTIVE surface on the SAME store-derived write root."""
+    _pin_creds_present(monkeypatch)
+    _patch_spines(monkeypatch)
+    with pull_singleflight_lock(store.path.parent):
+        client.app.state.brutex_resume_legacy()  # type: ignore[attr-defined]
+    snap = client.get("/api/v1/universe/pull-progress").json()
+    assert snap["state"] == "idle", "a peer-held flock must not start or fail a pull"
+    assert intent_store.banner.snapshot() is None
+    assert not intent_store.path.exists(), (
+        "the synthesized intent is cleaned on the peer skip — the next boot "
+        "re-decides from the ledger, never an unconditional intent re-fire"
+    )

@@ -17,8 +17,13 @@ constructor that formats its arguments:
 Both empirically proven pre-fix; the ``__reduce__`` constructor-arg fixes are
 pinned here per class (type / ``str`` / ``args`` / attribute fidelity). This
 file is also the module's discovery-gate test: it exercises every class +
-:func:`~brutex.data.errors.parquet_read_skip_errors` so
-``brutex/data/errors.py`` reads 100% line+branch standalone.
+:func:`~brutex.data.errors.parquet_read_skip_errors` + the round-18
+datetime-out-of-range sets
+(:func:`~brutex.data.errors.datetime_out_of_range_errors` /
+:func:`~brutex.data.errors.datetime_out_of_range_escape_errors` — MOVED here
+from ``test_parquet_read_skip_errors.py``, which does not stem-match the
+discovery gate's ``test_data_errors*`` / ``test_errors*`` globs; one source
+of truth) so ``brutex/data/errors.py`` reads 100% line+branch standalone.
 """
 
 from __future__ import annotations
@@ -31,14 +36,18 @@ from brutex.data.errors import (
     DataLakeError,
     GreeksEnrichPoolBroken,
     LakeWriteHalt,
+    MarketHoursHalt,
     PartitionError,
     PartitionLockTimeout,
     ResampleInputError,
     StoreWriteDeadlineExceeded,
     WriteDeadlineExceeded,
     WriterError,
+    datetime_out_of_range_errors,
+    datetime_out_of_range_escape_errors,
     parquet_read_skip_errors,
 )
+from brutex.models import BruteXError
 
 
 def _roundtrip(exc: BaseException) -> BaseException:
@@ -141,6 +150,43 @@ class TestConstructorArgReduce:
         assert twice.reason == "out_of_memory"
 
 
+class TestMarketHoursHalt:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 — the pull-control market-hours stop."""
+
+    def test_default_reason_and_message(self) -> None:
+        exc = MarketHoursHalt()
+        assert exc.reason == "market_hours"
+        assert str(exc) == "pull halted: market_hours"
+
+    def test_explicit_reason(self) -> None:
+        exc = MarketHoursHalt("market_hours")
+        assert exc.reason == "market_hours"
+
+    def test_roundtrip_not_doubled(self) -> None:
+        """Same reduce discipline as LakeWriteHalt — exactly one prefix."""
+        copy = _roundtrip(MarketHoursHalt())
+        assert type(copy) is MarketHoursHalt
+        assert str(copy) == "pull halted: market_hours"
+        assert copy.reason == "market_hours"
+        assert copy.args == MarketHoursHalt().args
+
+    def test_double_roundtrip_stable(self) -> None:
+        twice = _roundtrip(_roundtrip(MarketHoursHalt()))
+        assert isinstance(twice, MarketHoursHalt)
+        assert str(twice) == "pull halted: market_hours"
+
+    def test_is_a_brutex_error_not_a_data_lake_error(self) -> None:
+        """A pull-CONTROL stop — a BruteXError (for global-stop membership) but
+        deliberately NOT a DataLakeError (it is not a lake-write failure)."""
+        exc = MarketHoursHalt()
+        assert isinstance(exc, BruteXError)
+        assert not isinstance(exc, DataLakeError)
+
+    def test_not_a_parquet_skip_error(self) -> None:
+        """A market-hours halt must never be swallowed as an unreadable-file skip."""
+        assert not isinstance(MarketHoursHalt(), parquet_read_skip_errors())
+
+
 class TestMessageOnlyClasses:
     """The plain message-only classes keep the default (working) reduce."""
 
@@ -186,3 +232,41 @@ class TestParquetReadSkipErrors:
         # NARROW on purpose (Golden Rule #1): a genuine code bug still propagates.
         skip = parquet_read_skip_errors()
         assert not issubclass(ValueError, skip)
+
+
+class TestDatetimeOutOfRangeErrorSets:
+    """The round-18 out-of-range Datetime conversion-fault sets
+    (DEC-LAKE-HEAL-OPTIONS-FOREIGN-001)."""
+
+    def test_full_probe_set(self) -> None:
+        """The FULL probe set covers every empirically-verified
+        conversion-fault type — OverflowError (tz-aware positive overflow via
+        min/max), ValueError (naive/negative overflow via min/max), and
+        polars' PanicException (to_list — a BaseException that escapes
+        ``except Exception``)."""
+        import polars as pl
+
+        probe = datetime_out_of_range_errors()
+        assert OverflowError in probe
+        assert ValueError in probe
+        assert pl.exceptions.PanicException in probe
+        # The panic rationale: a BaseException, NOT an Exception — the reason
+        # the blanket guards must name it explicitly.
+        assert not issubclass(pl.exceptions.PanicException, Exception)
+        assert issubclass(pl.exceptions.PanicException, BaseException)
+        # NOT folded into the file-unreadable set (different consumers/semantics).
+        assert OverflowError not in parquet_read_skip_errors()
+
+    def test_escape_set_excludes_value_error(self) -> None:
+        """The BROAD-guard subset (healer per-finding set + L3 boot blanket)
+        deliberately EXCLUDES ValueError — around arbitrary heal/sweep code
+        that is the genuine-code-bug class and must keep propagating (Golden
+        Rule #1)."""
+        import polars as pl
+
+        escape = datetime_out_of_range_escape_errors()
+        assert OverflowError in escape
+        assert pl.exceptions.PanicException in escape
+        assert ValueError not in escape
+        # A strict subset of the full probe set (no member invented twice).
+        assert set(escape) < set(datetime_out_of_range_errors())

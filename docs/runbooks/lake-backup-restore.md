@@ -106,6 +106,23 @@ same thing unconditionally.
   invisible to a RUNNING dashboard (`lake_revision.py:39-47` docstring — the
   write-time lake manifest remains named future work, #867/#1025). After any
   manual surgery inside `bars/`: **restart the dashboard.**
+- **Deleting a `bars/` partition while its ledger row stays `SUCCESS` is
+  SILENT data loss — a later incremental pull does NOT restore it.** The
+  window ledger is the SOLE skip authority (`data/window_ledger.py`
+  `is_skippable`): a settled `SUCCESS`/`SKIPPED` window is skipped on ledger
+  authority, never re-verified against lake presence, so the deleted
+  partition's window is never re-fetched. Neither remediation lever covers
+  this case: `brutex reopen-skipped` reopens only `SKIPPED` rows, and
+  `record(degraded=...)` is a DURING-pull demotion the spine applies to a
+  window it just fetched — nothing watches for a vanished partition behind a
+  `SUCCESS` row. A naive in-memory `record(error_type=...)` FAILED demotion
+  is also silently REVERTED by the save-merge's more-settled-wins rule
+  (`window_ledger_store.py` `merge_ledger_rows`). Real recovery: delete (or
+  reopen via a `record(..., degraded=True)` + save, which registers the
+  tombstone the merge honours) the window's ledger row so the next pull
+  re-fetches it, or restore the partition from backup. Pinned end-to-end by
+  `tests/integration/test_incremental_pull_cycle.py`
+  (`test_deleted_partition_with_success_ledger_is_not_repulled`).
 - **A lost/absent ledger is recoverable, but expensively.** The next pull
   re-seeds settled windows from the lake bars it finds
   (`reconcile_ledger_with_lake` / the cold-start `seed_lake_success` bridge,

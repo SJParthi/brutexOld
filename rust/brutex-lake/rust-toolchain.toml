@@ -1,0 +1,6 @@
+# brutex-lake MSRV pin (DEC red-team fold, 2026-07-16): the crate's Cargo.toml sets
+# rust-version = "1.95" (sysinfo 0.39.3 MSRV); a fresh builder on an older default
+# toolchain hard-fails `maturin build --locked`. Directory-scoped so fno-math /
+# trading-core keep building under ci.yml's RUST_VERSION (1.93.1).
+[toolchain]
+channel = "1.97.0"

@@ -152,7 +152,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Show runner identity
         run: |
@@ -164,7 +164,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -428,7 +428,7 @@ jobs:
 
       - name: Upload absolute-bench artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: abs-bench
           path: abs-bench/
@@ -439,7 +439,7 @@ jobs:
         # S1: abstain is GREEN but never invisible. Distinct title + labels so it
         # can never be confused with a regression red; dedup by title (per key).
         if: steps.abscompare.outputs.needs_capture == '1' && github.event_name == 'schedule'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const key = '${{ steps.abscompare.outputs.hardware_key }}';
@@ -471,7 +471,7 @@ jobs:
         # #1511): a timeout-KILLED job reports CANCELLED, not failure — alert on
         # both so a silent timeout death is impossible.
         if: (failure() || cancelled()) && github.event_name == 'schedule'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const title = `bench-m4pro: failure on ${context.sha.substring(0, 7)}`;
@@ -522,11 +522,11 @@ jobs:
       # (review round 2).
       issues: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: abs-bench
       - name: Open bless PR (candidate committed VERBATIM — numbers measured on the runner, no edit surface here)
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const fs = require('fs');
@@ -560,7 +560,7 @@ jobs:
               body: fs.readFileSync('pr-body.md').toString()});
       - name: Alert on bless failure (a broken bootstrap loop must not be silent)
         if: (failure() || cancelled()) && github.event_name == 'schedule'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const title = `bench-m4pro: bless-baseline job failed on ${context.sha.substring(0, 7)}`;

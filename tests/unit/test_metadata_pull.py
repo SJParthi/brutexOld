@@ -33,6 +33,7 @@ from brutex.dashboard import metadata_pull as mp
 from brutex.dashboard.metadata_pull import (
     GROWW_METADATA_HISTORY_FLOOR,
     MetadataClientFactory,
+    MetadataPullReport,
     pull_expiries_contracts,
 )
 from brutex.data.coverage_ledger import (
@@ -257,6 +258,77 @@ def test_happy_persist_expiries_and_contracts(tmp_path: Path) -> None:
     assert sdk.calls.count("get_expiries") == 1
     assert sdk.calls.count("get_contracts") == 2
     assert not hasattr(sdk, "get_historical_candles")
+    registry.close()
+
+
+def test_metadata_phase_1_halts_when_market_opens(tmp_path: Path) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a metadata phase whose belt is CLOSED
+    raises MarketHoursHalt at the first expiry cell — the per-cell guard, mirroring the
+    ingest spines. No vendor call is issued (the guard fires BEFORE ``get_expiries``)."""
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    with pytest.raises(MarketHoursHalt):
+        pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-halt-1",
+            market_closed=lambda: True,
+        )
+    # The per-cell guard fires BEFORE the vendor call — no expiries fetched.
+    assert "get_expiries" not in sdk.calls
+    registry.close()
+
+
+def test_metadata_phase_2_halts_when_market_opens_mid_phase(tmp_path: Path) -> None:
+    """DEC-GROWW-MARKET-HOURS-GUARD-001 MAJOR-2: a belt that opens BETWEEN Phase-1 and
+    Phase-2 halts the contract phase (the per-cell guard in ``_fetch_contracts``) —
+    Phase-1's discovered expiries stay committed (resumable next out-of-hours run)."""
+    from brutex.data.errors import MarketHoursHalt
+
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]},
+        contracts={("NSE", "NIFTY", "2026-06-25"): ["NSE-NIFTY-25Jun26-24000-CE"]},
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+
+    calls = {"n": 0}
+
+    def _belt() -> bool:
+        # False for the single Phase-1 expiry cell, True for the Phase-2 contract job
+        # (the clock crossed 08:45 between the two phases).
+        calls["n"] += 1
+        return calls["n"] >= 2
+
+    with pytest.raises(MarketHoursHalt):
+        pull_expiries_contracts(
+            [_instrument("NIFTY")],
+            registry=registry,
+            coverage_store=coverage,
+            years=[2026],
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-halt-2",
+            market_closed=_belt,
+        )
+    # Phase-1 expiries were discovered + committed before the Phase-2 halt; the
+    # contract fetch never fired (guard before ``get_contracts``).
+    assert registry.count_expiries() == 1
+    assert "get_contracts" not in sdk.calls
     registry.close()
 
 
@@ -1235,6 +1307,86 @@ def test_zero_expiry_audit_fires_when_underlying_empty(tmp_path: Path) -> None:
     registry.close()
 
 
+def test_resolve_underlying_forms_blank_symbol_skipped_counted_warned() -> None:
+    """REFUTER ROUND 1 (DEC-FNO-UNDERLYING-EMPTY-GUARD-001): blank rows never grid.
+
+    A blank / whitespace-only ``symbol_name`` row is SKIPPED at the grid resolve —
+    no ``(exch, "")`` pair, no forms entry — counted, with ONE aggregate
+    ``metadata.underlying_blank_symbol_skipped`` WARNING per build carrying
+    ``exch:security_id`` samples (the kind-map builder's isolation idiom). Fails
+    pre-fix: the blank row minted a ``("NSE", "")`` grid pair with ``()`` forms.
+    """
+    with structlog.testing.capture_logs() as logs:
+        grid, forms_by_key = mp._resolve_underlying_forms(
+            [_instrument("NIFTY"), _equity(""), _equity("  ")]
+        )
+    assert grid == [("NSE", "NIFTY")]
+    assert set(forms_by_key) == {("NSE", "NIFTY")}
+    events = [e for e in logs if e["event"] == mp.METADATA_BLANK_SYMBOL_SKIPPED_EVENT]
+    assert len(events) == 1
+    assert events[0]["skipped"] == 2
+    assert events[0]["samples"] == ["NSE:2", "NSE:2"]  # _equity's fixed security_id
+    # A clean list emits NO skip event.
+    with structlog.testing.capture_logs() as logs2:
+        mp._resolve_underlying_forms([_instrument("NIFTY")])
+    assert [e for e in logs2 if e["event"] == mp.METADATA_BLANK_SYMBOL_SKIPPED_EVENT] == []
+    # The sample list caps at BLANK_SYMBOL_SAMPLE_CAP while the count stays true.
+    from brutex.dashboard.fno_underlying import BLANK_SYMBOL_SAMPLE_CAP
+
+    with structlog.testing.capture_logs() as logs3:
+        mp._resolve_underlying_forms([_equity("") for _ in range(BLANK_SYMBOL_SAMPLE_CAP + 2)])
+    [capped] = [e for e in logs3 if e["event"] == mp.METADATA_BLANK_SYMBOL_SKIPPED_EVENT]
+    assert capped["skipped"] == BLANK_SYMBOL_SAMPLE_CAP + 2
+    assert len(capped["samples"]) == BLANK_SYMBOL_SAMPLE_CAP
+
+
+def test_blank_symbol_row_pull_isolated_no_durable_failed_rows(tmp_path: Path) -> None:
+    """REFUTER ROUND 1 port of ``attack1_metadata_blank.py`` (the falsified "inert key").
+
+    Pre-fix, driving the REAL ``pull_expiries_contracts`` over ``[NIFTY, <blank>]``
+    captured a ``forms[0]`` IndexError per YEAR cell and upserted DURABLE
+    ``failed`` coverage rows keyed ``("NSE", "")`` (``expiry_failures == 3``,
+    re-failing every pull — the /universe mapping-integrity panel gated RED with an
+    unnameable empty-string symbol). Post-fix the blank row is skipped at the grid:
+    zero vendor calls for it, ZERO coverage rows keyed ``""``, zero failures, ONE
+    aggregate WARN — and NIFTY's chain lands untouched.
+    """
+    years = [2024, 2025, 2026]
+    sdk = _FakeSDK(
+        expiries={("NSE", "NIFTY", y): [f"{y}-06-25"] for y in years},
+        contracts={
+            ("NSE", "NIFTY", f"{y}-06-25"): [f"NSE-NIFTY-25Jun{y % 100:02d}-FUT"] for y in years
+        },
+    )
+    registry = _registry(tmp_path)
+    coverage = _CoverageSink()
+    with structlog.testing.capture_logs() as logs:
+        report = pull_expiries_contracts(
+            [_instrument("NIFTY"), _equity("")],
+            registry=registry,
+            coverage_store=coverage,
+            years=years,
+            dry_run=False,
+            run_parallel=_sync_run_parallel,
+            client_factory=_factory(sdk),
+            now=_NOW,
+            today=_TODAY,
+            run_id="r-blank",
+        )
+    # The blank row issued ZERO vendor calls; only NIFTY's forms reached the SDK.
+    assert sdk.expiry_underlying_forms == ["NIFTY"]
+    # No durable coverage row keyed on the empty symbol — and no failures at all.
+    assert [r for r in coverage.list_coverage() if r.underlying_symbol == ""] == []
+    assert report.expiry_failures == 0
+    assert report.underlyings == ("NIFTY",)
+    assert report.expiry_cells == len(years)  # NIFTY's cells only, never blank cells
+    assert report.expiries_persisted == len(years)
+    events = [e for e in logs if e["event"] == mp.METADATA_BLANK_SYMBOL_SKIPPED_EVENT]
+    assert len(events) == 1
+    assert events[0]["skipped"] == 1
+    registry.close()
+
+
 def test_zero_expiry_audit_silent_on_success(tmp_path: Path) -> None:
     """No WARNING when the underlying discovers ≥1 expiry (the healthy pull)."""
     sdk = _FakeSDK(expiries={("NSE", "NIFTY", 2026): ["2026-06-25"]})
@@ -1423,14 +1575,35 @@ def test_first_nonempty_over_forms_helper() -> None:
         return ["hit"] if form == "B" else []
 
     # A → empty, B → non-empty: stops at B (C never called).
-    assert mp._first_nonempty_over_forms(("A", "B", "C"), _fetch, is_empty=lambda r: not r) == [
-        "hit"
-    ]
+    assert mp._first_nonempty_over_forms(
+        ("A", "B", "C"), _fetch, is_empty=lambda r: not r, empty=[]
+    ) == ["hit"]
     assert calls == ["A", "B"]
     # All empty: every form tried, the last empty result returned.
     calls.clear()
-    assert mp._first_nonempty_over_forms(("X", "Y"), _fetch, is_empty=lambda r: not r) == []
+    assert (
+        mp._first_nonempty_over_forms(("X", "Y"), _fetch, is_empty=lambda r: not r, empty=[]) == []
+    )
     assert calls == ["X", "Y"]
+
+
+def test_first_nonempty_over_forms_empty_tuple_total_no_fetch() -> None:
+    """REFUTER ROUND 1 (DEC-FNO-UNDERLYING-EMPTY-GUARD-001): TOTAL for ``()`` forms.
+
+    The round-1 body did ``fetch(forms[0])`` unguarded, so the blank-symbol grid
+    pair's empty forms tuple raised ``IndexError`` per YEAR cell — captured by the
+    pool into durable ``failed`` coverage rows keyed ``(exch, "")``. The helper now
+    returns the caller's honest *empty* result with ZERO fetch calls. Fails
+    pre-fix (IndexError).
+    """
+    calls: list[str] = []
+
+    def _fetch(form: str) -> list[str]:  # pragma: no cover - must never run
+        calls.append(form)
+        return ["hit"]
+
+    assert mp._first_nonempty_over_forms((), _fetch, is_empty=lambda r: not r, empty=[]) == []
+    assert calls == []
 
 
 # ── Phase-2 failure → re-run re-pull (DEC-PHASE2-REGISTRY-REBUILD-001) ────────
@@ -2233,3 +2406,39 @@ def test_metadata_pool_pace_beat_reaches_the_runs_keyed_channel(tmp_path: Path) 
     assert report.expiries_persisted == 1
     assert len(beats) >= 2  # one per vendor call — expiries + contracts, all delivered
     assert drop_records == []  # a healthy metadata pull emits ZERO foreign-drop WARNs
+
+
+class TestMetadataReportOkProperty:
+    """``MetadataPullReport.ok`` — the StageOutcome home of the metadata-gate
+    predicate (DEC-STAGED-SEQUENCER-SEAMS-001; ``pipeline_pull.metadata_phase_ok``
+    delegates here)."""
+
+    @staticmethod
+    def _report(
+        *,
+        expiry_failures: int = 0,
+        contract_failures: int = 0,
+        store_write_deferrals: int = 0,
+    ) -> MetadataPullReport:
+        return MetadataPullReport(
+            dry_run=False,
+            years=(2024,),
+            underlyings=("NIFTY",),
+            expiry_cells=1,
+            cells_skipped=0,
+            expiry_failures=expiry_failures,
+            expiries_persisted=1,
+            contract_jobs=1,
+            contract_failures=contract_failures,
+            contracts_persisted=1,
+            note="ok",
+            store_write_deferrals=store_write_deferrals,
+        )
+
+    def test_clean_report_ok_true(self) -> None:
+        assert self._report().ok is True
+
+    def test_each_failure_arm_flips_ok_false(self) -> None:
+        assert self._report(expiry_failures=1).ok is False
+        assert self._report(contract_failures=1).ok is False
+        assert self._report(store_write_deferrals=1).ok is False

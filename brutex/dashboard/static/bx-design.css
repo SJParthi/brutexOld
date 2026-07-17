@@ -91,7 +91,11 @@
   /* palette — verbatim from the locked v28-hybrid set (identical to bx-theme.css) */
   --bg: #0A0D11; --surface: #131722; --surface-2: #1A1F2C; --surface-3: #232938;
   --border: #1E222D; --border-strong: #2B313F;
-  --text: #E5E8EC; --text-bright: #FFFFFF; --muted: #787B86;
+  --text: #E5E8EC; --text-bright: #FFFFFF;
+  /* --muted RETUNED #787B86 (~4.0:1, sub-AA) → #8B93A4 (~5.1:1 on --surface).
+     The ONE retuned existing value — a pure legibility fix (kept byte-identical
+     in bx-theme.css). Used by .bx-chip.muted, thead labels, nav links, hints. */
+  --muted: #8B93A4;
   --green: #26D9B0; --green-bright: #4FFFD0; --green-dim: #1A8870;
   --red: #FF5C5C; --yellow: #FFB74D; --blue: #5B8DEF; --purple: #9D7BFF; --pink: #FF6B9D;
 
@@ -123,6 +127,72 @@
 
   /* per-surface accent — override via body[data-accent] */
   --accent: var(--blue);
+
+  /* ── ADDITIVE design tokens (PR-1 · DEC-DASHBOARD-DESIGN-SYSTEM-PR1-FOUNDATION).
+     Dark-only today; every token is SEMANTICALLY named so a future light theme is
+     a value-swap, not a rename. All hexes reuse the frozen core palette — no new
+     colour is introduced, and no existing token value is changed here. ─────────── */
+
+  /* HONESTY channel — muted gold "disclosed / footnoted truth", distinct from
+     warn-amber AND bad-red (provenance · staleness caveat · ' *'/' ~' · fixture ·
+     assumed-algorithm · null-VIX). ~7:1 on --surface. */
+  --honest: #C9B27E;
+  --honest-bg: rgba(201, 178, 126, .10);
+  --honest-bd: rgba(201, 178, 126, .34);
+
+  /* AA-safe brightened hues for small MEANING-BEARING text (the base --red/--blue
+     stay the dot/fill/border colour). --ink-dim aliases the retuned --muted so
+     component CSS can name "meaningful secondary text" explicitly. */
+  --red-text: #FF7A7A;   /* ~5.2:1 — small negative/error text */
+  --blue-text: #7BA5F5;  /* ~5.4:1 — small info text          */
+  --ink-dim: var(--muted);
+
+  /* Status tints — ONE source so JS-built pills + hardcoded-hex call sites reuse
+     the same palette (kills the #34d399/#f87171/#9aa4b2/#4ade80 drift). */
+  --ok-bg: rgba(38, 217, 176, .10);  --ok-bd: rgba(38, 217, 176, .40);
+  --warn-bg: rgba(255, 183, 77, .10); --warn-bd: rgba(255, 183, 77, .40);
+  --bad-bg: rgba(255, 92, 92, .10);   --bad-bd: rgba(255, 92, 92, .45);
+  --info-bg: rgba(91, 141, 239, .10); --info-bd: rgba(91, 141, 239, .40);
+  --muted-bg: var(--surface);         --muted-bd: var(--border);
+
+  /* STATIC composited status-glow halos (zero animation) — the live-status anchor
+     signature that makes the live-dot / staleness-pill / rank-1 card POP. */
+  --glow-ok: 0 0 0 3px rgba(38, 217, 176, .14);
+  --glow-warn: 0 0 0 3px rgba(255, 183, 77, .16);
+  --glow-bad: 0 0 0 3px rgba(255, 92, 92, .16);
+
+  /* price×OI four-quadrant buildup — mapped onto the existing four hues (no new
+     palette): price↑OI↑ long · price↓OI↑ short · price↓OI↓ unwind · price↑OI↓ cover. */
+  --buildup-long: var(--green);
+  --buildup-short: var(--red);
+  --buildup-unwind: var(--yellow);
+  --buildup-cover: var(--blue);
+
+  /* option-chain: ATM strike-row band tint + the floating SPOT-marker accent. */
+  --row-atm: rgba(91, 141, 239, .10);
+  --spot-marker: var(--yellow);
+
+  /* one-shot value-change flash tint (diff-gated by the poller — NOT a loop). */
+  --band-flash: rgba(79, 255, 208, .22);
+
+  /* spacing + row-density (section rhythm + dense broker-grid rows). */
+  --s-7: 48px;
+  --row-py: 7px;         /* .bx-table td default (comfortable) */
+  --row-py-dense: 5px;   /* .bx-table--dense td (~28px single-line rows) */
+  --cell-px: 10px;
+  --chip-gap: 6px;
+  --cluster-gap: 8px;
+
+  /* the ONE numeric face (promoted from the inline .num stack) + the sticky-thead
+     hairline (broker-flat separation, not a heavy drop shadow). */
+  --font-num: "SF Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sticky-thead: 0 1px 0 var(--border-strong);
+
+  /* motion durations — ONE --ease curve everywhere (already defined above). */
+  --dur-fast: 140ms;    /* chip/tab/button hover + press        */
+  --dur-base: 180ms;    /* card lift                            */
+  --dur-enter: 450ms;   /* first-render section/row entrance    */
+  --dur-flash: 220ms;   /* one-shot value-change flash          */
 }
 body[data-accent="green"]  { --accent: var(--green); }
 body[data-accent="yellow"] { --accent: var(--yellow); }
@@ -143,6 +213,9 @@ body[data-accent="red"]    { --accent: var(--red); }
 @keyframes bxFloat      { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
 @keyframes bxRowIn      { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes bxRiseIn     { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+/* one-shot value-change flash: an OPACITY fade of a tinted overlay (never animates
+   background/layout — the .bx-flash::after overlay carries the --band-flash colour). */
+@keyframes bxFlash      { from { opacity: 1; } to { opacity: 0; } }
 
 /* ── 3 · Layout: fluid centered container + padding-only widget docking ────── */
 /* The ONE rule that kills every left-locked dead-right-side layout AND every
@@ -326,6 +399,188 @@ body { padding-bottom: calc(var(--dock-h) + env(safe-area-inset-bottom, 0px)); }
 /* BXUI.initVisibilityPause() toggles this class on <html>. */
 .bx-paused *, .bx-paused *::before, .bx-paused *::after {
   animation-play-state: paused !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BROKER-GRADE ADDITIVE COMPONENTS (PR-1 foundation)
+
+   Every rule below is ADDITIVE — it EXTENDS the seed vocabulary
+   (.bx-chip / .bx-table / .bx-live-dot / .bx-state) via new classes or new
+   properties on existing status classes, and rewrites NONE of the shipped
+   rules above. Selection/severity is reinforced by shape + border + text, never
+   colour alone (colourblind-safe + honest). Motion is transform/opacity-only and
+   is silenced by the reduced-motion block that follows.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── C1 · Chip modifiers (extend .bx-chip) ─────────────────────────────────── */
+/* Honesty channel — muted gold, visually distinct from warn + bad. */
+.bx-chip.honest { color: var(--honest); border-color: var(--honest-bd); background: var(--honest-bg); }
+/* Sizes: the 9-10px sub-legible badges are BANNED — --fs-0 (11px) is the floor. */
+.bx-chip--sm { padding: 2px 8px; font-size: var(--fs-0); line-height: 1.5; gap: 4px; }
+.bx-chip--lg { padding: 4px 12px; font-size: var(--fs-1); }
+/* Dimmed (not_wired / inert). */
+.bx-chip.bx-dim { opacity: .65; }
+/* SOLID: a louder primary status — fill tint .18 + full-hue border. */
+.bx-chip.ok.solid    { background: rgba(38, 217, 176, .18);  border-color: var(--green); }
+.bx-chip.warn.solid  { background: rgba(255, 183, 77, .18);  border-color: var(--yellow); }
+.bx-chip.bad.solid   { background: rgba(255, 92, 92, .18);   border-color: var(--red); }
+.bx-chip.info.solid  { background: rgba(91, 141, 239, .18);  border-color: var(--blue); }
+.bx-chip.honest.solid { background: rgba(201, 178, 126, .20); border-color: var(--honest); }
+/* Moneyness pill (shared movers / db / screener): signed depth reads alike CE/PE. */
+.bx-chip.mny-itm { color: var(--green); border-color: var(--ok-bd);  background: var(--ok-bg); }
+.bx-chip.mny-otm { color: var(--red-text); border-color: var(--bad-bd); background: var(--bad-bg); }
+.bx-chip.mny-atm { color: var(--blue-text); border-color: var(--info-bd); background: var(--info-bg); }
+.bx-chip.mny-na  { color: var(--muted); border-color: var(--muted-bd); background: var(--muted-bg); }
+
+/* ── C2 · Segmented control (asset / category / basis toggle) ──────────────── */
+/* Selection by ELEVATION + CONTRAST, not per-item hue (status colour stays reserved). */
+.bx-segment {
+  display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-pill);
+}
+.bx-segment-item {
+  appearance: none; -webkit-appearance: none; cursor: pointer; font: inherit;
+  font-size: var(--fs-1); font-weight: 600; line-height: 1.2;
+  color: var(--muted); background: transparent; border: 0; border-radius: var(--r-pill);
+  padding: 5px 14px;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+              transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.bx-segment-item:hover { color: var(--text); transform: translateY(-1px); }
+.bx-segment-item.is-active, .bx-segment-item[aria-pressed="true"] {
+  color: var(--text-bright); background: var(--surface-3); box-shadow: var(--elev-1);
+}
+
+/* ── C3 · Segmented tab-bar (page-level filter row) ────────────────────────── */
+.bx-tabbar {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--surface); overflow-x: auto; max-width: 100%;
+}
+.bx-tab {
+  appearance: none; -webkit-appearance: none; cursor: pointer; font: inherit;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--fs-1); font-weight: 600; line-height: 1.2; white-space: nowrap;
+  color: var(--muted); background: transparent; border: 1px solid transparent;
+  border-radius: var(--r-sm); padding: 5px 12px;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+              box-shadow var(--dur-fast) var(--ease);
+}
+.bx-tab:hover { color: var(--text); background: var(--surface-2); }
+.bx-tab.on, .bx-tab[aria-selected="true"] {
+  color: var(--text-bright); background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.bx-tab .n {
+  font-size: var(--fs-0); font-weight: 700; font-variant-numeric: tabular-nums;
+  color: var(--muted); background: var(--surface); border-radius: var(--r-pill);
+  padding: 0 6px; min-width: 18px; text-align: center;
+}
+.bx-tab.on .n, .bx-tab[aria-selected="true"] .n { color: var(--text); }
+/* Uppercase micro-caption above a control/KPI cluster (matches thead labels). */
+.bx-microlabel {
+  font-size: var(--fs-0); text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); font-weight: 700;
+}
+
+/* ── C4 · Dense broker-table modifiers (extend .bx-table) ──────────────────── */
+/* Generic numeric helper usable outside .bx-table too (right-aligned, tabular).
+   NAMESPACED as .bx-num (never bare .num) so it can NEVER bleed into an existing
+   page's <div class="num"> — e.g. v29.html's four sweep-hero stat numbers, which
+   would otherwise become right-aligned + monospace, a visible regression. PR-1
+   stays purely additive: it only styles opt-in .bx-* classes. The pre-existing
+   descendant-scoped .bx-table .num rule (§7) is the table-cell face and is
+   untouched. */
+.bx-num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-num); }
+.bx-table--dense th { padding: 6px var(--cell-px); }
+.bx-table--dense td { padding: var(--row-py-dense) var(--cell-px); }
+.bx-table--zebra tbody tr:nth-child(even) { background: rgba(255, 255, 255, .018); }
+.bx-table--zebra tbody tr:hover { background: rgba(91, 141, 239, .06); }
+/* 1px column-group separator (identity ↔ metric groups). */
+.bx-col-sep { border-left: 1px solid var(--border-strong); }
+/* Frozen identity column on wide tables (horizontal scroll never orphans rank#). */
+.bx-col-frozen {
+  position: sticky; left: 0; z-index: 1;
+  background: var(--surface); box-shadow: 1px 0 0 var(--border-strong);
+}
+/* Sticky uppercase thead hairline inside .bx-tablewrap. */
+.bx-thead-sticky thead th { box-shadow: var(--sticky-thead); }
+
+/* ── C5 · Sortable table header ────────────────────────────────────────────── */
+.bx-th-sort { cursor: pointer; user-select: none; }
+.bx-th-sort:hover { color: var(--text); }
+.bx-sort-glyph { color: var(--muted); font-weight: 700; }
+.bx-th-sort.sorted { color: var(--text-bright); }
+.bx-th-sort.sorted .bx-sort-glyph { color: var(--accent); }
+
+/* ── C6 · KPI strip + rank-1 podium card ───────────────────────────────────── */
+.bx-kpi-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s-3); }
+.bx-kpi { display: grid; gap: 4px; padding: var(--s-3) var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+.bx-kpi-v { font-size: var(--fs-4); font-weight: 700; color: var(--text-bright); font-variant-numeric: tabular-nums; font-family: var(--font-num); }
+/* value-gated colour — a green "0" is forbidden (JS adds .ok/.warn/.bad). */
+.bx-kpi-v.ok  { color: var(--green); }
+.bx-kpi-v.warn { color: var(--yellow); }
+.bx-kpi-v.bad { color: var(--red-text); }
+/* Leaderboard #1: static green top-ribbon + glow, no motion. */
+.bx-card--rank1 { position: relative; box-shadow: var(--glow-ok); border-color: var(--ok-bd); }
+.bx-card--rank1::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 2px; background: var(--green); border-radius: var(--r-lg) var(--r-lg) 0 0; }
+
+/* ── C7 · Live-dot STATIC glow halos — OPT-IN via .bx-glow (extend .bx-live-dot) ─ */
+/* Additive AND opt-in: the shipped .bx-live-dot.live-* base rules (§10) stay
+   BYTE-IDENTICAL to origin/main, so the live dots already on the 6 shipped pages
+   are unchanged. The static glow halo applies ONLY under the NEW .bx-glow modifier
+   (a page opts a dot in per its own batch PR). live-down stays static (a dead
+   surface must look dead). */
+.bx-live-dot.bx-glow.live-ok   { box-shadow: var(--glow-ok); }
+.bx-live-dot.bx-glow.live-warn { box-shadow: var(--glow-warn); }
+.bx-live-dot.bx-glow.live-down { box-shadow: var(--glow-bad); }
+
+/* ── C8 · Staleness-pill (promotes the bx-poll / rate-monitor tickers) ─────── */
+/* An .bx-chip--sm honesty surface: escalate by COLOUR + TEXT (muted → honest gold
+   → LOUD red), never by fade. JS adds .muted / .honest / .bad + the dot state. */
+.bx-stale-pill { gap: 6px; }
+.bx-stale-pill.bad { font-weight: 800; box-shadow: var(--glow-bad); }
+
+/* ── C9 · Provenance line ──────────────────────────────────────────────────── */
+.bx-prov { color: var(--muted); font-size: var(--fs-1); line-height: 1.5; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bx-prov-key { color: var(--honest); font-family: var(--font-num); }
+.bx-prov-note { color: var(--muted); }
+
+/* ── C10 · Honest state block — the awaiting variant (extend .bx-state) ─────── */
+/* Distinct from .empty: a run that WILL produce this artifact (gold ⧗), not a
+   lake with nothing. */
+.bx-state.awaiting { border-color: var(--honest-bd); background: var(--honest-bg); }
+.bx-state.awaiting .headline { color: var(--honest); }
+.bx-state.awaiting .ico { color: var(--honest); }
+
+/* ── C11 · Honest-note card + promoted ' *'/' ~' marker ────────────────────── */
+.bx-note {
+  display: flex; align-items: flex-start; gap: 8px;
+  border-left: 3px solid var(--border-strong); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  padding: 8px 12px; font-size: var(--fs-1); line-height: 1.5;
+  color: var(--muted); background: var(--surface);
+}
+.bx-note .ic { flex: 0 0 auto; line-height: 1.4; }
+.bx-note.warn   { border-left-color: var(--yellow); color: var(--yellow); background: var(--warn-bg); }
+.bx-note.honest { border-left-color: var(--honest); color: var(--honest); background: var(--honest-bg); }
+/* the bare ' *'/' ~' punctuation → a vivid, hoverable superscript chip. */
+.bx-mark { cursor: help; font-weight: 800; }
+.bx-mark.honest { color: var(--honest); }
+
+/* ── C12 · Option-chain: strike column + ATM spot-marker row (extend --dense) ─ */
+.bx-strike-col { font-weight: 800; color: var(--text-bright); text-align: center; }
+.bx-chain .bx-strike-col { position: relative; }
+.bx-spot-row { background: var(--row-atm); box-shadow: inset 3px 0 0 var(--spot-marker); }
+
+/* ── C13 · Value-change flash (diff-gated one-shot; O(changed), never a loop) ─ */
+/* JS adds .bx-flash to a cell whose textContent actually changed + removes it on
+   animationend. The overlay fades OPACITY only — fixed tabular-nums widths mean a
+   digit change never reflows, so the O(1)-latency work is never regressed. */
+.bx-flash { position: relative; }
+.bx-flash::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  border-radius: var(--r-xs); background: var(--band-flash);
+  animation: bxFlash var(--dur-flash) var(--ease) forwards;
 }
 
 /* ── 13 · Canonical reduced-motion kill (the .001ms form — one vocabulary) ─── */

@@ -112,6 +112,36 @@ _TOKEN_GOLDEN: tuple[tuple[str, str, str, str], ...] = (
 
 #: (server string, display, tier) — one representative per exact entry + rule.
 _LOOKUP_GOLDEN: tuple[tuple[str, str, str], ...] = (
+    # Portal-panel strings (the absorbed screener/strategy copy clean —
+    # merge-up round): the panels' pure helpers keep these literals for
+    # main's node goldens; the DOM render remaps them via the catalog.
+    (
+        "minute-path equity — the stored real series (R27)",
+        "equity curve — the stored minute-by-minute series",
+        "neutral",
+    ),
+    (
+        "no trades yet — awaiting real run artifact",
+        "no trades yet — they appear after the first completed run",
+        "neutral",
+    ),
+    # Health-hub surfaces (merge-up round — the #1747 widget's copy routed
+    # through the catalog; the wire stays frozen).
+    (
+        "OK — 3 ok · 2 not wired",
+        "OK — 3 ok · 2 not available yet",
+        "neutral",
+    ),
+    (
+        "not wired — no nightly report on this box",
+        "Not set up on this machine yet — no nightly report on this box.",
+        "neutral",
+    ),
+    (
+        "BRUTEX_BACKUP_REPO is unset and no backup state file exists on this box",
+        "A required setting is missing on this machine — hover for the exact name.",
+        "neutral",
+    ),
     (
         "awaiting real run artifact — no lake root wired for trades",
         "Trade detail isn't connected on this server yet.",
@@ -449,11 +479,30 @@ def _visible_text(html: str) -> str:
     return re.sub(r"<[^>]*>", " ", text)
 
 
+def _strip_portal_static(html: str) -> str:
+    """Remove the two PORTAL-folded blocks (DEC-OPERATOR-PORTAL-REFOLD-001
+    #1796: the winners section + the strategy drawer) before the jargon scan.
+
+    Their STATIC default strings are main's, pinned verbatim by the landed
+    ``test_dashboard_operator_portal.py`` suite — the first-lander-wins rule
+    the merge-up ruling applied to the ticker static text. The RUNTIME sinks
+    that overwrite them route through the BXCopy catalog (pinned by
+    ``TestPortalPanelCopyRouting`` below), so the literals are a pre-poll
+    flash inside a collapsed/hidden container, never a steady-state render.
+    """
+    text = re.sub(r'<section[^>]*id="ocWinnersSection".*?</section>', " ", html, flags=re.S)
+    text = re.sub(r'<aside[^>]*id="ocStrategyDrawer".*?</aside>', " ", text, flags=re.S)
+    # The ticker strip's pre-first-poll STATIC default is likewise main's
+    # wording (the merge-up first-lander rule); renderTicker rewrites it with
+    # the plain-English strip on the first poll (integration-pinned).
+    return re.sub(r'<span id="bxTickerStrip">[^<]*</span>', " ", text)
+
+
 class TestOperatorPageVisibleTextClean:
     """The operator page's visible prose carries no developer jargon."""
 
     def test_v29_visible_text_is_jargon_free(self) -> None:
-        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        html = _strip_portal_static((_TEMPLATES / "v29.html").read_text(encoding="utf-8"))
         visible = _visible_text(html)
         for name, pattern in _JARGON:
             hits = pattern.findall(visible)
@@ -473,8 +522,14 @@ class TestOperatorPageVisibleTextClean:
     def test_v29_raw_source_display_literal_absences(self) -> None:
         """The killed display literals are gone from the WHOLE file — JS
         string literals included (comments were swept where they carried the
-        exact display wording)."""
-        html = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        exact display wording). Post-merge-up exemption: the portal-folded
+        winners/drawer static blocks (#1796) carry main's pinned defaults —
+        stripped here, with the containment asserted separately below."""
+        raw = (_TEMPLATES / "v29.html").read_text(encoding="utf-8")
+        # Every remaining "awaiting real run artifact" literal must live
+        # INSIDE the two portal-folded blocks (main's pinned static text).
+        assert "awaiting real run artifact" not in _strip_portal_static(raw)
+        html = _strip_portal_static(raw)
         for needle in (
             "awaiting real run artifact",
             "tuples",
@@ -583,8 +638,12 @@ class TestOperatorPageVisibleTextClean:
         assert "data flow paused — waiting on the data vendor" in html
         # The heartbeat pull card renders both states as ACTIVE — in
         # agreement with its own pullWasActive() classifier.
-        assert "pull running — every call is failing" in html
-        assert "pull running — processing locally" in html
+        # Post-merge-up the heartbeat card renders main's #1747 classified
+        # truth arms (DEC-OPERATOR-HEALTH-TRUTH-001 — their strings win the
+        # structure per the coordinator ruling); the intent pinned here is
+        # unchanged: failing/local never fall through to a false-calm idle.
+        assert "'pull active — calls FAILING'" in html
+        assert "'pull active — local processing'" in html
 
     def test_hero_suspect_row_claims_latest_only_when_true(self) -> None:
         """Review round 2: the suspect flag rides the SELECTED run's
@@ -663,9 +722,11 @@ class TestOperatorPageVisibleTextClean:
         assert "'Sweep status unreachable — reconnecting'" in html
         assert "if (S.pullFeedFails >= 2) {" in html
         assert "'Data pull status unreachable — reconnecting'" in html
-        # The fan-out exists, is exported, and both pollPull error arms fire it.
+        # The fan-out exists, is exported, and the shared-poll failure
+        # subscriber fires it (post-#1720 there is ONE failure path — the
+        # __bxPullRateFailSubs subscriber — not the old two pollPull arms).
         assert "window.__bxHeroPullErr = window.BXHero.pullErr;" in html
-        assert html.count("window.__bxHeroPullErr && window.__bxHeroPullErr();") == 2
+        assert html.count("window.__bxHeroPullErr && window.__bxHeroPullErr();") == 1
         # A successful poll resets both counters (the degrade never latches).
         assert "S.sweepFeedFails = 0;" in html
         assert "S.pullFeedFails = 0;" in html
@@ -710,3 +771,56 @@ class TestOperatorPageVisibleTextClean:
         assert "(S.doneSurvivors === 1 ? ' strategy passed' : ' strategies passed')" in html
         # Idle-capitalization outlier: heartbeat idle cards read lowercase.
         assert "'Not yet run'" not in html
+
+
+class TestPortalPanelCopyRouting:
+    """The portal panels (DEC-OPERATOR-PORTAL-REFOLD-001 #1796) route their
+    VISIBLE runtime copy through the ONE BXCopy catalog — the absorbed
+    screener/strategy copy clean (coordinator-approved at the merge-up).
+
+    Source pins only: the panels keep their node-goldened pure-helper
+    literals (main's suite executes them without BXCopy), so the guarded
+    ``window.BXCopy ? … : <literal>`` shape is exactly what is asserted —
+    catalog render in the browser, literal fallback in the node harness.
+    Panel logic/structure untouched — copy + rendering hooks only.
+    """
+
+    def _js(self, name: str) -> str:
+        text = (_STATIC / name).read_text(encoding="utf-8")
+        assert text
+        return text
+
+    def test_screener_detail_sinks_route_through_the_catalog(self) -> None:
+        js = self._js("bx-screener-panel.js")
+        # The two awaiting/detail sinks ride BXCopy.apply with the calm
+        # fallback; the literal stays for the node harness.
+        assert js.count("window.BXCopy.apply(byId('scDetail')") >= 2
+        assert js.count("{ fallback: 'waiting for run data' }") >= 2
+        # The loaded/partial arm renders catalog text (verbatim server string
+        # demoted to title="server: …" by bxCopyApply).
+        assert "'Stored list partly readable — '" in js
+        assert "'winner list loaded'" in js
+        # The node-harness fallback arm keeps main's pinned literal.
+        assert "'PARTIAL artifact: ' + String(payload.detail)" in js
+
+    def test_strategy_panel_sinks_route_through_the_catalog(self) -> None:
+        js = self._js("bx-strategy-panel.js")
+        # Equity label DOM write remaps (the pure chooser keeps its literals).
+        assert "if (window.BXCopy) { window.BXCopy.apply(label, text, {}); }" in js
+        # Trades note / stName awaiting sinks ride the catalog.
+        assert js.count("{ fallback: 'waiting for run data' }") >= 3
+        # The trades source badge mirrors the bx-oneclick token pattern.
+        assert "window.BXCopy.token('source', rawSource)" in js
+        assert "'server: ' + rawSource" in js
+        # The two static no-trades notes are remapped at render.
+        assert js.count("window.BXCopy.apply(") >= 5
+
+    def test_panel_visible_string_literals_carry_no_new_jargon(self) -> None:
+        """Every NEW display string this routing introduces is jargon-free
+        (the catalog's own displayTexts() pin covers the remap targets)."""
+        for s in (
+            "waiting for run data",
+            "Stored list partly readable — ",
+            "winner list loaded",
+        ):
+            _assert_no_jargon(s, "portal panel copy")

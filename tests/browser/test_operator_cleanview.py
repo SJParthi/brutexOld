@@ -84,6 +84,9 @@ _JARGON_TOKENS: Final[tuple[str, ...]] = (
 #: bx-poll.js cadence — one virtual-clock advance per poll cycle.
 _WIDGET_POLL_MS: Final[int] = 3000
 _HEARTBEAT_PULL_MS: Final[int] = 5000
+#: the shared rate-monitor poller's capped failure backoff (3 s → 30 s), plus
+#: margin — a recovery poll is guaranteed within this window (#1720 refactor).
+_RATE_BACKOFF_CAP_MS: Final[int] = 31_000
 _ONECLICK_POLL_MS: Final[int] = 3000
 
 
@@ -145,13 +148,19 @@ def test_idle_page_is_calm_and_jargon_free(new_page: NewPageFactory, tmp_path: P
     assert bg_image == "none", f"awaiting banner still carries a gradient: {bg_image!r}"
 
     # Acceptance #1: the page text carries none of the banned tokens —
-    # scripts/styles removed, and the ONE exempt-by-design verbatim surface
-    # (the timeline's raw event lines — the search-coherence contract)
-    # excluded; everything else, the collapsed diagnostics included, is
+    # scripts/styles removed, and the exempt-by-design surfaces excluded:
+    # the timeline's raw event lines (the search-coherence contract) plus
+    # the two PORTAL-folded blocks (#1796 winners section + strategy
+    # drawer), whose STATIC defaults are main's pinned wording per the
+    # merge-up first-lander rule — the drawer is hidden and the winners
+    # body is collapsed until expand, when the panel fetch rewrites the
+    # copy through the BXCopy catalog. Everything else, the collapsed
+    # diagnostics AND the render-time-rewritten ticker strip included, is
     # scanned via textContent (stricter than innerText).
     visible = page.evaluate(
         "() => { const clone = document.body.cloneNode(true);"
-        " clone.querySelectorAll('script, style, #ocTimeline')"
+        " clone.querySelectorAll('script, style, #ocTimeline,"
+        " #ocWinnersSection, #ocStrategyDrawer')"
         "   .forEach((n) => n.remove());"
         " return clone.textContent; }"
     )
@@ -295,7 +304,7 @@ def test_hero_red_on_failing_pull(new_page: NewPageFactory, tmp_path: Path) -> N
     expect(hero).to_have_class("hero-bad")
     # The heartbeat pull card agrees (ALERT tone, active wording) — never
     # "no data pull running" for an active-and-failing pull.
-    expect(page.locator("#hbPull .hb-big")).to_have_text("pull running — every call is failing")
+    expect(page.locator("#hbPull .hb-big")).to_have_text("pull active — calls FAILING")
 
 
 # ── hero row 2: a feed outage over a last-known-ACTIVE pull degrades ────────
@@ -347,9 +356,12 @@ def test_hero_degrades_active_pull_row_on_feed_outage(
     expect(page.locator("#bxHeroSub")).to_have_text("retrying automatically")
     _screenshot(page, "hero-pull-outage-degrade.png")
     # Recovery: one good poll restores the honest active row (no latch).
+    # Post-#1720 the pull feed rides the shared bx-rate-monitor poller,
+    # whose failure BACKOFF (capped 3 s→30 s) can push the next poll past
+    # the old 5 s heartbeat cadence — fast-forward past the cap.
     mode["value"] = "flowing"
     with page.expect_response("**/api/v1/pull/rate"):
-        page.clock.fast_forward(_HEARTBEAT_PULL_MS)
+        page.clock.fast_forward(_RATE_BACKOFF_CAP_MS)
     expect(hero).to_have_text("Data pull in progress")
     expect(hero).to_have_class("hero-ok")
 

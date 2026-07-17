@@ -283,32 +283,69 @@ class TestRevisionKeyedRoute:
         assert fresh["mixed_snapshot_eras"] is True
         assert scan_spy["scan"] == 2
 
-    def test_probe_outage_computes_fresh_uncached(
+    def test_probe_outage_serves_last_known_labelled(
         self, client: TestClient, store: InstrumentStore, scan_spy: dict[str, int]
     ) -> None:
-        """T-c6: a ``None`` revision (probe outage) computes fresh on EVERY poll
-        and caches NOTHING — never a stale serve, never a poisoned key; recovery
-        after the outage resumes normal one-scan-per-revision caching.
+        """T-c6 (REWRITTEN by DEC-CACHE-SERVE-LAST-KNOWN-001): a ``None``
+        revision (probe outage — `sweep_results_revision` returns None ONLY on
+        a genuine stat fault, never for an absent tree) serves the LAST-KNOWN
+        payload labelled with the additive ``revision_probe`` degrade marker —
+        ONE build per outage, never a per-poll compute storm; recovery resumes
+        normal one-scan-per-revision caching and drops the marker.
+        """
+        lake_root = store.path.parent
+        _write_sweeps(lake_root, [_row(1)])
+        # Prime the cache pre-outage (the last-known entry).
+        clean = client.get("/api/v1/sweep/leaderboard").json()
+        assert clean["total_rows"] == 1
+        assert "revision_probe" not in clean  # additive — absent on clean polls
+        assert scan_spy["scan"] == 1
+        outage = pytest.MonkeyPatch()
+        try:
+            outage.setattr(app_module, "sweep_results_revision", lambda _root: None)
+            for _ in range(3):
+                payload = client.get("/api/v1/sweep/leaderboard").json()
+                assert payload["total_rows"] == 1  # the last-known rows
+                assert payload["revision_probe"] == "outage — serving last-known"
+            # ZERO extra scans across the outage — the last-known entry served
+            # (pre-fix: every outage poll paid the full O(stores×rows) build).
+            assert scan_spy["scan"] == 1
+        finally:
+            outage.undo()
+        # Clean recovery: same revision as the primed entry → pure hit, no marker.
+        recovered = client.get("/api/v1/sweep/leaderboard").json()
+        assert recovered["total_rows"] == 1
+        assert "revision_probe" not in recovered
+        assert scan_spy["scan"] == 1
+
+    def test_probe_outage_cold_start_seeds_once(
+        self, client: TestClient, store: InstrumentStore, scan_spy: dict[str, int]
+    ) -> None:
+        """An outage with NO primed entry computes ONCE (seeded, labelled) —
+        a persistent outage no longer pays the build per poll — and the first
+        post-recovery poll recomputes fresh (the seed's sentinel generation
+        can never read as clean).
         """
         lake_root = store.path.parent
         _write_sweeps(lake_root, [_row(1)])
         outage = pytest.MonkeyPatch()
         try:
             outage.setattr(app_module, "sweep_results_revision", lambda _root: None)
-            for _ in range(3):
-                payload = client.get("/api/v1/sweep/leaderboard").json()
-                assert payload["total_rows"] == 1  # still served, honestly fresh
-            # Every outage poll paid a full fresh build (scan inside build) —
-            # nothing was cached, nothing was served stale.
-            assert scan_spy["scan"] == 3
+            first = client.get("/api/v1/sweep/leaderboard").json()
+            assert first["total_rows"] == 1
+            assert first["revision_probe"] == "outage — computed fresh (seeded as last-known)"
+            assert scan_spy["scan"] == 1
+            second = client.get("/api/v1/sweep/leaderboard").json()
+            assert second["revision_probe"] == "outage — serving last-known"
+            assert scan_spy["scan"] == 1  # the seed served — no per-poll storm
         finally:
             outage.undo()
-        # Clean recovery: the first post-outage poll caches (one scan)…
-        assert client.get("/api/v1/sweep/leaderboard").json()["total_rows"] == 1
-        assert scan_spy["scan"] == 4
-        # …and the next poll is a pure hit.
-        assert client.get("/api/v1/sweep/leaderboard").json()["total_rows"] == 1
-        assert scan_spy["scan"] == 4
+        # Recovery: the seed is generation-sentinel-stamped → a real revision
+        # always recomputes (never a lingering outage seed served as clean).
+        recovered = client.get("/api/v1/sweep/leaderboard").json()
+        assert recovered["total_rows"] == 1
+        assert "revision_probe" not in recovered
+        assert scan_spy["scan"] == 2
 
     def test_route_payload_matches_direct_build(
         self, client: TestClient, store: InstrumentStore

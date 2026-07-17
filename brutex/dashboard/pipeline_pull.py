@@ -72,7 +72,7 @@ A clean run reaches all three and reports ``stopped_after = None``.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Final
@@ -97,8 +97,31 @@ from brutex.dashboard.pipeline_verdict import (
     PriorStepsVerdict as PriorStepsVerdict,  # noqa: PLC0414
 )
 from brutex.dashboard.pull_controller import BulkSpotReport
+
+# The staged-stage vocabulary + the STRUCTURAL stage contract live in the
+# dependency-free LEAF brutex.dashboard.stage_outcome
+# (DEC-STAGED-SEQUENCER-SEAMS-001, ADR-0021 §12 — the pipeline_verdict house
+# pattern: both this sequencer and any vendor binding import it, no cycle).
+from brutex.dashboard.stage_outcome import (
+    STAGE_FUTURES,
+    STAGE_FUTURES_PREBUILD,
+    STAGE_GREEKS,
+    STAGE_METADATA,
+    STAGE_OPTIONS,
+    STAGE_SPOT,
+    STAGE_SPOT_DAILY,
+    STAGE_SPOT_PREBUILD,
+    STAGE_STATUS_ABSENT,
+    STAGE_STATUS_FAILED,
+    STAGE_STATUS_SETTLED,
+    STAGE_STATUS_SKIPPED,
+    StageOutcome,
+    stage_outcome_ok,
+)
+from brutex.data.errors import MarketHoursHalt
 from brutex.data.fno_symbol import parse_fno_symbol
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.data.window_ledger_store import shared_pull_ledger_scope
 from brutex.money import format_inr, round_money
 from brutex.notifications.sweep_alerts import emit_vendor_conflict_alert
 
@@ -108,6 +131,13 @@ _LOG = structlog.get_logger(__name__)
 PHASE_SPOT = "spot"
 PHASE_METADATA = "metadata"
 PHASE_HISTORICAL = "historical"
+#: The DEFERRED-before-any-vendor-phase marker (DEC-GROWW-MARKET-HOURS-GUARD-001):
+#: the whole pipeline was skipped because the clock is inside the NSE market-hours
+#: window ``[08:45, 15:35)`` IST — no vendor call was issued (spot / metadata /
+#: historical all ``None``), keeping the shared Groww account free for TickVault's
+#: live feed. The non-vendor prebuild / movers stages are inapplicable (there was no
+#: pull to derive from) and also do not run.
+PHASE_MARKET_HOURS = "market_hours"
 #: The OPTIONAL gated movers phase: warm the movers snapshots ONLY after the
 #: prebuild SUCCEEDED over the clean symbol set (``PrebuildOutcome.ok`` —
 #: DEC-PREBUILD-CLEANSET-001 dropped the ``fetch_clean`` arm of the
@@ -166,12 +196,11 @@ def spot_phase_ok(report: BulkSpotReport) -> bool:
     bool
         ``True`` when the phase is clean enough to proceed to metadata.
     """
-    return (
-        not report.auth_aborted
-        and not report.quota_exhausted
-        and report.still_failed_windows == 0
-        and report.mass_empty_cause is None
-    )
+    # DEC-STAGED-SEQUENCER-SEAMS-001: the predicate expression MOVED verbatim
+    # onto the report (`BulkSpotReport.ok`) so the report satisfies the
+    # structural StageOutcome protocol without a copy or an import cycle
+    # (CLAUDE.md §11 COMMON); this gate is the documented thin wrapper.
+    return report.ok
 
 
 def metadata_phase_ok(report: MetadataPullReport) -> bool:
@@ -199,11 +228,9 @@ def metadata_phase_ok(report: MetadataPullReport) -> bool:
     bool
         ``True`` when the chain enumeration is clean enough to proceed to candles.
     """
-    return (
-        report.expiry_failures == 0
-        and report.contract_failures == 0
-        and report.store_write_deferrals == 0
-    )
+    # DEC-STAGED-SEQUENCER-SEAMS-001: expression MOVED onto the report
+    # (`MetadataPullReport.ok` — the StageOutcome home); thin wrapper here.
+    return report.ok
 
 
 def historical_phase_ok(report: CompositePullReport) -> bool:
@@ -241,18 +268,10 @@ def historical_phase_ok(report: CompositePullReport) -> bool:
     bool
         ``True`` when BOTH inner phases are clean (or were reported no-ops).
     """
-    meta = report.metadata
-    if meta is not None and not metadata_phase_ok(meta):
-        return False
-    hist = report.historical
-    if hist is None:
-        return True
-    return (
-        not hist.auth_aborted
-        and hist.still_failed_windows == 0
-        and hist.failed_pairs == 0
-        and hist.mass_empty_cause is None
-    )
+    # DEC-STAGED-SEQUENCER-SEAMS-001: the composed law MOVED onto the report
+    # (`CompositePullReport.ok`, riding the inner reports' own `ok`
+    # properties — the StageOutcome homes); thin wrapper here.
+    return report.ok
 
 
 #: The strict post-step barrier's opt-in env knob (DEC-PULL-SIX-STEP-ORDER-001).
@@ -497,6 +516,23 @@ class PipelinePullReport:
         The prebuild's failing symbol names (capped at 10 by the producer —
         :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`); empty when
         the phase did not run or had no failures.
+    prebuild_no_source
+        The prebuild's NO-SOURCE spot-target names — ZERO stored 1-minute
+        bars at derive time, nothing to derive (vendor-empty or never pulled;
+        DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) — capped at 10 by the
+        producer, exactly the ``quarantined_symbols``/``quarantined_count``
+        template; empty when the phase did not run or every target had
+        stored data. NOT failures: the movers warm still fires, and a
+        no-source symbol with NO parquet in ANY timeframe is structurally
+        absent from the warmed snapshots (no parquet ⇒ no discovery row);
+        previously stored DERIVED timeframes (a legacy vendor-fetched
+        ``1day``, a partially heal-emptied lake) still serve — genuine
+        stored bars, never fabricated (refuter round 2, MIGRATION.md
+        #1792) — counted + NAMED in the note instead of silently
+        vanishing (Golden Rule #1).
+    prebuild_no_source_count
+        The TRUE (uncapped) no-source total — the note's ``(+K more)``
+        remainder derives from it, so the cap never lies.
     prebuild_crashed
         The error TYPE NAME (e.g. ``"ValueError"``) when the guarded prebuild
         CRASHED whole-run instead of completing
@@ -568,14 +604,41 @@ class PipelinePullReport:
     #: numbers, and the movers warm was consequently skipped (gated on
     #: ``PrebuildOutcome.ok``).
     prebuild_disk_guarded: bool = False
+    #: The no-source spot targets (capped names + TRUE count — the
+    #: quarantined_symbols/quarantined_count template;
+    #: DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001, see the docstring above).
+    prebuild_no_source: tuple[str, ...] = ()
+    prebuild_no_source_count: int = 0
+    #: The stage-event vendor token (DEC-STAGED-SEQUENCER-SEAMS-001, ADR-0021
+    #: §10). Default ``"groww"`` — the legacy chain's vendor; only the STAGED
+    #: shape surfaces it on the wire (emit-on-staged in :meth:`to_dict`).
+    vendor: str = "groww"
+    #: The STAGED shape's per-stage status map (stage token →
+    #: ``settled`` / ``absent`` / ``failed`` / ``skipped`` — the
+    #: :mod:`~brutex.dashboard.stage_outcome` vocabulary). EMPTY on every
+    #: legacy-shape run (the byte-identical default); an ABSENT stage
+    #: (capability-unbound, ``None`` callable) reads the DISTINCT ``absent``
+    #: token — vacuously settled, NEVER conflated with ``failed`` (the
+    #: ADR-0021 Decision 3 ABSENT-vs-FAILED contract).
+    stage_status: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        """Return ``True`` iff all three phases ran AND each phase gate passed.
+        """Return ``True`` iff every phase/stage that exists on the graph settled.
 
-        A short-circuited run (``stopped_after`` set) is never ``ok``; a full run
-        is ``ok`` only when the spot, metadata, and historical gates all pass.
+        LEGACY shape (``stage_status`` empty — byte-identical law): all three
+        phases ran AND each phase gate passed; a short-circuited run
+        (``stopped_after`` set) is never ``ok``. STAGED shape
+        (DEC-STAGED-SEQUENCER-SEAMS-001): the chain completed
+        (``stopped_after is None``) and every stage is ``settled`` or
+        ``absent`` — an absent stage is VACUOUSLY-SETTLED (ok-true), never a
+        failure (the ADR-0021 Decision 3 contract).
         """
+        if self.stage_status:
+            return self.stopped_after is None and all(
+                status in (STAGE_STATUS_SETTLED, STAGE_STATUS_ABSENT)
+                for status in self.stage_status.values()
+            )
         return (
             self.stopped_after is None
             and self.spot is not None
@@ -588,7 +651,7 @@ class PipelinePullReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly dict for the ``/pull-pipeline`` route + panel."""
-        return {
+        payload: dict[str, Any] = {
             "ok": self.ok,
             "stopped_after": self.stopped_after,
             "note": self.note,
@@ -609,6 +672,21 @@ class PipelinePullReport:
             "metadata": self.metadata.to_dict() if self.metadata is not None else None,
             "historical": (self.historical.to_dict() if self.historical is not None else None),
         }
+        if self.prebuild_no_source_count:
+            # EMIT-ON-NONZERO (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001 — the
+            # #1539/#1649b emit-on-non-default precedent): the default
+            # all-stored-data payload stays byte-identical.
+            payload["prebuild_no_source"] = list(self.prebuild_no_source)
+            payload["prebuild_no_source_count"] = self.prebuild_no_source_count
+        if self.stage_status:
+            # EMIT-ON-STAGED (DEC-STAGED-SEQUENCER-SEAMS-001 — the same
+            # emit-on-non-default precedent): the legacy shape's payload stays
+            # BYTE-IDENTICAL (empty map ⇒ neither key), while a staged run
+            # surfaces its vendor token + per-stage statuses — incl. the
+            # DISTINCT `absent` token for capability-unbound stages.
+            payload["vendor"] = self.vendor
+            payload["stage_status"] = dict(self.stage_status)
+        return payload
 
 
 def _spot_stop_note(report: BulkSpotReport) -> str:
@@ -625,6 +703,15 @@ def _metadata_stop_note(report: MetadataPullReport) -> str:
     return (
         f"stopped after metadata — {report.expiry_failures} expiry + "
         f"{report.contract_failures} contract failure(s); historical NOT started"
+    )
+
+
+def _market_hours_stop_note() -> str:
+    """Build the honest stop-note for a market-hours deferral (no vendor phase ran)."""
+    return (
+        "deferred — inside NSE market-hours window (08:45-15:35 IST); no vendor pull "
+        "issued (spot / metadata / historical skipped to keep the shared Groww account "
+        "free for the live feed); resume on the next out-of-hours run"
     )
 
 
@@ -661,6 +748,24 @@ def _movers_note_clause(
 _NOTE_FAILURE_NAMES = 3
 
 
+def format_capped_names(
+    names: Sequence[str], true_count: int, cap: int = _NOTE_FAILURE_NAMES
+) -> str:
+    """``"A, B, C (+K more)"`` — capped names + the honest remainder from the TRUE count.
+
+    The ONE capped-names note formatter (CLAUDE.md §11 COMMON,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): shows up to *cap* of *names* and
+    appends ``(+K more)`` from *true_count* — the producer may have already
+    capped *names* (e.g. :data:`~brutex.dashboard.pipeline_prebuild.MAX_REPORTED_FAILURES`),
+    so the remainder derives from the UNCAPPED total, never the shown tuple
+    (Golden Rule #1). Shared by the prebuild-failures clause, the no-source
+    clause, and the ``brutex pull-all-spot`` stdout line — zero drift.
+    """
+    shown = ", ".join(names[:cap])
+    more = true_count - min(cap, len(names))
+    return f"{shown} (+{more} more)" if more > 0 else shown
+
+
 def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     """Build the ``, timeframes pre-built …`` note clause from the prebuild outcome.
 
@@ -673,7 +778,11 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
     clause naming up to :data:`_NOTE_FAILURE_NAMES` symbols with the TRUE
     remainder count (``failed_count`` — the producer caps
     :attr:`PrebuildOutcome.failed` at 10 names, so the remainder uses the
-    uncapped total; Golden Rule #1).
+    uncapped total; Golden Rule #1). A non-zero ``no_source_count``
+    (vendor-empty / never-pulled spot targets,
+    DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001) renders its own DISTINCT
+    counted+named clause BEFORE the failures clause (benign class first) —
+    both via the ONE :func:`format_capped_names` formatter.
     """
     if prebuild is None:
         return ""
@@ -699,11 +808,26 @@ def _prebuild_note_clause(prebuild: PrebuildOutcome | None) -> str:
         # daily open fell back to a non-09:15 first minute — full-history,
         # recomputed per run). Zero keeps the note byte-identical.
         clause += f", {prebuild.opens_substituted} daily open(s) substituted"
+    if prebuild.no_source_count:
+        # DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001: the benign no-source class
+        # renders BEFORE the failure class — counted + named (capped), wording
+        # deliberately distinct from "quarantined" (healthy vendor behavior,
+        # not a failure) and from "prebuild failures" (nothing failed), and
+        # naming BOTH causes honestly (the probe cannot prove the vendor arm).
+        # The clause claims ONLY the timeframe-build exclusion — the probe
+        # proves zero stored 1-MINUTE parquet, not zero parquet at all, and a
+        # previously stored DERIVED timeframe (a legacy vendor-fetched 1day)
+        # legitimately keeps the symbol in warm discovery (refuter round 2,
+        # MIGRATION.md #1792). Zero keeps the note byte-identical.
+        clause += (
+            f", {prebuild.no_source_count} symbol(s) skipped — no stored 1-minute data "
+            "(vendor-empty or never pulled), excluded from timeframe build: "
+            f"{format_capped_names(prebuild.no_source, prebuild.no_source_count)}"
+        )
     if prebuild.failed:
-        shown = ", ".join(prebuild.failed[:_NOTE_FAILURE_NAMES])
-        more = prebuild.failed_count - min(_NOTE_FAILURE_NAMES, len(prebuild.failed))
-        suffix = f" (+{more} more)" if more > 0 else ""
-        clause += f", prebuild failures: {shown}{suffix}"
+        clause += (
+            f", prebuild failures: {format_capped_names(prebuild.failed, prebuild.failed_count)}"
+        )
     if prebuild.fs_note is not None:
         # DEC-LAKE-FS-PROBE-001: a COARSE-allocation lake volume is named in the
         # headline too — the slack is spent by exactly this phase's tiny files.
@@ -880,16 +1004,292 @@ def _total_warmed(segment_movers_warmed: Mapping[str, int]) -> int | None:
     return sum(segment_movers_warmed.values())
 
 
+#: One staged-chain plan row: ``(stage token, callable-or-None, vendor_stage)``.
+#: ``vendor_stage`` marks the stages that issue VENDOR calls — the market-hours
+#: belt is re-checked before exactly those (DEC-GROWW-MARKET-HOURS-GUARD-001
+#: generalized per ADR-0021 §3.3; prebuilds + Greeks are local compute over the
+#: already-filled lake, never a vendor call — no belt).
+_StagePlanRow = tuple[str, Callable[[], StageOutcome] | None, bool]
+
+
+def _staged_market_hours_note(vendor: str, before: str) -> str:
+    """The honest stop-note for a STAGED-chain market-hours deferral."""
+    return (
+        f"deferred — inside NSE market-hours window (08:45-15:35 IST); the {vendor} "
+        f"staged chain stopped before the {before} stage (no further vendor call "
+        "issued); resume on the next out-of-hours run"
+    )
+
+
+def _staged_note(vendor: str, stopped_after: str | None, status: Mapping[str, str]) -> str:
+    """The honest one-line summary for a staged-chain run.
+
+    Lists every stage's status in canonical order — the DISTINCT ``absent``
+    token stays visible (an absent capability is announced, never a silent
+    hole; ADR-0021 §10) — led by the completion/stop verdict.
+    """
+    listing = ", ".join(f"{token} {state}" for token, state in status.items())
+    if stopped_after is not None:
+        return f"{vendor} staged pipeline stopped after {stopped_after} — stages: {listing}"
+    return f"{vendor} staged pipeline complete — stages: {listing}"
+
+
+def _staged_deferral_report(
+    *, vendor: str, status: dict[str, str], plan: Sequence[_StagePlanRow], before: str
+) -> PipelinePullReport:
+    """Build the market-hours deferral report for a staged chain.
+
+    Every not-yet-run PRESENT stage is marked ``skipped`` (it re-runs next
+    launch); ABSENT stages keep their ``absent`` token (they never exist on
+    this vendor's graph). ``stopped_after`` carries the legacy
+    :data:`PHASE_MARKET_HOURS` token — one deferral vocabulary across both
+    shapes (DEC-GROWW-MARKET-HOURS-GUARD-001).
+    """
+    for token, fn, _vendor_stage in plan:
+        if token not in status:
+            status[token] = STAGE_STATUS_ABSENT if fn is None else STAGE_STATUS_SKIPPED
+    return PipelinePullReport(
+        spot=None,
+        metadata=None,
+        historical=None,
+        stopped_after=PHASE_MARKET_HOURS,
+        note=_staged_market_hours_note(vendor, before),
+        vendor=vendor,
+        stage_status=status,
+    )
+
+
+def _run_staged_pipeline(
+    *,
+    run_spot: Callable[[], StageOutcome],
+    run_metadata: Callable[[], StageOutcome] | None,
+    run_spot_daily: Callable[[], StageOutcome] | None,
+    run_prebuild_spot: Callable[[], StageOutcome] | None,
+    run_futures: Callable[[], StageOutcome] | None,
+    run_prebuild_futures: Callable[[], StageOutcome] | None,
+    run_options: Callable[[], StageOutcome] | None,
+    run_greeks: Callable[[], StageOutcome] | None,
+    warm_spot_movers: Callable[[], MoversWarmResult] | None,
+    warm_futures_movers: Callable[[], MoversWarmResult] | None,
+    warm_options_movers: Callable[[], MoversWarmResult] | None,
+    strict_gate: bool,
+    market_closed: Callable[[], bool] | None,
+    vendor: str,
+) -> PipelinePullReport:
+    """Run the STAGED vendor chain over the canonical stage order — WS-B seams.
+
+    DEC-STAGED-SEQUENCER-SEAMS-001, per the frozen ADR-0021 design contract
+    (Decisions 2/3, §10-§12). The chain walks the CANONICAL order
+    SPOT-DAILY → SPOT-1M → SPOT-PREBUILD → METADATA → FUTURES →
+    FUTURES-PREBUILD → OPTIONS → GREEKS, sequential code — no scheduler to
+    misorder (§10 structural enforcement). Laws:
+
+    * **ABSENT-vs-FAILED (Decision 3 / CAPA-02):** a ``None`` callable is an
+      ABSENT stage — NEVER invoked, scored VACUOUSLY-SETTLED under the
+      DISTINCT ``absent`` token (``ok``-true semantics, never conflated with
+      ``failed``); the strict settle gate never withholds the Greeks/post
+      stages over absent stages (structural here: absent stages are simply
+      not consulted by any gate).
+    * **Fail-closed per stage (§3.3/§11):** a stage whose outcome fails
+      :func:`~brutex.dashboard.stage_outcome.stage_outcome_ok` sets
+      ``stopped_after=<its token>`` (SEQUENCER-minted from stage position —
+      the N2 ruling: vendor reports carry no stopped token); every later
+      PRESENT stage is marked ``skipped``, never invoked.
+    * **Market-hours belt (§3.3):** re-checked before every VENDOR stage
+      (spot_daily / spot / metadata / futures / options — prebuilds + Greeks
+      are local compute); a trip OR a mid-stage
+      :class:`~brutex.data.errors.MarketHoursHalt` defers the chain cleanly
+      (``stopped_after=market_hours``). The belt is the CALLER's bound
+      predicate — a guard-free vendor profile passes ``market_closed=None``
+      and never defers (the ADR Decision 4 per-vendor guard binding; the
+      binder is WS-C).
+    * **Halts (§11):** any other exception is a vendor-halt — ONE
+      ``pipeline.stage.halted`` event (vendor + stage tokens) then RE-RAISE
+      to the job layer's CRITICAL pull-halt handling; ``LakeWriteHalt`` is
+      never swallowed (§12 invariant 3). ``KeyboardInterrupt``/``SystemExit``
+      propagate raw.
+    * **Movers warm (the §4.1 supersession-4 law, pinned here in WS-B):**
+      with no terminal prebuild to gate on, the warm fires iff the
+      SPOT-PREBUILD and FUTURES-PREBUILD stages are settled-or-absent AND the
+      OPTIONS stage settled-or-absent AND the chain completed — an absent
+      stage is vacuously ok (Decision 3), so a vendor without a futures
+      capability never has its warm withheld by the missing stage.
+    * **Strict gate (§4.1 supersession 3, WS-B scope):** the staged shape is
+      fail-closed per stage, so a chain that reaches GREEKS has every
+      PRESENT prior stage settled — the strict barrier adds no extra staged
+      signal in WS-B (per-symbol quarantine visibility is a concrete-report
+      concern; mapping it onto the staged gates is the WS-C binder's
+      recorded choice). The pinned contract: ``strict_gate=True`` NEVER
+      withholds a stage over an ABSENT one.
+    * **Observability (§10):** the chain logs its capability-derived PLANNED
+      stage list at start (absent capabilities visible as "not on this
+      vendor's graph"), then ``pipeline.stage.started`` / ``.settled`` /
+      ``.halted`` per stage, each carrying ``vendor=`` + ``stage=`` tokens.
+
+    The report populates the additive ``vendor`` + ``stage_status`` fields;
+    the concrete ``spot``/``metadata``/``historical`` report fields stay
+    ``None`` — staged outcomes are PROTOCOL-opaque
+    (:class:`~brutex.dashboard.stage_outcome.StageOutcome`; the WS-C binder
+    owns any concrete-report enrichment). Disclosed envelope: the shared
+    pull-ledger scope is held across the WHOLE staged chain — the
+    interleaved prebuild stages run inside it (the legacy shape releases it
+    before its terminal post-steps; a staged chain's prebuilds sit BETWEEN
+    vendor stages, so releasing per stage would forfeit the one-load reuse —
+    DEC-LEDGER-LOAD-SPACE-V1-001, a recorded cost of the staged placement).
+    """
+    plan: tuple[_StagePlanRow, ...] = (
+        (STAGE_SPOT_DAILY, run_spot_daily, True),
+        (STAGE_SPOT, run_spot, True),
+        (STAGE_SPOT_PREBUILD, run_prebuild_spot, False),
+        (STAGE_METADATA, run_metadata, True),
+        (STAGE_FUTURES, run_futures, True),
+        (STAGE_FUTURES_PREBUILD, run_prebuild_futures, False),
+        (STAGE_OPTIONS, run_options, True),
+        (STAGE_GREEKS, run_greeks, False),
+    )
+    # §10: the capability-derived PLANNED stage list, logged at chain start —
+    # an absent capability is visible as "not on this vendor's graph".
+    _LOG.info(
+        "pipeline.stages.planned",
+        vendor=vendor,
+        stages=[token for token, fn, _v in plan if fn is not None],
+        absent=[token for token, fn, _v in plan if fn is None],
+        strict_gate=strict_gate,
+    )
+    status: dict[str, str] = {}
+    stopped_after: str | None = None
+    with shared_pull_ledger_scope():
+        for token, fn, vendor_stage in plan:
+            if fn is None:
+                # The ABSENT-vs-FAILED contract (ADR-0021 Decision 3): never
+                # invoked, vacuously settled under the DISTINCT token.
+                status[token] = STAGE_STATUS_ABSENT
+                continue
+            if stopped_after is not None:
+                # Fail-closed: a later PRESENT stage after a failed gate is
+                # honestly `skipped` — it re-runs next launch, never silently
+                # dropped and never fake-settled.
+                status[token] = STAGE_STATUS_SKIPPED
+                continue
+            if vendor_stage and market_closed is not None and market_closed():
+                _LOG.warning(
+                    "pipeline.deferred.market_hours",
+                    reason=PHASE_MARKET_HOURS,
+                    vendor=vendor,
+                    before=token,
+                )
+                return _staged_deferral_report(
+                    vendor=vendor, status=status, plan=plan, before=token
+                )
+            _LOG.info("pipeline.stage.started", vendor=vendor, stage=token)
+            try:
+                outcome = fn()
+            except MarketHoursHalt:
+                # The stage CROSSED into the market-hours window mid-flight —
+                # the vendor spine's own guard raised; committed work is
+                # already durable, the un-persisted remainder re-pulls next
+                # out-of-hours run (the legacy metadata-crossing pattern).
+                _LOG.warning(
+                    "pipeline.deferred.market_hours",
+                    reason=PHASE_MARKET_HOURS,
+                    vendor=vendor,
+                    crossed=token,
+                )
+                return _staged_deferral_report(
+                    vendor=vendor, status=status, plan=plan, before=token
+                )
+            except Exception as exc:
+                # A vendor-halt (the vendor's global-stop family incl.
+                # LakeWriteHalt — §12 invariant 3: NEVER swallowed): one loud
+                # stage-scoped event, then RE-RAISE to the job layer's
+                # CRITICAL pull-halt handling (the legacy shape's behavior for
+                # a propagating halt, now stage-attributed).
+                _LOG.error(
+                    "pipeline.stage.halted",
+                    vendor=vendor,
+                    stage=token,
+                    error_type=type(exc).__name__,
+                    error=repr(str(exc)),
+                )
+                raise
+            ok = stage_outcome_ok(outcome)
+            if ok:
+                status[token] = STAGE_STATUS_SETTLED
+                _LOG.info("pipeline.stage.settled", vendor=vendor, stage=token, ok=True)
+            else:
+                # A gate failure is a NON-exception stop (§11): the chain
+                # finishes with the failed stage named; `stopped_after` is
+                # SEQUENCER-minted from stage position (the N2 ruling).
+                status[token] = STAGE_STATUS_FAILED
+                stopped_after = token
+                _LOG.warning("pipeline.stage.settled", vendor=vendor, stage=token, ok=False)
+    # Movers warm — the §4.1 supersession-4 staged-graph law (no terminal
+    # prebuild exists to gate on): spot-prebuild ok ∧ futures-prebuild ok ∧
+    # options settled, each vacuously ok when ABSENT (Decision 3), and only
+    # on a completed chain. The warmers are injected exactly like the legacy
+    # shape's; a vendor with no consumed read surface binds none.
+    segment_movers_warmed: dict[str, int] = {}
+    segment_movers_failed: dict[str, int] = {}
+    warm_ok = stopped_after is None and all(
+        status[token] in (STAGE_STATUS_SETTLED, STAGE_STATUS_ABSENT)
+        for token in (STAGE_SPOT_PREBUILD, STAGE_FUTURES_PREBUILD, STAGE_OPTIONS)
+    )
+    if warm_ok:
+        warmers: tuple[tuple[str, Callable[[], MoversWarmResult] | None], ...] = (
+            (SEGMENT_SPOT, warm_spot_movers),
+            (SEGMENT_FUTURES, warm_futures_movers),
+            (SEGMENT_OPTIONS, warm_options_movers),
+        )
+        injected = [segment for segment, warm in warmers if warm is not None]
+        if injected:
+            _LOG.info("pipeline.movers_warm.started", segments=injected, vendor=vendor)
+            for segment, warm in warmers:
+                if warm is not None:
+                    result = warm()
+                    segment_movers_warmed[segment] = result.warmed
+                    if result.failed:
+                        segment_movers_failed[segment] = result.failed
+            _LOG.info(
+                "pipeline.movers_warm.done",
+                warmed=dict(segment_movers_warmed),
+                failed=dict(segment_movers_failed),
+                vendor=vendor,
+            )
+    note = _staged_note(vendor, stopped_after, status) + _movers_note_clause(
+        segment_movers_warmed, segment_movers_failed
+    )
+    return PipelinePullReport(
+        spot=None,
+        metadata=None,
+        historical=None,
+        stopped_after=stopped_after,
+        note=note,
+        movers_warmed=_total_warmed(segment_movers_warmed),
+        segment_movers_warmed=segment_movers_warmed,
+        segment_movers_failed=segment_movers_failed,
+        vendor=vendor,
+        stage_status=status,
+    )
+
+
 def run_full_pipeline(
     *,
-    run_spot: Callable[[], BulkSpotReport],
-    run_metadata: Callable[[], MetadataPullReport],
-    run_historical: Callable[[PriorStepsVerdict], CompositePullReport],
+    run_spot: Callable[[], StageOutcome],
+    run_metadata: Callable[[], StageOutcome] | None = None,
+    run_historical: Callable[[PriorStepsVerdict], CompositePullReport] | None = None,
     warm_spot_movers: Callable[[], MoversWarmResult] | None = None,
     warm_futures_movers: Callable[[], MoversWarmResult] | None = None,
     warm_options_movers: Callable[[], MoversWarmResult] | None = None,
     run_prebuild: Callable[[frozenset[str]], PrebuildOutcome] | None = None,
     strict_gate: bool = False,
+    market_closed: Callable[[], bool] | None = None,
+    run_spot_daily: Callable[[], StageOutcome] | None = None,
+    run_prebuild_spot: Callable[[], StageOutcome] | None = None,
+    run_futures: Callable[[], StageOutcome] | None = None,
+    run_prebuild_futures: Callable[[], StageOutcome] | None = None,
+    run_options: Callable[[], StageOutcome] | None = None,
+    run_greeks: Callable[[], StageOutcome] | None = None,
+    vendor: str = "groww",
 ) -> PipelinePullReport:
     """Run the gated spot→metadata→historical→prebuild→movers pipeline.
 
@@ -962,6 +1362,15 @@ def run_full_pipeline(
     it triggers is the real multi-hour vendor fill + the O(symbols × bars)
     prebuild (no throughput claim, Golden Rule #10).
 
+    **One ledger load per run (DEC-LEDGER-LOAD-SPACE-V1-001):** the fetch
+    phases run inside ONE
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`, so the
+    spot phase's full window-ledger materialisation is REUSED by the
+    historical phase (previously each phase loaded the whole O(rows) ledger —
+    two full loads + two co-resident copies per pipeline run). Per-phase saves
+    are unchanged; the scope closes before the prebuild/movers post-steps so
+    the ledger is released, not held through the derive.
+
     Parameters
     ----------
     run_spot
@@ -1005,49 +1414,249 @@ def run_full_pipeline(
         (DEC-PULL-SIX-STEP-ORDER-001). ``True`` makes the post-step barrier
         literal all-or-nothing (see above); ``False`` (default) keeps the
         cleanset path byte-identical.
+    run_spot_daily, run_prebuild_spot, run_futures, run_prebuild_futures, \
+run_options, run_greeks
+        The ADDITIVE staged callables (DEC-STAGED-SEQUENCER-SEAMS-001, per
+        the frozen ADR-0021 design contract, Decisions 2/3 + §12), each typed
+        at the STRUCTURAL
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol —
+        never the concrete Groww report types. Binding ANY of them selects
+        the STAGED shape: the chain walks the canonical order SPOT-DAILY →
+        SPOT-1M → SPOT-PREBUILD → METADATA → FUTURES → FUTURES-PREBUILD →
+        OPTIONS → GREEKS (``run_spot`` is the SPOT-1M stage; ``run_metadata``
+        the METADATA stage), with :func:`_run_staged_pipeline`'s laws —
+        ABSENT-vs-FAILED vacuous settling, per-stage fail-closed gates,
+        per-vendor-stage market-hours belt, ``pipeline.stage.*`` events, the
+        supersession-4 movers-warm law. The legacy combined params
+        (``run_historical`` / the terminal ``run_prebuild``) are MUTUALLY
+        EXCLUSIVE with the staged family — mixing both is a typed refusal
+        (the ADR-0021 §12 fail-loud junk-mix law; no precedence, no silent
+        winner). ALL ``None`` (the default) keeps the legacy chain
+        BYTE-IDENTICAL (parity-pinned). NO production caller binds these in
+        WS-B — the profile binders are WS-C/WS-D.
+    vendor
+        The stage-event vendor token (ADR-0021 §10), threaded onto every
+        ``pipeline.stage.*`` event + the report's additive ``vendor`` field
+        in the STAGED shape. Default ``"groww"``; the legacy shape accepts
+        it but emits no stage events (its logging is byte-identical).
 
     Returns
     -------
     PipelinePullReport
         The combined, auditable outcome of every phase that ran.
+
+    Raises
+    ------
+    ValueError
+        A caller mixed the legacy combined params with the staged family, or
+        selected the legacy shape without ``run_metadata``/``run_historical``
+        (both were REQUIRED parameters before the staged seams landed — the
+        defaults exist only so a staged caller can omit them).
+    TypeError
+        The legacy shape's ``run_spot``/``run_metadata`` returned something
+        other than the concrete Groww report types the legacy chain's gates,
+        quarantine derivation and note synthesis consume
+        (:class:`~brutex.dashboard.pull_controller.BulkSpotReport` /
+        :class:`~brutex.dashboard.metadata_pull.MetadataPullReport`) — the
+        params are typed at the structural protocol for the staged shape, so
+        the legacy narrowing is enforced fail-loud at runtime (every real
+        caller + suite passes the real dataclasses).
     """
-    spot = run_spot()
-    if not spot_phase_ok(spot):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+    # ── Shape dispatch (DEC-STAGED-SEQUENCER-SEAMS-001, ADR-0021 §12) ──────
+    staged_bound = [
+        token
+        for token, fn in (
+            (STAGE_SPOT_DAILY, run_spot_daily),
+            (STAGE_SPOT_PREBUILD, run_prebuild_spot),
+            (STAGE_FUTURES, run_futures),
+            (STAGE_FUTURES_PREBUILD, run_prebuild_futures),
+            (STAGE_OPTIONS, run_options),
+            (STAGE_GREEKS, run_greeks),
+        )
+        if fn is not None
+    ]
+    if staged_bound:
+        legacy_bound = [
+            name
+            for name, legacy_fn in (
+                ("run_historical", run_historical),
+                ("run_prebuild", run_prebuild),
+            )
+            if legacy_fn is not None
+        ]
+        if legacy_bound:
+            # The fail-loud junk-mix law (ADR-0021 §12 sketch disambiguation):
+            # the legacy combined params and the staged family are mutually
+            # exclusive — no precedence, no silent winner.
+            raise ValueError(
+                "run_full_pipeline: the legacy combined params "
+                f"({', '.join(legacy_bound)}) and the staged callables "
+                f"({', '.join(staged_bound)}) are mutually exclusive — bind ONE "
+                "shape (DEC-STAGED-SEQUENCER-SEAMS-001, the ADR-0021 §12 "
+                "fail-loud junk-mix law)"
+            )
+        return _run_staged_pipeline(
+            run_spot=run_spot,
+            run_metadata=run_metadata,
+            run_spot_daily=run_spot_daily,
+            run_prebuild_spot=run_prebuild_spot,
+            run_futures=run_futures,
+            run_prebuild_futures=run_prebuild_futures,
+            run_options=run_options,
+            run_greeks=run_greeks,
+            warm_spot_movers=warm_spot_movers,
+            warm_futures_movers=warm_futures_movers,
+            warm_options_movers=warm_options_movers,
+            strict_gate=strict_gate,
+            market_closed=market_closed,
+            vendor=vendor,
+        )
+    if run_metadata is None or run_historical is None:
+        raise ValueError(
+            "run_full_pipeline: the legacy chain shape requires BOTH run_metadata "
+            "and run_historical (they were required parameters before the staged "
+            "seams landed — DEC-STAGED-SEQUENCER-SEAMS-001; bind the staged "
+            "callables instead for a staged vendor graph)"
+        )
+    # Market-hours belt (DEC-GROWW-MARKET-HOURS-GUARD-001): if the clock is inside the
+    # NSE market-hours window ``[08:45, 15:35)`` IST, skip the ENTIRE vendor chain
+    # (spot / metadata / historical) so a pipeline pull that reached this call (e.g. a
+    # pull already dispatched as the market opened) never issues a vendor call that
+    # would compete with TickVault's live feed for the shared Groww account. The
+    # non-vendor prebuild / movers stages are inapplicable here (there is no pull to
+    # derive from) and also do not run. The mid-run per-window ``MarketHoursHalt`` is
+    # the belt for a pull already in flight; this is the belt for one about to start.
+    # Checked BEFORE the shared-ledger scope opens — a deferred pull never pays the
+    # whole-ledger materialisation (DEC-LEDGER-LOAD-SPACE-V1-001).
+    if market_closed is not None and market_closed():
+        _LOG.warning("pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS)
         return PipelinePullReport(
-            spot=spot,
+            spot=None,
             metadata=None,
             historical=None,
-            stopped_after=PHASE_SPOT,
-            note=_spot_stop_note(spot),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
+            stopped_after=PHASE_MARKET_HOURS,
+            note=_market_hours_stop_note(),
         )
+    # ONE whole-ledger materialisation for the fetch phases
+    # (DEC-LEDGER-LOAD-SPACE-V1-001): the spot phase and the historical phase
+    # each `begin_pull_ledger` the SAME lake — inside this scope the second
+    # (and any later) live begin reuses the first load's instance instead of
+    # re-materialising every recorded window row (measured 1,305 B/row RSS +
+    # ~13.6 µs/row per full load; two distinct materialisations co-resided
+    # across the phase boundary pre-scope). Per-phase SAVES are unchanged
+    # (durability byte-identical); the scope closes BEFORE the post-steps
+    # (prebuild/movers), releasing the ledger instead of holding it through
+    # the O(symbols × bars) derive — and every market-hours defer below exits
+    # (releases) it too. Safe by construction: the phases run sequentially on
+    # this one thread under the pull single-flight lock (the scope is a
+    # ContextVar — confined to this thread/context).
+    with shared_pull_ledger_scope():
+        spot = run_spot()
+        if not isinstance(spot, BulkSpotReport):
+            # The legacy narrowing (DEC-STAGED-SEQUENCER-SEAMS-001): run_spot
+            # is typed at the structural StageOutcome protocol for the STAGED
+            # shape, but the legacy chain's gates / quarantine derivation /
+            # note synthesis consume the concrete report — fail loud, never
+            # duck-type into a wrong-shape crash later (every real caller +
+            # suite passes the real dataclass; module docstring contract).
+            raise TypeError(
+                "run_full_pipeline (legacy shape): run_spot must return a "
+                f"BulkSpotReport; got {type(spot).__name__} — bind the staged "
+                "callables for a protocol-shaped vendor graph"
+            )
+        if not spot_phase_ok(spot):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_SPOT,
+                note=_spot_stop_note(spot),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
 
-    metadata = run_metadata()
-    if not metadata_phase_ok(metadata):
-        quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
-        return PipelinePullReport(
-            spot=spot,
-            metadata=metadata,
-            historical=None,
-            stopped_after=PHASE_METADATA,
-            note=_metadata_stop_note(metadata),
-            quarantined_symbols=quarantined,
-            quarantined_count=quarantined_count,
+        # Market-hours belt BEFORE the metadata vendor phase (DEC-GROWW-MARKET-HOURS-GUARD-001):
+        # spot finishing ~08:43 must NOT leak a `get_expiries`/`get_contracts` storm into the
+        # trading window. Re-check the guard here (the top check covers a pull dispatched into
+        # the window; this covers a spot phase that finished just before it opened). The
+        # metadata phase itself ALSO consults the guard per-cell so a metadata pull that
+        # CROSSES 08:45 halts mid-phase; this is the between-phases stop.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        try:
+            metadata = run_metadata()
+            if not isinstance(metadata, MetadataPullReport):
+                # The metadata twin of the run_spot narrowing above.
+                raise TypeError(
+                    "run_full_pipeline (legacy shape): run_metadata must return "
+                    f"a MetadataPullReport; got {type(metadata).__name__} — bind "
+                    "the staged callables for a protocol-shaped vendor graph"
+                )
+        except MarketHoursHalt:
+            # DEC-GROWW-MARKET-HOURS-GUARD-001: the metadata phase CROSSED 08:45 mid-flight
+            # — its per-cell guard raised MarketHoursHalt and run_two_phase re-raised it as a
+            # global stop. Committed expiries/contracts are already persisted (record-in-the-
+            # fetcher); the un-persisted cells re-pull next out-of-hours run. Stop cleanly.
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, crossed="metadata"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=None,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        if not metadata_phase_ok(metadata):
+            quarantined, quarantined_count = derive_quarantined_symbols(spot, None)
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_METADATA,
+                note=_metadata_stop_note(metadata),
+                quarantined_symbols=quarantined,
+                quarantined_count=quarantined_count,
+            )
+
+        # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
+        # cleanliness threaded INTO the historical phase (the Greeks seam at the
+        # historical tail cannot otherwise see a spot-side quarantine under the
+        # strict barrier). Computed AFTER both gates passed — the gate arms are
+        # True by construction here; the quarantine check is the strict extra.
+        prior = PriorStepsVerdict(
+            spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
+            metadata_clean=metadata_phase_ok(metadata),
+            strict=strict_gate,
         )
-
-    # PriorStepsVerdict (DEC-PULL-SIX-STEP-ORDER-001): spot + metadata
-    # cleanliness threaded INTO the historical phase (the Greeks seam at the
-    # historical tail cannot otherwise see a spot-side quarantine under the
-    # strict barrier). Computed AFTER both gates passed — the gate arms are
-    # True by construction here; the quarantine check is the strict extra.
-    prior = PriorStepsVerdict(
-        spot_clean=spot_phase_ok(spot) and not _spot_quarantine_names(spot),
-        metadata_clean=metadata_phase_ok(metadata),
-        strict=strict_gate,
-    )
-    historical = run_historical(prior)
+        # Market-hours belt BEFORE the historical (F&O) vendor phase
+        # (DEC-GROWW-MARKET-HOURS-GUARD-001): a metadata phase that finished just before the
+        # window opens must not leak the F&O candle storm into it. The F&O spine ALSO
+        # consults the guard per-contract (a contract already started at 08:45 finishes its
+        # few small windows — an acceptable, bounded residue), so this is the between-phases
+        # stop; a phase that crosses mid-flight halts on its next contract.
+        if market_closed is not None and market_closed():
+            _LOG.warning(
+                "pipeline.deferred.market_hours", reason=PHASE_MARKET_HOURS, before="historical"
+            )
+            return PipelinePullReport(
+                spot=spot,
+                metadata=metadata,
+                historical=None,
+                stopped_after=PHASE_MARKET_HOURS,
+                note=_market_hours_stop_note(),
+            )
+        historical = run_historical(prior)
     # Post-fetch stages (optional). Derive the quarantined names FIRST
     # (DEC-PREBUILD-CLEANSET-001): the UNCAPPED set is the prebuild's
     # exclusion set — one bad symbol no longer starves the other ~N−1 of
@@ -1088,7 +1697,17 @@ def run_full_pipeline(
     #    warming over them would cache a wrong snapshot. The `fetch_clean`
     #    arm is DROPPED (DEC-PREBUILD-CLEANSET-001): on a dirty-fetch day the
     #    movers warm over the freshly-derived CLEAN symbols, honestly
-    #    omitting the quarantined ones the note names.
+    #    omitting the quarantined ones the note names. A vendor-empty
+    #    NO-SOURCE spot target does NOT withhold the warm
+    #    (DEC-SPOTONLY-PREBUILD-EMPTY-EXCLUDE-001): nothing to derive, and
+    #    when NO timeframe holds parquet it is structurally absent from warm
+    #    discovery (no parquet ⇒ no dataset row, db_view's
+    #    _walk_candle_datasets any-parquet gate); a surviving previously
+    #    stored DERIVED timeframe legitimately keeps it discoverable — the
+    #    warm then serves genuine stored bars, never fabricated (refuter
+    #    round 2, MIGRATION.md #1792) — counted + named in the note either
+    #    way. The gate EXPRESSION below is unchanged — the behavioral flip
+    #    is entirely `ok` now staying True.
     segment_movers_warmed: dict[str, int] = {}
     segment_movers_failed: dict[str, int] = {}
     if prebuild is not None and prebuild.ok:
@@ -1153,6 +1772,8 @@ def run_full_pipeline(
         prebuild_built=prebuild.symbols_built if prebuild is not None else None,
         prebuild_total_bars=prebuild.total_bars if prebuild is not None else None,
         prebuild_failed=prebuild.failed if prebuild is not None else (),
+        prebuild_no_source=prebuild.no_source if prebuild is not None else (),
+        prebuild_no_source_count=(prebuild.no_source_count if prebuild is not None else 0),
         prebuild_crashed=prebuild.crashed if prebuild is not None else None,
         fs_allocation_note=prebuild.fs_note if prebuild is not None else None,
         prebuild_disk_guarded=prebuild.disk_guard_blocked if prebuild is not None else False,

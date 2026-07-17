@@ -30,11 +30,24 @@ wheel is built by maturin and installed in every CI job that imports
   solves IV from the traded price first (historical path). BruteX's thin
   ``brutex.options.greeks`` wrapper delegates here; the ``GREEKS_*`` constants
   mirror the kernel's clamp / floor / admission constants.
+* ``greeks_batch`` — the columnar batch face of ``greeks``
+  (``DEC-GREEKS-RUST-BATCH-001``): seven parallel columns → one
+  ``(values, error)`` element per row (exactly one is non-``None``; the error
+  string carries the kernel's ``invalid_input:`` / ``no_solution:`` prefix
+  VERBATIM), calling the SAME frozen kernel per element. The only whole-call
+  error is a column-length mismatch (``ValueError``). Consumed by the
+  default-OFF ``BRUTEX_GREEKS_RUST_BATCH`` enrich seam via
+  ``brutex.options.greeks.compute_greeks_batch``.
 * ``VwapState`` / ``MarketStructureState`` — the stateful, look-ahead-clean
   session-anchored VWAP + BOS/CHoCH detectors BruteX's ``stage1a`` engine drives
   per bar so the per-bar compute runs in Rust (the bit-identical
   backtest==live path; ``DEC-STAGE1A-WIRE-VWAP-BOS-001`` / ``DEC-NIFTY-INDICATORS-001``
   / ``DEC-NIFTY-BOS-CHOCH-001``).
+* ``stage1a_bar_bits_batch`` — the batch Stage-1A bar-bits kernel
+  (``DEC-STAGE1A-RUST-BATCH-001``): one call per ``(instrument, tf)`` build over
+  prepass-resolved columns/day-tables, returning one u128 mask per bar. The
+  default-OFF ``BRUTEX_SWEEP_RUST_STAGE1A`` seam in
+  ``brutex.engine.rust_stage1a`` is its ONE production consumer.
 
 Wheel-source freshness handshake (R2-CC-G1)
 -------------------------------------------
@@ -107,10 +120,12 @@ _EXPECTED_COMPILED_SYMBOLS: tuple[str, ...] = (
     "evaluate_spec",
     "evaluate_with_levels",
     "greeks",
+    "greeks_batch",
     "minute_of_session",
     "resolve_near_month",
     "seconds_of_day",
     "spec_canonical_bytes",
+    "stage1a_bar_bits_batch",
     "total_conditions",
     "version",
     "weekday_from_ordinal",
@@ -171,10 +186,12 @@ from ._trading_core import (  # noqa: E402  # type: ignore[import-not-found]
     evaluate_spec,
     evaluate_with_levels,
     greeks,
+    greeks_batch,
     minute_of_session,
     resolve_near_month,
     seconds_of_day,
     spec_canonical_bytes,
+    stage1a_bar_bits_batch,
     total_conditions,
     version,
     weekday_from_ordinal,
@@ -220,10 +237,12 @@ __all__ = [
     "evaluate_spec",
     "evaluate_with_levels",
     "greeks",
+    "greeks_batch",
     "minute_of_session",
     "resolve_near_month",
     "seconds_of_day",
     "spec_canonical_bytes",
+    "stage1a_bar_bits_batch",
     "total_conditions",
     "version",
     "weekday_from_ordinal",

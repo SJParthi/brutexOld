@@ -65,7 +65,7 @@ leaves it ``none``). A contract that quarantined or left a transient window is l
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -117,10 +117,11 @@ from brutex.adapters.ingest_common import (
     run_until_clean,
 )
 from brutex.adapters.protocol import DerivativeContract
+from brutex.calendars.market_hours import resolve_market_closed
 from brutex.calendars.observed_sessions import load_observed_holidays
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
-from brutex.data.errors import StoreWriteDeadlineExceeded
+from brutex.data.errors import MarketHoursHalt, StoreWriteDeadlineExceeded
 from brutex.data.greeks_enrich_pass import GREEKS_NOT_RUN as _GREEKS_NOT_RUN
 from brutex.data.greeks_enrich_pass import GreeksEnrichOutcome as _GreeksEnrichOutcome
 from brutex.data.greeks_enrich_pass import run_greeks_enrich_pass
@@ -132,6 +133,7 @@ from brutex.data.registry_store import (
     RegistryStore,
 )
 from brutex.data.sink import BarSink, NullBarSink
+from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import EMPTY, SKIPPED, WindowLedger
 from brutex.data.window_ledger_store import (
     begin_pull_ledger,
@@ -354,6 +356,19 @@ class HistoricalPullReport:
     """The Greeks driver's per-target quarantine tally (a per-contract
     read/solve/write error is quarantined INSIDE the driver — surfaced here,
     never conflated with a whole-pass failure)."""
+    contracts_step_filtered: int = 0
+    """In-window contract legs EXCLUDED from this invocation because their
+    ordering bucket's :class:`~brutex.adapters.ingest_common.PullStep` is
+    outside the caller's ``step_filter`` (DEC-STAGED-SEQUENCER-SEAMS-001 —
+    the ADR-0021 Decision 3 F&O-spine ``step_filter`` seam: a futures-only /
+    options-only STAGE invocation reuses this one spine). A filtered leg is
+    honestly ABSENT from pull EXECUTION — zero vendor calls, zero ledger
+    rows, no window planned, never marked complete, NEVER fake-settled — and
+    re-joins whichever invocation selects its step. It is NAMED here, never
+    silently subtracted: :attr:`contracts_selected` deliberately stays the
+    PRE-filter selection-grammar count (filtered legs included — the
+    ``step_filter`` scopes execution, not the selection accounting). 0 for
+    every ``step_filter=None`` caller (the byte-identical default)."""
     class_unresolved: int = 0
     """Contract legs whose index/stock ORDERING class could not be resolved from
     the caller's ``underlying_kinds`` map (DEC-PULL-SIX-STEP-ORDER-001) — each
@@ -361,6 +376,28 @@ class HistoricalPullReport:
     still pulled, one ``fno.step_unclassified`` WARN per underlying) and named
     in the note. 0 for a legacy ``underlying_kinds=None`` caller (the 2-bucket
     order — nothing to resolve) and for a fully-resolved map."""
+
+    @property
+    def ok(self) -> bool:
+        """The F&O candle stage verdict — the ONE home of the candle-gate predicate.
+
+        DEC-STAGED-SEQUENCER-SEAMS-001 (ADR-0021 §12 invariant 4): the inner
+        candle arm of the sequencer's
+        :func:`~brutex.dashboard.pipeline_pull.historical_phase_ok` gate
+        DELEGATES here via :attr:`CompositePullReport.ok` (expression MOVED
+        verbatim — this module sits below the sequencer in the import graph;
+        CLAUDE.md §11 COMMON), and the report thereby SATISFIES the structural
+        :class:`~brutex.dashboard.stage_outcome.StageOutcome` protocol for a
+        future futures-only / options-only stage binding. ``True`` iff the
+        pull neither died on auth, left any window failing, quarantined any
+        contract pair, nor halted on the mass-empty breaker.
+        """
+        return (
+            not self.auth_aborted
+            and self.still_failed_windows == 0
+            and self.failed_pairs == 0
+            and self.mass_empty_cause is None
+        )
 
     @property
     def verdict(self) -> PullVerdict:
@@ -389,7 +426,7 @@ class HistoricalPullReport:
 
     def to_dict(self) -> dict[str, object]:
         """JSON-safe view for the ``pull-historical`` route + the live panel."""
-        return {
+        payload: dict[str, object] = {
             "dry_run": self.dry_run,
             "intervals": list(self.intervals),
             "contracts_selected": self.contracts_selected,
@@ -423,6 +460,13 @@ class HistoricalPullReport:
             "class_unresolved": self.class_unresolved,
             "verdict": self.verdict.to_dict(),
         }
+        if self.contracts_step_filtered:
+            # EMIT-ON-NONZERO (the emit-on-non-default house precedent —
+            # DEC-STAGED-SEQUENCER-SEAMS-001): every unfiltered pull's payload
+            # stays byte-identical; a staged futures-only / options-only
+            # invocation surfaces its honest exclusion count.
+            payload["contracts_step_filtered"] = self.contracts_step_filtered
+        return payload
 
 
 class _EmptyCandleSDK:
@@ -838,6 +882,7 @@ def _build_note(
     greeks_enrich_error: str | None = None,
     class_unresolved: int = 0,
     greeks_strict_withheld: bool = False,
+    contracts_step_filtered: int = 0,
 ) -> str:
     """Honest one-line outcome note for the report / live panel.
 
@@ -887,6 +932,12 @@ def _build_note(
     the strict barrier withheld the pass on an unclean prior/F&O step. NEVER
     a FAILED verdict (nothing ran, nothing is lost — the overlay is
     re-derivable). The ``False`` default renders byte-identically to before.
+
+    *contracts_step_filtered* (DEC-STAGED-SEQUENCER-SEAMS-001): a positive
+    count appends ", N contract(s) outside the step filter skipped (pulled by
+    their own stage invocation)" — the honest step-scoped-invocation clause
+    (nothing lost: the excluded buckets ride whichever invocation selects
+    their step). The zero default renders byte-identically to before.
     """
     prefix = (
         "window ledger reload FAILED — running full re-verify pull (no skip); "
@@ -896,6 +947,12 @@ def _build_note(
     class_suffix = (
         f", {class_unresolved} contract(s) with unresolved index/stock class (ordered as stocks)"
         if class_unresolved
+        else ""
+    )
+    step_filter_suffix = (
+        f", {contracts_step_filtered} contract(s) outside the step filter skipped "
+        "(pulled by their own stage invocation)"
+        if contracts_step_filtered
         else ""
     )
     suffix = (
@@ -965,7 +1022,7 @@ def _build_note(
             f"pulled {windows} windows across {contracts_completed}/{contracts_selected} "
             f"contract(s){skipped_suffix} into the candle lake (rerun-safe — WindowLedger dedups)"
         )
-    return f"{prefix}{base}{suffix}{scope_suffix}{class_suffix}{greeks_suffix}"
+    return f"{prefix}{base}{suffix}{scope_suffix}{class_suffix}{step_filter_suffix}{greeks_suffix}"
 
 
 def _mark_complete(
@@ -1142,12 +1199,19 @@ def _run_phase(
     on_bars: Callable[[int], None] | None = None,
     on_ledger_sync: OnLedgerSync | None = None,
     form_preference: SymbolFormPreference | None = None,
+    ledger: WindowLedger | None = None,
 ) -> _PhaseResult:
     """Run ONE interval's full pull over *by_bucket* and fold its until-clean passes.
 
     The single ingest call site (CLAUDE.md §11 COMMON) — BOTH phases funnel through here,
     differing only by *interval* and the optional per-contract *contract_windows* bounds.
-    Opens its OWN pull-ledger (each phase's windows are namespaced by interval already), runs
+    Opens its OWN pull-ledger (each phase's windows are namespaced by interval already) —
+    UNLESS the caller injects an already-loaded *ledger*
+    (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared pipeline-instance seam: the phase's own
+    full-ledger load is skipped, its end-of-phase SAVE runs unchanged; IGNORED under
+    ``dry_run``, which always keeps the ``None`` never-records ledger; a ``None``
+    *ledger* loads exactly as before, and that load then honours an active
+    :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`) — runs
     the one-shot path OR the bounded until-clean loop, and returns the folded
     :class:`_PhaseResult`. The barrier flag :attr:`_PhaseResult.clean` is True iff EVERY
     selected contract landed clean with no quarantine / still-failing / auth death.
@@ -1163,7 +1227,11 @@ def _run_phase(
     likewise announced. *step_monitor* attributes every per-pair settle to its step
     (late writes WARN + count) and is the tests' hard ordering oracle.
     """
-    ledger: WindowLedger | None = begin_pull_ledger(lake_root, dry_run=dry_run)
+    # An injected `ledger=` (DEC-LEDGER-LOAD-SPACE-V1-001) skips the load and reuses
+    # the caller's instance — LIVE pulls only: a dry-run always resolves through
+    # begin_pull_ledger, which returns None (never records, never persists).
+    if ledger is None or dry_run:
+        ledger = begin_pull_ledger(lake_root, dry_run=dry_run)
     # LOUD reload failure (DEC-WINDOW-LEDGER-RESCUE-001): the persisted ledger existed
     # but could not be read — the store already WARNed (window_ledger.load_failed);
     # surface it on THIS phase's result too so the pull report/note announces
@@ -1264,6 +1332,22 @@ def _run_phase(
     # trips). Armed ONLY for a REAL live pull — a dry-run threads ``None`` (the same
     # gating as ``capture_hook_factory`` above), so a synthetic pull never observes.
     storm_breaker = None if dry_run else resolve_error_storm_breaker()
+    # Market-hours pull guard (DEC-GROWW-MARKET-HOURS-GUARD-001): the live-clock
+    # predicate consulted per contract (mid-round) + between until-clean rounds. Armed
+    # ONLY for a REAL live pull — a dry-run threads ``None`` (the ``storm_breaker``
+    # gating pattern), so a synthetic F&O pull never gates. When it flips ``True`` a
+    # contract raises ``MarketHoursHalt`` (a global stop) — caught below, the committed
+    # work kept + the not-yet-started later step buckets announced ``pull.step.halted``.
+    # The env kill switch is parsed ONCE here (fail-loud on junk); the bound predicate
+    # then reads the live clock only, so a junk env set mid-pull can never crash a long
+    # F&O phase with a per-contract ValueError.
+    market_closed = None if dry_run else resolve_market_closed()
+    # Pre-settle TODAY minute-completeness gate (DEC-PULL-TODAY-COMPLETENESS-GATE-001):
+    # the env kill switch is resolved ONCE per phase, fail-loud on junk at pull start
+    # (the ``resolve_market_closed`` posture, never mid-run); a dry-run short-circuits
+    # to ``False`` WITHOUT touching the env (belt — the F&O dry-run client returns
+    # EMPTY payloads, so the gate could never fire offline anyway).
+    today_gate = (not dry_run) and resolve_today_completeness_enabled()
     # Observed-sessions overlay (DEC-CALENDAR-OBSERVED-SESSIONS-001): loaded ONCE per
     # phase and threaded into the FUTURES partial-window observe margin ONLY (an
     # observed holiday is not a data hole) — NEVER into window planning / the 30d/60d
@@ -1360,6 +1444,7 @@ def _run_phase(
                 observed_holidays=observed_holidays,
                 breaker_health_probe=breaker_canary,
                 storm_breaker=storm_breaker,
+                market_closed=market_closed,
                 audit=audit,
                 # ONE shared &-form preference across every step bucket AND
                 # every until-clean round (DEC-FORM-WINNER-PERSIST-001; the
@@ -1367,6 +1452,9 @@ def _run_phase(
                 # in production the PersistentSymbolFormPreference over the
                 # instrument master, so the winner survives across pulls too.
                 form_preference=form_preference,
+                # Pre-settle TODAY minute-completeness gate
+                # (DEC-PULL-TODAY-COMPLETENESS-GATE-001) — resolved once above.
+                today_completeness_gate=today_gate,
             )
         except GrowwAuthError as exc:
             # A TERMINAL dead-credential auth failure HALTED the F&O spine mid-
@@ -1509,6 +1597,7 @@ def _run_phase(
                     _bucket_round_runner(bucket_key, bucket),
                     max_rounds=until_clean_rounds,
                     quota_exhausted=quota_hook,
+                    market_closed=market_closed,
                     stop_when_stuck=True,
                 )
             else:
@@ -1591,6 +1680,35 @@ def _run_phase(
                 step=later_step.label,
                 ordinal=int(later_step),
                 reason="mass_empty_halt",
+            )
+    except MarketHoursHalt as exc:
+        # A contract raised MarketHoursHalt mid-bucket (DEC-GROWW-MARKET-HOURS-GUARD-001):
+        # the F&O pull crossed into the NSE market-hours window and halted to leave the
+        # shared Groww account free for TickVault's live feed. Everything already
+        # committed survives (bars via the sink; window records via the finally's drain
+        # + ledger persist below); every un-settled window stays PLANNED/FAILED →
+        # resumable on the next out-of-hours run. CAUGHT here (like the mass-empty /
+        # auth halts) so it never escapes as a generic error; the CRITICAL Telegram
+        # pull-halt alert fires HERE (best-effort, can never mask the flow). The
+        # not-yet-started later step buckets are announced LOUDLY, per step.
+        emit_pull_halt_alert(exc)
+        halted_key = ordered_buckets[buckets_started - 1][0]
+        _LOG.warning(
+            "historical.pull.market_hours_halt",
+            error=str(exc),
+            step=_STEP_FOR_BUCKET[halted_key].label,
+            note=(
+                "pull crossed into NSE market hours — F&O pull halted before settling; "
+                "committed work kept; un-settled windows resume next out-of-hours run"
+            ),
+        )
+        for later_key, _later_bucket in ordered_buckets[buckets_started:]:
+            later_step = _STEP_FOR_BUCKET[later_key]
+            _LOG.warning(
+                "pull.step.halted",
+                step=later_step.label,
+                ordinal=int(later_step),
+                reason="market_hours",
             )
     finally:
         # CRITICAL ORDER (DEC-FNO-ASYNC-PIPELINE-WIRE-001): drain the async fetch_pipeline
@@ -1794,6 +1912,17 @@ def _heal_lake_after_pull(
     rebuilt contracts' ``(exchange, "FNO", groww_symbol)`` coordinates,
     bounded to the UNION of their resolved minute-window spans (a months
     SUPERSET of every per-contract span — bounded, never the whole lake).
+    This seam ALSO opts into the bounded ``options/`` expired-options-table
+    census+heal (``include_options=True`` —
+    DEC-LAKE-HEAL-OPTIONS-FOREIGN-001; months-scoped by FILENAME — a CLEAN
+    out-of-scope file is never read, but a FLAGGED in-scope file still costs
+    targeted canonical-sibling reads — and, in auto mode, reassignment
+    writes — in its foreign rows' HOME months, which may lie OUTSIDE the
+    span (anomaly-only cost, the :func:`~brutex.data.lake_heal.heal_after_pull`
+    round-2 honesty wording); the ONE seam owning the options wiring — the
+    spot glue stays ``False``). Honest bound: the existing zero-targets
+    early-out also skips the options census (a pull that rebuilt no
+    contracts pulled no months to bound by; L3 covers).
     Runs BEFORE :func:`_enrich_greeks_from_minute` (and before the pipeline's
     final prebuild phase — DEC-PIPELINE-AUTOPREBUILD-001 — which derives the
     intraday TFs + ``1day``) so every downstream derivation reads clean
@@ -1843,6 +1972,7 @@ def _heal_lake_after_pull(
                     catalog=catalog,
                     audit=audit,
                     on_report=lambda report: emit_lake_heal_alert(report, scope=scope),
+                    include_options=True,
                 )
             finally:
                 if catalog is not None:
@@ -1945,6 +2075,8 @@ def pull_contract_candles(
     underlying_kinds: Mapping[str, bool] | None = None,
     step_monitor: StepOrderMonitor | None = None,
     prior_steps: PriorStepsVerdict | None = None,
+    ledger: WindowLedger | None = None,
+    step_filter: Collection[PullStep] | None = None,
 ) -> HistoricalPullReport:
     """Download OHLC candles for the SELECTED registry *contracts* — Path A, no re-enumeration.
 
@@ -2111,7 +2243,49 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         is re-derivable, the next pull re-attempts). ``None`` (every
         non-pipeline caller — the /db selection route, tests) keeps today's
         best-effort behavior byte-identical.
+    ledger
+        Optional ALREADY-LOADED :class:`~brutex.data.window_ledger.WindowLedger`
+        to reuse for a LIVE pull (DEC-LEDGER-LOAD-SPACE-V1-001 — the shared
+        pipeline-instance seam, threaded to ``_run_phase``): skips the phase's
+        own full-ledger load; the end-of-phase SAVE runs unchanged. ``None``
+        (every existing caller) loads exactly as before — that load then
+        honours an active
+        :func:`~brutex.data.window_ledger_store.shared_pull_ledger_scope`,
+        the production full-pipeline sharing path. IGNORED under ``dry_run``.
+    step_filter
+        OPTIONAL :class:`~brutex.adapters.ingest_common.PullStep` selection
+        over the ordered F&O buckets (DEC-STAGED-SEQUENCER-SEAMS-001 — the
+        ADR-0021 Decision 3 seam: a FUTURES-only stage invocation passes
+        ``{INDICES_FUTURES, STOCKS_FUTURES}``, an OPTIONS-only one
+        ``{INDICES_OPTIONS, STOCKS_OPTIONS}``, both REUSING this one spine —
+        no second spine, no copied loop; Golden Rule #11). A contract whose
+        bucket's step is OUTSIDE the filter is EXCLUDED from this invocation
+        BEFORE any planning: zero vendor calls, zero ledger rows, no window
+        planned, never marked complete — honestly ABSENT from pull EXECUTION
+        and NAMED in ``contracts_step_filtered`` + ONE ``fno.step_filtered``
+        INFO, NEVER fake-settled (``contracts_selected`` deliberately stays
+        the PRE-filter selection-grammar count, filtered legs included — the
+        filter scopes execution, not the selection accounting) — and
+        re-joins whichever invocation selects its step (the ledger's settled
+        windows make the split idempotent).
+        ``None`` (every existing caller) runs ALL steps, byte-identical;
+        NO production caller passes a filter in WS-B — the stage binders are
+        WS-C/WS-D. An EMPTY filter is a typed refusal (a stage invocation
+        selecting nothing is a caller bug, never a silent 0-contract pull).
     """
+    # Step-filter normalization (DEC-STAGED-SEQUENCER-SEAMS-001): resolved
+    # EAGERLY so an EMPTY selection is a typed refusal BEFORE any client /
+    # registry / lake work — a stage invocation selecting nothing is a caller
+    # bug, never a silent 0-contract pull (the fail-loud junk law).
+    step_filter_set: frozenset[PullStep] | None = None
+    if step_filter is not None:
+        step_filter_set = frozenset(step_filter)
+        if not step_filter_set:
+            raise ValueError(
+                "pull_contract_candles: step_filter must select at least one "
+                "PullStep — pass None to run every step "
+                "(DEC-STAGED-SEQUENCER-SEAMS-001)"
+            )
     now = now or datetime.now(UTC)
     start, end = _resolve_range(from_date=from_date, to_date=to_date, now=now)
     pace, on_rate_limit, on_timeout, on_success = _rate_hooks(session_rate, dry_run=dry_run)
@@ -2228,8 +2402,23 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
     by_bucket: dict[_BucketKey, list[_RebuiltContract]] = {}
     class_unresolved = 0
     unresolved_warned: set[str] = set()
+    contracts_step_filtered = 0
+    step_filtered_row_symbols: set[str] = set()
+    step_filtered_contract_symbols: set[str] = set()
     for row, contract in in_window:
         bucket_key, resolved = _contract_bucket(row, underlying_kinds)
+        if step_filter_set is not None and _STEP_FOR_BUCKET[bucket_key] not in step_filter_set:
+            # Step-scoped invocation (DEC-STAGED-SEQUENCER-SEAMS-001): the
+            # contract's bucket is not this stage's — EXCLUDE it BEFORE any
+            # planning (zero vendor calls, zero ledger rows below: its window
+            # + selection entries are pruned after this loop) and count it
+            # honestly. It re-joins whichever invocation selects its step;
+            # the class-unresolved accounting deliberately does NOT fire for
+            # it (its own stage invocation counts + WARNs it exactly once).
+            contracts_step_filtered += 1
+            step_filtered_row_symbols.add(row.contract_symbol)
+            step_filtered_contract_symbols.add(contract.symbol)
+            continue
         if not resolved:
             # Fail-closed for ORDER, never for DATA: the leg is STILL pulled, just
             # ordered stock-side (an unknown can never jump ahead of a mandated
@@ -2239,6 +2428,29 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 unresolved_warned.add(row.underlying)
                 _LOG.warning("fno.step_unclassified", underlying=row.underlying)
         by_bucket.setdefault(bucket_key, []).append((row, contract))
+    if contracts_step_filtered:
+        # Prune the excluded legs from the window plan + the selection set so
+        # the EXECUTION surfaces (window planning, ledger seeding, the
+        # pipeline reconcile, completion stamps, the report's start_dates —
+        # and thereby the sequencer's quarantine derivation) never see them:
+        # honestly absent from execution, never fake-settled and never
+        # falsely quarantined. Deliberately NOT pruned: the report's
+        # `contracts_selected` — the PRE-filter selection-grammar count —
+        # still counts them; the exclusion is NAMED in
+        # `contracts_step_filtered`, never silently subtracted.
+        minute_windows = {
+            symbol: window
+            for symbol, window in minute_windows.items()
+            if symbol not in step_filtered_contract_symbols
+        }
+        selected_symbols = frozenset(selected_symbols - step_filtered_row_symbols)
+        # (`or ()` is pure typing hygiene — a non-zero count implies the
+        # filter was set; bandit's B101 keeps asserts out of production.)
+        _LOG.info(
+            "fno.step_filtered",
+            steps=sorted(step.label for step in (step_filter_set or ())),
+            contracts=contracts_step_filtered,
+        )
     _step_monitor = step_monitor if step_monitor is not None else StepOrderMonitor()
 
     # Per-contract EMPTY-retry budget (DEC-FETCH-PER-WINDOW-GUARANTEE-001): a confirmed-deep
@@ -2289,6 +2501,9 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 on_bars=on_bars,
                 on_ledger_sync=on_ledger_sync,
                 form_preference=form_preference,
+                # Shared pipeline ledger seam (DEC-LEDGER-LOAD-SPACE-V1-001):
+                # an injected instance skips _run_phase's own full-ledger load.
+                ledger=ledger,
             )
         finally:
             # Drain the async work BEFORE the 1-day derivation reads the just-written 1-minute
@@ -2341,6 +2556,10 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
                 contract.symbol
                 for _row, contract in rebuilt
                 if contract.symbol not in minute_windows
+                # A step-filtered leg is NOT a not-yet-open skip — it rides
+                # its own stage invocation (DEC-STAGED-SEQUENCER-SEAMS-001);
+                # annotating it never_planned here would mislabel the WARN.
+                and contract.symbol not in step_filtered_contract_symbols
             ],
         )
 
@@ -2421,6 +2640,7 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         greeks_enrich_error=greeks_outcome.error,
         class_unresolved=class_unresolved,
         greeks_strict_withheld=greeks_outcome is _GREEKS_STRICT_WITHHELD,
+        contracts_step_filtered=contracts_step_filtered,
     )
     return HistoricalPullReport(
         dry_run=dry_run,
@@ -2461,6 +2681,9 @@ PersistentSymbolFormPreference` (durable ``schema_meta`` winners — a fresh pul
         greeks_targets_errored=greeks_outcome.errored_targets,
         # DEC-PULL-SIX-STEP-ORDER-001: the fail-closed-for-ORDER classification tally.
         class_unresolved=class_unresolved,
+        # DEC-STAGED-SEQUENCER-SEAMS-001: the honest step-scoped exclusion tally
+        # (0 for every step_filter=None caller — the byte-identical default).
+        contracts_step_filtered=contracts_step_filtered,
     )
 
 

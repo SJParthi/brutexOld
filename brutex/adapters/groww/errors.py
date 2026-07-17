@@ -454,7 +454,7 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
     Used only when the class name is NOT a known typed subclass — i.e. the SDK
     raised a bare ``GrowwAPIException`` / ``GrowwBaseException``. Checks the
     HTTP-ish ``code`` first (``429``→rate-limit, ``408``/``504``→timeout,
-    ``500``/``502``/``503``→server-error, int or digit-string), then sniffs the
+    ``500``/``502``/``503``→server-error, int or ASCII-digit string), then sniffs the
     message for the transient classes in priority order (rate-limit, then timeout,
     then 5xx server error, then a transient network / DNS blip — so a 429 / timeout
     / 5xx that also mentions a connection never mis-reads as a plain network error,
@@ -467,7 +467,17 @@ def _classify_generic(exc: Exception) -> type[GrowwError]:
         code = None
     if isinstance(code, int) and code in _CODE_TO_ERROR:
         return _CODE_TO_ERROR[code]
-    if isinstance(code, str) and code.strip().isdigit() and int(code) in _CODE_TO_ERROR:
+    if (
+        isinstance(code, str)
+        # ASCII guard (DEC-GROWW-ERRORCODE-ASCII-GUARD-001): ``'²'.isdigit()`` is True
+        # but ``int('²')`` raises, so a non-ASCII-digit vendor ``code`` must fall
+        # through to message sniffing instead of escaping as a raw ``ValueError``
+        # that kills the whole pull (the house ``isascii() and isdigit()`` idiom —
+        # see ``greeks_enrich_pass._is_canonical_digits``).
+        and code.strip().isascii()
+        and code.strip().isdigit()
+        and int(code) in _CODE_TO_ERROR
+    ):
         return _CODE_TO_ERROR[int(code)]
     message = str(exc).casefold()
     if any(hint in message for hint in _RATE_LIMIT_HINTS):

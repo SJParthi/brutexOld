@@ -71,7 +71,7 @@ from brutex.engine.sweep_supervisor import (
 )
 from brutex.engine.sweep_watchdog import SweepWatchdog
 from brutex.orchestrator.audit import AuditWriter
-from brutex.strategies.types import Side
+from brutex.strategies.types import PriceSource, PriceSourceCell, Side
 from brutex.vocabulary import ProximityParams
 from hypothesis import assume, given
 from hypothesis import strategies as st
@@ -100,13 +100,25 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
-def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+def _trending_bars(n_days: int = 45, per_day: int = 120) -> list[CandleBar]:
+    """A mostly-up drift with every-5th-day DOWN sessions (the sweep_run twin).
+
+    Under the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) the
+    suite's ranked fixtures ride EOD-only exits (``stop_losses=[None]`` /
+    ``take_profits=[None]`` — the ``_grid`` default): tight SL/TP over these
+    wide-range synthetic bars always fills at the adverse extreme and
+    gate-rejects every combo; the DOWN days keep ``profit_factor`` finite and
+    45 days clears MIN_TRADES=30 at ~one session-gap trade per day per mask.
+    """
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
@@ -119,8 +131,10 @@ def _grid(**overrides: object) -> SweepGridConfig:
         "directions": [Side.BUY],
         "k_values": [1],
         "condition_bits": [0, 1, 2, 3, 4],
-        "stop_losses": [80],
-        "take_profits": [50],
+        # EOD-only exits — the ranked-fixture default under the one worst-case
+        # law (see _trending_bars); knob-specific tests override explicitly.
+        "stop_losses": [None],
+        "take_profits": [None],
         "proximities": [None],
         "mode": "A",
         "data_snapshot_hash": "snap0001",
@@ -180,6 +194,19 @@ class TestIdentity:
     def test_grid_identity_differs_with_top_k(self) -> None:
         assert grid_identity(_grid(top_k=5)) != grid_identity(_grid(top_k=9))
 
+    def test_grid_identity_differs_with_non_default_price_source(self) -> None:
+        """The non-default price-source axis emits its descriptor key + re-keys the grid.
+
+        A sole-baseline ``(HLC3, CLOSE)`` axis omits the ``price_source_cells`` key
+        (byte-identical to the pre-axis grid); a non-default axis emits it, so an
+        expanded grid can never silently resume a baseline checkpoint's work.
+        """
+        g_default = _grid()
+        g_non_default = _grid(
+            price_source_cells=[PriceSourceCell(PriceSource.OPEN, PriceSource.CLOSE)]
+        )
+        assert grid_identity(g_default) != grid_identity(g_non_default)
+
     def test_tuple_cache_key_is_32_bytes(self) -> None:
         grid = _grid()
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
@@ -215,15 +242,84 @@ class TestIdentity:
             top_k=10,
             min_hits=30,
         )
-        # Re-locked for DEC-NIFTY-FIB-AXIS-001: the grid descriptor gains the
-        # ``fib_anchors`` axis and the tuple-cache params gain the ``fib_anchor``
-        # key, so both digests moved by design (the anchor is part of the identity).
+        # Re-locked TWICE by design: DEC-NIFTY-FIB-AXIS-001 (the fib_anchors
+        # axis entered the descriptor), then DEC-FILL-WORST-CASE-ONLY-001 —
+        # the descriptor + tuple-cache params now fold the permanent
+        # ``fill_mode: worst_case`` token UNCONDITIONALLY, so both digests
+        # moved off the precise-era bytes (the anti-aliasing pin below keeps
+        # the retired constants dead).
         assert (
             grid_identity(grid)
-            == "e55de617a85d93ce83416ba68624c24b2eaaf2d63c482457a84837c09d11bf1a"
+            == "158df7d010e38f392ae1c5dccc785989c77ea06ad5c4759b1640c48d83b5addb"
         )
         key = tuple_cache_key(next(iter_sweep_tuples(grid)), grid)
-        assert key.hex() == "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
+        assert key.hex() == "ae16c106ca9f3001c9f9a3b54cb10c345d22eaf6582478845d75d6f303885131"
+
+    def test_one_law_identity_never_aliases_the_precise_era(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 anti-aliasing pin: the one-law grid
+        # identity + tuple cache key differ from the FROZEN precise-era
+        # constants (minted before the unconditional fill_mode token), so a
+        # one-law sweep can never resume a precise-era checkpoint nor
+        # cache-skip a precise-era tuple.
+        grid = _grid(stop_losses=[80], take_profits=[50])
+        precise_era_identity = "e55de617a85d93ce83416ba68624c24b2eaaf2d63c482457a84837c09d11bf1a"
+        precise_era_key = "f9f118e0cfdc414f95e3a89a04f8d0b648e2a53960ba9c6608a6be3a55da9222"
+        assert grid_identity(grid) != precise_era_identity
+        assert tuple_cache_key(next(iter_sweep_tuples(grid)), grid).hex() != precise_era_key
+
+    def test_gate_config_change_rekeys_identity_and_cache_key(self) -> None:
+        """Ruling 3 (DEC-SWEEP-UNKILLABLE-CORE-001): the overfit + Stage-3 gate config
+        is part of BOTH the run identity AND the tuple cache key.
+
+        A gated institutional re-run over a light-research results tree must NOT
+        resume the same checkpoint (``grid_identity``) NOR cache-skip the ungated
+        tuples (``tuple_cache_key``) — otherwise it serves ungated rows as gated
+        winners. Only the gate knobs differ here.
+        """
+        from brutex.ranking import OverfitGateConfig
+
+        # Explicit int SL/TP: stage3_enable REFUSES the suite's EOD-only
+        # (None) defaults, and only the gate knobs may differ between grids.
+        sl_tp: dict[str, object] = {"stop_losses": [80], "take_profits": [50]}
+        light = _grid(**sl_tp)  # overfit=None, stage3 default-off — light-research
+        gated_overfit = _grid(overfit=OverfitGateConfig(dsr_min=0.95), **sl_tp)
+        gated_stage3 = _grid(stage3_enable=True, **sl_tp)
+
+        # grid_identity (checkpoint resume) re-keys on either gate.
+        assert grid_identity(gated_overfit) != grid_identity(light)
+        assert grid_identity(gated_stage3) != grid_identity(light)
+        assert grid_identity(gated_overfit) != grid_identity(gated_stage3)
+
+        # tuple_cache_key (the cache-SKIP fast path — no preload safety net) too.
+        t_light = next(iter_sweep_tuples(light))
+        t_overfit = next(iter_sweep_tuples(gated_overfit))
+        t_stage3 = next(iter_sweep_tuples(gated_stage3))
+        assert tuple_cache_key(t_overfit, gated_overfit) != tuple_cache_key(t_light, light)
+        assert tuple_cache_key(t_stage3, gated_stage3) != tuple_cache_key(t_light, light)
+
+        # A distinct overfit KNOB value re-keys again (not just presence).
+        gated_overfit2 = _grid(overfit=OverfitGateConfig(dsr_min=0.90), **sl_tp)
+        assert grid_identity(gated_overfit2) != grid_identity(gated_overfit)
+
+    def test_gate_config_default_is_identity_byte_stable(self) -> None:
+        """Ruling 3: an UNCHANGED (ungated, no-Stage-3) grid keeps identity byte-stable.
+
+        The gate-config axis contributes NOTHING at defaults, so a light grid
+        hashes exactly as it did before this axis existed (the frozen goldens
+        above are unmoved) — the "gate-config change never cache-skips, unchanged
+        config never re-keys" contract. A disabled Stage-3 pass leaves its knobs
+        INERT, so changing ``stage3_top_k`` on a ``stage3_enable=False`` grid must
+        NOT move the identity (no false full-recompute).
+        """
+        light = _grid()
+        assert grid_identity(_grid()) == grid_identity(light)
+        # Stage-3 knobs are inert while disabled → identity unmoved.
+        assert grid_identity(_grid(stage3_top_k=999)) == grid_identity(light)
+        assert grid_identity(_grid(stage3_max_fevals=17)) == grid_identity(light)
+        t_light = next(iter_sweep_tuples(light))
+        assert tuple_cache_key(
+            next(iter_sweep_tuples(_grid(stage3_top_k=999))), _grid(stage3_top_k=999)
+        ) == tuple_cache_key(t_light, light)
 
     @given(
         top_k_a=st.integers(min_value=1, max_value=5),
@@ -254,7 +350,7 @@ class TestParallelReexports:
     """
 
     def test_tuple_label_format(self) -> None:
-        grid = _grid()
+        grid = _grid(stop_losses=[80], take_profits=[50])
         tuple_ = next(iter_sweep_tuples(grid))
         assert tuple_label(tuple_) == "NIFTY/1minute/bull/k=1/sl=80/tp=50"
 
@@ -304,17 +400,20 @@ class TestParallelReexports:
     def test_tuple_cache_key_byte_identical_to_pre_structural_convention(self) -> None:
         """PRODUCTION-path byte-identity golden (DEC-COMBO-DIGEST-REPRO-HASHES-001).
 
-        The hex below was captured by running the PRE-change (main)
-        ``tuple_cache_key`` — where the three reproducibility hashes travelled
-        INSIDE ``_tuple_cache_params`` by convention — over exactly this
-        ``_grid()`` fixture. The structural-kwargs code must reproduce it
-        EXACTLY: existing Bloom/LMDB dedup stores keyed under the legacy
-        convention remain valid (no stale-skip, no store invalidation).
+        RE-LOCKED for DEC-FILL-WORST-CASE-ONLY-001: the original hex
+        (``a840ae68…baac92``) was captured on pre-mode main over the old
+        ``_grid()`` fixture (sl=80/tp=50, no fill_mode token). The one-law
+        key now folds the permanent ``fill_mode: worst_case`` token
+        UNCONDITIONALLY and the suite fixture rides EOD-only exits, so the
+        bytes moved BY DESIGN (precise-era dedup stores must never be
+        served — the refusal law owns that). The hex below was captured on
+        THIS tree; the dynamic rebuild test above still proves the
+        structural-kwargs convention reproduces the private path exactly.
         """
         grid = _grid()
         tuple_ = next(iter_sweep_tuples(grid))
         assert tuple_cache_key(tuple_, grid).hex() == (
-            "a840ae6838edd7ab87b457ed898c2a51f48ca5435959f52f9916bec1c5baac92"
+            "4d95be5165c0595fb202a36051ed2fb70fc4c95480531191a0782c78008474cd"
         )
 
 
@@ -441,8 +540,18 @@ class TestRunSupervisedGrid:
                 skip_empty=False,
             )
 
-    def test_cache_hit_skips_the_tuple(self, tmp_path: Path) -> None:
-        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path."""
+    def test_cache_hit_skips_the_tuple(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-cached tuple is skipped (cache branch); a fresh sibling runs the no-bars path.
+
+        Pins the cache TIER mechanics under the legacy (guard-OFF) arm: the
+        fabricated cache mark has NO on-disk artifacts, which the default-ON
+        resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001) correctly forces
+        back through run_one_tuple — guard-ON behaviour is pinned in
+        ``test_engine_sweep_supervisor_store_guard.py``.
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -464,8 +573,15 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_CACHE" in actions
 
-    def test_resume_skips_completed_tuples(self, tmp_path: Path) -> None:
-        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path."""
+    def test_resume_skips_completed_tuples(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A loaded checkpoint resume-skips index 0; index 1 runs the no-bars path.
+
+        Legacy (guard-OFF) arm — the fabricated checkpoint has no on-disk
+        artifacts (see ``test_cache_hit_skips_the_tuple``'s rationale).
+        """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         grid = _grid(instruments=["NIFTY", "BANKNIFTY"])
         with (
             _open_guards(tmp_path, grid) as guards,
@@ -485,7 +601,9 @@ class TestRunSupervisedGrid:
         actions = [e.action for e in read_entries(tmp_path / "sup.jsonl")]
         assert "TUPLE_SKIPPED_RESUME" in actions
 
-    def test_resume_batches_prefix_into_one_audit_line(self, tmp_path: Path) -> None:
+    def test_resume_batches_prefix_into_one_audit_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A resume over N>1 completed tuples emits ONE summarising audit line.
 
         O(1) resume emission (DEC-SWEEP-SCALE-OPERABILITY-001): on a 4-tuple grid
@@ -493,8 +611,12 @@ class TestRunSupervisedGrid:
         ``TUPLE_SKIPPED_RESUME`` line (the prior per-tuple emission wrote 3)
         carrying ``resumed_count`` + the resume boundary, fires ONE progress
         publish for the whole prefix, and the hash chain — with the summary as
-        an ordinary entry — still verifies end-to-end.
+        an ordinary entry — still verifies end-to-end. Legacy (guard-OFF) arm —
+        the fabricated checkpoint prefix has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON intact
+        batched emission is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (resume prefix needs 4
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -546,13 +668,20 @@ class TestRunSupervisedGrid:
         assert snaps[0].evaluated == 3
         assert snaps[0].skipped == 3
 
-    def test_fully_resumed_rerun_emits_single_summary_line(self, tmp_path: Path) -> None:
+    def test_fully_resumed_rerun_emits_single_summary_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """An idempotent re-run over an N-tuple complete grid is O(1) in audit lines.
 
         The resume_count == total edge: the second run's ENTIRE grid is the
         resumed prefix — one summary line, zero per-tuple emission, and the
-        shared audit file still verifies across both runs.
+        shared audit file still verifies across both runs. Legacy (guard-OFF)
+        arm — an all-no-bars grid checkpoints ZERO artifacts, which the
+        default-ON guard deliberately re-probes each resume (the disclosed
+        no-bars shift, DEC-SWEEP-RESUME-STORE-GUARD-001; guard-ON arm pinned
+        in the store-guard suite).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         # Synthetic instrument names by test intent (full-resume edge needs 3
         # distinct tuples) — opt out of the Layer-1 engine-scope invariant
         # (DEC-ENGINE-SCOPE-GUARD-001).
@@ -878,8 +1007,11 @@ class TestRunSupervisedGrid:
         the no-bars paths: a later cache-HIT or no-bars tuple must NOT advance the
         checkpoint past the earlier failed tuple (else that failed tuple would be
         resume-skipped — the BLOCKER). 3 tuples: index 0 FAILS, index 1 is a
-        pre-cached cache-hit, index 2 has no bars.
+        pre-cached cache-hit, index 2 has no bars. Legacy (guard-OFF) arm — the
+        fabricated cache mark has no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale).
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 
@@ -977,8 +1109,12 @@ class TestRunSupervisedGrid:
 
         A mixed 5-tuple grid touching EVERY disposition: index 0 resume-skipped
         (pre-checkpointed), index 1 cache-skipped (pre-cached), index 2 RUNS,
-        index 3 NO BARS, index 4 FAILS.
+        index 3 NO BARS, index 4 FAILS. Legacy (guard-OFF) arm — the fabricated
+        checkpoint/cache marks have no on-disk artifacts (see
+        ``test_cache_hit_skips_the_tuple``'s rationale); the guard-ON
+        reconciliation invariant is pinned in the store-guard suite.
         """
+        monkeypatch.setenv("BRUTEX_SWEEP_RESUME_STORE_GUARD", "0")
         pytest.importorskip("polars")
         from brutex.engine.sweep_orchestrator import run_one_tuple as real_run_one
 

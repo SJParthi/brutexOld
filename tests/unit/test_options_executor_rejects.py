@@ -223,14 +223,21 @@ def test_stale_bar_is_logged() -> None:
     assert events[0]["exit_volume"] == 10
 
 
-def test_stale_guard_opt_out_accepts_zero_volume_bars() -> None:
+def test_stale_guard_is_unconditional_no_opt_out() -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001 (scope G): the reject_stale_bars opt-out
+    # is DELETED — a zero-volume bar ALWAYS rejects (killed-token pin + the
+    # uniform-reject law).
+    import inspect
+
+    for fn in (materialize_trade, run_rule_over_signals, execute_options_sim):
+        assert "reject_stale_bars" not in inspect.signature(fn).parameters, fn.__name__
     out = materialize_trade(
         _signal_2024(),
         RULES_BY_NAME["atm"],
         source=_VolumeSource(entry_volume=0, exit_volume=0),
-        reject_stale_bars=False,
     )
-    assert isinstance(out, MaterializedTrade)  # priced exactly as before the guard
+    assert isinstance(out, RejectedTrade)
+    assert out.reason is RejectReason.STALE_BAR
 
 
 def test_normal_volume_bars_unaffected_by_default_guard() -> None:
@@ -246,31 +253,22 @@ def test_run_rule_counts_stale_bar_rejects() -> None:
     assert res.n_rejected == 2
 
 
-def test_run_rule_opt_out_threads_through() -> None:
+def test_run_rule_counts_unconditional_stale_rejects() -> None:
     res = run_rule_over_signals(
         [_signal_2024()],
         RULES_BY_NAME["atm"],
         source=_VolumeSource(entry_volume=0),
-        reject_stale_bars=False,
     )
-    assert res.n_accepted == 1
-    assert res.n_rejected_stale_bar == 0
+    assert res.n_accepted == 0
+    assert res.n_rejected_stale_bar == 1
 
 
-def test_execute_options_sim_opt_out_available_at_api() -> None:
-    strict = execute_options_sim(
+def test_execute_options_sim_rejects_zero_volume_always() -> None:
+    out = execute_options_sim(
         [_signal_2024()], source=_VolumeSource(entry_volume=0), rules=[RULES_BY_NAME["atm"]]
     )
-    relaxed = execute_options_sim(
-        [_signal_2024()],
-        source=_VolumeSource(entry_volume=0),
-        rules=[RULES_BY_NAME["atm"]],
-        reject_stale_bars=False,
-    )
-    assert strict[0].n_rejected_stale_bar == 1
-    assert strict[0].n_accepted == 0
-    assert relaxed[0].n_rejected_stale_bar == 0
-    assert relaxed[0].n_accepted == 1
+    assert out[0].n_rejected_stale_bar == 1
+    assert out[0].n_accepted == 0
 
 
 # ── OptionsRuleResult new-counter validation ─────────────────────────────────

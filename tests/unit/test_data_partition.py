@@ -13,7 +13,7 @@ from brutex.data import (
     parse_partition_path,
     partition_for_timestamp,
 )
-from brutex.data.partition import SPOT_PROBE_SEGMENTS
+from brutex.data.partition import SPOT_PROBE_SEGMENTS, option_partition_stem
 
 # ────────────────────────────────────────────────────────────────────────
 # build_partition_path
@@ -291,6 +291,28 @@ class TestPartitionForTimestamp:
 
 
 # ────────────────────────────────────────────────────────────────────────
+# option_partition_stem
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestOptionPartitionStem:
+    """The ONE options-tree month-stem source (§11 COMMON, review round-15 NIT).
+
+    Byte-exact zero-padding pins — a drift here would desynchronise the option
+    writer's destination, the scanner's canonical-stem check + sibling path,
+    and the healer's reassignment destination all at once.
+    """
+
+    def test_zero_padded_canonical_form(self) -> None:
+        assert option_partition_stem(2024, 6) == "2024-06"
+        assert option_partition_stem(2024, 12) == "2024-12"
+
+    def test_min_and_max_datetime_years_pad(self) -> None:
+        assert option_partition_stem(1, 1) == "0001-01"  # datetime.MINYEAR pads to 4
+        assert option_partition_stem(9999, 12) == "9999-12"  # datetime.MAXYEAR
+
+
+# ────────────────────────────────────────────────────────────────────────
 # Mutation-kill pins (DEC-MUTATION-RUNTIME-001)
 # ────────────────────────────────────────────────────────────────────────
 
@@ -381,17 +403,20 @@ class TestYearBoundaryPins:
 
 
 class TestForbiddenSymbolCharPins:
-    """All 10 forbidden filesystem chars are rejected, message byte-exact.
+    """All 12 forbidden filesystem/glob chars are rejected, message byte-exact.
 
     The 5-char sample above leaves the ``\\``, ``*``, ``"``, ``>``, ``|``
     and NUL set-member mutants alive; covering every member makes each
     "XX…XX" frozenset-member mutant flip an expected rejection into an
     accepted path. The ``==`` on ``str(exc.value)`` additionally kills
     the wrapped-message mutant, which a substring ``match=`` cannot
-    (DEC-MUTATION-RUNTIME-001).
+    (DEC-MUTATION-RUNTIME-001). ``[``/``]`` joined the set at
+    DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 (the #1594 round-15 glob-metachar
+    law, write-side: a ``NSE-X[12]`` dir beside real ``NSE-X1``/``NSE-X2``
+    siblings glob-reads the SIBLINGS' bars into the wrong symbol).
     """
 
-    @pytest.mark.parametrize("ch", ["/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0"])
+    @pytest.mark.parametrize("ch", ["/", "\\", ":", "*", "?", '"', "<", ">", "|", "\0", "[", "]"])
     def test_rejects_each_forbidden_char(self, tmp_path: Path, ch: str) -> None:
         symbol = f"a{ch}b"
         with pytest.raises(PartitionError) as exc:

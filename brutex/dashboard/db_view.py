@@ -32,10 +32,12 @@ trigger an unbounded read.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
 import re
+import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -60,7 +62,8 @@ from brutex.adapters.groww.constants import (
     TRACK1_SPOT_INTERVAL,
 )
 from brutex.adapters.ingest_common import GROWW_COVERAGE_MARKET
-from brutex.calendars.nse import MUHURAT_SESSIONS
+from brutex.calendars.nse import MUHURAT_SESSIONS, previous_trading_session
+from brutex.config.hardware_envelope import memory_budget_bytes
 
 # NO lake_revision import — module-level OR lazy (AST-pinned by
 # ``test_db_view_no_lake_revision_import``): lake_revision lazily imports
@@ -71,13 +74,15 @@ from brutex.calendars.nse import MUHURAT_SESSIONS
 from brutex.dashboard.movers_cache import MoversSnapshotCache, revision_generation
 from brutex.dashboard.movers_resilient import movers_read_skip_errors
 from brutex.dashboard.registry_strikes import load_registry_strike_chain
-from brutex.data.errors import LakeWriteHalt
+from brutex.data.bar_screen import screen_rows
+from brutex.data.errors import CatalogError, LakeWriteHalt
 from brutex.data.fno_candle_lake import (
     FNO_CANDLE_COLUMNS,
     FNO_CANDLE_LAKE_SEGMENT,
 )
 from brutex.data.fno_symbol import parse_fno_symbol
-from brutex.data.lake_keys import spot_recovery_candidates
+from brutex.data.greeks_provenance import greeks_status_label
+from brutex.data.lake_keys import StockDriftMap, spot_recovery_candidates
 from brutex.data.lake_manifest import (
     ledger_stat_token,
     load_manifest_datasets,
@@ -94,11 +99,14 @@ from brutex.data.lake_stats_manifest import (
     FALLBACK_REL_LOG_CAP,
     KIND_BARS,
     KIND_OPTIONS,
+    TOKEN_SWEEP_MOVED,
+    TOKEN_SWEEP_OK,
     DatasetStats,
     StatsFileRow,
-    file_token_matches,
-    load_valid_dataset_stats,
+    bounded_token_sweep,
+    load_valid_dataset_stats_guarded,
     parse_rel_month,
+    rel_month_bounds,
     scan_dataset_rels,
     seed_dataset_stats,
     stat_token,
@@ -120,6 +128,7 @@ from brutex.data.partition import (
 from brutex.data.session import SESSION_OPEN, format_ist_clock
 from brutex.data.spot_features import pct_change
 from brutex.data.spot_join import utc_instant
+from brutex.data.today_completeness import TODAY_INCOMPLETE
 from brutex.data.window_ledger import (
     DEMOTED_SETTLE_REASONS,
     EMPTY_TERMINAL_THRESHOLD,
@@ -476,12 +485,19 @@ def _muhurat_exclusion_sql(muhurat_dates: Iterable[date]) -> str:
 #: see :func:`_muhurat_exclusion_sql` (DEC-DAILY-OPEN-PREDICATE-ALIGN-001).
 _MUHURAT_EXCLUSION_SQL: Final[str] = _muhurat_exclusion_sql(MUHURAT_SESSIONS)
 
-#: The two server-computed derived columns appended to every spot candle page
-#: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap.
-#: They are NOT real Parquet columns (never selectable in the column picker);
-#: the viewer computes them per bar from the symbol's prior-day last 1-minute
-#: close (DEC-SPOT-PREVCLOSE-1MIN-001).
-SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct")
+#: The server-computed derived columns appended to every spot candle page
+#: (DEC-DB-CANDLE-DERIVED-001): previous-day % change + the 09:15 overnight gap +
+#: the prev-close CONTIGUITY honesty flag (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001,
+#: the ``/db`` twin of the ``/movers`` " *" marker DEC-MOVERS-PREVCLOSE-CONTIGUITY-001
+#: #1539). ``prev_close_contiguous`` is ``False`` when the %-change baseline is NOT
+#: the NSE-calendar-adjacent prior session (a genuine lake hole was bridged — the
+#: served number is confidently wrong, so it is MARKED not silently changed),
+#: ``True`` when it IS adjacent, and ``None`` when there is no baseline / the
+#: calendar abstains past its coverage floor (never a fabricated verdict). They are
+#: NOT real Parquet columns (never selectable in the column picker); the viewer
+#: computes them per bar from the symbol's prior-day last 1-minute close
+#: (DEC-SPOT-PREVCLOSE-1MIN-001).
+SPOT_DERIVED_COLUMNS: Final = ("change_pct", "open_gap_pct", "prev_close_contiguous")
 
 #: The two server-computed derived columns appended to every **F&O** candle page on
 #: TOP of :data:`SPOT_DERIVED_COLUMNS` (DEC-FNO-MONEYNESS-001): the ONE moneyness cell the
@@ -500,9 +516,19 @@ FNO_MONEYNESS_COLUMNS: Final = ("moneyness",)
 #: resolvable for any decodable contract (option OR future), ``None`` only when undecodable.
 FNO_VALUE_COLUMNS: Final = ("spot", "intrinsic", "time_value", "days_to_expiry")
 
-#: The full F&O derived column set in display order: the combined moneyness label, then the
-#: value columns. ``_fno_derived_columns`` returns this for an ``FNO`` page.
-FNO_DERIVED_COLUMNS: Final = FNO_MONEYNESS_COLUMNS + FNO_VALUE_COLUMNS
+#: The derived HUMAN-READABLE Greeks status column (DEC-DB-FNO-DISPLAY-TRUTH-001 item 3):
+#: the stored ``greeks_provenance_id`` stamp's packed status decoded into words at READ
+#: time via the ONE COMMON :func:`brutex.data.greeks_provenance.greeks_status_label`
+#: (``"ok"`` / ``"below intrinsic — no unique IV"`` / …; ``"not enriched"`` when the bar
+#: carries no stamp — the overlay is stored on the ``1minute`` partition only; ``"—"``
+#: for a future, which is never enriched by design). Rides the page's own SELECT — no
+#: extra I/O; never a bare packed int presented as the only explanation of a NULL Greek.
+FNO_GREEKS_STATUS_COLUMNS: Final = ("greeks_status",)
+
+#: The full F&O derived column set in display order: the combined moneyness label, the
+#: value columns, then the decoded Greeks status. ``_fno_derived_columns`` returns this
+#: for an ``FNO`` page.
+FNO_DERIVED_COLUMNS: Final = FNO_MONEYNESS_COLUMNS + FNO_VALUE_COLUMNS + FNO_GREEKS_STATUS_COLUMNS
 
 #: Spot segments probed (in order) to resolve an F&O contract's UNDERLYING spot series —
 #: an index underlying rides ``INDEX``, a single-stock underlying rides ``CASH``. The
@@ -610,19 +636,51 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def table_summary(conn: Any) -> list[dict[str, Any]]:
+#: The :func:`table_summary` strict-mode (``raise_on_fault=True``) re-raise
+#: set: the store fault types (``duckdb.Error`` / ``OSError`` — the
+#: ``universe_cache.STORE_FAULT_TYPES`` members, a wedged volume / unreachable
+#: DuckDB / a dropped table on a foreign DB) PLUS
+#: :class:`~brutex.data.errors.CatalogError`, because the
+#: DEC-STORE-WRITE-DEADLINE-001 wedge latch (``_ensure_not_wedged`` on the
+#: store read view's ``execute``) raises CatalogError — a ``DataLakeError``,
+#: NOT a ``duckdb.Error``. MUST stay member-equal to the ``/api/v1/db/tables``
+#: route's ``_TABLES_PROBE_FAULT_TYPES`` (set-equality pinned in
+#: ``test_dashboard_pull_contention_routes.py``) so a strict-mode raise is
+#: ALWAYS caught by that route's uncached degrade arm — never a 500
+#: (round-8 review MINOR: the probe→compute TOCTOU).
+TABLE_SUMMARY_FAULT_TYPES: Final[tuple[type[BaseException], ...]] = (
+    CatalogError,
+    duckdb.Error,
+    OSError,
+)
+
+
+def table_summary(conn: Any, *, raise_on_fault: bool = False) -> list[dict[str, Any]]:
     """Return ``[{"table", "row_count"}]`` for every known table.
 
-    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. A
-    table that is missing (a partially-initialised or foreign DB) is
-    tolerated and reported with ``row_count == 0`` rather than raising,
-    so a fresh/empty store renders cleanly.
+    Runs one ``SELECT COUNT(*)`` per table in :data:`KNOWN_TABLES`. By
+    default a table that is missing (a partially-initialised or foreign
+    DB) — or any other per-table read fault — is tolerated and reported
+    with ``row_count == 0`` rather than raising, so a fresh/empty store
+    renders cleanly.
 
     Parameters
     ----------
     conn
         A DuckDB connection — typically
         :attr:`brutex.data.instrument_store.InstrumentStore.connection`.
+    raise_on_fault
+        ``True`` re-raises a :data:`TABLE_SUMMARY_FAULT_TYPES` member (a
+        store fault OR the DEC-STORE-WRITE-DEADLINE-001 wedge latch's
+        ``CatalogError``) instead of folding it into a 0-count — the
+        strict form the ``/api/v1/db/tables`` CACHED compute uses, so a
+        store that wedges AFTER a healthy freshness probe (the round-8
+        probe→compute TOCTOU) raises out of ``get_or_compute`` and a
+        wedge-degraded all-zero summary is NEVER stored under the
+        healthy pre-wedge token. Any exception OUTSIDE that fault set
+        still folds to 0 in BOTH modes (the never-a-500 posture is
+        unchanged for unexpected defect classes). Default ``False`` —
+        every existing caller byte-identical.
 
     Returns
     -------
@@ -635,6 +693,10 @@ def table_summary(conn: Any) -> list[dict[str, Any]]:
         # name is a hardcoded allowlist literal, never caller input.
         try:
             row = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()  # noqa: S608  # nosec B608 - name is a hardcoded KNOWN_TABLES literal, never caller input
+        except TABLE_SUMMARY_FAULT_TYPES:
+            if raise_on_fault:
+                raise
+            count = 0
         except Exception:
             count = 0
         else:
@@ -1280,6 +1342,7 @@ def _execute_parquet_resilient(
     skip_event: str = "db.parquet_skip",
     unreadable_event: str = "db.parquet_unreadable",
     skip_sink: list[bool] | None = None,
+    files: Sequence[str] | None = None,
 ) -> list[tuple[Any, ...]]:
     """Execute *sql* over the ``directory`` Parquet glob, **resilient to an unreadable file**.
 
@@ -1315,33 +1378,145 @@ def _execute_parquet_resilient(
     (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix; Golden Rule #1 — never a fabricated number).
     The fast (no-error) path never touches *skip_sink*.
 
+    *files* (optional, DEC-DB-LATENCY-HARDENING-001): an explicit BOUNDED candidate
+    file list (POSIX paths under *directory*) bound to the source ``?`` instead of
+    the whole ``/**/*.parquet`` glob — the caller has proven (byte-parity pinned per
+    caller) that only these files can hold rows the query can match, so DuckDB opens
+    O(candidates) Parquet footers per statement instead of O(all stored months).
+    ``None`` (the default) keeps the whole-glob read byte-identical; an EMPTY list
+    short-circuits to ``[]`` with ZERO queries (no candidate file ⇒ no matchable
+    row). The degraded corrupt-skip path probes ONLY the bounded candidates (a
+    corrupt file OUTSIDE them provably cannot hold a matchable row, so it neither
+    trips the probe nor the *skip_sink* adjacency guard — a strictly-narrower
+    degrade blast radius, named in MIGRATION.md #1719).
+
     The skip set is the COMMON :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`
     (``duckdb.Error`` covers a corrupt ``read_parquet``; ``OSError`` covers a file-level
     fault). ``duckdb.Error`` is deliberately BROAD (DuckDB exposes no version-stable
-    *unreadable-file* subclass), but a genuine SQL bug is STILL never swallowed: the
-    per-file probe finds every file readable (``omitted`` stays ``False``), so the
-    degraded re-run over the SAME files RE-RAISES the original error — it propagates as a
-    500, not a silent empty result (proven in the tests). The per-file probing is paid
-    ONLY when a read actually fails; the happy path stays a single query (Golden Rule #5
-    O(1) steady-state).
+    *unreadable-file* subclass). The per-file probe is SCHEMA-AWARE
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001): each file is probed with the REAL *sql* bound to
+    that ONE file, so an ALIEN-schema Parquet — readable bytes whose columns/dtypes
+    detonate the query (a missing ``timestamp`` binder error, a wrong-dtype
+    ``arg_max``/``SUM`` conversion error) — folds into the SAME skip set a corrupt file
+    does, instead of riding the old readability-only probe into a re-raise that 500'd
+    the surface on EVERY poll until manual cleanup (the sticky-500 class; the
+    lake-invariants scanner now emits a ``SchemaAlienFile`` finding for the same file so
+    the healer quarantines it for real). The residual union-conflict case (every file
+    passes its OWN probe yet the union over the subset still fails — a cross-file dtype
+    conflict) degrades to ``[]`` after ONE *unreadable_event* ERROR — never a 500.
+    HONEST envelope (Golden Rule #1/#10): this SUPERSEDES the earlier genuine-SQL-bug
+    re-raise carve-out — a genuine SQL bug in a call site's constant query now ALSO
+    degrades to a LOUDLY-logged empty result instead of a 500 (sanctioned: the constant
+    SQL strings are pinned by the per-module 100% coverage gate, which is the bug net;
+    the operator-facing alien-DATA sticky-500 outweighs the lab-only raise signal). The
+    per-file probing is paid ONLY when a read actually fails; the happy path stays a
+    single query (Golden Rule #5 O(1) steady-state).
+
+    *files* (optional, DEC-DB-BASELINE-MANIFEST-ROUTE-001): a PRE-PRUNED file
+    list bound to the source ``?`` instead of the whole-directory glob — the
+    %-baseline readers pass the manifest/month-grammar-selected page files so
+    a deep partition never opens every footer per click. The pruner only ever
+    SELECTS files (never changes values), so every in-bounds row reads
+    byte-identically to the glob; an EMPTY list short-circuits to ``[]`` with
+    ZERO I/O (nothing can match — DuckDB refuses an empty ``read_parquet``
+    list). The degraded probe path probes exactly the pruned set.
     """
-    glob = directory.as_posix() + "/**/*.parquet"
+    if files is not None and not files:
+        # A bounded read with ZERO candidate files: no matchable row can exist —
+        # the whole-glob read would return the same [] after opening every footer.
+        return []
+    source_bind: Any = list(files) if files is not None else directory.as_posix() + "/**/*.parquet"
     try:
-        return list(conn.execute(sql, [glob, *extra_params]).fetchall())
+        return list(conn.execute(sql, [source_bind, *extra_params]).fetchall())
     except movers_read_skip_errors() as whole_glob_error:
         readable, omitted = _readable_parquet_subset(
             conn,
             directory,
             whole_glob_error,
+            sql=sql,
+            extra_params=extra_params,
             source=source,
             skip_event=skip_event,
             unreadable_event=unreadable_event,
+            files=files,
         )
         if omitted and skip_sink is not None:
             skip_sink.append(True)
         if not readable:
             return []
-        return list(conn.execute(sql, [readable, *extra_params]).fetchall())
+        try:
+            return list(conn.execute(sql, [readable, *extra_params]).fetchall())
+        except movers_read_skip_errors() as subset_error:
+            # Cross-file union conflict: every file passed its OWN real-sql
+            # probe, yet the union over the subset still fails (e.g. two files
+            # whose shared column carries irreconcilable dtypes). Degrade to an
+            # honest empty result after ONE loud ERROR — never a 500, never a
+            # fabricated row (DEC-ALIEN-SCHEMA-READ-HEAL-001).
+            _LOG.error(unreadable_event, source=source, error=str(subset_error))
+            if skip_sink is not None and not omitted:
+                skip_sink.append(True)
+            return []
+
+
+#: The readable-subset verdict memo (DEC-WINDOWS-STAT-GUARD-LATCH-001, the
+#: C-r2-4 latch): while a corrupt/alien file persists in a partition, EVERY
+#: paging click takes the degraded path — pre-latch that re-probed EVERY file
+#: (a readability query + the real-sql schema probe per file) per click,
+#: O(files) probe queries each time. The memo keys on
+#: ``(directory, sha256(sql))`` and stores ``(file-set stat token, readable
+#: subset, omitted)`` — the ``_stats_fingerprint`` precedent: any file
+#: change (mtime/size/add/remove) moves the token → re-probe; an unchanged
+#: set is served with ZERO probe queries. Capped FIFO — the verdict is cheap
+#: to recompute, staleness is impossible (stat-token keyed).
+_READABLE_SUBSET_CACHE: dict[tuple[str, str], tuple[str, tuple[str, ...], bool]] = {}
+_READABLE_SUBSET_CACHE_CAP: Final[int] = 64
+_READABLE_SUBSET_LOCK = threading.Lock()
+
+
+def _reset_readable_subset_cache() -> None:
+    """Test seam — drop every memoised readable-subset verdict."""
+    with _READABLE_SUBSET_LOCK:
+        _READABLE_SUBSET_CACHE.clear()
+
+
+def _fileset_stat_token(files: Sequence[Path]) -> str:
+    """Digest the file set's ``(path, mtime_ns, size)`` triples — O(files) stats.
+
+    The latch's freshness token (the ``_stats_fingerprint`` idiom): a repeat
+    degraded click pays these stat syscalls but ZERO probe queries; any
+    changed/added/removed/vanished file moves the digest → full re-probe.
+    """
+    parts: list[str] = []
+    for file in files:
+        try:
+            st = file.stat()
+        except OSError:
+            parts.append(f"{file}:gone")
+        else:
+            parts.append(f"{file}:{st.st_mtime_ns}:{st.st_size}")
+    return hashlib.sha256(";".join(parts).encode("utf-8")).hexdigest()
+
+
+def _probe_parquet_file(
+    conn: Any, sql: str, candidate: str, extra_params: list[Any]
+) -> tuple[str, str] | None:
+    """Probe ONE file: ``None`` = passes both stages, else ``(reason, error)``.
+
+    Stage 1 readability (``SELECT 1 ... LIMIT 1`` — the corrupt class), stage
+    2 the caller's REAL *sql* over this one file (the alien-schema class,
+    DEC-ALIEN-SCHEMA-READ-HEAL-001). The ONE per-file probe seam — the latch
+    tests spy call counts through it.
+    """
+    skip_errors = movers_read_skip_errors()
+    try:
+        conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
+    except skip_errors as skip_reason:
+        return ("unreadable", str(skip_reason))
+    try:
+        conn.execute(sql, [[candidate], *extra_params]).fetchall()
+    except skip_errors as skip_reason:
+        return ("alien_schema", str(skip_reason))
+    return None
 
 
 def _readable_parquet_subset(
@@ -1349,20 +1524,31 @@ def _readable_parquet_subset(
     directory: Path,
     whole_glob_error: BaseException,
     *,
+    sql: str,
+    extra_params: list[Any],
     source: str,
     skip_event: str,
     unreadable_event: str,
+    files: Sequence[str] | None = None,
 ) -> tuple[list[str], bool]:
     """Probe each ``*.parquet`` under *directory*; return ``(readable_subset, any_omitted)``.
 
     The shared degraded-path resolver (CLAUDE.md §11 COMMON) reached ONLY after a
     whole-glob ``read_parquet`` already raised an unreadable-Parquet error
-    (*whole_glob_error*). Each file is probed with a cheap ``SELECT 1 ... LIMIT 1``; an
-    unreadable one is logged as *skip_event* (path + reason) and OMITTED — never a
-    fabricated bar. An empty return (NO readable file) is logged once as
-    *unreadable_event* so the caller degrades to an empty result instead of re-raising.
-    The skip set is the COMMON
-    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`.
+    (*whole_glob_error*). Each file is probed in TWO stages
+    (DEC-ALIEN-SCHEMA-READ-HEAL-001): (1) a cheap readability probe (``SELECT 1 ...
+    LIMIT 1`` — catches a corrupt / truncated / version-incompatible file), then (2) a
+    SCHEMA probe — the caller's REAL *sql* bound to that ONE file (+ *extra_params*
+    verbatim; results discarded) — which catches an ALIEN-schema file (missing column /
+    wrong dtype) the readability probe is structurally blind to. A file failing either
+    stage is logged as *skip_event* (path + ``reason`` ∈ {``unreadable``,
+    ``alien_schema``} + error) and OMITTED — never a fabricated bar. An empty return
+    (NO file passed both stages) is logged once as *unreadable_event* so the caller
+    degrades to an empty result instead of re-raising. The skip set is the COMMON
+    :func:`brutex.dashboard.movers_resilient.movers_read_skip_errors`. HONEST cost
+    (Golden Rule #10): the stage-2 probe executes the real query per file (an aggregate
+    reads that file's rows), so one degraded pass costs about ONE whole-partition scan
+    — paid only after the whole-glob read already failed, never on the happy path.
 
     The second tuple element ``any_omitted`` is ``True`` when at least one file was
     DROPPED from the read (a real skip OR the all-unreadable case). The adjacency-sensitive
@@ -1371,22 +1557,60 @@ def _readable_parquet_subset(
     true predecessor day's bar may have lived in the dropped file), so they must emit a
     BLANK %-change rather than bridge to a non-adjacent earlier day — never a fabricated
     number (Golden Rule #1).
+
+    LATCHED per file-set state (DEC-WINDOWS-STAT-GUARD-LATCH-001, the C-r2-4
+    fix): while a corrupt/alien file persists, EVERY paging click lands here —
+    pre-latch each click re-probed EVERY file (O(files) probe queries per
+    click). The verdict is now memoised in :data:`_READABLE_SUBSET_CACHE`
+    keyed ``(directory, sha256(sql))`` under the file set's
+    :func:`_fileset_stat_token`: a repeat click within one file-set state pays
+    O(files) ``stat`` syscalls + ZERO probe queries (spy-pinned); any file
+    change moves the token → full re-probe. HONEST O (Golden Rule #10): the
+    FIRST degraded click per file-set state stays O(files) probes (stage 2
+    reads each file's rows — about one whole-partition scan), and the memo
+    never makes the fast path cheaper — it bounds only the persistent-corrupt
+    repeat-click storm. The all-unreadable ERROR is re-logged per degraded
+    request (each empty serve stays loud), from the memo hit too.
+
+    *files* (DEC-DB-BASELINE-MANIFEST-ROUTE-001): when the failed read was
+    over a PRE-PRUNED file list, only those files are probed (the memo token
+    is computed over the same set, so two prunes of one directory can never
+    serve each other's verdict).
     """
-    skip_errors = movers_read_skip_errors()
-    readable: list[str] = []
+    candidates = (
+        [Path(f) for f in files] if files is not None else sorted(directory.rglob("*.parquet"))
+    )
+    token = _fileset_stat_token(candidates)
+    cache_key = (directory.as_posix(), hashlib.sha256(sql.encode("utf-8")).hexdigest())
+    with _READABLE_SUBSET_LOCK:
+        hit = _READABLE_SUBSET_CACHE.get(cache_key)
+    if hit is not None and hit[0] == token:
+        readable = list(hit[1])
+        omitted = hit[2]
+        if not readable:
+            _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
+        return readable, omitted
+    readable = []
     omitted = False
-    for path in sorted(directory.rglob("*.parquet")):
+    for path in candidates:
         candidate = path.as_posix()
-        try:
-            conn.execute("SELECT 1 FROM read_parquet(?) LIMIT 1", [candidate]).fetchone()
-        except skip_errors as skip_reason:
-            _LOG.warning(skip_event, source=source, path=candidate, error=str(skip_reason))
-            omitted = True
-        else:
+        verdict = _probe_parquet_file(conn, sql, candidate, extra_params)
+        if verdict is None:
             readable.append(candidate)
+        else:
+            reason, error = verdict
+            _LOG.warning(skip_event, source=source, path=candidate, reason=reason, error=error)
+            omitted = True
     if not readable:
         _LOG.error(unreadable_event, source=source, error=str(whole_glob_error))
         omitted = True
+    with _READABLE_SUBSET_LOCK:
+        if cache_key not in _READABLE_SUBSET_CACHE and (
+            len(_READABLE_SUBSET_CACHE) >= _READABLE_SUBSET_CACHE_CAP
+        ):
+            # FIFO eviction — insertion-ordered dict, oldest verdict first.
+            _READABLE_SUBSET_CACHE.pop(next(iter(_READABLE_SUBSET_CACHE)))
+        _READABLE_SUBSET_CACHE[cache_key] = (token, tuple(readable), omitted)
     return readable, omitted
 
 
@@ -1401,7 +1625,9 @@ def _aggregate_parquet_resilient(
     only bound ``?`` and no further params. A thin wrapper over the COMMON
     :func:`_execute_parquet_resilient` (no extra params, ``coverage.*`` log namespace) —
     the SAME probe-and-skip the ``/db`` candle pager uses (DEC-DB-CORRUPT-SKIP-001), so a
-    corrupt file degrades to its readable subset (or 0 rows) here too, never a 500.
+    corrupt file — and, since DEC-ALIEN-SCHEMA-READ-HEAL-001, an ALIEN-schema file the
+    schema-aware probe skips — degrades to its readable subset (or 0 rows) here too,
+    never a 500.
     """
     return _execute_parquet_resilient(
         conn,
@@ -1427,10 +1653,13 @@ def _execute_candle_page_resilient(
     The :func:`query_candles` page cursor needs the cursor *description* (the projected
     column names, which drive every downstream derived-column join) in addition to the
     rows, so it cannot use the row-only :func:`_execute_parquet_resilient`. SAME COMMON
-    probe-and-skip (``db.*`` log namespace, DEC-DB-CORRUPT-SKIP-001) via the shared
-    :func:`_readable_parquet_subset`: fast path binds the glob; on an unreadable-Parquet
-    error the readable subset is re-bound (the SELECT list is identical, so the column
-    description is byte-identical to the fast path). When NO file is readable, returns
+    probe-and-skip (``db.*`` log namespace, DEC-DB-CORRUPT-SKIP-001; schema-aware since
+    DEC-ALIEN-SCHEMA-READ-HEAL-001 — an alien-schema file folds into the skip set) via
+    the shared :func:`_readable_parquet_subset`: fast path binds the glob; on an
+    unreadable-Parquet error the readable subset is re-bound (the SELECT list is
+    identical, so the column description is byte-identical to the fast path). When NO
+    file passes the probes — or the subset re-run itself fails (the cross-file
+    union-conflict residue, logged ONCE as ``db.parquet_unreadable``) — returns
     ``([], [])`` — the caller renders an empty (degraded-but-correct) page, never a 500,
     never a fabricated bar.
     """
@@ -1442,15 +1671,79 @@ def _execute_candle_page_resilient(
             conn,
             directory,
             whole_glob_error,
+            sql=sql,
+            extra_params=extra_params,
             source=source,
             skip_event="db.parquet_skip",
             unreadable_event="db.parquet_unreadable",
         )
         if not readable:
             return [], []
-        cursor = conn.execute(sql, [readable, *extra_params])
+        try:
+            cursor = conn.execute(sql, [readable, *extra_params])
+        except movers_read_skip_errors() as subset_error:
+            _LOG.error("db.parquet_unreadable", source=source, error=str(subset_error))
+            return [], []
     out_columns = [str(col[0]) for col in (cursor.description or [])]
     return out_columns, list(cursor.fetchall())
+
+
+def _retry_candle_read_once[T](
+    operation: Callable[[], T],
+    *,
+    source: str,
+    retry_sleep: Callable[[float], None] | None,
+) -> T:
+    """Run one candle count/page read, retrying ONCE on a transient ``duckdb.Error``.
+
+    DEC-DB-CANDLES-TORN-READ-RETRY-001 — the ``/db`` candle-pager twin of the
+    window-ledger torn-read guard (DEC-WINDOW-TORN-READ-RETRY-001, see
+    :func:`build_window_payload` / :func:`phase_progress_payload`): the candle
+    lake writers land atomically (``os.replace``), but a pager request performs
+    MULTIPLE independent ``read_parquet`` opens (COUNT + page SELECT + the
+    cursor ``fetchall`` streaming read), so a live pull's replace landing
+    between/inside them surfaces as a transient ``duckdb.Error`` that
+    previously 500'd the page. *operation* is re-run ONCE after
+    :data:`_DUCKDB_RETRY_DELAY_S` (via *retry_sleep*, injectable for tests;
+    ``None`` = the ALIASED module default ``from time import sleep`` — the bare
+    name ``time`` here is ``datetime.time``). What the second attempt re-reads
+    has TWO shapes (review fold — the original "every operation re-globs"
+    claim was true only of the first): the LEGACY count/page operations
+    rebuild their glob / file list from the partition directory per attempt,
+    so the retry reads the freshly-replaced files; the #1228 manifest PRUNED
+    page (:func:`_stats_pruned_page`) re-plans from the request's captured
+    ``_StatsReadContext`` snapshot — a FIXED rel-path list, not a fresh glob —
+    which stays correct because an ``os.replace``'d file's CONTENT is re-read
+    on the retry and any stat-token movement is caught by
+    :func:`_stats_tokens_intact` (⇒ whole-request legacy degrade), so the
+    retry never serves a torn or stale manifest page. The retry covers the
+    WHOLE execute+fetch — including :func:`_execute_candle_page_resilient`'s
+    ``fetchall`` (outside its own corrupt-skip ``try``), the pruned page's
+    ``fetchall``, and the corrupt-file degrade path's unguarded re-run — the
+    exact windows the corrupt-skip ladder never guarded.
+
+    Honest envelope (Golden Rule #10): retry-once NARROWS the race, it does
+    not eliminate it — a SECOND replace landing inside the retry window still
+    raises (a genuine SQL bug likewise still propagates after one bounded
+    pause, mirroring the ledger guard's contract — never silently swallowed).
+    """
+    try:
+        return operation()
+    except duckdb.Error as exc:
+        # Torn read (reader-side multi-open race vs the atomic lake writer) —
+        # retry ONCE. The retry runs OUTSIDE any lock (the injected count
+        # cache computes unlocked and caches NOTHING on a raise — the
+        # phase_progress_payload precedent), so the second attempt recomputes
+        # cleanly and a retried success is cached normally.
+        _LOG.warning(
+            "db.candle_read_retry",
+            source=source,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        sleeper = _default_sleep if retry_sleep is None else retry_sleep
+        sleeper(_DUCKDB_RETRY_DELAY_S)
+        return operation()
 
 
 #: The intervals the SPOT coverage/completeness VERDICTS actually read — the
@@ -1650,7 +1943,9 @@ def summarize_spot_datasets(
         # free user text; the path is given to read_parquet as a bound parameter.
         # Resilient read: a single unreadable Parquet file degrades this dataset
         # to its readable subset (or 0 bars), never a 500 (DEC-COVERAGE-PARQUET-
-        # RESILIENT-001).
+        # RESILIENT-001) — including an ALIEN-schema file, which the schema-aware
+        # probe skips (DEC-ALIEN-SCHEMA-READ-HEAL-001; pre-fix that class
+        # RE-RAISED and this claim was false for it).
         # Bars are counted as DISTINCT timestamps (DEC-LAKE-READ-UNIQUE-001) so a
         # poisoned-era duplicated partition cannot inflate the coverage/
         # completeness bar counts above what the deduped readers actually serve.
@@ -1774,7 +2069,9 @@ def summarize_option_datasets(conn: Any, lake_root: Path) -> list[dict[str, Any]
     # addressing set (no free user text). Inner query = one row per series;
     # the outer rolls up per underlying, so COUNT(*) is the series count.
     # Resilient read: one corrupt Parquet file is SKIPPED (logged), never a 500
-    # (DEC-COVERAGE-PARQUET-RESILIENT-001).
+    # (DEC-COVERAGE-PARQUET-RESILIENT-001) — alien-schema files included via the
+    # schema-aware probe (DEC-ALIEN-SCHEMA-READ-HEAL-001; pre-fix that class
+    # RE-RAISED and this claim was false for it).
     # The inner per-series bar count is DISTINCT timestamps (the group key
     # already fixes `side`, so `(side, timestamp)` reduces to `timestamp` here) —
     # a poisoned-era duplicate cannot inflate it (DEC-LAKE-READ-UNIQUE-001).
@@ -1987,13 +2284,17 @@ def list_option_series(
 # ─── Lake STATS-manifest read integration (DEC-LAKE-STATS-MANIFEST-001) ──────
 #
 # The read half of the per-file stats manifest (the #867/#1025 named future
-# work): when a request opts in (``use_stats_manifest=True`` — the production
+# work, since SHIPPED by DEC-LAKE-STATS-MANIFEST-001 — MIGRATION.md #1614):
+# when a request opts in (``use_stats_manifest=True`` — the production
 # /db routes do; the pure-function default stays ``False`` so every direct
 # caller keeps the byte-identical legacy query pattern) AND the kill switch
 # (``BRUTEX_LAKE_STATS_MANIFEST``) is not ``off``, the candle pagers consult
 # the dataset's validated stats shard to (a) answer the page TOTAL from the
 # stamped per-file DISTINCT-key counts and (b) PRUNE the page query's file list
-# to only the files the requested page needs — true O(page) in partition depth.
+# to only the files the requested page needs — O(page-files) Parquet work
+# plus an O(D) per-request revalidation stat sweep (D = the ONE dataset's
+# month files), NOT literal O(page)/O(1) — the MIGRATION.md #1614 honest
+# envelope.
 # ANY validation/read failure falls back to the byte-identical legacy live
 # scan (one ``lake.stats_manifest.fallback`` log naming the clause) and the
 # read side reseeds the shard best-effort — the reader NEVER serves a number
@@ -2093,6 +2394,7 @@ class _StatsReadContext:
     effective: tuple[tuple[StatsFileRow, int], ...] = ()
     straddlers: tuple[StatsFileRow, ...] = ()
     served: bool = False
+    consult_timed_out: bool = False
 
     @property
     def should_seed(self) -> bool:
@@ -2100,9 +2402,16 @@ class _StatsReadContext:
 
         ``True`` only when the shard failed validation outright (absent /
         corrupt / stale) — a mid-request degrade keeps the existing shard (the
-        next request revalidates it; the writers keep it fresh).
+        next request revalidates it; the writers keep it fresh). A TIMED-OUT
+        consult (DEC-DASHBOARD-COLD-IO-DEADLINE-001) suppresses the seed: the
+        volume is WEDGED, so launching ``_seed_stats_manifest``'s three
+        unbounded stat sweeps + grouped scan against it would re-create the
+        very hang the deadline just bounded — and because no ``statseed|``
+        latch entry is written, a genuinely-absent shard still seeds on the
+        next HEALTHY click (recovery not poisoned; the suppression is
+        timeout-scoped, never drift-scoped).
         """
-        return self.stats is None
+        return self.stats is None and not self.consult_timed_out
 
     @property
     def total(self) -> int:
@@ -2206,7 +2515,10 @@ def _stats_read_context(
     no fallback is logged, no seed will run — byte-identical legacy behaviour.
 
     Otherwise the shard goes through the FULL anti-illusion validation
-    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats`) and,
+    (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`
+    — deadline-bounded per DEC-DASHBOARD-COLD-IO-DEADLINE-001: a
+    wedged-volume timeout builds a ``consult_timed_out`` context whose
+    ``should_seed`` is suppressed) and,
     when it holds, every file is classified against the bounds via the ONE
     shared :func:`_stats_file_verdict`; each straddler pays ONE bounded
     ``COUNT(DISTINCT …)`` over ONLY its own file (the identical WHERE the
@@ -2216,7 +2528,8 @@ def _stats_read_context(
     """
     if not use_stats_manifest or not stats_manifest_enabled():
         return None
-    stats = load_valid_dataset_stats(lake_root, kind=kind, key=key)
+    consult = load_valid_dataset_stats_guarded(lake_root, kind=kind, key=key)
+    stats = consult.stats
     ctx = _StatsReadContext(
         conn=conn,
         lake_root=lake_root,
@@ -2225,6 +2538,7 @@ def _stats_read_context(
         base=base,
         identity=identity,
         stats=stats,
+        consult_timed_out=consult.timed_out,
     )
     if stats is None:
         return ctx
@@ -2288,7 +2602,7 @@ def _stats_star_columns(
     under a key that folds in the validated file-state fingerprint
     (:func:`_stats_fingerprint`) — a memoised order can never be served for a
     file state other than the one it described (no staleness envelope at
-    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the O(page) win
+    all). ``None`` cache ⇒ the DESCRIBE runs inline (correct, the pruned-read win
     is smaller — the production routes always inject the cache). Returns
     ``None`` on a describe failure (the caller degrades to legacy).
     """
@@ -2324,23 +2638,38 @@ def _stats_tokens_intact(ctx: _StatsReadContext, planned: Sequence[StatsFileRow]
 
     Re-stats the pruned page sublist (*planned*) AND the straddler-counted
     files (their live bounded counts fed the manifest total, so a straddler
-    replaced between its ``COUNT`` and the response must degrade too). ANY
-    moved token logs the ``stat_token_moved`` fallback clause, flips
-    ``ctx.served`` off (the whole-request degrade law), and returns ``False``
-    — the caller discards the pruned result and re-runs on the legacy path.
+    replaced between its ``COUNT`` and the response must degrade too) via ONE
+    deadline-bounded
+    :func:`~brutex.data.lake_stats_manifest.bounded_token_sweep` pass
+    (DEC-DASHBOARD-COLD-IO-DEADLINE-001 — same gate + key as the consult, so
+    a mid-request wedge that latched the consult fails this fast with no
+    second daemon). ANY moved token logs the ``stat_token_moved`` fallback
+    clause (payload byte-preserved — the FIRST moved rel in today's exact
+    iteration order); a wedged-volume timeout logs ``restat_deadline`` (NO
+    ``rel`` key — never a fabricated field). Either flips ``ctx.served`` off
+    (the whole-request degrade law) and returns ``False`` — the caller
+    discards the pruned result and re-runs on the legacy path.
     """
-    for row in (*planned, *ctx.straddlers):
-        if not file_token_matches(ctx.base / row.rel, row):
-            _LOG.info(
-                _STATS_FALLBACK_EVENT,
-                kind=ctx.kind,
-                key=dict(ctx.key),
-                clause="stat_token_moved",
-                rel=row.rel,
-            )
-            ctx.served = False
-            return False
-    return True
+    verdict, rel = bounded_token_sweep(ctx.lake_root, ctx.base, (*planned, *ctx.straddlers))
+    if verdict == TOKEN_SWEEP_OK:
+        return True
+    if verdict == TOKEN_SWEEP_MOVED:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="stat_token_moved",
+            rel=rel,
+        )
+    else:
+        _LOG.info(
+            _STATS_FALLBACK_EVENT,
+            kind=ctx.kind,
+            key=dict(ctx.key),
+            clause="restat_deadline",
+        )
+    ctx.served = False
+    return False
 
 
 def _stats_pruned_page(
@@ -2360,7 +2689,9 @@ def _stats_pruned_page(
 ) -> tuple[list[str], list[tuple[Any, ...]]] | None:
     """Execute the page over ONLY the files it needs — or ``None`` ⇒ run legacy.
 
-    The manifest page path (true O(page) in partition depth): plan the minimal
+    The manifest page path (O(page-files) Parquet work — the plan walk and
+    the request's revalidation are each O(D) in the dataset's month files,
+    so NOT literal O(page) in partition depth): plan the minimal
     file sublist + rebased local ``OFFSET`` via :meth:`_StatsReadContext.plan_page`,
     then execute the IDENTICAL SQL shape the legacy page uses (same
     SELECT/WHERE/QUALIFY/ORDER/LIMIT — only the ``read_parquet(?)`` binding
@@ -2803,7 +3134,9 @@ def query_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     registry_path: Path | None = None,
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
     use_stats_manifest: bool = False,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Read one page of OHLCV candles for a partition set (DEC-DB-QUERY-001).
 
@@ -2812,12 +3145,45 @@ def query_candles(
     — no data duplication, the lake stays the single source of truth.
     The glob is scoped to ONE ``(symbol, interval)`` (its whole-year/month
     files only), and the page is ``LIMIT``-bounded — so a click never
-    materialises more than ``limit`` rows in Python regardless of how many
-    years are stored (DuckDB additionally skips row-groups via min/max stats;
-    this is engine cost, not directory pruning). *start* / *end* are inclusive
-    ISO ``YYYY-MM-DD`` bounds matched against the bar's UTC calendar date.
-    Returns an empty
-    page (never raises) when the partition set has no Parquet files yet.
+    materialises more than ``limit`` rows in PYTHON regardless of how many
+    years are stored. *start* / *end* are inclusive ISO ``YYYY-MM-DD`` bounds
+    matched against the bar's UTC calendar date (IST for the derived ``1day``
+    — see :func:`_date_bounds`). Returns an empty page (never raises) when
+    the partition set has no Parquet files yet.
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in partition
+    depth; DEC-DB-OPAGE-HONESTY-001, folding the DEC-LATENCY-HONESTY-BATCH-001
+    correction of the prior "DuckDB additionally skips row-groups via min/max
+    stats" claim, which this query shape DEFEATS): the page DATA query
+    performs a FULL columnar scan of every matched partition row before it
+    slices the page. The read-side keep-FIRST dedup ``QUALIFY row_number()
+    OVER (PARTITION BY timestamp …) = 1`` window (DEC-LAKE-READ-UNIQUE-001)
+    hash-partitions the whole matched set, the ``ORDER BY "timestamp"`` sorts
+    it, and the date bounds compare a derived ``(timestamp AT TIME ZONE
+    …)::DATE`` expression that DuckDB does not prune through against the raw
+    ``timestamp`` column's row-group min/max stats — and only THEN do
+    ``LIMIT``/``OFFSET`` take the slice. So the DuckDB engine cost is
+    **O(total matched partition rows)** (plus one Parquet footer open per
+    file), NOT O(page): ``LIMIT`` bounds ONLY how many rows materialise in
+    Python — the FIRST page is not cheaper than the whole scan — and a deep
+    ``OFFSET`` is O(row-groups up to the offset) on top. The page ``total``
+    is a ``COUNT(DISTINCT timestamp)``, itself **O(rows)** on the first
+    computation per write-generation and O(1) on a cached repeat (see
+    *count_cache*). That scan is flat enough to pass the shared-CI < 8×
+    depth-ratio gate (``tests/bench/test_db_candle_query_o1.py``); genuine
+    row-group pruning would need stats-compatible raw-column predicates.
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the dataset's month files), NOT literal O(page). This
+    mirrors the
+    :func:`brutex.data.lake_read.dedup_qualify_sql` /
+    :func:`~brutex.data.lake_read.dedup_qualify_latest_sql` honest envelope;
+    a prev/next paging click therefore RE-SCANS the partition — flat only in
+    that the count + F&O stored-life span are cached, never in the row-scan
+    term.
 
     Parameters
     ----------
@@ -2839,9 +3205,11 @@ def query_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-DB-CANDLE-COUNT-CACHE-001) + the current write-generation it is keyed
-        by. When supplied, the O(files) Parquet-footer ``COUNT(*)`` is memoised per
-        ``(coords, start, end)`` so a prev/next paging click within one dataset is
-        an O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        by. When supplied, the ``COUNT(DISTINCT timestamp)`` total — O(rows) on the
+        first computation per write-generation, O(1) on a cached repeat — is
+        memoised per ``(coords, start, end)`` so a prev/next paging click within one
+        dataset is an O(1) hit; a pull bumps *generation* → recompute (never a stale
+        total).
         The SAME cache also memoises the F&O default-range STORED-LIFE span under
         :func:`candle_span_key` (coords-only — the span is bound/paging-invariant),
         so the applied-range chip (DEC-DB-UX-PACK-001 Feature 2) never re-runs its
@@ -2859,8 +3227,10 @@ def query_candles(
         Opt into the per-file lake STATS manifest (DEC-LAKE-STATS-MANIFEST-001):
         the page ``total`` + the default-range span are answered from the
         dataset's VALIDATED stats shard and the page query's file list is
-        PRUNED to only the files the page needs — true O(page) in partition
-        depth. Served ONLY after full per-request revalidation (parse + key
+        PRUNED to only the files the page needs — O(page-files) Parquet
+        work plus an O(D) per-request revalidation stat sweep (D = the
+        dataset's month files), NOT literal O(page). Served ONLY after
+        full per-request revalidation (parse + key
         echo + file-set + per-file stat token + month bounds); ANY failure —
         including a mid-request pruned-read error or a moved stat token —
         re-runs the WHOLE request on the byte-identical legacy path (one
@@ -2869,6 +3239,23 @@ def query_candles(
         default ``False`` keeps every direct caller byte-identical to the
         legacy query pattern, and the ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill
         switch forces legacy even when ``True``.
+    retry_sleep
+        Injectable sleeper for the torn-read retry-once guard
+        (DEC-DB-CANDLES-TORN-READ-RETRY-001, the DEC-WINDOW-TORN-READ-RETRY-001
+        idiom): a live pull's atomic ``os.replace`` landing between/inside
+        this request's independent ``read_parquet`` opens (COUNT + page
+        SELECT + ``fetchall``) surfaces as a transient ``duckdb.Error`` — each
+        read is retried ONCE after :data:`_DUCKDB_RETRY_DELAY_S` over a
+        freshly-rebuilt glob/file list (see :func:`_retry_candle_read_once`).
+        ``None`` (the default) sleeps for real. HONEST envelope: retry-once
+        narrows the race, it does not eliminate it — a second replace inside
+        the retry window still raises; and a CACHED total served beside a
+        LIVE page read can lag a concurrent writer within one generation
+        (inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 generation-keyed
+        design) — when the page returned rows, the returned ``total`` is
+        therefore raised to at least ``offset + len(rows)`` (an OBSERVED
+        lower bound); an EMPTY page never adjusts the total (it proves
+        nothing — ``offset + 0`` is a bound only for k > 0 rows).
 
     Returns
     -------
@@ -2913,11 +3300,14 @@ def query_candles(
     base = lake_root / "bars" / exchange / segment / symbol / interval
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
         empty_cols = list(columns) if columns is not None else list(CANDLE_COLUMNS)
-        # An F&O page ALWAYS carries the strike-step honesty field so the frontend's
-        # key set is stable across an empty vs populated partition; an empty page
-        # presents no step, so the label is an honest None
-        # (DEC-MONEYNESS-REGISTRY-STEP-001).
-        empty_step_confidence = {"strike_step_confidence": None} if is_fno else {}
+        # An F&O page ALWAYS carries the strike-step honesty field + the spot-join
+        # provenance so the frontend's key set is stable across an empty vs populated
+        # partition; an empty page presents no step and joins nothing, so both are an
+        # honest None (DEC-MONEYNESS-REGISTRY-STEP-001; DEC-DB-FNO-DISPLAY-TRUTH-001
+        # item 9).
+        empty_step_confidence = (
+            {"strike_step_confidence": None, "spot_join_interval": None} if is_fno else {}
+        )
         return {
             **empty_step_confidence,
             "symbol": symbol,
@@ -2972,7 +3362,16 @@ def query_candles(
     # timestamps. The PAGE query collapses them keep-FIRST in the same single
     # scan (QUALIFY over filename + file_row_number order — deterministic), and
     # the TOTAL counts DISTINCT timestamps so it equals what the deduped pages
-    # actually serve. A clean partition is byte-identical.
+    # actually serve. A clean partition is byte-identical. HONEST complexity
+    # (DEC-DB-OPAGE-HONESTY-001, see the docstring): this QUALIFY window +
+    # ``ORDER BY`` is an O(total matched rows) columnar scan per click — the
+    # LIMIT/OFFSET below bound only the Python materialisation, NOT the scan.
+    # The QUALIFY is NOT skipped on a "clean" partition: no reliable O(1) /
+    # footer-only clean signal exists (the only detector is COUNT(*) ==
+    # COUNT(DISTINCT ts), itself an O(rows) scan), and skipping the window
+    # would be a constant-factor win, not a complexity change — so the dedup
+    # correctness guard stays on (deferred follow-up, never a correctness risk
+    # for a perf win).
     page_source = DEDUP_PARQUET_SOURCE_SQL
     qualify_sql = dedup_qualify_sql(("timestamp",))
 
@@ -3004,10 +3403,12 @@ def query_candles(
         use_stats_manifest=use_stats_manifest,
     )
 
-    # The page total is a `COUNT(*)` over `read_parquet(glob)` — DuckDB answers it
-    # from each Parquet file's FOOTER metadata, so it is O(files), NOT O(1): on a
-    # deep multi-year partition it re-reads every monthly file's footer on EVERY
-    # paging click (~8 ms at 6 years, growing as the lake deepens). The total is
+    # The page total is a `COUNT(DISTINCT timestamp)` over `read_parquet(glob)` —
+    # the deduped row count the keep-FIRST pages serve, NOT a footer `COUNT(*)`. So
+    # it is O(rows), NOT O(1): DuckDB scans the whole matched row set to count the
+    # distinct timestamps, so on a deep multi-year partition the first computation
+    # per write-generation grows with the stored rows on EVERY uncached paging
+    # click. The total is
     # invariant across paging / sort / column subsetting of the same
     # (coords, start, end), so the dashboard injects a generation-stamped cache
     # (DEC-DB-CANDLE-COUNT-CACHE-001): a prev/next click within one dataset is an
@@ -3018,13 +3419,19 @@ def query_candles(
     # closure from the stamped per-file counts instead (zero footer I/O beyond
     # the ≤few straddler files) — same number, revalidated THIS request.
     def _legacy_count_total() -> int:
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            f"SELECT {distinct_count_sql(('timestamp',))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            list(where_params),
-            source=skip_source,
-        )
+        # The COUNT execute+fetch rides the torn-read retry-once guard
+        # (DEC-DB-CANDLES-TORN-READ-RETRY-001): the resilient helper rebuilds
+        # its glob from `base` per attempt, so the retry re-globs fresh.
+        def _run_count() -> list[tuple[Any, ...]]:
+            return _execute_parquet_resilient(
+                conn,
+                base,
+                f"SELECT {distinct_count_sql(('timestamp',))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+                list(where_params),
+                source=skip_source,
+            )
+
+        rows = _retry_candle_read_once(_run_count, source=skip_source, retry_sleep=retry_sleep)
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     def _count_total() -> int:
@@ -3049,29 +3456,44 @@ def query_candles(
     # BEFORE the page runs — the pruner flips ``served`` off on a mid-request
     # failure, and the degrade law below needs the pre-page verdict).
     manifest_total_candidate = stats_ctx is not None and stats_ctx.served
-    pruned = _stats_pruned_page(
-        stats_ctx,
-        select=select,
-        columns=columns,
-        where_sql=where_sql,
-        where_params=list(where_params),
-        qualify_sql=qualify_sql,
-        order_sql=order_sql,
-        descending=descending,
-        limit=safe_limit,
-        offset=safe_offset,
-        count_cache=count_cache,
-        generation=generation,
-    )
-    if pruned is not None:
-        out_columns, raw_rows = pruned
-    else:
-        out_columns, raw_rows = _execute_candle_page_resilient(
+
+    # Both page forms ride the torn-read retry-once guard
+    # (DEC-DB-CANDLES-TORN-READ-RETRY-001): the pruned form's own fail-closed
+    # ladder catches execute-time unreadable-file errors, but its ``fetchall``
+    # streaming read sits outside that ladder — and the legacy form's
+    # ``fetchall`` + corrupt-skip degrade re-run were likewise unguarded. Each
+    # attempt re-plans / re-globs from the partition directory.
+    def _run_pruned_page() -> tuple[list[str], list[tuple[Any, ...]]] | None:
+        return _stats_pruned_page(
+            stats_ctx,
+            select=select,
+            columns=columns,
+            where_sql=where_sql,
+            where_params=list(where_params),
+            qualify_sql=qualify_sql,
+            order_sql=order_sql,
+            descending=descending,
+            limit=safe_limit,
+            offset=safe_offset,
+            count_cache=count_cache,
+            generation=generation,
+        )
+
+    def _run_legacy_page() -> tuple[list[str], list[tuple[Any, ...]]]:
+        return _execute_candle_page_resilient(
             conn,
             base,
             f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
             [*where_params, safe_limit, safe_offset],
             source=skip_source,
+        )
+
+    pruned = _retry_candle_read_once(_run_pruned_page, source=skip_source, retry_sleep=retry_sleep)
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _retry_candle_read_once(
+            _run_legacy_page, source=skip_source, retry_sleep=retry_sleep
         )
         if manifest_total_candidate:
             # Whole-request degrade law (DEC-LAKE-STATS-MANIFEST-001): the
@@ -3093,6 +3515,17 @@ def query_candles(
                     generation=generation,
                     compute=_legacy_count_total,
                 )
+    # Honest observed lower bound (DEC-DB-CANDLES-TORN-READ-RETRY-001): the
+    # generation-keyed CACHED total can lag a LIVE page read within one
+    # generation (a concurrent writer between the COUNT and the page — the
+    # skew is inherent to the DEC-DB-CANDLE-COUNT-CACHE-001 design, documented
+    # not eliminated). When the page returned rows, the total is raised to at
+    # least ``offset + len(rows)`` — an OBSERVED lower bound. An EMPTY page
+    # proves nothing (``offset + 0`` is only a bound for k > 0 rows) and must
+    # never adjust the total: an unconditional clamp fabricated
+    # ``total == offset`` for any offset past the end (review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
@@ -3102,6 +3535,58 @@ def query_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001): route the page through
+    # the ONE COMMON engine-parity screen so a bad-tick spike / an insane bar the
+    # engine + /movers drop is never SERVED raw here — /db == /movers == engine.
+    # Runs AFTER the raw page rows are resolved (pruned OR legacy path — the
+    # screen is path-agnostic) and AFTER the observed-lower-bound clamp above,
+    # which deliberately reads the RAW page length (a tighter bound on the RAW
+    # stored count the total describes). Spot/futures candles keep the FULL
+    # screen (insane + ×4 bad-tick), seeded with the last KEPT in-session bar
+    # before the page's earliest row so the cross-row bad-tick screen is correct
+    # at the page's left edge (`_bad_tick_seed_bar`; the deep-cluster residual is
+    # documented there). CONTRACT-TYPE-AWARE on the F&O segment: this route ALSO
+    # serves CE/PE contract partitions (via the FNO cascade), and option PREMIA
+    # legitimately move ≥4×/minute on leverage — so a decoded CE/PE symbol
+    # screens INSANE-ONLY (`bad_tick_enabled=False`, no seed — the cross-row arm
+    # is off), matching /movers-options + the /db expired-options tab exactly
+    # (the same scope rule as `_read_future_session(bad_tick=)`); FUT and
+    # unparseable F&O symbols keep the full default-ON screen. Clean pages
+    # return the same object (byte-identical; the screen is an O(page-rows)
+    # Python pass — honest cost, not zero work). HONEST envelope: the seed read
+    # is ONE additional DuckDB query per non-option page over the partition
+    # glob — an O(files) Parquet-metadata scan (a constant-factor addition to
+    # the per-click query count; the LIMIT-k row read itself is tiny), eager
+    # even on clean data; and `total` above is the DATASET-wide
+    # DISTINCT-timestamp count (manifest- OR legacy-served), so on a CORRUPT
+    # partition it OVER-counts by the number of screened-out rows (the served
+    # page shows fewer rows than `total`/`limit` imply) — a bounded honesty gap
+    # on corrupt data only, never a fabricated bar.
+    is_option_contract = False
+    if is_fno:
+        parts = parse_fno_symbol(symbol)
+        is_option_contract = parts is not None and parts.option_type is not None
+        # NIT (disclosed): an UNPARSEABLE F&O symbol falls to the default-ON
+        # full screen — unreachable via the product (the FNO cascade offers
+        # only parse-decoded contracts) and conservative in direction (a
+        # mystery partition is screened like a future, never served a spike).
+    raw_rows = screen_rows(
+        raw_rows,
+        out_columns,
+        source=skip_source,
+        # Options: no seed (the cross-row bad-tick arm is off, a seed is unused
+        # work); spot/FUT/unparseable: the bounded seeded default. `None` (not
+        # True) on the default arm preserves the BRUTEX_BAD_TICK_SCREEN
+        # kill-switch read — the engine-parity contract.
+        seed_bar=(
+            None
+            if is_option_contract
+            else _bad_tick_seed_bar(
+                conn, base, raw_rows=raw_rows, out_columns=out_columns, skip_source=skip_source
+            )
+        ),
+        bad_tick_enabled=False if is_option_contract else None,
+    )
     # Render the bar timestamp as a clean IST wall-clock (no +05:30 suffix,
     # DATE-ONLY for 1day); every other cell goes through the generic JSON
     # coercion (shared helper).
@@ -3124,12 +3609,15 @@ def query_candles(
     #   trading days of minute bars regardless of how many years are stored — the
     #   per-click cost stays flat as the lake grows. Byte-identical to the prior
     #   full-partition scan for every page date (proven in the db-query tests).
+    # Build the prev-close VALUE map AND its predecessor-DATE provenance map from
+    # ONE scan (the latter drives the contiguity marker,
+    # DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001).
     if interval == _DAILY_INTERVAL:
-        prev_close = _prev_trading_close(
-            _daily_close_by_date(conn, lake_root, exchange=exchange, segment=segment, symbol=symbol)
+        last_close_by_date = _daily_close_by_date(
+            conn, lake_root, exchange=exchange, segment=segment, symbol=symbol
         )
     else:
-        prev_close = _intraday_prev_close_by_page_date(
+        last_close_by_date = _intraday_last_close_with_predecessor(
             conn,
             lake_root,
             exchange=exchange,
@@ -3137,13 +3625,23 @@ def query_candles(
             symbol=symbol,
             page_dates=_page_ist_dates(raw_rows, out_columns),
         )
-    derived = _spot_derived_rows(raw_rows, out_columns, prev_close, interval=interval)
+    prev_close = _prev_trading_close(last_close_by_date)
+    prev_close_date = _prev_trading_close_date(last_close_by_date)
+    derived = _spot_derived_rows(
+        raw_rows,
+        out_columns,
+        prev_close,
+        prev_close_date,
+        exchange=exchange,
+        interval=interval,
+    )
     # F&O option pages also carry per-bar moneyness (ITM/ATM/OTM + ATM±N) classified
     # against the underlying spot at each bar (DEC-FNO-MONEYNESS-001); spot pages do not.
     extra_columns: list[str] = [*SPOT_DERIVED_COLUMNS, *_fno_derived_columns(segment)]
     step_confidence: StepConfidence | None = None
+    spot_join_interval: str | None = None
     if segment == FNO_CANDLE_LAKE_SEGMENT:
-        fno_cells, step_confidence = _fno_derived_rows(
+        fno_cells, step_confidence, spot_join_interval = _fno_derived_rows(
             conn,
             lake_root,
             exchange=exchange,
@@ -3154,6 +3652,11 @@ def query_candles(
             registry_path=registry_path,
             count_cache=count_cache,
             generation=generation,
+            # The evidence-grounded stock drift rung for the moneyness spot-join
+            # (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001) — default ``None`` at every
+            # layer keeps the pure-function callers byte-identical; the dashboard
+            # injects its composite-token-memoised loader (see ``build_app``).
+            stock_drift_loader=stock_drift_loader,
         )
         extra_cells: list[tuple[Any, ...]] = [
             (*spot_pair, *fno) for spot_pair, fno in zip(derived, fno_cells, strict=True)
@@ -3243,6 +3746,13 @@ def query_candles(
         payload["strike_step_confidence"] = (
             step_confidence.value if step_confidence is not None else None
         )
+        # The spot-join provenance (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9): which spot
+        # interval served the per-bar moneyness/spot join — "1minute" marks the
+        # fallback join on a partially-prebuilt lake (the frontend renders an honest
+        # note when it differs from the page interval); None when nothing joined.
+        # ALWAYS stamped on an F&O page (the strike_step_confidence stable-key-set
+        # precedent).
+        payload["spot_join_interval"] = spot_join_interval
     return payload
 
 
@@ -3446,11 +3956,14 @@ def _intraday_last_close_by_date(
     :func:`_validate_candle_coords` in the caller — no free user text) and
     aggregates with ``arg_max(close, timestamp)`` grouped by the bar DATE — ONE
     columnar pass returns ~one row per trading day, so the per-bar lookup
-    downstream is O(1) (CLAUDE.md §5). Session-filtered intraday bars (09:15–15:29
-    IST) never cross the IST/UTC date boundary, so ``CAST(timestamp AS DATE)`` IS
-    the IST trading date (matches :func:`_bar_ist_date` used on the viewed bars).
-    Returns ``{}`` when the symbol has no 1-minute partition yet, so the derived
-    columns degrade to blank rather than raising (DEC-DB-CANDLE-DERIVED-001).
+    downstream is O(1) (CLAUDE.md §5). Grouped by the bar's IST date via the COMMON
+    session-tz-independent :data:`_IST_DATE_EXPR` (NOT a bare ``CAST(timestamp AS
+    DATE)``, which resolves in the ambient DuckDB session ``TimeZone`` and splits
+    one NSE session across two dates on a negative-offset host —
+    DEC-SPOT-SESSION-DAYS-IST-TZ-001), so the key matches :func:`_bar_ist_date`
+    used on the viewed bars regardless of host tz. Returns ``{}`` when the symbol
+    has no 1-minute partition yet, so the derived columns degrade to blank rather
+    than raising (DEC-DB-CANDLE-DERIVED-001).
     """
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
     if not (base.is_dir() and any(base.rglob("*.parquet"))):
@@ -3463,7 +3976,7 @@ def _intraday_last_close_by_date(
     rows = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_max(close, "timestamp") AS last_close '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path bound
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-prevclose:{exchange}/{segment}/{symbol}",
@@ -3488,6 +4001,27 @@ def _prev_trading_close(last_close: dict[date, Decimal]) -> dict[date, Decimal]:
     return out
 
 
+def _prev_trading_close_date(last_close: dict[date, Decimal]) -> dict[date, date]:
+    """Map each trading date to the PREVIOUS AVAILABLE trading date in the series.
+
+    The provenance twin of :func:`_prev_trading_close`: it exposes the exact
+    predecessor DATE whose close that map used as the baseline, so the
+    prev-close contiguity marker (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001) can
+    compare the baseline's actual source session against the NSE-calendar's
+    immediately-preceding session (:func:`previous_trading_session`) — a
+    MISMATCH means a real session was bridged (a lake hole), so the %-change is
+    marked non-contiguous. Same O(N) single sorted walk; the earliest date has
+    no predecessor and is absent (its bars carry no contiguity verdict).
+    """
+    out: dict[date, date] = {}
+    prev: date | None = None
+    for day in sorted(last_close):
+        if prev is not None:
+            out[day] = prev
+        prev = day
+    return out
+
+
 def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> set[date]:
     """The distinct IST trading dates present in a fetched page's ``timestamp`` column.
 
@@ -3503,6 +4037,343 @@ def _page_ist_dates(raw_rows: list[tuple[Any, ...]], out_columns: list[str]) -> 
     return {_bar_ist_date(row[ts_idx]) for row in raw_rows if isinstance(row[ts_idx], datetime)}
 
 
+#: How many same-session predecessor bars the ``/db`` bad-tick seed reads + screens
+#: to resolve the page's left edge (DEC-DASHBOARD-READ-SCREEN-001). Bounds the ROW
+#: read to k (the glob's O(files) metadata scan is the honest per-click cost — see
+#: `_bad_tick_seed_bar`); a spike cluster deeper than this is the honest
+#: documented residual (the whole-day /movers reader is always correct).
+_BAD_TICK_SEED_WINDOW: Final[int] = 8
+
+
+def _bad_tick_seed_bar(
+    conn: Any,
+    base: Path,
+    *,
+    raw_rows: list[tuple[Any, ...]],
+    out_columns: list[str],
+    skip_source: str,
+) -> tuple[Any, float, float, float, float] | None:
+    """Last KEPT in-session bar before the page's earliest row, or ``None``.
+
+    The bounded prior-bar seed for the ``/db`` cross-row bad-tick screen
+    (DEC-DASHBOARD-READ-SCREEN-001), mirroring the predecessor read of
+    :func:`_intraday_last_close_with_predecessor`: reads the last
+    :data:`_BAD_TICK_SEED_WINDOW` bars STRICTLY BEFORE the page's earliest row AND
+    on the same IST session date (the COMMON :data:`_IST_DATE_EXPR` equality —
+    never a bare ``CAST(timestamp AS DATE)``, which resolves in the ambient
+    DuckDB session TimeZone; DEC-DB-TZ-MONEYNESS-FIXES-001), SCREENS that
+    ascending window through the SAME
+    :func:`~brutex.data.bar_screen.screen_rows`, and returns the LAST KEPT bar as
+    the seed — so the page's leading row is judged against the last GOOD close, not
+    a spike sitting immediately before the page (the single-spike / short-cluster
+    left-edge case; screening only the raw immediate predecessor would wrongly
+    baseline the page's first good row against that spike). The window read is
+    ``ORDER BY DESC LIMIT k`` over the partition glob — HONEST cost: the k-row
+    read is tiny, but the glob itself is an O(files) Parquet-metadata scan (a
+    constant-factor addition per click, NOT O(1) in partition depth). Returns
+    ``None`` when the page lacks OHLC/``timestamp`` columns, is empty, has no
+    same-session predecessor (a page that starts at 09:15), or the whole window
+    screens out. HONEST residual: a spike cluster DEEPER than the window, or a
+    spike as the window's own first bar, is not resolved — the whole-day
+    ``/movers`` reader is always correct; this bounded seed only narrows the
+    ``/db`` page-local left edge.
+    """
+    if any(name not in out_columns for name in ("timestamp", "open", "high", "low", "close")):
+        return None
+    ts_idx = out_columns.index("timestamp")
+    page_ts = [row[ts_idx] for row in raw_rows if isinstance(row[ts_idx], datetime)]
+    if not page_ts:
+        return None
+    earliest = min(page_ts)
+    # The same-session bound is an IST-date equality through the COMMON
+    # :data:`_IST_DATE_EXPR` (never a bare ``CAST(... AS DATE)``, which resolves
+    # in the ambient DuckDB session TimeZone and would SPLIT an IST session
+    # across two local dates under e.g. America/New_York — the
+    # DEC-DB-TZ-MONEYNESS-FIXES-001 hazard class; the Python side mirrors it
+    # with an explicit ``astimezone(_IST)``, naive timestamps read as UTC per
+    # the lake contract).
+    earliest_utc = (
+        earliest.replace(tzinfo=UTC) if earliest.tzinfo is None else earliest.astimezone(UTC)
+    )
+    window = _execute_parquet_resilient(
+        conn,
+        base,
+        'SELECT "timestamp", "open", "high", "low", "close" '  # noqa: S608  # nosec B608 - constant expr over read_parquet(?) with bound params
+        "FROM read_parquet(?, union_by_name=true) "
+        f'WHERE "timestamp" < ? AND {_IST_DATE_EXPR} = ? '
+        'ORDER BY "timestamp" DESC LIMIT ?',
+        [earliest, earliest_utc.astimezone(_IST).date(), _BAD_TICK_SEED_WINDOW],
+        source=skip_source,
+    )
+    if not window:
+        return None
+    # Screen the ascending predecessor window; the last SURVIVOR is the seed.
+    ascending = list(reversed(window))
+    kept = screen_rows(
+        ascending,
+        ["timestamp", "open", "high", "low", "close"],
+        source=skip_source,
+    )
+    if not kept:
+        return None
+    ts, open_, high, low, close = kept[-1]
+    return (ts, open_, high, low, close)
+
+
+def _bars_file_windows(
+    lake_root: Path,
+    base: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    interval: str,
+) -> list[tuple[str, datetime, datetime]] | None:
+    """Chronological ``(path, window_lo, window_hi_exclusive)`` per month file — or ``None``.
+
+    The %-baseline file PRUNER (DEC-DB-BASELINE-MANIFEST-ROUTE-001): the
+    baseline readers previously bound the WHOLE multi-year partition glob per
+    paging click — DuckDB prunes row groups by the timestamp predicate but
+    still OPENS every file's FOOTER (row-group pruning ≠ file pruning), so
+    the per-click cost grew with the stored years. This helper bounds each
+    month file by a half-open UTC instant window so the readers bind ONLY the
+    files that can hold their rows:
+
+    * **Manifest arm** — a VALIDATED stats shard
+      (:func:`~brutex.data.lake_stats_manifest.load_valid_dataset_stats_guarded`,
+      full anti-illusion validation; kill switch off / absent / stale shard
+      → the grammar arm) gives each file's EXACT stamped ``[min_ts, max_ts]``
+      (hi made exclusive with +1µs); rows are already strictly-increasing
+      chronological. Used purely as a FILE-LIST pruner — the data is read
+      LIVE, so no count-serving TOCTOU re-stat is needed (the residual
+      mid-request replace race is the same one the glob bind always had).
+    * **Grammar arm** — the directory listing bounded by each file's OWN
+      canonical UTC-month name
+      (:func:`~brutex.data.lake_stats_manifest.rel_month_bounds` — the
+      partition law: a month file holds only its own UTC month's bars). ONE
+      O(files) listing, ZERO footer opens. A TIMED-OUT consult
+      (DEC-DASHBOARD-COLD-IO-DEADLINE-001) returns ``None`` BEFORE this arm —
+      the wedged volume must not pay the next O(files) ``rglob`` listing
+      against itself.
+
+    ``None`` = cannot bound (a non-canonical filename in the tree / a listing
+    fault / a wedged-volume consult timeout) — the caller degrades to the
+    legacy whole-glob bind, byte-identical
+    behaviour. HONEST envelope (Golden Rule #10): the grammar arm's bounds
+    assume the UTC-month partition invariant; a month-invariant-VIOLATING lake
+    (foreign rows — the ``lake_invariants``/``lake_heal`` finding class) may
+    prune a foreign row's file out, exactly as the manifest's clause-4
+    month-bounds validation refuses such a shard; the invariant scanners are
+    the remediation, not this reader.
+    """
+    consult = load_valid_dataset_stats_guarded(
+        lake_root,
+        kind=KIND_BARS,
+        key={"exchange": exchange, "segment": segment, "symbol": symbol, "interval": interval},
+    )
+    stats = consult.stats
+    if stats is not None:
+        return [
+            ((base / row.rel).as_posix(), row.min_ts, row.max_ts + timedelta(microseconds=1))
+            for row in stats.files
+        ]
+    if consult.timed_out:
+        # The volume is WEDGED: falling through to the grammar arm would run
+        # the O(files) ``base.rglob`` listing against the SAME wedged volume
+        # (the D1 hole). ``None`` is this function's existing "cannot bound →
+        # legacy whole-glob bind" contract.
+        return None
+    try:
+        listed = sorted(base.rglob("*.parquet"))
+    except OSError:
+        return None
+    windows: list[tuple[str, datetime, datetime]] = []
+    for file in listed:
+        bounds = rel_month_bounds(KIND_BARS, file.relative_to(base).as_posix())
+        if bounds is None:
+            return None  # a non-canonical name cannot be bounded — degrade to the whole glob
+        windows.append((file.as_posix(), bounds[0], bounds[1]))
+    windows.sort(key=lambda w: w[1])
+    return windows
+
+
+def _files_intersecting(
+    windows: list[tuple[str, datetime, datetime]], lo: datetime, hi: datetime
+) -> list[str]:
+    """The window files intersecting the half-open instant span ``[lo, hi)``."""
+    return [path for (path, w_lo, w_hi) in windows if w_lo < hi and w_hi > lo]
+
+
+def _predecessor_files(windows: list[tuple[str, datetime, datetime]], lo: datetime) -> list[str]:
+    """Files that can hold a bar STRICTLY BEFORE *lo*, newest-first.
+
+    On the manifest arm the FIRST candidate is guaranteed to hold one
+    (``min_ts`` is a real bar instant); on the grammar arm a month file whose
+    month started before *lo* may still hold only ≥ *lo* bars (data starting
+    mid-month), so the caller STEPS BACK through the list until a row lands
+    (documented step-back — typically one query, worst-case O(files) queries
+    on a pathologically empty-before-*lo* dataset).
+    """
+    return [path for (path, w_lo, _w_hi) in windows if w_lo < lo][::-1]
+
+
+def _intraday_last_close_with_predecessor(
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    page_dates: set[date],
+) -> dict[date, Decimal]:
+    """Page-span last-1-minute-close map WITH the single predecessor bar prepended.
+
+    The page-bounded read underneath :func:`_intraday_prev_close_by_page_date`
+    (DEC-DB-UNIVERSE-O1-LATENCY-001), exposed as its own helper so BOTH the
+    prev-close VALUE map (:func:`_prev_trading_close`) and the prev-close
+    predecessor-DATE provenance map (:func:`_prev_trading_close_date`, driving the
+    contiguity marker DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001) can be built from ONE
+    scan. Reads only:
+
+    1. the last 1-minute close per day for the page's OWN ``[min, max]`` date span
+       (an intraday page covers ~1–2 trading days), and
+    2. the single 1-minute bar immediately BEFORE the page's earliest date — the
+       one baseline that lives outside the page's own span (the predecessor of the
+       first page row).
+
+    Both reads are bounded by the bar ``timestamp`` (IST-midnight instants) AND —
+    the DEC-DB-BASELINE-MANIFEST-ROUTE-001 honesty fix — by a PRUNED FILE LIST
+    (:func:`_bars_file_windows`: manifest-exact per-file bounds, else the
+    canonical UTC-month filename grammar): the span read binds only the page's
+    own month file(s) and the predecessor read binds one preceding file (with the
+    documented grammar-arm step-back when that file holds no bar before the page).
+    HONEST cost (Golden Rule #10; the pre-fix claim "row-group-pruned ⇒ flat" was
+    FALSE — DuckDB still opened EVERY file's footer per click): the per-click read
+    is now O(page months + 1 predecessor file) footer opens plus one O(files)
+    directory listing (grammar arm; the manifest arm pays O(D) stat validation),
+    degrading to the legacy whole-glob bind — byte-identical results, pruning
+    never changes values — when neither arm can bound the tree. The result is
+    **byte-identical** to the prior full-partition scan for every page date: the
+    page's dates are contiguous trading days (a page is a ``LIMIT``/``OFFSET``
+    slice of timestamp-sorted bars), and prepending their single shared
+    predecessor makes :func:`_prev_trading_close` map each page date to the same
+    prior-day close the full scan would (proven in
+    ``tests/unit/test_dashboard_db_query.py`` + the manifest-on/off parity pins
+    in ``tests/unit/test_dashboard_db_baseline_manifest.py``). Returns ``{}``
+    (every derived cell blank) when *page_dates* is empty, the symbol has no
+    1-minute partition, or a corrupt file was skipped (the adjacency guard — a
+    bridged predecessor would baseline a NON-ADJACENT close).
+
+    The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
+    even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
+    the viewed bars, the close baseline from the 1-minute feed underneath them.
+    """
+    if not page_dates:
+        return {}
+    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
+    if not (base.is_dir() and any(base.rglob("*.parquet"))):
+        return {}
+    lo, hi = min(page_dates), max(page_dates)
+    # IST-midnight instants bound the scan to the page's own span (+ predecessor);
+    # the GROUP-BY / projection key is the bar's IST date via the COMMON
+    # session-tz-independent :data:`_IST_DATE_EXPR` (the SAME keying as
+    # _intraday_last_close_by_date and the _bar_ist_date lookup keys in
+    # _spot_derived_rows). A bare CAST(ts AS DATE) resolves in the ambient DuckDB
+    # session TimeZone and would roll a 03:45-UTC (09:15 IST) session bar back one
+    # calendar day on a negative-offset host, mis-keying the baseline —
+    # DEC-SPOT-SESSION-DAYS-IST-TZ-001.
+    lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
+    hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
+    skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
+    # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): the prior-day-close baseline
+    # is ONLY valid if every CANDIDATE file read cleanly — `_prev_trading_close` maps each
+    # page date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds
+    # "the bar just before `lo`". If a bounded-candidate file was skipped (corrupt), the
+    # true adjacent predecessor may have lived in the dropped file, so any %-change we
+    # computed would be baselined on a NON-ADJACENT earlier day — a confidently-WRONG
+    # number. So we record whether either read omitted a candidate and, if so, return {} →
+    # every affected bar gets an honest BLANK %-change, never a fabricated one (Golden
+    # Rule #1). A corrupt file OUTSIDE the pruned candidate lists provably cannot hold
+    # the span's bars or the true predecessor (`_bars_file_windows`'s window bounds —
+    # DEC-DB-BASELINE-MANIFEST-ROUTE-001 #1670 / DEC-DB-LATENCY-HARDENING-001 #1719),
+    # so it no longer blanks the page (the named strictly-narrower degrade).
+    skip_sink: list[bool] = []
+    # File-list pruning (DEC-DB-BASELINE-MANIFEST-ROUTE-001): bind ONLY the
+    # files whose windows can hold the read's rows; None ⇒ the legacy
+    # whole-glob bind (byte-identical — pruning only SELECTS files).
+    windows = _bars_file_windows(
+        lake_root,
+        base,
+        exchange=exchange,
+        segment=segment,
+        symbol=symbol,
+        interval=_INTRADAY_BASE_INTERVAL,
+    )
+    span_files = (
+        _files_intersecting(windows, lo_instant, hi_instant) if windows is not None else None
+    )
+    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob/
+    #    file list is built from validated coordinates (no free user text);
+    #    path(s) + instants bound.
+    span_sql = (
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_max(close, "timestamp") AS last_close '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path + instants bound
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d'
+    )
+    span = _execute_parquet_resilient(
+        conn,
+        base,
+        span_sql,
+        [lo_instant, hi_instant],
+        source=skip_source,
+        skip_sink=skip_sink,
+        files=span_files,
+    )
+    last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
+    # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
+    #    page date. On the pruned arm this is ONE preceding file (manifest-exact),
+    #    stepping back file-by-file on the grammar arm until a row lands; the
+    #    legacy arm keeps the whole-glob ORDER BY DESC LIMIT 1 (which reads ~one
+    #    row-group, not the whole past).
+    pred_sql = (
+        f"SELECT {_IST_DATE_EXPR} AS d, close "  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path + instant bound
+        "FROM read_parquet(?, union_by_name=true) "
+        'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1'
+    )
+    if windows is None:
+        pred_rows = _execute_parquet_resilient(
+            conn,
+            base,
+            pred_sql,
+            [lo_instant],
+            source=skip_source,
+            skip_sink=skip_sink,
+        )
+    else:
+        pred_rows = []
+        for pred_file in _predecessor_files(windows, lo_instant):
+            pred_rows = _execute_parquet_resilient(
+                conn,
+                base,
+                pred_sql,
+                [lo_instant],
+                source=skip_source,
+                skip_sink=skip_sink,
+                files=[pred_file],
+            )
+            if pred_rows or skip_sink:
+                # A row landed — or a file was skipped, which voids adjacency
+                # below anyway; either way the step-back stops.
+                break
+    if skip_sink:
+        # A corrupt file was skipped → adjacency is no longer guaranteed → honest blank.
+        return {}
+    if pred_rows:
+        pred = pred_rows[0]
+        last_close[pred[0]] = _to_decimal(pred[1])
+    return last_close
+
+
 def _intraday_prev_close_by_page_date(
     conn: Any,
     lake_root: Path,
@@ -3516,84 +4387,22 @@ def _intraday_prev_close_by_page_date(
 
     The flat-latency replacement for ``_prev_trading_close(
     _intraday_last_close_by_date(...))`` on the ``/db`` intraday candle pager
-    (DEC-DB-UNIVERSE-O1-LATENCY-001). Instead of aggregating the WHOLE multi-year
-    1-minute partition on every paging click, it reads only:
-
-    1. the last 1-minute close per day for the page's OWN ``[min, max]`` date span
-       (an intraday page covers ~1–2 trading days), and
-    2. the single 1-minute bar immediately BEFORE the page's earliest date — the
-       one baseline that lives outside the page's own span (the predecessor of the
-       first page row).
-
-    Both reads are bounded by the bar ``timestamp`` (IST-midnight instants), which
-    DuckDB row-group-prunes, so the per-click cost is O(page date-span) — flat as
-    the lake deepens, never O(all stored years). The result is **byte-identical**
-    to the prior full-partition scan for every page date: the page's dates are
-    contiguous trading days (a page is a ``LIMIT``/``OFFSET`` slice of
-    timestamp-sorted bars), and prepending their single shared predecessor makes
-    ``_prev_trading_close`` map each page date to the same prior-day close the full
-    scan would (proven in ``tests/unit/test_dashboard_db_query.py``). Returns
-    ``{}`` (every derived cell blank) when *page_dates* is empty or the symbol has
-    no 1-minute partition — matching :func:`_intraday_last_close_by_date`.
-
-    The baseline ALWAYS reads the ``1minute`` partition (DEC-SPOT-PREVCLOSE-1MIN-001),
-    even when a coarser intraday timeframe is being VIEWED — *page_dates* come from
-    the viewed bars, the close baseline from the 1-minute feed underneath them.
+    (DEC-DB-UNIVERSE-O1-LATENCY-001): a thin :func:`_prev_trading_close` over the
+    page-bounded :func:`_intraday_last_close_with_predecessor` scan. Byte-identical
+    to the prior full-partition scan for every page date; ``{}`` (every derived
+    cell blank) when the page is empty / the symbol has no 1-minute partition / a
+    corrupt file was skipped.
     """
-    if not page_dates:
-        return {}
-    base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
-    if not (base.is_dir() and any(base.rglob("*.parquet"))):
-        return {}
-    lo, hi = min(page_dates), max(page_dates)
-    # IST-midnight instants bound the scan to the page's own span (+ predecessor);
-    # session bars (09:15–15:29 IST) never fall before 09:15, so CAST(ts AS DATE)
-    # for a bar in [lo 00:00 IST, (hi+1) 00:00 IST) is its IST trading date — the
-    # SAME keying as _intraday_last_close_by_date (session-tz-independent here).
-    lo_instant = datetime.combine(lo, time(0, 0), tzinfo=_IST)
-    hi_instant = datetime.combine(hi + timedelta(days=1), time(0, 0), tzinfo=_IST)
-    skip_source = f"candle-prevclose:{exchange}/{segment}/{symbol}"
-    # ADJACENCY GUARD (DEC-DB-CORRUPT-SKIP-001 BLOCKER fix): the prior-day-close baseline
-    # is ONLY valid if the partition read in full — `_prev_trading_close` maps each page
-    # date to its IMMEDIATE predecessor, and the predecessor read (#2 below) finds "the
-    # bar just before `lo`". If ANY file in this 1-minute partition was skipped (corrupt),
-    # the true adjacent predecessor may have lived in the dropped file, so any %-change we
-    # computed would be baselined on a NON-ADJACENT earlier day — a confidently-WRONG
-    # number. So we record whether either read omitted a file and, if so, return {} → every
-    # affected bar gets an honest BLANK %-change, never a fabricated one (Golden Rule #1).
-    skip_sink: list[bool] = []
-    # 1) last 1-minute close per day, bounded to the page's [lo, hi] span. glob is
-    #    built from validated coordinates (no free user text); path + instants bound.
-    span = _execute_parquet_resilient(
-        conn,
-        base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_max(close, "timestamp") AS last_close '
-        "FROM read_parquet(?, union_by_name=true) "
-        'WHERE "timestamp" >= ? AND "timestamp" < ? GROUP BY d',
-        [lo_instant, hi_instant],
-        source=skip_source,
-        skip_sink=skip_sink,
+    return _prev_trading_close(
+        _intraday_last_close_with_predecessor(
+            conn,
+            lake_root,
+            exchange=exchange,
+            segment=segment,
+            symbol=symbol,
+            page_dates=page_dates,
+        )
     )
-    last_close: dict[date, Decimal] = {day: _to_decimal(close) for day, close in span}
-    # 2) the single bar immediately BEFORE lo — the predecessor of the earliest
-    #    page date (ORDER BY DESC LIMIT 1 reads ~one row-group, not the whole past).
-    pred_rows = _execute_parquet_resilient(
-        conn,
-        base,
-        'SELECT CAST("timestamp" AS DATE) AS d, close '
-        "FROM read_parquet(?, union_by_name=true) "
-        'WHERE "timestamp" < ? ORDER BY "timestamp" DESC LIMIT 1',
-        [lo_instant],
-        source=skip_source,
-        skip_sink=skip_sink,
-    )
-    if skip_sink:
-        # A corrupt file was skipped → adjacency is no longer guaranteed → honest blank.
-        return {}
-    if pred_rows:
-        pred = pred_rows[0]
-        last_close[pred[0]] = _to_decimal(pred[1])
-    return _prev_trading_close(last_close)
 
 
 def _daily_close_by_date(
@@ -3634,8 +4443,47 @@ def _daily_close_by_date(
     return {_bar_ist_date(ts): _to_decimal(close) for ts, close in rows}
 
 
+def _existing_month_files_in_span(base: Path, start: date, end: date) -> list[str]:
+    """The EXISTING ``<base>/<yyyy>/<mm>.parquet`` files that can hold a bar whose
+    IST date falls in the INCLUSIVE ``[start, end]`` span — pure enumeration.
+
+    DEC-DB-LATENCY-HARDENING-001: the file-list bound for the span-scoped readers.
+    The candidate months follow the ±1-calendar-day pad law of
+    ``spot_daily_resample.ist_span_partition_months`` (a bar's UTC partition month
+    can differ from its IST date's month by at most the 05:30 offset — the pad can
+    only ever ADD the immediately-adjacent month, never drop a matchable file),
+    saturating at the ``date`` domain edges so a degenerate 0001/9999 span simply
+    keeps everything (never an ``OverflowError``). Enumerated from the EXISTING
+    tree — honestly a SECOND full rglob BESIDE the readers' own ``any(...)``
+    presence-guard listing (immaterial next to the O(all-months) Parquet
+    footer opens it removes, but a real added directory walk, stated) — each
+    rel parsed by the SAME ASCII month grammar the stats
+    manifest pins (:func:`~brutex.data.lake_stats_manifest.parse_rel_month`,
+    ``KIND_BARS``); a NON-grammar file (a stray out-of-band parquet whose month is
+    unknowable) is conservatively KEPT so the bounded read can never exclude a file
+    the whole-glob read would have seen (byte-parity, Golden Rule #1). O(existing
+    files) listing per call — this bounds the DuckDB FOOTER OPENS per statement to
+    O(span months), NOT the directory listing (stated, never O(1)).
+    """
+    lo = (start - timedelta(days=1)) if start > date.min else start
+    hi = (end + timedelta(days=1)) if end < date.max else end
+    lo_key, hi_key = (lo.year, lo.month), (hi.year, hi.month)
+    keep: list[str] = []
+    for path in sorted(base.rglob("*.parquet")):
+        parsed = parse_rel_month(KIND_BARS, f"{path.parent.name}/{path.name}")
+        if parsed is None or lo_key <= parsed <= hi_key:
+            keep.append(path.as_posix())
+    return keep
+
+
 def _daily_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 1-DAY official open per IST date → ``{ist_date: open}``.
 
@@ -3644,6 +4492,15 @@ def _daily_open_by_date(
     the pre-open report (DEC-PREOPEN-REPORT-1DAY-001), on the SAME 1-day basis as
     the report's previous close so the two never mix price scales. Reads the
     1-day partition keyed by :func:`_bar_ist_date`; ``{}`` when absent.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range. When given, the read binds ONLY the
+    existing month files that can hold an in-span bar
+    (:func:`_existing_month_files_in_span` — O(span months) DuckDB footer opens
+    per click instead of O(all stored months)); the consumer
+    (``build_preopen_rows``) uses ONLY in-span days of this map, so the bounded
+    map is byte-identical for every consumed key (parity-pinned). ``None`` (the
+    default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _DAILY_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _DAILY_INTERVAL
@@ -3657,12 +4514,19 @@ def _daily_open_by_date(
         'SELECT "timestamp", open FROM read_parquet(?, union_by_name=true)',
         [],
         source=f"candle-dayopen:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {_bar_ist_date(ts): _to_decimal(open_) for ts, open_ in rows}
 
 
 def _intraday_open_by_date(
-    conn: Any, lake_root: Path, *, exchange: str, segment: str, symbol: str
+    conn: Any,
+    lake_root: Path,
+    *,
+    exchange: str,
+    segment: str,
+    symbol: str,
+    span: tuple[date, date] | None = None,
 ) -> dict[date, Decimal]:
     """Read the symbol's 09:15 IST session-open 1-minute OPEN per day → ``{ist_date: open}``.
 
@@ -3674,9 +4538,19 @@ def _intraday_open_by_date(
     prior day's last 1-minute close, :func:`_intraday_last_close_by_date` +
     :func:`_prev_trading_close`). Mirrors :func:`_intraday_last_close_by_date`: a
     bound ``read_parquet`` glob over validated coordinates, ONE columnar pass
-    (~one row per trading day → O(1) per-day lookup, CLAUDE.md §5); session bars
-    never cross the IST/UTC date boundary so ``CAST(timestamp AS DATE)`` IS the IST
-    trading date. ``{}`` when the symbol has no 1-minute partition.
+    (~one row per trading day → O(1) per-day lookup, CLAUDE.md §5); grouped by the
+    bar's IST date via the COMMON session-tz-independent :data:`_IST_DATE_EXPR`
+    (NOT a bare ``CAST(timestamp AS DATE)``, which resolves in the ambient DuckDB
+    session ``TimeZone`` and would roll a session bar back one calendar day on a
+    negative-offset host — DEC-SPOT-SESSION-DAYS-IST-TZ-001), matching
+    :func:`_bar_ist_date`. ``{}`` when the symbol has no 1-minute partition.
+
+    *span* (DEC-DB-LATENCY-HARDENING-001): the report's own INCLUSIVE
+    ``[start, end]`` IST date range — the exact bound-law + parity contract of
+    :func:`_daily_open_by_date` (the profiling evidence measured the minute
+    basis binding EVERY 1-minute month file of EVERY symbol — 616 files per
+    export click at 103 symbols — where a 3-week report needs ~1–2 per symbol).
+    ``None`` (the default) keeps the whole-partition read byte-identical.
     """
     _validate_candle_coords(exchange, segment, symbol, _INTRADAY_BASE_INTERVAL)
     base = lake_root / "bars" / exchange / segment / symbol / _INTRADAY_BASE_INTERVAL
@@ -3689,10 +4563,11 @@ def _intraday_open_by_date(
     rows = _execute_parquet_resilient(
         conn,
         base,
-        'SELECT CAST("timestamp" AS DATE) AS d, arg_min(open, "timestamp") AS first_open '
+        f'SELECT {_IST_DATE_EXPR} AS d, arg_min(open, "timestamp") AS first_open '  # noqa: S608  # nosec B608 - _IST_DATE_EXPR is a hardcoded constant; path bound
         "FROM read_parquet(?, union_by_name=true) GROUP BY d",
         [],
         source=f"candle-dayopen-min:{exchange}/{segment}/{symbol}",
+        files=None if span is None else _existing_month_files_in_span(base, span[0], span[1]),
     )
     return {day: _to_decimal(first_open) for day, first_open in rows}
 
@@ -3701,10 +4576,12 @@ def _spot_derived_rows(
     raw_rows: list[tuple[Any, ...]],
     out_columns: list[str],
     prev_close_by_date: dict[date, Decimal],
+    prev_close_date_by_date: dict[date, date] | None = None,
     *,
+    exchange: str | None = None,
     interval: str = _INTRADAY_BASE_INTERVAL,
-) -> list[tuple[Any, Any]]:
-    """Compute the per-bar ``(change_pct, open_gap_pct)`` derived pair.
+) -> list[tuple[Any, Any, Any]]:
+    """Compute the per-bar ``(change_pct, open_gap_pct, prev_close_contiguous)`` triple.
 
     For each bar (DEC-DB-CANDLE-DERIVED-001), baselined on *prev_close_by_date* —
     the prior trading day's close **on the shown interval's own basis**
@@ -3718,25 +4595,50 @@ def _spot_derived_rows(
       view computed on EVERY bar (the open-vs-prior-close gap); for an intraday
       view computed ONLY for the day's 09:15:00 IST market-open bar (the overnight
       gap), ``None`` on every other intraday bar.
+    * ``prev_close_contiguous`` — the honesty verdict (DEC-DB-PREVCLOSE-CONTIGUITY-MARKER-001,
+      the ``/db`` twin of the ``/movers`` #1539 " *" marker): ``True`` when the
+      baseline came from the NSE-calendar's IMMEDIATELY-preceding session,
+      ``False`` when a real session was BRIDGED (the baseline predecessor DATE in
+      *prev_close_date_by_date* is NOT :func:`previous_trading_session` for the
+      bar's date — a genuine lake hole, so the served %-change is confidently wrong
+      and is MARKED, never silently changed — the #1539 doctrine), and ``None`` when
+      there is no baseline, the caller passed no provenance map, or the calendar
+      ABSTAINS past its coverage floor (never a fabricated verdict, Golden Rule #1).
 
-    Both reuse the COMMON :func:`brutex.data.spot_features.pct_change` primitive
-    (CLAUDE.md §11) and stay full precision — statistical metrics, never
-    money-rounded (CLAUDE.md §4); the 2dp is a *display*-only concern in
-    ``db.html``. A bar whose IST date is absent from *prev_close_by_date* (the
-    first trading day, or a symbol with no baseline lake) gets ``(None, None)``;
-    a zero previous close yields ``None`` (no divide-by-zero, via ``pct_change``).
+    The ``change_pct`` / ``open_gap_pct`` reuse the COMMON
+    :func:`brutex.data.spot_features.pct_change` primitive (CLAUDE.md §11) and stay
+    full precision — statistical metrics, never money-rounded (CLAUDE.md §4); the
+    2dp is a *display*-only concern in ``db.html``. A bar whose IST date is absent
+    from *prev_close_by_date* (the first trading day, or a symbol with no baseline
+    lake) gets ``(None, None, None)``; a zero previous close yields ``None`` (no
+    divide-by-zero, via ``pct_change``). *prev_close_date_by_date* / *exchange* are
+    the provenance inputs for the contiguity verdict; omitted (the pre-marker
+    signature) → contiguity is uniformly ``None`` (byte-compatible with callers
+    that do not request the marker).
     """
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     open_idx = out_columns.index("open") if "open" in out_columns else -1
     close_idx = out_columns.index("close") if "close" in out_columns else -1
     is_daily = interval == _DAILY_INTERVAL
-    derived: list[tuple[Any, Any]] = []
+    # Per-page memo over the COMMON prev-session resolver (mirrors the /movers
+    # per-build memo, movers_snapshot.make_expected_session_resolver) so repeated
+    # bars on the same IST date resolve the calendar once.
+    session_memo: dict[date, date | None] = {}
+
+    def _expected_prev_session(ist_date: date) -> date | None:
+        if ist_date not in session_memo:
+            session_memo[ist_date] = previous_trading_session(ist_date, exchange=exchange)
+        return session_memo[ist_date]
+
+    derived: list[tuple[Any, Any, Any]] = []
     for row in raw_rows:
         change: Decimal | None = None
         gap: Decimal | None = None
+        contiguous: bool | None = None
         ts = row[ts_idx] if ts_idx >= 0 else None
         if isinstance(ts, datetime):
-            prev = prev_close_by_date.get(_bar_ist_date(ts))
+            ist_date = _bar_ist_date(ts)
+            prev = prev_close_by_date.get(ist_date)
             if prev is not None:
                 if close_idx >= 0:
                     change = pct_change(_to_decimal(row[close_idx]), prev)
@@ -3744,7 +4646,14 @@ def _spot_derived_rows(
                 # the 09:15 IST session-open bar (DEC-DB-CANDLE-PERINTERVAL-001).
                 if open_idx >= 0 and (is_daily or _bar_ist_time(ts) == _SESSION_OPEN_IST):
                     gap = pct_change(_to_decimal(row[open_idx]), prev)
-        derived.append((_json_safe(change), _json_safe(gap)))
+                # Contiguity verdict — only when the caller supplied the predecessor
+                # provenance map AND the calendar can name the true prior session
+                # (else honest abstain: None, never a guessed marker).
+                if prev_close_date_by_date is not None:
+                    expected = _expected_prev_session(ist_date)
+                    if expected is not None:
+                        contiguous = prev_close_date_by_date.get(ist_date) == expected
+        derived.append((_json_safe(change), _json_safe(gap), contiguous))
     return derived
 
 
@@ -3763,80 +4672,194 @@ def _underlying_spot_close_by_ts(
     underlying: str,
     interval: str,
     ts_values: list[datetime],
-) -> dict[datetime, Decimal]:
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
+) -> tuple[dict[datetime, Decimal], str | None]:
     """Read ``{bar_instant: underlying_spot_close}`` for an F&O contract's underlying.
 
     The per-bar spot needed to classify an option's moneyness (DEC-FNO-MONEYNESS-001).
     Probes the underlying spot under :data:`_SPOT_PROBE_SEGMENTS` (``INDEX`` then
     ``CASH`` — an index underlying rides INDEX, a stock rides CASH) at the SAME
     *interval* as the option bars, so the two series align bar-for-bar by timestamp. The
-    read is BOUNDED to the page's ``[min, max]`` instant (``BETWEEN``), so it never
-    materialises more than the page's worth of spot bars regardless of how many years
-    are stored — O(page) once, then O(1) per-bar lookup downstream (CLAUDE.md §5).
+    read is BOUNDED to the page's ``[min, max]`` instant (``BETWEEN``) AND — the
+    DEC-DB-BASELINE-MANIFEST-ROUTE-001 pruning — to the month FILE(S) that can hold
+    those instants (:func:`_bars_file_windows`; ``None`` ⇒ the byte-identical legacy
+    whole-glob bind), so it never materialises more than the page's worth of spot
+    bars NOR opens every stored year's footer per page — O(page months) file opens
+    once, then O(1) per-bar lookup downstream (CLAUDE.md §5).
 
-    Returns ``{}`` (→ every bar classifies UNKNOWN, never raising) when *ts_values* is
-    empty, the underlying coordinate is illegal, or the underlying spot is absent from
-    both segments (Golden Rule #1 — an honest UNKNOWN, never a fabricated spot).
+    Returns ``(spots, joined_interval)`` — *joined_interval* names the spot interval
+    that actually served the join (the page *interval*, or ``"1minute"`` on the
+    fallback below), ``None`` when nothing joined. Returns ``({}, None)`` (→ every bar
+    classifies UNKNOWN, never raising) when *ts_values* is empty, the underlying
+    coordinate is illegal, or the underlying spot is absent everywhere (Golden Rule #1
+    — an honest UNKNOWN, never a fabricated spot).
 
     When the exact *underlying* probe comes back EMPTY (and only then — zero extra
     I/O and NO log on the hot path), the COMMON spot-key drift-recovery ladder
     (:func:`~brutex.data.lake_keys.spot_recovery_candidates` — index aliases BOTH
     directions + the ``BRUTEX_FNO_INDEX_ALIASES`` env override + the
-    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs) is walked in
+    ``"<EXCH>-<underlying>"`` #911 form + the ``lake_keys`` #911 rungs + the
+    evidence-grounded STOCK drift rung supplied by *stock_drift_loader*) is walked in
     order, returning the FIRST candidate with any joined spot bar and emitting ONE
     ``db_view.spot_key_recovered`` info naming both keys
     (DEC-DB-MONEYNESS-KEY-RECOVER-001 — pre-fix, a verbose-symbol index such as
     ``MIDCPNIFTY`` over a ``NIFTYMIDSELECT``-keyed spot dir read moneyness UNKNOWN on
     every bar even though the spot data existed on disk). Ladder exhaustion returns
     the honest empty map — never a fabricated spot.
+
+    *stock_drift_loader* (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001 — the /db moneyness
+    twin of the Greeks ladder's DEC-GREEKS-SPOTJOIN-STOCK-001 stock arm) lazily
+    supplies the master-verified :data:`~brutex.data.lake_keys.StockDriftMap`; it is
+    invoked AT MOST ONCE per call and ONLY on the already-cold exhausted-primary path
+    (the exact-key hot path pays zero extra I/O), so a drifted stock spot dir
+    (``BAJAJ-AUTO`` vs the chain's ``BAJAJAUTO``) now classifies moneyness instead of
+    reading ``"?"`` on every bar. ``None`` (the default) or a loader returning
+    ``None``/empty is byte-identical to the pre-stock ladder (the pinned
+    :func:`spot_recovery_candidates` prefix invariant); the one recovery log gains
+    the additive ``rung`` field (``"stock_drift"`` / ``"alias_ladder"``), attributed
+    exactly as the Greeks twin attributes it (indices past the 2-arg ladder length
+    are uniquely stock-sourced).
+
+    **1-minute fallback on a partially-prebuilt lake (DEC-DB-FNO-DISPLAY-TRUTH-001
+    item 9):** when the whole walk at the display *interval* joins nothing AND
+    ``interval != "1minute"``, the SAME key walk re-runs at
+    :data:`_INTRADAY_BASE_INTERVAL` — the always-present base feed, exactly mirroring
+    the %CHNG baseline convention (DEC-SPOT-PREVCLOSE-1MIN-001, which ALWAYS reads
+    ``1minute`` regardless of the viewed timeframe). The fallback joins ONLY the
+    page's own bar instants (a bound-parameter ``IN`` list, ≤ page size — O(page);
+    a ``BETWEEN`` at 1minute would materialise every minute in the page's wall
+    span). Semantics, honestly disclosed: it serves the 1-minute close AT the bar's
+    labelled instant (the bucket-OPEN minute), whereas a prebuilt display-interval
+    partition serves the bucket's resampled close (its LAST minute) — both real
+    stored data, the drift surfaced via *joined_interval* provenance (the page
+    stamps ``spot_join_interval``), never a fabricated value. Honest limit: a
+    ``1day`` page's bar instants are midnight-IST — no 1-minute bar exists at those
+    instants, so a 1day page cannot fall back (stays ``"?"``). One
+    ``db_view.spot_tf_fallback`` info per page marks the fallback arm.
     """
     if not ts_values:
-        return {}
+        return {}, None
     min_ts, max_ts = min(ts_values), max(ts_values)
 
-    def _probe(key: str) -> dict[datetime, Decimal]:
+    def _probe(key: str, probe_interval: str) -> dict[datetime, Decimal]:
         for segment in _SPOT_PROBE_SEGMENTS:
             try:
-                _validate_candle_coords(exchange, segment, key, interval)
+                _validate_candle_coords(exchange, segment, key, probe_interval)
             except ValueError:
                 return {}  # a key that is not a legal coordinate → no spot under it.
-            base = lake_root / "bars" / exchange / segment / key / interval
+            base = lake_root / "bars" / exchange / segment / key / probe_interval
             if not (base.is_dir() and any(base.rglob("*.parquet"))):
                 continue
-            # glob built from validated coordinates (no free user text); path + both
-            # bounds are bound parameters (same SQL/path-injection guard as
-            # query_candles). A NULL close is filtered in SQL so a stray null spot bar
-            # degrades that instant to UNKNOWN (the no-spot bucket) rather than raising
-            # in `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
+            # glob/file list built from validated coordinates (no free user text);
+            # path(s) + every bound (BETWEEN pair / IN-list instants) are bound
+            # parameters (same SQL/path-injection guard as query_candles). A NULL
+            # close is filtered in SQL so a stray null spot bar degrades that
+            # instant to UNKNOWN (the no-spot bucket) rather than raising in
+            # `_to_decimal(None)` — honouring the "never raises / honest UNKNOWN"
             # contract. Resilient read (DEC-DB-CORRUPT-SKIP-001): a corrupt
-            # underlying-spot Parquet degrades the join to its readable subset (the
-            # affected option bars classify UNKNOWN), never a 500.
+            # underlying-spot Parquet degrades the join to its readable subset
+            # (the affected option bars classify UNKNOWN), never a 500.
+            # File-pruned to the page's instant span
+            # (DEC-DB-BASELINE-MANIFEST-ROUTE-001): the BETWEEN is inclusive (and
+            # every IN-list instant lies within [min_ts, max_ts]), so the
+            # half-open window intersect uses max_ts + 1µs.
+            windows = _bars_file_windows(
+                lake_root,
+                base,
+                exchange=exchange,
+                segment=segment,
+                symbol=key,
+                interval=probe_interval,
+            )
+            span_files = (
+                _files_intersecting(
+                    windows,
+                    _utc_instant(min_ts),
+                    _utc_instant(max_ts) + timedelta(microseconds=1),
+                )
+                if windows is not None
+                else None
+            )
+            if probe_interval == interval:
+                where_sql = 'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL'
+                params: list[Any] = [min_ts, max_ts]
+            else:
+                # The 1minute FALLBACK joins only the page's own bar instants — a
+                # bound-parameter IN list keeps the read O(page) instead of an
+                # O(minutes-in-span) BETWEEN over the base feed.
+                placeholders = ", ".join("?" for _ in ts_values)
+                where_sql = f'WHERE "timestamp" IN ({placeholders}) AND close IS NOT NULL'
+                params = list(ts_values)
+            # S608 suppression justification: the two WHERE shapes are trusted module
+            # constants (a literal BETWEEN, or "?" placeholders only); the path +
+            # every value are bound parameters — no free text reaches the SQL.
+            sql = (
+                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '  # noqa: S608  # nosec B608
+                + where_sql
+            )
             rows = _execute_parquet_resilient(
                 conn,
                 base,
-                'SELECT "timestamp", close FROM read_parquet(?, union_by_name=true) '
-                'WHERE "timestamp" BETWEEN ? AND ? AND close IS NOT NULL',
-                [min_ts, max_ts],
-                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{interval}",
+                sql,
+                params,
+                source=f"candle-spotjoin:{exchange}/{segment}/{key}/{probe_interval}",
+                files=span_files,
             )
             return {_utc_instant(ts): _to_decimal(close) for ts, close in rows}
         return {}
 
-    spots = _probe(underlying)
-    if spots:
+    # The drift map is resolved lazily AT MOST ONCE per call (both _walk passes
+    # share the memo), and only on the recovery path — the exact-key hot path
+    # never touches the loader (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001).
+    drift_memo: list[StockDriftMap | None] = []
+
+    def _drift() -> StockDriftMap | None:
+        if not drift_memo:
+            drift_memo.append(stock_drift_loader() if stock_drift_loader is not None else None)
+        return drift_memo[0]
+
+    def _walk(probe_interval: str) -> dict[datetime, Decimal]:
+        spots = _probe(underlying, probe_interval)
+        if spots:
+            return spots
+        stock_drift = _drift()
+        candidates = spot_recovery_candidates(underlying, exchange, stock_drift=stock_drift)
+        alias_count = len(candidates)
+        if stock_drift:
+            # The extra 2-arg call runs only on the already-cold exhausted-primary
+            # path with a truthy map — pure string ops, O(1)-bounded (the exact
+            # rung-attribution mechanism of the Greeks twin,
+            # ``greeks_enrich.read_spot_join_with_recovery``).
+            alias_count = len(spot_recovery_candidates(underlying, exchange))
+        for idx, candidate in enumerate(candidates):
+            recovered = _probe(candidate, probe_interval)
+            if recovered:
+                _LOG.info(
+                    "db_view.spot_key_recovered",
+                    underlying=underlying,
+                    recovered_key=candidate,
+                    exchange=exchange,
+                    interval=probe_interval,
+                    rung="stock_drift" if idx >= alias_count else "alias_ladder",
+                )
+                return recovered
         return spots
-    for candidate in spot_recovery_candidates(underlying, exchange):
-        recovered = _probe(candidate)
-        if recovered:
+
+    spots = _walk(interval)
+    if spots:
+        return spots, interval
+    if interval != _INTRADAY_BASE_INTERVAL:
+        fallback = _walk(_INTRADAY_BASE_INTERVAL)
+        if fallback:
             _LOG.info(
-                "db_view.spot_key_recovered",
+                "db_view.spot_tf_fallback",
                 underlying=underlying,
-                recovered_key=candidate,
                 exchange=exchange,
                 interval=interval,
+                fallback=_INTRADAY_BASE_INTERVAL,
             )
-            return recovered
-    return spots
+            return fallback, _INTRADAY_BASE_INTERVAL
+    return {}, None
 
 
 def _fno_strike_step(
@@ -3957,8 +4980,13 @@ def _fno_derived_rows(
     registry_path: Path | None = None,
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
-) -> tuple[list[tuple[str, str | None, str | None, str | None, int | None]], StepConfidence | None]:
-    """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry)``.
+    stock_drift_loader: Callable[[], StockDriftMap | None] | None = None,
+) -> tuple[
+    list[tuple[str, str | None, str | None, str | None, int | None, str]],
+    StepConfidence | None,
+    str | None,
+]:
+    """Compute the per-bar F&O derived cells: ``(moneyness, spot, intrinsic, time_value, days_to_expiry, greeks_status)``.
 
     Matches :data:`FNO_DERIVED_COLUMNS`. The combined ``moneyness`` label (bucket + signed
     strike-depth, ``"ITM -1"`` / ``"OTM +10"`` / ``"ATM"``) is classified against the
@@ -3970,7 +4998,13 @@ def _fno_derived_rows(
     * ``intrinsic`` — :func:`_option_intrinsic` (2-dp), ``None`` when no spot;
     * ``time_value`` — ``close − intrinsic`` (2-dp), ``None`` when no spot;
     * ``days_to_expiry`` — pure ``(expiry − bar IST date).days`` (no I/O), resolvable for any
-      decodable contract (option OR future), ``None`` only when undecodable / no timestamp.
+      decodable contract (option OR future), ``None`` only when undecodable / no timestamp;
+    * ``greeks_status`` — the stored ``greeks_provenance_id`` stamp's packed status decoded
+      into words (DEC-DB-FNO-DISPLAY-TRUTH-001 item 3) via the ONE COMMON
+      :func:`brutex.data.greeks_provenance.greeks_status_label` — no extra I/O (the pid rides
+      the page's own SELECT); a stamp-less bar (legacy 7-column partition, derived-TF page —
+      the overlay lives on ``1minute`` — or a ``greeks_provenance_id``-less column
+      projection) honestly reads ``"not enriched"``, a future ``"—"``.
 
     A FUTURE (or an undecodable symbol) reads ``moneyness="—"`` with ``None`` value columns
     and no spot read attempted — but still gets ``days_to_expiry`` when its expiry decodes; an
@@ -3982,8 +5016,8 @@ def _fno_derived_rows(
     column projection therefore reads ``UNKNOWN``/``None`` on every bar (honest — the join key
     is absent — never a fabricated value), not a crash.
 
-    Returns ``(rows, step_confidence)`` — the second element labels which ladder
-    produced the ATM±N strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001):
+    Returns ``(rows, step_confidence, spot_join_interval)`` — the second element labels
+    which ladder produced the ATM±N strike-grid step (DEC-MONEYNESS-REGISTRY-STEP-001):
     :attr:`~brutex.data.moneyness.StepConfidence.REGISTRY` when the AUTHORITATIVE
     vendor chain (read from *registry_path* via the generation-memoised
     :func:`_registry_strike_chain`) supplied it,
@@ -3991,6 +5025,9 @@ def _fno_derived_rows(
     lake-observed sibling ladder did (the page then carries an honest low-confidence
     marker — the observed min gap can overestimate the true base step), and ``None``
     when no step was derivable at all (or the page is a future/undecodable contract).
+    The third element is the spot interval that actually served the per-bar join
+    (DEC-DB-FNO-DISPLAY-TRUTH-001 item 9 — ``"1minute"`` marks the fallback join on a
+    partially-prebuilt lake; ``None`` when nothing joined / no join was attempted).
     """
     parts = parse_fno_symbol(symbol)
     option_type = parts.option_type if parts is not None else None
@@ -3999,12 +5036,32 @@ def _fno_derived_rows(
     expiry = parts.expiry if parts is not None else None
     ts_idx = out_columns.index("timestamp") if "timestamp" in out_columns else -1
     close_idx = out_columns.index("close") if "close" in out_columns else -1
+    pid_idx = (
+        out_columns.index("greeks_provenance_id") if "greeks_provenance_id" in out_columns else -1
+    )
 
     def _dte(ts: Any) -> int | None:
         """Calendar days from the bar's IST date to expiry — pure, ``None`` if unknown."""
         if expiry is None or not isinstance(ts, datetime):
             return None
         return (expiry - _bar_ist_date(ts)).days
+
+    def _greeks_status(row: tuple[Any, ...]) -> str:
+        """Decode the row's stored provenance stamp into the display words.
+
+        A missing / non-int cell (legacy partition NULL, derived-TF page, a
+        ``greeks_provenance_id``-less column projection) is an honest ``None`` stamp
+        → ``"not enriched"`` for an option (mirrors the documented timestamp-less-
+        projection behaviour above — never a fabricated status, never a raise).
+        """
+        pid = row[pid_idx] if pid_idx >= 0 else None
+        # DuckDB fetchall() returns a native Python int for INTEGER-family columns
+        # (NULL → None) — the driver contract this isinstance narrowing relies on.
+        # bool is EXCLUDED explicitly (bool subclasses int, so a stray True would
+        # otherwise decode as packed id 1 → a fabricated "ok"); DuckDB never yields
+        # bool for an INTEGER column, but Golden Rule #1 forbids relying on that.
+        packed = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+        return greeks_status_label(packed, is_option=option_type is not None)
 
     # A future / undecodable contract (or an option with no decoded strike) has no
     # moneyness/value — "—" + None on every bar, no spot read; days_to_expiry still resolves
@@ -4013,10 +5070,21 @@ def _fno_derived_rows(
     # ``parse_fno_symbol`` returns ``None`` → caught by ``underlying is None``).
     if option_type is None or underlying is None or strike is None:
         na_label = moneyness_view(option_type, strike, None, None).label
-        return [
-            (na_label, None, None, None, _dte(row[ts_idx] if ts_idx >= 0 else None))
-            for row in raw_rows
-        ], None
+        return (
+            [
+                (
+                    na_label,
+                    None,
+                    None,
+                    None,
+                    _dte(row[ts_idx] if ts_idx >= 0 else None),
+                    _greeks_status(row),
+                )
+                for row in raw_rows
+            ],
+            None,
+            None,
+        )
 
     ts_values = [
         row[ts_idx] for row in raw_rows if ts_idx >= 0 and isinstance(row[ts_idx], datetime)
@@ -4037,21 +5105,27 @@ def _fno_derived_rows(
         lake_root, exchange=exchange, symbol=symbol, registry_strikes=registry_strikes
     )
     step = resolved_step.step
-    spot_by_ts = _underlying_spot_close_by_ts(
+    spot_by_ts, spot_join_interval = _underlying_spot_close_by_ts(
         conn,
         lake_root,
         exchange=exchange,
         underlying=underlying,
         interval=interval,
         ts_values=ts_values,
+        # The evidence-grounded stock drift rung (DEC-DB-MONEYNESS-STOCK-EVIDENCE-001)
+        # — the injected lazy loader is consulted only on the exhausted-primary
+        # recovery path, so a drifted stock spot dir classifies moneyness exactly
+        # as the Greeks ladder recovers its spot join; the healthy exact-key page
+        # pays zero extra I/O.
+        stock_drift_loader=stock_drift_loader,
     )
-    rows: list[tuple[str, str | None, str | None, str | None, int | None]] = []
+    rows: list[tuple[str, str | None, str | None, str | None, int | None, str]] = []
     for row in raw_rows:
         ts = row[ts_idx] if ts_idx >= 0 else None
         spot = spot_by_ts.get(_utc_instant(ts)) if isinstance(ts, datetime) else None
         view = moneyness_view(option_type, strike, spot, step)
         if spot is None:
-            rows.append((view.label, None, None, None, _dte(ts)))
+            rows.append((view.label, None, None, None, _dte(ts), _greeks_status(row)))
             continue
         intrinsic = _option_intrinsic(option_type, strike, spot)
         close = row[close_idx] if close_idx >= 0 else None
@@ -4063,9 +5137,10 @@ def _fno_derived_rows(
                 str(round_money(intrinsic)),
                 time_value,
                 _dte(ts),
+                _greeks_status(row),
             )
         )
-    return rows, resolved_step.confidence
+    return rows, resolved_step.confidence, spot_join_interval
 
 
 def option_candle_count_key(series: str, start: str | None, end: str | None) -> str:
@@ -4102,6 +5177,7 @@ def query_option_candles(
     count_cache: CandleCountCache | None = None,
     generation: int = 0,
     use_stats_manifest: bool = False,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> dict[str, Any]:
     """Read one page of expired-option bars for a series (DEC-DB-QUERY-001).
 
@@ -4112,8 +5188,26 @@ def query_option_candles(
     data duplication, the lake stays the single source of truth. *series* is the
     filesystem-safe segment from :func:`list_option_datasets` and is validated
     against :func:`_validate_option_segment` (NO free user text in the glob,
-    same path/SQL-injection guard as the spot reader). The page is
-    ``LIMIT``-bounded so a click never materialises more than *limit* rows.
+    same path/SQL-injection guard as the spot reader).
+
+    HONEST complexity (Golden Rule #10 — this is NOT O(page) in series depth;
+    DEC-DB-OPAGE-HONESTY-001): identical envelope to :func:`query_candles`. The
+    page DATA query performs a FULL columnar scan of every matched series row —
+    the keep-FIRST dedup ``QUALIFY row_number() OVER (PARTITION BY (side,
+    timestamp) …) = 1`` window hash-partitions the whole matched set and the
+    ``ORDER BY "timestamp"`` sorts it — BEFORE ``LIMIT``/``OFFSET`` slice the
+    page. So the engine cost is **O(total matched series rows)** (plus one
+    Parquet footer open per file); ``LIMIT`` bounds ONLY the Python
+    materialisation and a deep ``OFFSET`` is O(row-groups up to the offset) on
+    top. The page ``total`` is a ``COUNT(DISTINCT (side, timestamp))``, itself
+    **O(rows)** on the first computation per write-generation and O(1) on a
+    cached repeat (see *count_cache*).
+    This envelope is the LEGACY arm's: the write-time per-file STATS
+    manifest — the #867/#1025 named future work, since SHIPPED by
+    DEC-LAKE-STATS-MANIFEST-001 (MIGRATION.md #1614) and wired into THIS
+    function via *use_stats_manifest* — prunes a validated page's read to
+    O(page-files) Parquet work at an O(D) per-request revalidation stat
+    sweep (D = the series' month files), NOT literal O(page).
 
     Projects the 11 :data:`OPTION_CANDLE_COLUMNS` — the OHLCV+OI set PLUS the
     per-bar option stamps ``side`` / ``strike`` / ``spot`` / ``iv``. *start* /
@@ -4144,9 +5238,11 @@ def query_option_candles(
     count_cache, generation
         Optional generation-stamped cache for the page ``total``
         (DEC-LAKE-READ-O1-AUDIT-001) + the current write-generation it is keyed
-        on. When supplied, the ``COUNT(*)`` over the whole series glob is memoised
-        per ``(series, start, end)`` (paging-invariant) so a prev/next click is an
-        O(1) hit; a pull bumps *generation* → recompute (never a stale total).
+        on. When supplied, the ``COUNT(DISTINCT (side, timestamp))`` total over the
+        whole series glob — O(rows) on the first computation per write-generation,
+        O(1) on a cached repeat — is memoised per ``(series, start, end)``
+        (paging-invariant) so a prev/next click is an O(1) hit; a pull bumps
+        *generation* → recompute (never a stale total).
         The SAME cache also memoises the default-range STORED-LIFE span under
         :func:`option_candle_span_key` (series-only key), so the applied-range chip
         (DEC-DB-UX-PACK-001 Feature 2) never re-runs its MIN/MAX scan on a paging
@@ -4159,6 +5255,19 @@ def query_option_candles(
         + best-effort reseed. The production route passes ``True``; the pure
         default ``False`` keeps direct callers byte-identical, and the
         ``BRUTEX_LAKE_STATS_MANIFEST=off`` kill switch forces legacy.
+    retry_sleep
+        Injectable sleeper for the torn-read retry-once guard — the
+        expired-options twin of the :func:`query_candles` parameter
+        (DEC-DB-CANDLES-TORN-READ-RETRY-001): this pager runs the SAME
+        two-query COUNT + page shape over the series glob, so a live pull's
+        atomic ``os.replace`` mid-request tears identically. Each read is
+        retried ONCE after :data:`_DUCKDB_RETRY_DELAY_S` over a
+        freshly-rebuilt glob/file list (see :func:`_retry_candle_read_once`);
+        ``None`` (the default) sleeps for real. Same honest envelope: the
+        race is narrowed, not eliminated, and when the page returned rows the
+        returned ``total`` is raised to at least ``offset + len(rows)`` (an
+        observed lower bound; an EMPTY page never adjusts the total — it
+        proves nothing).
 
     Returns
     -------
@@ -4258,20 +5367,28 @@ def query_option_candles(
     )
 
     def _legacy_count_total() -> int:
-        """Run the O(files) deduped-total footer-scan over the whole series glob.
+        """Run the O(rows) ``COUNT(DISTINCT (side, timestamp))`` deduped-total scan
+        over the whole series glob (the deduped composite-key count the keep-FIRST
+        pages serve, NOT a footer ``COUNT(*)``; O(1) on a cached repeat).
 
         Routed through the COMMON :func:`_execute_parquet_resilient` (the series
         dir is FLAT, so its recursive ``**/*.parquet`` glob reads the identical
         file set as the flat glob): a corrupt file is skipped + counted out of
         the total, never a 500 (DEC-ENGINE-MISC-PACK-002).
         """
-        rows = _execute_parquet_resilient(
-            conn,
-            base,
-            f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
-            list(where_params),
-            source=skip_source,
-        )
+
+        # The COUNT execute+fetch rides the torn-read retry-once guard
+        # (DEC-DB-CANDLES-TORN-READ-RETRY-001; re-globs fresh per attempt).
+        def _run_count() -> list[tuple[Any, ...]]:
+            return _execute_parquet_resilient(
+                conn,
+                base,
+                f"SELECT {distinct_count_sql(('side', 'timestamp'))} FROM {source}{where_sql}",  # noqa: S608  # nosec B608 - source is read_parquet(?) with a bound path; values bound
+                list(where_params),
+                source=skip_source,
+            )
+
+        rows = _retry_candle_read_once(_run_count, source=skip_source, retry_sleep=retry_sleep)
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     def _count_total() -> int:
@@ -4293,29 +5410,41 @@ def query_option_candles(
         )
     page_select = DEDUP_STAR_SELECT_SQL if select == "*" else select
     manifest_total_candidate = stats_ctx is not None and stats_ctx.served
-    pruned = _stats_pruned_page(
-        stats_ctx,
-        select=select,
-        columns=columns,
-        where_sql=where_sql,
-        where_params=list(where_params),
-        qualify_sql=qualify_sql,
-        order_sql=order_sql,
-        descending=descending,
-        limit=safe_limit,
-        offset=safe_offset,
-        count_cache=count_cache,
-        generation=generation,
-    )
-    if pruned is not None:
-        out_columns, raw_rows = pruned
-    else:
-        out_columns, raw_rows = _execute_candle_page_resilient(
+
+    # Both page forms ride the torn-read retry-once guard — the
+    # expired-options twin of the query_candles wiring
+    # (DEC-DB-CANDLES-TORN-READ-RETRY-001; re-plans / re-globs per attempt).
+    def _run_pruned_page() -> tuple[list[str], list[tuple[Any, ...]]] | None:
+        return _stats_pruned_page(
+            stats_ctx,
+            select=select,
+            columns=columns,
+            where_sql=where_sql,
+            where_params=list(where_params),
+            qualify_sql=qualify_sql,
+            order_sql=order_sql,
+            descending=descending,
+            limit=safe_limit,
+            offset=safe_offset,
+            count_cache=count_cache,
+            generation=generation,
+        )
+
+    def _run_legacy_page() -> tuple[list[str], list[tuple[Any, ...]]]:
+        return _execute_candle_page_resilient(
             conn,
             base,
             f"SELECT {page_select} FROM {page_source}{where_sql}{qualify_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - validated select + bound path + bound values
             [*where_params, safe_limit, safe_offset],
             source=skip_source,
+        )
+
+    pruned = _retry_candle_read_once(_run_pruned_page, source=skip_source, retry_sleep=retry_sleep)
+    if pruned is not None:
+        out_columns, raw_rows = pruned
+    else:
+        out_columns, raw_rows = _retry_candle_read_once(
+            _run_legacy_page, source=skip_source, retry_sleep=retry_sleep
         )
         if manifest_total_candidate:
             # Whole-request degrade law: never pair a manifest total with a
@@ -4330,6 +5459,14 @@ def query_option_candles(
                     generation=generation,
                     compute=_legacy_count_total,
                 )
+    # Honest observed lower bound — the expired-options twin of the
+    # query_candles clamp (DEC-DB-CANDLES-TORN-READ-RETRY-001): when the page
+    # returned rows the total is raised to at least ``offset + len(rows)``
+    # (an OBSERVED lower bound); an EMPTY page proves nothing and never
+    # adjusts the total (the unconditional clamp fabricated
+    # ``total == offset`` past the end — review fold).
+    if raw_rows:
+        total = max(total, safe_offset + len(raw_rows))
     if stats_ctx is not None:
         _LOG.info(
             _STATS_READ_EVENT,
@@ -4338,6 +5475,19 @@ def query_option_candles(
             validated=stats_ctx.stats is not None,
             page_source="manifest" if pruned is not None else "live_scan",
         )
+    # Split-brain screen (DEC-DASHBOARD-READ-SCREEN-001), INSANE-ONLY for options:
+    # positivity/ordering-impossible option bars are dropped so /db-options never
+    # SERVES a corrupt bar, but the ×4 bad-tick screen is DISABLED
+    # (`bad_tick_enabled=False`) — option PREMIA legitimately move ≥4×/minute on
+    # leverage, so the index-circuit-breaker-calibrated threshold would drop legit
+    # bars; the engine never screens options either. This MATCHES /movers-options
+    # (which passes bad_tick=False through _read_future_session), so the two agree.
+    # No bad-tick seed is needed (the cross-row arm is off). Runs AFTER the raw
+    # page rows are resolved (pruned OR legacy — path-agnostic) and AFTER the
+    # observed-lower-bound clamp above (which deliberately reads the RAW page
+    # length); on a CORRUPT partition the served page shows fewer rows than the
+    # RAW total implies — a bounded honesty gap, never a fabricated bar.
+    raw_rows = screen_rows(raw_rows, out_columns, source=skip_source, bad_tick_enabled=False)
     # Options roll a 1-minute table, so the bar always renders full HH:MM:SS (no
     # date-only collapse); options carry no spot derived %-columns.
     rows = _render_candle_rows(raw_rows, out_columns, "1minute")
@@ -4522,6 +5672,11 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
       streak-provenance follow-up, NOT claimed).
     * any other ``SKIPPED`` (terminally-settled empty) → the same, suffixed
       ``— settled`` (the ledger promoted it; no further re-pull).
+    * ``FAILED`` carrying :data:`~brutex.data.today_completeness.TODAY_INCOMPLETE`
+      (DEC-PULL-TODAY-COMPLETENESS-GATE-001) → ``"today's session not yet
+      settled by vendor (will re-pull)"`` — the pre-settle TODAY gate's
+      streak-exempt deferral, honest that the vendor simply has not settled
+      today yet (not an error, not a data hole).
     * ``FAILED`` → ``"FAILED (will re-pull)"`` — an error, not evidence of
       no-data; the window stays re-pullable.
     * ``SUCCESS`` / ``PLANNED`` / anything else → the bare status name
@@ -4540,6 +5695,13 @@ def window_status_label(status: str, empty_streak: int, last_error: str | None =
         return (
             f"vendor confirmed no trades ({max(int(empty_streak), 1)} clean attempt(s) — settled)"
         )
+    if status == "FAILED" and last_error == TODAY_INCOMPLETE:
+        # DEC-PULL-TODAY-COMPLETENESS-GATE-001: a covers-today window demoted
+        # because the vendor has not settled TODAY's session yet — the honest
+        # wording (a streak-EXEMPT, time-transient deferral; a SKIPPED settle
+        # carrying this tag is structurally unreachable but covered by
+        # DEMOTED_SETTLE_REASONS membership above, defensively).
+        return "today's session not yet settled by vendor (will re-pull)"
     if status == "FAILED":
         return "FAILED (will re-pull)"
     return status
@@ -4614,6 +5776,18 @@ def _window_row(
 #: death). Counts are ALWAYS complete; only the row list is capped.
 WINDOW_ROWS_CAP: int = 20_000
 
+#: Resident-entry bound for the DEDICATED /coverage/windows page-row cache
+#: (DEC-WINDOWS-MIDPULL-FLOOR-001, hostile-review round-2 MEDIUM fold): a page
+#: entry holds up to ``min(limit, WINDOW_ROWS_CAP)`` projected row-dicts (the
+#: route's DEFAULT limit is the 20k cap), so the page family must NOT share the
+#: 256-cap counts instance — worst-case resident there would be ~256 × 20k-row
+#: pages, and page-key churn could LRU-evict the tiny counts entries. A small
+#: dedicated instance bounds retained pages to ≤ this capacity ×
+#: ``min(limit, WINDOW_ROWS_CAP)`` rows (8 × 20k = 160k row-dicts worst case —
+#: stated, not hidden) while the handful of live UI coordinates
+#: (market × status × page) stay warm.
+WINDOW_PAGE_CACHE_CAPACITY: int = 8
+
 #: Severity-first display order for the capped row list: actionable rows
 #: (FAILED, then EMPTY) surface before the bulk statuses, so the cap can never
 #: hide what the operator must act on.
@@ -4624,6 +5798,14 @@ _WINDOW_STATUS_ORDER: Final[dict[str, int]] = {
     "SKIPPED": 3,
     "PLANNED": 4,
 }
+
+#: Canonical sentinel every NOT-allow-listed ``?status=`` value collapses onto
+#: BEFORE cache-key minting (DEC-WINDOWS-MIDPULL-FLOOR-001, round-2 hardening):
+#: an unknown status matches nothing on both payload paths (legacy parity), so
+#: without the collapse each distinct bogus value would mint a fresh page-cache
+#: key AND pay a full fold. The sentinel's SQL arm is the literal ``1 = 0``,
+#: never a ``status = <sentinel>`` bind.
+_UNKNOWN_WINDOW_STATUS: Final[str] = "__UNKNOWN_STATUS__"
 
 
 def _ledger_stamp_moved() -> bool:
@@ -4644,8 +5826,101 @@ def _ledger_stamp_moved() -> bool:
     return True
 
 
-#: Resident-key bound for the shared ledger read cache: 3 key families
-#: (records / rows / spot-rollup) × multi-lake test headroom.
+def _compute_cursor(conn: Any) -> Any:
+    """A statement-isolated DuckDB cursor for a cached window compute — never a raise.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001: the flagged
+    (``stale_while_revalidate``) window caches may run a compute on a
+    BACKGROUND daemon revalidator, CONCURRENT with the request thread's own
+    statements on the SAME shared connection — and DuckDB's execute→fetch is
+    per-connection pending-result state, so interleaved statements corrupt
+    each other's results (reproduced in-suite: a background counts fold
+    fetched the request's 16-column page rows and died on the 3-tuple
+    unpack). ``conn.cursor()`` yields an isolated statement holder for BOTH
+    production shapes (round-1 BLOCKER fix — the original fallback rationale
+    was FALSE for the store conn, which had no ``cursor()`` and silently
+    shared one single-thread-per-view instance across the revalidator
+    daemons): a raw DuckDB connection returns an independent engine
+    connection (its own pending-result state), and the store's
+    ``_LockedReadConn`` returns a FRESH locked view over the same read
+    cursor + read lock (independent per-view hold state; each compute's
+    execute→fetch stays atomic under the store read lock — never a shared
+    ``_held`` flag, whose cross-thread corruption leaked the read lock and
+    froze every later dashboard read). The inline single-flight computes ride
+    the same cursor, which also closes the pre-existing (rare) cross-request
+    interleave on these families. A conn without ``cursor()`` (test fakes /
+    exotic injections — genuinely single-threaded drivers) — or a raising
+    ``cursor()`` — falls back to *conn* itself (isolation is best-effort,
+    never a 500). Callers pair every isolated cursor with
+    :func:`_close_cursor` so a compute can never strand a held view.
+    """
+    factory = getattr(conn, "cursor", None)
+    if factory is None:
+        return conn
+    try:
+        return factory()
+    except Exception:  # pylint: disable=broad-except — isolation is best-effort
+        return conn
+
+
+def _close_cursor(cursor: Any, conn: Any) -> None:
+    """Best-effort close of a per-compute isolated cursor — NEVER the shared *conn*.
+
+    DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 round 1: an isolated cursor
+    can end its compute still HOLDING state — the legacy-shape probe
+    (`_ensure_full_schema`) raises ``ValueError`` after a description-only
+    read, which on a ``_LockedReadConn`` view leaves the store read lock
+    acquired (an abandoned hold = every later dashboard read deadlocks; the
+    request-shared view was previously rebalanced by the NEXT execute, a
+    per-compute view never is) — and a raw DuckDB cursor is an engine
+    connection worth freeing eagerly rather than at GC. The fallback arm
+    (``cursor is conn`` — the caller's own shared connection) is never
+    closed; a missing/raising ``close`` is swallowed (cleanup can never mask
+    the compute's own outcome or 500 a poll).
+    """
+    if cursor is conn:
+        return
+    close = getattr(cursor, "close", None)
+    if close is None:
+        return
+    with contextlib.suppress(Exception):  # cleanup is best-effort
+        close()
+
+
+def _isolated_counts_total(
+    conn: Any, source: _LedgerScanSource
+) -> tuple[dict[str, dict[str, int]], int]:
+    """:func:`_window_counts_total` on a per-compute isolated cursor (closed after).
+
+    The ONE compute body the flagged counts caches run — possibly on a
+    background SWR revalidator daemon concurrent with the request thread —
+    so it must never touch the caller's shared *conn* directly
+    (`_compute_cursor`) and must release its view even on a raise
+    (`_close_cursor`).
+    """
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_total(cursor, source)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+def _isolated_counts_since(
+    conn: Any, source: _LedgerScanSource, since_iso: str
+) -> tuple[dict[str, dict[str, int]], int]:
+    """The per-run twin of :func:`_isolated_counts_total` — same isolation law."""
+    cursor = _compute_cursor(conn)
+    try:
+        return _window_counts_since(cursor, source, since_iso)
+    finally:
+        _close_cursor(cursor, conn)
+
+
+#: Resident-key bound for the shared ledger read cache: 2 key families
+#: (records / spot-rollup — the ``ledger-rows`` family was RETIRED by
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3: the /db grid rows are now an
+#: O(page) on-demand projection over the ONE resident records family, never a
+#: second resident whole-ledger tuple) × multi-lake test headroom.
 _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
 
 #: Hard cap on the ledger read cache's adaptive floor — the #920 ``SummaryCache``
@@ -4654,22 +5929,115 @@ _LEDGER_READ_CACHE_CAPACITY: Final[int] = 32
 #: so the tighter cap bounds the worst-case served staleness.
 _LEDGER_READ_FLOOR_CAP_S: Final[float] = 120.0
 
+#: Byte watermark for the ledger read cache (DEC-MEMORY-FOOTPRINT-HARDENING-001):
+#: the cache retains ONE parsed whole-ledger record TUPLE per lake (~1.0 KB/row
+#: measured — a production 841k-row ledger parses to ~0.8 GB resident; fix 3
+#: retired the second per-row ``ledger-rows`` family, halving the tracked
+#: two-family residency) plus the small spot-rollup dicts, so the 32-entry
+#: count bound alone is no byte
+#: bound at all. Budget = 1/16 of total RAM via the COMMON `memory_budget_bytes`
+#: (3 GiB on the CLAUDE.md §8 48 GiB box); floor 1 GiB when RAM is undetected —
+#: generous enough that today's steady state (one lake, two families) never
+#: evicts, while a pathological multi-lake session is bounded. No new env var.
+_LEDGER_READ_CACHE_FRACTION: Final[float] = 1.0 / 16.0
+_LEDGER_READ_CACHE_FLOOR_BYTES: Final[int] = 1 << 30  # 1 GiB
+
+#: Per-record byte ESTIMATE for the ledger sizing hint (hostile-review M1 on
+#: DEC-MEMORY-FOOTPRINT-HARDENING-001): RE-MEASURED at the 2026-07-11 #1719
+#: merge-reconcile — main's DEC-... #1386 INTERNED ledger decode (shared
+#: key-string objects across records) halved the per-record deep size, so the
+#: pre-interning ~600 B/record basis (rounded to 640) over-stated the deep
+#: walk ~2.1× and tripped the fix-3 residency ratio pin; the residency bench
+#: now measures the resident ``ledger-records`` family at ~301 B/record @ 50k
+#: rows under the SAME ``deep_size_bytes`` accounting the watermark evicts on
+#: (``tests/bench/test_ledger_cache_residency.py``); rounded conservatively UP
+#: to 320 so the hint over-states rather than under-states (the watermark then
+#: evicts EARLIER than the deep walk would — the safe direction for a byte
+#: bound). HONEST (Golden Rule #10): an estimate feeding an estimate — the
+#: watermark tracks approximations, never exact RSS; the hint-vs-deep-walk
+#: accuracy is pinned within 3× on a real records payload.
+_LEDGER_RECORD_EST_BYTES: Final[int] = 320
+
+#: Flat overhead added by the hint for a payload's outer shells (the 2-tuple /
+#: dict container + slack) — small beside even a few records.
+_LEDGER_HINT_BASE_BYTES: Final[int] = 512
+
+#: The records-family payload's arity: ``(generation, records)`` — named to
+#: avoid a PLR2004 magic number (the app.py convention).
+_LEDGER_RECORDS_PAYLOAD_ARITY: Final[int] = 2
+
+
+def _ledger_payload_size_hint(payload: object) -> int | None:
+    """O(1)-in-rows sizing hint for the ledger cache's payload families.
+
+    Hostile-review M1 (DEC-MEMORY-FOOTPRINT-HARDENING-001): the fix-2 byte
+    watermark ran :func:`~brutex.dashboard.movers_cache.deep_size_bytes` over
+    every COLD ledger parse's ``(generation, tuple[WindowLedgerRecord, ...])``
+    payload — measured **5.28 s** at the documented 841k-row production scale
+    (~25M ``getsizeof``/``getattr`` ops through the ``__slots__`` MRO branch)
+    plus a transient ~1.7M-entry ``seen`` id-set (~100+ MB), recurring at pull
+    cadence (the stamp moves per delta flush). This hint recognizes THE
+    records-family shape — a 2-tuple ``(int generation, tuple of
+    WindowLedgerRecord)``, checked on the FIRST element only (O(1); every
+    record in a payload is the same type by construction — one
+    ``load_window_ledger(...).records()`` materialization) — and returns
+    ``len(records) × _LEDGER_RECORD_EST_BYTES + _LEDGER_HINT_BASE_BYTES``.
+    Every OTHER shape returns ``None`` → the cache's deep-size fallback; the
+    only other resident family, the ``spot-rollup|`` dict, is SMALL by
+    construction (≤ spot symbols × fetch intervals cells, ~1.5k — its deep
+    walk is sub-millisecond), so it deliberately stays on the accurate walk.
+    """
+    if (
+        isinstance(payload, tuple)
+        and len(payload) == _LEDGER_RECORDS_PAYLOAD_ARITY
+        and isinstance(payload[0], int)
+        and isinstance(payload[1], tuple)
+    ):
+        from brutex.data.window_ledger import WindowLedgerRecord
+
+        records = payload[1]
+        if not records or isinstance(records[0], WindowLedgerRecord):
+            return _LEDGER_HINT_BASE_BYTES + len(records) * _LEDGER_RECORD_EST_BYTES
+    return None
+
 
 def _make_ledger_read_cache(
-    *, clock: Callable[[], float] = _monotonic_clock
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
 ) -> MoversSnapshotCache:
     """Construct THE shared stamped ledger read cache — parameters exist ONCE.
 
-    Single-flight + the #920 adaptive floor, both REUSED from the verified
+    Single-flight + the #920 adaptive floor + the RAM-derived byte watermark
+    (DEC-MEMORY-FOOTPRINT-HARDENING-001), all REUSED from the verified
     :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` contract (no
-    third hand-rolled cache — CLAUDE.md §11 COMMON). *clock* is injectable so
-    the floor tests are deterministic (production keeps the monotonic default).
+    third hand-rolled cache — CLAUDE.md §11 COMMON), plus the M1
+    ledger-aware ``size_of`` sizing hint so a cold 841k-row parse never pays
+    the measured 5.28 s deep-size walk (see :func:`_ledger_payload_size_hint`).
+    *clock* / *swr_runner* are injectable so the floor +
+    stale-while-revalidate tests are deterministic (production keeps the
+    monotonic default and the daemon-thread runner).
     """
     return MoversSnapshotCache(
         capacity=_LEDGER_READ_CACHE_CAPACITY,
+        max_bytes=memory_budget_bytes(
+            fraction=_LEDGER_READ_CACHE_FRACTION,
+            floor_bytes=_LEDGER_READ_CACHE_FLOOR_BYTES,
+        ),
+        size_of=_ledger_payload_size_hint,
         pull_active_probe=_ledger_stamp_moved,
         adaptive_floor=True,
         adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4 widened — the
+        # operator's live repro: /db window-ledger rows stuck behind an inline
+        # O(rows) re-parse past the floor mid-pull): PAST-floor stamp churn
+        # serves the PRIOR stamp's records instantly and re-parses in ONE
+        # tokenless background revalidator — bounded staleness (≤ floor + one
+        # parse behind the live ledger), every serve logged, converged by the
+        # next idle read (the constant-True probe keeps the arm armed exactly
+        # while the stamp churns).
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
         clock=clock,
     )
 
@@ -4690,7 +6058,7 @@ def _make_ledger_read_cache(
 #: possibly spanning several ≥2 s delta flushes (a TIME bound, never a
 #: stamp-COUNT bound — the floor branch ages ``computed_at`` only), ALWAYS
 #: logged (``movers_cache.stale_served``) — the #920 ≤50%-duty law.
-#: The DERIVED families (rows / spot-rollup) are stamped with the generation
+#: The one DERIVED cached family (spot-rollup) is stamped with the generation
 #: the records were ACTUALLY served at (:func:`_ledger_records_stamped` embeds
 #: it in the cached value), so a projection built from a floor-stale records
 #: serve is itself generation-stale — never latched under the fresh generation
@@ -4698,6 +6066,15 @@ def _make_ledger_read_cache(
 #: under its OWN floor once the records floor passes, so a derived family's
 #: worst-case staleness COMPOSES the records floor with its own (each capped
 #: at 120 s) — every stale serve logged on the key that served it.
+#: RESIDENCY (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3): the ``ledger-records``
+#: family is THE single resident per-row representation. The former
+#: ``ledger-rows`` cached family (a second whole-ledger tuple-per-row payload,
+#: ~1.0 KB/row of tracked bytes beside the records' ~1.0 KB/row) is RETIRED —
+#: the /db grid projects its rows ON DEMAND from the cached records
+#: (:func:`window_ledger_rows_page`, O(page) per request), so exactly one
+#: per-row family is resident per lake and the grid's staleness is exactly the
+#: records serve (single-phase — the rows half of the composed-floor envelope
+#: is gone with the cache entry).
 _LEDGER_READ_CACHE: MoversSnapshotCache = _make_ledger_read_cache()
 
 
@@ -4707,12 +6084,88 @@ def _reset_ledger_read_cache() -> None:
     _LEDGER_READ_CACHE = _make_ledger_read_cache()
 
 
+def make_window_payload_caches(
+    *,
+    clock: Callable[[], float] = _monotonic_clock,
+    swr_runner: Callable[[Callable[[], None]], None] | None = None,
+) -> tuple[MoversSnapshotCache, MoversSnapshotCache]:
+    """Construct the ``(counts_cache, page_cache)`` pair for ``/coverage/windows``.
+
+    DEC-WINDOWS-MIDPULL-FLOOR-001 — the ONE construction point (`app.py` wires
+    it verbatim; parameters exist ONCE, the ``_make_ledger_read_cache``
+    precedent). Both instances ride the SAME probe/floor shape as the sibling
+    :data:`_LEDGER_READ_CACHE` — the constant-``True``
+    :func:`_ledger_stamp_moved` probe + the tighter
+    :data:`_LEDGER_READ_FLOOR_CAP_S` (120 s) cap — because these caches'
+    generation IS the ledger stamp digest: steady state never reaches the
+    floor branch (the stamp is immobile → every read is a generation hit), and
+    a stamp move from ANY process — an in-process pull's delta flush AND a
+    cross-process CLI ``brutex fetch`` (which an in-process
+    ``BackgroundPullJob.running`` probe would be blind to) — is floor-bounded
+    ``min(max(2 s, the family's own compute duration), 120 s)`` + logged
+    (``movers_cache.stale_served``), never silent (hostile-review round-2
+    MINOR fold, option (a) — supersedes the round-1 ``_pull_live`` probe whose
+    floor never covered CLI churn). The PAGE instance is a SMALL dedicated
+    cache (:data:`WINDOW_PAGE_CACHE_CAPACITY`) so retained pages stay bounded
+    and page-key churn can never evict the counts entries (round-2 MEDIUM
+    fold — see the capacity constant's envelope). *clock* is injectable so the
+    floor tests are deterministic (production keeps the monotonic default).
+    Both instances ALSO opt into ``stale_while_revalidate``
+    (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 — see the construction
+    comment below for the sanctioned-staleness envelope).
+    """
+    # DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001 (G4): BOTH instances opt
+    # into stale-while-revalidate — a pull-progress / /coverage/windows poll
+    # landing PAST the 120 s-capped floor serves the PRIOR stamp's counts /
+    # page instantly and revalidates the O(rows + delta-footers) fold in ONE
+    # tokenless background daemon; concurrent pollers never block on the
+    # single-flight (the operator's live repro: the windows page stuck at
+    # "loading…" mid-pull, and the /universe feed dropping ~154 s recurring).
+    # The fold still RUNS (≤1 concurrent, ≤ floor cadence) — this bounds poll
+    # LATENCY, it does not eliminate the fold (Golden Rule #10). Because the
+    # probe is the constant-True `_ledger_stamp_moved`, the SWR arm also
+    # covers CROSS-PROCESS CLI-pull stamp churn: an idle-after-CLI-write read
+    # past the floor converges via one background fold instead of one inline
+    # fold (≤ seconds delayed freshness, log-labelled — the disclosed
+    # sanctioned delta for the counts family).
+    counts_cache = MoversSnapshotCache(
+        pull_active_probe=_ledger_stamp_moved,
+        adaptive_floor=True,
+        adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
+        clock=clock,
+    )
+    page_cache = MoversSnapshotCache(
+        capacity=WINDOW_PAGE_CACHE_CAPACITY,
+        pull_active_probe=_ledger_stamp_moved,
+        adaptive_floor=True,
+        adaptive_floor_cap_s=_LEDGER_READ_FLOOR_CAP_S,
+        stale_while_revalidate=True,
+        swr_runner=swr_runner,
+        clock=clock,
+    )
+    return counts_cache, page_cache
+
+
 #: The ledger's incremental-delta sub-directory name (DEC-LEDGER-DELTA-FLUSH-001).
 #: MUST equal ``brutex.data.window_ledger_store.DELTAS_DIRNAME`` — pinned by
 #: test, not imported at module level (the ``lake_revision._SWEEPS_DIRNAME``
 #: precedent: this module deliberately carries no module-level
 #: ``window_ledger_store`` edge — CodeQL ``py/cyclic-import``).
 _LEDGER_DELTAS_DIRNAME: Final[str] = "deltas"
+
+#: The ledger table's directory + filename under the lake root
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal
+#: ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME`` — pinned by
+#: test, not imported (the :data:`_LEDGER_DELTAS_DIRNAME` precedent + the
+#: ``phase_progress_payload`` no-import-edge law): even a FUNCTION-local
+#: ``window_ledger_store`` import participates in the
+#: ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+#: ``py/cyclic-import`` flags, so the new fast path derives the path from
+#: these constants instead of importing ``ledger_path``.
+_LEDGER_TABLE_DIRNAME: Final[str] = "window_ledger"
+_LEDGER_TABLE_FILENAME: Final[str] = "ledger.parquet"
 
 
 def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
@@ -4722,9 +6175,81 @@ def _ledger_delta_files(ledger_file: Path) -> tuple[Path, ...]:
     beside the base ``ledger.parquet`` instead of rewriting it; every ledger
     reader in this module must see them or the /coverage surfaces freeze for the
     whole pull. Derived from *ledger_file* (``<dir>/deltas/*.parquet``) so no
-    ``window_ledger_store`` import edge is added. O(deltas) listing.
+    ``window_ledger_store`` import edge is added. O(deltas) listing — this probe
+    runs on EVERY poll (it is how a stamp move is detected), so it is sorted by
+    the NAME string (DEC-WINDOWS-MIDPULL-FLOOR-001): for same-directory entries
+    that is order-identical to whole-``Path`` ordering on this POSIX-only lake
+    (one shared parent; the zero-padded ``time_ns-pid`` names carry no case),
+    while skipping ``Path.__lt__``'s per-comparison part-normalisation — the
+    measured hot term of a warm poll at a multi-hour pull's hundreds of pending
+    deltas. A listing OSError (a wedged volume — EIO and friends) degrades to
+    ``()`` after the latched stat-outage WARN
+    (DEC-WINDOWS-STAT-GUARD-LATCH-001), never a raise → 500.
     """
-    return tuple(sorted((ledger_file.parent / _LEDGER_DELTAS_DIRNAME).glob("*.parquet")))
+    directory = ledger_file.parent / _LEDGER_DELTAS_DIRNAME
+    try:
+        files = tuple(sorted(directory.glob("*.parquet"), key=lambda f: f.name))
+    except OSError as exc:
+        _note_ledger_stat_outcome(source="deltas", degraded=True, path=directory, error=str(exc))
+        return ()
+    _note_ledger_stat_outcome(source="deltas", degraded=False, path=directory)
+    return files
+
+
+#: One-per-outage-flip latch for the ledger stat-degrade WARN
+#: (DEC-WINDOWS-STAT-GUARD-LATCH-001): the ledger surfaces poll every ~4 s,
+#: so an unlatched WARN per stat attempt would storm the log for the whole
+#: outage. Keyed PER STAT SOURCE (``"base"`` = the ledger-file stat,
+#: ``"deltas"`` = the deltas-dir listing — the two independent probes ONE
+#: ``_ledger_cache_stamp`` poll runs back-to-back): the prior shared bool let
+#: a persistently-faulty deltas dir beside a HEALTHY base flip the latch on
+#: EVERY poll (the healthy base reset it, the deltas fault re-armed it) — a
+#: WARN+INFO pair per poll, exactly the storm the latch exists to prevent
+#: (review fold on DEC-CACHE-SERVE-LAST-KNOWN-001's batch). Each source now
+#: flips independently. Plain module dict — a rare race costs at most one
+#: duplicate log line, never a wrong verdict.
+_LEDGER_STAT_DEGRADED: dict[str, bool] = {}
+
+
+def _note_ledger_stat_outcome(
+    *, source: str, degraded: bool, path: Path, error: str | None = None
+) -> None:
+    """Flip *source*'s stat-outage latch, logging ONCE per flip (never per poll)."""
+    prior = _LEDGER_STAT_DEGRADED.get(source, False)
+    if degraded and not prior:
+        _LEDGER_STAT_DEGRADED[source] = True
+        _LOG.warning("db.ledger_stat_degraded", source=source, path=path.as_posix(), error=error)
+    elif not degraded and prior:
+        _LEDGER_STAT_DEGRADED[source] = False
+        _LOG.info("db.ledger_stat_recovered", source=source, path=path.as_posix())
+
+
+def _ledger_base_stat(ledger_file: Path) -> tuple[int, bool | None]:
+    """One guarded ``stat`` of the ledger base → ``(mtime_ns, present)``.
+
+    DEC-WINDOWS-STAT-GUARD-LATCH-001 — the OSError-classed replacement for the
+    bare ``Path.is_file()`` / ``FileNotFoundError``-only stats that made a
+    transient EBADF/ELOOP render a SILENT empty grid (pathlib swallows those
+    errnos into ``False`` with zero logs) and an EIO raise a route 500.
+    ``present`` is a three-state verdict: ``True`` (regular stat succeeded),
+    ``False`` (DEFINITIVELY absent — ``FileNotFoundError``/
+    ``NotADirectoryError``), or ``None`` (a stat OUTAGE — any other
+    ``OSError``: EIO/EBADF/ELOOP/…, logged through the one-per-outage-flip
+    :func:`_note_ledger_stat_outcome` latch, NAMED never silent). Both
+    non-``True`` arms stamp ``mtime_ns=0`` (the established absent-base
+    token), so a healthy↔outage flip moves the cache generation and the next
+    healthy poll recomputes — never a latched stale entry.
+    """
+    try:
+        st = ledger_file.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        _note_ledger_stat_outcome(source="base", degraded=False, path=ledger_file)
+        return (0, False)
+    except OSError as exc:
+        _note_ledger_stat_outcome(source="base", degraded=True, path=ledger_file, error=str(exc))
+        return (0, None)
+    _note_ledger_stat_outcome(source="base", degraded=False, path=ledger_file)
+    return (st.st_mtime_ns, True)
 
 
 def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
@@ -4733,12 +6258,12 @@ def _ledger_cache_stamp(ledger_file: Path) -> tuple[int, tuple[str, ...]]:
     ``(base mtime_ns, delta filenames)``: a full save moves the base mtime; a
     delta append/prune changes the (immutable-once-written) delta name set — so
     any flush shape invalidates. A missing base (a first pull's mid-flight
-    delta-only checkpoint) stamps ``0``, never raises.
+    delta-only checkpoint) stamps ``0``, never raises; a stat OUTAGE
+    (EIO/EBADF/ELOOP — previously an unguarded raise → 500 through
+    ``_ledger_records_stamped``) ALSO stamps ``0`` after the latched WARN
+    (:func:`_ledger_base_stat`, DEC-WINDOWS-STAT-GUARD-LATCH-001).
     """
-    try:
-        base_mtime = ledger_file.stat().st_mtime_ns
-    except FileNotFoundError:
-        base_mtime = 0
+    base_mtime, _present = _ledger_base_stat(ledger_file)
     return (base_mtime, tuple(f.name for f in _ledger_delta_files(ledger_file)))
 
 
@@ -4811,12 +6336,15 @@ def _ledger_scan_source(ledger_file: Path) -> _LedgerScanSource:
     the deltas order among themselves (one code path, live-verified).
     """
     deltas = _ledger_delta_files(ledger_file)  # the ONE listing this call performs
-    try:
-        base_mtime = ledger_file.stat().st_mtime_ns
-        base_present = True
-    except FileNotFoundError:
-        base_mtime = 0
-        base_present = False
+    # OSError-classed stat (DEC-WINDOWS-STAT-GUARD-LATCH-001): a definite
+    # absence (False) excludes the base from the fold list as before; a stat
+    # OUTAGE (None — EIO/EBADF/ELOOP) keeps the base IN the list — excluding a
+    # file that exists would present a delta-only view as truth (a fabricated
+    # partial ledger), while including it lets the READ decide: an unreadable
+    # base surfaces as a duckdb error into the existing retry/legacy-fold
+    # degrade ladders, never a silent wrong grid.
+    base_mtime, present = _ledger_base_stat(ledger_file)
+    base_present = present is not False
     token = _stamp_token_text(base_mtime, tuple(f.name for f in deltas))
     base = ledger_file.as_posix()
     if not deltas:
@@ -4843,8 +6371,8 @@ def _ledger_records_stamped(lake_root: Path) -> tuple[int, tuple[Any, ...]]:
     generation the records were actually COMPUTED at — the cached value EMBEDS
     its own epoch, so an adaptive-floor STALE serve (which returns the PRIOR
     entry verbatim) hands the caller the OLD generation, never the fresh one.
-    The derived key families (``ledger-rows`` / ``spot-rollup``) MUST stamp
-    their projections with THIS served generation: a projection built from
+    The derived cached key family (``spot-rollup``) MUST stamp
+    its projection with THIS served generation: a projection built from
     floor-stale records is then cached generation-STALE itself and recomputes
     once the records floor passes AND its OWN #920 floor permits (a derived
     entry ages under its own floor after the records refresh — the two floors
@@ -4883,7 +6411,7 @@ def _ledger_records_cached(lake_root: Path) -> tuple[Any, ...]:
 
 
 def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
-    """The /db window-ledger grid's row tuples, parsed ONCE per ledger stamp.
+    """The WHOLE window-ledger row projection, parsed ONCE per ledger stamp.
 
     DEC-SUSPICION-SWEEP-FIXES-001 (D3): the ``/api/v1/db/window-ledger`` route
     previously ran an UNCACHED ``load_window_ledger(...).to_rows()`` — a full
@@ -4891,53 +6419,115 @@ def window_ledger_rows_cached(lake_root: Path) -> tuple[tuple[Any, ...], ...]:
     pull holds ~841k rows, the measured shape behind :data:`WINDOW_ROWS_CAP`) on
     EVERY paging click. This helper routes the read through the SAME stamp-keyed
     ``_ledger_records_cached`` single parse the other ledger readers share, then
-    memoises the row projection (the canonical
+    builds the row projection (the canonical
     :func:`~brutex.data.window_ledger.ledger_record_row` per record — byte-equal
-    to ``WindowLedger.to_rows`` by construction, ONE source of the shape) as a
-    SEPARATE key family (``ledger-rows|<path>``) on THE shared
-    :data:`_LEDGER_READ_CACHE` (DEC-LEDGER-DELTA-O-PAGE-001) — a grid poll never
-    rebuilds the O(rows) tuple projection either. A paging click within one
-    ledger stamp is an O(1) cache handoff; the composite stamp token (base mtime
-    PLUS the pending delta name set, DEC-LEDGER-DELTA-FLUSH-001) re-keys it on a
-    full save OR a mid-pull delta append. A lake with no ledger Parquet AND no
-    pending deltas returns ``()`` — the same empty grid the uncached read
-    produced; a base-less DELTA-ONLY lake (a first pull's mid-flight checkpoint)
-    now renders its live rows like every other ledger reader (the fixed
-    base-less inconsistency — ``_ledger_records_cached`` always read it, this
-    projection returned ``()``). The projection is stamped with the SERVED
-    records generation (:func:`_ledger_records_stamped` — never the fresh stamp
-    a floor-stale records serve did not reach), so rows built from floor-stale
-    records stay generation-stale and recompute once the records floor passes
-    and this entry's own floor permits — never latched (the fix-round latch
-    defect, Golden Rule #1).
-    HONEST envelope (Golden Rule #10): the first read per stamp is still O(rows)
-    (parse + projection), and staleness after a stamp move is TWO-phase — the
-    records adaptive floor (``min(max(2 s, the parse's own duration), 120 s)``)
-    serves the prior rows first, and once it passes this ``ledger-rows`` entry
-    serves stale under its OWN #920 floor (``min(max(2 s, the projection's own
-    duration), 120 s)``), so the two floors COMPOSE: worst-case staleness =
-    records floor + rows floor, EACH capped at 120 s (possibly spanning several
-    ≥2 s delta flushes — a time bound, never a stamp-count bound). EVERY stale
-    serve is logged (``movers_cache.stale_served``) on the key that actually
-    served it — ``ledger-records`` in the first phase, ``ledger-rows`` in the
-    second; only the REPEAT read is O(1) — true O(page) needs a write-time
-    manifest, NOT claimed (the #867/#1025 envelope).
+    to ``WindowLedger.to_rows`` by construction, ONE source of the shape)
+    ON DEMAND. RESIDENCY (DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3): the
+    projection is NO LONGER cached — the retired ``ledger-rows|<path>`` family
+    held a SECOND whole-ledger per-row payload beside the records family
+    (~1.0 KB/row of tracked bytes EACH, measured — ~0.8 GB apiece at the
+    production 841k-row ledger), so the shared cache now retains exactly ONE
+    per-row representation per lake and the transient projection's leaf objects
+    are SHARED with the resident records (tuple shells only, garbage after the
+    caller drops them). The ``/db`` grid route rides the O(page)
+    :func:`window_ledger_rows_page` instead; this whole-projection surface is
+    kept for parity/compat consumers with its exact historical output. A lake
+    with no ledger Parquet AND no pending deltas returns ``()`` — the same
+    empty grid the uncached read produced; a base-less DELTA-ONLY lake (a first
+    pull's mid-flight checkpoint) renders its live rows like every other ledger
+    reader.
+    HONEST envelope (Golden Rule #10): EVERY call now pays the O(rows) tuple
+    projection (the parse itself stays one-per-stamp behind the records cache)
+    — callers that only need a page must use :func:`window_ledger_rows_page`.
+    Staleness is exactly the records serve, SINGLE-phase since fix 3 (the
+    projection has no cache entry, so no second #920 floor exists): a stamp
+    move within the records adaptive floor (``min(max(2 s, the parse's own
+    duration), 120 s)``) serves rows built from the prior records — possibly
+    spanning several ≥2 s delta flushes (a time bound, never a stamp-count
+    bound), logged (``movers_cache.stale_served``) on the ``ledger-records``
+    key that served it — and the first read past the floor projects the
+    on-disk truth immediately (no rows-floor lag to compose); true O(page)
+    totals need a write-time manifest, NOT claimed (the #867/#1025 envelope).
     """
     from brutex.data.window_ledger import ledger_record_row
     from brutex.data.window_ledger_store import ledger_path
 
     path = ledger_path(lake_root)
-    if not path.is_file() and not _ledger_delta_files(path):
+    # OSError-classed presence gate (DEC-WINDOWS-STAT-GUARD-LATCH-001): the
+    # prior bare ``path.is_file()`` swallowed a transient EBADF/ELOOP into
+    # ``False`` — a lake that HAS a ledger rendered a SILENT empty grid
+    # (total=0, zero logs) — and RAISED on EIO → a route 500. Now: a
+    # DEFINITIVELY absent base (+ no deltas) keeps the honest empty grid; a
+    # stat OUTAGE proceeds to the read attempt (the stat glitch may be
+    # transient while the read works), NAMED by the latched
+    # ``db.ledger_stat_degraded`` WARN — never silent.
+    _mtime, present = _ledger_base_stat(path)
+    if present is False and not _ledger_delta_files(path):
         return ()
-    # The records read runs FIRST (O(1) on a hit) so the projection is stamped
-    # with the generation the records were ACTUALLY served at — the compute
-    # closes over that exact snapshot, never re-reading under a fresher stamp.
-    generation, records = _ledger_records_stamped(lake_root)
-    return _LEDGER_READ_CACHE.get_or_compute(
-        f"ledger-rows|{path.as_posix()}",
-        generation=generation,
-        compute=lambda: tuple(ledger_record_row(r) for r in records),
-    )
+    try:
+        # The records read is the ONE cached representation (fix 3 — the
+        # ledger-rows| projection family is RETIRED); the whole-projection
+        # here is rebuilt per call from that resident snapshot.
+        _generation, records = _ledger_records_stamped(lake_root)
+        return tuple(ledger_record_row(r) for r in records)
+    except movers_read_skip_errors() as exc:
+        # A wedged volume can still fail the READ itself (EIO inside
+        # ``load_window_ledger``'s own stat — its never-raises contract does
+        # not cover a raising ``Path.is_file``). Honest NAMED degrade: one
+        # WARN + an empty grid this poll — never a 500; nothing is cached
+        # (the raising compute stores nothing), so the next poll retries.
+        _LOG.warning("db.window_ledger_read_degraded", path=path.as_posix(), error=str(exc))
+        return ()
+
+
+def window_ledger_rows_page(
+    lake_root: Path, *, offset: int, limit: int
+) -> tuple[int, tuple[tuple[Any, ...], ...]]:
+    """ONE ``(total, page)`` slice of the window-ledger grid rows — O(page).
+
+    DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3 — the ``/api/v1/db/window-ledger``
+    route's read: slice the CACHED records FIRST, then project ONLY the page's
+    records through the canonical
+    :func:`~brutex.data.window_ledger.ledger_record_row` (projection is
+    per-record pure, so slice-then-project is byte-identical to the retired
+    cached whole-projection's ``rows[offset : offset + limit]``). A paging
+    click within one ledger stamp is an O(1) records-cache handoff + an
+    O(page ≤ *limit*) tuple projection — never a second resident whole-ledger
+    rows family (the residency this fix collapses) and never an O(rows)
+    re-projection per click. *offset* is clamped ``>= 0`` via the COMMON
+    :func:`clamp_offset` (the route validates ``ge=0`` anyway); an offset past
+    the end is a clean empty page with the real *total* (Python slice
+    semantics, exactly the route's historical behaviour). A lake with no
+    ledger Parquet AND no pending deltas returns ``(0, ())``.
+    HONEST envelope (Golden Rule #10): the FIRST read per stamp still pays one
+    O(rows) parse (the records cache's documented cost); staleness is exactly
+    the records serve (see :func:`window_ledger_rows_cached` — single-phase,
+    logged on the ``ledger-records`` key).
+    """
+    from brutex.data.window_ledger import ledger_record_row
+
+    # Path derived from the pinned module-local constants (the #1431 fast-path
+    # pattern — see :data:`_LEDGER_TABLE_DIRNAME`): even a FUNCTION-local
+    # ``window_ledger_store`` import participates in the
+    # ``window_ledger_store → coverage_reconcile → db_view`` cycle CodeQL
+    # ``py/cyclic-import`` flags; the constants are test-pinned equal to
+    # ``window_ledger_store.LEDGER_DIRNAME`` / ``LEDGER_FILENAME``.
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
+    # The SAME OSError-classed presence gate + named read degrade as
+    # :func:`window_ledger_rows_cached` (DEC-WINDOWS-STAT-GUARD-LATCH-001,
+    # merge-composed — the /db grid route rides THIS function, so the #1386
+    # hardening must cover it too).
+    _mtime, present = _ledger_base_stat(path)
+    if present is False and not _ledger_delta_files(path):
+        return (0, ())
+    try:
+        _generation, records = _ledger_records_stamped(lake_root)
+    except movers_read_skip_errors() as exc:
+        _LOG.warning("db.window_ledger_read_degraded", path=path.as_posix(), error=str(exc))
+        return (0, ())
+    safe_offset = clamp_offset(offset)
+    page = records[safe_offset : safe_offset + limit]
+    return (len(records), tuple(ledger_record_row(r) for r in page))
 
 
 def _window_market_bucket(market: str) -> str:
@@ -5102,14 +6692,20 @@ def _ledger_stat_fields(ledger_file: Path) -> dict[str, Any]:
     return {"ledger_size": st.st_size, "ledger_mtime_ns": st.st_mtime_ns}
 
 
+_WindowCacheT = TypeVar("_WindowCacheT")
+
+
 class WindowCountsCache(Protocol):
-    """Generation-stamped cache contract for the ``/coverage/windows`` GROUP BY counts.
+    """Generation-stamped cache contract for the ``/coverage/windows`` ledger reads.
 
     Structural (``Protocol``) so this module never hard-imports a concrete cache — the
     dashboard injects the COMMON generation-stamped LRU
     (:class:`~brutex.dashboard.movers_cache.MoversSnapshotCache`, reused per CLAUDE.md
     §11, DEC-COVERAGE-WINDOWS-O1-001). Mirrors :class:`CandleCountCache` but memoises
-    the ``(bucketed_counts, total)`` tuple, not a bare int.
+    whole values, not a bare int: the ``(bucketed_counts, total)`` GROUP BY tuple AND
+    — since DEC-WINDOWS-MIDPULL-FLOOR-001 — the projected page-row list (the
+    ``window-page|…`` key family), hence the method-level type variable. The name is
+    kept for caller back-compat (every injector already wires this Protocol).
     """
 
     def get_or_compute(
@@ -5117,9 +6713,9 @@ class WindowCountsCache(Protocol):
         key: str,
         *,
         generation: int,
-        compute: Callable[[], tuple[dict[str, dict[str, int]], int]],
-    ) -> tuple[dict[str, dict[str, int]], int]:
-        """Return *key*'s cached ``(counts, total)`` for *generation*, computing on a miss."""
+        compute: Callable[[], _WindowCacheT],
+    ) -> _WindowCacheT:
+        """Return *key*'s cached value for *generation*, computing on a miss."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
@@ -5208,6 +6804,302 @@ def _window_counts_since(
         [*source.params, since_iso],
     )
     return _fold_status_counts(cursor.fetchall())
+
+
+#: The canonical 16-column ledger row projection, in ``LedgerRowTuple`` order
+#: (DEC-DB-LATENCY-HARDENING-001). MUST equal ``window_ledger_store._COLUMNS``
+#: — pinned by test, not imported (the :data:`_WINDOW_KEY_COLUMNS` precedent:
+#: this module deliberately carries no module-level ``window_ledger_store``
+#: edge — CodeQL ``py/cyclic-import``).
+_LEDGER_ROW_COLUMNS: Final[tuple[str, ...]] = (
+    *_WINDOW_KEY_COLUMNS,
+    "status",
+    "bars",
+    "attempts",
+    "last_error",
+    "first_seen_at",
+    "last_attempt_at",
+    "empty_streak",
+    "in_pull_fetches",
+    "bars_net_new",
+    "empty_retries",
+    "transient_retries",
+)
+
+
+def _ledger_page_row(raw: Sequence[Any]) -> tuple[Any, ...]:
+    """Coerce ONE DuckDB ledger page row to the canonical ``LedgerRowTuple`` shape.
+
+    DEC-DB-LATENCY-HARDENING-001: the EXACT per-cell coercion the legacy Python
+    parse applies (``window_ledger_store._rows_to_records`` — ``str``/``int`` on
+    the required cells, ``None``-passthrough on the optional trio), so the fast
+    path's tuples are byte-equal to :func:`window_ledger_rows_cached`'s. A
+    ``None`` in ANY column the legacy parse either requires or DERIVES
+    (``empty_streak`` / ``in_pull_fetches`` carry legacy per-row derivation
+    rules this projection deliberately does not duplicate) raises ``ValueError``
+    so :func:`query_window_ledger_page` defers the WHOLE request to the
+    byte-identical legacy parse — never a divergent cell (Golden Rule #1).
+    """
+    (
+        market,
+        security_id,
+        interval,
+        window_start,
+        window_end,
+        status,
+        bars,
+        attempts,
+        last_error,
+        first_seen_at,
+        last_attempt_at,
+        empty_streak,
+        in_pull_fetches,
+        bars_net_new,
+        empty_retries,
+        transient_retries,
+    ) = raw
+    required = (
+        market,
+        security_id,
+        interval,
+        window_start,
+        window_end,
+        status,
+        bars,
+        attempts,
+        first_seen_at,
+        empty_streak,
+        in_pull_fetches,
+    )
+    if any(cell is None for cell in required):
+        raise ValueError(
+            "window-ledger fast path: NULL in a required/derivable column — "
+            "defer to the legacy Python parse"
+        )
+    return (
+        str(market),
+        str(security_id),
+        str(interval),
+        str(window_start),
+        str(window_end),
+        str(status),
+        int(bars),
+        int(attempts),
+        None if last_error is None else str(last_error),
+        str(first_seen_at),
+        None if last_attempt_at is None else str(last_attempt_at),
+        int(empty_streak),
+        int(in_pull_fetches),
+        None if bars_net_new is None else int(bars_net_new),
+        None if empty_retries is None else int(empty_retries),
+        None if transient_retries is None else int(transient_retries),
+    )
+
+
+def query_window_ledger_page(
+    conn: Any,
+    lake_root: Path,
+    *,
+    limit: int,
+    offset: int,
+    count_cache: WindowCountsCache | None = None,
+    page_cache: WindowCountsCache | None = None,
+    retry_sleep: Callable[[float], None] | None = None,
+) -> tuple[tuple[tuple[Any, ...], ...], int]:
+    """ONE ``/db`` window-ledger page + the real total — DuckDB-first, legacy-safe.
+
+    DEC-DB-LATENCY-HARDENING-001 (MIGRATION.md #1719): the ``/api/v1/db/window-ledger``
+    route previously served a 100-row page by paying ONE full
+    ``load_window_ledger`` Python parse per ledger stamp move (measured
+    7,177.5 ms of a 7,628 ms request at 400k rows — and the stamp moves
+    repeatedly MID-PULL, so the "first read per stamp" cost recurred every few
+    seconds). The page is now a DuckDB ``LIMIT``/``OFFSET`` projection over the
+    SAME assembled :func:`_ledger_scan_source` the ``/coverage/windows`` fast
+    paths scan (steady state = the bare ``read_parquet(?)`` literal; mid-pull =
+    the :func:`~brutex.data.lake_read.dedup_latest_source_sql` latest-wins
+    base+delta fold — provably the ``load_window_ledger`` fold), ordered by the
+    5-part window key exactly as :meth:`WindowLedger.records` sorts (DuckDB's
+    binary VARCHAR collation == Python's code-point ``str`` order over the
+    UTF-8 key columns; a NULL in a KEY column would diverge — DuckDB orders
+    NULLS LAST while the legacy parse coerces ``str(None)`` and sorts it
+    lexicographically — but that shape is writer-UNREACHABLE today: the key
+    columns are ``pa.string()`` cells rendered from non-null ``WindowKey``
+    fields, and a page CONTAINING such a row defers via the NULL-cell guard
+    anyway), with the total from ONE ``COUNT(*)`` over the fold.
+    Both are memoised on the injected caches (``wledger-total|…`` /
+    ``wledger-page|…`` key families) at the composite-stamp-token generation —
+    a repeat click within one ledger stamp is an O(1) handoff.
+
+    BYTE-PARITY + degrade law (the fast-equals-legacy pin,
+    ``tests/unit/test_dashboard_db_view_window_ledger_page.py``): the projected
+    tuples are cell-for-cell equal to ``window_ledger_rows_cached``'s slice. A
+    shape the legacy parse handles with DERIVATION rules this query cannot
+    reproduce — a legacy pre-R1 base missing any of the 5 optional columns
+    (probed via one metadata-only ``LIMIT 0`` describe over the BASE file, the
+    :func:`_build_window_payload_duckdb` precedent), or a NULL in a
+    required/derivable cell — defers the WHOLE request to the byte-identical
+    legacy path. A transient ``duckdb.Error`` (the torn-read replace race)
+    retries ONCE after :data:`_DUCKDB_RETRY_DELAY_S`; a second failure (e.g. a
+    persistently malformed delta, which the multi-file SQL read cannot skip
+    file-granularly but ``load_window_ledger`` can) degrades to the legacy
+    parse too — never a 500, never a divergent row. ``conn=None`` (no DuckDB
+    connection wired) is the legacy path outright.
+
+    HONEST envelope (Golden Rule #10): the page render is O(page) but each
+    FRESH-stamp query is ONE O(total physical rows + pending delta footers)
+    columnar scan (the ``query_candles`` envelope — NOT literal O(page); true
+    O(page) needs a write-time row manifest, NOT claimed); what this fix
+    removes is the O(rows) PYTHON record fold + full-tuple projection per
+    stamp (the measured 7.2–8.8 s term), replaced by the columnar scan the
+    coverage paths already pay. Repeat clicks within a stamp are O(1) hits.
+    """
+    # Path derived from the pinned module-local constants — deliberately NO
+    # ``window_ledger_store`` import, not even function-local: the lazy import
+    # still participates in the ``window_ledger_store → coverage_reconcile →
+    # db_view`` cycle CodeQL ``py/cyclic-import`` flags (the
+    # ``phase_progress_payload`` no-import-edge precedent).
+    path = lake_root / _LEDGER_TABLE_DIRNAME / _LEDGER_TABLE_FILENAME
+    if not path.is_file() and not _ledger_delta_files(path):
+        return (), 0
+
+    def _fast() -> tuple[tuple[tuple[Any, ...], ...], int]:
+        """One fast-path attempt — re-assembles the scan source per attempt."""
+        # Re-assembled per attempt (fresh delta listing), so the retry below
+        # self-heals the save-time flock prune race (DEC-LEDGER-DELTA-O-PAGE-001).
+        source = _ledger_scan_source(path)
+        ledger_glob = path.as_posix()
+        probed = False
+
+        def _ensure_full_schema(c: Any) -> None:
+            """Legacy-shape probe — LAZY, so a warm (fully-cached) click runs
+            ZERO SQL. The _build_window_payload_duckdb precedent, but STRICTER:
+            the /db grid projects ALL 16 columns, so ANY absent optional column
+            defers to the legacy parse, whose per-row derivation rules this
+            query deliberately does not duplicate. Metadata-only LIMIT 0
+            describe over the BASE file ONLY — never the union_by_name'd delta
+            list, whose NULL-fill would mask a legacy base's missing columns.
+            Base-ABSENT (a first pull's delta-only checkpoint) skips it: every
+            delta is written by `append_ledger_delta` with the full current
+            schema (writer-pinned). Run at most once per fresh attempt; *c* is
+            the calling compute's statement-isolated cursor (`_compute_cursor`
+            — the flagged caches may run a compute on a background revalidator,
+            concurrent with the request thread's statements; a production
+            store conn isolates via `_LockedReadConn.cursor()`), closed by the
+            compute's `finally` (`_close_cursor`) so the legacy-shape raise
+            below — thrown AFTER a description-only read — can never strand a
+            held read-lock view (round-1 BLOCKER hygiene)."""
+            nonlocal probed
+            if probed or not path.is_file():
+                return
+            available = {
+                str(col[0])
+                for col in (
+                    c.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
+                    or []
+                )
+            }
+            if not set(_LEDGER_ROW_COLUMNS).issubset(available):
+                raise ValueError("legacy-shape ledger Parquet — defer to the Python parse path")
+            probed = True
+
+        generation = revision_generation(source.stamp_token)
+        select_sql = ", ".join(f'"{name}"' for name in _LEDGER_ROW_COLUMNS)
+        order_sql = ", ".join(f'"{name}"' for name in _WINDOW_KEY_COLUMNS)
+
+        def _total() -> int:
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # COUNT(*) over the fold = the number of DISTINCT window keys (the
+                # QUALIFY keeps exactly one row per key; a steady-state base holds
+                # unique keys by construction — save writes the folded to_rows()).
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {source.from_sql}",  # noqa: S608  # nosec B608 — from_sql is a trusted module-built constant; all values bound
+                    list(source.params),
+                ).fetchone()
+                return int(row[0]) if row else 0
+            finally:
+                # The legacy-shape probe raises AFTER a description-only read —
+                # on a `_LockedReadConn` view that hold must be released here or
+                # the store read lock leaks forever (round-1 BLOCKER hygiene).
+                _close_cursor(c, conn)
+
+        def _page() -> tuple[tuple[Any, ...], ...]:
+            c = _compute_cursor(conn)
+            try:
+                _ensure_full_schema(c)
+                # ORDER/LIMIT apply OUTSIDE the fold subquery (ghost-row safe); the
+                # source params bind FIRST (the subquery precedes them in the text).
+                cursor = c.execute(
+                    f"SELECT {select_sql} FROM {source.from_sql} "  # noqa: S608  # nosec B608 — trusted module-built fragments; page bounds bound
+                    f"ORDER BY {order_sql} LIMIT ? OFFSET ?",
+                    [*source.params, limit, offset],
+                )
+                return tuple(_ledger_page_row(raw) for raw in cursor.fetchall())
+            finally:
+                _close_cursor(c, conn)
+
+        if count_cache is None:
+            total = _total()
+        else:
+            total = count_cache.get_or_compute(
+                f"wledger-total|{ledger_glob}", generation=generation, compute=_total
+            )
+        if page_cache is None:
+            rows = _page()
+        else:
+            # The page key folds (limit, offset) via one tuple repr (the
+            # window-page precedent — unambiguous, no bare `|` joins).
+            rows = page_cache.get_or_compute(
+                f"wledger-page|{ledger_glob}|{(limit, offset)!r}",
+                generation=generation,
+                compute=_page,
+            )
+        return rows, total
+
+    if conn is not None:
+        try:
+            return _fast()
+        except ValueError as exc:
+            # Legacy shape / NULL-in-derivable-cell — the legacy parse owns the
+            # derivation rules; defer the whole request (byte-identical output).
+            _LOG.warning(
+                "window_ledger_page.fallback",
+                fallback="legacy_shape",
+                error=str(exc),
+                **_ledger_stat_fields(path),
+            )
+        except duckdb.Error as exc:
+            # Torn read (reader-side multi-open race vs the atomic writer) —
+            # retry ONCE, then degrade to the legacy parse (which skips a
+            # persistently malformed delta file-granularly).
+            _LOG.warning(
+                "window_ledger_page.duckdb_retry",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                **_ledger_stat_fields(path),
+            )
+            sleeper = _default_sleep if retry_sleep is None else retry_sleep
+            sleeper(_DUCKDB_RETRY_DELAY_S)
+            try:
+                return _fast()
+            except (duckdb.Error, ValueError) as exc2:
+                _LOG.warning(
+                    "window_ledger_page.duckdb_fallback",
+                    fallback="rows",
+                    error=str(exc2),
+                    error_type=type(exc2).__name__,
+                    **_ledger_stat_fields(path),
+                )
+    # LEGACY degrade — byte-identical rows to the pre-fix route (ONE row-shape
+    # source, ``ledger_record_row``): the stamp-cached records sliced FIRST,
+    # then ONLY the page projected (``window_ledger_rows_page`` —
+    # DEC-MEMORY-FOOTPRINT-HARDENING-001 fix 3 merge-compose: the degrade arm
+    # no longer pays the O(rows) whole-tuple projection per request). Serves
+    # the no-conn caller, the legacy-shape ledger, and the double-failure
+    # torn-read/bad-delta arm.
+    total, page = window_ledger_rows_page(lake_root, offset=offset, limit=limit)
+    return page, total
 
 
 #: The three window-phase buckets, in pull order (spot → futures → options), the
@@ -5341,11 +7233,27 @@ def phase_progress_payload(
     *count_cache* is ``None`` the counts are computed directly (used by the
     pure-fast-path tests); the production route always injects the cache. O(1) on a
     cache hit; on a miss it runs ONE ``GROUP BY market, status``
-    (:func:`_window_counts_total`). The cache key rides the composite ledger stamp
-    token at a FIXED ``generation=0`` (DEC-LEDGER-DELTA-O-PAGE-001 — mid-pull
-    ``mark_dirty`` fires per window tick, far more often than the ≥2 s ledger
-    flush, so generation-keying would miss every poll; the stamp token is the
-    COMPLETE content signal — never stale, Golden Rule #1). The *generation*
+    (:func:`_window_counts_total`). The cache key is the STABLE
+    ``window-counts|<path>`` family stamped at a generation DIGESTED from the
+    composite ledger stamp token (:func:`~brutex.dashboard.movers_cache.revision_generation`
+    — DEC-WINDOWS-MIDPULL-FLOOR-001, restructured from the prior
+    stamp-token-IN-key / fixed-``generation=0`` shape of
+    DEC-LEDGER-DELTA-O-PAGE-001 so the injected cache's opt-in #920 adaptive
+    floor can actually engage: a floor needs a generation MISMATCH on one
+    stable key, which a stamp-in-key layout structurally never produces). The
+    stamp token stays the COMPLETE content signal — mid-pull ``mark_dirty``
+    fires per window tick, far more often than the ≥2 s ledger flush, and a
+    full save / delta append / cross-process CLI write each move the token →
+    the generation (never stale past the floor, Golden Rule #1). The
+    production cache (``app.py``, built by :func:`make_window_payload_caches`)
+    rides the SAME probe/floor shape as the sibling :data:`_LEDGER_READ_CACHE`
+    — the constant-``True`` :func:`_ledger_stamp_moved` probe + the 120 s
+    :data:`_LEDGER_READ_FLOOR_CAP_S` cap — so ANY stamp churn (an in-process
+    pull's delta flush AND a cross-process CLI pull's) may serve the PRIOR
+    stamp's counts for at most ``min(max(2 s, the count's own compute
+    duration), 120 s)`` per the #920 ≤50%-duty law, every stale serve logged
+    ``movers_cache.stale_served`` — bounded + visible, never silent; steady
+    state (immobile stamp) never reaches the floor branch. The *generation*
     parameter is retained for signature compatibility.
 
     **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001, supersedes the O(records)
@@ -5389,15 +7297,26 @@ def phase_progress_payload(
         if count_cache is None:
             counts, _total = _window_counts_total(conn, source)
         else:
-            # The composite stamp token keys the cache (base mtime + delta name
-            # set), so a CROSS-PROCESS write (a CLI `brutex fetch` while the
-            # dashboard is open) AND a mid-pull delta append both invalidate —
-            # the SAME key `_build_window_payload_duckdb` uses, so the two
-            # routes share one warm entry.
+            # STABLE key + stamp-digest generation (DEC-WINDOWS-MIDPULL-FLOOR-001):
+            # the composite stamp token (base mtime + delta name set) still carries
+            # the COMPLETE content signal — a CROSS-PROCESS write (a CLI `brutex
+            # fetch` while the dashboard is open) AND a mid-pull delta append both
+            # move the generation — but riding it as the GENERATION of one stable
+            # key (instead of inside the key) lets the injected cache's opt-in
+            # #920 adaptive floor throttle mid-pull recomputes. The SAME key
+            # `_build_window_payload_duckdb` uses, so the two routes share one
+            # warm entry.
+            # The compute runs on a statement-isolated cursor, closed after
+            # (`_isolated_counts_total`): the flagged cache may execute it on a
+            # background revalidator, concurrent with this thread's own
+            # statements — and a production store conn's isolation rides
+            # `_LockedReadConn.cursor()` (a fresh per-compute view; the shared
+            # single-thread view corrupted its hold flag cross-thread and
+            # leaked the store read lock — round-1 BLOCKER).
             counts, _total = count_cache.get_or_compute(
-                f"window-counts|{ledger_file.as_posix()}|{source.stamp_token}",
-                generation=0,
-                compute=lambda: _window_counts_total(conn, source),
+                f"window-counts|{ledger_file.as_posix()}",
+                generation=revision_generation(source.stamp_token),
+                compute=lambda: _isolated_counts_total(conn, source),
             )
         return counts
 
@@ -5450,6 +7369,31 @@ def phase_progress_payload(
     return build_phase_progress(counts, current_phase=current_phase)
 
 
+def _window_symbol_map_token(symbol_for_id: Mapping[str, str] | None) -> str:
+    """Digest the id→symbol display map into a stable page-cache key segment.
+
+    DEC-WINDOWS-MIDPULL-FLOOR-001: the cached page ROWS embed the decoded option
+    symbols (:func:`_window_row` via *symbol_for_id*), so the page key must move
+    when the map's CONTENT moves (an instrument-master reload mid-session) or a
+    cached page would keep serving the old display names — a stale illusion
+    (Golden Rule #1). Pure + deterministic: an order-independent SHA-256 over the
+    sorted items, ``"0"`` for ``None``/empty (the two key identically — both
+    project raw coordinates). O(map) per call (~750 entries ≈ tens of µs —
+    dwarfed by the O(instruments) store read that builds the map each request).
+    ``\\x1f``/``\\x1e`` separators make ``(key, value)`` pair boundaries
+    unambiguous.
+    """
+    if not symbol_for_id:
+        return "0"
+    digest = hashlib.sha256()
+    for key in sorted(symbol_for_id):
+        digest.update(key.encode("utf-8"))
+        digest.update(b"\x1f")
+        digest.update(symbol_for_id[key].encode("utf-8"))
+        digest.update(b"\x1e")
+    return digest.hexdigest()[:16]
+
+
 def _build_window_payload_duckdb(
     conn: Any,
     ledger_file: Path,
@@ -5462,8 +7406,22 @@ def _build_window_payload_duckdb(
     count_cache: WindowCountsCache | None,
     generation: int,
     since: str | None = None,
+    page_cache: WindowCountsCache | None = None,
 ) -> dict[str, Any]:
-    """O(page)-on-repeat ``/coverage/windows`` payload via DuckDB (DEC-COVERAGE-WINDOWS-O1-001).
+    """The ``/coverage/windows`` payload via DuckDB — stamp-cached counts AND page rows.
+
+    TRUE envelope first (Golden Rule #10 — DEC-WINDOWS-MIDPULL-FLOOR-001
+    corrects the prior "O(page)-on-repeat" headline, which was stale for the
+    mid-pull ACCUMULATION regime): the counts are stamp-cached
+    (:func:`_window_counts_total`, ONE ``GROUP BY`` per fresh stamp) and the row
+    PAGE is now ALSO stamp-cached (the ``window-page|…`` key family below), so a
+    repeat poll WITHIN one ledger stamp is an O(1) cache handoff for both — but
+    every FRESH stamp still pays ONE O(total physical rows + every pending delta
+    file's Parquet footer) columnar fold PER cached family, and mid-pull the
+    pending-delta count grows ~1 file/2 s until the pull-end save prunes them
+    (a multi-hour pull reaches thousands — measured 2026-07-09: the warm poll
+    grew 33 ms @ 50 deltas → 158 ms @ 400 pre-fix because the page query re-ran
+    per poll). NOT literal O(page); delta COMPACTION stays named future work.
 
     Counts come from ONE stamp-cached ``GROUP BY`` (:func:`_window_counts_total`);
     the row page is a ``WHERE``-filtered, severity-ordered ``LIMIT``/``OFFSET`` query — so
@@ -5475,25 +7433,42 @@ def _build_window_payload_duckdb(
     with within-a-status-tier rows ordered deterministically by ``(security_id,
     interval, window_start, window_end)``.
 
-    **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001):** pending ledger deltas are
-    folded latest-wins IN SQL — every query scans the ONE assembled
-    :func:`_ledger_scan_source` (the steady-state ``read_parquet(?)`` literal
-    when no deltas exist — SQL text byte-identical, spy-pinned — else the
-    :func:`~brutex.data.lake_read.dedup_latest_source_sql` fold subquery), and
-    the count-cache keys ride the composite stamp token at a FIXED
-    ``generation=0`` (mid-pull ``mark_dirty`` fires per window tick, far more
-    often than the ≥2 s ledger flush, so generation-keying would miss every
-    poll; the stamp token is the COMPLETE content signal — a full save moves the
-    base mtime, an append/prune moves the delta name set, a CLI cross-process
-    write moves both — never stale, Golden Rule #1). The *generation* parameter
-    is retained for signature compatibility. HONEST envelope (Golden Rule #10):
-    mid-pull, the folded source is ONE O(total physical rows incl. every delta
-    file's footer) columnar hash-partition per fresh stamp (the ≥2 s flush
-    cadence bounds stamp movement), O(1)-cached between stamps via the composite
-    stamp token; NOT literal O(page) — the same envelope ``query_candles``
-    already accepts. The O(delta-file-count) footer-open term grows over a
-    multi-hour pull until the pull-end save subsumes the deltas; delta
-    compaction is NAMED future work, not claimed.
+    **Mid-pull deltas (DEC-LEDGER-DELTA-O-PAGE-001 + DEC-WINDOWS-MIDPULL-FLOOR-001):**
+    pending ledger deltas are folded latest-wins IN SQL — every query scans the
+    ONE assembled :func:`_ledger_scan_source` (the steady-state
+    ``read_parquet(?)`` literal when no deltas exist — SQL text byte-identical,
+    spy-pinned — else the :func:`~brutex.data.lake_read.dedup_latest_source_sql`
+    fold subquery). The cache keys are STABLE per family
+    (``window-counts|<path>`` / ``window-counts-since|<path>|<since>`` /
+    ``window-page|<path>|<filters+page+symbol-map token>``) and stamped at a
+    generation DIGESTED from the composite stamp token
+    (:func:`~brutex.dashboard.movers_cache.revision_generation` — restructured
+    from the prior stamp-token-IN-key / fixed-``generation=0`` shape so the
+    injected cache's opt-in #920 adaptive floor can engage: a floor needs a
+    generation MISMATCH on one stable key). The stamp token stays the COMPLETE
+    content signal (a full save moves the base mtime, an append/prune moves the
+    delta name set, a CLI cross-process write moves both); mid-pull
+    ``mark_dirty`` fires per window tick, far more often than the ≥2 s ledger
+    flush, so the app-side write generation is deliberately NOT used here. The
+    *generation* parameter is retained for signature compatibility. The counts
+    ride the injected *count_cache*; the page rows ride the injected
+    *page_cache* — a SMALL DEDICATED instance
+    (:data:`WINDOW_PAGE_CACHE_CAPACITY`; a page entry holds up to ``min(limit,
+    WINDOW_ROWS_CAP)`` projected row-dicts, so sharing the 256-cap counts
+    instance risked GB-scale retention and page-churn eviction of the counts
+    entries). Both production instances (``app.py``, built by
+    :func:`make_window_payload_caches`) ride the SAME probe/floor shape as the
+    sibling :data:`_LEDGER_READ_CACHE` — the constant-``True``
+    :func:`_ledger_stamp_moved` probe + the 120 s
+    :data:`_LEDGER_READ_FLOOR_CAP_S` cap — so ANY stamp churn (an in-process
+    pull's delta flush AND a cross-process CLI pull's) may serve a family's
+    PRIOR-stamp entry for at most ``min(max(2 s, that family's own compute
+    duration), 120 s)`` (the #920 ≤50%-duty law), every stale serve logged
+    ``movers_cache.stale_served`` — bounded + visible, never silent; steady
+    state (immobile stamp) never reaches the floor branch. The families floor
+    independently, so one bounded-stale poll may mix counts and rows from
+    adjacent stamps (≤ one floor window apart, self-heals on the next
+    past-floor poll).
 
     *since* (DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the current pull's journal
     ``started`` wall-UTC instant, or ``None`` when no real pull-start is known.
@@ -5523,45 +7498,90 @@ def _build_window_payload_duckdb(
         # written by `append_ledger_delta` with the full 14-column schema (writer-pinned), so
         # the residual union NULL-fill is `bars_net_new`-only on a base that predates that
         # optional column — equal to the Python fold's honest ``None``, never fed to ``int()``.
-        available = {
-            str(col[0])
-            for col in (
-                conn.execute("SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]).description
-                or []
-            )
-        }
+        # ISOLATED cursor + close (DEC-DASHBOARD-PULL-CONTENTION-RESILIENCE-001
+        # deadlock fix): this description-only probe was the LAST remaining
+        # statement on the request's SHARED ``_LockedReadConn`` view — with no
+        # fetch and no close it left the store read RLock HELD by the request's
+        # worker thread at request end (pre-round-1 the later counts/page
+        # statements on the SAME shared view rebalanced it via ``execute``'s
+        # leading ``_release()``; the round-1 per-compute ``cursor()`` isolation
+        # moved them off the shared view, so nothing rebalanced), and the NEXT
+        # request dispatched to a DIFFERENT worker thread deadlocked forever on
+        # ``_lock.acquire()`` (reproduced: the CI unit-gate hang at
+        # test_windows_ledger_fast_path_through_real_connection; py-spy-traced
+        # to the instrument_store ``_LockedReadConn.execute`` acquire). The
+        # probe now follows the same ``_compute_cursor``/``_close_cursor``
+        # discipline as every other statement in this function — its view
+        # releases the lock in the ``finally`` even on the legacy-shape raise
+        # below.
+        probe = _compute_cursor(conn)
+        try:
+            available = {
+                str(col[0])
+                for col in (
+                    probe.execute(
+                        "SELECT * FROM read_parquet(?) LIMIT 0", [ledger_glob]
+                    ).description
+                    or []
+                )
+            }
+        finally:
+            _close_cursor(probe, conn)
         if not {"empty_streak", "in_pull_fetches"}.issubset(available):
             raise ValueError("legacy-shape ledger Parquet — defer to the pyarrow derive path")
     counts_since: dict[str, dict[str, int]] | None = None
+    # STATUS ALLOW-LIST (DEC-WINDOWS-MIDPULL-FLOOR-001, round-2 hardening):
+    # an unknown ?status= value matches nothing on BOTH payload paths (legacy
+    # parity), but each DISTINCT bogus value would otherwise mint a fresh
+    # page-cache key + pay a full fold — so every not-known status collapses
+    # onto ONE canonical sentinel BEFORE key minting, and the sentinel's page
+    # arm is the literal `1 = 0` (never `status = <sentinel>` — airtight even
+    # against a hypothetical stored row equal to the sentinel string).
+    wanted_status_raw = status.upper() if status else None
+    wanted_status = (
+        _UNKNOWN_WINDOW_STATUS
+        if wanted_status_raw is not None and wanted_status_raw not in _WINDOW_STATUS_ORDER
+        else wanted_status_raw
+    )
+    # STABLE keys + a stamp-digest generation (DEC-WINDOWS-MIDPULL-FLOOR-001,
+    # restructured from stamp-token-IN-key at generation=0): the composite stamp
+    # token (base mtime + the pending delta name set) still carries the COMPLETE
+    # content signal — a CROSS-PROCESS write (a CLI `brutex fetch` while the
+    # dashboard is open — which does NOT bump the dashboard's own in-process
+    # generation) AND a mid-pull delta append both move the generation, while a
+    # mark_dirty storm at an unchanged ledger never thrashes the entry — but
+    # riding it as the GENERATION of one stable key lets the injected cache's
+    # opt-in #920 adaptive floor throttle mid-pull recomputes (a floor needs a
+    # generation mismatch on the SAME key). A repeat click within one stamp
+    # stays an O(1) hit.
+    stamp_generation = revision_generation(source.stamp_token)
     if count_cache is None:
         counts, total = _window_counts_total(conn, source)
         if since is not None:
             counts_since, _since_total = _window_counts_since(conn, source, since)
     else:
-        # Key the cache on the composite stamp token (base mtime + the pending delta
-        # name set) at a FIXED generation=0 — so a CROSS-PROCESS write (a CLI `brutex
-        # fetch` while the dashboard is open — which does NOT bump the dashboard's own
-        # in-process generation) AND a mid-pull delta append both invalidate, while a
-        # mark_dirty storm at an unchanged ledger never thrashes the entry. A repeat
-        # click within one stamp stays an O(1) hit.
+        # Computes run on a statement-isolated cursor, closed after
+        # (`_isolated_counts_total`): the flagged caches may execute them on a
+        # background revalidator daemon, concurrent with this thread's own
+        # statements — a production store conn isolates via
+        # `_LockedReadConn.cursor()` (fresh per-compute view, round-1 BLOCKER).
         counts, total = count_cache.get_or_compute(
-            f"window-counts|{ledger_glob}|{source.stamp_token}",
-            generation=0,
-            compute=lambda: _window_counts_total(conn, source),
+            f"window-counts|{ledger_glob}",
+            generation=stamp_generation,
+            compute=lambda: _isolated_counts_total(conn, source),
         )
         if since is not None:
             # SAME memo pattern as the lifetime counts (REUSE, no new cache class —
             # DEC-TELEMETRY-SCOPE-BUDGET-RUNCOUNTS-001): the pull-start token joins the
             # key so a NEW pull (new journal `started`) can never be served the prior
-            # run's per-run figures even within one stamp.
-            since_key = f"window-counts-since|{ledger_glob}|{source.stamp_token}|{since}"
+            # run's per-run figures even across the LRU's retained stamps.
+            since_key = f"window-counts-since|{ledger_glob}|{since}"
             counts_since, _since_total = count_cache.get_or_compute(
                 since_key,
-                generation=0,
-                compute=lambda: _window_counts_since(conn, source, since),
+                generation=stamp_generation,
+                compute=lambda: _isolated_counts_since(conn, source, since),
             )
 
-    wanted_status = status.upper() if status else None
     valid_buckets = ("spot", "options", "futures")
     if market is None:
         buckets = list(valid_buckets)
@@ -5579,70 +7599,132 @@ def _build_window_payload_duckdb(
         # freshly-planned pull and carry no per-row info beyond their count).
         matched = sum(v for b in buckets for s, v in counts[b].items() if s != "PLANNED")
 
-    where: list[str] = []
-    where_params: list[Any] = []
-    if market == "options":
-        where.append("market = ?")
-        where_params.append(_OPTION_WINDOW_MARKET)
-    elif market == "futures":
-        where.append("market = ?")
-        where_params.append(_FUTURE_WINDOW_MARKET)
-    elif market == "spot":
-        where.append("market NOT IN (?, ?)")
-        where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
-    elif market is not None:
-        where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
-    if wanted_status:
-        where.append("status = ?")
-        where_params.append(wanted_status)
-    else:
-        where.append("status != ?")
-        where_params.append("PLANNED")
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-    order_sql = (
-        f" ORDER BY {_window_severity_order_sql()}, "
-        '"security_id", "interval", "window_start", "window_end"'
-    )
-    # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
-    # a superseded row version can never resurrect through a filter); the
-    # source params bind FIRST (the subquery precedes them in the SQL text).
-    params: list[Any] = [*source.params, *where_params, limit, offset]
-    cursor = conn.execute(
-        f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
-        params,
-    )
-    out_columns = [str(col[0]) for col in (cursor.description or [])]
     rows: list[dict[str, Any]] = []
-    for raw in cursor.fetchall():
-        # DuckDB returns native Python values (str for the string columns, int for the
-        # int64 ones, None for a null) — pass them straight to the shared `_window_row`
-        # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
-        # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
-        # already str()/None-handle each field). This page always carries
-        # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
-        # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
-        # delta-only scan reads files `append_ledger_delta` writes with the full
-        # 14-column schema (writer-pinned) — so read them directly.
-        cell = dict(zip(out_columns, raw, strict=True))
-        record = SimpleNamespace(
-            market=cell["market"],
-            security_id=cell["security_id"],
-            interval=cell["interval"],
-            window_start=cell["window_start"],
-            window_end=cell["window_end"],
-            status=cell["status"],
-            bars=cell["bars"],
-            attempts=cell["attempts"],
-            last_error=cell["last_error"],
-            last_attempt_at=cell["last_attempt_at"],
-            empty_streak=int(cell["empty_streak"]),
-            in_pull_fetches=int(cell["in_pull_fetches"]),
-        )
-        rows.append(
-            _window_row(
-                record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
+    # Counts-only mode (DEC-WINDOWS-COUNTS-ONLY-001, ``limit=0``): the consumers
+    # that render ONLY counts/meta (coverage.html's windows KPI card +
+    # universe.html's all-segments line) SKIP the row-page query entirely — not
+    # even a ``LIMIT 0`` plan against the (mid-pull delta-folded) scan source —
+    # and (pack-train fold) the page memo below (DEC-WINDOWS-MIDPULL-FLOOR-001)
+    # is neither read nor key-minted at ``limit=0``. ``matched`` above is
+    # already derived from the stamp-cached counts, so the counts-only payload
+    # costs ZERO row-page work; ``capped`` below stays the honest
+    # ``matched > limit`` (matching rows exist, none shipped).
+    if limit > 0:
+
+        def _page_rows() -> list[dict[str, Any]]:
+            """Run the ONE page query + row projection — byte-identical to the
+            pre-cache inline body (pinned by
+            ``test_page_cache_fresh_compute_byte_identical``); cached per stamp
+            below so a repeat poll skips the O(total rows + delta footers) fold."""
+            where: list[str] = []
+            where_params: list[Any] = []
+            if market == "options":
+                where.append("market = ?")
+                where_params.append(_OPTION_WINDOW_MARKET)
+            elif market == "futures":
+                where.append("market = ?")
+                where_params.append(_FUTURE_WINDOW_MARKET)
+            elif market == "spot":
+                where.append("market NOT IN (?, ?)")
+                where_params.extend((_OPTION_WINDOW_MARKET, _FUTURE_WINDOW_MARKET))
+            elif market is not None:
+                where.append("1 = 0")  # unrecognized market → no rows (legacy parity)
+            if wanted_status == _UNKNOWN_WINDOW_STATUS:
+                where.append("1 = 0")  # unknown status → no rows (legacy parity, ONE key)
+            elif wanted_status:
+                where.append("status = ?")
+                where_params.append(wanted_status)
+            else:
+                where.append("status != ?")
+                where_params.append("PLANNED")
+            where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+            order_sql = (
+                f" ORDER BY {_window_severity_order_sql()}, "
+                '"security_id", "interval", "window_start", "window_end"'
             )
-        )
+            # WHERE / ORDER / LIMIT apply OUTSIDE the fold subquery (ghost-row safe —
+            # a superseded row version can never resurrect through a filter); the
+            # source params bind FIRST (the subquery precedes them in the SQL text).
+            # Statement-isolated cursor, closed after: this compute may run on the
+            # flagged page cache's background revalidator, concurrent with the
+            # request thread's own statements — a production store conn isolates
+            # via `_LockedReadConn.cursor()` (fresh per-compute view; the shared
+            # single-thread view leaked the store read lock — round-1 BLOCKER).
+            params: list[Any] = [*source.params, *where_params, limit, offset]
+            isolated = _compute_cursor(conn)
+            try:
+                cursor = isolated.execute(
+                    f"SELECT * FROM {source.from_sql}{where_sql}{order_sql} LIMIT ? OFFSET ?",  # noqa: S608  # nosec B608 - SELECT * over a module-built trusted source; filters/page/order are bound or trusted constants
+                    params,
+                )
+                out_columns = [str(col[0]) for col in (cursor.description or [])]
+                raw_rows = cursor.fetchall()
+            finally:
+                _close_cursor(isolated, conn)
+            page: list[dict[str, Any]] = []
+            for raw in raw_rows:
+                # DuckDB returns native Python values (str for the string columns, int for the
+                # int64 ones, None for a null) — pass them straight to the shared `_window_row`
+                # exactly as the legacy path forwards the `WindowLedgerRecord` attributes (ONE
+                # projection shape, CLAUDE.md §11 COMMON; `_decode_option_window`/`format_ist_clock`
+                # already str()/None-handle each field). This page always carries
+                # empty_streak/in_pull_fetches: a legacy pre-R1 BASE that lacks them was already
+                # deferred to the pyarrow derive path by the base-only probe, and a base-LESS
+                # delta-only scan reads files `append_ledger_delta` writes with the full
+                # 14-column schema (writer-pinned) — so read them directly.
+                cell = dict(zip(out_columns, raw, strict=True))
+                record = SimpleNamespace(
+                    market=cell["market"],
+                    security_id=cell["security_id"],
+                    interval=cell["interval"],
+                    window_start=cell["window_start"],
+                    window_end=cell["window_end"],
+                    status=cell["status"],
+                    bars=cell["bars"],
+                    attempts=cell["attempts"],
+                    last_error=cell["last_error"],
+                    last_attempt_at=cell["last_attempt_at"],
+                    empty_streak=int(cell["empty_streak"]),
+                    in_pull_fetches=int(cell["in_pull_fetches"]),
+                )
+                page.append(
+                    _window_row(
+                        record, first_seen_at=cell.get("first_seen_at"), symbol_for_id=symbol_for_id
+                    )
+                )
+            return page
+
+        if page_cache is None:
+            rows = _page_rows()
+        else:
+            # The page-row cache (DEC-WINDOWS-MIDPULL-FLOOR-001): the row-page query
+            # re-ran the WHOLE O(total rows + delta footers) fold on EVERY poll even
+            # within one stamp (only the counts were cached — measured 33 ms @ 50
+            # pending deltas → 158 ms @ 400 per warm poll, 2026-07-09). Memoise the
+            # projected rows per (stamp, filters, page, symbol-map content) on the
+            # injected DEDICATED page instance (the SAME MoversSnapshotCache class —
+            # no new cache class, CLAUDE.md §11 — but its OWN small-capacity
+            # instance, `make_window_payload_caches`: a page entry holds up to
+            # min(limit, WINDOW_ROWS_CAP) row-dicts, so sharing the 256-cap counts
+            # instance risked GB-scale retention AND page-key churn evicting the
+            # tiny counts entries — round-2 MEDIUM fold): a repeat poll within one
+            # stamp is an O(1) handoff; a fresh stamp recomputes ONCE per page
+            # coordinate; the small LRU bounds retained pages. The filter/page
+            # segment rides one tuple `repr` (unambiguous — a client-supplied
+            # `market`/`status` string can never forge a key collision through a
+            # bare `|` join; unknown statuses are already collapsed onto the ONE
+            # sentinel above); the symbol-map token keeps a master reload from
+            # serving stale display names. Counts-only calls (``limit=0``,
+            # DEC-WINDOWS-COUNTS-ONLY-001) never reach this branch — no page-cache
+            # read and no key mint (the pack-train fold nests the memo inside the
+            # ``limit > 0`` guard).
+            page_key = (
+                f"window-page|{ledger_glob}|"
+                f"{(market, wanted_status, limit, offset, _window_symbol_map_token(symbol_for_id))!r}"
+            )
+            rows = page_cache.get_or_compute(
+                page_key, generation=stamp_generation, compute=_page_rows
+            )
     payload: dict[str, Any] = {
         "source": "ledger",
         "count": total,
@@ -5699,6 +7781,7 @@ def build_window_payload(
     generation: int = 0,
     since: str | None = None,
     retry_sleep: Callable[[float], None] | None = None,
+    page_cache: WindowCountsCache | None = None,
 ) -> dict[str, Any]:
     """Project the per-window state for ``/coverage/windows`` — the unified ledger if present.
 
@@ -5747,7 +7830,13 @@ def build_window_payload(
         Exact status row filter (``"FAILED"`` …). ``"PLANNED"`` is the ONLY way
         PLANNED rows enter the row list.
     limit
-        Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``).
+        Row-list cap (clamped to ``[1, WINDOW_ROWS_CAP]``). ``0`` = COUNTS-ONLY
+        (DEC-WINDOWS-COUNTS-ONLY-001): the payload ships the identical
+        ``counts``/``count``/``matched``/``empty_threshold`` meta with
+        ``windows=[]`` and ``returned=0``, and the fast path SKIPS the row-page
+        query entirely — the cheap mode for consumers that render only the
+        stamp-cached counts (coverage.html's KPI card, universe.html's
+        all-segments line).
     retry_sleep
         Injectable sleeper for the torn-read retry (DEC-WINDOW-TORN-READ-RETRY-001;
         deterministic tests). ``None`` → the real aliased :func:`time.sleep`. A
@@ -5769,7 +7858,11 @@ def build_window_payload(
     """
     from brutex.data.window_ledger_store import ledger_path
 
-    limit = max(1, min(int(limit), WINDOW_ROWS_CAP))
+    # ``limit=0`` = COUNTS-ONLY (DEC-WINDOWS-COUNTS-ONLY-001): counts + meta with
+    # ``windows=[]`` — every other value keeps the historical ``[1, WINDOW_ROWS_CAP]``
+    # clamp byte-identically (a negative direct-caller limit still clamps UP to 1;
+    # the route already refuses negatives via ``ge=0``).
+    limit = 0 if int(limit) == 0 else max(1, min(int(limit), WINDOW_ROWS_CAP))
     ledger_file = ledger_path(lake_root)
     ledger_deltas = _ledger_delta_files(ledger_file)
     # FAST PATH (DEC-COVERAGE-WINDOWS-O1-001): with a DuckDB *conn* injected and a
@@ -5799,6 +7892,7 @@ def build_window_payload(
                 count_cache=count_cache,
                 generation=generation,
                 since=since,
+                page_cache=page_cache,
             )
 
         try:
@@ -5866,10 +7960,17 @@ def build_window_payload(
         and (wanted_status == r.status if wanted_status else r.status != "PLANNED")
     ]
     selected.sort(key=lambda r: _WINDOW_STATUS_ORDER.get(r.status, 9))
+    # The legacy page honours *offset* exactly like the DuckDB fast path (which binds
+    # `LIMIT ? OFFSET ?`) — pre-fix this slice was `selected[:limit]`, so on a legacy
+    # backing (None conn / legacy-shape base / double duckdb.Error / status_log) every
+    # "Next ›" click silently re-served page 1 (DEC-DB-FNO-DISPLAY-TRUTH-001 item 2).
+    # Same COMMON clamp_offset guard as every other pager; a past-the-end offset
+    # honestly returns an empty page ("returned" possibly 0), `matched` unchanged.
+    safe_offset = clamp_offset(offset)
     rows = [
         # The legacy status log has no first_seen_at — getattr keeps ONE shape.
         _window_row(r, first_seen_at=getattr(r, "first_seen_at", None), symbol_for_id=symbol_for_id)
-        for r in selected[:limit]
+        for r in selected[safe_offset : safe_offset + limit]
     ]
     return {
         "source": source,
@@ -5961,7 +8062,53 @@ def _contract_grid_row(row: Any) -> list[Any]:
     ]
 
 
-def registry_counts(registry_path: Path) -> dict[str, Any]:
+def registry_count_key(
+    kind: str,
+    *,
+    exch: str | None = None,
+    underlying: str | None = None,
+    expiry_date: str | None = None,
+) -> str:
+    """Build the stable cache key for a registry COUNT (DEC-O1-GUARANTEE-HARDEN-001 H1).
+
+    The registry pagers' ``total`` is a FILTERED ``COUNT(*)`` over the
+    monotonically-growing ``registry.duckdb`` tables — paging-invariant (the
+    :func:`candle_count_key` law: ``limit`` / ``offset`` never change how many
+    rows match), so every page of the same ``(kind, filters)`` shares ONE
+    cached total per registry content revision. *kind* names the counted
+    surface (``"exp"`` expiries / ``"con"`` contracts / ``"counts"`` the
+    whole-registry nav-badge dict). The filter triple is folded via ``repr``
+    (never a bare ``|`` join): the registry filters are UNVALIDATED query
+    strings, so a literal ``|`` inside one must not collide two distinct
+    filter shapes into one key.
+    """
+    return f"reg|{kind}|{(exch, underlying, expiry_date)!r}"
+
+
+def _registry_total(
+    count_cache: CandleCountCache | None,
+    *,
+    generation: int,
+    key: str,
+    compute: Callable[[], int],
+) -> int:
+    """One registry COUNT — memoised when a cache is injected, direct otherwise.
+
+    The ONE cache-or-compute chokepoint for the registry pagers' totals
+    (§11 COMMON — both pagers ride it). ``count_cache=None`` is the
+    byte-identical legacy path (every click recounts, the pre-H1 behaviour).
+    """
+    if count_cache is None:
+        return compute()
+    return count_cache.get_or_compute(key, generation=generation, compute=compute)
+
+
+def registry_counts(
+    registry_path: Path,
+    *,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
+) -> dict[str, Any]:
     """Return ``{"expiries", "contracts", "exists", "note"}`` for the registry cache.
 
     A MISSING ``registry.duckdb`` degrades honestly to ``{"expiries": 0,
@@ -5971,31 +8118,53 @@ def registry_counts(registry_path: Path) -> dict[str, Any]:
     counts are read read-only via :class:`~brutex.data.registry_store.RegistryStore`
     (which is closed before returning), and ``note`` is ``None``.
 
+    With a *count_cache* injected (DEC-O1-GUARANTEE-HARDEN-001 H1) the two
+    whole-table ``COUNT(*)`` reads are memoised under
+    ``registry_count_key("counts")`` at *generation* (the registry-content
+    stat-token digest the route derives) — a repeat nav-badge read within one
+    registry revision is an O(1) dict handoff instead of a store open + two
+    COUNTs; the FIRST read per revision still pays the real store read (honest
+    O(1)-on-repeat, never bare O(1)). ``count_cache=None`` (the default) is
+    the byte-identical legacy path.
+
     Parameters
     ----------
     registry_path
         The ``registry.duckdb`` path (see :func:`registry_path_for`).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (:func:`candle_count_key` precedent — the COMMON
+        :class:`~brutex.dashboard.movers_cache.MoversSnapshotCache` satisfies
+        the Protocol).
 
     Returns
     -------
     dict[str, Any]
         ``{"expiries": <int>, "contracts": <int>, "exists": <bool>,
-        "note": <str|None>}``.
+        "note": <str|None>}`` — always a FRESH dict (a memoised hit is copied,
+        so a caller mutating the payload never poisons the cache).
     """
     if not registry_path.is_file():
         return {"expiries": 0, "contracts": 0, "exists": False, "note": _REGISTRY_MISSING_NOTE}
-    from brutex.data.registry_store import RegistryStore
 
-    store = RegistryStore.open(registry_path)
-    try:
-        return {
-            "expiries": store.count_expiries(),
-            "contracts": store.count_contracts(),
-            "exists": True,
-            "note": None,
-        }
-    finally:
-        store.close()
+    def _read() -> dict[str, Any]:
+        """Open the store read-only and count both tables (the legacy body)."""
+        from brutex.data.registry_store import RegistryStore
+
+        with RegistryStore.open(registry_path) as store:
+            return {
+                "expiries": store.count_expiries(),
+                "contracts": store.count_contracts(),
+                "exists": True,
+                "note": None,
+            }
+
+    if count_cache is None:
+        return _read()
+    cached = count_cache.get_or_compute(
+        registry_count_key("counts"), generation=generation, compute=_read
+    )
+    return dict(cached)
 
 
 def list_registry_expiries(
@@ -6005,6 +8174,8 @@ def list_registry_expiries(
     underlying: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted expiry DATES as a browsable grid (``/db``).
 
@@ -6028,6 +8199,16 @@ def list_registry_expiries(
         the store's parameterized SELECT.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1 — the :func:`candle_count_key` idiom):
+        the FILTERED ``total`` is paging-invariant, so with a cache injected a
+        repeat/paging click within one registry revision is an O(1) memo hit
+        instead of an O(filtered rows) ``COUNT(*)`` per click; the FIRST count
+        per revision still runs the real query (honest O(1)-on-repeat). The
+        default ``None`` is the byte-identical legacy path. The page DATA
+        query below stays a per-click ``LIMIT``/``OFFSET`` SELECT (already
+        O(page)) — only the COUNT is memoised.
 
     Returns
     -------
@@ -6053,7 +8234,12 @@ def list_registry_expiries(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_expiries(exch=exch, underlying=underlying)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key("exp", exch=exch, underlying=underlying),
+            compute=lambda: store.count_expiries(exch=exch, underlying=underlying),
+        )
         rows = [
             _expiry_grid_row(r)
             for r in store.list_expiries(
@@ -6080,6 +8266,8 @@ def list_registry_contracts(
     expiry_date: str | None = None,
     limit: int = _LIMIT_MAX,
     offset: int = 0,
+    count_cache: CandleCountCache | None = None,
+    generation: int = 0,
 ) -> dict[str, Any]:
     """List the registry's persisted contract SYMBOLS as a browsable grid (``/db``).
 
@@ -6106,6 +8294,12 @@ def list_registry_contracts(
         malformed value raises ``ValueError``.
     limit, offset
         Page bounds (clamped to ``[1, 500]`` / ``[0, ∞)``).
+    count_cache, generation
+        Optional injected COUNT memo + the registry-content generation
+        (DEC-O1-GUARANTEE-HARDEN-001 H1; see :func:`list_registry_expiries` —
+        the same O(1)-on-repeat law over the FILTERED leg count, keyed with
+        the validated ISO *expiry_date* string; ``None`` = byte-identical
+        legacy recount per click).
 
     Returns
     -------
@@ -6138,7 +8332,19 @@ def list_registry_contracts(
 
     store = RegistryStore.open(registry_path)
     try:
-        total = store.count_contracts(exch=exch, underlying=underlying, expiry_date=parsed_expiry)
+        total = _registry_total(
+            count_cache,
+            generation=generation,
+            key=registry_count_key(
+                "con",
+                exch=exch,
+                underlying=underlying,
+                expiry_date=None if parsed_expiry is None else parsed_expiry.isoformat(),
+            ),
+            compute=lambda: store.count_contracts(
+                exch=exch, underlying=underlying, expiry_date=parsed_expiry
+            ),
+        )
         rows = [
             _contract_grid_row(r)
             for r in store.list_contracts(
@@ -6177,6 +8383,7 @@ __all__ = [
     "REGISTRY_EXPIRY_COLUMNS",
     "SPOT_DERIVED_COLUMNS",
     "SPOT_VERDICT_INTERVALS",
+    "TABLE_SUMMARY_FAULT_TYPES",
     "WINDOW_PHASES",
     "build_phase_progress",
     "build_window_payload",
@@ -6196,6 +8403,7 @@ __all__ = [
     "query_candles",
     "query_option_candles",
     "query_table",
+    "registry_count_key",
     "registry_counts",
     "registry_path_for",
     "resolve_applied_range",
@@ -6206,5 +8414,6 @@ __all__ = [
     "summarize_spot_verdict_datasets",
     "table_summary",
     "window_ledger_rows_cached",
+    "window_ledger_rows_page",
     "window_status_label",
 ]

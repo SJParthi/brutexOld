@@ -52,6 +52,33 @@ full sweep until Phase 9.5 pilot passes.
   these indices — operator decision 2026-05-16). Options costs in Track 1
   (handled by Track 2). Live order placement (out of scope for both
   tracks).
+- **NIFTY-futures track (reconciles the line above — ADR-0012 / CLAUDE.md §2
+  Rule 3 engine-scope amendment, operator-authorized 2026-06-29; LAUNCHED by
+  DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001 + DEC-FUTURES-ADDRESSING-PIN-001 +
+  DEC-STAGE1A-ROLL-RESET-001, MIGRATION.md #1700–#1702):** the brute-force
+  ENGINE additionally runs on **NIFTY futures** (signal-only, like spot) for the
+  dedicated dynamic-strategy track — addressed by the ONE pinned series alias
+  `NSE-NIFTY-FUT`, roll-resolved at launch into the per-contract
+  `bars/NSE/FNO/NSE-NIFTY-<DDMmmYY>-FUT` lake partitions with a TOTAL
+  per-contract Stage-1A reset at every roll (D11 — never a back-adjusted
+  continuous price series). The RUN-IDENTITY FORMULA IS UNCHANGED: a futures run
+  enters via the existing `instrument` field (the alias), the conditional
+  `roll_schedule` key inside `canonical_params`, and the full-content
+  `data_snapshot_hash` over the stitched bars — never new hash fields. The
+  "futures lack daily volume" rationale above described the 2026-05-16 spot-era
+  decision; ADR-0012 supersedes it for NIFTY futures specifically (they carry
+  real traded volume — the reason the session-VWAP conditions are feasible).
+  BANKNIFTY/SENSEX futures and every other F&O contract stay REFERENCE_ONLY.
+  **[RETIRED — DEC-ENGINE-SPOT-ONLY-001, 2026-07-13, MIGRATION.md #1790:
+  the operator directed the engine back to SPOT-ONLY ("wipe off the future,
+  only spots alone") — this track's ENGINE authorization is consciously
+  superseded; `NSE-NIFTY-FUT` is refused at every production sweep entry
+  ("the engine is spot-only; NSE-NIFTY-FUT remains lake/REFERENCE_ONLY")
+  and the engine sweep surface is EXACTLY the 3 spot indices. The paragraph
+  above is kept as the historical record; the alias/resolver/roll machinery
+  survive ONLY as lake tooling below the scope gate. The 2026-05-16 "NOT in
+  scope: futures execution on the indices" line above is authoritative
+  again.]**
 - **Engine-vs-lake distinction:** wording like "4 index instruments / no F&O contracts" elsewhere in this spec
   describes the BRUTE-FORCE ENGINE; the LAKE is the expanded surface per DEC-P0-063. See CLAUDE.md §3 +
   MIGRATION.md entry #200 for the locked decision.
@@ -238,8 +265,12 @@ spot timeline by timestamp alignment.
 
 ## Strategy Specification
 
-- **Entry rule:** signal at bar N → enter at bar N+1 OPEN.
-- **Forced exit:** 15:20 IST. Overrides everything.
+- **Entry rule:** signal at bar N → enter on bar N+1, filled at that
+  bar's ADVERSE EXTREME (BUY = HIGH / SELL = LOW — the ONE worst-case
+  fill law, DEC-FILL-WORST-CASE-ONLY-001 #1825; timing unchanged from
+  the historical "bar N+1 OPEN" rule, only the PRICE moved).
+- **Forced exit:** 15:20 IST. Overrides everything (fills at the 15:20
+  bar's adverse extreme).
 - **Mode A** — stop-loss + take-profit grid:
   - SL ∈ [5, 200] paisa, 40 steps
   - TP ∈ [10, 500] paisa, 50 steps
@@ -719,21 +750,32 @@ ALL 30+ metrics displayed in the JSON report and PNG charts.
 3. **UTC storage internal, IST display only.** Session: 03:45-10:00 UTC.
 4. **No look-ahead:** bar N signal → bar N+1 open entry. Instrumented
    bar accessor catches violations at runtime (debug build only).
-5. **Precise fills (corrected 2026-05-16):** entry at bar N+1 OPEN
-   (exact value); exit at bar M+1 OPEN (exact value). NO pessimistic
-   fill on spot. Operator clarified: spot indices (NIFTY/BANKNIFTY/
-   SENSEX) are computed averages and are NOT directly tradable — there
-   is no order book to slip against, so pessimistic fill is fiction.
-   Pessimistic-fill convention applies ONLY to Track 2 options (where
-   real order books exist).
-6. **NO slippage on spot (corrected 2026-05-16):** spot indices have
-   no executable venue, so any slippage adjustment is meaningless.
-   Track 1 backtest uses the exact bar OPEN price at entry and exit.
-   Slippage applies ONLY in Track 2 options per
-   `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (delta-bucketed × ToD ×
-   VIX). At 1-minute granularity we never have tick-level access,
-   so spot's "1-tick adverse" rule (from v1 spec, now retired) is
-   doubly inappropriate: no venue + no tick data.
+5. **WORST-CASE fills — the ONE fill law (SUPERSEDED 2026-07-12→15 by
+   operator directive: DEC-FILL-WORST-CASE-ONLY-001 #1825 — worst-case
+   is the ONLY fill model; absorbs the #1522 FillMode-mode design, the
+   PRECISE opt-out never shipped):** fill-bar TIMING
+   is unchanged (signal at bar N → the fill bar is N+1; forced 15:20;
+   same-bar SL-first tie), but the fill PRICE assumes the worst the
+   decided bar printed — entry at the entry bar's ADVERSE EXTREME
+   (BUY at HIGH / SELL at LOW); an SL/TP fills at
+   `min(level, bar low)` for a BUY exit / `max(level, bar high)` for a
+   SELL exit (the with-the-level clamp — never better than the level,
+   never better than the bar); open-anchored events (forced 15:20,
+   Mode-B signal exits) and `end_of_data`/`session_gap` price the
+   decided bar's adverse extreme. The historical "precise fills /
+   spot-is-not-tradable-so-pessimism-is-fiction" clause (corrected
+   2026-05-16) is CONSCIOUSLY superseded: the operator now wants the
+   anti-illusion floor — the backtest can only UNDERSTATE. INTERIM
+   HONESTY: until the PR-B 1-minute execution grid lands, the adverse
+   extreme is the DECISION-TF bar's (a 5-minute entry takes the whole
+   5-minute range's adverse depth) — strictly MORE pessimistic than
+   the operator's next-1-minute-bar target law, never optimistic.
+6. **NO tick slippage on spot (unchanged):** spot indices have no
+   executable venue, so no ±tick adjustment is applied on Track 1 —
+   the worst-case bar-extreme anchor of rule 5 IS the whole spot fill
+   law. The ±1-tick adverse addition applies ONLY in Track 2
+   options/futures per `docs/track2/TRACK2_OPTIONS_SPEC.md` §9 (flat
+   1-tick on the worst-case anchor).
 7. **NO brokerage / NO STT / NO costs.** Track 1 is signal research only
    (operator confirmed 2026-05-16). Track 2 handles realism via expired
    options data (see `docs/track2/`).

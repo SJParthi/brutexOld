@@ -42,12 +42,15 @@ Honest envelope (Golden Rule #10)
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from brutex.engine.results_store import _atomic_write
-from brutex.engine.trial_stats import TrialStatsError, _validate_hex
+from brutex.engine.sweep_lookahead import env_flag_tristate
+from brutex.engine.trial_stats import TrialStatsError, _validate_hex, trial_stats_sidecar_path
 from brutex.models import BruteXError
 
 #: Sentinel schema version — bump on any incompatible field change.
@@ -72,6 +75,109 @@ _PAYLOAD_KEYS: Final[tuple[str, ...]] = (
     "store_content_hash",
     "tuple_digest",
 )
+
+#: Kill switch for the resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001).
+#: DEFAULT ON — a data-loss guard must never require opt-in; the explicit OFF
+#: restores the byte-identical pre-guard skip loop (the honest escape hatch for
+#: an emergency revert or a pathological network-FS stat-latency environment —
+#: with the switch off the S5b silent-loss mode RETURNS; stated, not papered
+#: over).
+RESUME_STORE_GUARD_ENV: Final[str] = "BRUTEX_SWEEP_RESUME_STORE_GUARD"
+
+#: The artifact names :func:`missing_tuple_artifacts` reports, in sorted order.
+TUPLE_ARTIFACT_NAMES: Final[tuple[str, ...]] = ("sentinel", "sidecar", "store")
+
+
+def resume_store_guard_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Resolve the :data:`RESUME_STORE_GUARD_ENV` kill switch — fail-loud on junk.
+
+    unset / ``""`` → ``True`` (default-ON: the guard closes a silent
+    permanent-data-loss mode — the S5b operator scenario "massive pull →
+    delete → re-run must never silently lose data" — so opt-in would ship the
+    loss mode by default); truthy/falsy tokens per the ONE sweep env
+    vocabulary (:func:`brutex.engine.sweep_lookahead.env_flag_tristate` —
+    imported, never copied); anything else raises (the fail-loud env
+    convention — a typo must neither silently disarm a data-loss guard nor
+    silently arm anything). The fail-safe direction is deliberately INVERTED
+    versus ``rust_metrics``' warn-once-OFF: there OFF is the safe oracle arm,
+    here ON is the safe arm.
+
+    Parameters
+    ----------
+    env
+        Injectable environment mapping (tests); ``None`` reads ``os.environ``.
+
+    Raises
+    ------
+    ValueError
+        If the value is set to something outside the two token sets.
+    """
+    mapping = os.environ if env is None else env
+    raw = mapping.get(RESUME_STORE_GUARD_ENV, "")
+    if not raw.strip():
+        return True
+    flag = env_flag_tristate(raw)
+    if flag is None:
+        raise ValueError(
+            f"{RESUME_STORE_GUARD_ENV}={raw!r} is not a recognised switch value; expected "
+            "one of '1', 'on', 'true', 'yes' (enable — the default when unset) or "
+            "'0', 'off', 'false', 'no' (disable — restores the pre-guard skip loop, "
+            "re-opening the S5b deleted-store silent-loss mode)"
+        )
+    return flag
+
+
+def missing_tuple_artifacts(store_path: Path) -> tuple[str, ...]:
+    """Return the sorted names of the tuple's MISSING persisted artifacts — O(1).
+
+    The INTACT-ARTIFACTS PREDICATE of the resume store guard
+    (DEC-SWEEP-RESUME-STORE-GUARD-001): exactly THREE stat-level existence
+    probes, zero reads, zero hashing —
+
+    1. ``store`` — the tuple's Parquet at
+       :func:`~brutex.engine.sweep_orchestrator.tuple_store_path` (present even
+       for a completed ZERO-finalist tuple: ``ResultsStore.flush`` always
+       renders the full schema from possibly-empty row lists, so a legal
+       completed-empty tuple persists a schema-only 0-row Parquet);
+    2. ``sentinel`` — the paired completion sentinel
+       (:func:`completion_sentinel_path`);
+    3. ``sidecar`` — the trial-stats sidecar
+       (:func:`~brutex.engine.trial_stats.trial_stats_sidecar_path`). On this
+       tree the sentinel and the sidecar are written under the SAME
+       ``trial_stats_digest is not None`` condition and the grid drivers always
+       supply the digest, so sentinel-present ⟹ sidecar-was-written — a missing
+       sidecar is therefore always a DELETION (the same silent-loss class,
+       feeding Stage-4 DSR deflation), and the stat is free.
+
+    ``()`` = INTACT (a resume/cache skip is allowed); any missing name → the
+    caller falls through to ``run_one_tuple``, whose existing
+    ``_sentinel_resume`` self-heals with a FULL byte-identical redo.
+
+    WHAT COUNTS AS PAIRED — filename-level only: both sibling names are derived
+    by appending suffixes to the full store filename, which embeds the 16-hex
+    BLAKE3 tuple digest (the collision guard), so name-adjacency IS the pairing
+    at stat level. The sentinel's ``tuple_digest`` FIELD and the
+    ``store_content_hash`` are deliberately NOT read or re-hashed here — a JSON
+    read + SHA-256 over the store per skipped tuple would violate the
+    O(1)-stat contract.
+
+    HONEST ENVELOPE (Golden Rule #10) — what this deliberately does NOT
+    detect: CORRUPTION. A present-but-truncated/tampered/zero-byte Parquet, a
+    corrupt or digest-mismatched sentinel body, and a corrupt sidecar all read
+    INTACT at this gate. Content verification (sentinel read + tuple-digest
+    match + SHA-256 store re-hash + sidecar pairing) remains
+    ``_sentinel_resume``'s job when the tuple actually re-enters, and the G1
+    ``store_quarantine`` seam's job on a run-path open failure. This gate
+    closes exactly the MISSING-artifact class — the S5b operator scenario.
+    """
+    missing: list[str] = []
+    if not completion_sentinel_path(store_path).is_file():
+        missing.append("sentinel")
+    if not trial_stats_sidecar_path(store_path).is_file():
+        missing.append("sidecar")
+    if not store_path.is_file():
+        missing.append("store")
+    return tuple(missing)
 
 
 class TupleCompletionError(BruteXError):
@@ -243,10 +349,14 @@ def read_completion_sentinel(path: Path) -> TupleCompletionSentinel:
 __all__ = [
     "COMPLETION_SCHEMA_VERSION",
     "COMPLETION_SUFFIX",
+    "RESUME_STORE_GUARD_ENV",
+    "TUPLE_ARTIFACT_NAMES",
     "TupleCompletionError",
     "TupleCompletionSentinel",
     "completion_sentinel_path",
+    "missing_tuple_artifacts",
     "read_completion_sentinel",
     "render_completion_sentinel",
+    "resume_store_guard_enabled",
     "write_completion_sentinel",
 ]

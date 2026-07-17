@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import pytest
 from brutex.data.models import CandleBar
 from brutex.data.option_dedup import OptionDedupIndex
-from brutex.engine.results_store import ResultsStore
+from brutex.engine.results_store import ResultRow, ResultsStore
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
 from brutex.engine.sweep_driver import metrics_for_mask
@@ -65,7 +65,7 @@ _CTX: dict[str, str] = {
     "indicator_version": "ind-v1",
     "code_commit_sha": "deadbeef",
 }
-_PARAMS: dict[str, object] = {"sl_paisa": 80, "tp_paisa": 50, "prior_n": 3}
+_PARAMS: dict[str, object] = {"sl_paisa": None, "tp_paisa": None, "prior_n": 3}
 
 
 def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
@@ -86,13 +86,33 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
-def _trending_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+def _trending_bars(n_days: int = 45, per_day: int = 120) -> list[CandleBar]:
+    """A multi-day mostly-up drifting session with periodic DOWN days.
+
+    Under the ONE worst-case fill law (DEC-FILL-WORST-CASE-ONLY-001) a tight
+    SL/TP over these wide-range synthetic bars always fills at the adverse
+    extreme and loses, so the suite's ranked fixtures ride EOD-only exits
+    (``sl/tp = None`` — the ``_make_config`` default): a BUY enters at the
+    signal bar's HIGH and closes at the session boundary (the #1743
+    ``session_gap`` retroactive close at the day-last bar's LOW). Up days
+    (+0.9/3 bars ≈ +₹36/day) win despite the ~₹1.6 adverse haircut; every
+    5th day drifts DOWN (−₹36/day) and loses — the losers keep
+    ``profit_factor`` FINITE so :func:`brutex.ranking.passes_gates` can pass
+    (an all-winner pool reads ``profit_factor=None`` → rejected). 45 days
+    clears the MIN_TRADES=30 gate at ~one session-gap trade per day per mask
+    (measured: masks 2/8/16 pass gates — 36/35/44 trades, PF 2.75/2.65/3.39;
+    masks 1/4 stay honestly rejected, their conditions never fire on a down
+    day so their all-winner pools read ``profit_factor=None``).
+    """
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.6 if m % 3 else price + 0.3
+            else:
+                close = price + 0.6 if m % 3 else price - 0.3
             bars.append(_bar(d, m, price, close))
             price = close
     return bars
@@ -110,8 +130,12 @@ def _make_config(**overrides: object) -> SweepRunConfig:
         "indicator_version": "ind-v1",
         "code_commit_sha": "deadbeef",
         "tf_minutes": 1,
-        "sl_paisa": 80,
-        "tp_paisa": 50,
+        # DEC-FILL-WORST-CASE-ONLY-001: the suite default rides EOD-only
+        # exits — a tight SL/TP over the wide-range synthetic bars always
+        # fills at the adverse extreme under the one law and gate-rejects
+        # every combo. Knob-specific tests override explicitly.
+        "sl_paisa": None,
+        "tp_paisa": None,
     }
     base.update(overrides)
     return SweepRunConfig(**base)  # type: ignore[arg-type]
@@ -119,6 +143,14 @@ def _make_config(**overrides: object) -> SweepRunConfig:
 
 def _dedup() -> ComboDedup:
     return ComboDedup(OptionDedupIndex(capacity=10_000, fpr_target=1e-6))
+
+
+#: An ADR-0012 roll schedule covering the `_trending_bars` fixture (base day
+#: 2026-01-05 IST): one mid-stream roll + a covering tail, as day-ordinals.
+_FUT_SCHEDULE: tuple[int, ...] = (
+    datetime(2026, 1, 8, tzinfo=_IST).date().toordinal(),
+    datetime(2026, 3, 31, tzinfo=_IST).date().toordinal(),
+)
 
 
 # ────── DEC-SWEEP-RUST-TRADESIM-WIRE-001 test seams ──────
@@ -133,7 +165,12 @@ def _dedup() -> ComboDedup:
 
 
 def _forced_fallback_sim(
-    bars: Sequence[CandleBar], bar_bits: Sequence[int], *, tf_minutes: int
+    bars: Sequence[CandleBar],
+    bar_bits: Sequence[int],
+    *,
+    tf_minutes: int,
+    reference_stamper: object = None,
+    precomputed_columns: object = None,
 ) -> ResidentTradeSim:
     """A ResidentTradeSim with the compiled kernel DISABLED — the pure-Python arm.
 
@@ -141,9 +178,17 @@ def _forced_fallback_sim(
     bit-identical Python oracle (the wired-vs-unwired forcing seam — the same
     instance-level ``_rust = None`` mechanism the rust_trade_sim fallback tests
     use; a FACTORY rather than a subclass, so no ``__init__`` overwrites the
-    attribute the superclass ctor just built).
+    attribute the superclass ctor just built). ``precomputed_columns`` tracks
+    the additive W2-rider kwarg (DEC-STAGE1A-RUST-BATCH-001) so the factory's
+    signature stays call-compatible with the production seam.
     """
-    sim = ResidentTradeSim(bars, bar_bits, tf_minutes=tf_minutes)
+    sim = ResidentTradeSim(
+        bars,
+        bar_bits,
+        tf_minutes=tf_minutes,
+        reference_stamper=reference_stamper,  # type: ignore[arg-type]
+        precomputed_columns=precomputed_columns,  # type: ignore[arg-type]
+    )
     sim._rust = None  # pyright: ignore[reportPrivateUsage] — the DEC-P0-017 friend seam
     return sim
 
@@ -395,10 +440,48 @@ class TestSweepRunConfig:
         with pytest.raises(ValueError, match="min_hits must be >= 0"):
             _make_config(min_hits=-1)
 
+    def test_fill_mode_field_deleted(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001 killed-token pin: SweepRunConfig has NO
+        # fill-mode axis — worst-case is the law, never a configuration field.
+        import dataclasses
+
+        assert "fill_mode" not in {f.name for f in dataclasses.fields(SweepRunConfig)}
+        with pytest.raises(TypeError):
+            _make_config(fill_mode="worst_case")
+
     def test_proximity_is_carried(self) -> None:
         prox = ProximityParams(pivot_proximity_bps=25)
         cfg = _make_config(proximity=prox)
         assert cfg.proximity is prox
+
+    # ── ADR-0012 instrument⟺schedule hard invariant (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001) ──
+
+    def test_futures_alias_requires_a_roll_schedule(self) -> None:
+        # Direction 1: the alias with NO schedule is refused — a futures run
+        # can never silently sweep the constant-key path.
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _make_config(instrument="NSE-NIFTY-FUT")
+
+    @pytest.mark.parametrize("instrument", ["NIFTY", "BANKNIFTY", "SENSEX"])
+    def test_spot_instrument_forbids_a_roll_schedule(self, instrument: str) -> None:
+        # Direction 2: a spot config with a schedule is refused — presence is a
+        # TOTAL function of the identity field, so no instrument can ever mint
+        # both a with-key and a without-key run identity (the #1062 bug class).
+        with pytest.raises(ValueError, match="roll_schedule is required for"):
+            _make_config(instrument=instrument, roll_schedule=_FUT_SCHEDULE)
+
+    def test_futures_alias_with_a_schedule_constructs(self) -> None:
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        assert cfg.roll_schedule == _FUT_SCHEDULE
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [(), (5, 5), (7, 3), (-1, 5)],
+        ids=["empty", "duplicate", "decreasing", "negative"],
+    )
+    def test_invalid_roll_schedule_shape_rejected(self, schedule: tuple[int, ...]) -> None:
+        with pytest.raises(ValueError, match="non-empty strictly increasing"):
+            _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=schedule)
 
 
 # ────── ranked_combo_to_result_row ──────
@@ -417,8 +500,8 @@ def _ranked_combo(bars: list[CandleBar]) -> tuple[RankedCombo, list[int]]:
                 m,
                 direction=Side.BUY,
                 tf_minutes=1,
-                stop_loss_paisa=80,
-                take_profit_paisa=50,
+                stop_loss_paisa=None,
+                take_profit_paisa=None,
                 start_equity_paisa=10_000_000,
             ),
         )
@@ -610,7 +693,33 @@ class TestCanonicalTradeParams:
             "proximity_bps": None,
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
+            "fill_mode": "worst_case",
         }
+
+    def test_fill_mode_emitted_unconditionally_as_worst_case(self) -> None:
+        # DEC-FILL-WORST-CASE-ONLY-001: the ONE fill law enters EVERY
+        # run-identity as the permanent ``fill_mode: worst_case`` key — no
+        # caller can omit it (there is no parameter to omit it WITH), so no
+        # post-DEC run_id can ever alias a frozen precise-era identity (whose
+        # canonical params carried NO fill_mode key under the retired
+        # emit-on-non-PRECISE elide law).
+        params = canonical_trade_params(
+            sl_paisa=None,
+            tp_paisa=None,
+            prior_n=1,
+            proximity=None,
+            start_equity_paisa=1,
+        )
+        assert params["fill_mode"] == "worst_case"
+        import inspect as _inspect
+
+        assert "fill_mode" not in _inspect.signature(canonical_trade_params).parameters
+        # The anti-aliasing kill shot: the SAME knobs hashed WITHOUT the key
+        # (the precise-era byte layout) mint a DIFFERENT run_id.
+        legacy = {k: v for k, v in params.items() if k != "fill_mode"}
+        rid_now = mask_run_id(mask=1, params=params, **_CTX)
+        rid_precise_era = mask_run_id(mask=1, params=legacy, **_CTX)
+        assert rid_now != rid_precise_era
 
     def test_fib_anchor_enters_the_params_layout(self) -> None:
         # DEC-NIFTY-FIB-AXIS-001: a non-prev-day anchor changes the run-identity —
@@ -673,6 +782,82 @@ class TestCanonicalTradeParams:
 
         assert _canonical_params(cfg) == expected
         assert mask_run_id(mask=1, params=_canonical_params(cfg), **_CTX) == rid_via_helper
+
+    # ── ADR-0012 roll_schedule — conditional emission + the aliasing kill-shot ──
+
+    def test_spot_params_carry_no_roll_schedule_key(self) -> None:
+        """No schedule ⇒ NO key — spot run-ids stay byte-identical (P2).
+
+        The exact dict (not just key absence) is pinned so a renamed or
+        default-emitted key can never slip in.
+        """
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            roll_schedule=None,
+        )
+        assert params == {
+            "sl_paisa": 80,
+            "tp_paisa": 50,
+            "prior_n": 3,
+            "proximity_bps": None,
+            "fib_anchor": "prev_day",
+            "start_equity_paisa": 10_000_000,
+            "fill_mode": "worst_case",
+        }
+        assert "roll_schedule" not in params
+
+    def test_roll_schedule_emitted_as_json_canonical_ints(self) -> None:
+        params = canonical_trade_params(
+            sl_paisa=80,
+            tp_paisa=50,
+            prior_n=3,
+            proximity=None,
+            start_equity_paisa=10_000_000,
+            roll_schedule=_FUT_SCHEDULE,
+        )
+        assert params["roll_schedule"] == list(_FUT_SCHEDULE)
+        assert all(isinstance(v, int) for v in params["roll_schedule"])
+
+    def test_aliasing_kill_shot_distinct_schedules_mint_distinct_run_ids(self) -> None:
+        """TWO different schedules over IDENTICAL bar bytes ⇒ DISTINCT run_ids.
+
+        The §1062-class containment teeth (DEC-NIFTY-FUTURES-SWEEP-LAUNCH-001):
+        the snapshot hash captures the BARS, so if two lakes stitch identical
+        bytes under different boundary ordinals, ONLY the recorded
+        ``roll_schedule`` separates the two computations — the run identity
+        must move on the schedule alone.
+        """
+        ctx = dict(_CTX, instrument="NSE-NIFTY-FUT")
+
+        def _rid(schedule: tuple[int, ...]) -> str:
+            params = canonical_trade_params(
+                sl_paisa=80,
+                tp_paisa=50,
+                prior_n=3,
+                proximity=None,
+                start_equity_paisa=10_000_000,
+                roll_schedule=schedule,
+            )
+            # SAME mask, SAME context, SAME data_snapshot_hash — the bars are
+            # byte-identical by construction; only the schedule differs.
+            return mask_run_id(mask=0b101, params=params, **ctx)
+
+        other_schedule = (_FUT_SCHEDULE[0] + 1, _FUT_SCHEDULE[1])
+        assert _rid(_FUT_SCHEDULE) != _rid(other_schedule)
+
+    def test_futures_config_identity_routes_the_schedule(self) -> None:
+        # §11 COMMON: the futures config's identity params ARE this helper's
+        # output, schedule included.
+        from brutex.engine.sweep_run import (
+            _canonical_params,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        assert _canonical_params(cfg)["roll_schedule"] == list(_FUT_SCHEDULE)
 
 
 # ────── trial-stats sidecar write point (DEC-TRIAL-STATS-WRITE-001) ──────
@@ -1208,6 +1393,33 @@ class TestRunPersistedSweep:
         ):
             run_persisted_sweep(_trending_bars(), cfg, store=store, dedup=_dedup(), audit=audit)
 
+    def test_apriori_enabled_enumeration_source_is_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEC-SWEEP-APRIORI-TUPLE-001: with ``BRUTEX_SWEEP_APRIORI`` set the
+        enumeration source becomes the Apriori pruned generator — exercising
+        ``run_persisted_sweep``'s ``if apriori_enabled():`` arm (the lazy
+        ``generate_apriori_candidates`` import + call) — and the persisted
+        leaderboard stays byte-identical to the brute-force OFF path.
+
+        The byte-parity golden proves the same equality, but its file stem is
+        not attributed to ``sweep_run`` by the touched-module coverage gate, so
+        this focused test scopes that arm's coverage to sweep_run's OWN
+        per-module 100% gate.
+        """
+        bars = _trending_bars()
+        cfg = _make_config(condition_bits=[0, 1, 2, 3, 4], k=2, min_hits=0)
+
+        monkeypatch.delenv("BRUTEX_SWEEP_APRIORI", raising=False)
+        off = _run_sweep(tmp_path, "off", bars, cfg)
+
+        monkeypatch.setenv("BRUTEX_SWEEP_APRIORI", "1")
+        on = _run_sweep(tmp_path, "on", bars, cfg)
+
+        assert on.store_content_hash == off.store_content_hash
+        assert (tmp_path / "on.parquet").read_bytes() == (tmp_path / "off.parquet").read_bytes()
+        assert on.persisted == off.persisted
+
     def test_happy_path_persists_and_audits_three_lines(self, tmp_path: Path) -> None:
         bars = _trending_bars()
         store = ResultsStore(path=tmp_path / "r.parquet")
@@ -1274,15 +1486,18 @@ class TestRunPersistedSweep:
         cfg = _make_config()
         dedup = _dedup()
         # Pre-mark every enumerated identity → every mask is skipped. The params
-        # layout carries the default ``fib_anchor`` (prev_day) so these hand-built
-        # run-ids match the sweep's (DEC-NIFTY-FIB-AXIS-001).
+        # layout carries the default ``fib_anchor`` (prev_day) AND the permanent
+        # ``fill_mode`` key (DEC-FILL-WORST-CASE-ONLY-001 — hand-built WITHOUT it
+        # the run-ids would be the precise-era identities and nothing would
+        # skip) so these hand-built run-ids match the sweep's.
         params = {
-            "sl_paisa": 80,
-            "tp_paisa": 50,
+            "sl_paisa": None,
+            "tp_paisa": None,
             "prior_n": 3,
             "proximity_bps": None,
             "fib_anchor": "prev_day",
             "start_equity_paisa": 10_000_000,
+            "fill_mode": "worst_case",
         }
         for mask in (1, 2, 4, 8, 16):
             dedup.mark(
@@ -1371,6 +1586,37 @@ class TestRunPersistedSweep:
         assert mask_run_id(mask=1, params=prox_params, **_CTX) != mask_run_id(
             mask=1, params=default_params, **_CTX
         )
+
+    def test_gate_conflict_at_persist_becomes_tuple_scoped_combo_error(
+        self, tmp_path: Path
+    ) -> None:
+        """C5 (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001): a gate-config conflict at the
+        finalist ``store.append`` is converted AT THE SOURCE into a SweepComboError.
+
+        The typed :class:`ResultsStoreGateConflictError` is a SIBLING of
+        ``ResultsStoreError`` — converting it here (not letting it propagate as a
+        ``ResultsStoreError``) makes it sail PAST ``run_one_tuple``'s
+        ``except ResultsStoreError`` global-abort re-raise and land on the grid
+        driver's ``except SweepComboError`` tuple-skip ladder, naming the config
+        cause. This covers the new persist-loop except branch.
+        """
+        from brutex.engine.results_store import ResultsStoreGateConflictError
+
+        bars = _trending_bars()
+
+        class _GateConflictStore(ResultsStore):
+            def append(self, row: ResultRow) -> bool:
+                raise ResultsStoreGateConflictError(
+                    "the ONLY differing field(s) (deflated_sharpe) are gate-derived DSR "
+                    "metric(s) (DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001)."
+                )
+
+        store = _GateConflictStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:  # noqa: SIM117
+            with pytest.raises(SweepComboError, match="gate-config conflict persisting") as exc:
+                run_persisted_sweep(bars, _make_config(), store=store, dedup=_dedup(), audit=audit)
+        assert "NIFTY" in str(exc.value)
+        assert "DEC-SWEEP-TUPLE-DIGEST-GATE-IDENTITY-001" in str(exc.value)
 
 
 # ────── SweepComboError — fail-loud-with-fingerprint (Resilient: skip+continue) ──────
@@ -1712,7 +1958,11 @@ class TestSweepComboError:
         to a single-tuple skip, and — because the raise is BEFORE the trial-stats
         sidecar / mark / completion-sentinel writes — the tuple is left
         UN-sentineled and the dedup UN-marked, so a resume deterministically
-        REDOES the whole tuple (Golden Rule #7).
+        REDOES the whole tuple (Golden Rule #7). ONE typed carve-out
+        (DEC-VIX-STAMP-WIRE-001 round-2): a VIX-ONLY ``VixTrioConflictError``
+        (VIX sits outside the run identity — the VIX lake moved, not the
+        engine) IS demoted to a tuple-skip by the grid drivers; the PLAIN
+        ``ResultsStoreError`` exercised here stays a grid abort.
         """
         from brutex.engine.results_store import ResultsStoreError
         from brutex.engine.trial_stats import trial_stats_sidecar_path
@@ -1987,6 +2237,181 @@ class TestResidentKernelBarMismatch:
         with (
             AuditWriter.open(tmp_path / "a.jsonl") as audit,
             pytest.raises(ValueError, match="kernel was built for Fib anchor"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_built_for_other_vwap_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose VWAP source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 52-53 are VWAP-source
+        SPECIFIC, so a kernel built for a different source would silently score the
+        WRONG bits; ``run_persisted_sweep`` fails-fast, exactly like the anchor guard.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default VWAP source is HLC3
+        assert cfg.vwap_source is PriceSource.HLC3
+        kernel = ResidentSweepKernel(
+            bars, proximity=cfg.proximity, prior_n=cfg.prior_n, vwap_source=PriceSource.OPEN
+        )
+        assert kernel.vwap_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for VWAP source"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_kernel_built_for_other_ema_source_raises(self, tmp_path: Path) -> None:
+        """A kernel whose EMA source disagrees with the tuple's is rejected.
+
+        DEC-NIFTY-PRICE-SOURCE-AXIS-001: ``bar_bits`` bits 0-5 are EMA-source
+        SPECIFIC; a mismatched kernel would silently score the WRONG bits. The VWAP
+        source is left at the default so the VWAP guard passes and the EMA guard trips.
+        """
+        from brutex.engine.sweep_kernel import ResidentSweepKernel
+        from brutex.strategies.types import PriceSource
+
+        bars = _trending_bars()
+        cfg = _make_config()  # default EMA source is CLOSE
+        assert cfg.ema_source is PriceSource.CLOSE
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            vwap_source=cfg.vwap_source,
+            ema_source=PriceSource.OPEN,
+        )
+        assert kernel.vwap_source is cfg.vwap_source
+        assert kernel.ema_source is PriceSource.OPEN
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for EMA source"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+
+class TestResidentKernelRollScheduleMismatch:
+    """The ADR-0012 roll-schedule twin of the Fib-anchor kernel guard.
+
+    A pre-built kernel's ``bar_bits`` are schedule-SPECIFIC (the per-contract
+    hard resets move with the boundaries), so a kernel built under a DIFFERENT
+    schedule than the tuple's would silently misplace every roll boundary
+    (DEC-STAGE1A-ROLL-RESET-001) — fail-fast, exactly like the ``n_bars`` /
+    anchor guards.
+    """
+
+    def test_kernel_built_for_other_schedule_raises(self, tmp_path: Path) -> None:
+        bars = _trending_bars()
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        # SAME bars, SAME anchor — only the schedule disagrees (a one-entry
+        # covering schedule vs the tuple's two-entry one).
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            roll_schedule=(_FUT_SCHEDULE[-1],),
+        )
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for roll_schedule"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_scheduleless_kernel_for_a_futures_tuple_raises(self, tmp_path: Path) -> None:
+        # None vs tuple is ALSO a mismatch — a spot-built kernel can never
+        # serve a futures tuple (its bits never hard-reset at the rolls).
+        bars = _trending_bars()
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        kernel = ResidentSweepKernel(bars, proximity=cfg.proximity, prior_n=cfg.prior_n)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built for roll_schedule"),
+        ):
+            run_persisted_sweep(
+                bars,
+                cfg,
+                store=store,
+                dedup=_dedup(),
+                audit=audit,
+                trial_stats_digest="ab12cd34ef56ab12",
+                kernel=kernel,
+            )
+
+    def test_matching_schedule_kernel_is_accepted(self, tmp_path: Path) -> None:
+        pytest.importorskip("polars")
+        bars = _trending_bars(n_days=4)
+        cfg = _make_config(instrument="NSE-NIFTY-FUT", roll_schedule=_FUT_SCHEDULE)
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            roll_schedule=_FUT_SCHEDULE,
+        )
+        summary = _run_sweep(tmp_path, "ok", bars, cfg, kernel=kernel)
+        assert summary.evaluated > 0
+
+    def test_kernel_built_with_other_1day_mask_flag_raises(self, tmp_path: Path) -> None:
+        # The D12 twin (review round-1 finding 5): a hand-built kernel whose
+        # ``apply_1day_mask`` flag disagrees with the tuple's derived flag
+        # carries bar_bits with the intraday-only bits (ToD 44-47 / VWAP
+        # 52-53) wrongly set/cleared — fail-fast, exactly like the schedule
+        # guard (unreachable via the production cache, whose key contains
+        # instrument+tf, the flag's only inputs).
+        from brutex.engine.stage1a import apply_1day_mask_for
+
+        bars = _trending_bars()
+        cfg = _make_config()
+        assert apply_1day_mask_for(cfg.instrument, cfg.tf) is False
+        kernel = ResidentSweepKernel(
+            bars,
+            proximity=cfg.proximity,
+            prior_n=cfg.prior_n,
+            apply_1day_mask=True,
+        )
+        assert kernel.n_bars == len(bars)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with (
+            AuditWriter.open(tmp_path / "a.jsonl") as audit,
+            pytest.raises(ValueError, match="kernel was built with apply_1day_mask"),
         ):
             run_persisted_sweep(
                 bars,
@@ -2487,13 +2912,15 @@ class TestU128EnvelopeThroughSweep:
     def test_u128_mask_sweep_rust_served_equals_forced_fallback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Bit 0 FIRES on `_trending_bars` (the default-config masks produce real
-        # trades), bits 64/65 never do — the wide masks now PROMOTE the batch
-        # to the u128 kernel (no call fallback), and the byte-equality below
-        # compares stores with REAL trade rows, never two degenerate
-        # zero-trade stores (the vacuous-equality trap).
+        # Bit 1 FIRES on `_trending_bars` AND its mask passes the ranking
+        # gates under the one worst-case law (bit 0's all-winner pool reads
+        # profit_factor=None → gate-rejected), bits 64/65 never fire — the
+        # wide masks now PROMOTE the batch to the u128 kernel (no call
+        # fallback), and the byte-equality below compares stores with REAL
+        # trade rows, never two degenerate zero-trade stores (the
+        # vacuous-equality trap).
         bars = _trending_bars()
-        cfg = _make_config(condition_bits=[0, 64, 65], k=1, min_hits=0)
+        cfg = _make_config(condition_bits=[1, 64, 65], k=1, min_hits=0)
         with capture_logs() as logs:
             wired = _run_sweep(tmp_path, "w", bars, cfg)
         # NOT a fallback any more: the wide sibling kernel was promoted once.
@@ -2505,7 +2932,7 @@ class TestU128EnvelopeThroughSweep:
         paths = [e for e in logs if e["event"] == "sweep_run.trade_sim_path"]
         assert paths[0]["rust_active"] is True
         # Non-vacuous: the ranking gate drops the two zero-trade u128-bit
-        # masks, so EXACTLY the firing mask 0b1 persists — the byte-equality
+        # masks, so EXACTLY the firing mask 0b10 persists — the byte-equality
         # below compares stores carrying a real trade-bearing row, never two
         # empty/degenerate stores. Its trades are pinned via the independent
         # metrics oracle.
@@ -2514,7 +2941,7 @@ class TestU128EnvelopeThroughSweep:
         direct = metrics_for_mask(
             bars,
             build_bar_bits(bars),
-            1,
+            2,
             direction=cfg.direction,
             tf_minutes=cfg.tf_minutes,
             stop_loss_paisa=cfg.sl_paisa,
@@ -3083,3 +3510,102 @@ class TestLazyRunIdHardening:
         assert digest.persisted == legacy.persisted == 0  # Stage-1B dropped everything
         assert digest_peak < legacy_peak
         assert legacy_peak - digest_peak > digest.evaluated * 48
+
+
+# ────── The WORST_CASE finalist-projection threading pin (fix round 2) ──────
+
+
+def _worst_case_ranking_bars(n_days: int = 15, per_day: int = 120) -> list[CandleBar]:
+    """A drift strong enough that combos RANK under the WORST_CASE floor.
+
+    ``_trending_bars``'s gentle 0.6-per-3-bars drift loses every trade once
+    entries fill at the bar HIGH (the ±0.5 pad dwarfs the drift), so the
+    worst-case arm never persists a finalist there. This variant rises 1.0
+    with a 0.5 dip every 4th bar under a tight ±0.05 pad — worst-case fills
+    still clear the rank gates, and the SL/TP levels' re-anchoring on the
+    adverse entry moves TRIGGER TIMING between the modes (the observable the
+    projection pin below needs).
+    """
+    bars: list[CandleBar] = []
+    for d in range(n_days):
+        price = 100.0
+        for m in range(per_day):
+            close = price + 1.0 if m % 4 else price - 0.5
+            ts = (
+                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
+            ).astimezone(UTC)
+            hi = max(price, close) + 0.05
+            lo = min(price, close) - 0.05
+            bars.append(
+                CandleBar(
+                    timestamp=ts,
+                    open=Decimal(str(round(price, 2))),
+                    high=Decimal(str(round(hi, 2))),
+                    low=Decimal(str(round(lo, 2))),
+                    close=Decimal(str(round(close, 2))),
+                    volume=100,
+                    open_interest=None,
+                )
+            )
+            price = close
+    return bars
+
+
+class TestWorstCaseFinalistProjection:
+    """The finalist-projection anchor pin under the ONE worst-case law.
+
+    History (the absorbed PR #1522 design's fix round 2): when fill modes still existed,
+    severing the projector's mode kwarg silently re-simulated finalists under
+    the PRECISE library default while the RANKING ran worst-case — persisting
+    precise-timing price anchors on a worst-case row. The mode axis is now
+    DELETED (DEC-FILL-WORST-CASE-ONLY-001), so the surviving obligation is
+    the anchor-consistency law itself: the persisted row's
+    ``avg_entry_price`` / ``avg_exit_price`` anchors MUST match an
+    independent oracle re-simulation of the SAME finalist under the one law
+    (a projector that re-simulated under any OTHER pricing would fail the
+    literal pins below — they were minted from the worst-case arm and differ
+    hard from the retired precise projection's 389-trade / 153.79 anchors).
+    """
+
+    def test_finalist_projection_matches_the_oracle_anchors(self, tmp_path: Path) -> None:
+        bars = _worst_case_ranking_bars()
+        cfg = _make_config(sl_paisa=200, tp_paisa=100)
+        store = ResultsStore(path=tmp_path / "r.parquet")
+        with AuditWriter.open(tmp_path / "a.jsonl") as audit:
+            summary = run_persisted_sweep(bars, cfg, store=store, dedup=_dedup(), audit=audit)
+        assert summary.persisted >= 1  # the seam is EXERCISED, not vacuously skipped
+        rows = {row.mask_bits: row for row in store.rows()}
+        assert 16 in rows, sorted(rows)
+        row = rows[16]
+        # Hand-derived worst-case anchors (the oracle re-derivation below
+        # reproduces them): 218 trades, avg entry-bar open 149.86, avg
+        # exit-bar close 151.42 — the retired PRECISE projection of the SAME
+        # mask was 389 trades / avg exit 153.79, so a projector priced any
+        # other way cannot reproduce these pins.
+        assert row.total_trades == 218
+        assert row.avg_entry_price == Decimal("149.86")
+        assert row.avg_exit_price == Decimal("151.42")
+        # Independent oracle re-derivation of the anchors under the one law.
+        from brutex.engine.sweep_driver import mask_to_entry_signals
+        from brutex.engine.trade_sim import simulate_trades
+        from brutex.money import round_money
+
+        bar_bits = build_bar_bits(bars)
+        ts_to_bar = {bar.timestamp: bar for bar in bars}
+        trades = simulate_trades(
+            bars,
+            mask_to_entry_signals(bar_bits, 16),
+            direction=Side.BUY,
+            tf_minutes=1,
+            stop_loss_paisa=200,
+            take_profit_paisa=100,
+        )
+        entries = [ts_to_bar[t.entry_ts].open for t in trades]
+        exits = [ts_to_bar[t.exit_ts].close for t in trades]
+        anchors = (
+            len(trades),
+            round_money(sum(entries, Decimal("0")) / len(entries)),
+            round_money(sum(exits, Decimal("0")) / len(exits)),
+        )
+        assert anchors == (218, Decimal("149.86"), Decimal("151.42"))
+        assert (row.total_trades, row.avg_entry_price, row.avg_exit_price) == anchors

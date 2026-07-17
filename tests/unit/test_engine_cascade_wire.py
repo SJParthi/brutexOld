@@ -100,6 +100,59 @@ def _spec(**overrides: object) -> cw.CascadeTupleSpec:
     return cw.CascadeTupleSpec(**base)  # type: ignore[arg-type]
 
 
+class TestSpecFillModeManifestLaw:
+    """DEC-FILL-WORST-CASE-ONLY-001: the unconditional manifest token + the
+    precise-era refusal law (worst-case is the ONLY fill model)."""
+
+    def test_spec_dict_carries_the_permanent_worst_case_token(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        assert payload["fill_mode"] == "worst_case"
+        assert cw._spec_from_dict(payload) == _spec()
+
+    def test_absent_key_refuses_as_precise_era(self) -> None:
+        # Fails-before pin: a pre-DEC manifest (no fill_mode key — the old
+        # PRECISE elide) must refuse LOUDLY naming the DEC, never replay.
+        payload = cw._spec_to_dict(_spec())
+        del payload["fill_mode"]
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_literal_precise_token_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "precise"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"re-run the sweep to produce a worst-case manifest",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_junk_fill_mode_refuses(self) -> None:
+        payload = cw._spec_to_dict(_spec())
+        payload["fill_mode"] = "worst"
+        with pytest.raises(
+            cw.CascadeWireError,
+            match=r"precise-era cascade manifest refused \(DEC-FILL-WORST-CASE-ONLY-001\)",
+        ):
+            cw._spec_from_dict(payload)
+
+    def test_spec_carries_no_fill_mode_field(self) -> None:
+        # Killed-token pin: the config object carries NO mode — the law is
+        # global, so nothing can thread a per-spec fill choice back in.
+        from dataclasses import fields
+
+        assert "fill_mode" not in {f.name for f in fields(cw.CascadeTupleSpec)}
+
+    def test_candidates_for_spec_runs_the_one_law_deterministically(self) -> None:
+        bars = _session_bars()
+        a = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        b = cw.candidates_for_spec(_spec(winners=((_rid(1), 0),)), bars)
+        assert len(a) == 1
+        assert a[0].returns == b[0].returns  # no hidden mode input survives
+
+
 def _bars_for(bars: list[CandleBar]) -> Callable[[str, str], list[CandleBar]]:
     """Return a ``bars_for`` that serves *bars* for NIFTY/1minute, else empty."""
 
@@ -177,6 +230,32 @@ def _fib_anchor_history(
     return bars
 
 
+def _lockbox_intraday_history() -> list[CandleBar]:
+    """Twelve real trading days whose ±500-paisa legs close IN-day.
+
+    Fixture repair for DEC-TRADESIM-OPEN-SESSION-GUARD-001: the original
+    ``_fib_anchor_history()`` shape (flat interiors, each 5-bar day a
+    session-tail hole) closed its SL/TP trades ONLY via cross-session fills
+    against each NEXT day's first bar — the exact overnight-gap fills the
+    open-position session guard now closes at the prior day's last stored
+    bar (every trade 0-pnl → flat complement equity → an undefined train
+    Sharpe). Alternating up/down days with in-day ±6-point ranges give the
+    lockbox split REAL in-day trade variance on BOTH sides of the window.
+    """
+    bars: list[CandleBar] = []
+    for n, day in enumerate(_FIB_TRADING_DAYS):
+        base_px = 10_000 + 25 * n
+        base_ts = datetime(day.year, day.month, day.day, 9, 15, tzinfo=_IST)
+        up_day = n % 2 == 0
+        for i in range(6):
+            o = base_px + i
+            high, low = (o + 6, o - 1) if up_day else (o + 1, o - 6)
+            bars.append(
+                _bar_at(base_ts + timedelta(minutes=i), str(o), str(high), str(low), str(o))
+            )
+    return bars
+
+
 def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
     return CandleBar(
         timestamp=ts_ist.astimezone(UTC),
@@ -190,28 +269,33 @@ def _bar_at(ts_ist: datetime, o: str, h: str, low: str, c: str) -> CandleBar:
 
 
 def _fat_tailed_bars() -> list[CandleBar]:
-    """A 40-bar session with a few extreme spikes → fat-tailed realised trade PnL.
+    """A 40-bar gap-up session with two down-spikes → fat-tailed WORST-CASE PnL.
 
-    The wide intrabar ranges let an SL/TP exit fill at different prices across
-    trades, and the four spike bars (10/24 up, 16/30 down) inject the heavy
-    tails, so a reconstruction over these bars yields a DEFINED, non-zero
-    (excess) kurtosis — the regime where the excess-vs-non-excess distinction
-    is material to the DSR. The pattern is deterministic (no RNG): a fixed
-    ``±`` swing list plus the spike overrides.
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (the one hardcoded adverse-max
+    law): a long ENTERS at the bar HIGH and a triggered TP fills at
+    ``min(level, low)``, so a positive-Sharpe fixture needs the TRIGGER bar's
+    LOW to clear the target — every regular bar GAPS UP (open = prior close
+    + 3.00, low = open − 0.20, close = open + 1.00, high = close + 0.30), so
+    the next bar's low (prior close + 2.80) sits above the TP level (entry
+    high + 2.00 = prior close + 2.30 relative to its own bar) and the win
+    banks exactly +200 paisa. The two down-spike bars (16: −4.00, 30: −6.00)
+    inject the heavy tail: bar 30's dip breaches the entry-relative floor and
+    the trade closes at the adverse ``min(level, low)`` for −330 paisa.
+    Measured on this tree: 13 trades = twelve +200 and one −330 → Sharpe
+    ≈ 1.127 (> the test's SR_0 ≈ 0.207) with a DEFINED, non-zero excess
+    kurtosis ≈ 8.083 — the regime where the excess-vs-non-excess distinction
+    is material to the DSR. Deterministic (no RNG).
     """
-    swings = [1.0, 1.2, 0.8, 1.5, -0.9, -1.1, 1.0, 1.2, 0.8, 1.5]
     seq: list[tuple[str, str, str, str]] = []
     price = 100.0
     for i in range(40):
-        o = price
-        if i in (10, 24):  # fat UPSIDE spikes
-            high, low, c = o + 15.0, o - 0.5, o + 12.0
-        elif i in (16, 30):  # fat DOWNSIDE spikes
-            high, low, c = o + 0.5, o - 15.0, o - 12.0
+        o = price + 3.0
+        if i in (16, 30):  # fat DOWNSIDE spikes (different depths → tail variety)
+            depth = 4.0 if i == 16 else 6.0
+            high, low, c = o + 0.1, o - depth, o - depth + 1.0
         else:
-            delta = swings[i % len(swings)]
-            c = o + delta
-            high, low = max(o, c) + 1.5, min(o, c) - 1.5
+            c = o + 1.0
+            high, low = c + 0.3, o - 0.2
         seq.append((f"{o:.2f}", f"{high:.2f}", f"{low:.2f}", f"{c:.2f}"))
         price = c
 
@@ -234,9 +318,9 @@ def _fat_tailed_bars() -> list[CandleBar]:
 def _fat_tailed_candidate() -> Any:
     """Reconstruct one fat-tailed :class:`CandidateInput` over :func:`_fat_tailed_bars`.
 
-    ``sl=500 / tp=200`` over the spike session produces 15 trades with a
-    defined, non-zero excess kurtosis (≈1.73) — the fixture the
-    DSR-kurtosis-convention regression tests share.
+    ``sl=500 / tp=200`` over the gap-up session produces 13 worst-case trades
+    (twelve +200, one −330) with a defined, non-zero excess kurtosis (≈8.08)
+    — the fixture the DSR-kurtosis-convention regression tests share.
     """
     bars = _fat_tailed_bars()
     bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
@@ -569,9 +653,12 @@ class TestBuildCandidateInput:
         the old ``0.0``, which the DSR would have mis-read as a non-excess
         kurtosis of zero).
         """
-        bars = _session_bars()
+        # A FLAT session (o == h == l == c on every bar): under the one
+        # worst-case law every fill lands at the same price, so the
+        # reconstructed PnL is constant (zero) → kurtosis undefined.
+        flat = [_bar(16 + i, "100.00", "100.00", "100.00", "100.00") for i in range(6)]
+        bars = flat
         bar_bits = build_bar_bits(bars, proximity=None, prior_n=3)
-        # Tight identical SL hits → constant per-trade PnL → kurtosis undefined.
         cand = cw.build_candidate_input(
             run_id=_rid(1),
             mask=0,
@@ -678,10 +765,12 @@ class TestLockboxTrainingSplit:
         from brutex.metrics.cpcv import sharpe_of_returns
         from brutex.metrics.lockbox import resolve_lockbox_window
 
-        bars = _fib_anchor_history()
-        # SL/TP legs so trades CLOSE throughout the 12-day history (with no
-        # legs the single mask-0 position holds to end_of_data and the
-        # complement equity is flat — the fallback case tested separately).
+        bars = _lockbox_intraday_history()
+        # SL/TP legs so trades CLOSE IN-day throughout the 12-day history
+        # (with no legs the single mask-0 position holds to end_of_data and
+        # the complement equity is flat — the fallback case tested
+        # separately; the in-day ranges are the DEC-TRADESIM-OPEN-SESSION-
+        # GUARD-001 fixture repair — see _lockbox_intraday_history).
         cand = self._build(bars, sl_paisa=500, tp_paisa=500)
 
         # Independent recompute of the exact reconstruction chain.
@@ -869,6 +958,198 @@ class TestRunCascadeOverSpecs:
         assert report.groups == ()
 
 
+# ── ADR-0012 futures roll-schedule carriage (review round-1) ─────────────────
+
+#: The pinned NIFTY-futures series alias (import-identity asserted in
+#: test_futures_series / test_universe; spelled literally to self-describe).
+_FUT_ALIAS = "NSE-NIFTY-FUT"
+#: An arbitrary two-roll schedule (expiry day-ordinals).
+_FUT_SCHEDULE = (date(2026, 5, 28).toordinal(), date(2026, 6, 25).toordinal())
+
+
+class TestFuturesRollScheduleCarriage:
+    """Stage-4 re-scores a futures pool under the SWEEP's roll schedule — never
+    schedule-blind (review round-1 findings 3/6/11/13/17/21: the automatic
+    cascade rebuilt futures winners' bar_bits with ``roll_schedule=None`` over
+    roll-stitched bars, silently violating the D11 hard-reset law)."""
+
+    def _spy(self, calls: list[tuple[str, tuple[int, ...] | None]]) -> Callable[..., list[Any]]:
+        def spy(
+            spec: cw.CascadeTupleSpec,
+            bars: Sequence[CandleBar],
+            *,
+            lockbox_default_window_days: int,
+            lockbox_min_trades: int,
+            roll_schedule: tuple[int, ...] | None = None,
+        ) -> list[Any]:
+            calls.append((spec.instrument, roll_schedule))
+            return []
+
+        return spy
+
+    def test_pool_schedule_threads_into_candidates_for_spec(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fails-before: run_cascade_over_specs never passed roll_schedule, so
+        # the spy recorded None for the futures pool.
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        cw.run_cascade_over_specs(
+            [_spec(), _spec(instrument=_FUT_ALIAS)],
+            bars_for=lambda _i, _t: _session_bars(),
+            config=cw.cascade_config_for_sweep("a" * 64),
+            sweep_id="a" * 64,
+            roll_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+        )
+        assert sorted(calls) == [
+            ("NIFTY", None),  # spot pools stay on the byte-identical None path
+            (_FUT_ALIAS, _FUT_SCHEDULE),
+        ]
+
+    @pytest.mark.parametrize("schedules", [None, {}], ids=["no-map", "alias-missing"])
+    def test_futures_pool_without_schedule_skips_loudly(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        schedules: dict[str, tuple[int, ...]] | None,
+    ) -> None:
+        # A pre-carriage manifest replay must never re-score a futures pool
+        # schedule-blind: the pool SKIPS with one WARN naming the remedy.
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        with capture_logs() as logs:
+            report = cw.run_cascade_over_specs(
+                [_spec(instrument=_FUT_ALIAS)],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                roll_schedules=schedules,
+            )
+        assert report.groups == ()
+        assert calls == []  # candidates never rebuilt schedule-blind
+        warned = [
+            rec
+            for rec in logs
+            if rec["event"] == "cascade_wire.futures_pool_skipped_no_roll_schedule"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["instrument"] == _FUT_ALIAS
+        assert "sweep-all" in str(warned[0]["remedy"])
+
+    def test_spot_pool_with_a_schedule_entry_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Round-3 finding 2, the POSITIVE invariant direction at the shared
+        # core: a schedule entry for a NON-alias pool must never be applied
+        # silently (pre-fix `roll_schedules.get(instrument)` threaded it into
+        # candidates_for_spec → build_bar_bits(roll_schedule=...), breaking
+        # the replay's byte-identity contract, then dying on Stage-1A's raw
+        # beyond-schedule ValueError for a short schedule).
+        calls: list[tuple[str, tuple[int, ...] | None]] = []
+        monkeypatch.setattr(cw, "candidates_for_spec", self._spy(calls))
+        with pytest.raises(cw.CascadeWireError, match="non-futures instrument 'NIFTY'"):
+            cw.run_cascade_over_specs(
+                [_spec()],
+                bars_for=lambda _i, _t: _session_bars(),
+                config=cw.cascade_config_for_sweep("a" * 64),
+                sweep_id="a" * 64,
+                roll_schedules={"NIFTY": _FUT_SCHEDULE},
+            )
+        assert calls == []  # the schedule never reached a spot bar_bits build
+
+    def test_auto_path_records_schedules_and_replay_threads_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AUTOMATIC: the launch's resolved map lands in the manifest…
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="FNO", start="2026-05-01", end="2026-06-30"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+            roll_schedule_by_instrument={_FUT_ALIAS: _FUT_SCHEDULE},
+        )
+        manifest = cw.load_manifest(tmp_path)
+        assert manifest.roll_schedules == ((_FUT_ALIAS, _FUT_SCHEDULE),)
+        # …and the MANUAL replay hands the SAME frozen schedules to the core.
+        seen: dict[str, object] = {}
+
+        def spy_core(*args: Any, **kwargs: Any) -> cw.CascadeWireReport:
+            seen.update(kwargs)
+            return cw.CascadeWireReport(sweep_id="a" * 64, groups=())
+
+        monkeypatch.setattr(cw, "run_cascade_over_specs", spy_core)
+        cw.run_and_write_from_manifest(tmp_path, bars_for=_bars_for(_session_bars()))
+        assert seen["roll_schedules"] == {_FUT_ALIAS: _FUT_SCHEDULE}
+
+    def test_spot_only_auto_path_records_none(self, tmp_path: Path) -> None:
+        cw.run_and_write_from_specs(
+            tmp_path,
+            sweep_id="a" * 64,
+            specs=[_spec()],
+            bars_for=_bars_for(_session_bars()),
+            bars_context=cw.BarsContext(
+                exchange="NSE", segment="INDEX", start="2021-01-01", end="2021-02-01"
+            ),
+            cascade_config=cw.cascade_config_for_sweep("a" * 64),
+        )
+        assert cw.load_manifest(tmp_path).roll_schedules is None
+
+
+class TestCheckReplayRollSchedule:
+    """The replay's frozen-vs-re-derived schedule cross-check (review round-2
+    findings 1/4/9): `load_bars_for_manifest` stitches bars from the CURRENT
+    lake while `run_and_write_from_manifest` re-scores under the manifest's
+    FROZEN schedule — a drifted lake must REFUSE loudly naming both schedules,
+    never silently rewrite the report under mismatched Stage-1A resets."""
+
+    def test_matching_schedules_pass(self) -> None:
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+    def test_drifted_lake_refuses_naming_both_schedules(self) -> None:
+        fresh = (*_FUT_SCHEDULE, date(2026, 7, 30).toordinal())  # a pulled successor
+        with pytest.raises(cw.CascadeWireError) as excinfo:
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+        message = str(excinfo.value)
+        assert str(list(_FUT_SCHEDULE)) in message  # the FROZEN schedule named
+        assert str(list(fresh)) in message  # the re-derived schedule named
+        assert "contract set changed" in message
+        assert "brutex sweep-all" in message  # the remediation
+
+    def test_backfilled_head_contract_refuses_too(self) -> None:
+        # The silent-D11 direction: a head contract backfilled AFTER the
+        # launch (the head_unowned WARN's own remediation) PREPENDS an expiry.
+        fresh = (date(2026, 4, 30).toordinal(), *_FUT_SCHEDULE)
+        with pytest.raises(cw.CascadeWireError, match="contract set changed"):
+            cw.check_replay_roll_schedule(
+                instrument=_FUT_ALIAS,
+                frozen_schedules={_FUT_ALIAS: _FUT_SCHEDULE},
+                fresh_schedule=fresh,
+            )
+
+    @pytest.mark.parametrize(
+        "frozen", [None, {}, {"OTHER": _FUT_SCHEDULE}], ids=["no-map", "empty", "other-instrument"]
+    )
+    def test_pre_carriage_manifest_abstains(
+        self, frozen: dict[str, tuple[int, ...]] | None
+    ) -> None:
+        # No frozen schedule for this instrument ⇒ nothing to enforce — the
+        # pool is loudly SKIPPED downstream by run_cascade_over_specs instead.
+        cw.check_replay_roll_schedule(
+            instrument=_FUT_ALIAS,
+            frozen_schedules=frozen,
+            fresh_schedule=_FUT_SCHEDULE,
+        )
+
+
 # ── Report serialisation ──────────────────────────────────────────────────────
 
 
@@ -888,6 +1169,10 @@ def _manual_report() -> cw.CascadeWireReport:
                 # hand-built serializer fixture: the leaderboard dsr stamp
                 # below is not cross-validated against the flag.
                 provisional=True,
+                # DEC-RESULTS-CASCADE-VERDICT-JOIN-001: a MEASURED stage-3
+                # rate here vs the default-None rejected verdict below, so
+                # the serializer is value-pinned for BOTH states.
+                cpcv_pass_rate=0.875,
             ),
             CandidateVerdict(
                 candidate_id=_rid(2),
@@ -1035,6 +1320,104 @@ class TestManifestSerialisation:
         del payload["specs"][0]["fib_anchor"]
         restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
         assert restored.specs[0].fib_anchor is FibAnchorKind.PREV_DAY
+
+    def test_roll_schedules_round_trip(self) -> None:
+        # ADR-0012 carriage (review round-1): the futures schedules survive
+        # serialize → deserialize so the MANUAL replay uses the sweep's own
+        # per-contract hard resets.
+        base = _manifest()
+        manifest = cw.CascadeManifest(
+            version=base.version,
+            sweep_id=base.sweep_id,
+            cascade_config=base.cascade_config,
+            bars_context=base.bars_context,
+            specs=base.specs,
+            roll_schedules=(("NSE-NIFTY-FUT", (739034, 739062)),),
+        )
+        restored = cw.manifest_from_json(cw.manifest_to_json(manifest))
+        assert restored == manifest
+        assert restored.roll_schedules == (("NSE-NIFTY-FUT", (739034, 739062)),)
+
+    def test_pre_carriage_manifest_without_roll_schedules_key_parses(self) -> None:
+        # A manifest written before the schedule carriage has no key at all —
+        # it parses with roll_schedules=None (the additive-parse precedent).
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        del payload["roll_schedules"]
+        restored = cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+        assert restored.roll_schedules is None
+
+    def test_malformed_roll_schedules_raises(self) -> None:
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", ["not-an-ordinal"]]]
+        with pytest.raises(cw.CascadeWireError, match="invalid roll_schedules"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [[True, 739030], [739000.9, 739030], ["739000", 739030]],
+        ids=["bool", "float", "int-string"],
+    )
+    def test_non_int_ordinal_types_refused_not_coerced(self, schedule: list[object]) -> None:
+        # Round-4 finding 2: the parse boundary documented itself as THE
+        # validator for a hand-edited manifest, yet bare `int()` silently
+        # coerced `true` → 1, truncated 739000.9 → 739000, and parsed an
+        # int-string — now strictly int-not-bool, mirroring the audit reader
+        # `_schedules_from_entries`.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="non-int roll_schedule ordinal"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_duplicate_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-7 finding 8: the parse boundary validated each entry's alias
+        # + shape but never UNIQUENESS — both `dict(manifest.roll_schedules)`
+        # consumers silently adopted whichever contradictory entry sorted
+        # LAST, while the audit twin `_schedules_from_entries` refuses the
+        # same per-instrument disagreement. The parse boundary now refuses
+        # identically.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [
+            ["NSE-NIFTY-FUT", [738000, 738030]],
+            ["NSE-NIFTY-FUT", [738000, 738031]],
+        ]
+        with pytest.raises(cw.CascadeWireError, match="duplicate entry for instrument"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    def test_spot_instrument_roll_schedules_entry_refused_at_parse(self) -> None:
+        # Round-3 finding 2: the manifest has no integrity digest, so a
+        # hand-edited/corrupt `roll_schedules` entry for a SPOT instrument
+        # was trusted verbatim and silently rebuilt that pool's bar_bits
+        # WITH per-contract hard resets. The presence ⟺ alias invariant is
+        # now enforced at the parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NIFTY", [738000, 738100]]]
+        with pytest.raises(cw.CascadeWireError, match="not.*the NIFTY-futures series alias"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        "schedule",
+        [[], [738100, 738000], [738000, 738000], [-5]],
+        ids=["empty", "decreasing", "duplicate", "negative"],
+    )
+    def test_shape_violating_roll_schedule_refused_at_parse(self, schedule: list[int]) -> None:
+        # The SweepRunConfig shape law (non-empty, strictly increasing,
+        # non-negative ordinals), mirrored at the manifest parse boundary.
+        import json
+
+        payload = json.loads(cw.manifest_to_json(_manifest()))
+        payload["roll_schedules"] = [["NSE-NIFTY-FUT", schedule]]
+        with pytest.raises(cw.CascadeWireError, match="strictly increasing"):
+            cw.manifest_from_json(json.dumps(payload).encode("utf-8"))
 
     def test_bad_json_raises(self) -> None:
         with pytest.raises(cw.CascadeWireError, match="not valid JSON"):
@@ -1998,3 +2381,75 @@ class TestStage3CellRelPath:
     def test_bad_rel_path_raises(self, bad: str) -> None:
         with pytest.raises(cw.CascadeWireError, match="rel_path"):
             _stage3_cell_with(rel_path=bad)
+
+
+# ── _manifest_window_dt (per-module 100% gate; DEC-VIX-STAMP-WIRE-001) ────────
+
+
+class TestManifestWindowDt:
+    """The ONE manifest window-endpoint parse for the manual replay's slice reads.
+
+    The seam's behavioural suite also pins this in
+    ``tests/unit/test_engine_vix_stamper_wiring.py``; these mirrors keep THIS
+    module's per-file 100% gate honest on its OWN discovered covering suite
+    (``scripts/ci/coverage_gate_discovery.py`` maps ``cascade_wire.py`` to the
+    ``test_*cascade_wire*`` files only).
+    """
+
+    def test_naive_endpoint_is_utc(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05")
+        assert parsed == datetime(2026, 1, 5, tzinfo=UTC)
+
+    def test_aware_endpoint_offset_preserved(self) -> None:
+        parsed = cw._manifest_window_dt("2026-01-05T09:15:00+05:30")
+        assert parsed.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+class TestCpcvRateSerialisation:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: the additive per-verdict rate key."""
+
+    def test_cpcv_pass_rate_serialises_both_states(self) -> None:
+        # Additive at REPORT_VERSION 1 (the pool_pbo/provisional precedent):
+        # the RAW full-precision fraction on the measured verdict, JSON null
+        # on the never-measured one — and the version does NOT bump.
+        payload = cw.wire_report_to_dict(_manual_report())
+        assert payload["version"] == cw.REPORT_VERSION
+        verdicts = payload["groups"][0]["report"]["verdicts"]  # type: ignore[index]
+        assert verdicts[0]["cpcv_pass_rate"] == 0.875
+        assert verdicts[1]["cpcv_pass_rate"] is None
+        raw = cw.serialize_wire_report(_manual_report())
+        assert b'"cpcv_pass_rate":0.875' in raw
+        assert b'"cpcv_pass_rate":null' in raw
+
+
+class TestWriteReportAtomic:
+    """DEC-RESULTS-CASCADE-VERDICT-JOIN-001: write_report is tmp→fsync→replace."""
+
+    def test_bytes_identical_and_no_temp_residue(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == cw.serialize_wire_report(_manual_report())
+        # The atomic_write_simple temp file never survives a clean write.
+        residue = [p.name for p in path.parent.iterdir() if p.name != path.name]
+        assert residue == []
+
+    def test_lands_via_os_replace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from brutex.data import atomic_io
+
+        calls: list[tuple[str, str]] = []
+        real_replace = atomic_io.os.replace
+
+        def _spy(src: str | Path, dst: str | Path) -> None:
+            calls.append((str(src), str(dst)))
+            real_replace(src, dst)
+
+        monkeypatch.setattr(atomic_io.os, "replace", _spy)
+        path = cw.write_report(tmp_path, _manual_report())
+        # Exactly ONE atomic rename, landing the final report path — a
+        # concurrent /results read can never see a torn half-write.
+        assert [dst for _, dst in calls] == [str(path)]
+
+    def test_overwrite_replaces_previous_report(self, tmp_path: Path) -> None:
+        path = cw.write_report(tmp_path, _manual_report())
+        first = path.read_bytes()
+        cw.write_report(tmp_path, _manual_report())
+        assert path.read_bytes() == first  # deterministic bytes, atomically re-landed

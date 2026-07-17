@@ -73,17 +73,28 @@ from typing import Final, Protocol
 import structlog
 
 __all__ = [
+    "AUTO_RESUME_MASTER_ENV",
     "AUTO_RESUME_ON_BOOT_ENV",
     "IncompletePull",
     "LedgerLike",
     "ResumeVerdict",
     "detect_incomplete_pull",
     "maybe_resume_on_boot",
+    "resolve_auto_resume_master",
     "resolve_auto_resume_on_boot",
 ]
 
 #: Structured logger — surfaces the boot-time resume decision into ``/logs``.
 _LOG = structlog.get_logger("brutex.orchestrator.auto_resume")
+
+#: MASTER kill switch above BOTH boot-resume arms (the intent-backed pipeline
+#: resume AND the legacy CLI child). Default OFF — see
+#: :func:`resolve_auto_resume_master`. When this is off, a leftover
+#: ``<lake>/.pull_intent.json`` can NEVER silently trigger a full-universe pull
+#: on boot: the launcher short-circuits BEFORE either sub-gate
+#: (:data:`AUTO_RESUME_ON_BOOT_ENV` / ``BRUTEX_PULL_INTENT_RESUME``) is consulted
+#: and before the intent file is read.
+AUTO_RESUME_MASTER_ENV: Final[str] = "BRUTEX_AUTO_RESUME"
 
 #: Env var gating the boot-time auto-resume. Default OFF — see
 #: :func:`resolve_auto_resume_on_boot`.
@@ -203,6 +214,35 @@ def resolve_auto_resume_on_boot(env: Mapping[str, str] | None = None) -> bool:
     """
     source: Mapping[str, str] = os.environ if env is None else env
     raw = source.get(AUTO_RESUME_ON_BOOT_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() in _TRUTHY
+
+
+def resolve_auto_resume_master(env: Mapping[str, str] | None = None) -> bool:
+    """Resolve the MASTER boot-resume kill switch from the env — default OFF.
+
+    The single gate ABOVE both boot-resume arms (the intent-backed pipeline
+    resume AND the legacy CLI child). Reads :data:`AUTO_RESUME_MASTER_ENV`
+    (``BRUTEX_AUTO_RESUME``) and returns ``True`` ONLY for an explicit truthy
+    value (``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``, case-insensitive) —
+    identical to the sibling :func:`resolve_auto_resume_on_boot` truthy set, so
+    the operator learns ONE convention (CLAUDE.md §11 COMMON). ANY other value —
+    unset, blank, ``"0"``, ``"false"``, or unrecognised — returns ``False``
+    (junk is mapped to the safe default-OFF SILENTLY, never raising, mirroring
+    the sibling resolvers exactly; CLAUDE.md §2 Rule 6 — a gate can never be
+    enabled by accident). *env* defaults to :data:`os.environ`; a test injects
+    its own mapping. O(1).
+
+    HONEST (Golden Rule #10): making the crash-recovery boot-resume OPT-IN is a
+    DELIBERATE behaviour change by operator directive — it overrides the prior
+    default-ON of the intent arm (``BRUTEX_PULL_INTENT_RESUME``), so a leftover
+    ``<lake>/.pull_intent.json`` can no longer auto-launch a full-universe pull
+    on boot. The two per-arm sub-gates still apply BENEATH this master gate once
+    it is on.
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    raw = source.get(AUTO_RESUME_MASTER_ENV)
     if raw is None:
         return False
     return raw.strip().lower() in _TRUTHY

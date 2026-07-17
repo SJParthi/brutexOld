@@ -70,6 +70,18 @@ var BX_COPY_TOKENS = {
 /* ── Exact detail strings (consulted before the ordered rules) ───────────── */
 
 var BX_COPY_EXACT = {
+  /* Portal-panel strings (the absorbed screener/strategy copy clean —
+     DEC-OPERATOR-PAGE-CLEANVIEW-001 merge-up round): the panels' pure
+     helpers keep these literals for their node goldens; the DOM render
+     remaps them here. */
+  "minute-path equity — the stored real series (R27)": {
+    text: "equity curve — the stored minute-by-minute series",
+    tier: "neutral"
+  },
+  "no trades yet — awaiting real run artifact": {
+    text: "no trades yet — they appear after the first completed run",
+    tier: "neutral"
+  },
   "awaiting real run artifact — no lake root wired for trades": {
     text: "Trade detail isn't connected on this server yet.",
     tier: "neutral"
@@ -100,12 +112,36 @@ var BX_COPY_EXACT = {
       "Not checked yet — press Replay to verify. Verification method is " +
       "provisional until the audit component ships.",
     tier: "neutral"
-  }
+  },
 };
 
 /* ── Ordered pattern rules — most-specific first; $1/$2 = captures ───────── */
 
 var BX_COPY_RULES = [
+  {
+    /* Health-hub FOLD pill ("OK — 3 ok · 2 not wired" — client-composed from
+       the frozen fold headline): the "not wired" prose remaps in place. */
+    re: /^((?:OK|AMBER|RED)\b.*?\d+) not wired\b(.*)$/,
+    text: "$1 not available yet$2",
+    tier: "neutral"
+  },
+  {
+    /* Health-hub LANE headlines (DEC-OPERATOR-HEALTH-TRUTH-001 payload —
+       the wire is frozen): every "not wired — <plain reason>" variant
+       (doctor/mutation/nightly/backup …) remaps at render; the reason tail
+       is already plain English and carries through verbatim. */
+    re: /^not wired — (.*)$/,
+    text: "Not set up on this machine yet — $1.",
+    tier: "neutral"
+  },
+  {
+    /* Health-hub lane DETAILS naming an unset BRUTEX_* env var: the setting
+       name moves into title="server: …" (the fixture-badge law) — the note
+       reads plain English. */
+    re: /^BRUTEX_[A-Z_]+ is unset\b.*$/,
+    text: "A required setting is missing on this machine — hover for the exact name.",
+    tier: "neutral"
+  },
   {
     re: /^awaiting real run artifact — top100 entry carries no results-depth reference/,
     text: "This run is from an older version — re-run the sweep to record trade detail.",
