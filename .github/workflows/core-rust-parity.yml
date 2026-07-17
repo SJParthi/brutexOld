@@ -36,6 +36,13 @@
 #      tests that hard-import the fno_math/trading_core wheels are
 #      deselected/dropped HERE ONLY — see the loud comments on the pytest
 #      steps below; they stay exercised in main CI.
+#   5. The milestone-3 config legs (DEC-CONFIG-RUST-LEAVES-001 m3): the
+#      seam-core + paths/dotenv/backupenv facade suites flag-OFF at 100%
+#      coverage, then the three config families re-run VERBATIM with ALL
+#      THREE seams ENGAGED (BRUTEX_CORE_RUST_PATHS / _DOTENV /
+#      _BACKUPENV=1 — independent flags, one combined leg; the
+#      crate-genuinely-engaged teeth live in each facade suite's
+#      engagement-spy + steady-state parity + hypothesis differentials).
 #
 # NOT a required gate (the lake-rust-parity precedent / coordinator
 # ruling): it gates the FUTURE default-ON flip, not every PR — a red run
@@ -64,12 +71,26 @@ on:
       - "brutex/money_rust.py"
       - "brutex/config/hardware_envelope.py"
       - "brutex/config/hardware_envelope_rust.py"
+      - "brutex/config/seam_core.py"
+      - "brutex/config/paths.py"
+      - "brutex/config/paths_rust.py"
+      - "brutex/config/dotenv.py"
+      - "brutex/config/dotenv_rust.py"
+      - "brutex/config/backup_env.py"
+      - "brutex/config/backup_env_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
       - "tests/unit/test_hardware_envelope_rust.py"
+      - "tests/unit/test_config_seam_core.py"
+      - "tests/unit/test_config_paths.py"
+      - "tests/unit/test_config_paths_rust.py"
+      - "tests/unit/test_config_dotenv.py"
+      - "tests/unit/test_config_dotenv_rust.py"
+      - "tests/unit/test_backup_env.py"
+      - "tests/unit/test_backup_env_rust.py"
       - "tests/golden/test_money_rounding_golden.py"
       - ".github/workflows/core-rust-parity.yml"
   pull_request:
@@ -79,12 +100,26 @@ on:
       - "brutex/money_rust.py"
       - "brutex/config/hardware_envelope.py"
       - "brutex/config/hardware_envelope_rust.py"
+      - "brutex/config/seam_core.py"
+      - "brutex/config/paths.py"
+      - "brutex/config/paths_rust.py"
+      - "brutex/config/dotenv.py"
+      - "brutex/config/dotenv_rust.py"
+      - "brutex/config/backup_env.py"
+      - "brutex/config/backup_env_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
       - "tests/unit/test_hardware_envelope.py"
       - "tests/unit/test_config_hardware_envelope.py"
       - "tests/unit/test_hardware_envelope_fingerprint.py"
       - "tests/unit/test_hardware_envelope_rust.py"
+      - "tests/unit/test_config_seam_core.py"
+      - "tests/unit/test_config_paths.py"
+      - "tests/unit/test_config_paths_rust.py"
+      - "tests/unit/test_config_dotenv.py"
+      - "tests/unit/test_config_dotenv_rust.py"
+      - "tests/unit/test_backup_env.py"
+      - "tests/unit/test_backup_env_rust.py"
       - "tests/golden/test_money_rounding_golden.py"
       - ".github/workflows/core-rust-parity.yml"
   workflow_dispatch:
@@ -188,7 +223,16 @@ jobs:
           # equality is preserved.
           expected_key = "-".join(("mac16-8", "%dc%dp%de" % (14, 10, 4), "%dg" % 48, "arm64"))
           assert key_probe == expected_key, f"key probe: {key_probe!r}"
-          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv)")
+          lake_probe = brutex_core.paths_lake_root_str("/Volumes/T7//lake/", "")
+          assert lake_probe == "/Volumes/T7/lake", f"paths probe: {lake_probe!r}"
+          vol_probe = brutex_core.paths_volume_parent_str("/Volumes/T7/lake")
+          assert vol_probe == "/Volumes/T7", f"volume probe: {vol_probe!r}"
+          pairs_probe = brutex_core.dotenv_parse_pairs("A=1\nexport B = 'two'\nA=3")
+          assert pairs_probe == [("A", "3"), ("B", "two")], f"dotenv probe: {pairs_probe!r}"
+          subset_probe = brutex_core.backupenv_verify_subset_valid("2%")
+          assert subset_probe is True, f"backupenv probe: {subset_probe!r}"
+          assert brutex_core.backupenv_verify_subset_valid("8388608t") is False
+          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv + m3 config)")
           PY
 
       # LANE-SCOPED COVERAGE NARROWING (honest, DEC-CONFIG-RUST-LEAVES-001):
@@ -214,10 +258,22 @@ jobs:
             tests/unit/test_config_hardware_envelope.py \
             tests/unit/test_hardware_envelope_fingerprint.py \
             tests/unit/test_hardware_envelope_rust.py \
+            tests/unit/test_config_seam_core.py \
+            tests/unit/test_config_paths.py \
+            tests/unit/test_config_paths_rust.py \
+            tests/unit/test_config_dotenv.py \
+            tests/unit/test_config_dotenv_rust.py \
+            tests/unit/test_backup_env.py \
+            tests/unit/test_backup_env_rust.py \
             --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin \
             --cov=brutex.money --cov=brutex.money_rust \
             --cov=brutex.config.hardware_envelope \
-            --cov=brutex.config.hardware_envelope_rust --cov-branch \
+            --cov=brutex.config.hardware_envelope_rust \
+            --cov=brutex.config.seam_core \
+            --cov=brutex.config.paths --cov=brutex.config.paths_rust \
+            --cov=brutex.config.dotenv --cov=brutex.config.dotenv_rust \
+            --cov=brutex.config.backup_env --cov=brutex.config.backup_env_rust \
+            --cov-branch \
             --cov-report=term-missing --cov-fail-under=100
 
       - name: Money family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
@@ -244,3 +300,22 @@ jobs:
             tests/unit/test_config_hardware_envelope.py \
             tests/unit/test_hardware_envelope_fingerprint.py \
             --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin
+
+      # The milestone-3 config families re-run VERBATIM with all three
+      # seams ENGAGED (independent flags — one combined leg; each facade
+      # suite's TestRealCrateParity carries the per-seam engagement spy +
+      # the hypothesis differential, so a silent degrade cannot go green).
+      - name: config families re-run VERBATIM with the m3 seams ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_PATHS: "1"
+          BRUTEX_CORE_RUST_DOTENV: "1"
+          BRUTEX_CORE_RUST_BACKUPENV: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_config_seam_core.py \
+            tests/unit/test_config_paths.py \
+            tests/unit/test_config_paths_rust.py \
+            tests/unit/test_config_dotenv.py \
+            tests/unit/test_config_dotenv_rust.py \
+            tests/unit/test_backup_env.py \
+            tests/unit/test_backup_env_rust.py

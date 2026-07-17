@@ -508,6 +508,10 @@ jobs:
             "brutex/data/lake_rust_resample.py:tests/unit/test_lake_rust_resample.py:" \
             "brutex/money_rust.py:tests/unit/test_money_rust.py:" \
             "brutex/config/hardware_envelope_rust.py:tests/unit/test_hardware_envelope_rust.py:" \
+            "brutex/config/seam_core.py:tests/unit/test_config_seam_core.py:" \
+            "brutex/config/paths_rust.py:tests/unit/test_config_paths_rust.py:" \
+            "brutex/config/dotenv_rust.py:tests/unit/test_config_dotenv_rust.py:" \
+            "brutex/config/backup_env_rust.py:tests/unit/test_backup_env_rust.py:" \
             "brutex/feed_rust.py:tests/unit/test_feed_rust.py:" \
             "brutex/feed/replay.py:tests/integration/test_feed_replay.py tests/integration/test_feed_replay_bad_tick_screen.py tests/integration/test_feed_replay_rust_seam.py:30" \
             "brutex/engine/sweep_apriori.py:tests/unit/test_engine_sweep_apriori.py:" \
