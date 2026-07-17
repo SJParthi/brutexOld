@@ -1,11 +1,15 @@
-"""O(1) benchmarks for the u128 TWO-LIMB strategy-mask path (`combo_mask`).
+"""O(1) benchmarks for the u128 TWO-LIMB numpy ORACLE path (`combo_mask`).
 
 DEC-O1-CLAIMS-HONESTY-001 bench pin. ``test_engine_combo_mask_o1.py`` pins the
 u64 scalar path only (its dense bar is 52-bit); since DEC-VOCAB-U128-CODEGEN-001
-the vocabulary mask carries u128 headroom, and any mask OR bar with a bit >= 64
-routes ``count_supermasks`` to the bit-exact two-limb numpy reference
+the vocabulary mask carries u128 headroom. Since DEC-ENUM-KERNEL-U128-001 a
+mask OR bar with a bit >= 64 routes the production ``count_supermasks`` to the
+u128 RUST kernel (pinned by ``test_engine_combo_mask_wide_kernel_o1.py``);
+the bit-exact two-limb numpy reference benched HERE
 (``count_supermasks_reference`` → ``_split_limbs``/``_count_two_limb`` — two
-u64 ANDs + two compares per bar). These benches pin the >=64-bit path:
+u64 ANDs + two compares per bar) is retained as the parity ORACLE, and its
+per-bar cost stays pinned so an oracle regression cannot silently rot the
+parity suites. These benches pin the >=64-bit oracle path:
 
 * ``evaluate_mask`` with u128 operands — per-eval latency flat vs how many
   evals run (a constant AND/CMP on a bounded-width (<=128-bit) Python int);
@@ -21,10 +25,10 @@ still blows well past 3×. Shared CI is byte-unchanged (5× default). Operand
 WIDTHS are identical across both bases so the ratio times the workload size,
 never a limb-count difference.
 
-NON-GOAL (stated per Golden Rule #10): ``ResidentBarBuffer``'s u128 branch is
-deliberately NOT benched here — it re-runs ``_split_limbs(self._raw)`` per
-call (O(bars) per *call* by design), so a flat-vs-mask-count pin on it would
-be unfair/misleading.
+NON-GOAL (stated per Golden Rule #10): ``ResidentBarBuffer``'s wide branch is
+deliberately NOT benched here — since DEC-ENUM-KERNEL-U128-001 it serves the
+resident u128 Rust kernel, pinned in its own file
+(``test_engine_combo_mask_wide_kernel_o1.py``).
 """
 
 from __future__ import annotations
@@ -86,7 +90,10 @@ class TestU128Routing:
         assert evaluate_mask(_BAR_U128, _MASK_U128 | (1 << 121)) is False
 
     def test_public_count_routes_to_two_limb_bit_exact(self) -> None:
-        """Public ``count_supermasks`` with a bit >= 64 == the reference, bit-exact.
+        """Public ``count_supermasks`` with a bit >= 64 == the oracle, bit-exact.
+
+        (Since DEC-ENUM-KERNEL-U128-001 the public route serves the u128 Rust
+        kernel; the equality against the two-limb oracle is the parity law.)
 
         Mixed bars: a satisfying superset + the exactly-satisfying mask itself
         + a zero bar → a non-trivial count of 2 on BOTH the public route and

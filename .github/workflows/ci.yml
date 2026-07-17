@@ -1361,11 +1361,13 @@ jobs:
           else
             echo "(brutex.data.models test file not present yet — gate inactive)"
           fi
-          # 19i · brutex.engine.combo_mask (133 stmts, 52 branches — grown for
-          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012). The
-          # base scalar suite is test_engine_combo_mask.py; the u128 two-limb
-          # numpy oracle/fallback paths (the >=64-bit headroom + the
-          # kernel-unavailable ResidentBars fallback) live in the dedicated
+          # 19i · brutex.engine.combo_mask (183 stmts, 72 branches — grown for
+          # the u128 widening, DEC-VOCAB-U128-CODEGEN-001 / ADR-0012, then the
+          # u128 Rust kernel dispatch, DEC-ENUM-KERNEL-U128-001). The base
+          # scalar suite is test_engine_combo_mask.py; the >=64-bit kernel
+          # dispatch paths (the wide Rust routing + lazy promotion + the
+          # LOUD-FAIL WideKernelUnavailableError law + the retained numpy
+          # oracle / <=64-bit ResidentBars fallback) live in the dedicated
           # test_engine_combo_mask_u128.py — BOTH are required to reach 100%
           # line+branch (COMMON, composed not duplicated — mirrors the
           # quota_tracker two-file gate above).
