@@ -1549,7 +1549,7 @@ jobs:
           #       at import time, which is impossible to reach in normal
           #       test paths without monkey-patching pre-import.
           if compgen -G "tests/unit/test_timeframes.py" > /dev/null; then
-            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py
+            pytest --cov=brutex.data.timeframes --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_timeframes.py tests/unit/test_timeframes_registry.py
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
