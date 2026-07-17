@@ -32,7 +32,10 @@
 #      + the hardware_envelope family re-run VERBATIM under
 #      BRUTEX_CORE_RUST_HWENV=1 (same engaged-teeth reasoning; detection
 #      stays Python — the parity bar is BEHAVIORAL, per the facade's
-#      seam-split record).
+#      seam-split record). Lane-local narrowing: the engine/CLI consumer
+#      tests that hard-import the fno_math/trading_core wheels are
+#      deselected/dropped HERE ONLY — see the loud comments on the pytest
+#      steps below; they stay exercised in main CI.
 #
 # NOT a required gate (the lake-rust-parity precedent / coordinator
 # ruling): it gates the FUTURE default-ON flip, not every PR — a red run
@@ -182,6 +185,19 @@ jobs:
           print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv)")
           PY
 
+      # LANE-SCOPED COVERAGE NARROWING (honest, DEC-CONFIG-RUST-LEAVES-001):
+      # this lane installs ONLY the brutex-core wheel — fno_math and
+      # trading_core are deliberately ABSENT (their maturin builds are the
+      # deep wheel chain this pyo3-only ~2-min lane exists to avoid;
+      # verified: `brutex.engine.sweep_mem_budget` hard-imports BOTH wheels
+      # at module scope and `brutex.cli` hard-imports trading_core).
+      # TestFortyEightGibRegressionPin's three tests import
+      # brutex.engine.sweep_mem_budget + brutex.orchestrator.bloom INSIDE
+      # the test bodies, so they are deselected HERE ONLY; they (and the
+      # engine/CLI consumer files dropped from the flag-ON leg below) stay
+      # fully exercised in main CI flag-OFF, where the wheels are built.
+      # The seam parity this lane owns is still proven end-to-end by the
+      # facade suites + the frozen goldens + the hypothesis differentials.
       - name: Facade + money + hwenv suites, flag OFF (wheel present, crate untouched)
         run: |
           pytest -q \
@@ -192,6 +208,7 @@ jobs:
             tests/unit/test_config_hardware_envelope.py \
             tests/unit/test_hardware_envelope_fingerprint.py \
             tests/unit/test_hardware_envelope_rust.py \
+            --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin \
             --cov=brutex.money --cov=brutex.money_rust \
             --cov=brutex.config.hardware_envelope \
             --cov=brutex.config.hardware_envelope_rust --cov-branch \
@@ -205,6 +222,13 @@ jobs:
             tests/unit/test_money.py \
             tests/golden/test_money_rounding_golden.py
 
+      # The engine/CLI consumer files (test_cli_thread_bound.py +
+      # test_engine_sweep_mem_budget*.py) are DROPPED from this lane-local
+      # re-run — same wheel wall as above (module-scope brutex.cli /
+      # brutex.engine imports need trading_core + fno_math, absent here).
+      # They run flag-OFF in main CI; the flag-ON hwenv parity is carried by
+      # the facade suite's TestRealCrateParity + goldens + differential and
+      # the family re-run below.
       - name: hwenv family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
         env:
           BRUTEX_CORE_RUST_HWENV: "1"
@@ -213,6 +237,4 @@ jobs:
             tests/unit/test_hardware_envelope.py \
             tests/unit/test_config_hardware_envelope.py \
             tests/unit/test_hardware_envelope_fingerprint.py \
-            tests/unit/test_cli_thread_bound.py \
-            tests/unit/test_engine_sweep_mem_budget.py \
-            tests/unit/test_engine_sweep_mem_budget_workers.py
+            --deselect tests/unit/test_hardware_envelope.py::TestFortyEightGibRegressionPin
