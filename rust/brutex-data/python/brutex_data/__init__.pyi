@@ -2,6 +2,8 @@
 # DEC-DATA-RUST-PURELAW-001). Mirrors rust/brutex-data/src/lib.rs — keep in
 # lockstep with the `#[pymodule]` registration block there.
 
+from collections.abc import Sequence
+
 __version__: str
 
 def parse_fno_symbol_coords(
@@ -28,4 +30,34 @@ def parse_fno_symbol_coords(
     spot / short / bad expiry / empty exchange-underlying-strike token).
     Raises ``RuntimeError`` only if the parse panicked (caught at the FFI
     boundary — a panic never crosses raw).
+    """
+
+def stock_drift_fold(symbol: str) -> str:
+    """Law A — the irreversible evidence-matching fold (ASCII-only by
+    facade contract): ``symbol.upper().replace(" ", "").replace("-", "")``
+    transcribed token-for-token. The string OUT is the computed fold (the
+    window_ledger "computed-ASCII-out" allowance — a conscious deviation
+    from PR-1's integers-only discipline). Raises ``RuntimeError`` only on
+    a caught panic.
+    """
+
+def spot_key_candidates(symbol: str, exchange: str) -> list[str]:
+    """Law B — the ordered #911 drift-recovery candidates, identity
+    excluded (ASCII-only by facade contract; the facade tuples the list).
+    Strings OUT are the computed candidate strings (the computed-ASCII-out
+    allowance). Raises ``RuntimeError`` only on a caught panic.
+    """
+
+def spot_recovery_candidates(
+    underlying: str,
+    exchange: str,
+    alias_pairs: Sequence[tuple[str, str]],
+    drift_bucket: Sequence[str],
+) -> list[str]:
+    """Law C — the full recovery-ladder CORE with the alias pairs + the
+    stock-drift bucket INJECTED (the Python wrapper computes both — no
+    Mapping crosses the FFI; ASCII-only by facade contract; the facade
+    tuples the list). Strings OUT are the computed candidate strings (the
+    computed-ASCII-out allowance). Raises ``RuntimeError`` only on a
+    caught panic.
     """
