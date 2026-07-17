@@ -110,7 +110,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING, Final, Literal
 
-from brutex.data.write_domain import WriteDomain, primary_write_domain
+from brutex.data.write_domain import FEEDS_COMPONENT, WriteDomain, primary_write_domain
 from brutex.models import BruteXError
 
 if TYPE_CHECKING:  # pragma: no cover — typing-only imports (no runtime edge)
@@ -456,9 +456,29 @@ class VendorProfileRegistry:
                 f"profiles {profile.vendor!r} and {other.vendor!r} BOTH claim the PRIMARY "
                 "write domain — exactly one primary profile per lake (ADR-0021 Decision 1)"
             )
-        # Feed-vs-feed subtree disjointness (the primary-vs-feed pair is
-        # structurally disjoint by the WriteDomain type's whole-`feeds/`-prefix
-        # exclusion). Prefix overlap in EITHER direction is a refusal.
+        # Primary-vs-feed subtree disjointness. The WriteDomain type's
+        # whole-`feeds/`-prefix exclusion makes a BUILDER-built pair
+        # (`feeds_write_domain` enforces the feeds/ nesting law at
+        # construction) structurally disjoint — but a hand-built RAW feed
+        # WriteDomain claiming a non-feeds/ subtree (e.g. `bars/`) would
+        # silently overlap the primary's real write territory, so the pair
+        # is refused HERE too (the hostile-review MINOR-2 fold on
+        # DEC-FEED-REGISTRY-COMMON-001 — fails-before-pinned; the compare
+        # reuses write_domain.FEEDS_COMPONENT, never a re-minted literal).
+        pair = (profile, other) if profile.write_domain.primary else (other, profile)
+        primary_side, feed_side = pair
+        if primary_side.write_domain.primary and not feed_side.write_domain.primary:
+            for parts in feed_side.write_domain.allowed_parts:
+                if parts[:1] != (FEEDS_COMPONENT,):
+                    raise VendorProfileError(
+                        f"feed profile {feed_side.vendor!r} claims write-domain subtree "
+                        f"{'/'.join(parts)!r} OUTSIDE the '{FEEDS_COMPONENT}/' component "
+                        f"while {primary_side.vendor!r} holds the PRIMARY domain — the "
+                        "primary owns everything outside feeds/ (ADR-0021 Decision 1 / "
+                        "Pin D1-1; every second-vendor byte nests under feeds/<vendor>/)"
+                    )
+        # Feed-vs-feed subtree disjointness. Prefix overlap in EITHER
+        # direction is a refusal.
         for mine in profile.write_domain.allowed_parts:
             for theirs in other.write_domain.allowed_parts:
                 shorter = min(len(mine), len(theirs))

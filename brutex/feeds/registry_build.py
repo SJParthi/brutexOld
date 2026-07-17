@@ -41,9 +41,13 @@ if TYPE_CHECKING:  # pragma: no cover — typing-only imports (no runtime edge)
 
 #: A caller-config vendor entry: called with the ONE resolved lake root,
 #: returns that vendor's frozen profile (registered as-is — fail-loud).
+#: Deliberately NOT in ``__all__``: a PEP 695 ``type`` alias (typing-only,
+#: zero external importers today) — CodeQL's ``__all__`` resolver does not
+#: see ``type``-statement bindings (alert 1193), and an export with no
+#: consumer is not worth the standing false positive.
 type ProfileBuilder = Callable[[Path], VendorPullProfile]
 
-__all__ = ["ProfileBuilder", "build_default_registry"]
+__all__ = ["build_default_registry"]
 
 
 def build_default_registry(

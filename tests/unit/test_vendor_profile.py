@@ -230,11 +230,17 @@ class TestRegistry:
         # factory wrapper escapes both identity spellings — the registration
         # PRODUCT probe catches it.
         registry = VendorProfileRegistry()
+
+        def masked_groww_default() -> SessionRateController:
+            # The wrapper IS the point (a named def, never the bare class —
+            # that would trip the class-identity arm instead): a
+            # wrapper-masked Groww default must be caught by the PRODUCT
+            # probe, not the class-identity spelling.
+            return SessionRateController()
+
         masked = replace(
             synthetic_feed_profile(tmp_path),
-            # The lambda IS the point: a wrapper-masked Groww default must be
-            # caught by the PRODUCT probe, not the class-identity spelling.
-            rate_factory=lambda: SessionRateController(),  # noqa: PLW0108
+            rate_factory=masked_groww_default,
         )
         with pytest.raises(VendorProfileError, match="PRODUCT is a SessionRateController"):
             registry.register(masked)
@@ -274,18 +280,74 @@ class TestRegistry:
     def test_two_primary_profiles_refused(self, tmp_path: Path) -> None:
         registry = VendorProfileRegistry()
         registry.register(groww_pull_profile(tmp_path))
+
+        def fresh_feed_rate_controller() -> FakeFeedRateController:
+            # A fresh-per-call factory (a named def, NOT the shared class
+            # object) so the shared-identity arms cannot mask the
+            # dual-primary refusal.
+            return FakeFeedRateController()
+
         # A distinct rate factory + account resolver so the SHARED-identity
         # arms (checked first) cannot mask the dual-primary refusal.
         second = replace(
             groww_pull_profile(tmp_path),
             vendor="groww2",
-            # A fresh-per-call factory (NOT the shared class object) so the
-            # shared-identity arms cannot mask the dual-primary refusal.
-            rate_factory=lambda: FakeFeedRateController(),  # noqa: PLW0108
+            rate_factory=fresh_feed_rate_controller,
             account_key_resolver=lambda: "groww2-account",
         )
         with pytest.raises(VendorProfileError, match="BOTH claim the PRIMARY"):
             registry.register(second)
+
+    def test_raw_nonfeeds_feed_domain_beside_primary_refused(self, tmp_path: Path) -> None:
+        # Hostile-review MINOR-2 (fails-before-pinned): a hand-built RAW feed
+        # WriteDomain claiming `bars/` bypasses feeds_write_domain's nesting
+        # law at construction, and PRE-fix the registry ACCEPTED it beside
+        # the Groww primary — the allowed_parts × allowed_parts overlap loop
+        # is VACUOUS against the primary's empty allowed set (verified: this
+        # test fails on the pre-fix code with "DID NOT RAISE"). The
+        # primary-vs-feed arm now refuses, naming both vendors.
+        registry = VendorProfileRegistry()
+        registry.register(groww_pull_profile(tmp_path))
+        base = synthetic_feed_profile(tmp_path)
+        raw = replace(
+            base,
+            write_domain=replace(base.write_domain, name="bars", allowed_parts=(("bars",),)),
+        )
+        with pytest.raises(VendorProfileError, match="OUTSIDE the 'feeds/' component"):
+            registry.register(raw)
+
+    def test_raw_nonfeeds_feed_domain_then_primary_also_refused(self, tmp_path: Path) -> None:
+        # Order independence for the MINOR-2 arm: feed-first-then-primary
+        # refuses identically (the pairwise arm normalizes the pair, so the
+        # registration order can never mask the overlap).
+        registry = VendorProfileRegistry()
+        base = synthetic_feed_profile(tmp_path)
+        raw = replace(
+            base,
+            write_domain=replace(base.write_domain, name="bars", allowed_parts=(("bars",),)),
+        )
+        registry.register(raw)  # alone (no primary yet) — nothing to overlap
+        with pytest.raises(VendorProfileError, match="OUTSIDE the 'feeds/' component"):
+            registry.register(groww_pull_profile(tmp_path))
+
+    def test_raw_feeds_nested_domain_beside_primary_registers(self, tmp_path: Path) -> None:
+        # A RAW-but-feeds/-nested domain stays legal — the MINOR-2 arm keys
+        # on the structural feeds/ component (write_domain.FEEDS_COMPONENT),
+        # never on builder provenance; sanctioned builder-built domains are
+        # covered by the unchanged full suite.
+        registry = VendorProfileRegistry()
+        registry.register(groww_pull_profile(tmp_path))
+        base = synthetic_feed_profile(tmp_path)
+        raw = replace(
+            base,
+            write_domain=replace(
+                base.write_domain,
+                name="feeds/rawfeed",
+                allowed_parts=(("feeds", "rawfeed"),),
+            ),
+        )
+        registry.register(raw)
+        assert base.vendor in registry.vendors()
 
     @pytest.mark.parametrize(
         ("mine", "theirs"),
