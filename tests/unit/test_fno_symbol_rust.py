@@ -16,9 +16,12 @@ single-call-site grep pin, and the mutation-workflow wiring pin.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import locale
 import re
+import subprocess
+import sys
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -185,13 +188,31 @@ class TestFlagResolution:
 
 class TestOffArmInertness:
     def test_off_never_imports_or_touches_crate(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The design's bomb-crate spy: raises on ANY attribute access AND on
+        # The design's bomb-crate spy: detects ANY attribute access AND any
         # import — the flag-OFF/unset public path must never reach either.
-        class _Bomb:
-            def __getattr__(self, name: str) -> object:
-                raise AssertionError(f"flag-OFF path touched crate attr {name!r}")
+        # CODEQL FIX ROUND shape: ``__getattr__`` honours the special-method
+        # contract (AttributeError, never AssertionError) — but an
+        # AttributeError alone is NOT the teeth, because the facade's
+        # ``_resolve_crate`` probes via ``getattr(crate, name, None)`` which
+        # SWALLOWS it silently (as would ``hasattr``). The teeth are the
+        # call-recording ``touched`` ledger asserted EMPTY after the walk —
+        # a wrongful touch fails the test even when the raise is swallowed
+        # (re-proven by temporarily flipping the flag ON against this bomb
+        # with the REAL import_module: parse equality still held and the
+        # AttributeError was swallowed by getattr's default, yet touched read
+        # ['__spec__', 'parse_fno_symbol_coords'] → the assert-empty fails).
+        class _BombCrate:
+            def __init__(self) -> None:
+                self.touched: list[str] = []
 
-        monkeypatch.setitem(__import__("sys").modules, "brutex_data", _Bomb())
+            def __getattr__(self, name: str) -> object:
+                # Only MISSING attrs reach __getattr__ — ``touched`` itself
+                # lives in the instance __dict__ and resolves normally.
+                self.touched.append(name)
+                raise AttributeError(f"flag-OFF path touched crate attr {name!r}")
+
+        bomb = _BombCrate()
+        monkeypatch.setitem(__import__("sys").modules, "brutex_data", bomb)
 
         def _bomb_import(name: str) -> object:
             raise AssertionError(f"flag-OFF path imported {name!r}")
@@ -199,6 +220,7 @@ class TestOffArmInertness:
         monkeypatch.setattr(fsr.importlib, "import_module", _bomb_import)
         for symbol in BOMB_CORPUS:
             assert parse_fno_symbol(symbol) == _parse_fno_symbol_python(symbol)
+        assert bomb.touched == []
 
     def test_falsy_set_is_equally_inert(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(fsr.DATA_RUST_ENV, "0")
@@ -749,14 +771,21 @@ class TestWiringPins:
     def test_single_call_site_pin(self) -> None:
         # Risk #12: `routed_parse_fno_symbol` is called from EXACTLY ONE
         # production site — fno_symbol.parse_fno_symbol (the injected
-        # callables are always that module's own oracle helpers).
+        # callables are always that module's own oracle helpers). The
+        # definition line is EXCLUDED def-shape-independently (the PEP 695
+        # generic def spells `routed_parse_fno_symbol[…](` — the CodeQL fix
+        # round — so a bare name-paren regex would miss/hit it by syntax).
         pkg = REPO_ROOT / "brutex"
         callers: list[str] = []
         for path in sorted(pkg.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            if re.search(r"routed_parse_fno_symbol\(", text):
-                callers.append(str(path.relative_to(REPO_ROOT)))
-        assert callers == ["brutex/data/fno_symbol.py", "brutex/data/fno_symbol_rust.py"]
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.lstrip()
+                if stripped.startswith("def "):
+                    continue
+                if re.search(r"routed_parse_fno_symbol\(", stripped):
+                    callers.append(str(path.relative_to(REPO_ROOT)))
+                    break
+        assert callers == ["brutex/data/fno_symbol.py"]
 
     def test_public_seam_injects_the_oracle_triple(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The public entry routes through the facade with the real oracle
@@ -774,6 +803,64 @@ class TestWiringPins:
         assert seen["python_law"] is _parse_fno_symbol_python
         assert seen["strike_law"] is parse_strike_token
         assert seen["build_parts"] is FnoSymbolParts
+
+
+class TestImportGraphAcyclic:
+    """The CODEQL FIX ROUND import-order pins — the cycle class can't return.
+
+    The interim ``TYPE_CHECKING``-only ``FnoSymbolParts`` import was
+    runtime-free yet still a module-level cyclic-import finding; the facade
+    now types the parts via its LOCAL structural ``SymbolParts`` Protocol +
+    injection and imports ``fno_symbol`` NOWHERE. Two layers: (a)
+    fresh-interpreter subprocess imports in EVERY order (each module alone +
+    both sequential orders — a reintroduced runtime cycle fails here), and
+    (b) an AST source pin that refuses ANY import of ``fno_symbol`` from the
+    facade — including a ``TYPE_CHECKING``-guarded one (the exact shape that
+    regressed).
+    """
+
+    @pytest.mark.parametrize(
+        "statements",
+        [
+            ("import brutex.data.fno_symbol_rust",),
+            ("import brutex.data.fno_symbol",),
+            ("import brutex.data.fno_symbol_rust", "import brutex.data.fno_symbol"),
+            ("import brutex.data.fno_symbol", "import brutex.data.fno_symbol_rust"),
+        ],
+        ids=["facade_alone", "oracle_alone", "facade_then_oracle", "oracle_then_facade"],
+    )
+    def test_fresh_interpreter_import_order(self, statements: tuple[str, ...]) -> None:
+        code = "\n".join(statements)
+        proc = subprocess.run(  # fixed argv, our own interpreter — never shell
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+            cwd=REPO_ROOT,
+        )
+        assert proc.returncode == 0, (
+            f"fresh-interpreter import failed for {statements!r}:\n{proc.stderr}"
+        )
+
+    def test_facade_source_never_imports_fno_symbol(self) -> None:
+        src = (REPO_ROOT / "brutex" / "data" / "fno_symbol_rust.py").read_text(encoding="utf-8")
+        offenders: list[str] = []
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module == "brutex.data.fno_symbol" or module.endswith(".fno_symbol"):
+                    offenders.append(f"line {node.lineno}: from {module} import …")
+            elif isinstance(node, ast.Import):
+                offenders.extend(
+                    f"line {node.lineno}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name == "brutex.data.fno_symbol"
+                )
+        assert offenders == [], (
+            "the facade must NEVER import fno_symbol (not even under TYPE_CHECKING — "
+            f"the no-cycle law, DEC-DATA-RUST-PURELAW-001): {offenders}"
+        )
 
 
 class TestMutationWorkflowWiring:

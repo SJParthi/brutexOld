@@ -12,8 +12,13 @@ string slices (byte-identical by construction), :class:`datetime.date`,
 the ``Decimal`` strike via the INJECTED ``parse_strike_token`` oracle
 helper (all Decimal semantics — trailing zeros, ``1E4``, ``24_000``, sign,
 whitespace — stay Python forever), and ``FnoSymbolParts`` via the injected
-constructor. The facade never imports ``fno_symbol`` at runtime (no cycle
-— the ``window_ledger_rust``/``WindowKey`` move).
+constructor. The facade never imports ``fno_symbol`` AT ALL — not even
+under ``TYPE_CHECKING`` (the CODEQL FIX ROUND: the interim
+``TYPE_CHECKING``-only import was runtime-free yet still a module-level
+cyclic-import finding; the parts type is now the LOCAL structural
+:class:`SymbolParts` Protocol + the generic ``PartsT`` TypeVar, so the
+import graph is acyclic in BOTH directions, statically and at runtime —
+pinned by the fresh-interpreter import-order tests + the AST source pin).
 
 ## The fail-closed layers (the ``window_ledger_rust`` template, adapted)
 
@@ -166,8 +171,6 @@ if TYPE_CHECKING:
     from decimal import Decimal
     from types import ModuleType
 
-    from brutex.data.fno_symbol import FnoSymbolParts
-
 _LOG = structlog.get_logger(__name__)
 
 #: The opt-in env flag (default OFF; junk fails loud-OFF). ONE flag for the
@@ -258,10 +261,34 @@ _TYPE_TABLE: Final[tuple[tuple[str, str | None], ...]] = (
 )
 
 
-class ParseSymbolLaw(Protocol):
-    """The Python parse-law oracle's call shape (``parse_fno_symbol``)."""
+class SymbolParts(Protocol):
+    """Structural stand-in for ``fno_symbol.FnoSymbolParts`` — no import, no cycle.
 
-    def __call__(self, symbol: str) -> FnoSymbolParts | None:
+    The CODEQL FIX ROUND shape (module docstring): the facade needs exactly
+    ONE member of the injected parts value object — the ``strike`` the
+    strict burn-in equality (:func:`_parts_equal_strict`) representation-
+    pins — so it types the parts STRUCTURALLY instead of importing the
+    concrete dataclass (even a ``TYPE_CHECKING``-only import kept the
+    static import graph cyclic). ``FnoSymbolParts`` satisfies this Protocol
+    by construction (its ``strike: Decimal | None`` field).
+    """
+
+    @property
+    def strike(self) -> Decimal | None:
+        """The option strike (``None`` for a future)."""
+        raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
+
+
+class ParseSymbolLaw[PartsT: SymbolParts](Protocol):
+    """The Python parse-law oracle's call shape (``parse_fno_symbol``).
+
+    Generic over the concrete parts type (PEP 695, the house
+    ``retry_call[T]`` shape; variance inferred) — bound to the structural
+    :class:`SymbolParts` view so the facade never names the concrete
+    dataclass; inferred as ``FnoSymbolParts`` at the ONE caller.
+    """
+
+    def __call__(self, symbol: str) -> PartsT | None:
         """Decode *symbol* into parts, or ``None`` (never raising)."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
@@ -274,7 +301,7 @@ class StrikeTokenLaw(Protocol):
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
 
-class BuildPartsLaw(Protocol):
+class BuildPartsLaw[PartsT: SymbolParts](Protocol):
     """The parts-constructor shape (``FnoSymbolParts`` itself satisfies it)."""
 
     def __call__(
@@ -286,7 +313,7 @@ class BuildPartsLaw(Protocol):
         instrument_type: str,
         strike: Decimal | None,
         option_type: str | None,
-    ) -> FnoSymbolParts:
+    ) -> PartsT:
         """Construct the decoded-parts value object."""
         raise NotImplementedError  # pragma: no cover — Protocol stub, never executed
 
@@ -485,7 +512,7 @@ def _coords_structurally_valid(coords: object, symbol: str) -> bool:
     return True
 
 
-def _parts_equal_strict(a: FnoSymbolParts | None, b: FnoSymbolParts | None) -> bool:
+def _parts_equal_strict(a: SymbolParts | None, b: SymbolParts | None) -> bool:
     """Burn-in equality: dataclass equality AND ``str(strike)`` equality.
 
     Dataclass ``__eq__`` compares ``Decimal`` numerically
@@ -498,13 +525,13 @@ def _parts_equal_strict(a: FnoSymbolParts | None, b: FnoSymbolParts | None) -> b
     return a == b and str(a.strike) == str(b.strike)
 
 
-def routed_parse_fno_symbol(
+def routed_parse_fno_symbol[PartsT: SymbolParts](
     symbol: str,
     *,
-    python_law: ParseSymbolLaw,
+    python_law: ParseSymbolLaw[PartsT],
     strike_law: StrikeTokenLaw,
-    build_parts: BuildPartsLaw,
-) -> FnoSymbolParts | None:
+    build_parts: BuildPartsLaw[PartsT],
+) -> PartsT | None:
     """The routed parse law — flag-gated Rust structure, Python materialization.
 
     EVERY path returns the oracle-contract result: flag-OFF / latched /
@@ -542,7 +569,7 @@ def routed_parse_fno_symbol(
         return python_law(symbol)
 
     if coords is None:
-        rust_result: FnoSymbolParts | None = None
+        rust_result: PartsT | None = None
     else:
         if not _coords_structurally_valid(coords, symbol):
             _warn_once(
@@ -614,6 +641,7 @@ __all__ = [
     "BuildPartsLaw",
     "ParseSymbolLaw",
     "StrikeTokenLaw",
+    "SymbolParts",
     "data_rust_disabled",
     "data_rust_enabled",
     "reset_fno_symbol_rust_for_tests",
