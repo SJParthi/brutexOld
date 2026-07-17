@@ -70,6 +70,14 @@ on:
       # models.py defines the CandleBar/FnoGreeksBar/OptionBar schemas that
       # dictate the rendered frames' byte surfaces (review-round fold).
       - "brutex/data/models.py"
+      # Wave-B resample seam (DEC-LAKE-RUST-RESAMPLE-001, ledger #1913).
+      - "brutex/data/lake_rust_resample.py"
+      - "brutex/data/tf_resampler.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -78,6 +86,15 @@ on:
       - "tests/unit/test_lake_rust_merge.py"
       - "tests/unit/test_parquet_writer_rust_merge.py"
       - "tests/golden/test_lake_rust_merge_parity.py"
+      - "tests/unit/test_window_ledger_rust.py"
+      - "tests/unit/test_lake_rust_resample.py"
+      - "tests/unit/test_tf_resampler_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_parity.py"
+      # The stats-shard render seam (DEC-LAKE-RUST-STATS-MANIFEST-001).
+      - "brutex/data/lake_rust_stats.py"
+      - "brutex/data/lake_stats_manifest.py"
+      - "tests/unit/test_lake_rust_stats.py"
+      - "tests/golden/test_lake_stats_shard_rust_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED (review-round): brutex/data/lake_heal.py /
       # lake_invariants.py + their suites. The flag-ON heal twin step is
@@ -92,6 +109,13 @@ on:
       - "brutex/data/lake_rust_render.py"
       - "brutex/data/lake_rust_merge.py"
       - "brutex/data/models.py"
+      - "brutex/data/lake_rust_resample.py"
+      - "brutex/data/tf_resampler.py"
+      # G8 Wave C-3 — the window-ledger pure-law facade + its consumers
+      # (DEC-LAKE-RUST-WINDOW-LEDGER-001).
+      - "brutex/data/window_ledger_rust.py"
+      - "brutex/data/window_status.py"
+      - "brutex/data/window_ledger.py"
       - "tests/unit/test_lake_rust_render.py"
       - "tests/unit/test_parquet_writer_rust_render.py"
       - "tests/unit/test_option_parquet_writer_rust_render.py"
@@ -100,6 +124,14 @@ on:
       - "tests/unit/test_lake_rust_merge.py"
       - "tests/unit/test_parquet_writer_rust_merge.py"
       - "tests/golden/test_lake_rust_merge_parity.py"
+      - "tests/unit/test_window_ledger_rust.py"
+      - "tests/unit/test_lake_rust_resample.py"
+      - "tests/unit/test_tf_resampler_rust_seam.py"
+      - "tests/integration/test_lake_rust_resample_parity.py"
+      - "brutex/data/lake_rust_stats.py"
+      - "brutex/data/lake_stats_manifest.py"
+      - "tests/unit/test_lake_rust_stats.py"
+      - "tests/golden/test_lake_stats_shard_rust_parity.py"
       - ".github/workflows/lake-rust-parity.yml"
       # DELIBERATELY EXCLUDED: lake_heal.py / lake_invariants.py + suites —
       # same rationale as the push block above (render-seam-scoped twin).
@@ -256,12 +288,24 @@ jobs:
           pytest -rs -q \
             tests/golden/test_lake_rust_render_parity.py \
             tests/golden/test_option_lake_rust_render_parity.py \
+            tests/golden/test_lake_rust_merge_parity.py \
+            tests/golden/test_lake_stats_shard_rust_parity.py \
             tests/unit/test_lake_rust_render.py \
             tests/unit/test_parquet_writer_rust_render.py \
             tests/unit/test_option_parquet_writer_rust_render.py \
-            tests/golden/test_lake_rust_merge_parity.py \
             tests/unit/test_lake_rust_merge.py \
-            tests/unit/test_parquet_writer_rust_merge.py
+            tests/unit/test_parquet_writer_rust_merge.py \
+            tests/unit/test_lake_rust_stats.py \
+            tests/unit/test_lake_rust_resample.py \
+            tests/unit/test_tf_resampler_rust_seam.py \
+            tests/integration/test_lake_rust_resample_parity.py \
+            tests/unit/test_window_ledger_rust.py
+          # G8 window-ledger differential + affected suites, flag-ON arm
+          # (the real wheel is installed + lockstep-aligned above).
+          BRUTEX_LAKE_RUST_WINDOW_LEDGER=1 pytest -rs -q \
+            tests/unit/test_window_ledger_rust.py \
+            tests/unit/test_window_status.py \
+            tests/unit/test_window_ledger.py
 
       - name: Heal + option-writer suites with the Rust seam ENGAGED (flag-ON twin)
         # The PR-2 non-perturbation leg: the 18-round

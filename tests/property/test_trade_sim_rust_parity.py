@@ -20,7 +20,7 @@ from brutex.data.models import CandleBar
 from brutex.engine.combo_mask import mask_to_entry_signals
 from brutex.engine.rust_trade_sim import ResidentTradeSim
 from brutex.engine.stage1a import build_bar_bits
-from brutex.engine.trade_sim import FillPolicy, LevelFill, SameBarTie, simulate_trades
+from brutex.engine.trade_sim import simulate_trades
 from brutex.strategies.types import Side
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -38,8 +38,8 @@ _START_TIMES = [(9, 15), (15, 16)]
 @st.composite
 def _feed_and_params(
     draw: st.DrawFn,
-) -> tuple[list[CandleBar], list[int], Side, int | None, int | None, FillPolicy]:
-    """Generate (bars, masks, direction, sl_paisa, tp_paisa, policy).
+) -> tuple[list[CandleBar], list[int], Side, int | None, int | None]:
+    """Generate (bars, masks, direction, sl_paisa, tp_paisa).
 
     Bars at index ``>= split`` roll to the NEXT session (day-2, restarting at
     09:15 IST), so the corpus spans trading-day boundaries and the kernel's
@@ -79,29 +79,22 @@ def _feed_and_params(
     direction = draw(st.sampled_from([Side.BUY, Side.SELL]))
     sl = draw(st.none() | st.integers(min_value=1, max_value=4000))
     tp = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    policy = FillPolicy(
-        stop_loss=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
-        take_profit=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
-        same_bar=draw(st.sampled_from([SameBarTie.SL_FIRST, SameBarTie.TP_FIRST])),
-    )
     # Masks drawn from a small bit space so they actually fire on the feed.
     masks = draw(
         st.lists(st.integers(min_value=0, max_value=63), min_size=1, max_size=6, unique=True)
     )
-    return bars, masks, direction, sl, tp, policy
+    return bars, masks, direction, sl, tp
 
 
 @given(case=_feed_and_params())
 @settings(max_examples=200, deadline=None)
 def test_rust_seam_equals_python_oracle(
-    case: tuple[list[CandleBar], list[int], Side, int | None, int | None, FillPolicy],
+    case: tuple[list[CandleBar], list[int], Side, int | None, int | None],
 ) -> None:
-    bars, masks, direction, sl, tp, policy = case
+    bars, masks, direction, sl, tp = case
     bar_bits = build_bar_bits(bars)
     sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
-    got = sim.simulate_masks(
-        masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp, policy=policy
-    )
+    got = sim.simulate_masks(masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp)
     expected = [
         simulate_trades(
             bars,
@@ -110,7 +103,6 @@ def test_rust_seam_equals_python_oracle(
             tf_minutes=1,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
-            policy=policy,
         )
         for m in masks
     ]
@@ -136,8 +128,8 @@ _U128_ALL_ONES = (1 << 128) - 1
 @st.composite
 def _wide_feed_and_params(
     draw: st.DrawFn,
-) -> tuple[list[CandleBar], list[int], list[int], Side, int | None, int | None, FillPolicy, bool]:
-    """Generate (bars, bar_bits, masks, direction, sl, tp, policy, widen_bars).
+) -> tuple[list[CandleBar], list[int], list[int], Side, int | None, int | None, bool]:
+    """Generate (bars, bar_bits, masks, direction, sl, tp, widen_bars).
 
     ``widen_bars`` selects the resident-kernel width: True ORs drawn
     >64-bit positions into the Stage-1A bar_bits (the u128 kernel serves from
@@ -189,12 +181,7 @@ def _wide_feed_and_params(
     direction = draw(st.sampled_from([Side.BUY, Side.SELL]))
     sl = draw(st.none() | st.integers(min_value=1, max_value=4000))
     tp = draw(st.none() | st.integers(min_value=1, max_value=4000))
-    policy = FillPolicy(
-        stop_loss=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
-        take_profit=draw(st.sampled_from([LevelFill.AT_LEVEL, LevelFill.NEXT_OPEN])),
-        same_bar=draw(st.sampled_from([SameBarTie.SL_FIRST, SameBarTie.TP_FIRST])),
-    )
-    return bars, bar_bits, masks, direction, sl, tp, policy, widen_bars
+    return bars, bar_bits, masks, direction, sl, tp, widen_bars
 
 
 # The pre-existing `@given(case=_feed_and_params())` above carries the SAME
@@ -204,17 +191,15 @@ def _wide_feed_and_params(
 @given(case=_wide_feed_and_params())  # pyright: ignore[reportCallIssue]
 @settings(max_examples=150, deadline=None)
 def test_rust_u128_seam_equals_python_oracle(
-    case: tuple[
-        list[CandleBar], list[int], list[int], Side, int | None, int | None, FillPolicy, bool
-    ],
+    case: tuple[list[CandleBar], list[int], list[int], Side, int | None, int | None, bool],
 ) -> None:
     """>64-bit masks/bar_bits: the Rust u128 path is bit-identical to the oracle."""
-    bars, bar_bits, masks, direction, sl, tp, policy, _widen_bars = case
+    bars, bar_bits, masks, direction, sl, tp, _widen_bars = case
     sim = ResidentTradeSim(bars, bar_bits, tf_minutes=1)
     assert sim.rust_active is True  # a compiled kernel holds the window
     with capture_logs() as logs:
         got = sim.simulate_masks(
-            masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp, policy=policy
+            masks, direction=direction, stop_loss_paisa=sl, take_profit_paisa=tp
         )
     # Anti-vacuity: Rust served the batch — no oracle fallback fired.
     assert [e for e in logs if e["event"] == "rust_trade_sim.call_fallback"] == []
@@ -226,7 +211,6 @@ def test_rust_u128_seam_equals_python_oracle(
             tf_minutes=1,
             stop_loss_paisa=sl,
             take_profit_paisa=tp,
-            policy=policy,
         )
         for m in masks
     ]

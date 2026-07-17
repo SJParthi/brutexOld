@@ -728,6 +728,15 @@ jobs:
           else
             echo "(brutex.execution.errors test file not present yet — gate inactive)"
           fi
+          # DEC-FILL-WORST-CASE-ONLY-001: the stdlib-only global fill-mode
+          # vocabulary leaf (the single-member WORST_CASE token + the
+          # fail-loud require_fill_mode_env_unset refusal guard) — 100%
+          # line+branch standalone.
+          if compgen -G "tests/unit/test_execution_fill_mode.py" > /dev/null; then
+            pytest --cov=brutex.execution.fill_mode --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_execution_fill_mode.py
+          else
+            echo "(brutex.execution.fill_mode test file not present yet — gate inactive)"
+          fi
           if compgen -G "tests/unit/test_strategies_errors.py" > /dev/null; then
             pytest --cov=brutex.strategies.errors --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_strategies_errors.py
           else
@@ -1544,8 +1553,9 @@ jobs:
           else
             echo "(brutex.data.timeframes test file not present yet — gate inactive)"
           fi
-          # 21c · brutex.data.tf_resampler (48 stmts, 20 branches —
-          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard)
+          # 21c · brutex.data.tf_resampler (57 stmts, 26 branches —
+          #       grew with the DEC-RESAMPLER-INPUT-GUARD-001 input guard,
+          #       then the DEC-LAKE-RUST-RESAMPLE-001 seam branch)
           #       Closes 94.74→100% via 1 surgical test
           #       (`test_non_dataframe_input_raises_typeerror` covers line
           #       77 TypeError for non-polars.DataFrame input).
@@ -1554,9 +1564,12 @@ jobs:
           #       reachable ONLY from a frame carrying an `open_interest`
           #       column, which test_fno_resample.py provides (the
           #       OHLCV-only test_tf_resampler.py never grows that column).
-          #       Both files are required to keep this module 100%.
+          #       DEC-LAKE-RUST-RESAMPLE-001: the flag-ON seam branch is
+          #       reachable only via test_tf_resampler_rust_seam.py (the
+          #       stem-matched seam-wiring pins — the feed_replay_rust_seam
+          #       precedent). All the files are required for 100%.
           if compgen -G "tests/unit/test_tf_resampler.py" > /dev/null; then
-            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py
+            pytest --cov=brutex.data.tf_resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_tf_resampler.py tests/unit/test_fno_resample.py tests/property/test_tf_resampler_greeks_close_snapshot.py tests/unit/test_tf_resampler_rust_seam.py
           else
             echo "(brutex.data.tf_resampler test file not present yet — gate inactive)"
           fi
@@ -3605,8 +3618,13 @@ jobs:
   # cargo Rust wheel builds (fno-math + trading-core, each with a 3x
   # network-retry loop) — the flaky, contention-sensitive setup phases
   # — NOT sweep compute. The sweep-compute leg has its own hard in-test
-  # ceiling `seconds_first < 300.0`
-  # (tests/integration/test_sweep_full_chain_rehearsal.py:255), which
+  # ceiling `seconds_first < 300.0` (`_RUNTIME_CEILING_S` in
+  # tests/integration/test_sweep_full_chain_rehearsal.py — the STRICT
+  # tier, asserted whenever the process is NOT coverage-traced, i.e.
+  # exactly THIS job; the coverage-traced unit job asserts the
+  # documented 3x instrumentation allowance instead, since under
+  # whole-package `--cov=brutex --cov-branch` tracing the same pass
+  # measures the tracer, ~45x — 315.4 s vs ~7 s, run 29269883269), which
   # the 21 tests PASSED on #1462 — so the sweep ran in under 5 min even
   # during the contended run, and this timeout raise CANNOT mask a
   # sweep regression (a real slowdown trips that 300s assertion and

@@ -990,13 +990,16 @@ def make_lake_read_1m(  # pragma: no cover — raw lake read, integration-tested
     :class:`ValueError` contract is kept in BOTH modes (a months set matching
     nothing on disk raises, mirroring the empty-tree raise).
 
-    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001): the collected frame is
+    Price-sanity gate (DEC-STORED-DATA-VALIDATION-001; finiteness added by
+    DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): the collected frame is
     validated by the COMMON
-    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (positivity
-    + OHLC ordering, one vectorized pass) BEFORE it reaches any resampler — a
-    corrupt 1m bar (e.g. ``high < low``) previously LAUNDERED into
-    self-consistent-looking derived buckets across all 19 TFs + ``1day``
-    (live-reproduced: an emitted derived ``low: 0.0``). The raised
+    :func:`~brutex.data.price_sanity.validate_frame_price_sanity` (finiteness
+    + positivity + OHLC ordering, one vectorized pass) BEFORE it reaches any
+    resampler — a corrupt 1m bar (e.g. ``high < low``, or a planted
+    ``high = inf``/``NaN`` the pre-fix mask was blind to) previously LAUNDERED
+    into self-consistent-looking derived buckets across all 19 TFs + ``1day``
+    (live-reproduced: an emitted derived ``low: 0.0``; the assurance session's
+    executed repro: a derived 5-minute bucket ``high = inf``). The raised
     :class:`~brutex.data.errors.ResampleInputError` is already in the
     prebuild's per-symbol quarantine set, so the symbol is quarantined +
     NAMED and its derived TFs are NOT written — rows are never silently

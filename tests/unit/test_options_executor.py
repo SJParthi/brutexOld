@@ -528,3 +528,102 @@ def test_signals_from_spot_trades_empty() -> None:
         expiry_kind=ExpiryKind.MONTHLY,
     )
     assert sigs == []
+
+
+# ── DEC-FILL-WORST-CASE-ONLY-001 — the worst-case fill mode ────────────────────────
+
+
+@dataclass(frozen=True)
+class _RangeSource:
+    """Range-bar source: high/low = open ± band (the worst-case anchors)."""
+
+    entry_open: str = "120.00"
+    exit_open: str = "150.00"
+    band: str = "1.00"
+
+    def load_pair(
+        self,
+        *,
+        instrument: OptionsUnderlying,
+        expiry_date: date,
+        strike: int,
+        option_type: str,
+        entry_ts: datetime,
+        exit_ts: datetime,
+    ) -> OptionBarPair | None:
+        del instrument, expiry_date, strike, entry_ts, exit_ts
+
+        def range_bar(open_rupees: str) -> OptionBar:
+            px = Decimal(open_rupees)
+            b = Decimal(self.band)
+            return OptionBar(
+                timestamp=_ENTRY,
+                open=px,
+                high=px + b,
+                low=px - b,
+                close=px,
+                volume=10,
+                open_interest=100,
+                side=option_type,
+                strike=Decimal("25000"),
+                spot=Decimal("25012"),
+                iv=Decimal("0.15"),
+            )
+
+        return OptionBarPair(
+            entry_bar=range_bar(self.entry_open), exit_bar=range_bar(self.exit_open)
+        )
+
+
+def test_worst_case_is_the_only_law_no_mode_parameter() -> None:
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill law — the
+    # executor surfaces carry NO mode parameter (killed-token pins).
+    import inspect
+
+    for fn in (materialize_trade, run_rule_over_signals, execute_options_sim):
+        assert "fill_mode" not in inspect.signature(fn).parameters, fn.__name__
+
+
+def test_worst_case_buys_high_sells_low_plus_tick() -> None:
+    # Range bars ₹120.00 ± 1.00 → buy = 12,100 + 5; ₹150.00 ± 1.00 → sell =
+    # 14,900 − 5. The record's open fields keep OPEN semantics.
+    out = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
+    assert isinstance(out, MaterializedTrade)
+    assert (out.entry_open_paisa, out.exit_open_paisa) == (12_000, 15_000)
+    assert out.breakdown.buy_fill_paisa == 12_105
+    assert out.breakdown.sell_fill_paisa == 14_895
+
+
+def test_ranged_bars_never_beat_flat_bars() -> None:
+    # The per-trade floor: the SAME opens on WIDER bars can only fill worse
+    # (flat bars fill exactly open ± tick — the never-flatter anchor).
+    worst = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
+    flat = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_Source())
+    assert isinstance(worst, MaterializedTrade)
+    assert isinstance(flat, MaterializedTrade)
+    assert worst.net_pnl_paisa < flat.net_pnl_paisa
+
+
+def test_tick_floor_gate_judged_on_opens_fill_law_independent() -> None:
+    # The §7.8 entry-quality gate reads the OPENs — the fill law never
+    # changes a reject decision (a large bar HIGH cannot rescue or doom a
+    # floor-priced entry).
+    floor_rupees = f"{TICK_FLOOR_MULTIPLE * TICK_PAISA / 100:.2f}"
+    out = materialize_trade(
+        _signal(),
+        RULES_BY_NAME["atm"],
+        source=_Source(entry_open=floor_rupees, exit_open="1.00"),
+    )
+    assert isinstance(out, RejectedTrade)
+    assert out.reason is RejectReason.TICK_FLOOR
+
+
+def test_rule_and_sim_surfaces_price_the_one_law() -> None:
+    # run_rule_over_signals + execute_options_sim price the SAME hardcoded
+    # worst-case law as materialize_trade — one law, no per-surface drift.
+    rule = run_rule_over_signals([_signal()], RULES_BY_NAME["atm"], source=_RangeSource())
+    sim = execute_options_sim([_signal()], source=_RangeSource(), rules=[RULES_BY_NAME["atm"]])
+    single = materialize_trade(_signal(), RULES_BY_NAME["atm"], source=_RangeSource())
+    assert isinstance(single, MaterializedTrade)
+    assert rule.net_pnl_paisa == single.net_pnl_paisa
+    assert sim[0].net_pnl_paisa == rule.net_pnl_paisa

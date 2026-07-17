@@ -1135,6 +1135,154 @@ def test_prebuild_quarantines_corrupt_symbol_and_names_it(tmp_path: Path) -> Non
     assert (tmp_path / "bars" / _EXCHANGE / _SEGMENT / clean / "5minute").exists()
 
 
+def _plant_nonfinite_1m(lake_root: Path, symbol: str, *, column: str, value: float) -> None:
+    """Raw-plant a 1-minute partition holding one non-finite *column* bar.
+
+    Raw pyarrow — the writer + the vendor parse (``to_price``'s explicit
+    ``is_finite`` guard) refuse non-finite prices, so a stored non-finite
+    price is only ever planted/out-of-band corrupt data (the #1067 raw-plant
+    convention; DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001).
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    dest = (
+        lake_root
+        / "bars"
+        / _EXCHANGE
+        / _SEGMENT
+        / symbol
+        / "1minute"
+        / f"{_SESSION_OPEN_UTC.year:04d}"
+        / f"{_SESSION_OPEN_UTC.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    timestamps = [_SESSION_OPEN_UTC + timedelta(minutes=i) for i in range(3)]
+    columns: dict[str, list[float]] = {
+        "open": [100.0, 100.0, 100.0],
+        "high": [110.0, 110.0, 110.0],
+        "low": [90.0, 90.0, 90.0],
+        "close": [105.0, 105.0, 105.0],
+    }
+    columns[column][0] = value  # bar 0 carries the non-finite poison
+    pq.write_table(
+        pa.table(
+            {
+                "timestamp": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+                "open": pa.array(columns["open"], type=pa.float64()),
+                "high": pa.array(columns["high"], type=pa.float64()),
+                "low": pa.array(columns["low"], type=pa.float64()),
+                "close": pa.array(columns["close"], type=pa.float64()),
+                "volume": pa.array([10, 10, 10], type=pa.int64()),
+                "open_interest": pa.array([None, None, None], type=pa.int64()),
+            }
+        ),
+        dest,
+    )
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+def test_nonfinite_high_1m_partition_refuses_to_derive(tmp_path: Path, value: float) -> None:
+    """FAILS-BEFORE (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, defect #2): the
+    pre-fix price-sanity mask was BLIND to ``high ∈ {+inf, NaN}`` — the
+    assurance session executed-repro'd ``make_lake_read_1m`` RETURNING
+    ``highs=[inf, ...]`` silently and the 5-minute max aggregation minting a
+    derived bucket ``high = inf``. Now the read refuses loudly and NOTHING
+    derived is written."""
+    from brutex.data.errors import ResampleInputError
+
+    _plant_nonfinite_1m(tmp_path, _SYMBOL, column="high", value=value)
+    with pytest.raises(ResampleInputError, match="price-insane") as excinfo:
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=_EXCHANGE,
+            segment=_SEGMENT,
+            symbol=_SYMBOL,
+            kind=PrebuildKind.SPOT,
+            tfs=("5m",),
+        )
+    assert f"{_EXCHANGE}/{_SEGMENT}/{_SYMBOL}/1minute" in str(excinfo.value)
+    # No derived partition was written — the inf/NaN did not launder.
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "5minute").exists()
+
+
+def test_prebuild_quarantines_nonfinite_symbol_and_names_it(tmp_path: Path) -> None:
+    """The pipeline prebuild quarantines the inf-HIGH symbol via the EXISTING
+    per-symbol machinery (the strengthened gate raises ResampleInputError —
+    already in ``gated_prebuild._per_symbol_data_errors``): the clean sibling
+    still builds, the poisoned one is NAMED in ``failed``, no derived TFs."""
+    from brutex.dashboard.fno_cascade import build_fno_cascade
+    from brutex.dashboard.pipeline_prebuild import PrebuildTarget, run_pipeline_prebuild
+    from brutex.data.timeframe_materialize import MaterializeResult
+    from brutex.models import Exchange, Instrument, InstrumentType, Segment
+
+    def _spot(name: str) -> Instrument:
+        return Instrument(
+            exch_id=Exchange.NSE,
+            security_id=abs(hash(name)) & 0xFFFF,
+            symbol_name=name,
+            display_name=name,
+            instrument=InstrumentType.IDX,
+            segment=Segment.INDEX,
+            series=None,
+            isin=None,
+            underlying_symbol=None,
+            underlying_security_id=None,
+            lot_size=0,
+            tick_size=Decimal("0.05"),
+            sm_freeze_qty=None,
+            sm_expiry_date=None,
+            strike_price=None,
+        )
+
+    poisoned, clean = "INFSYM", "GOODSYM"
+    _plant_nonfinite_1m(tmp_path, poisoned, column="high", value=float("inf"))
+    _write_1m_bars_for(tmp_path, clean)
+
+    def _materialize(target: PrebuildTarget) -> MaterializeResult:
+        return materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange=target.exchange,
+            segment=target.segment,
+            symbol=target.symbol,
+            kind=target.kind,
+            tfs=("5m",),
+        )
+
+    outcome = run_pipeline_prebuild(
+        instruments=[_spot(poisoned), _spot(clean)],
+        cascade=build_fno_cascade([]),
+        materialize=_materialize,
+    )
+    assert outcome.ok is False
+    assert outcome.failed == (poisoned,)  # the poisoned symbol is NAMED
+    assert outcome.symbols_built == 1  # the clean sibling still built
+    assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / poisoned / "5minute").exists()
+    assert (tmp_path / "bars" / _EXCHANGE / _SEGMENT / clean / "5minute").exists()
+
+
+def test_clean_lake_read_1m_is_pure_pass_through(tmp_path: Path) -> None:
+    """HEALTHY-LAKE IDENTITY PIN (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001): on
+    a clean lake the strengthened gate changes NOTHING — the reader's frame
+    equals the raw parquet content under the same rename/select/sort."""
+    from brutex.data.timeframe_materialize import make_lake_read_1m
+
+    _write_1m_bars_for(tmp_path, _SYMBOL, n=10)
+    frame = make_lake_read_1m(
+        lake_root=tmp_path, exchange=_EXCHANGE, segment=_SEGMENT, symbol=_SYMBOL
+    )()
+    raw = pl.read_parquet(
+        (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1minute").as_posix()
+        + "/**/*.parquet"
+    )
+    expected = (
+        raw.rename({"timestamp": "ts_utc"})
+        .select("ts_utc", "open", "high", "low", "close", "volume")
+        .sort("ts_utc")
+    )
+    assert frame.equals(expected)
+
+
 def _write_1m_bars_for(lake_root: Path, symbol: str, n: int = 10) -> None:
     """Write *n* clean in-session 1-minute bars for *symbol* via the real sink."""
     bars = [

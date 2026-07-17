@@ -305,6 +305,48 @@ class TestDegradeMatrix:
         assert str(off_exc.value) == str(on_exc.value)
         assert _fallback_reasons(on_logs) == ["null_column"]
 
+    @pytest.mark.parametrize(("column_idx", "column"), [(2, "high"), (1, "open"), (4, "close")])
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")], ids=["+inf", "nan"])
+    def test_nonfinite_price_column_degrades_with_exception_parity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        column_idx: int,
+        column: str,
+        value: float,
+    ) -> None:
+        """DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001 × DEC-FEED-RUST-CORE-001: the
+        kernel's decision plane is a bit-identity port of the PRE-guard checks
+        and is BLIND to inf/NaN (positivity holds vacuously; an inf close
+        would fold into the bad-tick ratio as a silent DROP), so a non-finite
+        price column must DEGRADE to the oracle loop — whose finiteness gate
+        raises the SAME typed corrupt-bar error on both arms (exception
+        parity), never a kernel-arm silent accept/drop."""
+        pytest.importorskip("brutex_feed", reason="wheel required for the non-finite gate")
+        rows = [list(r) for r in _clean_rows()]
+        rows[1][column_idx] = value
+        table = _table([tuple(r) for r in rows])
+        monkeypatch.delenv(FEED_RUST_ENV, raising=False)
+        with pytest.raises(ValueError, match="non-finite") as off_exc:
+            arrow_table_to_bars(table, source=_SOURCE)
+        monkeypatch.setenv(FEED_RUST_ENV, "1")
+        with capture_logs() as on_logs, pytest.raises(ValueError, match="non-finite") as on_exc:
+            arrow_table_to_bars(table, source=_SOURCE)
+        assert str(off_exc.value) == str(on_exc.value)
+        assert _fallback_reasons(on_logs) == ["nonfinite_price_column"]
+        events = [rec for rec in on_logs if rec["event"] == FEED_RUST_FALLBACK_EVENT]
+        assert events[0]["column"] == column
+
+    def test_all_finite_clean_table_passes_the_nonfinite_gate_and_serves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The finiteness eligibility probe is a pure PASS on finite input —
+        the kernel still serves (no degrade WARN) and the arms stay
+        bar-identical (the clean-path guardrail for the new gate)."""
+        pytest.importorskip("brutex_feed", reason="wheel required for the non-finite gate")
+        off, on, _, on_logs = _run_both_arms(_table(_clean_rows()), monkeypatch)
+        _assert_bars_str_identical(off, on)
+        assert _fallback_reasons(on_logs) == []
+
     def test_null_open_interest_is_legal_never_degrades(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
