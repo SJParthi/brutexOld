@@ -1529,16 +1529,10 @@ jobs:
           # backfill ratchet — second batch of small-gap non-orchestrator
           # modules pushed to 100% via surgical tests + module-load
           # defensive-assertion pragmas. Lifts strict-100% gate count 45 → 49.
-          # 21a · brutex.data.parser (55 stmts, 14 branches, 15 tests)
-          #       Closes 92.75→100% via 3 surgical tests in
-          #       TestDecimalCoercion: Decimal-passthrough (line 145),
-          #       string-input parse (line 149), tz-aware ISO timestamp
-          #       skips IST-attach branch (82→84).
-          if compgen -G "tests/unit/test_data_parser.py" > /dev/null; then
-            pytest --cov=brutex.data.parser --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_parser.py
-          else
-            echo "(brutex.data.parser test file not present yet — gate inactive)"
-          fi
+          # 21a · brutex.data.parser — gate REMOVED with the dead module
+          #       (DEC-DATA-PARSER-DEAD-DELETE-001, MIGRATION.md #1941;
+          #       zero production callers — only the data/__init__
+          #       re-export; git history retains the bytes).
           # 21b · brutex.data.timeframes (22 stmts post-pragma, 8 branches,
           #       34 tests). Closes 84.21→100% via 1 surgical test
           #       (`test_unsupported_tf_raises` covers line 140 ValueError)
