@@ -61,7 +61,7 @@ from __future__ import annotations
 
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -70,6 +70,12 @@ import structlog
 
 _LOG = structlog.get_logger(__name__)
 
+#: The IANA time-zone KEY for India Standard Time — the ONE canonical string
+#: root (DEC-TIMESTAMP-IST-SINGLESOURCE-001) every ``"Asia/Kolkata"`` string
+#: consumer derives from (polars ``convert_time_zone`` region strings, DuckDB
+#: ``AT TIME ZONE`` SQL literals, the string-family ``_IST`` module mirrors).
+IST_TZ_NAME: Final[str] = "Asia/Kolkata"
+
 #: IST is a FIXED +05:30 offset with NO daylight-saving transition (India has
 #: observed no DST since 1945). ``ZoneInfo("Asia/Kolkata")`` is therefore a
 #: constant-offset zone — every instant maps to UTC+05:30 — which is the
@@ -77,11 +83,51 @@ _LOG = structlog.get_logger(__name__)
 #: because the IANA database is the authoritative source and a future
 #: (hypothetical) policy change would be picked up without a code edit. A
 #: ``pytz`` / naive / machine-local construction would be a bug; this is not.
-IST = ZoneInfo("Asia/Kolkata")
+#: The ONE canonical ZoneInfo-family root (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+IST = ZoneInfo(IST_TZ_NAME)
+
+#: The fixed UTC→IST wall-clock offset (+05:30) as a :class:`~datetime.timedelta`
+#: — the ONE canonical OFFSET root (DEC-TIMESTAMP-IST-SINGLESOURCE-001). India
+#: has observed no DST since 1945, so the offset is exact for every covered
+#: instant; every derived representation (:data:`IST_OFFSET_MINUTES`,
+#: :data:`IST_FIXED_OFFSET`, the polars-duration helper
+#: ``brutex.data.session.ist_offset_duration``, the SQL / Rust / JS mirrors)
+#: traces here — never independently re-minted. The ZoneInfo↔offset equality
+#: law (``IST.utcoffset(...) == IST_UTC_OFFSET``) is test-pinned.
+IST_UTC_OFFSET: Final[timedelta] = timedelta(hours=5, minutes=30)
+
+#: The same fixed offset in whole minutes (330) — DERIVED from
+#: :data:`IST_UTC_OFFSET`, never a second literal
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001). Consumed by the DuckDB
+#: ``INTERVAL '{n} minutes'`` interpolation + the cross-language drift pins.
+IST_OFFSET_MINUTES: Final[int] = int(IST_UTC_OFFSET.total_seconds()) // 60
+
+#: The fixed-offset REPRESENTATION of IST — ``timezone(IST_UTC_OFFSET)`` — the
+#: ONE source for the ``timezone(timedelta(hours=5, minutes=30))`` family
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001). Deliberately a SEPARATE constant from
+#: :data:`IST`: the two families are NOT interchangeable (``tzname()`` /
+#: ``repr`` / the DST API differ — ``'UTC+05:30'`` vs ``'Asia/Kolkata'``), so
+#: a consumer must never swap one for the other; each family unifies onto its
+#: own root, and the same-``utcoffset`` equality of the two is test-pinned.
+IST_FIXED_OFFSET: Final[timezone] = timezone(IST_UTC_OFFSET)
+
+#: The regular NSE/BSE session OPEN (09:15 IST) — the ONE canonical root
+#: (DEC-TIMESTAMP-IST-SINGLESOURCE-001); ``brutex.data.session.SESSION_OPEN``
+#: re-exports it and every plain 09:15 constant mirror derives from it.
 SESSION_OPEN_IST = time(9, 15)
+
+#: The regular NSE/BSE session CLOSE (15:30 IST, exclusive) — the ONE canonical
+#: root (DEC-TIMESTAMP-IST-SINGLESOURCE-001); ``brutex.data.session.SESSION_CLOSE``
+#: re-exports it. NOTE: the F&O expiry-INSTANT convention
+#: (``greeks_enrich.EXPIRY_HOUR_IST``/``EXPIRY_MINUTE_IST``) merely EQUALS this
+#: wall clock — it is a distinct contract-expiry law, deliberately NOT unified.
 SESSION_CLOSE_IST = time(15, 30)
 FORCED_EXIT_IST = time(15, 20)
-PRE_OPEN_END_IST = time(9, 15)
+
+#: The pre-open auction ends AT the session open — DERIVED from
+#: :data:`SESSION_OPEN_IST` (the same 09:15 instant by exchange rule), never a
+#: second ``time(9, 15)`` literal (DEC-TIMESTAMP-IST-SINGLESOURCE-001).
+PRE_OPEN_END_IST = SESSION_OPEN_IST
 FIRST_USABLE_BAR_IST = time(9, 16)
 TICK_SIZE_PAISA = 5
 SESSION_DURATION_MINUTES = 375  # 09:15-15:30 = 6h15m = 375 minutes
