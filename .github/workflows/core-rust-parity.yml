@@ -1,11 +1,14 @@
 # core-rust-parity.yml — the brutex-core crate build + flag-ON parity lane.
 #
-# Slice T35 milestone 1 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md #1943).
-# The money seam is DEFAULT-OFF behind BRUTEX_CORE_RUST_MONEY and the main
-# CI test job deliberately never installs the crate (the facade
-# `brutex/money_rust.py` degrades loudly to the Decimal oracle when it is
-# absent — its wheel-free unit suite carries the 100% gate there), so this
-# dedicated lane is where the crate has teeth:
+# Slice T35 milestones 1 + 2 (DEC-CONFIG-RUST-LEAVES-001, MIGRATION.md
+# #1943). The money seam (BRUTEX_CORE_RUST_MONEY) and the
+# hardware-envelope derivation seam (BRUTEX_CORE_RUST_HWENV) are both
+# DEFAULT-OFF and the main CI test job deliberately never installs the
+# crate (each facade — `brutex/money_rust.py` /
+# `brutex/config/hardware_envelope_rust.py` — degrades loudly to its
+# Python oracle when it is absent; the wheel-free unit suites carry the
+# 100% gates there), so this dedicated lane is where the crate has
+# teeth:
 #
 #   1. cargo fmt / clippy -D warnings / test --release --locked (the
 #      rounding-boundary + carry + grouping + negative-zero matrix, the
@@ -22,6 +25,14 @@
 #      equivalent to flag-OFF for the re-run legs — the crate-genuinely-
 #      engaged teeth live in the engagement-spy + steady-state parity
 #      tests, which fail loudly on a silent degrade).
+#   4. The hwenv twin legs (milestone 2): test_hardware_envelope_rust.py's
+#      TestRealCrateParity (reference-box goldens flag-ON, this-box
+#      behavioral parity over REAL detection, the engagement spy, the
+#      300-example hypothesis differential over all four derivation laws)
+#      + the hardware_envelope family re-run VERBATIM under
+#      BRUTEX_CORE_RUST_HWENV=1 (same engaged-teeth reasoning; detection
+#      stays Python — the parity bar is BEHAVIORAL, per the facade's
+#      seam-split record).
 #
 # NOT a required gate (the lake-rust-parity precedent / coordinator
 # ruling): it gates the FUTURE default-ON flip, not every PR — a red run
@@ -48,8 +59,14 @@ on:
       - "rust/brutex-core/**"
       - "brutex/money.py"
       - "brutex/money_rust.py"
+      - "brutex/config/hardware_envelope.py"
+      - "brutex/config/hardware_envelope_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_hardware_envelope.py"
+      - "tests/unit/test_config_hardware_envelope.py"
+      - "tests/unit/test_hardware_envelope_fingerprint.py"
+      - "tests/unit/test_hardware_envelope_rust.py"
       - "tests/golden/test_money_rounding_golden.py"
       - ".github/workflows/core-rust-parity.yml"
   pull_request:
@@ -57,8 +74,14 @@ on:
       - "rust/brutex-core/**"
       - "brutex/money.py"
       - "brutex/money_rust.py"
+      - "brutex/config/hardware_envelope.py"
+      - "brutex/config/hardware_envelope_rust.py"
       - "tests/unit/test_money.py"
       - "tests/unit/test_money_rust.py"
+      - "tests/unit/test_hardware_envelope.py"
+      - "tests/unit/test_config_hardware_envelope.py"
+      - "tests/unit/test_hardware_envelope_fingerprint.py"
+      - "tests/unit/test_hardware_envelope_rust.py"
       - "tests/golden/test_money_rounding_golden.py"
       - ".github/workflows/core-rust-parity.yml"
   workflow_dispatch:
@@ -152,16 +175,26 @@ jobs:
 
           probe = brutex_core.round_money_str("1.005")
           assert probe == "1.01", f"wheel probe: {probe!r}"
-          print(f"brutex_core {brutex_core.__version__} probe OK")
+          hwenv_probe = brutex_core.hwenv_pool_workers(10, 14, True, 2, None)
+          assert hwenv_probe == 8, f"hwenv wheel probe: {hwenv_probe!r}"
+          key_probe = brutex_core.hwenv_hardware_key("mac16-8", 14, 10, 4, 48, "arm64")
+          assert key_probe == "mac16-8-14c10p4e-48g-arm64", f"key probe: {key_probe!r}"
+          print(f"brutex_core {brutex_core.__version__} probe OK (money + hwenv)")
           PY
 
-      - name: Facade + money suites, flag OFF (wheel present, crate untouched)
+      - name: Facade + money + hwenv suites, flag OFF (wheel present, crate untouched)
         run: |
           pytest -q \
             tests/unit/test_money.py \
             tests/unit/test_money_rust.py \
             tests/golden/test_money_rounding_golden.py \
-            --cov=brutex.money --cov=brutex.money_rust --cov-branch \
+            tests/unit/test_hardware_envelope.py \
+            tests/unit/test_config_hardware_envelope.py \
+            tests/unit/test_hardware_envelope_fingerprint.py \
+            tests/unit/test_hardware_envelope_rust.py \
+            --cov=brutex.money --cov=brutex.money_rust \
+            --cov=brutex.config.hardware_envelope \
+            --cov=brutex.config.hardware_envelope_rust --cov-branch \
             --cov-report=term-missing --cov-fail-under=100
 
       - name: Money family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
@@ -171,3 +204,15 @@ jobs:
           pytest -q \
             tests/unit/test_money.py \
             tests/golden/test_money_rounding_golden.py
+
+      - name: hwenv family re-run VERBATIM with the seam ENGAGED (flag-ON twin)
+        env:
+          BRUTEX_CORE_RUST_HWENV: "1"
+        run: |
+          pytest -q \
+            tests/unit/test_hardware_envelope.py \
+            tests/unit/test_config_hardware_envelope.py \
+            tests/unit/test_hardware_envelope_fingerprint.py \
+            tests/unit/test_cli_thread_bound.py \
+            tests/unit/test_engine_sweep_mem_budget.py \
+            tests/unit/test_engine_sweep_mem_budget_workers.py
