@@ -112,6 +112,9 @@ _CRATE_API: Final[tuple[str, ...]] = (
     "spot_recovery_candidates",
 )
 
+#: Law B emits at most TWO rungs (stripped-upper + the ``EXCH-`` form).
+_CANDIDATES_MAX_LEN: Final[int] = 2
+
 #: Warn-once / engaged-once memo (reset via the test seam only).
 _OBSERVABILITY_MEMO: Final[set[str]] = set()
 
@@ -281,7 +284,7 @@ def _candidates_result_valid(result: object, symbol: str) -> bool:
     if not isinstance(result, (list, tuple)):
         return False
     entries = tuple(result)
-    if len(entries) > 2:
+    if len(entries) > _CANDIDATES_MAX_LEN:
         return False
     if not _entries_structurally_clean(entries):
         return False
@@ -401,9 +404,7 @@ def routed_spot_key_candidates(
     _log_engaged_once(crate)
     if _BURN_IN_REMAINING[_LAW_CANDIDATES] > 0:
         oracle_result = python_law(symbol, exchange)
-        if not _burn_in_ok(
-            _LAW_CANDIDATES, rust_result, oracle_result, symbol=repr(symbol)
-        ):
+        if not _burn_in_ok(_LAW_CANDIDATES, rust_result, oracle_result, symbol=repr(symbol)):
             return oracle_result
     return rust_result
 
@@ -424,9 +425,7 @@ def routed_spot_recovery_candidates(
     """
 
     def _oracle() -> tuple[str, ...]:
-        return python_law(
-            underlying, exchange, alias_pairs=alias_pairs, drift_bucket=drift_bucket
-        )
+        return python_law(underlying, exchange, alias_pairs=alias_pairs, drift_bucket=drift_bucket)
 
     if not data_rust_enabled() or _DISABLED_REASON[0] is not None:
         return _oracle()
@@ -458,9 +457,7 @@ def routed_spot_recovery_candidates(
     _log_engaged_once(crate)
     if _BURN_IN_REMAINING[_LAW_RECOVERY] > 0:
         oracle_result = _oracle()
-        if not _burn_in_ok(
-            _LAW_RECOVERY, rust_result, oracle_result, underlying=repr(underlying)
-        ):
+        if not _burn_in_ok(_LAW_RECOVERY, rust_result, oracle_result, underlying=repr(underlying)):
             return oracle_result
     return rust_result
 
