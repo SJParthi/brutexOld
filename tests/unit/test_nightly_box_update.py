@@ -2035,10 +2035,10 @@ class TestResidualArms:
     def test_quarantine_dir_serial_exhaustion_returns_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from datetime import UTC as _utc
+        from datetime import UTC as _UTC
         from datetime import datetime as _dt
 
-        fixed = _dt(2026, 1, 1, tzinfo=_utc)
+        fixed = _dt(2026, 1, 1, tzinfo=_UTC)
 
         class _FakeDt:
             @staticmethod

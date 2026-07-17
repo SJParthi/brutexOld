@@ -1104,6 +1104,10 @@ def _finish(
             )
     signature, repeats, demoted = _apply_alarm_dedupe(ctx, status)
     _emit_alarms(ctx, status, signature, repeats, demoted)
+    # The report lists are ORDERED-UNIQUE (a multi-build night restores the
+    # same lane lock after each build — one path, never N duplicate rows).
+    lock_restored = tuple(dict.fromkeys(ctx.lock_restored))
+    quarantined = tuple(dict.fromkeys(ctx.quarantined))
     return BoxUpdateOutcome(
         status=status,
         from_sha=ctx.from_sha,
@@ -1116,8 +1120,8 @@ def _finish(
         gate=ctx.gate,
         repair=ctx.repair,
         pip_restore=ctx.pip_restore,
-        lock_restored=tuple(ctx.lock_restored),
-        quarantined=tuple(ctx.quarantined),
+        lock_restored=lock_restored,
+        quarantined=quarantined,
         alarm_signature=signature,
         alarm_repeats=repeats,
         reexec=reexec,
