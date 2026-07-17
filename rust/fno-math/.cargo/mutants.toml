@@ -35,4 +35,20 @@
 #                 path; its known June/July survivors are enumerated in
 #                 MIGRATION.md #1597 and gating it is a NAMED follow-up.
 #   math/mod.rs — empty scaffold, 0 mutants.
-examine_globs = ["src/metrics.rs", "src/trade_sim.rs", "src/python.rs", "src/lib.rs"]
+# DEC-ENUM-KERNEL-U128-001 (fenced additive scope entry — union seam with
+# sibling fno-math lanes): src/mask_word.rs joins the scope because the
+# width-generic MaskWord trait HOISTED there from trade_sim.rs (where its
+# mutants were previously counted + kill-spot-checked under the #1549 fold)
+# must STAY mutation-gated after the move — both the trade-sim walk and the
+# enum/count kernels ride its single `is_superset` method. Re-measured
+# 2026-07-17 on this tree (`cargo mutants --list | wc -l` from this dir):
+# 611 total (the hoist moved the MaskWord-impl mutants out of trade_sim
+# into mask_word; the u128 count twins + generic-core delegators in
+# python.rs/lib.rs add the rest of the +12 vs the pre-branch 599).
+examine_globs = [
+    "src/metrics.rs",
+    "src/trade_sim.rs",
+    "src/python.rs",
+    "src/lib.rs",
+    "src/mask_word.rs",
+]

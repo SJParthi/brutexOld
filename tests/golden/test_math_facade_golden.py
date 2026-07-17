@@ -36,13 +36,18 @@ _EXPECTED_SURFACE: frozenset[str] = frozenset(
     {
         # fno_math (rust/fno-math)
         "ResidentBars",
+        # DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (a
+        # deliberate, reviewed surface addition; fenced additive entries).
+        "ResidentBarsU128",
         "ResidentSweepSim",
         "ResidentSweepSimU128",
         "add_u64",
         "bitand_count_u64s",
         "bitcount_u64s",
         "blake3_hash",
+        "count_supermask_u128s",
         "count_supermask_u64s",
+        "count_supermasks_u128s",
         "count_supermasks_u64s",
         "count_supermasks_u64s_nthreads",
         "popcount_bytes",

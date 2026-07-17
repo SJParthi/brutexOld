@@ -21,6 +21,7 @@
 //! register their `#[pyfunction]` entries here and add them to the
 //! `lib.rs` `#[pymodule]` block.
 
+use crate::mask_word::MaskWord;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -196,9 +197,27 @@ pub fn count_supermask_u64s(bar_bits: Vec<u64>, mask: u64) -> u64 {
 ///
 /// `mask == 0` requires nothing, so every bar matches and the result is
 /// `bars.len()` (`(bar & 0) == 0` always). Empty `bars` → `0`.
+///
+/// Since DEC-ENUM-KERNEL-U128-001 this is the `W = u64` thin delegator onto
+/// the width-generic [`count_one_core`] (the trade-sim `simulate_one_core`
+/// delegator idiom) — kept under its original name + signature so every
+/// pre-existing u64 call site (and test) compiles UNCHANGED; the compiler
+/// monomorphizes the core back to the exact pre-generic code.
 fn count_one(bars: &[u64], mask: u64) -> u64 {
+    count_one_core(bars, mask)
+}
+
+/// Width-generic SUPERSET-count inner loop — the ONE core both mask widths
+/// share (DEC-ENUM-KERNEL-U128-001, over the hoisted [`MaskWord`] trait).
+/// The superset test is the trait's single method, so the u64 production
+/// kernel and the u128 kernel run this exact loop: for `W = u64` the
+/// compiler monomorphizes to the pre-generic [`count_one`] code (the
+/// existing u64 suite passing UNMODIFIED is the frozen-behaviour gate); for
+/// `W = u128` the compiler's two-limb lowering of the 128-bit `&`/`==` is
+/// the "two-limb" evaluation — no hand-rolled limb pairs.
+fn count_one_core<W: MaskWord>(bars: &[W], mask: W) -> u64 {
     bars.iter()
-        .map(|&bar| u64::from((bar & mask) == mask))
+        .map(|&bar| u64::from(W::is_superset(bar, mask)))
         .sum()
 }
 
@@ -233,16 +252,31 @@ const PARALLEL_WORK_THRESHOLD: u64 = 1 << 20;
 /// `masks.len() * bars.len()` that overflowed `u64` would SIGABRT the host
 /// process. Saturation simply caps at `u64::MAX` (which is `>= THRESHOLD`, so
 /// such an enormous workload correctly takes the parallel arm).
+///
+/// Since DEC-ENUM-KERNEL-U128-001 this is the `W = u64` thin delegator onto
+/// the width-generic [`count_supermasks_dispatch_core`] — original name +
+/// signature kept so every pre-existing u64 call site (and test) compiles
+/// UNCHANGED (the trade-sim delegator idiom).
 #[inline]
 fn count_supermasks_dispatch(bars: &[u64], masks: &[u64]) -> Vec<u64> {
+    count_supermasks_dispatch_core(bars, masks)
+}
+
+/// Width-generic serial/parallel batch dispatch — the ONE dispatch both mask
+/// widths share (DEC-ENUM-KERNEL-U128-001, same monomorphization argument as
+/// [`count_one_core`]): the u64 AND u128 batch entries — free functions and
+/// resident classes alike — route through here, so the serial/parallel
+/// boundary and the order-preserving collect can never drift between widths.
+#[inline]
+fn count_supermasks_dispatch_core<W: MaskWord>(bars: &[W], masks: &[W]) -> Vec<u64> {
     let work = (masks.len() as u64).saturating_mul(bars.len() as u64);
     // Dispatch via the COMMON crate predicate (DEC-MUTATION-RUNTIME-003):
     // both arms are output-identical by design, so the boundary itself is
     // gated by `dispatch_tests::parallel_dispatch_boundary_is_exclusive`.
     if crate::below_parallel_threshold(work, PARALLEL_WORK_THRESHOLD) {
-        masks.iter().map(|&m| count_one(bars, m)).collect()
+        masks.iter().map(|&m| count_one_core(bars, m)).collect()
     } else {
-        masks.par_iter().map(|&m| count_one(bars, m)).collect()
+        masks.par_iter().map(|&m| count_one_core(bars, m)).collect()
     }
 }
 
@@ -451,6 +485,91 @@ impl ResidentBars {
         count_one(&self.bars, mask)
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// DEC-ENUM-KERNEL-U128-001 — the u128 enum/count kernel twins (fenced,
+// self-contained additive block; the merge-union seam with sibling lanes).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Batched per-mask SUPERSET count over a **u128** domain — the wide twin of
+/// [`count_supermasks_u64s`] (DEC-ENUM-KERNEL-U128-001).
+///
+/// Identical contract with `bar_bits` / `masks` widened to native
+/// `Vec<u128>` (the DEC-TRADE-SIM-U128-KERNEL-001 FFI crossing, probe-verified
+/// under pyo3 0.29 `abi3-py312`: round-trip exact; a value `>= 2**128` or a
+/// negative int raises `OverflowError` at the extraction edge — no new probe
+/// needed, the recorded transcript covers `Vec<u128>`). Routes through the
+/// SAME width-generic [`count_supermasks_dispatch`] (one dispatch, one
+/// serial/parallel boundary, one order-preserving collect), so the u128 count
+/// is the compiler's two-limb lowering of the exact u64 loop — bit-identical
+/// semantics, Golden Rule #4 determinism unchanged (pure integer counts).
+///
+/// Unlike the trade-sim u128 twin (future headroom), THIS kernel is the
+/// ACTIVE production path for the Stage-2 enum/count the moment the
+/// vocabulary crosses 64 bits — `brutex.engine.combo_mask` routes every
+/// >64-bit batch here and REFUSES to degrade silently when it is missing
+/// (the LOUD-FAIL inversion recorded in DEC-ENUM-KERNEL-U128-001).
+#[pyfunction]
+pub fn count_supermasks_u128s(bar_bits: Vec<u128>, masks: Vec<u128>) -> Vec<u64> {
+    count_supermasks_dispatch_core(&bar_bits, &masks)
+}
+
+/// Single-mask SUPERSET count over a u128 domain — the wide twin of
+/// [`count_supermask_u64s`]. Counts bars where `(bar & mask) == mask`;
+/// `mask == 0` matches every bar.
+#[pyfunction]
+pub fn count_supermask_u128s(bar_bits: Vec<u128>, mask: u128) -> u64 {
+    count_one_core(&bar_bits, mask)
+}
+
+/// Resident bar buffer over a **u128** domain — the wide twin of
+/// [`ResidentBars`] (DEC-ENUM-KERNEL-U128-001).
+///
+/// Same frozen/Sync/no-panic contract and the same honest complexity
+/// envelope: construction is the one-time `O(N_bars)` `Vec<u128>` extract;
+/// each [`Self::count_supermasks`] is `O(N_masks · N_bars)` compute +
+/// `O(N_masks)` marshalling, delegating to the SAME width-generic
+/// [`count_supermasks_dispatch`] / [`count_one`] the u64 class uses, so the
+/// two widths can never drift. A `bar_bits` / mask value outside
+/// `[0, 2**128)` raises `OverflowError` at the PyO3 extraction edge
+/// (probe-pinned; never a panic under `panic = "abort"`).
+#[pyclass(frozen, module = "fno_math")]
+pub struct ResidentBarsU128 {
+    bars: Vec<u128>,
+}
+
+#[pymethods]
+impl ResidentBarsU128 {
+    /// Build a resident buffer from u128 `bar_bits`. The ONE-TIME `O(N_bars)`
+    /// Python→Rust copy is paid here via the `Vec<u128>` extract.
+    #[new]
+    fn new(bar_bits: Vec<u128>) -> Self {
+        Self { bars: bar_bits }
+    }
+
+    /// Number of resident bars (the only exposed view of the buffer).
+    #[getter]
+    fn n_bars(&self) -> usize {
+        self.bars.len()
+    }
+
+    /// Batched per-mask SUPERSET count over the resident u128 bars.
+    ///
+    /// Same contract as [`ResidentBars::count_supermasks`] with masks widened
+    /// to `Vec<u128>`: `out[j]` aligns with `masks[j]`; empty `masks` →
+    /// empty `Vec`; empty resident bars → `0` per mask; `mask == 0` → all
+    /// bars. Only `masks` crosses the FFI boundary per call.
+    fn count_supermasks(&self, masks: Vec<u128>) -> Vec<u64> {
+        count_supermasks_dispatch_core(&self.bars, &masks)
+    }
+
+    /// Single-mask SUPERSET count over the resident u128 bars.
+    fn count_supermask(&self, mask: u128) -> u64 {
+        count_one_core(&self.bars, mask)
+    }
+}
+
+// ── end DEC-ENUM-KERNEL-U128-001 block ───────────────────────────────────
 
 /// Return the total number of set bits across a raw byte slice.
 ///
@@ -952,5 +1071,241 @@ mod tests {
         // body=8 (one exact chunk of 0x01×8), tail=2 (0x03):
         // sum 10 vs `-`→6 vs `*`→16 — kills the body/tail `+` flips.
         assert_eq!(popcount_bytes(&[1, 1, 1, 1, 1, 1, 1, 1, 3]), 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DEC-ENUM-KERNEL-U128-001 — u128 enum/count kernel tests (fenced additive
+// test module; the pre-existing `mod tests` above is deliberately untouched).
+// ─────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod u128_kernel_tests {
+    use super::{
+        ResidentBarsU128, count_one_core, count_supermask_u128s, count_supermasks_dispatch_core,
+        count_supermasks_u128s,
+    };
+
+    const U64_MAX: u128 = u64::MAX as u128;
+
+    /// Naive reference: per-mask filter+count with the raw scalar superset
+    /// expression — deliberately a DIFFERENT loop shape from the branchless
+    /// `count_one` sum, so the differential has independent teeth.
+    fn naive_reference(bars: &[u128], masks: &[u128]) -> Vec<u64> {
+        masks
+            .iter()
+            .map(|&m| bars.iter().filter(|&&b| (b & m) == m).count() as u64)
+            .collect()
+    }
+
+    #[test]
+    fn u128_empty_masks_is_empty() {
+        assert_eq!(
+            count_supermasks_u128s(vec![1, 2, 3], vec![]),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn u128_empty_bars_is_zero_per_mask() {
+        assert_eq!(
+            count_supermasks_u128s(vec![], vec![1, 1 << 127, 0]),
+            vec![0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn u128_single_bar_window() {
+        let bar = (1u128 << 100) | 0b11;
+        assert_eq!(
+            count_supermasks_u128s(vec![bar], vec![bar, 1 << 100, 0b11, 1 << 99, 0]),
+            vec![1, 1, 1, 0, 1]
+        );
+    }
+
+    #[test]
+    fn u128_boundary_bits_63_and_64() {
+        // The limb boundary: bit 63 is the low limb's top bit, bit 64 the
+        // high limb's bottom bit — a truncating kernel (or a limb swap)
+        // conflates them.
+        let b63 = 1u128 << 63;
+        let b64 = 1u128 << 64;
+        let bars = vec![b63, b64, b63 | b64, 0];
+        assert_eq!(
+            count_supermasks_u128s(bars.clone(), vec![b63, b64, b63 | b64]),
+            vec![2, 2, 1]
+        );
+        assert_eq!(count_supermask_u128s(bars.clone(), b63), 2);
+        assert_eq!(count_supermask_u128s(bars, b64), 2);
+    }
+
+    #[test]
+    fn u128_bit_127_sign_bit_patterns() {
+        // Bit 127 (the u128 "sign bit" were it signed) + bit 63 together —
+        // a signed-lowering or arithmetic-shift defect shows here.
+        let top = 1u128 << 127;
+        let sign_pair = top | (1 << 63);
+        let bars = vec![top, sign_pair, 1 << 63, u128::MAX];
+        assert_eq!(
+            count_supermasks_u128s(bars, vec![top, sign_pair, 1 << 63]),
+            vec![3, 2, 3]
+        );
+    }
+
+    #[test]
+    fn u128_hi_limb_only_masks() {
+        // Masks with ZERO low-limb bits: a kernel that truncated to u64 would
+        // see mask 0 and count EVERY bar.
+        let bars = vec![(1u128 << 70) | 1, 1 << 80, 0b111, 0];
+        assert_eq!(
+            count_supermasks_u128s(bars, vec![1 << 70, 1 << 80, (1 << 70) | (1 << 80)]),
+            vec![1, 1, 0]
+        );
+    }
+
+    #[test]
+    fn u128_all_ones() {
+        let bars = vec![u128::MAX, u128::MAX - 1, 0];
+        assert_eq!(
+            count_supermasks_u128s(bars.clone(), vec![u128::MAX, 0]),
+            vec![1, 3]
+        );
+        assert_eq!(count_supermask_u128s(bars, u128::MAX), 1);
+    }
+
+    #[test]
+    fn u128_mask_zero_matches_all_bars() {
+        let bars = vec![0u128, 1 << 127, 42];
+        assert_eq!(count_supermasks_u128s(bars.clone(), vec![0]), vec![3]);
+        assert_eq!(count_supermask_u128s(bars, 0), 3);
+    }
+
+    #[test]
+    fn u128_resident_class_matches_free_kernels() {
+        let bars = vec![(1u128 << 90) | 0b101, 1 << 90, 0b101, u128::MAX];
+        let masks = vec![(1u128 << 90) | 0b101, 1 << 90, 0b100, 0];
+        let resident = ResidentBarsU128::new(bars.clone());
+        assert_eq!(resident.n_bars(), 4);
+        assert_eq!(
+            resident.count_supermasks(masks.clone()),
+            count_supermasks_u128s(bars.clone(), masks.clone())
+        );
+        for &m in &masks {
+            assert_eq!(
+                resident.count_supermask(m),
+                count_supermask_u128s(bars.clone(), m)
+            );
+        }
+        // Empty-mask + repeat-call determinism on the resident buffer.
+        assert_eq!(resident.count_supermasks(vec![]), Vec::<u64>::new());
+        assert_eq!(
+            resident.count_supermasks(masks.clone()),
+            resident.count_supermasks(masks)
+        );
+    }
+
+    #[test]
+    fn u128_kernel_equals_u64_kernel_on_u64_fit_inputs() {
+        // Anti-drift pin (the #1550 idiom): on u64-fitting inputs the u128
+        // monomorphization must agree with the u64 monomorphization exactly —
+        // the shared width-generic core makes any future de-sharing loud.
+        let bars64: Vec<u64> = vec![0b0011, 0b0111, 0b1000, 0b1011, 0, u64::MAX, 1 << 63];
+        let masks64: Vec<u64> = vec![0b0011, 0b1000, 1 << 63, 0, u64::MAX];
+        let bars128: Vec<u128> = bars64.iter().map(|&b| u128::from(b)).collect();
+        let masks128: Vec<u128> = masks64.iter().map(|&m| u128::from(m)).collect();
+        assert_eq!(
+            count_supermasks_dispatch_core(&bars128, &masks128),
+            count_supermasks_dispatch_core(&bars64, &masks64)
+        );
+    }
+
+    #[test]
+    fn u128_parallel_arm_bit_exact_vs_naive() {
+        // Cross the 1<<20 work threshold with wide operands so the rayon arm
+        // runs on genuinely two-limb values; must equal the naive reference.
+        let bars: Vec<u128> = (0..1024u128).map(|i| (i << 64) | i | 0b11).collect();
+        let masks: Vec<u128> = (0..1100u128)
+            .map(|i| (1 << (64 + (i % 60))) | (i & 0b1))
+            .collect();
+        let work = (masks.len() as u64) * (bars.len() as u64);
+        assert!(work >= super::PARALLEL_WORK_THRESHOLD);
+        assert_eq!(
+            count_supermasks_dispatch_core(&bars, &masks),
+            naive_reference(&bars, &masks)
+        );
+    }
+
+    #[test]
+    fn u128_count_one_matches_naive_single() {
+        let bars = vec![(1u128 << 127) | 1, 1 << 64, (1 << 64) | (1 << 63)];
+        for &m in &[0u128, 1, 1 << 63, 1 << 64, (1 << 127) | 1, u128::MAX] {
+            assert_eq!(count_one_core(&bars, m), naive_reference(&bars, &[m])[0]);
+        }
+    }
+
+    // ── proptest differential: generic kernel vs naive reference ─────────
+
+    use proptest::prelude::*;
+
+    /// Hostile u128 strategy: mixes pure-low, pure-high, boundary-straddling
+    /// (bits 63+64), sign-bit (bits 63/127) and fully random words.
+    fn u128_word() -> impl Strategy<Value = u128> {
+        prop_oneof![
+            (0u64..=u64::MAX).prop_map(u128::from),
+            (0u64..=u64::MAX).prop_map(|hi| u128::from(hi) << 64),
+            Just((1u128 << 63) | (1u128 << 64)),
+            Just((1u128 << 127) | (1u128 << 63)),
+            Just(u128::MAX),
+            proptest::num::u128::ANY,
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn u128_dispatch_matches_naive_reference(
+            bars in proptest::collection::vec(u128_word(), 0..64),
+            masks in proptest::collection::vec(u128_word(), 0..16),
+        ) {
+            prop_assert_eq!(
+                count_supermasks_dispatch_core(&bars, &masks),
+                naive_reference(&bars, &masks)
+            );
+        }
+
+        #[test]
+        fn u128_kernel_agrees_with_u64_kernel_on_u64_domain(
+            bars in proptest::collection::vec(0u64..=u64::MAX, 0..64),
+            masks in proptest::collection::vec(0u64..=u64::MAX, 0..16),
+        ) {
+            let bars128: Vec<u128> = bars.iter().map(|&b| u128::from(b)).collect();
+            let masks128: Vec<u128> = masks.iter().map(|&m| u128::from(m)).collect();
+            prop_assert_eq!(
+                count_supermasks_dispatch_core(&bars128, &masks128),
+                count_supermasks_dispatch_core(&bars, &masks)
+            );
+        }
+
+        #[test]
+        fn u128_masking_off_high_limb_equals_u64_count(
+            bars in proptest::collection::vec(u128_word(), 0..64),
+            masks in proptest::collection::vec(u128_word(), 0..16),
+        ) {
+            // Truncation-relationship pin: mask every hostile wide word down
+            // to its LOW limb; the wide kernel over the truncations must equal
+            // the u64 kernel over the same truncations (feeding the u64
+            // strategy's hostile low-limb bit patterns into the cross-width
+            // agreement) — while the FULL wide count over the original words
+            // legitimately diverges whenever a high limb is nonzero, which is
+            // exactly the truncation bug class the u128 kernel exists to
+            // prevent (so NO assertion equates wide-count with truncated
+            // count on the originals).
+            let bars_low: Vec<u128> = bars.iter().map(|&b| b & U64_MAX).collect();
+            let masks_low: Vec<u128> = masks.iter().map(|&m| m & U64_MAX).collect();
+            let bars64: Vec<u64> = bars_low.iter().map(|&b| b as u64).collect();
+            let masks64: Vec<u64> = masks_low.iter().map(|&m| m as u64).collect();
+            prop_assert_eq!(
+                count_supermasks_dispatch_core(&bars_low, &masks_low),
+                count_supermasks_dispatch_core(&bars64, &masks64)
+            );
+        }
     }
 }

@@ -145,6 +145,14 @@ fn _fno_math(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s, m)?)?;
     m.add_function(wrap_pyfunction!(python::count_supermasks_u64s_nthreads, m)?)?;
     m.add_class::<python::ResidentBars>()?;
+    // ── DEC-ENUM-KERNEL-U128-001: the u128 enum/count kernel twins ──
+    // (fenced additive registration block — keep-both union seam with
+    // sibling fno-math lanes; the twins of count_supermask_u64s /
+    // count_supermasks_u64s / ResidentBars over native Vec<u128>.)
+    m.add_function(wrap_pyfunction!(python::count_supermask_u128s, m)?)?;
+    m.add_function(wrap_pyfunction!(python::count_supermasks_u128s, m)?)?;
+    m.add_class::<python::ResidentBarsU128>()?;
+    // ── end DEC-ENUM-KERNEL-U128-001 registration block ──
     m.add_class::<trade_sim::ResidentSweepSim>()?;
     m.add_class::<trade_sim::ResidentSweepSimU128>()?;
     m.add_function(wrap_pyfunction!(metrics::sweep_drawdown_stats, m)?)?;
