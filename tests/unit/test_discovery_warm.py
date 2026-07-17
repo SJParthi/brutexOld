@@ -272,3 +272,16 @@ class TestWarmBestEffort:
         )
         # Nothing was seeded — the next read computes for itself.
         assert caches["db_datasets_cache"].size() == 0
+
+
+class TestPreopenDatasetsKeyScopeToken:
+    """DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3 memo law): the key fold."""
+
+    def test_none_token_is_the_legacy_key(self) -> None:
+        assert preopen_datasets_key("day") == "preopen_datasets|day"
+
+    def test_token_folds_and_keys_distinctly(self) -> None:
+        keyed = preopen_datasets_key("day", scope_token=scope_revision())
+        assert keyed == f"preopen_datasets|day|s={scope_revision()}"
+        assert keyed != preopen_datasets_key("day")
+        assert keyed != preopen_datasets_key("minute", scope_token=scope_revision())

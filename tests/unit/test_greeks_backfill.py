@@ -2366,3 +2366,33 @@ class TestModuleDocstringHonesty:
         # The reworded sentence NAMES the real engine-visible change.
         assert "sweep_checkpoint" in flat and "fail-loud corruption refusals" in flat
         assert "NIFTY/BANKNIFTY/SENSEX" in flat  # the scope claim that IS true stays
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the scan scope gate ───────
+
+
+class TestScanScopeGate:
+    """Stage-2a: scoped-out stored contracts never probed / never targeted."""
+
+    def test_stock_contract_gated_counted_and_never_probed(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        _write_month(tmp_path, "NSE-NIFTY-25Jan24-21000-CE", 2024, 1, [None])
+        _write_month(tmp_path, "NSE-RELIANCE-25Jan24-2900-CE", 2024, 1, [None])
+        scan = scan_stale_greeks_targets(tmp_path, rate_source=_RATE, scope=resolve_read_scope())
+        assert scan.scope_excluded == 1
+        assert [t.symbol for t in scan.targets] == ["NSE-NIFTY-25Jan24-21000-CE"]
+        # The §2.4 default arm — merge-base behavior, zero count, both targeted.
+        legacy = scan_stale_greeks_targets(tmp_path, rate_source=_RATE)
+        assert legacy.scope_excluded == 0
+        assert len(legacy.targets) == 2
+
+    def test_scope_excluded_on_reports_and_log(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        _write_month(tmp_path, "NSE-RELIANCE-25Jan24-2900-CE", 2024, 1, [None])
+        scan = scan_stale_greeks_targets(tmp_path, rate_source=_RATE, scope=resolve_read_scope())
+        plan = plan_greeks_backfill(scan, rate_source=_RATE, force=False, expired_only=False)
+        report = dry_run_backfill_report(plan)
+        assert report.scope_excluded == 1
+        assert report.to_dict()["scope_excluded"] == 1

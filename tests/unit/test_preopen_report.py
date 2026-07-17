@@ -3371,3 +3371,65 @@ class TestFreshDailyMaps:
         events = [log for log in logs if log["event"] == "preopen.freshness_check_failed"]
         assert len(events) == 1
         assert events[0]["error_type"] == "ResampleInputError"
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R3): the report scope screen ───
+
+
+class TestResolveReportDatasetsScope:
+    """Stage-2a: scoped-out symbols are screened out of report discovery."""
+
+    @staticmethod
+    def _seed(lake: Path) -> None:
+        _write(
+            lake,
+            "RELIANCE",
+            "1day",
+            [_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="2900", close="2910")],
+        )
+        ParquetWriter(lake_root=lake).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="22000", close="22010")],
+        )
+
+    def test_scope_screens_stock_and_none_is_legacy(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        self._seed(tmp_path)
+        scoped = resolve_report_datasets(tmp_path, basis="day", scope=resolve_read_scope())
+        assert scoped == [("NSE", "INDEX", "NIFTY")]
+        # The §2.4 default arm — merge-base behavior (the fails-before oracle).
+        legacy = resolve_report_datasets(tmp_path, basis="day")
+        assert legacy == [("NSE", "INDEX", "NIFTY"), ("NSE", "CASH", "RELIANCE")]
+
+    def test_index_only_lake_byte_identical(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="22000", close="22010")],
+        )
+        assert resolve_report_datasets(tmp_path, basis="day", scope=resolve_read_scope()) == (
+            resolve_report_datasets(tmp_path, basis="day")
+        )
+
+    def test_drifted_index_dir_recovered_then_admitted(self, tmp_path: Path) -> None:
+        # The Rev-2 ordering pin (scope AFTER recovery) on the R3 surface.
+        from brutex.config.feed_scope import resolve_read_scope
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NSE-NIFTY",
+            interval="1day",
+            bars=[_bar(datetime(2024, 3, 1, 3, 45, tzinfo=UTC), open_="22000", close="22010")],
+        )
+        assert resolve_report_datasets(tmp_path, basis="day", scope=resolve_read_scope()) == [
+            ("NSE", "INDEX", "NSE-NIFTY")
+        ]

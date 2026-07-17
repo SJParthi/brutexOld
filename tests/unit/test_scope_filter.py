@@ -21,6 +21,9 @@ from brutex.data.scope_filter import (
     WINDOW_LEGACY_UNRESOLVED,
     classify_window_row,
     scope_admits_dataset,
+    scope_admits_fno_contract,
+    scope_excluded_echo,
+    scope_note_suffix,
     window_scope_admit,
 )
 
@@ -179,3 +182,48 @@ class TestWindowScopeAdmit:
         assert admit(("groww-option", "25|NSE_FNO", "OPT|WEEK|1|ATM+3|CALL", "a", "b")) is True
         # legacy_unresolved → NOT admitted (skipped-not-reopened).
         assert admit(("groww-option", "777|NSE_FNO", "OPT|WEEK|1|ATM+3|CALL", "a", "b")) is False
+
+
+# ── stage-2a additions: the R1 note/echo helpers + the R4 contract form ───
+
+
+class TestScopeNoteSuffix:
+    def test_zero_and_negative_are_empty(self) -> None:
+        assert scope_note_suffix(0) == ""
+        assert scope_note_suffix(-3) == ""
+
+    def test_wording_names_count_and_dec(self) -> None:
+        # The R1 wording law — the exact design string, thousands-grouped.
+        assert scope_note_suffix(1) == (
+            " 1 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+        )
+        assert scope_note_suffix(1234) == (
+            " 1,234 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+        )
+
+
+class TestScopeExcludedEcho:
+    def test_emit_on_nonzero(self) -> None:
+        assert scope_excluded_echo(0) == {}
+        assert scope_excluded_echo(-1) == {}
+        assert scope_excluded_echo(7) == {"scope_excluded": 7}
+
+
+class TestScopeAdmitsFnoContract:
+    def test_admitted_pair_and_stock_pair(self) -> None:
+        scope = _index4()
+        assert scope_admits_fno_contract("NSE", "NIFTY", scope) is True
+        assert scope_admits_fno_contract("BSE", "SENSEX", scope) is True
+        assert scope_admits_fno_contract("NSE", "RELIANCE", scope) is False
+        # Pair-exact: BSE derivative legs of an NSE-scoped index are OUT.
+        assert scope_admits_fno_contract("BSE", "NIFTY", scope) is False
+
+    def test_junk_exchange_excluded_under_bounded_scope(self) -> None:
+        # The §3.5 totality law — never a raise, excluded + counted by callers.
+        assert scope_admits_fno_contract("MCX", "NIFTY", _index4()) is False
+        assert scope_admits_fno_contract("", "NIFTY", _index4()) is False
+
+    def test_unbounded_scope_is_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        wide = _full(monkeypatch)
+        assert scope_admits_fno_contract("MCX", "ANYTHING", wide) is True
+        assert scope_admits_fno_contract("NSE", "RELIANCE", wide) is True

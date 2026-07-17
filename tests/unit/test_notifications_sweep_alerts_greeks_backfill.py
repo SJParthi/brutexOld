@@ -53,6 +53,7 @@ class FakeBackfillReport:
     errored: int = 0
     stale_unfixable: int = 0
     bars_written: int = 123
+    scope_excluded: int = 0
 
 
 class TestGreeksBackfillComplete:
@@ -66,6 +67,23 @@ class TestGreeksBackfillComplete:
         assert event.dedupe_key == f"greeks-backfill:{'a' * 12}"
         assert "✅ Greeks backfill complete" in event.message
         assert escape_markdown_v2("5/5 contracts re-stamped v2") in event.message
+
+    def test_scope_excluded_clause_is_emit_on_nonzero(self) -> None:
+        # DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the summary line names
+        # the scope census only when nonzero — a zero-count summary stays
+        # byte-identical (the clean-head test above IS the zero arm).
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        assert alerter.greeks_backfill_complete(FakeBackfillReport(scope_excluded=4)) is True
+        (event,) = fake.published
+        assert escape_markdown_v2("scope-excluded=4 (DEC-UNIVERSE-INDEX-ONLY-001)") in event.message
+
+    def test_zero_scope_excluded_absent_from_message(self) -> None:
+        fake = FakeNotifier()
+        alerter = SweepAlerter(notifier=fake)
+        assert alerter.greeks_backfill_complete(FakeBackfillReport()) is True
+        (event,) = fake.published
+        assert "scope" not in event.message
 
     def test_failures_downgrade_to_warning_head(self) -> None:
         fake = FakeNotifier()

@@ -1071,3 +1071,93 @@ class TestFuturesContiguityGoldens:
         assert len(infos) == 1
         assert infos[0]["symbol"] == fut
         assert infos[0]["found_session"] == "2024-11-01"
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the futures scope filter ──
+
+
+class TestFuturesScopeFilter:
+    """Stage-2a: stock FUT datasets are gated out at DISCOVERY (counted)."""
+
+    @staticmethod
+    def _seed(tmp_path: Path) -> None:
+        for symbol, close in (
+            ("NSE-NIFTY-27Jun24-FUT", "22100"),
+            ("NSE-RELIANCE-27Jun24-FUT", "2950"),
+        ):
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_min_bar(hour=9, minute=15, close=close, volume=100, oi=900)],
+            )
+
+    def test_discover_counts_excluded_stock_contract(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.dashboard.movers_futures import _discover_futures
+
+        self._seed(tmp_path)
+        by_underlying, excluded = _discover_futures(tmp_path, scope=resolve_read_scope())
+        assert set(by_underlying) == {"NIFTY"}
+        assert excluded == 1
+        # The §2.4 default arm — merge-base behavior, zero count.
+        legacy, zero = _discover_futures(tmp_path)
+        assert set(legacy) == {"NIFTY", "RELIANCE"}
+        assert zero == 0
+
+    def test_compute_counts_and_all_excluded_early_return(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.dashboard.movers_futures import compute_futures_candidates
+
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-RELIANCE-27Jun24-FUT",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="2950", volume=100, oi=900)],
+        )
+        only_stock = compute_futures_candidates(
+            lake_root=tmp_path,
+            interval="1minute",
+            date=_DAY.isoformat(),
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        assert only_stock.movers == ()
+        assert only_stock.scope_excluded == 1
+
+    def test_payload_note_and_echo_emit_on_nonzero(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.dashboard.movers_futures import (
+            build_futures_payload,
+            compute_futures_candidates,
+        )
+
+        self._seed(tmp_path)
+        cands = compute_futures_candidates(
+            lake_root=tmp_path,
+            interval="1minute",
+            date=_DAY.isoformat(),
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        payload = build_futures_payload(
+            cands.movers,
+            interval="1minute",
+            date=cands.date,
+            time=None,
+            top_n=5,
+            skipped=cands.skipped,
+            scope_excluded=cands.scope_excluded,
+        )
+        assert payload["scope_excluded"] == 1
+        assert (
+            " 1 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+            in payload["note"]
+        )
+        zero = build_futures_payload(
+            cands.movers, interval="1minute", date=cands.date, time=None, top_n=5, skipped=0
+        )
+        assert "scope_excluded" not in zero
+        assert "excluded by scope" not in zero["note"]

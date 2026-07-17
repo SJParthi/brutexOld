@@ -25,12 +25,14 @@ from brutex.dashboard.movers_snapshot import (
     _row_to_bar,
     build_snapshot_payload,
     compute_snapshot,
+    compute_spot_candidates,
     interval_minutes,
     is_intraday_interval,
     minute_to_hhmm,
     normalize_min_volume,
     parse_snapshot_date,
     pending_asset_payload,
+    run_movers_snapshot,
     session_bar_times,
     value_meets_volume_floor,
 )
@@ -991,3 +993,115 @@ class TestStoredStaleWarner:
         from brutex.dashboard.movers_snapshot import _STORED_STALE_WARN_CAP
 
         assert _STORED_STALE_WARN_CAP == 20
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the spot scope filter ─────
+
+
+class TestSpotScopeFilter:
+    """Stage-2a: stock spot datasets are gated out at DISCOVERY (counted)."""
+
+    @staticmethod
+    def _seed(lake: Path) -> None:
+        from brutex.data.parquet_writer import ParquetWriter
+
+        writer = ParquetWriter(lake_root=lake)
+        for segment, symbol, close in (("INDEX", "NIFTY", "22000"), ("CASH", "RELIANCE", "2900")):
+            writer.write(
+                exchange="NSE",
+                segment=segment,
+                symbol=symbol,
+                interval="1day",
+                bars=[
+                    CandleBar(
+                        timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+                        open=Decimal(close),
+                        high=Decimal(close),
+                        low=Decimal(close),
+                        close=Decimal(close),
+                        volume=500,
+                        open_interest=None,
+                    )
+                ],
+            )
+
+    def test_stock_excluded_and_counted_under_index4(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        self._seed(tmp_path)
+        scoped = compute_spot_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        assert [s.instrument.symbol for s in scoped.snapshots] == ["NIFTY"]
+        assert scoped.scope_excluded == 1
+        # The §2.4 default arm — merge-base behavior, zero count.
+        legacy = compute_spot_candidates(
+            lake_root=tmp_path, interval="1day", date="2024-06-13", time=None
+        )
+        assert sorted(s.instrument.symbol for s in legacy.snapshots) == ["NIFTY", "RELIANCE"]
+        assert legacy.scope_excluded == 0
+
+    def test_all_excluded_early_return_carries_count(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+        from brutex.data.parquet_writer import ParquetWriter
+
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="CASH",
+            symbol="RELIANCE",
+            interval="1day",
+            bars=[
+                CandleBar(
+                    timestamp=datetime(2024, 6, 13, 3, 45, tzinfo=UTC),
+                    open=Decimal("2900"),
+                    high=Decimal("2900"),
+                    low=Decimal("2900"),
+                    close=Decimal("2900"),
+                    volume=1,
+                    open_interest=None,
+                )
+            ],
+        )
+        scoped = compute_spot_candidates(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        assert scoped.snapshots == ()
+        assert scoped.scope_excluded == 1
+
+    def test_payload_note_and_echo_emit_on_nonzero(self) -> None:
+        payload = build_snapshot_payload(
+            (), interval="1day", date="2024-06-13", time=None, top_n=5, skipped=0, scope_excluded=2
+        )
+        assert payload["scope_excluded"] == 2
+        assert (
+            " 2 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+            in payload["note"]
+        )
+        zero = build_snapshot_payload(
+            (), interval="1day", date="2024-06-13", time=None, top_n=5, skipped=0
+        )
+        assert "scope_excluded" not in zero
+        assert "excluded by scope" not in zero["note"]
+
+    def test_run_movers_snapshot_threads_scope(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        self._seed(tmp_path)
+        payload = run_movers_snapshot(
+            lake_root=tmp_path,
+            interval="1day",
+            date="2024-06-13",
+            time=None,
+            top_n=5,
+            scope=resolve_read_scope(),
+        )
+        assert payload["scope_excluded"] == 1
+        assert {row["symbol"] for row in payload["volume"]} == {"NIFTY"}

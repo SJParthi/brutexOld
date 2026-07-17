@@ -43,6 +43,7 @@ from brutex.config.feed_scope import resolve_read_scope, scope_revision
 from brutex.dashboard.app import DashboardState, build_app
 from brutex.dashboard.movers_options import (
     _discover_options,
+    build_options_payload,
     compute_options_candidates,
     run_options_snapshot,
 )
@@ -2612,3 +2613,85 @@ class TestOptionsContiguityGoldens:
         assert len(infos) == 1
         assert infos[0]["symbol"] == ce
         assert infos[0]["found_session"] == "2024-11-01"
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R1): the options scope filter ──
+
+
+class TestOptionsScopeFilter:
+    """Stage-2a: stock CE/PE datasets are gated out at DISCOVERY (counted)."""
+
+    @staticmethod
+    def _seed(tmp_path: Path) -> None:
+        for symbol, close in (
+            ("NSE-NIFTY-27Jun24-22000-CE", "150"),
+            ("NSE-RELIANCE-27Jun24-2900-CE", "55"),
+        ):
+            _write(
+                tmp_path,
+                segment="FNO",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_min_bar(hour=9, minute=15, close=close, volume=60, oi=500)],
+            )
+
+    def test_discover_counts_excluded_stock_contract(self, tmp_path: Path) -> None:
+        self._seed(tmp_path)
+        contracts, excluded = _discover_options(tmp_path, scope=resolve_read_scope())
+        assert {row[2] for row in contracts} == {"NIFTY"}
+        assert excluded == 1
+        # A stock FUT dataset is the FUTURES tab's population — never counted
+        # into the OPTIONS tab's exclusions (the suffix pre-screen).
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-RELIANCE-27Jun24-FUT",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="2950", volume=10, oi=1)],
+        )
+        _, excluded_after = _discover_options(tmp_path, scope=resolve_read_scope())
+        assert excluded_after == 1
+
+    def test_compute_and_payload_carry_the_count(self, tmp_path: Path) -> None:
+        self._seed(tmp_path)
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1minute",
+            date=_DAY.isoformat(),
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        assert {m.underlying for m in cands.movers} == {"NIFTY"}
+        assert cands.scope_excluded == 1
+        payload = build_options_payload(
+            cands.movers,
+            interval="1minute",
+            date=cands.date,
+            time=None,
+            top_n=5,
+            skipped=cands.skipped,
+            scope_excluded=cands.scope_excluded,
+        )
+        assert payload["scope_excluded"] == 1
+        assert (
+            " 1 stored-only symbols excluded by scope (DEC-UNIVERSE-INDEX-ONLY-001)."
+            in payload["note"]
+        )
+
+    def test_all_excluded_early_return_carries_count(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            segment="FNO",
+            symbol="NSE-RELIANCE-27Jun24-2900-CE",
+            interval="1minute",
+            bars=[_min_bar(hour=9, minute=15, close="55", volume=60, oi=500)],
+        )
+        cands = compute_options_candidates(
+            lake_root=tmp_path,
+            interval="1minute",
+            date=_DAY.isoformat(),
+            time=None,
+            scope=resolve_read_scope(),
+        )
+        assert cands.movers == ()
+        assert cands.scope_excluded == 1

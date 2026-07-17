@@ -43,6 +43,7 @@ from brutex.data.greeks_enrich_pass import (
     lake_target_builder,
     resolve_cli_greeks_enrich,
     run_greeks_enrich_pass,
+    scoped_option_windows,
 )
 from brutex.data.partition import MAX_PARTITION_YEAR, MIN_PARTITION_YEAR
 from hypothesis import given, settings
@@ -1027,3 +1028,46 @@ class TestModuleHygiene:
         )
         with pytest.raises(FrozenInstanceError):
             row.symbol = "other"  # type: ignore[misc]
+
+
+# ── DEC-UNIVERSE-INDEX-ONLY-001 (design §3 R4): the scoped discovery twin ─
+
+
+class TestScopedOptionWindows:
+    """Stage-2a: stock contracts gated out of enrich targeting (counted)."""
+
+    def test_stock_contract_excluded_counted_index_kept(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        _make_contract(tmp_path, "NSE-NIFTY-25Jan24-21000-CE", [(2024, 1)])
+        _make_contract(tmp_path, "NSE-RELIANCE-25Jan24-2900-CE", [(2024, 1)])
+        windows, excluded = scoped_option_windows(tmp_path, scope=resolve_read_scope())
+        assert [w.symbol for w in windows] == ["NSE-NIFTY-25Jan24-21000-CE"]
+        assert excluded == 1
+        # The bare discover call stays legitimately UNFILTERED (§2.4 / §6#9).
+        assert sorted(w.underlying for w in discover_option_windows(tmp_path)) == [
+            "NIFTY",
+            "RELIANCE",
+        ]
+
+    def test_scope_none_is_byte_identical_with_zero_count(self, tmp_path: Path) -> None:
+        _make_contract(tmp_path, "NSE-NIFTY-25Jan24-21000-CE", [(2024, 1)])
+        windows, excluded = scoped_option_windows(tmp_path)
+        assert windows == discover_option_windows(tmp_path)
+        assert excluded == 0
+
+    def test_missing_bars_tree_returns_empty_with_zero_count(self, tmp_path: Path) -> None:
+        assert scoped_option_windows(tmp_path) == ((), 0)
+
+    def test_builder_fires_on_scope_excluded_seam(self, tmp_path: Path) -> None:
+        from brutex.config.feed_scope import resolve_read_scope
+
+        _make_contract(tmp_path, "NSE-NIFTY-25Jan24-21000-CE", [(2024, 1)])
+        _make_contract(tmp_path, "NSE-RELIANCE-25Jan24-2900-CE", [(2024, 1)])
+        seen: list[int] = []
+        build = lake_target_builder(
+            tmp_path, scope=resolve_read_scope(), on_scope_excluded=seen.append
+        )
+        targets = build()
+        assert [t.symbol for t in targets] == ["NSE-NIFTY-25Jan24-21000-CE"]
+        assert seen == [1]
