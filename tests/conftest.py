@@ -110,6 +110,78 @@ os.environ.setdefault(REVISION_PROBE_TTL_ENV, "0")
 # tested law.
 os.environ.setdefault(SETTLE_EVIDENCE_PATH_ENV, "off")
 
+# DEC-TEST-AWS-HERMETICITY-001 — the suite-wide AWS hermeticity belt. The
+# loud, named error every blocked live-AWS attempt raises. Message names the
+# remediation (inject a fake), never a secret.
+AWS_HERMETICITY_BELT_MESSAGE = (
+    "test tried to reach live AWS (blocked by the tests/conftest.py AWS "
+    "hermeticity belt) — inject a fake store/client instead "
+    "(tests/fakes/fake_aws_client.py / tests/fakes/fake_s3_client.py, or the "
+    "account_key_resolver / aws_loader / client= injection seams)"
+)
+
+
+def _aws_belt_blocked(*_args: Any, **_kwargs: Any) -> Any:
+    """The belt's boundary stand-in — raises loudly instead of touching AWS."""
+    raise RuntimeError(AWS_HERMETICITY_BELT_MESSAGE)
+
+
+@pytest.fixture(autouse=True)
+def _aws_hermeticity_belt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make it impossible for ANY test to reach live AWS (SSM/S3) by accident.
+
+    DEC-TEST-AWS-HERMETICITY-001 (the market-hours-guard philosophy — hermetic
+    against the NETWORK instead of the wall clock): production resolves the
+    Groww credentials + shared token from LIVE AWS SSM SecureStrings
+    (DEC-AWS-ONLY-CREDS-001), and ``BackgroundPullJob.start``'s DEFAULT
+    ``account_key_resolver`` reaches that path — so on a box with boto3 + ambient
+    IAM credentials, a test that starts a job without injecting a resolver
+    performed a REAL ``ssm:GetParameter WithDecryption=true`` against the
+    production SecureStrings (a hermeticity failure + a secret-exposure class;
+    on boto3-less CI the same path merely degraded to ``CredentialsError`` →
+    graceful skip, which is why it stayed green). This belt pins EVERY suite
+    run to the deterministic no-AWS behaviour:
+
+    * the repo's ONE real-SSM-client factory
+      (``brutex.adapters.groww.aws_client.build_real_aws_client``) — plus its
+      module-level from-import bindings in ``credentials_aws`` /
+      ``token_store_aws`` — is replaced with a stand-in raising
+      :data:`AWS_HERMETICITY_BELT_MESSAGE`. Callers keep their DOCUMENTED
+      fail-fast mapping (e.g. ``credentials_aws._build_client_or_raise`` maps
+      any build failure to ``CredentialsError``), so the suite behaves exactly
+      like boto3-less CI on every box — but the live call is now IMPOSSIBLE,
+      not merely absent.
+    * the boto3 network boundary itself (``boto3.client`` / ``boto3.resource``
+      + the ``Session`` method twins) is patched when boto3 is importable —
+      covering lazy function-local ``import boto3`` sites (e.g. the
+      crossverify S3 publisher's real-client factory) and any direct use.
+      Skipped gracefully when boto3 is not installed (the CI posture).
+
+    Tests that deliberately fake the seam (constructor-injected
+    ``AwsClient``/S3 fakes, ``aws_loader=``, ``account_key_resolver=``, or a
+    test-level monkeypatch of the same attribute — which overrides this belt)
+    are untouched: the fakes never construct a real boto3 client. Pinned by
+    ``tests/unit/test_aws_hermeticity_belt.py`` (active + loud + source-pinned
+    ``autouse=True``).
+    """
+    import brutex.adapters.groww.aws_client as _aws_client_module
+    import brutex.adapters.groww.token_store_aws as _token_store_aws_module
+    import brutex.config.credentials_aws as _credentials_aws_module
+
+    monkeypatch.setattr(_aws_client_module, "build_real_aws_client", _aws_belt_blocked)
+    # From-import bindings resolve from THEIR module's namespace — patch each.
+    monkeypatch.setattr(_credentials_aws_module, "build_real_aws_client", _aws_belt_blocked)
+    monkeypatch.setattr(_token_store_aws_module, "build_real_aws_client", _aws_belt_blocked)
+    try:
+        import boto3  # type: ignore[import-not-found, unused-ignore]
+        import boto3.session  # type: ignore[import-not-found, unused-ignore]
+    except ImportError:
+        return  # boto3 not installed (the CI posture) — nothing to patch.
+    monkeypatch.setattr(boto3, "client", _aws_belt_blocked)
+    monkeypatch.setattr(boto3, "resource", _aws_belt_blocked)
+    monkeypatch.setattr(boto3.session.Session, "client", _aws_belt_blocked)
+    monkeypatch.setattr(boto3.session.Session, "resource", _aws_belt_blocked)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_today_gate_log_state() -> None:
