@@ -1374,7 +1374,10 @@ def read_option_rows(lake_root: Path, target: GreeksEnrichTarget) -> list[dict[s
     base_columns = ("timestamp", "open", "high", "low", "close", "volume", "open_interest")
     frames: list[pl.DataFrame] = []
     for file in files:
-        df = pl.read_parquet(file)
+        # glob=False: *file* is ONE concrete month path (DEC-SPOT-DERIVE-TS-
+        # RANGE-HARDENING-001, the #1594 round-15 metachar law) — a
+        # `[`-carrying contract dir must never glob-read its siblings' bars.
+        df = pl.read_parquet(file, glob=False)
         missing = [name for name in GREEKS_OVERLAY_FIELDS if name not in df.columns]
         if missing:
             df = df.with_columns(

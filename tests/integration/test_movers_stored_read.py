@@ -228,26 +228,25 @@ class TestSpotStoredReadEquality:
         assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
 
     def test_spot_daily_path_counts_as_stored(self, tmp_path: Path) -> None:
-        # The 1day movers path reads the stored (derived) 1day partition by
-        # construction — it counts in stored_reads (and is otherwise unchanged).
+        # A FRESH (production-prebuilt) 1day partition serves from stored and
+        # counts in stored_reads. CONSCIOUSLY RE-SEEDED for
+        # DEC-MOVERS-DAILY-FRESHNESS-001: the pre-guard seed hand-planted a
+        # 1day bar DIVERGING from the 1-minute base (a 09:15-IST stamp +
+        # invented OHLC) — under the daily verify-equality guard that IS a
+        # stale partition (served derived, resampled_reads) — so the "counts
+        # as stored" intent is now pinned on the honest shape: the SAME
+        # production prebuild the pipeline runs.
         _seed_spot(tmp_path, "NIFTY", 20000)
-        _write(
-            tmp_path,
+        result = materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
             segment="INDEX",
             symbol="NIFTY",
-            interval="1day",
-            bars=[
-                CandleBar(
-                    timestamp=datetime(_DAY.year, _DAY.month, _DAY.day, 3, 45, tzinfo=UTC),
-                    open=Decimal("20000"),
-                    high=Decimal("20100"),
-                    low=Decimal("19900"),
-                    close=Decimal("20095"),
-                    volume=5000,
-                    open_interest=None,
-                )
-            ],
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+            daily_before=_DAILY_BEFORE,
         )
+        assert result.written.get("1day", 0) > 0  # the prebuild really derived the 1day
         cands = compute_spot_candidates(
             lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
         )
@@ -1065,3 +1064,289 @@ class TestFuturesOptionsMaterialisationInvariance:
         # last 1-minute close / OI, byte-equal to the walk-back it replaced).
         assert mover.pct_change is not None
         assert mover.oi_chg_pct is not None
+
+
+# ── DAILY arm: the stored-1day VERIFY-EQUALITY guard ──────────────────────
+# DEC-MOVERS-DAILY-FRESHNESS-001 — the named follow-up of
+# DEC-MOVERS-STORED-FRESHNESS-001 (#1795a), which guarded only the INTRADAY
+# stored-TF path. The daily movers read (`_read_daily_bars`) served the stored
+# derived 1day row with NO freshness check, so a 1-minute append WITHOUT a
+# re-prebuild left the 1day tab serving a STALE LTP/volume beside fresh
+# intraday tabs (the executed crosscut probe: 1day ₹100.00 vs 1minute ₹200.00).
+
+
+def _seed_stale_daily_lake(lake: Path) -> None:
+    """The executed daily-arm repro, PRODUCTION writers only.
+
+    1. OLD 1-minute base 09:15..09:19 IST on ``_DAY`` (closes 98..102);
+    2. the REAL pipeline prebuild derives the stored ``1day`` from it (an
+       explicit ``daily_before`` past ``_DAY`` — the completed-session law);
+    3. NEWER 1-minute bars 15:25..15:29 (close 200) appended with NO
+       re-prebuild — the stale-prebuild state (a CLI pull / crashed prebuild /
+       the #1031 hole re-pull class).
+    """
+    writer = ParquetWriter(lake_root=lake)
+    old = [_bar(day=_DAY, hour=9, minute=15 + i, close=str(98 + i), volume=10) for i in range(5)]
+    writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=old)
+    result = materialize_lake_timeframes(
+        lake_root=lake,
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        kind=PrebuildKind.SPOT,
+        include_daily=True,
+        daily_before=_DAILY_BEFORE,
+    )
+    assert result.written.get("1day", 0) > 0  # the prebuild really derived the 1day.
+    new = [
+        _bar(day=_DAY, hour=15, minute=25 + i, close=str(180 + i * 5), volume=20) for i in range(5)
+    ]
+    writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=new)
+
+
+class TestDailyStoredFreshness:
+    def test_stale_daily_serves_fresh_derived_with_one_warn(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE (the executed probe): the stale stored 1day served LTP
+        ₹100 (well, close 102 here) while the 1-minute base closed at 200; the
+        guard serves the 1m-DERIVED daily values + exactly ONE capped WARN."""
+        _seed_stale_daily_lake(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        snap = cands.snapshots[0]
+        assert snap.ltp == Decimal("200.00")  # the FRESH derived close, never 102.
+        assert snap.volume == 5 * 10 + 5 * 20  # the whole day's 1-minute volume.
+        assert snap.bar_count == 1  # one daily bar — the bar IS the day.
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert stale_events[0]["interval"] == "1day"
+        assert stale_events[0]["symbol"] == "NIFTY"
+        assert stale_events[0]["stored_max_ist"] == "00:00"  # midnight-IST daily stamp
+        assert stale_events[0]["base_max_ist"] == "15:29"
+
+    def test_fresh_prebuilt_daily_serves_stored_zero_warns(self, tmp_path: Path) -> None:
+        """The fresh-parity pin: a correctly-prebuilt lake's daily read serves
+        the STORED bar (from_stored, byte-identical values) with ZERO warns —
+        this test also passes on the PRE-guard source (the parity evidence)."""
+        writer = ParquetWriter(lake_root=tmp_path)
+        old = [
+            _bar(day=_DAY, hour=9, minute=15 + i, close=str(98 + i), volume=10) for i in range(5)
+        ]
+        writer.write(exchange="NSE", segment="INDEX", symbol="NIFTY", interval="1minute", bars=old)
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+            daily_before=_DAILY_BEFORE,
+        )
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        snap = cands.snapshots[0]
+        assert snap.ltp == Decimal("102.00")  # the stored (== derived) close.
+        assert snap.volume == 50
+        assert (cands.stored_reads, cands.resampled_reads) == (1, 0)
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
+    def test_missing_day_row_derives_from_minute_base(self, tmp_path: Path) -> None:
+        """FAILS-BEFORE: a NEW 1-minute day appended after the last prebuild has
+        NO stored 1day row — the pre-guard read returned [] (the symbol vanished
+        from the daily tab, even as the default date moves to the new day); the
+        guard serves the 1m-derived daily bar for it."""
+        _seed_stale_daily_lake(tmp_path)
+        next_day = date(2024, 6, 14)
+        ParquetWriter(lake_root=tmp_path).write(
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1minute",
+            bars=[_bar(day=next_day, hour=9, minute=15, close="210", volume=7)],
+        )
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=next_day.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        snap = cands.snapshots[0]
+        assert snap.ltp == Decimal("210.00")
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 1)
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert stale_events[0]["stored_max_ist"] == "absent"  # the missing-day-row shape
+
+    def test_daily_fail_open_serves_stored_without_minute_base(self, tmp_path: Path) -> None:
+        """The disclosed fail-open arm: a 1day row with NO 1-minute evidence for
+        the day (a 1day-only / legacy lake) serves the stored bar UNVERIFIED —
+        falling back would drop the row (strictly worse) — with zero warns."""
+        from brutex.dashboard.movers_snapshot import _read_daily_bars
+
+        _write(
+            tmp_path,
+            segment="INDEX",
+            symbol="NIFTY",
+            interval="1day",
+            bars=[
+                CandleBar(
+                    timestamp=datetime(_DAY.year, _DAY.month, _DAY.day, 3, 45, tzinfo=UTC),
+                    open=Decimal("20000"),
+                    high=Decimal("20100"),
+                    low=Decimal("19900"),
+                    close=Decimal("20095"),
+                    volume=5000,
+                    open_interest=None,
+                )
+            ],
+        )
+        with structlog.testing.capture_logs() as logs:
+            bars, from_stored = _read_daily_bars(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=_DAY
+            )
+        assert from_stored is True
+        assert len(bars) == 1
+        assert bars[0].close == Decimal("20095")
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
+    def test_daily_reprebuild_heals_back_to_stored(self, tmp_path: Path) -> None:
+        """Convergence: re-running the production prebuild over the appended
+        base flips the read back to a verified stored serve with zero warns
+        (the prebuild remains the heal — the guard never writes anything)."""
+        _seed_stale_daily_lake(tmp_path)
+        materialize_lake_timeframes(
+            lake_root=tmp_path,
+            exchange="NSE",
+            segment="INDEX",
+            symbol="NIFTY",
+            kind=PrebuildKind.SPOT,
+            include_daily=True,
+            daily_before=_DAILY_BEFORE,
+        )
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert (cands.stored_reads, cands.resampled_reads) == (1, 0)
+        assert cands.snapshots[0].ltp == Decimal("200.00")
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []
+
+    def test_daily_corrupt_stored_row_screened_then_derived(self, tmp_path: Path) -> None:
+        """An out-of-band INSANE stored 1day row (high < low — plantable only by
+        raw parquet, the writers refuse it) is screened out, reads STALE against
+        the healthy 1-minute derivation, and the derived bar serves — never a
+        raw corrupt serve, never a CandleBar ValueError 500 (the #1811 class)."""
+        import polars as pl
+
+        _seed_stale_daily_lake(tmp_path)
+        daily_dir = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1day" / "2024"
+        target = next(iter(sorted(daily_dir.glob("*.parquet"))))
+        frame = pl.read_parquet(target)
+        # Invert high/low on the stored day row — a bit-rot / tamper shape.
+        frame = frame.with_columns(
+            pl.lit(1.0).alias("high"),
+            pl.lit(9999.0).alias("low"),
+        )
+        frame.write_parquet(target)
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert len(cands.snapshots) == 1
+        assert cands.snapshots[0].ltp == Decimal("200.00")  # the derived truth
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert len(stale_events) == 1
+        assert stale_events[0]["stored_max_ist"] == "absent"  # wholly screened out
+
+    def test_daily_date_max_boundary_fails_open(self, tmp_path: Path) -> None:
+        """date.max has no strictly-later derive cutoff (`day + 1` would raise
+        OverflowError — the #1795a R3-N1 boundary class): the read fails open
+        instead of crashing. The shape is OUT-OF-BAND by construction — the
+        production writers refuse year 9999 (`partition_for_timestamp`'s
+        [2000, 2100] law) — but ``date=9999-12-31`` is a well-formed WIRE value
+        (`parse_snapshot_date` accepts it), so a hand-planted month file must
+        never 500 the route through this seam."""
+        import polars as pl
+        from brutex.dashboard.movers_snapshot import _read_daily_bars
+
+        boundary = date.max
+        planted = tmp_path / "bars" / "NSE" / "INDEX" / "NIFTY" / "1minute" / "9999" / "12.parquet"
+        planted.parent.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                # 09:15 IST on 9999-12-31 == 03:45 UTC the same day.
+                "timestamp": [datetime(9999, 12, 31, 3, 45, tzinfo=UTC)],
+                "open": [200.0],
+                "high": [201.0],
+                "low": [199.0],
+                "close": [200.0],
+                "volume": [1],
+                "open_interest": [None],
+            },
+            schema_overrides={"open_interest": pl.Int64},
+        ).write_parquet(planted)
+        # Without the explicit gate the derive cutoff `day + 1 day` raises
+        # OverflowError here (verified by reverting the gate); with it the read
+        # fails open — no stored 1day row exists (unwritable year), so the
+        # honest answer is the empty fail-open tuple, never a raise.
+        assert _read_daily_bars(
+            tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=boundary
+        ) == ([], True)
+
+    def test_daily_stale_warn_deduped_per_symbol_within_a_build(self, tmp_path: Path) -> None:
+        """The shared warner state: TWO stale daily symbols in one build emit
+        one WARN each (deduped per (exchange, symbol, 1day), the intraday
+        guard's exact key law — one cap bounds the whole build)."""
+        for symbol in ("NIFTY", "BANKNIFTY"):
+            writer = ParquetWriter(lake_root=tmp_path)
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_bar(day=_DAY, hour=9, minute=15, close="100", volume=10)],
+            )
+            materialize_lake_timeframes(
+                lake_root=tmp_path,
+                exchange="NSE",
+                segment="INDEX",
+                symbol=symbol,
+                kind=PrebuildKind.SPOT,
+                include_daily=True,
+                daily_before=_DAILY_BEFORE,
+            )
+            writer.write(
+                exchange="NSE",
+                segment="INDEX",
+                symbol=symbol,
+                interval="1minute",
+                bars=[_bar(day=_DAY, hour=15, minute=29, close="150", volume=10)],
+            )
+        with structlog.testing.capture_logs() as logs:
+            cands = compute_spot_candidates(
+                lake_root=tmp_path, interval="1day", date=_DAY.isoformat(), time=None
+            )
+        assert (cands.stored_reads, cands.resampled_reads) == (0, 2)
+        stale_events = [e for e in logs if e["event"] == "movers.stored_stale_fallback"]
+        assert sorted(e["symbol"] for e in stale_events) == ["BANKNIFTY", "NIFTY"]
+
+    def test_daily_stale_direct_caller_without_state_falls_back_silently(
+        self, tmp_path: Path
+    ) -> None:
+        """A direct caller passing no warn state (the intraday guard's exact
+        contract) still gets the derived fallback — just silently."""
+        from brutex.dashboard.movers_snapshot import _read_daily_bars
+
+        _seed_stale_daily_lake(tmp_path)
+        with structlog.testing.capture_logs() as logs:
+            bars, from_stored = _read_daily_bars(
+                tmp_path, exchange="NSE", segment="INDEX", symbol="NIFTY", day=_DAY
+            )
+        assert from_stored is False
+        assert bars[-1].close == Decimal("200")
+        assert [e for e in logs if e["event"] == "movers.stored_stale_fallback"] == []

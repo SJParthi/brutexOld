@@ -477,6 +477,10 @@ _PER_FINDING_HEAL_ERRORS: Final[tuple[type[BaseException], ...]] = (
 #: the sweep daemon thread (the "boot never crashes" contract). The scan gate
 #: + ``_PER_FINDING_HEAL_ERRORS`` stop it upstream; this is the last-line rail
 #: (OverflowError is already an ``Exception`` — the fold only ADDS the panic).
+#: ALSO consumed by ``_rebuild_tf_months``'s per-symbol isolation
+#: (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001): the recall's months-bounded
+#: re-materialise converts bars Python-side, so the SAME panic class escaped
+#: its former bare ``except Exception`` and aborted the whole recall batch.
 #: A named constant because mypy --strict rejects a starred-unpack tuple
 #: DISPLAY in an ``except`` clause while accepting a tuple-typed expression.
 _SWEEP_GUARD_ERRORS: Final[tuple[type[BaseException], ...]] = (
@@ -1471,7 +1475,15 @@ def _rebuild_tf_months(
         )
     except LakeWriteHalt:
         raise
-    except Exception as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
+    # _SWEEP_GUARD_ERRORS = Exception + the out-of-range-timestamp conversion
+    # panics (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, the round-18 idiom): a
+    # planted 2**62-us stored stamp panics the rebuild's Rust→Python conversion
+    # as a BaseException that sailed PAST the former bare `except Exception`
+    # and aborted the WHOLE recall batch; the read-boundary gate refuses it
+    # FIRST as ResampleInputError — this is the defense-in-depth rail so any
+    # residual panic stays per-symbol isolation. KeyboardInterrupt/SystemExit
+    # still propagate (the guard is never a blanket BaseException).
+    except _SWEEP_GUARD_ERRORS as exc:  # pylint: disable=broad-exception-caught — per-symbol isolation
         _LOG.warning(
             "lake_heal.tf_rebuild_failed", symbol=symbol, tfs=sorted(tf_labels), error=str(exc)
         )

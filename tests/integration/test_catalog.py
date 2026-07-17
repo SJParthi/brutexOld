@@ -665,3 +665,64 @@ class TestClosedGuardsAndIdempotentClose:
                 start=datetime(2024, 1, 1),  # naive
                 end=datetime(2024, 1, 2, tzinfo=UTC),
             )
+
+
+class TestGlobMetacharSymbolRefused:
+    """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 (the #1594 round-15 metachar law
+    on the ENGINE feed mouth) — FAILS-BEFORE (executed repro): a registered
+    partition whose symbol dir is ``NSE-X[12]`` beside real ``NSE-X1``/
+    ``NSE-X2`` siblings made ``get_bars``'s ``pl.read_parquet(str(path))``
+    glob-interpret the path and serve the SIBLINGS' bars AS this symbol
+    (rows=3, close 100.11 — silent cross-symbol corruption on the sweep feed).
+    Now the bracket symbol is refused at ``build_partition_path`` (the
+    forbidden-chars law, typed ``PartitionError``) BEFORE any read, and the
+    explicit-path read itself is ``glob=False`` (defense-in-depth)."""
+
+    def test_bracket_symbol_get_bars_refused_never_reads_siblings(self, tmp_path: Path) -> None:
+        import polars as pl
+        from brutex.data.errors import PartitionError
+
+        def _plant_raw(symbol: str, close: float) -> None:
+            dest = tmp_path / "bars" / "NSE" / "CASH" / symbol / "1minute" / "2024" / "01.parquet"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            stamps = [datetime(2024, 1, 3, 4, i, tzinfo=UTC) for i in range(3)]
+            pl.DataFrame(
+                {
+                    "timestamp": stamps,
+                    "open": [close] * 3,
+                    "high": [close + 1] * 3,
+                    "low": [close - 1] * 3,
+                    "close": [close] * 3,
+                    "volume": [10] * 3,
+                    "open_interest": [None] * 3,
+                }
+            ).with_columns(pl.col("open_interest").cast(pl.Int64)).write_parquet(dest)
+
+        _plant_raw("NSE-X1", 100.11)
+        _plant_raw("NSE-X2", 100.22)
+        _plant_raw("NSE-X[12]", 100.55)
+        entry = CatalogEntry(
+            exchange="NSE",
+            segment="CASH",
+            symbol="NSE-X[12]",
+            interval="1minute",
+            year=2024,
+            month=1,
+            raw_hash="0" * 64,
+            row_count=3,
+            first_ts=datetime(2024, 1, 3, 4, 0, tzinfo=UTC),
+            last_ts=datetime(2024, 1, 3, 4, 2, tzinfo=UTC),
+            fetched_at=datetime(2024, 1, 3, 12, tzinfo=UTC),
+        )
+        with Catalog.open(tmp_path / "catalog.duckdb") as cat:
+            cat.upsert(entry)
+            with pytest.raises(PartitionError, match="forbidden"):
+                cat.get_bars(
+                    lake_root=tmp_path,
+                    exchange="NSE",
+                    segment="CASH",
+                    symbol="NSE-X[12]",
+                    interval="1minute",
+                    start=datetime(2024, 1, 1, tzinfo=UTC),
+                    end=datetime(2024, 2, 1, tzinfo=UTC),
+                )
