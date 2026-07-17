@@ -2392,9 +2392,10 @@ jobs:
             echo "(brutex.metrics.spa test file not present yet — gate inactive)"
           fi
           # DEC-STAT-CPCV-WFO-001 (#428): Stage-4 cross-validation primitives —
-          # brutex.metrics.cpcv (104 stmts / 34 branches) CPCV splits +
-          # purge/embargo + pass-rate; brutex.metrics.wfo (76 / 22) walk-forward
-          # rolling/anchored/expanding pass-rates.
+          # brutex.metrics.cpcv (132 stmts / 44 branches as of
+          # DEC-METRICS-RUST-STATS-001) CPCV splits + purge/embargo +
+          # pass-rate + the rust_stats dispatch; brutex.metrics.wfo (76 / 22)
+          # walk-forward rolling/anchored/expanding pass-rates.
           # NOTE: driven via the numpy-safe `--cov=brutex` + `coverage report
           # --include` form (NOT the dotted `--cov=brutex.metrics.cpcv`): once
           # the spa re-export (DEC-STAT-SPA-001, #431) landed, brutex.metrics
@@ -2417,6 +2418,21 @@ jobs:
             coverage report --include="*/brutex/metrics/wfo.py" --show-missing --fail-under=100
           else
             echo "(brutex.metrics.wfo test file not present yet — gate inactive)"
+          fi
+          # DEC-METRICS-RUST-STATS-001 (slice 6): brutex.metrics.rust_stats —
+          # the flag-gated Rust Stage-3/4 statistics seam (env tristate,
+          # per-function autorevert latch, burn-in self-check, kernel
+          # bindings). 100% line+branch from its dedicated unit suite ALONE;
+          # the property/golden/bench suites add kernel-vs-oracle parity.
+          # Same numpy-safe `--cov=brutex` + `coverage report --include`
+          # form as the sibling metrics gates.
+          if compgen -G "tests/unit/test_rust_stats.py" > /dev/null; then
+            pytest tests/unit/test_rust_stats.py --cov=brutex --cov-branch --cov-fail-under=0 -q
+            coverage report --include="*/brutex/metrics/rust_stats.py" | grep -q "brutex/metrics/rust_stats.py" \
+              || { echo "ERROR: brutex/metrics/rust_stats.py was not measured — gate failed"; exit 1; }
+            coverage report --include="*/brutex/metrics/rust_stats.py" --show-missing --fail-under=100
+          else
+            echo "(brutex.metrics.rust_stats test file not present yet — gate inactive)"
           fi
           # DEC-STAT-LOCKBOX-MC-001: Stage-4 filters #8 (Lockbox held-out
           # validation) + #9 (Monte-Carlo entry-permutation). brutex.metrics.lockbox
