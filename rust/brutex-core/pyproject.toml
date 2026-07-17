@@ -1,0 +1,50 @@
+# Maturin build configuration for the BruteX root-leaf Rust crate
+# (slice T35, DEC-CONFIG-RUST-LEAVES-001 — MIGRATION.md #1943).
+#
+# Pip installs this as a separate distribution alongside `brutex`, exactly
+# like the sibling kernels (`rust/fno-math`, `rust/trading-core`,
+# `rust/brutex-lake`). It is DELIBERATELY not installed by the main CI test
+# job: the Python facade (`brutex/money_rust.py`) is default-OFF and
+# degrades loudly to the Decimal oracle when the crate is absent; only the
+# dedicated `.github/workflows/core-rust-parity.yml` lane builds + installs
+# it and runs the flag-ON parity legs.
+#
+# References:
+#   - rust/brutex-lake/pyproject.toml (the layout template)
+#   - rust/fno-math/pyproject.toml (the original DEC-P0-055 convention)
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "brutex-core"
+version = "0.2.0"
+description = "BruteX root-leaf Rust seams — the DEC-MONEY-2DP-001 money laws as exact decimal-string arithmetic, byte-locked to the CPython Decimal oracle (slice T35)."
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.12"
+authors = [
+    { name = "SJParthi" },
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "License :: Other/Proprietary License",
+]
+
+[tool.maturin]
+# Mixed Python + Rust layout (the fno-math DEC-P0-055 convention): Python
+# source under `python/`, the cdylib registered as the private
+# `brutex_core._brutex_core` submodule, re-exported by `__init__.py` with a
+# matched `__init__.pyi` + `py.typed` marker for pyright/mypy strict mode.
+python-source = "python"
+module-name = "brutex_core._brutex_core"
+features = ["pyo3/extension-module"]
+strip = true
+# Enforce the committed Cargo.lock on every wheel build (cargo --locked) —
+# the brutex-lake convention; this crate's graph is pyo3-only, so the lock
+# is small, but a silent re-resolution is still a supply-chain surprise.
+locked = true
