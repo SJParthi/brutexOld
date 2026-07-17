@@ -53,7 +53,7 @@ expansion.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Collection, Generator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -115,10 +115,12 @@ from brutex.adapters.ingest_common import (
 )
 from brutex.adapters.protocol import MarketAdapter
 from brutex.calendars.observed_sessions import load_observed_holidays
+from brutex.config.feed_scope import DEFAULT_FEED, FeedScope, resolve_feed_scope
 from brutex.dashboard.coverage_reconcile import load_lake_spans
 from brutex.dashboard.pull_census import emit_written_settled_census
 from brutex.data.errors import MarketHoursHalt
 from brutex.data.parquet_writer import fold_max_close_delta
+from brutex.data.scope_filter import window_scope_admit
 from brutex.data.sink import BarSink, NullBarSink
 from brutex.data.today_completeness import resolve_today_completeness_enabled
 from brutex.data.window_ledger import WindowLedger
@@ -131,7 +133,7 @@ from brutex.data.window_ledger_store import (
     reconcile_ledger_with_lake,
     run_skipped_audit_guarded,
 )
-from brutex.models import Instrument
+from brutex.models import Instrument, InstrumentType
 from brutex.notifications.sweep_alerts import emit_pull_halt_alert
 from brutex.observability.correlation import inherited_pull_id_scope
 from brutex.observability.pull_journal import record_pull_finish, record_pull_start
@@ -402,6 +404,48 @@ def parse_symbol_list(symbols: str) -> list[str]:
     return out
 
 
+def screen_pull_scope(
+    instruments: Iterable[Instrument],
+    *,
+    scope: FeedScope | None = None,
+) -> None:
+    """The ONE P7 vendor-pull scope screen (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3).
+
+    Guards every RAW single-symbol / selection store-resolution arm that feeds
+    a vendor pull: during the stale-store window (the boot auto-heal is
+    best-effort — a failed master fetch keeps serving the pre-cut ~750-row
+    store) a bookmarked/scripted stock id would otherwise trigger REAL stock
+    SPOT + F&O-metadata vendor pulls. The screen **fires ONLY when the acting
+    *scope* is ``bounded()``** — under an UNBOUNDED (``full``) scope it is a
+    PASS-THROUGH (the legacy EQ admission rule takes REQUIRED store sets these
+    arms have no handle to; evaluating it with default-empty sets would 400
+    every legitimate stock selection under ``full`` and break the §5.6 widen
+    path — the bounded-gate law). IDX rows are judged via
+    ``admits_underlying``; EQ (and any other resolved type) is refused unless
+    ``admits_stocks()``. Out-of-scope ⇒ :class:`ValueError` naming the id(s) +
+    the DEC (the routes map it to a 400 — fail-closed, never a silent partial
+    pull); a steady-state 4-row store resolves only admitted rows, so those
+    requests are byte-identical.
+    """
+    if scope is None:
+        scope = resolve_feed_scope(DEFAULT_FEED)
+    if not scope.bounded():
+        return
+    refused: list[str] = []
+    for instrument in instruments:
+        if instrument.instrument == InstrumentType.IDX:
+            if not scope.admits_underlying(instrument.exch_id, instrument.symbol_name):
+                refused.append(instrument.symbol_name)
+        elif not scope.admits_stocks():
+            refused.append(instrument.symbol_name)
+    if refused:
+        raise ValueError(
+            f"out-of-scope instrument(s) refused: {', '.join(sorted(set(refused)))} — "
+            "the pull universe is index-only (DEC-UNIVERSE-INDEX-ONLY-001); "
+            "stored data stays readable in /db, but no vendor pull is issued"
+        )
+
+
 def resolve_pull_symbols(
     symbols: str, lookup: Callable[[str], Instrument | None]
 ) -> list[Instrument]:
@@ -451,6 +495,11 @@ def resolve_pull_symbols(
         raise ValueError(
             f"unknown security_id(s) not in the instrument store: {', '.join(unknown)}"
         )
+    # P7 arm (i) — the ONE ?symbols= chokepoint (serves /pull-pipeline ·
+    # /pull-all · /pull-expiries-contracts · /retry-failed · the composite
+    # /pull-historical arm): a stale-store stock id must refuse loudly, never
+    # vendor-pull (DEC-UNIVERSE-INDEX-ONLY-001).
+    screen_pull_scope(resolved)
     return resolved
 
 
@@ -511,6 +560,8 @@ def resolve_pull_targets(
         instrument = lookup(symbol)
         if instrument is None:
             raise ValueError(f"unknown security_id {symbol!r} — not in the instrument store")
+        # P7 arm (ii) — the single-?symbol= selection (DEC-UNIVERSE-INDEX-ONLY-001).
+        screen_pull_scope([instrument])
         return [instrument], "single"
     return whole_universe(), "universe"
 
@@ -2642,7 +2693,31 @@ def pull_all_spot(
                         # AFTER the census snapshot above so the audit's own
                         # demotions never enter the pre-pull census pair.
                         # Best-effort: any error is a 0 no-op, never a block.
-                        run_skipped_audit_guarded(ledger, lake_root, pull_id=pid)
+                        # P9 (DEC-UNIVERSE-INDEX-ONLY-001): the rotation runs
+                        # over the acting scope's ADMITTED window rows only —
+                        # a durable pre-cut stock SKIPPED population must
+                        # never burn the ≤25/pull budget on windows NO
+                        # producer will re-fetch (each demotion would be a
+                        # PERMANENT SKIPPED→FAILED flip). The admitted-sid map
+                        # (legacy sid|segment rows) is derived from THIS
+                        # pull's already-screened instruments — conservative:
+                        # an in-scope legacy sid absent from a narrow
+                        # selection is skipped-not-reopened this pull and
+                        # rotates on the next whole-universe pull; out-of-
+                        # scope rows are excluded + counted, never demoted.
+                        # None (an unbounded scope) = the legacy unfiltered
+                        # rotation, byte-identical.
+                        run_skipped_audit_guarded(
+                            ledger,
+                            lake_root,
+                            pull_id=pid,
+                            admit=window_scope_admit(
+                                resolve_feed_scope(DEFAULT_FEED),
+                                admitted_sids={
+                                    str(inst.security_id): inst.symbol_name for inst in instruments
+                                },
+                            ),
+                        )
                         plan_windows(
                             ledger,
                             instruments=instruments,

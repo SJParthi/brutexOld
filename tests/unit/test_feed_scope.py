@@ -64,9 +64,7 @@ def _instrument(
         lot_size=1,
         tick_size=Decimal("0.05"),
         sm_freeze_qty=None,
-        sm_expiry_date=date(2026, 9, 24)
-        if instrument_type.value in ("FUT", "CE", "PE")
-        else None,
+        sm_expiry_date=date(2026, 9, 24) if instrument_type.value in ("FUT", "CE", "PE") else None,
         strike_price=Decimal("100") if instrument_type.value in ("CE", "PE") else None,
         asm_gsm_flag=False,
     )
@@ -186,17 +184,13 @@ class TestFailClosedDefaultWarn:
         note_feed_registered("gdfl")
         with capture_logs() as logs:
             assert resolve_feed_scope("gdfl").token == SCOPE_INDEX4
-        assert not [
-            e for e in logs if e["event"] == "feed_scope.active_feed_fail_closed_default"
-        ]
+        assert not [e for e in logs if e["event"] == "feed_scope.active_feed_fail_closed_default"]
 
     def test_no_warn_for_inactive_unknown_feed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(FEED_SCOPE_ENV, "full")
         with capture_logs() as logs:
             assert resolve_feed_scope("gdfl").token == SCOPE_INDEX4
-        assert not [
-            e for e in logs if e["event"] == "feed_scope.active_feed_fail_closed_default"
-        ]
+        assert not [e for e in logs if e["event"] == "feed_scope.active_feed_fail_closed_default"]
 
 
 class TestNonActiveKeyLaw:
@@ -241,9 +235,7 @@ class TestNonActiveKeyLaw:
             resolve_read_scope()
             resolve_read_scope()
             resolve_feed_scope("dhan")
-        assert (
-            len([e for e in logs if e["event"] == "feed_scope.inactive_feed_wide_binding"]) == 1
-        )
+        assert len([e for e in logs if e["event"] == "feed_scope.inactive_feed_wide_binding"]) == 1
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -269,9 +261,7 @@ class TestActiveFeedsAndReadUnion:
         assert union.admitted_underlyings == INDEX4_UNDERLYINGS
         assert union.fno_underlyings == INDEX4_FNO_UNDERLYINGS
 
-    def test_any_active_full_makes_union_unbounded(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_any_active_full_makes_union_unbounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(FEED_SCOPE_ENV, "gdfl=full")
         note_feed_registered("gdfl")
         union = resolve_read_scope()
@@ -368,8 +358,9 @@ class TestMirrorPins:
         """
         from brutex.universe import V1_INDICES
 
-        assert INDEX4_FNO_UNDERLYINGS == frozenset(
-            (u.exchange, u.underlying_symbol) for u in V1_INDICES if not u.reference_only
+        assert (
+            frozenset((u.exchange, u.underlying_symbol) for u in V1_INDICES if not u.reference_only)
+            == INDEX4_FNO_UNDERLYINGS
         )
 
     def test_trio_token_banned_in_scope_modules(self) -> None:
@@ -439,11 +430,7 @@ class TestClosureImportPin:
                 roots.add(node.module)
         for module in roots:
             top = module.split(".")[0]
-            ok = (
-                module in allowed_brutex
-                or top == "structlog"
-                or top in sys.stdlib_module_names
-            )
+            ok = module in allowed_brutex or top == "structlog" or top in sys.stdlib_module_names
             assert ok, f"feed_scope.py imports {module!r} — outside the §2.1 allowed set"
         assert "brutex.models" in roots  # anti-vacuous: the walk saw the imports
 

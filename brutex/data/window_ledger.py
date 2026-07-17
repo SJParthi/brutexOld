@@ -34,7 +34,7 @@ parallel window worker); the snapshot is O(N) over the recorded windows.
 from __future__ import annotations
 
 import threading
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -1120,6 +1120,7 @@ class WindowLedger:
         *,
         start_after: tuple[str, str, str, str, str] | None = None,
         cap: int = SKIPPED_AUDIT_PER_PULL,
+        admit: Callable[[tuple[str, str, str, str, str]], bool] | None = None,
     ) -> tuple[int, tuple[str, str, str, str, str] | None]:
         """Round-robin re-open of ≤ *cap* terminally-``SKIPPED`` windows — the mechanized audit.
 
@@ -1140,6 +1141,20 @@ class WindowLedger:
         ≈0.03%-of-call-budget arithmetic (~0.06-0.09% counting the full fresh
         confirmation budget each re-opened window regains).
 
+        *admit* (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3 P9) is an optional
+        window-key predicate: ``None`` = the legacy unfiltered rotation
+        (every existing caller byte-identical — no data→config import here;
+        the predicate itself is built by
+        :func:`brutex.data.scope_filter.window_scope_admit` at the pull
+        seam). With a predicate bound, NON-admitted rows — post-cut stale
+        stock spot/F&O windows, plus legacy ``sid|segment`` rows whose sid
+        the admitted map cannot resolve — consume NO budget and are NEVER
+        demoted (a SKIPPED→FAILED flip on a window no producer will re-fetch
+        is a PERMANENT flip — the audit's own DATA-SAFE contract): the
+        rotation runs over the ADMITTED subset only, so the ≤ *cap* budget
+        genuinely audits in-scope windows. *admit* runs under the ledger
+        lock — it must be pure + fast (set lookups / a symbol parse).
+
         Returns
         -------
         tuple[int, tuple | None]
@@ -1156,6 +1171,8 @@ class WindowLedger:
             skipped_keys = sorted(
                 wk for wk, row in self._by_window.items() if row.status == SKIPPED
             )
+            if admit is not None:
+                skipped_keys = [wk for wk in skipped_keys if admit(wk)]
             if not skipped_keys:
                 return 0, None
             if start_after is None:

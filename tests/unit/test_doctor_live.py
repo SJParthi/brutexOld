@@ -23,6 +23,7 @@ from brutex.adapters.groww.constants import (
 )
 from brutex.adapters.rate_common import RateController
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 
 from tests.fakes.fake_aws_client import FakeAwsClient
 
@@ -1788,6 +1789,18 @@ def _prepare_amp(
 
 
 class TestStageAmpersand:
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+        This class pins the pre-#1934 &-probe MECHANICS (form calls · evidence
+        sidecar · winner seeds · stamp discipline) over the M&M stock family;
+        under the shipped index4 default the P10 gate SHORT-CIRCUITS the stage
+        before family derivation, so the mechanics run under ``full`` (where
+        the gate is a pass-through — byte-identical). The shipped-default
+        guard arm is the P10 scope-gate test (stage-1 follow-on)."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
+
     def test_skips_when_not_opted_in(self, tmp_path: Path) -> None:
         deps, ctx, _box = prepare_client(tmp_path)
         outcome = dl.stage_ampersand(deps, ctx)

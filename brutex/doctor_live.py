@@ -115,6 +115,7 @@ from brutex.calendars.observed_sessions import (
 from brutex.config.credentials import resolve_groww_aws_credentials
 from brutex.config.credentials_types import CredentialsError, GrowwFileCredentials
 from brutex.config.dotenv import parse_dotenv
+from brutex.config.feed_scope import DEFAULT_FEED, resolve_feed_scope
 from brutex.config.paths import lake_root_identity, resolve_lake_root
 from brutex.data.atomic_io import atomic_write_simple
 from brutex.data.bhavcopy import (
@@ -2545,6 +2546,18 @@ def stage_ampersand(deps: KitDeps, ctx: KitContext) -> StageOutcome:
         return _skip(14, "ampersand", "stage 3 did not run — no live client")
     if ctx.master is None:
         return _skip(14, "ampersand", "stage 4 did not run — no instrument master")
+    # P10 (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3): every `&`-underlying
+    # with F&O legs is a STOCK (M&M · M&MFIN · L&TFH · GVT&D · J&KBANK — no
+    # index carries `&`), so under a stock-excluding acting scope the stage
+    # SHORT-CIRCUITS BEFORE family derivation — zero vendor calls, zero
+    # durable `groww.form_winner.*` seeds — with its OWN scope-naming skip
+    # reason (NEVER the "no &-underlying" text below: the stage-4 master parse
+    # is untouched (A7), so the master still LISTS the family and that wording
+    # would be false; the genuinely-empty-master arm keeps its message).
+    if not resolve_feed_scope(DEFAULT_FEED).admits_stocks():
+        return _skip(
+            14, "ampersand", "&-family excluded by universe scope (DEC-UNIVERSE-INDEX-ONLY-001)"
+        )
     family = ampersand_family(ctx.master.universe)
     if not family:
         return _skip(14, "ampersand", "the instrument master lists no &-underlying with F&O legs")

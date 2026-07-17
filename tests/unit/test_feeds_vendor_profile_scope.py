@@ -105,8 +105,6 @@ class TestRegistrationSeamOrdering:
         with pytest.raises(VendorProfileError, match="EMPTY underlying"):
             replace(
                 synthetic_feed_profile(tmp_path, vendor="badfeed"),
-                scope=FeedScopeBinding(
-                    admitted=(UnderlyingScope(underlying="", fno_chain=False),)
-                ),
+                scope=FeedScopeBinding(admitted=(UnderlyingScope(underlying="", fno_chain=False),)),
             )
         assert "badfeed" not in active_feeds()

@@ -1830,6 +1830,7 @@ def run_skipped_audit(
     *,
     pull_id: str,
     cap: int = SKIPPED_AUDIT_PER_PULL,
+    admit: Callable[[tuple[str, str, str, str, str]], bool] | None = None,
 ) -> int:
     """Mechanized round-robin re-audit of ≤ *cap* terminally-``SKIPPED`` windows — once per pull.
 
@@ -1854,13 +1855,35 @@ def run_skipped_audit(
     their behalf; a later rotation pass reaches them again) — deliberately NOT
     inverted, since the cursor save must not ride the pull-end save's
     lock/halt paths.
+
+    *admit* (DEC-UNIVERSE-INDEX-ONLY-001, design §3.3 P9): the optional
+    window-key scope predicate threaded through to
+    :meth:`~brutex.data.window_ledger.WindowLedger.audit_reopen_skipped` —
+    ``None`` = the legacy unfiltered rotation (byte-identical). With a
+    predicate bound, out-of-scope rows consume no budget, are never demoted,
+    and are COUNTED into the ``pull.skipped_audit`` log line
+    (``out_of_scope=N`` — the counting wrapper below), so the operator sees
+    exactly how much of the durable SKIPPED population the scope excludes.
     """
     prior = load_skipped_audit_cursor(lake_root)
     if prior is not None and prior[0] == pull_id:
         _LOG.debug("pull.skipped_audit_already_ran", pull_id=pull_id)
         return 0
     start_after = prior[1] if prior is not None else None
-    reopened, last_key = ledger.audit_reopen_skipped(start_after=start_after, cap=cap)
+    out_of_scope = 0
+    counted_admit: Callable[[tuple[str, str, str, str, str]], bool] | None = None
+    if admit is not None:
+
+        def counted_admit(window_key: tuple[str, str, str, str, str]) -> bool:
+            nonlocal out_of_scope
+            verdict = admit(window_key)
+            if not verdict:
+                out_of_scope += 1
+            return verdict
+
+    reopened, last_key = ledger.audit_reopen_skipped(
+        start_after=start_after, cap=cap, admit=counted_admit
+    )
     save_skipped_audit_cursor(
         lake_root,
         pull_id=pull_id,
@@ -1872,6 +1895,7 @@ def run_skipped_audit(
         reopened=reopened,
         cap=cap,
         cursor=list(last_key) if last_key is not None else None,
+        out_of_scope=out_of_scope,
     )
     return reopened
 
@@ -1882,18 +1906,20 @@ def run_skipped_audit_guarded(
     *,
     pull_id: str,
     cap: int = SKIPPED_AUDIT_PER_PULL,
+    admit: Callable[[tuple[str, str, str, str, str]], bool] | None = None,
 ) -> int:
     """Best-effort :func:`run_skipped_audit` — a ``None`` ledger / any error is a 0 no-op.
 
     The pull-seam wrapper (the #935/#1014 guarded-wiring precedent): a dry-run
     threads ``ledger=None`` (no audit — nothing persists on a dry-run) and ANY
     internal error logs ``pull.skipped_audit_error`` and returns 0, so the
-    mechanized audit can never block, slow, or crash a pull.
+    mechanized audit can never block, slow, or crash a pull. *admit* is the
+    optional #1934 scope predicate, threaded verbatim (``None`` = legacy).
     """
     if ledger is None:
         return 0
     try:
-        return run_skipped_audit(ledger, lake_root, pull_id=pull_id, cap=cap)
+        return run_skipped_audit(ledger, lake_root, pull_id=pull_id, cap=cap, admit=admit)
     except Exception as exc:  # pylint: disable=broad-exception-caught — best-effort seam
         _LOG.warning("pull.skipped_audit_error", pull_id=pull_id, error=str(exc))
         return 0

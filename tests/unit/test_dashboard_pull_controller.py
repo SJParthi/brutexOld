@@ -41,6 +41,7 @@ from brutex.adapters.ingest_common import (
     synthetic_spot_bars,
 )
 from brutex.adapters.protocol import MarketAdapter
+from brutex.config.feed_scope import FEED_SCOPE_ENV as _FEED_SCOPE_ENV_1934
 from brutex.dashboard import pull_controller
 from brutex.dashboard.pull_controller import (
     GROWW_FETCH_INTERVALS,
@@ -1651,6 +1652,17 @@ class TestResolvePullSymbols:
 
 class TestResolvePullTargets:
     """``resolve_pull_targets`` — the SHARED selection resolver (DEC-PULL-SELECTED-PIPELINE-001)."""
+
+    @pytest.fixture(autouse=True)
+    def _full_scope_arm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EXPLICIT full arm (DEC-UNIVERSE-INDEX-ONLY-001 — the §6 migration law).
+
+        This class pins the pre-#1934 resolver MECHANICS (precedence · source
+        labels · fail-closed unknowns) over synthetic ``A``/``B`` index
+        fixtures the P7 screen would refuse under the shipped index4 default;
+        under ``full`` the screen is a pass-through (byte-identical). The
+        shipped-default guard arms live in ``TestScreenPullScopeWired``."""
+        monkeypatch.setenv(_FEED_SCOPE_ENV_1934, "full")
 
     def test_symbols_selection_wins_and_labels_selection(self) -> None:
         store = {"A": _index("A"), "B": _index("B")}
