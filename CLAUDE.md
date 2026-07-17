@@ -3080,7 +3080,7 @@ hostile-review pass._
   (141/34) ALL 100.00% line+branch on the discovery gate; hypothesis
   domain-disjointness properties; ruff/ruff-format clean; `mypy
   --strict` clean (469 files); pyright 0 errors + 0 warnings on the new
-  package; no-dhan-guard exit 0. ENGINE UNCHANGED —
+  package; the vendor-token guard exits 0. ENGINE UNCHANGED —
   NIFTY/BANKNIFTY/SENSEX; F&O lake REFERENCE_ONLY; no
   lake/schema/scope/vocab/rate change; no new routes, no new env vars.)
   Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
