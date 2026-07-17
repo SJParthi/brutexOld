@@ -987,3 +987,66 @@ class TestSpotNoSourceClassification:
         assert payload["ok"] is True
         clean = PhasePrebuildReport("spot", ("A",), ("A",), (), 1).to_dict()
         assert "no_source" not in clean  # emit-on-nonempty — the absent arm
+
+
+class TestConversionPanicQuarantine:
+    """DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001 — PanicException joins the
+    per-symbol quarantine set (the #1594 round-18 escape-error idiom on the
+    SPOT derive path).
+
+    FAILS-BEFORE: a stored out-of-datetime-range timestamp panicked polars'
+    Rust→Python conversion as ``pyo3_runtime.PanicException`` — a
+    BaseException NOT in ``_per_symbol_data_errors()`` — so the WHOLE spot
+    phase aborted (executed repro on a real planted lake).
+    """
+
+    def test_panic_exception_quarantines_one_symbol(self) -> None:
+        pl = pytest.importorskip("polars")
+
+        def materialize_spot(inst: Instrument) -> MaterializeResult:
+            if inst.symbol_name == "POISONED":
+                raise pl.exceptions.PanicException(
+                    "called `Result::unwrap()` on an `Err` value: OverflowError"
+                )
+            return _ok(5)
+
+        report = run_gated_prebuild(
+            underlyings=[_spot("POISONED"), _spot("GOOD")],
+            materialize_spot=materialize_spot,
+            futures_contracts_for=_no_contracts,
+            materialize_future=_raise_contract,
+        )
+        spot = report.phases[0]
+        assert spot.succeeded == ("GOOD",)  # the later symbol still ran
+        assert len(spot.failed) == 1
+        symbol, error = spot.failed[0]
+        assert symbol == "POISONED"
+        assert error.startswith("PanicException: ")
+
+    def test_keyboard_interrupt_still_propagates(self) -> None:
+        """The escape set is exactly (OverflowError, PanicException) — never a
+        blanket BaseException: an operator Ctrl-C must stop the phase."""
+
+        def materialize_spot(inst: Instrument) -> MaterializeResult:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            run_gated_prebuild(
+                underlyings=[_spot("ANY")],
+                materialize_spot=materialize_spot,
+                futures_contracts_for=_no_contracts,
+                materialize_future=_raise_contract,
+            )
+
+    def test_per_symbol_set_pins_panic_membership(self) -> None:
+        pl = pytest.importorskip("polars")
+
+        from brutex.dashboard.gated_prebuild import (
+            _per_symbol_data_errors,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        members = _per_symbol_data_errors()
+        assert pl.exceptions.PanicException in members
+        assert OverflowError in members  # via the escape set AND ArithmeticError
+        assert not issubclass(KeyboardInterrupt, members)
+        assert not issubclass(SystemExit, members)

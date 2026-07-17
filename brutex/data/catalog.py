@@ -571,7 +571,12 @@ class Catalog:
                     f"catalog references missing partition file {path} "
                     f"— run 'brutex data verify' to re-sync the catalog"
                 )
-            frames.append(pl.read_parquet(str(path)))
+            # glob=False: the catalog resolves ONE concrete partition file —
+            # the ENGINE's feed mouth must never glob-interpret a `[`-carrying
+            # symbol dir into its siblings' bars (DEC-SPOT-DERIVE-TS-RANGE-
+            # HARDENING-001, the #1594 round-15 metachar law; the writer also
+            # refuses to mint such dirs — partition._FORBIDDEN_SYMBOL_CHARS).
+            frames.append(pl.read_parquet(str(path), glob=False))
 
         combined = pl.concat(frames, how="vertical_relaxed")
         # Read-side dedup gate (DEC-LAKE-READ-UNIQUE-001): a partition poisoned

@@ -518,3 +518,112 @@ def test_derive_daily_quarantines_nonfinite_target_no_crash(tmp_path: Path) -> N
     assert report.errored == 1
     assert report.derived == 0
     assert not (tmp_path / "bars" / _EXCHANGE / _SEGMENT / _SYMBOL / "1day").exists()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Window reader — bars-tree glob parity + the ts-range belt
+# (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_window_read_bracket_symbol_reads_literal_file_only(tmp_path: Path) -> None:
+    """FAILS-BEFORE (the #1594 round-15 metachar law): a symbol dir named
+    ``NSE-X[12]`` beside real ``NSE-X1``/``NSE-X2`` siblings made the window
+    reader's month-file list glob-interpret and pull the SIBLINGS' bars into
+    this symbol's derived 1day. glob=False reads the literal file only."""
+    import polars as pl
+
+    day = date(2024, 1, 3)
+
+    def _plant(symbol: str, close: float) -> None:
+        dest = (
+            tmp_path
+            / "bars"
+            / "NSE"
+            / "CASH"
+            / symbol
+            / "1minute"
+            / f"{day.year:04d}"
+            / f"{day.month:02d}.parquet"
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        stamps = [datetime(2024, 1, 3, 4, i, tzinfo=UTC) for i in range(3)]
+        pl.DataFrame(
+            {
+                "timestamp": stamps,
+                "open": [close] * 3,
+                "high": [close + 1] * 3,
+                "low": [close - 1] * 3,
+                "close": [close] * 3,
+                "volume": [10, 11, 12],
+            }
+        ).write_parquet(dest)
+
+    _plant("NSE-X1", 100.11)
+    _plant("NSE-X2", 100.22)
+    _plant("NSE-X[12]", 100.55)  # the literal dir's OWN bars
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange="NSE",
+        segment="CASH",
+        symbol="NSE-X[12]",
+        start=day,
+        end=day + timedelta(days=1),
+    )
+    frame = read()
+    assert frame.height == 3
+    assert set(frame.get_column("close").to_list()) == {100.55}
+
+
+def test_window_read_excludes_out_of_range_ts_row_structurally(tmp_path: Path) -> None:
+    """The window cut structurally excludes an out-of-datetime-range stored
+    stamp (its IST date can never fall inside a real ``[start, end)``), so the
+    window read returns ONLY the in-window rows and never panics; the ts gate
+    behind the filter is the defense-in-depth belt
+    (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001)."""
+    import polars as pl
+
+    day = date(2024, 1, 3)
+    dest = (
+        tmp_path
+        / "bars"
+        / "NSE"
+        / "INDEX"
+        / "NIFTY"
+        / "1minute"
+        / f"{day.year:04d}"
+        / f"{day.month:02d}.parquet"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    stamps = pl.Series(
+        "timestamp",
+        [
+            int(datetime(2024, 1, 3, 4, 0, tzinfo=UTC).timestamp() * 1_000_000),
+            int(datetime(2024, 1, 3, 4, 1, tzinfo=UTC).timestamp() * 1_000_000),
+            2**62,  # ~year 148108 — far past datetime.max, within i64
+        ],
+        dtype=pl.Int64,
+    ).cast(pl.Datetime(time_unit="us", time_zone="UTC"))
+    pl.DataFrame(
+        {
+            "timestamp": stamps,
+            "open": [100.0] * 3,
+            "high": [101.0] * 3,
+            "low": [99.0] * 3,
+            "close": [100.5] * 3,
+            "volume": [10, 11, 12],
+        }
+    ).write_parquet(dest)
+    read = make_lake_read_1m_window(
+        lake_root=tmp_path,
+        exchange="NSE",
+        segment="INDEX",
+        symbol="NIFTY",
+        start=day,
+        end=day + timedelta(days=1),
+    )
+    frame = read()
+    assert frame.height == 2  # the poison row is outside every real window
+    # And converting the returned frame to Python instants is SAFE — the very
+    # operation the poison row panicked pre-fix.
+    assert len(frame.get_column("ts_utc").to_list()) == 2
