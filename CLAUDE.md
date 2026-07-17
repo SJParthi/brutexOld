@@ -18,7 +18,38 @@
 > answer-key is the contract both sides satisfy; no other
 > adaptation/protocol coupling exists.
 
-_Last updated: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
+_Last updated: 2026-07-17 (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001,
+MIGRATION.md #1919, branch `claude/spot-derive-ts-range-hardening` —
+out-of-`datetime`-range stored TIMESTAMPS (e.g. a planted 2**62-µs stamp —
+~year 148108, within i64, past `datetime.max`) are REJECTED at the SPOT
+derive read boundary: the NEW COMMON
+`price_sanity.validate_frame_ts_datetime_range` gate (one vectorized i64
+min/max pass over the ts column's physical view — the probe itself can
+never panic) runs in BOTH `make_lake_read_1m` + `make_lake_read_1m_window`
+BEFORE the price gate, raising the quarantining `ResampleInputError`
+deterministically — pre-fix such a stamp survived the vectorized resample
+and PANICKED the Rust→Python conversion at `frame_to_candle_bars`'s
+`to_list()` as `pyo3_runtime.PanicException`, a BaseException past every
+`except Exception` (executed repro: ONE poisoned symbol aborted the WHOLE
+crossverify prebuild leg — every later symbol skipped); the THREE SPOT-path
+catchers gain the #1594 round-18 escape guard as defense-in-depth
+(`gated_prebuild._per_symbol_data_errors` + `prebuild_leg`'s per-symbol
+quarantine + `lake_heal._rebuild_tf_months` on the existing
+`_SWEEP_GUARD_ERRORS`; KeyboardInterrupt/SystemExit still propagate).
+PLUS the bars-tree `glob=False` metachar parity sweep (the #1594 round-15
+law, nine explicit-path reads incl. the ENGINE feed mouth
+`data/catalog.py get_bars` — executed repro: a `NSE-X[12]` dir beside real
+`NSE-X1`/`NSE-X2` siblings silently served the SIBLINGS' bars as that
+symbol) + `[`/`]` join `partition._FORBIDDEN_SYMBOL_CHARS` (the writer
+refuses to mint such dirs; no legitimate vendor symbol carries a bracket —
+fixture-verified). Both defects PRE-EXISTING, executed-repro'd at merge
+base ecb37cc4 fail-before / pass-after; healthy-lake byte-identity pinned +
+the frozen engine goldens pass UNMODIFIED. READ-boundary hardening only —
+ENGINE UNCHANGED on clean feeds — NIFTY/BANKNIFTY/SENSEX; no
+lake/schema/scope/vocab/rate change. This header carries the pointer,
+never the story — the full record lives in the §1 Active-branch blurb +
+MIGRATION.md #1919.)
+Earlier: 2026-07-16 (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001,
 MIGRATION.md #1897, branch `claude/lake-read-nonfinite-ohlc-guard-v2` —
 non-finite OHLC (inf/-inf/NaN) is REJECTED at BOTH lake-read boundaries:
 `arrow_table_to_bars` gains the explicit finiteness gate (an inf-HIGH bar
@@ -3010,7 +3041,102 @@ hostile-review pass._
   `adapters/groww/live.py` `build_live_client`/`build_live_pool`,
   `pull_controller._build_live_controller` — are the HISTORICAL pull's client +
   rate controller, NOT the feed, and stay.)
-- **Active branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
+- **Active branch:** `claude/spot-derive-ts-range-hardening`
+  (**DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, MIGRATION.md #1919** —
+  entry number coordinator-allocated from the central queue; merge base
+  ecb37cc4 — TWO CONFIRMED defects, both executed-repro'd fail-before at
+  the pristine merge base / pass-after on the identical scripts.
+  DEFECT 1 (MAJOR, production-reachable): an out-of-`datetime`-range stored
+  TIMESTAMP — a `Datetime("us")` value like `2**62` µs (~year 148108,
+  within i64, far past `datetime.max`) — survives the vectorized resample
+  and PANICS the Rust→Python conversion at
+  `spot_daily_resample.frame_to_candle_bars`'s `Series.to_list()` as
+  `pyo3_runtime.PanicException`, a **BaseException** no `except Exception`
+  stops (polars 1.42.1); THREE SPOT-path catchers omitted it —
+  `gated_prebuild._per_symbol_data_errors`, `crossverify/prebuild_leg.py`'s
+  bare per-symbol `except Exception` (executed: `LEG ABORTED —
+  pyo3_runtime.PanicException ESCAPED`, the healthy later symbol never
+  processed) and `lake_heal._rebuild_tf_months`' bare `except Exception`;
+  the `include_daily=False` months-bounded shape (exactly the crossverify
+  leg + heal recall) returns before the incidental OverflowError net that
+  saved the pipeline shape, and `make_lake_read_1m` screened OHLC only,
+  never ts (the #1594 round-18 OPTIONS-tree fix was never ported to the
+  SPOT derive readers). THE FIX, both arms: (a) the read-boundary gate —
+  NEW COMMON `price_sanity.validate_frame_ts_datetime_range` (ONE
+  vectorized pass over the ts column's `to_physical()` i64 view compared
+  against the EXACT Python-representable bounds per polars time unit —
+  pure integer `timedelta` arithmetic, boundary-EXACT: stored
+  `datetime.min`/`datetime.max` PASS, one-past-each raises; `ns` vacuously
+  representable, documented; the probe itself can never panic and depends
+  on no exception shape), wired in `make_lake_read_1m` (both arms) +
+  `make_lake_read_1m_window` (the window-cut frame — the IST window cut
+  structurally excludes the class today, so the window gate is the
+  disclosed belt) BEFORE `validate_frame_price_sanity` (whose own
+  first-offender message indexes ts and would itself panic); the raised
+  `ResampleInputError` NAMES the context + offender count + the first
+  offending PHYSICAL value + unit (the datetime itself is unrepresentable);
+  (b) defense-in-depth — the three catchers widened via the round-18 idiom
+  (`_per_symbol_data_errors` folds `datetime_out_of_range_escape_errors()`
+  with the wheel-free fallback unchanged; `prebuild_leg` gains
+  `_quarantine_guard_errors() = (Exception, *escape)` resolved once per run
+  before the loop; `lake_heal._rebuild_tf_months` rides the module's
+  existing `_SWEEP_GUARD_ERRORS`); KeyboardInterrupt/SystemExit still
+  propagate everywhere (negative-pinned). DEFECT 2 (MINOR, silent
+  cross-symbol corruption): #1594 round-15's `glob=False` covered ONLY the
+  OPTIONS raw reads — a bars symbol dir named `NSE-X[12]` beside real
+  `NSE-X1`/`NSE-X2` siblings made every explicit-path bars read serve the
+  SIBLINGS' bars as that symbol (executed at merge base: the ENGINE feed
+  mouth `Catalog.get_bars` returned X1's bars for the registered
+  `NSE-X[12]`, zero warnings; `lake_day_glob` + the months-bounded derive
+  read identical). FIX: `glob=False` on the NINE bars-tree explicit-path
+  polars reads (`make_lake_read_1m` months arm — the whole-tree `**` arm is
+  deliberate discovery and keeps glob; `make_lake_read_1m_window`;
+  `spot_join`; `lake_day_glob.read_day_month_frame`; `data/catalog.py`
+  get_bars — the ENGINE feed mouth; `greeks_enrich` per-file;
+  `greeks_backfill` ×2; `catalog_reconcile` per-file; BytesIO + DuckDB
+  bound-parameter reads untouched by design) + `[`/`]` join
+  `partition._FORBIDDEN_SYMBOL_CHARS` (10 → 12 — the writer refuses to
+  mint such dirs; `parse_partition_path` re-validates so planted bracket
+  dirs read unparseable to the scanners; no legitimate vendor symbol
+  carries a bracket, fixture-verified). EXECUTED PROOF: crossverify
+  `run_prebuild_leg` over [poisoned NIFTY, healthy RELIANCE] on a REAL
+  production-writer lake — BEFORE the leg aborts + RELIANCE never derives,
+  AFTER `DeriveOutcome(derived=1, failed=1, failed_names=('NIFTY',))` with
+  RELIANCE derived and NIFTY writing NOTHING (correct-or-absent); the
+  gated_prebuild spot phase twin; the three glob drives (catalog refuses
+  cleanly with the typed PartitionError; the raw-path readers serve the
+  literal file's own bars). TESTS: the 14-test direct gate battery
+  (boundary-exact both ends · ms/ns units · naive columns · the
+  never-panics pin · the independent integer-oracle bounds pin) + the
+  reader-level integration regressions (refuses-to-derive naming symbol +
+  physical value; the include_daily twin; the healthy-lake BYTE-IDENTITY
+  pin — both reader arms frame-`equals` the raw parquet transform; the
+  bracket-literal months read) + the crossverify REAL-lake e2e (the repro
+  as a permanent regression) + injected-panic quarantine /
+  KeyboardInterrupt-propagates / guard-members / wheel-free tests on
+  prebuild_leg AND gated_prebuild + the lake_heal recall panic-isolation
+  regression + the catalog/lake_day_glob/spot_join/window-reader bracket
+  regressions. HONEST LIMITS: the movers display seams +
+  `_read_future_session` are NOT ts-gated here (named residual, the #1811
+  follow-up discipline); `derive_daily_for_targets`' per-target catch is
+  NOT widened (its window reader structurally excludes the class + every
+  production caller sits behind a widened catcher); `cli.py`'s
+  options-tree replay read is an identified sibling deliberately left
+  (named follow-up); stored legacy bracket dirs stay INERT (read literally
+  now, never healed here). GATES: all TWELVE touched modules 100.00%
+  line+branch measured the ci.yml way (`price_sanity` 66/24 ·
+  `timeframe_materialize` 176/56 · `spot_daily_resample` 204/54 ·
+  `gated_prebuild` 144/26 · `prebuild_leg` 61/12 · `lake_heal` 764/234 ·
+  `spot_join` 27/4 · `lake_day_glob` 24/6 · `data/catalog` 171/54 ·
+  `greeks_backfill` 493/150 · `catalog_reconcile` 99/28 · `partition`
+  83/24); ruff/ruff-format clean; `mypy --strict` clean (466 files, 0 new
+  vs baseline); pyright 0 errors; the frozen engine goldens pass
+  UNMODIFIED (catalog.py's glob=False is byte-neutral on the engine feed
+  path — proven, not asserted). READ-boundary hardening only — ENGINE
+  UNCHANGED on clean/healthy lakes — NIFTY/BANKNIFTY/SENSEX; F&O lake
+  REFERENCE_ONLY; no lake/schema/scope/vocab/rate change; no new routes,
+  no new env vars.)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
   (**DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897** —
   renumbered #1832 → #1897 at the 2026-07-16 merge-reconcile per the
   steward ledger map (#1832 taken on main by
@@ -8768,7 +8894,30 @@ hostile-review pass._
 
 ## 3. Branching and Commits
 
-- **Active feature branch:** `claude/lake-read-nonfinite-ohlc-guard-v2`
+- **Active feature branch:** `claude/spot-derive-ts-range-hardening`
+  (DEC-SPOT-DERIVE-TS-RANGE-HARDENING-001, MIGRATION.md #1919 —
+  coordinator-allocated entry; out-of-`datetime`-range stored TIMESTAMPS
+  rejected at the SPOT derive read boundary — the NEW COMMON
+  `price_sanity.validate_frame_ts_datetime_range` gate (vectorized i64
+  bounds, boundary-exact, never panics) in `make_lake_read_1m` +
+  `make_lake_read_1m_window` raising the quarantining
+  `ResampleInputError` (pre-fix a planted 2**62-µs stamp panicked
+  `frame_to_candle_bars`' `to_list()` as `pyo3_runtime.PanicException`, a
+  BaseException past every `except Exception` — executed repro: ONE
+  poisoned symbol aborted the WHOLE crossverify prebuild leg); the three
+  SPOT-path catchers (gated_prebuild per-symbol set · prebuild_leg
+  quarantine · lake_heal `_rebuild_tf_months`) widened with the #1594
+  round-18 escape guard as defense-in-depth
+  (KeyboardInterrupt/SystemExit still propagate); the bars-tree
+  `glob=False` metachar parity sweep on nine explicit-path reads incl. the
+  ENGINE feed mouth `data/catalog.py` (a `NSE-X[12]` dir beside real
+  `NSE-X1`/`NSE-X2` siblings silently served the SIBLINGS' bars — executed
+  repro) + `[`/`]` joining `partition._FORBIDDEN_SYMBOL_CHARS`;
+  fails-before proven at merge base ecb37cc4; healthy-lake byte-identity +
+  the frozen engine goldens pinned UNMODIFIED; ENGINE UNCHANGED on clean
+  feeds — NIFTY/BANKNIFTY/SENSEX; matches §1's Active branch line — see §1
+  + MIGRATION.md #1919 for the full blurb)
+  Earlier: `claude/lake-read-nonfinite-ohlc-guard-v2`
   (DEC-LAKE-READ-NONFINITE-OHLC-GUARD-001, MIGRATION.md #1897 — renumbered
   #1832 → #1897 at the 2026-07-16 merge-reconcile per the steward ledger
   map — non-finite
