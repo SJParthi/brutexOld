@@ -136,15 +136,56 @@ def _bar(day: int, minute: int, o: float, c: float) -> CandleBar:
     )
 
 
+def _bar_ohlc(day: int, minute: int, o: float, h: float, lo: float, c: float) -> CandleBar:
+    """Build one IST-session minute bar with EXPLICIT extremes (worst-case fixture)."""
+    ts = (
+        datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=day, minutes=minute)
+    ).astimezone(UTC)
+    return CandleBar(
+        timestamp=ts,
+        open=Decimal(str(round(o, 2))),
+        high=Decimal(str(round(h, 2))),
+        low=Decimal(str(round(lo, 2))),
+        close=Decimal(str(round(c, 2))),
+        volume=100,
+        open_interest=None,
+    )
+
+
 def _trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
-    """A multi-day upward-drifting session — BUY combos win often via the TP leg."""
+    """A gap-up drift both masks RANK on under the ONE worst-case fill law.
+
+    RE-CRAFTED for DEC-FILL-WORST-CASE-ONLY-001 (a worst-case entry fills at
+    the bar HIGH, so the old wide-range drift SL'd every entry on its own
+    bar): 7-bar cycles of NARROW gap-up bars (open = prior close + 3.00,
+    range 0.50 < the SL 0.80 — no same-bar stop-out; the NEXT gap-up's low
+    clears the TP level so the win banks exactly +50), a shallow BEARISH
+    signal bar at cycle position 3 (feeds the k=1 bit-1 mask), and — every
+    4th cycle — a DEEP bearish bar at position 4 (range 0.85 > the SL) whose
+    stop-out keeps profit_factor FINITE for BOTH masks (losses −85 entering
+    the deep bar itself / −115 stopped from the prior bar's fill). Measured
+    on this tree at sl=80/tp=50: FULL mask-0 PF 3.72 · mask-2 PF 3.77; TRAIN
+    slice 72 / 30 trades — every hard rank gate passes on both masks.
+    """
     bars: list[CandleBar] = []
+    cycle = 0
     for d in range(n_days):
         price = 100.0
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
-            bars.append(_bar(d, m, price, close))
-            price = close
+            k = m % 7
+            if k == 0:
+                cycle += 1
+            if k == 3:  # shallow bearish SIGNAL bar (bit 1 fires)
+                o = price
+                c, h, lo = o - 0.3, o + 0.1, o - 0.4
+            elif k == 4 and cycle % 4 == 0:  # deep bearish loss carrier
+                o = price
+                c, h, lo = o - 0.65, o + 0.1, o - 0.75
+            else:  # narrow gap-up win bar
+                o = price + 3.0
+                c, h, lo = o + 0.3, o + 0.4, o - 0.1
+            bars.append(_bar_ohlc(d, m, o, h, lo, c))
+            price = c
     return bars
 
 
@@ -825,8 +866,17 @@ class TestStage3NonDefaultPriceSource:
         to the EMA group 0-5 (the ``build_bar_bits`` source-locality contract).
         """
         ema_cell = PriceSourceCell(vwap_source=PriceSource.HLC3, ema_source=PriceSource.OPEN)
-        grid = _grid(price_source_cells=[ema_cell])
-        bars = _trending_bars(_N_DAYS)
+        # Drift zig-zag + EOD-only exits: the gap-up _trending_bars ranks under
+        # the one law but its OPEN series is a level-shifted CLOSE copy, so an
+        # EMA-source change moves NO bit on it (see _drift_trending_bars).
+        # Axis-MAX legal levels the micro fixture can never trigger (see
+        # _drift_trending_bars) — every trade session-gap-closes at EOD.
+        grid = _grid(
+            price_source_cells=[ema_cell],
+            stop_losses=[200],
+            take_profits=[500],
+        )
+        bars = _drift_trending_bars(_N_DAYS)
         report = _run_full(tmp_path, bars, grid)
         assert report.enabled is True
         assert report.masks_refined >= 1
@@ -855,40 +905,41 @@ class TestStage3NonDefaultPriceSource:
 # ────── the bar_bits memo MUST be price-source-keyed (GAP-1) ──────
 
 
-def _spiked_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
-    """Upward-drifting session with a large per-bar HIGH spike.
+def _drift_trending_bars(n_days: int, per_day: int = 30) -> list[CandleBar]:
+    """MICRO-scale drift zig-zag — rankable under the ONE worst-case fill law
+    at STAGE-3-LEGAL integer levels, and EMA-source-sensitive.
 
-    The +8.0 high spike lifts each bar's HLC3 well above its close, so the
-    ``EMA(HLC3)`` baseline sits far above the ``EMA(CLOSE)`` baseline: bit 1
-    (``close_below_ema20``, an EMA bit that fires WITHOUT traded volume — unlike
-    the inert VWAP bits 52-53 on this volume-flat fixture) fires on a much larger
-    bar set under ``ema_source=HLC3`` (~196 fires) than under ``ema_source=CLOSE``
-    (~83), yet is non-zero under BOTH — so the k=1 bit-1 mask trades AND ranks
-    under both cells, but on disjoint entry bars, refining to genuinely different
-    rows. The upward drift keeps the BUY TP leg winning so the masks survive.
+    Two constraints meet here (DEC-FILL-WORST-CASE-ONLY-001 ×
+    DEC-NIFTY-PRICE-SOURCE-AXIS-001): (a) Stage-3 grids REQUIRE integer sl/tp
+    on the locked Mode-A axes (SL ∈ [5,200] / TP ∈ [10,500] paisa — ADR-0007
+    condition 3), and under the one law a level a fixture's bars can REACH
+    always fills at the adverse extreme; so the bars are scaled to ±6/3-paisa
+    zig moves with 5-paisa pads (bar range ≈ 16 paisa, daily excursion ≈ ±90
+    paisa) and the consuming tests pass the axis-MAX ``sl=[200], tp=[500]`` —
+    legal ints the fixture can never trigger, so every trade rides to the
+    #1743 session-gap EOD close (up days win, the every-5th DOWN day keeps
+    ``profit_factor`` finite for the rank gates; measured: masks_refined=2 on
+    the k∈{0,1} bit-1 grid). (b) The EMA-source bit-flip demonstrations need
+    a source series whose SHAPE differs from CLOSE — a pure LEVEL shift
+    cancels in the source-vs-its-own-EMA comparison (the gap-up
+    :func:`_trending_bars`' OPEN series is exactly such a shift, measured
+    ZERO flips), while this zig-zag's one-bar open/close PHASE shift moves
+    the EMA crossings (measured: ``ema_source=open`` flips bits {0,1,2,3},
+    ``ema_source=hlc3`` flips bits {0,1} on the train slice).
     """
     bars: list[CandleBar] = []
     for d in range(n_days):
         price = 100.0
+        down_day = d % 5 == 4
         for m in range(per_day):
-            close = price + 0.6 if m % 3 else price - 0.3
+            if down_day:
+                close = price - 0.06 if m % 3 else price + 0.03
+            else:
+                close = price + 0.06 if m % 3 else price - 0.03
             open_ = price
-            hi = max(open_, close) + 8.0
-            lo = min(open_, close) - 0.5
-            ts = (
-                datetime(2026, 1, 5, 9, 16, tzinfo=_IST) + timedelta(days=d, minutes=m)
-            ).astimezone(UTC)
-            bars.append(
-                CandleBar(
-                    timestamp=ts,
-                    open=Decimal(str(round(open_, 2))),
-                    high=Decimal(str(round(hi, 2))),
-                    low=Decimal(str(round(lo, 2))),
-                    close=Decimal(str(round(close, 2))),
-                    volume=100,
-                    open_interest=None,
-                )
-            )
+            hi = max(open_, close) + 0.05
+            lo = min(open_, close) - 0.05
+            bars.append(_bar_ohlc(d, m, open_, hi, lo, close))
             price = close
     return bars
 
@@ -933,7 +984,7 @@ class TestStage3MemoIsPriceSourceKeyed:
         return {src: sorted(v) for src, v in out.items()}
 
     def test_each_cell_refines_against_its_own_source_bits(self, tmp_path: Path) -> None:
-        bars = _spiked_trending_bars(_N_DAYS)
+        bars = _drift_trending_bars(_N_DAYS)
         # top_k / stage3_top_k widened so the merged (instrument, tf, mode)
         # leaderboard keeps BOTH cells' masks (2 masks × 2 cells) — otherwise the
         # bounding could drop a cell and mask the collision.
@@ -941,21 +992,39 @@ class TestStage3MemoIsPriceSourceKeyed:
             _run_full(
                 tmp_path / "a",
                 bars,
-                _grid(price_source_cells=[self._A], top_k=8, stage3_top_k=8),
+                _grid(
+                    price_source_cells=[self._A],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
             )
         )[self._A]
         single_b = self._rows_by_source(
             _run_full(
                 tmp_path / "b",
                 bars,
-                _grid(price_source_cells=[self._B], top_k=8, stage3_top_k=8),
+                _grid(
+                    price_source_cells=[self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
             )
         )[self._B]
         both = self._rows_by_source(
             _run_full(
                 tmp_path / "ab",
                 bars,
-                _grid(price_source_cells=[self._A, self._B], top_k=8, stage3_top_k=8),
+                _grid(
+                    price_source_cells=[self._A, self._B],
+                    top_k=8,
+                    stage3_top_k=8,
+                    stop_losses=[200],
+                    take_profits=[500],
+                ),
             )
         )
 
@@ -1399,3 +1468,43 @@ class TestManifestRecordRelPath:
         (tmp_path / "root").mkdir()
         with pytest.raises(Stage3WireError, match="not under"):
             stage3_manifest_record(self._report_with_cell(outside), results_root=tmp_path / "root")
+
+
+# ────── The WORST_CASE evaluator threading pin (fix round 2) ──────
+
+
+class TestEvaluatorOneLawWorstCase:
+    """DEC-FILL-WORST-CASE-ONLY-001: stage3_wire's ``_make_evaluator`` runs the
+    ONE hardcoded worst-case law — the fill_mode/policy seam is DELETED.
+
+    Hand-derived pins on ``_trending_bars(3)`` (the worst-case-rankable
+    gap-up fixture) at ``evaluate(80, 50)``: 27 trades — 24 TP wins of
+    exactly +50 (entry at the narrow gap-up bar's HIGH; the next gap-up's
+    low clears the TP level so the fill is AT level) and 3 deep-bar
+    stop-outs (−115 each: entry fill o+0.40, stop floor o−0.40, deep low
+    o−0.75 → adverse fill min(level, low) = o−0.75) → gross_profit
+    24 × 50 = 1_200, gross_loss 3 × 115 = 345, net +855.
+    """
+
+    def test_one_law_evaluation_reproduces_the_worst_case_pins(self) -> None:
+        import inspect
+
+        from brutex.engine import stage3_wire as stage3_mod
+
+        assert "fill_mode" not in inspect.signature(stage3_mod._make_evaluator).parameters
+        bars = _trending_bars(3)
+        bar_bits = build_bar_bits(bars)
+        evaluate = stage3_mod._make_evaluator(
+            bars=bars,
+            bar_bits=bar_bits,
+            mask=0,
+            side=Side.BUY,
+            tf_minutes=1,
+            start_equity_paisa=10_000_000,
+            reference_stamper=None,
+        )
+        worst = evaluate(80, 50)
+        assert worst.total_trades == 27
+        assert worst.net_pnl_paisa == 855
+        assert worst.gross_profit_paisa == 1_200
+        assert worst.gross_loss_paisa == 345

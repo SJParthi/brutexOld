@@ -7363,6 +7363,18 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
         print(f"[brutex] {exc}", file=sys.stderr)
         return EXIT_USER_ERROR
 
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model. A set
+    # BRUTEX_FILL_MODE — ANY value, even the literal "worst_case" — is a
+    # stale launch config from the deleted mode machinery and REFUSES loudly
+    # pre-sweep (fail-loud beats silently tolerating a dead knob).
+    from brutex.execution.fill_mode import FillMode, require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] sweep-all config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
+
     # Resume store guard (DEC-SWEEP-RESUME-STORE-GUARD-001): resolve the kill
     # switch EAGERLY too — a junk BRUTEX_SWEEP_RESUME_STORE_GUARD is a clean
     # pre-sweep user-config error, never a mid-launch traceback (both sweep
@@ -7849,6 +7861,15 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                 from brutex.engine.sweep_verify import SWEEP_LAUNCH_ACTION
 
                 for fut_instrument in sorted(roll_schedule_by_instrument):
+                    # DEC-FILL-WORST-CASE-ONLY-001: the launch context line
+                    # records the one fill law ALWAYS AND EXPLICITLY —
+                    # matching canonical_trade_params' unconditional emit —
+                    # so sweep-verify's precise-era refusal can judge any
+                    # generation from its own audit lines.
+                    launch_params: dict[str, object] = {
+                        "roll_schedule": list(roll_schedule_by_instrument[fut_instrument]),
+                        "fill_mode": FillMode.WORST_CASE.value,
+                    }
                     ingest_audit.append(
                         action=SWEEP_LAUNCH_ACTION,
                         subject=f"sweep-all:launch:{fut_instrument}",
@@ -7857,9 +7878,7 @@ def cmd_sweep_all(  # pragma: no cover — orchestration shim over the 100%-test
                             "data_snapshot_hash": grid.data_snapshot_hash,
                             "indicator_version": grid.indicator_version,
                             "code_commit_sha": grid.code_commit_sha,
-                            "params": {
-                                "roll_schedule": list(roll_schedule_by_instrument[fut_instrument])
-                            },
+                            "params": launch_params,
                         },
                     )
             dedup = plan_launch_dedup(grid, digest_path=True)
@@ -9150,7 +9169,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             )
             inconclusive_only = True
         else:
-            scratch = (
+            import dataclasses as _dataclasses
+
+            scratch_base = (
                 scratch_root
                 if scratch_root is not None
                 else Path(tempfile.mkdtemp(prefix="brutex-sweep-verify-"))
@@ -9160,8 +9181,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # RECORDED (STAGE_3_PASS_START audit payloads — condition B1);
             # operator --stage3-* flags are the audit-less fallback only
             # (condition B8), and a disagreement refuses cells, never silently
-            # prefers either side.
-            stage3_grid = None
+            # prefers either side. Resolved ONCE — mode-independent — then
+            # folded into each recount mode's grid inside the loop below.
+            stage3_ready = False
             cells_note: str | None = None
             cell_evidence = False
             knobs_from_audit = False
@@ -9218,8 +9240,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         "no recorded Stage-3 knobs in the audit and no --stage3-* flags supplied"
                     )
                 if cells_note is None and stage3_kwargs is not None:
-                    import dataclasses as _dataclasses
-
                     from brutex.engine.stage3_wire import (
                         Stage3WireError,
                         ensure_stage3_runtime,
@@ -9229,9 +9249,8 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                         current_versions = ensure_stage3_runtime()
                     except Stage3WireError as exc:
                         cells_note = f"stage3 runtime unavailable: {exc}"
-                        stage3_grid = None
                     else:
-                        stage3_grid = _dataclasses.replace(grid, **stage3_kwargs)
+                        stage3_ready = True
                         versions_ok = stage3_audit.optimizer_versions in (
                             (),
                             (current_versions,),
@@ -9245,9 +9264,6 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                             )
                 if cells_note is not None:
                     print(f"[brutex] stage3 cells degraded to INCONCLUSIVE: {cells_note}")
-            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
-            audit_path = scratch / "audit.jsonl"
-            audit_path.parent.mkdir(parents=True, exist_ok=True)
             # The shadow re-sweep must stamp EXACTLY like the launcher did
             # (DEC-VIX-STAMP-WIRE-001 round-2 BLOCKER): cmd_sweep_all binds
             # the window-bounded India-VIX stamper into every persisted row,
@@ -9272,6 +9288,20 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 end=_parse_dt(end),
                 catalog_path=catalog,
             )
+            # DEC-FILL-WORST-CASE-ONLY-001: ONE fill law → ONE recount plan
+            # (the per-mode union loop is deleted with the mode vocabulary; a
+            # precise-era generation was already refused by
+            # recorded_audit_facts before any tier ran).
+            mode_grid = grid
+            scratch = scratch_base
+            stage3_grid = (
+                _dataclasses.replace(mode_grid, **stage3_kwargs)
+                if stage3_ready and stage3_kwargs is not None
+                else None
+            )
+            print(f"[brutex] recount: shadow re-sweep into {scratch} (costs a full sweep)")
+            audit_path = scratch / "audit.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
             train_hash_ok = True
             # Dead launch Bloom KILLED here too (R2-SL-F1, the cmd_sweep_all
             # twin): the shadow re-sweep runs the SAME digest path
@@ -9283,10 +9313,10 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
             # plan_launch_dedup returns the no-alloc raising sink instead.
             with AuditWriter.open(audit_path) as audit:
                 resweep_summary = run_sweep_grid(
-                    grid,
+                    mode_grid,
                     bars_for=lambda s, i: slices.get((s, i), []),
-                    store_for=make_store_for(scratch, grid),
-                    dedup=plan_launch_dedup(grid, digest_path=True),
+                    store_for=make_store_for(scratch, mode_grid),
+                    dedup=plan_launch_dedup(mode_grid, digest_path=True),
                     audit=audit,
                     roll_schedule_by_instrument=roll_schedule_by_instrument,
                     reference_stamper=recount_stamper,
@@ -9343,7 +9373,7 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                     out_root,
                     scratch,
                     plan_expected_stores(
-                        out_root, grid, stage3=stage3 if stage3_grid is not None else None
+                        out_root, mode_grid, stage3=stage3 if stage3_grid is not None else None
                     ),
                     context_match=context_match,
                     cell_evidence=cell_evidence,
@@ -9361,7 +9391,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
                 inconclusive_only = True
             # Heal-plan emission (DEC-SWEEP-HEAL-001 C1/C2): heal-grade
             # evidence exists ONLY under a matched context — the plan freezes
-            # the condemnation-time hashes for `brutex sweep-heal`.
+            # the condemnation-time hashes for `brutex sweep-heal`. The plan
+            # filename folds the grid identity, which carries the
+            # unconditional worst-case fill key.
             if emit_heal_plan:
                 if not context_match:
                     print(
@@ -9377,9 +9409,9 @@ def cmd_sweep_verify(  # pragma: no cover — orchestration shim over the 100%-t
 
                     heal_plan = build_heal_plan(
                         rec_report,
-                        plan_expected_stores(out_root, grid),
+                        plan_expected_stores(out_root, mode_grid),
                         root=out_root,
-                        grid_identity=grid_identity(grid),
+                        grid_identity=grid_identity(mode_grid),
                         context=RecordedContext(
                             data_snapshot_hash=snapshot,
                             indicator_version=indicator,
@@ -9916,6 +9948,11 @@ def _replay_spot_signals_for_row(  # pragma: no cover — engine + lake I/O, ope
         entry_signals,
         direction=side,
         tf_minutes=tf_minutes,
+        # DEC-FILL-WORST-CASE-ONLY-001: the replay simulates under the ONE
+        # hardcoded worst-case fill law — the same law the winners were
+        # swept under by construction. NOTE the honest pre-existing
+        # envelope: this replay carries NO sl/tp either — it is an
+        # entry/exit-instant approximation, not a byte-parity re-simulation.
         reference_stamper=None,
     )
     # Keep-FIRST spot-open map (DEC-LAKE-READ-UNIQUE-001): a plain comprehension
@@ -10072,6 +10109,16 @@ def cmd_options_sim(  # pragma: no cover — orchestration over real-lake I/O + 
         return EXIT_USER_ERROR
 
     audit_path = results_root / "audit" / f"options-sim-{run_id[:12]}.jsonl"
+    # DEC-FILL-WORST-CASE-ONLY-001: worst-case is the ONLY fill model — a set
+    # BRUTEX_FILL_MODE (any value) is a stale launch config from the deleted
+    # mode machinery and REFUSES loudly at this executor launch too.
+    from brutex.execution.fill_mode import require_fill_mode_env_unset
+
+    try:
+        require_fill_mode_env_unset()
+    except ValueError as exc:
+        print(f"[brutex] options-sim config error: {exc}", file=sys.stderr)
+        return EXIT_USER_ERROR
     # Deliberately NO VIX stamper here (DEC-VIX-STAMP-WIRE-001 round-2): the
     # replay's stamps were provably discarded at the SpotSignal conversion —
     # see the sanctioned literal-None site in _replay_spot_signals_for_row —
