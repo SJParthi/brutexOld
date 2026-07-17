@@ -917,14 +917,14 @@ jobs:
           #       package — seeded deterministic generator + O(1)-per-bar candle
           #       maths + instrument index + MarketAdapter composition.
           if compgen -G "tests/unit/test_synthetic_adapter.py" > /dev/null; then
-            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py
+            pytest --cov=brutex.adapters.synthetic --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_synthetic_adapter.py tests/unit/test_synthetic_constants_registry_pin.py
           else
             echo "(brutex.adapters.synthetic test file not present yet — gate inactive)"
           fi
           # 13b · brutex.data.partition (79 stmts, 24 branches, 70 tests — DEC-MUTATION-RUNTIME-001 mutation pins)
           #       Lake partition path computation (year/month/symbol/tf)
           if compgen -G "tests/unit/test_data_partition.py" > /dev/null; then
-            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py
+            pytest --cov=brutex.data.partition --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_data_partition.py tests/unit/test_data_partition_registry_pin.py
           else
             echo "(brutex.data.partition test file not present yet — gate inactive)"
           fi
@@ -1500,7 +1500,7 @@ jobs:
           #       honest mark — code remains defensive in case the guard at
           #       143-144 is removed in the future.
           if compgen -G "tests/unit/test_feed_resampler.py" > /dev/null; then
-            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py
+            pytest --cov=brutex.feed.resampler --cov-branch --cov-report=term-missing --cov-fail-under=100 tests/unit/test_feed_resampler.py tests/unit/test_feed_resampler_registry_pin.py
           else
             echo "(brutex.feed.resampler test file not present yet — gate inactive)"
           fi
