@@ -215,6 +215,46 @@ class TestDedupLatestFoldMixArms:
         for name, rows in folded.items():
             assert rows == reference, f"mix arm {name} diverged from the pure-py fold"
 
+    def test_empty_base_plus_delta_folds_identically(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An EMPTY base (0 rows; on the rust arm ZERO row groups) UNION'd with
+        a delta through the REAL fold path — the review-round-1 gap: the
+        empty-base watch-item and the fold arms never met. The
+        ``read_parquet(?, union_by_name=true, filename=true,
+        file_row_number=true)`` scan must union a 0-row-group polars base with
+        a delta identically to the pyarrow arm, and the page query must serve
+        it fast-path (NO fallback log)."""
+        lakes: dict[str, Path] = {}
+        for name, rust in (("py", False), ("rust", True)):
+            lake = tmp_path / name
+            lake.mkdir()
+            _set_arm(monkeypatch, rust=rust)
+            wls.save_window_ledger(WindowLedger(), lake)  # the EMPTY base
+            live = wls.load_window_ledger(lake)
+            live.record(_key(0), raw_bars=5, error_type=None, bars_appended=5, now=_T0)
+            assert wls.append_ledger_delta(live, lake) == 1
+            assert lake_rust_ledger_render.rust_ledger_render_disabled() is False
+            lakes[name] = lake
+        _set_arm(monkeypatch, rust=False)
+        # Anti-vacuous: the rust base is genuinely the 0-ROW-GROUP shape (the
+        # #1917 empty-file structure divergence) — the union below unions it.
+        assert pq.read_metadata(wls.ledger_path(lakes["rust"])).num_row_groups == 0
+        assert pq.read_metadata(wls.ledger_path(lakes["py"])).num_row_groups == 1
+        # The REAL fold path (db_view._ledger_scan_source →
+        # lake_read.dedup_latest_source_sql): rows identical py-arm vs rust-arm.
+        py_fold = _fold_rows(lakes["py"])
+        rust_fold = _fold_rows(lakes["rust"])
+        assert py_fold == rust_fold
+        assert len(py_fold) == 1 and py_fold[0][1] == "SYM00"  # the delta row
+        # And the page query serves BOTH fast-path — no fallback/retry log.
+        for lake in lakes.values():
+            monkeypatch.setattr(db_view, "_LEDGER_READ_CACHE", db_view._make_ledger_read_cache())
+            with duckdb.connect() as conn, capture_logs() as logs:
+                page, total = db_view.query_window_ledger_page(conn, lake, limit=10, offset=0)
+            assert [e for e in logs if e["event"].startswith("window_ledger_page.")] == []
+            assert total == 1 and page == tuple(py_fold)
+
 
 class TestWindowLedgerPageParity:
     def test_page_payload_identical_and_no_fallback_on_the_rust_base(

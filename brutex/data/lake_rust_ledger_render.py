@@ -462,6 +462,14 @@ def render_ledger_parquet_bytes(
         )
         return python_render()
     try:
+        # DELIBERATE template deviation (disclosed): the frame construction
+        # (`_ledger_frame`) runs INSIDE this catch — the PR-1 template has
+        # the CALLER build the frame outside it. Fail-closed on purpose: a
+        # construction fault (a mis-typed cell under strict=True, a polars
+        # raise) degrades to the oracle — correct bytes, one `render_error`
+        # warn-once — and construction DRIFT is caught by the CI parity
+        # lane's anti-vacuous bytes-differ pins + the LEDGER_COLUMNS /
+        # string-int-split drift pins, never a new crash class into a save.
         rust_bytes = crate.render_ledger_parquet_from_ipc(
             ipc_handoff_bytes(_ledger_frame(rows, pl))
         )

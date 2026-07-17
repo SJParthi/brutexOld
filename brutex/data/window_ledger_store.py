@@ -711,7 +711,11 @@ def _render_ledger_parquet_python(rows: Sequence[LedgerRowTuple]) -> bytes:
     :func:`_rows_to_table` then a zero-kwarg ``pq.write_table`` — extracted
     to ONE place, rendering to BYTES (``pq.write_table`` writes identical
     bytes to a buffer and to a path — pinned in the store suite beside the
-    byte-determinism golden probe). Flag-OFF production runs exactly this;
+    byte-determinism golden probe; "byte-identical" is scoped to the BYTES —
+    the buffer hop adds a bounded one-render peak-memory delta on the default
+    path, the full parquet buffer held in RAM before the temp write, KB–MB at
+    ledger scale beside the already-materialised pyarrow table). Flag-OFF
+    production runs exactly this;
     flag-ON it is the ROW-EQUIVALENCE burn-in oracle the facade compares
     the crate render against (never bytes — the #1917 measured-infeasible
     verdict; see :mod:`brutex.data.lake_rust_ledger_render`).
